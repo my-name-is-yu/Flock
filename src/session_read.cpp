@@ -98,7 +98,7 @@ public:
         const auto status = argument(args,"status",128);
         const auto limit = pageSize(args);
         const auto key = Json::array({filters.query,project,status,filters.from,filters.to});
-        auto environments = store_.connectedSearchEnvironments(message_);
+        auto environments = channelScope_.empty() ? store_.connectedSessionEnvironments(message_) : std::set<std::string>{};
         const bool connected = !environments.empty();
         const auto configuredProject = connected ? std::string{} : field(message_.routing,"projectId");
         if (!connected && channelScope_.empty()) environments = configuredSessionEnvironments(message_.routing);
@@ -167,7 +167,7 @@ public:
             if (timedOut && scanned == 0) return scopedResult(failure(searchTimedOut));
             std::lock_guard lock(store_.mutex);
             Transaction transaction(store_.db);
-            if ((connected && environments != store_.connectedSearchEnvironments(message_)) ||
+            if ((connected && environments != store_.connectedSessionEnvironments(message_)) ||
                 (anchor && !permitted(anchor->target,false,connected))) return scopedResult(failure(unavailable));
             std::erase_if(matches,[&](const Candidate& row) { return !permitted(row.target,false,connected); });
             if (matches.size() <= limit && !timedOut && scanned < scanLimit) continue;
@@ -357,16 +357,15 @@ private:
     std::optional<SessionTarget> approved_;
 
     bool inSessionScope(const SessionTarget& target, bool connected) const {
-        if (connected)
-            return store_.connectedSessionAccess(message_,target);
         if (!channelScope_.empty()) {
             std::lock_guard lock(store_.mutex);
-            if (!store_.query(R"SQL(
+            return store_.query(R"SQL(
 SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN channel_tasks c ON c.task_id=t.id
+JOIN channel_messages m ON m.message_id=c.message_id AND m.person_id=?
 WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
-)SQL",{bot_,channelScope_,target.environmentId,target.threadId}).next()) return false;
+)SQL",{message_.admittedActor.id,bot_,channelScope_,target.environmentId,target.threadId}).next();
         }
-        return true;
+        return !connected || store_.connectedSessionAccess(message_,target);
     }
 
     bool permitted(const SessionTarget& target, bool dispatched, bool connected) const {
@@ -647,7 +646,7 @@ void Store::Impl::authorizeSessionHistory(const conversation::Message& message, 
     SessionEvidence(*this,policy,message,t3).authorizeHistory(steps);
 }
 
-std::set<std::string> Store::Impl::connectedSearchEnvironments(const conversation::Message& message) {
+std::set<std::string> Store::Impl::connectedSessionEnvironments(const conversation::Message& message) {
     std::lock_guard lock(mutex);
     if (!humanSessionRequest(message) &&
         (message.principalSource != conversation::PrincipalSource::channel || message.channelScope.empty() ||
@@ -657,7 +656,7 @@ std::set<std::string> Store::Impl::connectedSearchEnvironments(const conversatio
     auto rows = query(R"SQL(
 SELECT environment_id FROM t3_connector CROSS JOIN t3_connected_environments
 WHERE (? OR person_id=?) AND NOT EXISTS (SELECT 1 FROM bot_members WHERE bot=?)
-)SQL",{actor.adminRoot,actor.id,message.bot});
+)SQL",{actor.adminRoot ? 1 : 0,actor.id,message.bot});
     std::set<std::string> result;
     while (rows.next()) result.insert(rows.string(0));
     return result;
@@ -682,7 +681,7 @@ WHERE t.bot_id=? AND r.environment_id=? AND r.thread_id=? AND json_extract(o.dat
 )SQL",{message.bot,target.environmentId,target.threadId,parent.environmentId,parent.threadId}).next())
             return authorized();
     }
-    return connectedSearchEnvironments(message).contains(target.environmentId);
+    return connectedSessionEnvironments(message).contains(target.environmentId);
 }
 
 std::optional<WorkSession> Store::Impl::resolveWorkSession(const conversation::Message& message,

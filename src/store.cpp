@@ -415,7 +415,7 @@ void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
     save(task);
     if (peer && peer->sender == id) {
         auto recipient = load(peer->recipient);
-        if (stop.participation) {
+        if (stop.participation && peer->kind == "work") {
             // The Session exit owns this task's Run, while the peer still owns its own task and Run.
             exec("UPDATE peer_exchanges SET phase='closed' WHERE id=?",{peer->id});
             if (recipient["state"] == "peer_waiting") {

@@ -717,7 +717,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
 void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
                           const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
                           const ReconcileBotCreation& reconcileBotCreation,
-                          const IntakeResolver& intake, std::stop_token shutdown) {
+                          const IntakeResolver& intake, const PeerResolver& peers, std::stop_token shutdown) {
     Message message;
     {
         std::lock_guard lock(mutex);
@@ -948,7 +948,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
             continue;
         }
         if (decision.tool == "invite_bot") {
-            if (!inviteSessionBot(message,step,decision,t3,intake,shutdown)) return;
+            if (!inviteSessionBot(message,step,decision,t3,intake,peers,shutdown)) return;
             continue;
         }
         if (decision.tool == "leave_session") {

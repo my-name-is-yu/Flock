@@ -385,8 +385,10 @@ Credential loadCredential(const std::filesystem::path& path, const std::string& 
     Credential credential{url.full, str(saved, "token"), str(saved, "generation"),
                           saved["expiresAt"].get<Seconds>(), saved["operate"].get<bool>()};
     if (url.path != "/mcp" || !validToken(credential.token) || credential.generation.size() != 43 ||
-        credential.generation.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != std::string::npos ||
-        credential.expiresAt <= unixTime()) noCredential();
+        credential.generation.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != std::string::npos)
+        noCredential();
+    if (credential.expiresAt <= unixTime())
+        throw Failure(Failure::Kind::Auth,"Sign in to this T3 environment again",Failure::Reason::CredentialExpired);
     return credential;
 }
 

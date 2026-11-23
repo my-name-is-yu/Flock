@@ -366,8 +366,8 @@ class Fixture(BaseHTTPRequestHandler):
                 status = state["botRunStatus"]
                 if state.get("differentWaitRun"):
                     return {"threadId": "thread", "runId": "root", "status": "completed", "timedOut": False}
-                return {"threadId": "thread", "runId": state["botRun"], "status": status,
-                        "timedOut": status != "completed"}
+                return {"threadId": "thread", "runId": state.get("botRunContinuation") or state["botRun"],
+                        "status": status, "timedOut": status != "completed" or state.get("botRunTimedOut", False)}
             if scenario == "selected-session":
                 assert args["threadId"] in ("human-selected", "flock-selected") and args["runId"] == "selected-run"
                 status = state["selectedRunStatus"]
@@ -457,7 +457,8 @@ class Fixture(BaseHTTPRequestHandler):
         latest = "later" if scenario.endswith("-result") else (active or "root")
         count = 1 if scenario in ("question", "ambiguous", "approval", "race", "settling-input") else 0
         if state.get("sessionWakeFixture"):
-            active = state.get("botRun") if state["botRunStatus"] == "running" else active
+            if state["botRunStatus"] == "running":
+                active = state.get("botRunContinuation") or state.get("botRun")
             if state.get("personFinished") and state["botRunStatus"] == "queued":
                 active = None
         summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest, "archived": False,
@@ -476,6 +477,10 @@ class Fixture(BaseHTTPRequestHandler):
                        for i in range(1, len(state["effects"].get("t3_thread_send", [])))]
         rows = [self.item(thread_id, 0, "root", "user_message", state["launched"], source="mcp"),
                 self.item(thread_id, 1, "root", "assistant_message", "root report")]
+        if state.get("sessionWakeFixture") and state.get("botRunContinuation"):
+            rows.append(self.item(thread_id, 2, state["botRunContinuation"], "user_message",
+                                  "Continue where you left off.", source="server") |
+                        {"messageId": "message:restart-continuation:" + state["botRun"]})
         if scenario == "selected-session":
             assert thread_id in ("human-selected", "flock-selected")
             source = "web" if thread_id == "human-selected" else "mcp"

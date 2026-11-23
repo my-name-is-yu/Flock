@@ -4,6 +4,7 @@
 #include "flock/policy.hpp"
 #include "flock/session_read.hpp"
 
+#include <fstream>
 #include <iostream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -125,7 +126,10 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     const auto message = participation.ask(*connection,start,resolve);
     check(participation.ask(*connection,start,resolve) == message,"The same Session ask created another turn");
     store.policy().setMode(localOwner,"supervised");
-    const RuntimeOptions options{.intake=[](std::string_view bot, std::string_view text) {
+    const RuntimeOptions options{.peers=[](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot == "release") return {{"Triage",{"triage","","env-1","project"}}};
+        return {};
+    },.intake=[](std::string_view bot, std::string_view text) {
         return Intake{std::string(bot),std::string(text),"env-1","project"};
     }};
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
@@ -610,6 +614,20 @@ int main(int argc, char** argv) {
         check(effects("t3_thread_launch").size() == 1, "stale authorization never launches another T3 thread");
 
         sessionMessageWake(*restarted,home.parent_path()/"session-wake.db",fixture,effects);
+        const auto expired = home.parent_path()/"expired-creds";
+        std::filesystem::create_directory(expired);
+        std::filesystem::permissions(expired,std::filesystem::perms::owner_all);
+        for (const auto& entry : std::filesystem::directory_iterator(home)) {
+            std::ifstream source(entry.path());
+            auto credential = Json::parse(source,nullptr,false);
+            if (!credential.is_object() || credential.value("environmentId","") != "env-1") continue;
+            credential["expiresAt"] = unixTime() - 1;
+            const auto copy = expired/entry.path().filename();
+            std::ofstream(copy) << credential.dump();
+            std::filesystem::permissions(copy,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+        }
+        check(makeT3Mcp(expired)->sessionMessageWake({"env-1","thread"},run) == "unknown",
+              "A confirmed credential expiry did not settle as an unknown Run outcome");
         fixture({{"scope", "orchestration:read"}});
         check(!signIn("env-1"), "login reports read-only approval");
         other.authGeneration = adapter->authGeneration("env-1", launch.config);

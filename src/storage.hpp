@@ -219,7 +219,7 @@ struct Store::Impl {
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
     Json sessionReadTool(const conversation::Message&, int step, const Decision&, T3&);
     void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
-    std::set<std::string> connectedSearchEnvironments(const conversation::Message&);
+    std::set<std::string> connectedSessionEnvironments(const conversation::Message&);
     std::optional<WorkSession> resolveWorkSession(const conversation::Message&, std::string_view sessionRef, T3&);
     bool permitsWorkSession(const conversation::Message&, const WorkSession&);
     bool permitsWorkSession(Id sourceMessageId, const WorkSession&);
@@ -291,9 +291,10 @@ struct Store::Impl {
     void recordSessionSendRun(Id, const SessionSendReceipt&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,
-                 std::stop_token);
+                 const PeerResolver&, std::stop_token);
     bool sendSessionMessage(const conversation::Message&, int, const Decision&, bool hasWebEvidence, T3&, std::stop_token);
-    bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&, std::stop_token);
+    bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&,
+                          const PeerResolver&, std::stop_token);
     bool leaveSession(const conversation::Message&, int, const Decision&, T3&, std::stop_token);
     void wakeSessionMessages(T3&, std::stop_token);
     bool runSessionEffect(const conversation::Message&, int step, const Decision&, bool offered, bool hasWebEvidence,

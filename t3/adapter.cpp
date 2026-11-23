@@ -136,6 +136,21 @@ Json wait(Client& client, const RunRef& run, WaitFor scope, int timeout = 400) {
     return response;
 }
 
+bool isRestartContinuation(Client& client, const RunRef& assigned, const std::string& effective) {
+    // T3 creates a server message keyed by the cut Run each time it resumes after a restart.
+    constexpr std::string_view prefix = "message:restart-continuation:";
+    Scan scan;
+    auto current = assigned.runId;
+    return !walkThreadHistoryForward(client,scan,assigned.threadId,"messages",32,-1,[&](const Json& item) {
+        if (localItem(item,assigned.threadId) && str(item,"type") == "user_message" &&
+            str(item,"creationSource") == "server" && str(item,"messageId") == std::string(prefix) + current) {
+            current = str(item,"runId");
+            if (current.empty()) invalidResponse();
+        }
+        return current != effective;
+    });
+}
+
 bool confirmsQueueCancellation(Client& client, const RunRef& assigned, const Json& head) {
     for (const auto& run : array(head,"recentRuns")) {
         if (str(run,"runId") != assigned.runId) continue;
@@ -898,10 +913,11 @@ public:
         try {
             Client client(credential(target.environmentId,Json::object()));
             const auto reply = wait(client,run,WaitFor::Run,1);
-            if (str(reply,"runId") != run.runId) return {};
+            const auto effective = str(reply,"runId");
             const auto status = str(reply,"status");
+            if (boolean(reply,"timedOut") && !active(status)) return {};
+            if (effective != run.runId && !isRestartContinuation(client,run,effective)) return {};
             if (terminal(status)) {
-                if (boolean(reply,"timedOut")) return {};
                 return status == "completed" ? "finished" : "failed";
             }
             if (!active(status)) return "unknown";
@@ -909,10 +925,11 @@ public:
             if (pending(client,run.threadId).empty()) return {};
             // The thread-level question list may have changed while the exact Run ended.
             const auto head = threadHead(client,run.threadId).at("thread");
-            if (str(head,"activeRunId") == run.runId) return "waiting_for_person";
+            if (str(head,"activeRunId") == effective) return "waiting_for_person";
             return {};
         } catch (const Failure& failure) {
-            return failure.reason == Failure::Reason::HistoryNotFound ? "unknown" : "";
+            return failure.reason == Failure::Reason::HistoryNotFound ||
+                   failure.reason == Failure::Reason::CredentialExpired ? "unknown" : "";
         }
     }
 

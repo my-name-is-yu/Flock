@@ -266,11 +266,14 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{Json{{"kind","message_session"}},id,step});
         if (!sqlite3_changes(db)) return false;
+        const auto read = Resource::sessionRead(target.environmentId,target.threadId);
+        if (!message.channelScope.empty() || !Policy(*this).allows(message.bot,read)) title.clear();
         title = bounded(redactT3Tokens(redactor(message.bot).text(title)),512);
         exec(R"SQL(
-INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state) VALUES(?,?,?,?,'active')
+INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state)
+SELECT ?,?,?,person_id,'active' FROM t3_connector WHERE singleton=1
 ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
-)SQL",{message.bot,target.environmentId,target.threadId,message.admittedActor.id});
+)SQL",{message.bot,target.environmentId,target.threadId});
         transaction.commit();
     }
 
@@ -337,8 +340,14 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
         const auto source = loadTurnMessage(wait.message);
         auto routing = source.routing;
         routing.erase("sessionInvitation");
+        Policy policy(*this);
+        auto title = wait.title;
+        if (!policy.allows(wait.bot,Resource::sessionRead(wait.target.environmentId,wait.target.threadId))) title.clear();
+        if (auto origin = routing.find("sessionOrigin"); origin != routing.end() &&
+            !policy.allows(wait.bot,Resource::sessionRead(field(*origin,"environmentId"),field(*origin,"threadId"))))
+            (*origin)["title"] = "";
         routing["sessionWake"] = {{"environmentId",wait.target.environmentId},{"threadId",wait.target.threadId},
-                                  {"title",wait.title},{"reason",reason},{"sourceMessageId",wait.message}};
+                                  {"title",title},{"reason",reason},{"sourceMessageId",wait.message}};
         exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message',?,?)",
              {unixTime(),Json{{"sessionWake",routing.at("sessionWake")}},wait.bot});
         const auto id = last();
@@ -367,7 +376,7 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
                            messageId,source);
     auto task = load(id);
     if (routing.contains("sessionOrigin")) task["sessionOrigin"] = routing.at("sessionOrigin");
-    else if (!source.is_null()) {
+    else if (resume) {
         auto parent = query(R"SQL(
 SELECT json_extract(t.data,'$.sessionOrigin') FROM tasks t
 JOIN messages m ON m.id=json_extract(t.data,'$.sourceMessageId')

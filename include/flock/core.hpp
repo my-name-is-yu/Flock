@@ -40,6 +40,7 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
 
 struct BotNotes { std::string soul, memory; };
 struct PeerBot { std::string name; Intake intake; std::string role = {}; };
+using PeerResolver = std::function<std::vector<PeerBot>(std::string_view)>;
 
 struct Decision {
     std::string tool;
@@ -348,7 +349,7 @@ struct RuntimeOptions {
     // "off", "on_demand", "prefill". Prefill uses the same bounded T3 history reader.
     std::string sessionRead = "off";
     // Resolve the peers this sender can use, with each peer's own execution settings.
-    std::function<std::vector<PeerBot>(std::string_view)> peers = {};
+    PeerResolver peers = {};
     std::function<void(std::string_view)> automationError = {};
     std::shared_ptr<const BotTools> botTools = {};
     std::shared_ptr<GitHost> gitHost = {};

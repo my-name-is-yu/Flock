@@ -179,11 +179,13 @@ Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, 
     } else if (replyTo && (source == conversation::PrincipalSource::trusted ||
                            source == conversation::PrincipalSource::web)) {
         auto previous = query(R"SQL(
-SELECT json_extract(m.routing,'$.sessionOrigin'),json_extract(m.routing,'$.sessionInvitationDepth') FROM journal j
+SELECT coalesce(json_extract(t.data,'$.sessionOrigin'),json_extract(m.routing,'$.sessionOrigin')),
+       json_extract(m.routing,'$.sessionInvitationDepth') FROM journal j
 LEFT JOIN conversation_turns turn ON turn.reply_id=j.id
-LEFT JOIN tasks t ON t.id=j.task_id
+LEFT JOIN tasks t ON t.id=j.task_id AND t.bot_id=?2
 JOIN messages m ON m.id=coalesce(turn.message_id,json_extract(t.data,'$.sourceMessageId'),j.id)
-WHERE j.id=? AND m.bot_id=? AND m.person_id=? AND json_type(m.routing,'$.sessionOrigin')='object'
+WHERE j.id=?1 AND m.bot_id=?2 AND m.person_id=?3
+  AND (json_type(t.data,'$.sessionOrigin')='object' OR json_type(m.routing,'$.sessionOrigin')='object')
 )SQL",{replyTo,routing.botId,actor.id});
         if (previous.next()) {
             auto inherited = previous.json(0);

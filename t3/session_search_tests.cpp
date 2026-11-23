@@ -260,8 +260,11 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     fixture({{"differentWaitRun",false},{"transientWakeFailure",true}});
     runtime->runConversations();
     check(model.wakes.empty(),"A transient failure consumed the Run wait");
+    fixture({{"transientWakeFailure",false},{"botRunStatus","completed"},{"botRunTimedOut",true}});
+    runtime->runConversations();
+    check(model.wakes.empty(),"A timed-out terminal response consumed the Run wait");
     restart();
-    fixture({{"transientWakeFailure",false},{"botRunStatus","completed"}});
+    fixture({{"botRunTimedOut",false},{"botRunContinuation","continued-send"}});
     runtime->runConversations();
     check(model.wakes.size() == 1 && model.wakes.back().at("reason") == "finished" &&
           model.reads.back().at("ok") == true,"Restart lost the Bot Run wake or its Session history");
@@ -275,13 +278,13 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     check(model.wakes.size() == 1,"Restart repeated an already delivered wake");
 
     store->policy().setMode(localOwner,"full");
-    fixture({{"botRunStatus","queued"}});
+    fixture({{"botRunStatus","queued"},{"botRunContinuation",""}});
     receive("full");
     runtime->runConversations();
     check(sends() == before + 2 && model.result.at("ok") == true,"Full did not send");
-    fixture({{"botRunStatus","running"},{"botQuestion",true}});
+    fixture({{"botRunStatus","running"},{"botQuestion",true},{"botRunContinuation","continued-with-question"}});
     runtime->runConversations();
-    fixture({{"botRunStatus","completed"},{"botQuestion",false}});
+    fixture({{"botRunStatus","completed"},{"botQuestion",false},{"botRunContinuation",""}});
     runtime->runConversations();
     check(model.wakes.size() == 2 && model.wakes.back().at("reason") == "waiting_for_person",
           "A pending user question did not wake exactly once");
@@ -290,7 +293,6 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     runtime->runConversations();
     check(sends() == before + 3,"The revocation test did not queue a send");
     T3Connections(*store).disconnect("env-1");
-    runtime->runConversations();
     restart();
     T3Connections(*store).connect("env-1",localOwner.id,3210);
     fixture({{"botRunStatus","completed"}});
@@ -307,6 +309,19 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
         [](auto token, auto workspace) { return token == "fixture" && workspace == "test"; },
         [&](auto, auto) -> std::optional<ChannelSender> { return ChannelSender{intake.botId,localOwner.id}; },
         std::make_shared<SlackTransport>()});
+    const auto slack = [&](std::string_view id) {
+        store->receiveChannel(ChannelKind::slack,"fixture",{{"workspaceId","test"},{"threadRef","slack-thread"},
+            {"externalMessageId",id},{"senderId","sender"},{"text","Check staging."}},[&](auto,auto) { return intake; });
+        runtime->runConversations();
+    };
+    const auto send = model.next;
+    model.next = {"flock_session_search",Json::object(),"Find unrelated Sessions"};
+    slack("catalog");
+    check(model.result.at("sessions").empty(),"The linked personal Bot exposed its T3 catalog to Slack");
+    model.next = {"flock_session_events",{{"environmentId","env-1"},{"threadId",thread},{"operation","counts"}},"Read an unrelated Session"};
+    slack("history");
+    check(model.result.at("ok") == false,"A channel turn read a Session outside the Slack thread");
+    model.next = send;
     store->policy().setMode(localOwner,"supervised");
     fixture({{"botRunStatus","queued"}});
     store->receiveChannel(ChannelKind::slack,"fixture",{{"workspaceId","test"},{"threadRef","slack-thread"},
@@ -325,6 +340,8 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     fixture({{"botRunStatus","completed"}});
     runtime->runConversations();
     check(model.wakes.size() == 3,"The Slack send did not wake the Bot");
+    check(model.wakes.back().at("title") == "" && model.reads.back().at("ok") == false,
+          "A Slack send or wake gave the thread access to unrelated Session evidence");
     const auto channelTimeline = store->conversation(intake.botId);
     check(std::ranges::any_of(channelTimeline,[](const Json& event) {
         const auto& data = event.at("data");

@@ -57,10 +57,19 @@ std::string Store::Impl::ensureModelBudget(std::string key, const Json& config) 
 }
 
 std::string Store::Impl::messageModelBudget(Id messageId) {
-    auto row = query("SELECT routing FROM messages WHERE id=?",{messageId});
-    if (!row.next()) throw Conflict("The originating message is missing");
-    const auto routing = row.json(0);
-    return ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
+    for (;;) {
+        auto row = query(R"SQL(
+SELECT m.routing,i.source_message_id FROM messages m
+LEFT JOIN session_invitations i ON i.message_id=m.id WHERE m.id=?
+)SQL",{messageId});
+        if (!row.next()) throw Conflict("The originating message is missing");
+        const auto routing = row.json(0);
+        const auto wake = routing.find("sessionWake");
+        const auto source = wake == routing.end() ? row.number(1) : wake->at("sourceMessageId").get<Id>();
+        if (!source) return ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
+        if (source >= messageId) throw Conflict("Invalid model budget ancestry");
+        messageId = source;
+    }
 }
 
 std::string Store::Impl::taskModelBudget(const Json& task) {

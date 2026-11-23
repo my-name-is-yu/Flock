@@ -1,5 +1,6 @@
 #include "flock/policy.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/participation.hpp"
 #include "flock/t3_connection.hpp"
 #include "task_history.hpp"
 #include <sqlite3.h>
@@ -289,23 +290,45 @@ void durableInboxAndTargetedRevision() {
 
 void linkedResultStartsANewSession() {
     Fixture f;
-    const auto original = f.store->submit(f.routing("計測方法の提案"));
+    f.t3.sessions[{"desktop","origin"}] = {.title="Plan Session",.projectId="project"};
+    T3Connections connector(*f.store);
+    const auto token = connector.connect("desktop",localOwner.id,48123);
+    const auto connection = connector.authenticate(token);
+    SessionParticipation participation(*f.store,f.t3);
+    f.script("計測方法の提案",{start()});
+    participation.ask(*connection,{"alpha","計測方法の提案","origin","original-plan"},
+                      [&](auto,auto) { return f.routing(); });
+    f.runtime->runConversations();
+    const auto original = f.store->tasks("alpha").front().at("id").get<Id>();
     f.reach(original,"running");
     const std::string report = "1. Measure by hand\n2. Capture a fixture trace\n3. Measure after release";
     f.t3.finish("run-1",report);
     f.reach(original,"completed");
     const auto earlier = f.event(original,"completed");
-    const auto resultId = lastTaskEvent(*f.store,original,"completed").at("id");
+    const Id resultId = lastTaskEvent(*f.store,original,"completed").at("id");
+    f.store->setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+        return person == localOwner.id ? std::optional{true} : std::nullopt;
+    });
+    f.script("Which Session produced the plan?",{[](const ModelInput& input) {
+        check(input.event.at("sessionOrigin").at("threadId") == "origin","The result reply lost the Session origin");
+        return Decision{"reply",{{"text","The plan came from the linked child Session."}},"Report the Session"};
+    }});
+    const auto reply = f.store->receiveWeb(localOwner,f.routing(),"reply-to-plan","Which Session produced the plan?",resultId);
+    f.runtime->runConversations();
+    check(f.response(reply).at("text") == "The plan came from the linked child Session.","The explicit result reply failed");
+    participation.stop(*connection,"alpha","origin");
     f.script("2案目を実装して",{start({{"request","Implement option 2: capture a fixture trace"},
                                        {"sourceResultMessageId",resultId}})});
-    f.receive("implement","2案目を実装して");
+    f.store->receiveWeb(localOwner,f.routing(),"implement","2案目を実装して");
+    f.runtime->runConversations();
     const auto task = f.store->tasks("alpha").front();
     const auto id = task["id"].get<Id>();
     check(id != original && task["sourceTaskId"] == original && task["sourceResultRefs"].size() == 1 &&
           task["sourceResultRefs"][0]["messageId"] == resultId && task["sourceResultRefs"][0]["text"] == report,
           "implementation was not linked to the earlier result");
     f.reach(id,"running");
-    check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == "delegate" &&
+    check(f.t3.sent.size() == 2 && f.t3.sent.front().sessionOrigin && !f.t3.sent.back().sessionOrigin &&
+          f.t3.sent.back().tool == "delegate" &&
           f.task(original)["runs"][0]["threadId"] != f.task(id)["runs"][0]["threadId"] &&
           f.event(original,"completed") == earlier,"linked implementation changed prior work or reused its Thread");
     const auto& instruction = f.t3.sent.back().instruction;

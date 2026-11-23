@@ -18,6 +18,10 @@ constexpr auto aliceCredential = "Bearer flock-fixture-alice";
 const Person alice{"alice",true}, bob{"bob"};
 const Json sessionOrigin{{"environmentId","env-1"},{"threadId","thread"},{"title","Staging follow-up"}};
 
+PeerBot peer(std::string_view bot) {
+    return {std::string(bot),{std::string(bot),"","env-1","bot-project",Json::object()}};
+}
+
 std::string participationState(const std::filesystem::path& database, const char* bot) {
     sqlite3* raw = nullptr;
     const auto opened = sqlite3_open_v2(database.c_str(),&raw,SQLITE_OPEN_READONLY,nullptr);
@@ -194,24 +198,35 @@ void webSendParticipation() {
         std::vector<std::string> cancelled;
 
         std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
-            if (target != SessionTarget{"env-1","thread"}) return {};
+            if (target.environmentId != "env-1" || (target.threadId != "thread" && target.threadId != "admin-thread"))
+                return {};
             return SessionMetadata{.title="Staging follow-up",.projectId="origin-project"};
         }
-        Delivery send(const Command&) override {
+        Delivery send(const Command& command) override {
             ++sends;
-            return {Delivery::Kind::Accepted,{"thread","web-send-run",{}},{},false,"queued"};
+            return {Delivery::Kind::Accepted,{command.target.threadId,"web-send-run",{}},{},false,"queued"};
         }
         QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget& target, std::string_view run) override {
-            check(target == SessionTarget{"env-1","thread"},"Cancelled the wrong Session");
-            cancelled.emplace_back(run);
+            check(target.environmentId == "env-1","Cancelled the wrong environment");
+            cancelled.push_back(target.threadId + "/" + std::string(run));
             return QueueCancelOutcome::Cancelled;
         }
     } t3;
     struct WebSendModel : Model {
-        Json send, invite;
+        Json send, invite, leave;
 
         ModelTurn decide(const ModelInput& input) override {
             const auto& steps = input.event.at("turn");
+            if (input.event.at("text") == "Post as admin." || input.event.at("text") == "Leave as admin.") {
+                const bool leaves = input.event.at("text") == "Leave as admin.";
+                if (steps.empty()) {
+                    Json args{{"environmentId","env-1"},{"threadId","admin-thread"}};
+                    if (!leaves) args["text"] = "Staging is ready.";
+                    return {{{leaves ? "leave_session" : "message_session",args,"Act in the admin's Session"}}};
+                }
+                if (leaves) leave = steps.back().at("result");
+                return {{{"reply",{{"text","Done."}},"Finish the turn"}}};
+            }
             const Json target{{"environmentId","env-1"},{"threadId","thread"}};
             if (!input.event.contains("sessionInvitation")) {
                 check(!input.event.contains("sessionOrigin"),"The Web send already had a Session origin");
@@ -241,7 +256,8 @@ void webSendParticipation() {
     const auto server = startWeb(store,0,cb);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization",aliceCredential}});
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },{.intake=cb.intake});
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
+                    {.peers=[](std::string_view) { return std::vector{peer("triage")}; },.intake=cb.intake});
     const auto send = [&](std::string_view id) {
         browser.post("/api/messages",{{"botId","release"},{"clientMessageId",id},{"text","Send a staging update."}},201);
         runtime.runConversations();
@@ -257,12 +273,24 @@ void webSendParticipation() {
 
     const auto stopped = Mcp(*server,token).call("flock_stop",{{"bot","release"},{"threadId","thread"}});
     check(stopped.at("structuredContent").at("cancelled") == 1 &&
-          t3.cancelled == std::vector<std::string>{"web-send-run"},"Stop did not cancel the Web Bot's queued Run");
+          t3.cancelled == std::vector<std::string>{"thread/web-send-run"},"Stop did not cancel the Web Bot's queued Run");
     send("web-send-after-stop");
     check(t3.sends == 1 && model.send == Json{{"ok",false},{"error","This Bot's participation in the Session has stopped"}},
           "A Web send reopened the stopped participation");
     check(participationState(dir.path/"flock.sqlite3","release") == "removed",
           "A Web send changed the removed participation");
+    const Person admin{"ops-admin",true};
+    store.setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
+        if (id == alice.id || id == admin.id) return true;
+        return {};
+    });
+    store.receiveWeb(admin,cb.intake("release",""),"admin-send","Post as admin.");
+    runtime.runConversations();
+    store.receiveWeb(admin,cb.intake("release",""),"admin-leave","Leave as admin.");
+    runtime.runConversations();
+    check(t3.sends == 2 && model.leave.value("ok",false) && model.leave.at("cancelled") == 1 &&
+          t3.cancelled.back() == "admin-thread/web-send-run",
+          "A Web admin could not leave the Session they posted to");
 }
 
 void sessionInvitations() {
@@ -367,7 +395,13 @@ void sessionInvitations() {
     const auto server = startWeb(store,0,cb);
     Mcp mcp(*server,token);
     const auto soul = [](std::string_view) { return std::string{}; };
-    const RuntimeOptions options{.intake=cb.intake};
+    const RuntimeOptions options{.peers=[](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot == "release") return {peer("triage"),peer("broken"),peer("specialist")};
+        if (bot == "triage") return {peer("settings")};
+        if (bot == "settings") return {peer("specialist")};
+        if (bot == "specialist") return {peer("release")};
+        return {};
+    },.intake=cb.intake};
     auto runtime = std::make_unique<Runtime>(store,model,t3,soul,options);
     store.policy().setMode(alice,"supervised");
     const auto ask = mcp.call("flock_ask",{{"bot","release"},{"threadId","thread"},{"requestId","invite-chain"},
@@ -440,6 +474,11 @@ void sessionInvitations() {
     };
     reject("self","release","A Bot cannot invite itself");
     reject("forbidden","unknown","Bot access is required");
+    reject("not-allowlisted","settings","The destination Bot is unavailable or not allowed");
+    const auto read = Resource::sessionRead("env-1","thread");
+    store.policy().changeNeverRule(alice,read.action,read.target,true);
+    reject("restricted-title","triage","This Session is unavailable through your T3 connection");
+    store.policy().changeNeverRule(alice,read.action,read.target,false);
     reject("bad-intake","broken","The invited Bot is unavailable");
     model.thread = "unrelated";
     reject("unrelated","triage","Invite a Bot into a Session you participate in or launched");
@@ -498,6 +537,297 @@ void sessionInvitations() {
     runtime->runConversations();
     check(model.receipts.at("Release Bot").value("ok",false) && participationState(database,"triage") == "active" &&
           participationState(database,"settings") == "left","Inviting a Bot back did not reactivate just that Bot");
+}
+
+void syntheticTurnsShareModelBudget() {
+    struct BudgetT3 : FixedT3 {
+        int sends = 0;
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
+            if (target != SessionTarget{"env-1","thread"} && target != SessionTarget{"env-2","outside"}) return {};
+            return SessionMetadata{.title="Staging follow-up",.projectId="project"};
+        }
+        Delivery send(const Command& command) override {
+            return {Delivery::Kind::Accepted,{command.target.threadId,"run-" + std::to_string(++sends),{}},{},false,"queued"};
+        }
+        std::string sessionMessageWake(const SessionTarget&, const RunRef&) override { return "finished"; }
+    } t3;
+    struct BudgetModel : Model {
+        int calls = 0, inviteeCalls = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            ++calls;
+            const auto& event = input.event;
+            if (event.contains("sessionInvitation")) ++inviteeCalls;
+            if (event.at("turn").empty() && !event.contains("sessionInvitation")) {
+                if (event.at("text") == "Invite Triage")
+                    return {{{"invite_bot",{{"botId","triage"},{"environmentId","env-1"},{"threadId","thread"},
+                                            {"note","Review the checks."}},"Invite Triage"}}};
+                const bool outside = event.at("text") == "Check the other Session.";
+                return {{{"message_session",{{"environmentId",outside ? "env-2" : "env-1"},
+                          {"threadId",outside ? "outside" : "thread"},{"text","Checking."}},
+                          "Send a follow-up"}}};
+            }
+            return {{{"reply",{{"text","Done."}},"Finish the turn"}}};
+        }
+    } model;
+    TestDirectory dir;
+    Store store(dir.path/"flock.sqlite3");
+    T3Connections connector(store);
+    const auto token = connector.connect("env-1",localOwner.id,4173);
+    auto cb = callbacks();
+    cb.sessionT3 = &t3;
+    cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
+        const int limit = bot == "triage" ? 20 : request == "Invite Triage" ? 1 : 2;
+        return {std::string(bot),std::string(request),"env-1","project",{{"modelCallLimit",limit}}};
+    };
+    const auto server = startWeb(store,0,cb);
+    Mcp mcp(*server,token);
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
+                    {.peers=[](std::string_view) { return std::vector{peer("triage")}; },.intake=cb.intake});
+    const auto ask = [&](const char* key, const char* text) {
+        mcp.call("flock_ask",{{"bot","release"},{"threadId","thread"},{"requestId",key},{"text",text}}).at("structuredContent");
+    };
+    const auto approve = [&](const Json& item) {
+        store.decideInbox(localOwner,{item.at("botId"),InboxKind::conversation_model_budget,item.at("itemId"),
+                                      item.at("waitId"),item.at("taskId"),item.at("targetRevision"),
+                                      item.at("targetGeneration")},"approve");
+    };
+    ask("follow-ups","Keep checking");
+    runtime.runConversations();
+    runtime.runConversations();
+    const auto wakeApproval = store.inbox(localOwner,"release").at(0);
+    check(model.calls == 2 && t3.sends == 1 && wakeApproval.at("itemKind") == "conversation_model_budget",
+          "A synthetic wake got a new two-call allowance");
+    approve(wakeApproval);
+    for (int i = 0; i < 3; ++i) runtime.runConversations();
+    check(model.calls == 3 && t3.sends == 2,"The next wake escaped the root budget after one approved call");
+    ask("invite","Invite Triage");
+    runtime.runConversations();
+    const auto inviteApproval = store.inbox(localOwner,"triage").at(0);
+    check(model.calls == 4 && model.inviteeCalls == 0 &&
+          inviteApproval.at("itemKind") == "conversation_model_budget",
+          "The fresh ask did not get one call, or the invitation used the invitee's allowance");
+    approve(inviteApproval);
+    runtime.runConversations();
+    check(model.calls == 5 && model.inviteeCalls == 1,"The invitee's approval did not allow precisely one call");
+
+    connector.connect("env-2",localOwner.id,4173);
+    ask("cross-environment","Check the other Session.");
+    runtime.runConversations();
+    check(t3.sends == 3,"The Bot did not queue a message in the other environment");
+    const auto pausedCount = store.pausedConversations("release").size();
+    connector.disconnect("env-1");
+    connector.connect("env-1",localOwner.id,4173);
+    runtime.runConversations();
+    check(model.calls == 7 && store.pausedConversations("release").size() < pausedCount,
+          "Reconnecting the origin revived a wake in a different environment");
+}
+
+void slowProbeAndStoppedApproval() {
+    struct ProbeT3 : FixedT3 {
+        std::promise<void> healthyStarted;
+        std::shared_future<void> healthy = healthyStarted.get_future().share();
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline deadline) override {
+            if (target.environmentId == "env-0-stalled") {
+                healthy.wait_until(deadline.value());
+                throw SessionReadTimeout{};
+            }
+            if (deadline != SessionReadDeadline{} && std::chrono::steady_clock::now() >= deadline)
+                throw SessionReadTimeout{};
+            if (deadline != SessionReadDeadline{}) healthyStarted.set_value();
+            return SessionMetadata{.title="Staging follow-up",.projectId="project"};
+        }
+    } t3;
+    TestDirectory dir;
+    Store store(dir.path/"flock.sqlite3");
+    auto connection = T3Connections(store);
+    const auto token = connection.connect("env-0-stalled",localOwner.id,4173);
+    connection.connect("env-1",localOwner.id,4173);
+    auto cb = callbacks();
+    cb.sessionT3 = &t3;
+    const auto server = startWeb(store,0,cb);
+    Mcp mcp(*server,token);
+    store.policy().setMode(localOwner,"supervised");
+    mcp.call("flock_ask",{{"bot","release"},{"threadId","thread"},{"requestId","healthy"},{"text","Check staging."}})
+        .at("structuredContent");
+    AskModel model;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    runtime.runConversations();
+    const auto card = store.inbox(localOwner).at(0);
+    check(model.asks == 1 && model.origin.at("environmentId") == "env-1" && card.at("status") == "pending",
+          "An earlier environment probe starved the healthy environment or skipped Supervised approval");
+    mcp.call("flock_stop",{{"bot","release"},{"threadId","thread"}}).at("structuredContent");
+    check(store.inbox(localOwner).empty(),"The stopped Session ask still had an approval in the inbox");
+    bool unavailable = false;
+    try {
+        store.decideInbox(localOwner,{card.at("botId"),InboxKind::policy_approval,card.at("itemId"),card.at("waitId"),
+                                      card.at("taskId"),card.at("targetRevision"),card.at("targetGeneration")},"allow_once");
+    } catch (const DecisionUnavailable&) { unavailable = true; }
+    check(unavailable,"A saved approval still worked after the Session stop");
+}
+
+void stopSelectedTaskAndConsultation() {
+    struct TaskT3 : FixedT3 {
+        std::vector<Command> sends;
+        std::vector<std::string> cancellations, interrupts;
+
+        std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
+                std::string_view, std::string_view, Id, SessionReadDeadline) override {
+            return {{"thread"},{}};
+        }
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
+            if (target != SessionTarget{"env-1","thread"}) return {};
+            return SessionMetadata{.title="Selected Session",.projectId="selected-project"};
+        }
+        Delivery send(const Command& command) override {
+            sends.push_back(command);
+            if (command.tool == "start_in_session")
+                return {Delivery::Kind::Accepted,{"thread","queued-task",{}},{},false,"queued"};
+            return FixedT3::send(command);
+        }
+        Observation observe(const std::string&, const Json&, const RunRef&) override {
+            Observation observation;
+            observation.kind = Observation::Kind::Running;
+            return observation;
+        }
+        QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget& target, std::string_view run) override {
+            check(target == SessionTarget{"env-1","thread"},"Cancelled a different Session");
+            cancellations.emplace_back(run);
+            return QueueCancelOutcome::Cancelled;
+        }
+        InterruptOutcome interrupt(const std::string&, const Json&, const RunRef& run) override {
+            interrupts.push_back(run.runId);
+            return InterruptOutcome::Requested;
+        }
+    } t3;
+    struct TaskModel : Model {
+        Id consultant = 0;
+        int consultantCalls = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& event = input.event;
+            if (event.at("kind") == "conversation_turn") {
+                const auto& steps = event.at("turn");
+                const auto request = event.at("text");
+                if (request == "Work in the selected Session." && steps.empty())
+                    return {{{"flock_session_search",Json::object(),"Find the selected Session"}}};
+                if (request == "Work in the selected Session." && steps.size() == 1)
+                    return {{{"start_task",{{"request",request},
+                              {"sessionRef",steps.back().at("result").at("sessions").at(0).at("sessionRef")}},"Queue work"}}};
+                if (steps.empty()) return {{{"start_task",{{"request",request}},"Start work"}}};
+                return {{{"reply",{{"text","Started."}},"Finish the conversation turn"}}};
+            }
+            if (input.task.at("request") == "Consult a peer.")
+                return {{{"send_bot_message",{{"botId","triage"},{"kind","consult"},{"text","Offer advice."}},"Consult Triage"}}};
+            if (input.task.at("request") == "Offer advice.") {
+                consultant = input.task.at("id");
+                ++consultantCalls;
+                check(std::ranges::find(input.tools,"delegate") == input.tools.end(),"A consultation acquired delegation");
+                return {{{"reply_to_bot",{{"kind","question"},{"text","Which environment?"}},"Ask the sending Bot"}}};
+            }
+            return {{{"delegate",{{"instruction","Check staging."},{"doneWhen","Staging is checked."}},"Run the task"}}};
+        }
+    } model;
+    TestDirectory dir;
+    Store store(dir.path/"flock.sqlite3");
+    const auto token = T3Connections(store).connect("env-1",localOwner.id,4173);
+    auto cb = callbacks();
+    cb.sessionT3 = &t3;
+    cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
+        return {std::string(bot),std::string(request),"env-1","origin-project",Json::object()};
+    };
+    const auto server = startWeb(store,0,cb);
+    Mcp mcp(*server,token);
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
+                    {.peers=[](std::string_view) { return std::vector{peer("triage")}; }});
+    auto blockingIntake = peer("triage").intake;
+    blockingIntake.request = "Hold the peer's project slot.";
+    const auto blocker = store.submit(blockingIntake);
+    const auto start = [&](const char* key, const char* text) -> Id {
+        mcp.call("flock_ask",{{"bot","release"},{"threadId","thread"},{"requestId",key},{"text",text}}).at("structuredContent");
+        runtime.runConversations();
+        return store.tasks("release").front().at("id");
+    };
+    const auto selected = start("queued-task","Work in the selected Session.");
+    const auto sender = start("consult","Consult a peer.");
+    tick(runtime,4);
+    check(store.task(selected).at("activeRun").at("runId") == "queued-task" &&
+          store.task(blocker).at("state") == "running" && model.consultant &&
+          store.task(model.consultant).at("state") == "peer_waiting",
+          "The task did not queue, or the consultation did not wait behind the occupied slot");
+    const auto stopped = mcp.call("flock_stop",{{"bot","release"},{"threadId","thread"}}).at("structuredContent");
+    tick(runtime,4);
+    check(stopped.at("cancelled") == 1 && stopped.at("stoppedChildSessions") == 1 &&
+          t3.cancellations == std::vector<std::string>{"queued-task"} && t3.interrupts.empty() &&
+          store.task(selected).at("state") == "cancelled" && store.task(sender).at("state") == "cancelled" &&
+          store.task(model.consultant).at("state") == "cancelled" && model.consultantCalls == 1 &&
+          store.task(blocker).at("state") == "running",
+          "Stop left queued work or consultation runnable, or touched an unrelated Run");
+}
+
+void inviteIntoPeerLaunch() {
+    struct PeerT3 : FixedT3 {
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
+            if (target.environmentId != "env-1" || (target.threadId != "thread" && target.threadId != "thread-bot-project"))
+                return {};
+            return SessionMetadata{.title="Peer Session",.projectId="project"};
+        }
+    } t3;
+    struct PeerModel : Model {
+        Json invite;
+        int invitations = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& event = input.event;
+            if (event.at("kind") == "bot_request")
+                return {{{"delegate",{{"instruction","Check staging."},{"doneWhen","Staging is checked."}},"Launch peer work"}}};
+            if (event.at("kind") != "conversation_turn")
+                return {{{"send_bot_message",{{"botId","triage"},{"kind","work"},{"text","Check staging."},
+                          {"doneWhen","Staging is checked."}},"Ask Triage"}}};
+            const auto& steps = event.at("turn");
+            if (event.contains("sessionInvitation")) ++invitations;
+            else if (event.at("text") == "Start peer work." && steps.empty())
+                return {{{"start_task",{{"request","Start peer work."}},"Start the parent task"}}};
+            else if (event.at("text") == "Invite the verifier.") {
+                if (steps.empty())
+                    return {{{"invite_bot",{{"botId","settings"},{"environmentId","env-1"},{"threadId","thread-bot-project"},
+                             {"note","Verify the staging checks."}},"Invite the verifier"}}};
+                invite = steps.back().at("result");
+            }
+            return {{{"reply",{{"text","Done."}},"Finish the turn"}}};
+        }
+    } model;
+    TestDirectory dir;
+    Store store(dir.path/"flock.sqlite3");
+    T3Connections connector(store);
+    const auto token = connector.connect("env-1",localOwner.id,4173);
+    auto cb = callbacks();
+    cb.sessionT3 = &t3;
+    cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
+        return {std::string(bot),std::string(request),"env-1","origin-project",Json::object()};
+    };
+    const auto server = startWeb(store,0,cb);
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
+                    {.peers=[](std::string_view bot) {
+                        return bot == "release" ? std::vector{peer("triage")} : std::vector{peer("settings")};
+                    },.intake=cb.intake});
+    Mcp(*server,token).call("flock_ask",{{"bot","release"},{"threadId","thread"},
+        {"requestId","peer-launch"},{"text","Start peer work."}}).at("structuredContent");
+    tick(runtime,5);
+    check(t3.launches["bot-project"] == 1,"Triage did not launch its peer work");
+    const Person other{"other-admin",true};
+    store.setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
+        if (id == localOwner.id || id == other.id) return true;
+        return {};
+    });
+    const auto invite = [&](const Person& actor, const char* id) {
+        connector.connect("env-1",actor.id,4173);
+        store.receiveWeb(actor,cb.intake("triage",""),id,"Invite the verifier.");
+        runtime.runConversations();
+    };
+    invite(other,"foreign-peer-launch");
+    check(model.invite.value("error","") == "Invite a Bot into a Session you participate in or launched" &&
+          model.invitations == 0,"A different requester inherited the peer's Session");
+    invite(localOwner,"my-peer-launch");
+    check(model.invite.value("ok",false) && model.invitations == 1,
+          "The requester could not invite a Bot into the peer's launched Session");
 }
 
 void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& credentials) {
@@ -890,6 +1220,14 @@ int main(int argc, char** argv) {
         webSendParticipation();
         scenario = "Session invitations";
         sessionInvitations();
+        scenario = "synthetic turn model budget";
+        syntheticTurnsShareModelBudget();
+        scenario = "slow Session probe and stopped approval";
+        slowProbeAndStoppedApproval();
+        scenario = "stop selected tasks and consultations";
+        stopSelectedTaskAndConsultation();
+        scenario = "invite into a peer launch";
+        inviteIntoPeerLaunch();
         scenario = "stop child Sessions";
         stopChildSessions(argv[1],argv[2]);
         return 0;

@@ -139,7 +139,7 @@ struct Runtime::Impl {
 
     void runTurn(Id id) {
         db.runTurn(id,model,t3,soul,options.clock,*options.botTools,options.gitHost.get(),options.applyBotChange,
-                   options.reconcileBotCreation,options.intake,shutdown.get_token());
+                   options.reconcileBotCreation,options.intake,options.peers,shutdown.get_token());
     }
 
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
@@ -786,6 +786,11 @@ ORDER BY id)SQL");
                 else {
                     db.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)", {action["id"],id,
                         task["environmentId"],outcome.run.threadId,outcome.run.runId,outcome.run.link});
+                    if (const auto participation = action.value("sessionParticipationId",Id{}); participation)
+                        db.exec(R"SQL(
+INSERT OR IGNORE INTO session_queue_cancellations(participation_id,run,stop_id)
+SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_through>=?
+)SQL",{outcome.run.runId,participation,task.at("sourceMessageId")});
                     if (task.contains("workflowId")) {
                         const auto now = options.clock();
                         db.exec("UPDATE workflow_stages SET confirmed_state='running',confirmed_at=?,unreachable=0,"
@@ -993,6 +998,16 @@ ORDER BY id)SQL");
                 if (resource) {
                     policyGate = assess(current,true);
                     if (policyGate != ApprovalGate::allow) return false;
+                }
+                if (usesExistingSession && current.contains("sourceMessageId")) {
+                    const auto source = db.loadTurnMessage(current.at("sourceMessageId"));
+                    const SessionTarget target{cmd.environmentId,cmd.target.threadId};
+                    auto participant = db.query(R"SQL(
+SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=? AND state='active'
+)SQL",{cmd.ownerBotId,target.environmentId,target.threadId});
+                    if (participant.next() && (participant.string(1) == db.turnActor(source).id ||
+                                               db.connectedSessionAccess(source,target)))
+                        action["sessionParticipationId"] = participant.number(0);
                 }
                 auto payload = action;
                 payload.erase("phase");
