@@ -1510,7 +1510,7 @@ function eventCard(event, context, place, report) {
   if (side === 'bot') line.append(node('span', 'msg-avatar-space'));
   else if (side === 'external') line.append(icon('person', 'msg-avatar external-sender'));
   const bubble = node('div', 'bubble');
-  const text = node('p', 'event-text');
+  const text = node(['conversation_message', 'conversation_reply'].includes(event.kind) ? 'div' : 'p', 'event-text');
   const actions = node('div', 'msg-actions');
   actions.append(time);
   const extras = [];
@@ -1544,7 +1544,10 @@ function eventCard(event, context, place, report) {
       }
     }
   } else if (event.kind === 'conversation_reply') {
-    text.textContent = data.text;
+    if (typeof data.textHtml === 'string') {
+      text.classList.add('markdown-body');
+      text.innerHTML = data.textHtml;
+    } else text.textContent = data.text ?? '';
     text.classList.add('foldable-text');
     bubble.append(text);
     const paused = context.paused.get(data.messageId);
@@ -1597,7 +1600,10 @@ function eventCard(event, context, place, report) {
     if (data.reason) bubble.append(reasonText(data.reason));
   } else {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
-    text.append(document.createTextNode(data.text ?? ''));
+    if (event.kind === 'conversation_message' && typeof data.textHtml === 'string') {
+      text.classList.add('markdown-body');
+      text.innerHTML = data.textHtml;
+    } else text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
     text.classList.add('foldable-text');
     if (event.kind === 'conversation_message' && data.imageAttachmentCount > 0) {
