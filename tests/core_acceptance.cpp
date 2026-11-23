@@ -91,7 +91,7 @@ struct Script : Model {
 };
 
 struct SimulatedT3 : T3 {
-    int launches = 0, follows = 0, replies = 0, interrupts = 0, reconciles = 0, reads = 0, polls = 0;
+    int launches = 0, follows = 0, selectedStarts = 0, replies = 0, interrupts = 0, reconciles = 0, reads = 0, polls = 0;
     std::string generation = "same-oauth-session";
     bool loseAcknowledgement = false;
     bool delayLaunchRunId = false;
@@ -132,13 +132,18 @@ struct SimulatedT3 : T3 {
         if (std::exchange(failBeforeWorkSend,false)) return {};
         if (rejectWork && rejectWork(cmd))
             return {Delivery::Kind::NotAccepted,{},"The provisioned specialist worktree does not match the saved commit",true};
-        const auto serial = launches + follows + 1;
+        const auto serial = launches + follows + selectedStarts + 1;
         RunRef run{"thread-" + std::to_string(launches + 1),"run-" + std::to_string(serial),"https://t3.test/thread"};
         if (cmd.tool == "delegate") ++launches;
         else {
-            check(cmd.tool == "follow_up" && !cmd.target.runId.empty(),"invalid follow-up target");
+            if (cmd.tool == "start_in_session") {
+                check(!cmd.target.threadId.empty() && cmd.target.runId.empty(),"invalid selected Session target");
+                ++selectedStarts;
+            } else {
+                check(cmd.tool == "follow_up" && !cmd.target.runId.empty(),"invalid follow-up target");
+                ++follows;
+            }
             run.threadId = cmd.target.threadId;
-            ++follows;
         }
         runs.emplace(run.runId,Observation{});
         check(assignments.emplace(cmd.actionId,run).second,"duplicated action");
@@ -283,6 +288,65 @@ struct Fixture {
         return messages;
     }
 };
+
+Id seedSelectedTask(Fixture& fixture) {
+    T3Connections(*fixture.store).connect("e",localOwner.id,4173);
+    fixture.model.script = [](const ModelInput& input) -> Decision {
+        if (input.event.at("kind") == "conversation_turn")
+            return {"reply",{{"text","Work in the selected Session."}},"Acknowledge the request"};
+        if (input.event.at("kind") == "policy_outcome") return ask();
+        return work();
+    };
+    fixture.store->receive(localOwner,{"alpha","","e","p"},"select-thread","Continue in the selected Session");
+    fixture.runtime->runConversations();
+    const auto id = fixture.submit();
+    executeSql(fixture.directory/"state.db",R"SQL(
+UPDATE tasks SET data=json_set(data,'$.sourceMessageId',(SELECT id FROM messages WHERE bot_id='alpha'),
+    '$.selectedSession',json_object('environmentId','e','projectId','p','threadId','selected-thread'))
+WHERE id=(SELECT max(id) FROM tasks);
+)SQL");
+    return id;
+}
+
+void selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun() {
+    Fixture f;
+    const auto task = seedSelectedTask(f);
+    f.t3.runs["other-run"] = {};
+    f.t3.loseAcknowledgement = true;
+    f.wait(task,"unknown_delivery");
+    check(f.t3.selectedStarts == 1 && f.t3.launches == 0,"Selected work created another Thread");
+    f.t3.runs.at("run-1").status = "queued";
+    f.restart();
+    f.reach(task,"running");
+    f.now += 30;
+    f.runtime->tick();
+    check(f.t3.selectedStarts == 1 && f.t3.reconciles == 1 &&
+          f.task(task).at("activeRun").at("runId") == "run-1" &&
+          f.task(task).at("queuedInT3") == true && f.task(task).at("deadline") == 0,
+          "Restart duplicated the send or a confirmed queued Run reached a work deadline");
+    f.store->operate(localOwner,TaskTarget::from(f.task(task),0),"cancel");
+    f.runtime->tick();
+    check(f.t3.interruptedRuns.size() == 1 && f.t3.interruptedRuns.front().runId == "run-1" &&
+          f.t3.interruptedRuns.front().threadId == "selected-thread","Cancellation targeted unrelated work");
+    f.t3.finish("run-1","cancelled");
+    f.reach(task,"cancelled");
+    check(!f.task(task).contains("queuedInT3"),"Cancelled work retained a T3 queue status");
+}
+
+void selectedWorkRechecksConnectionAfterApproval() {
+    Fixture f;
+    const auto task = seedSelectedTask(f);
+    f.store->policy().setMode(localOwner,"supervised");
+    f.wait(task,"policy_approval");
+    const auto item = f.store->inbox(localOwner).at(0);
+    check(item.at("requestTitle").get<std::string>().starts_with("t3.send"),"Selected work used the new-Thread policy");
+    f.store->decideInbox(localOwner,{item.at("botId"),InboxKind::policy_approval,item.at("itemId"),
+        item.at("waitId"),item.at("taskId"),item.at("targetRevision"),item.at("targetGeneration")},"allow_once");
+    f.t3.onPreflight = [&] { T3Connections(*f.store).disconnect("e"); };
+    f.wait(task,"user_question");
+    check(f.t3.seen.empty() && f.logs(task,"policy_action_closed") == 1,
+          "A previously approved selected Session sent work after its connection was revoked");
+}
 
 void invalidDecisions() {
     Fixture f;
@@ -3371,6 +3435,8 @@ int main() {
             {"delivery recovery",recoveredDelivery},{"launch receipt recovery",launchReceiptSurvivesRecovery},
             {"retry unsent Session answer",unsentAnswerRemainsRetryable},
             {"cancel during delivery",cancelDuringDelivery},
+            {"selected work reconciles and cancels only its own queued Run",selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun},
+            {"selected work rechecks its T3 connection after approval",selectedWorkRechecksConnectionAfterApproval},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
             {"settled report recovery across restart",settledReportCanRecoverAfterRestart},
             {"late report recovery after retries exhaust",lateReportCanRestoreCompletion},

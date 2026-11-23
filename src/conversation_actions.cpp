@@ -193,12 +193,17 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
 
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
                                       std::string_view environment, Id messageId, const Json& source,
-                                      bool resume) {
-    const auto destination = environment.empty() ? field(routing,"environmentId")
-        : verifiedEnvironment(routing,routing,environment);
-    const auto id = submit({std::string(bot),std::string(request),destination,field(routing,"projectId"),
-                            routing.at("config")},messageId,source);
+                                      bool resume, const WorkSession* selectedSession) {
+    const auto destination = selectedSession ? selectedSession->environmentId
+        : environment.empty() ? field(routing,"environmentId") : verifiedEnvironment(routing,routing,environment);
+    const auto project = selectedSession ? selectedSession->projectId : field(routing,"projectId");
+    if (selectedSession) redactor(bot).requirePublic(selectedSession->threadId);
+    const auto id = submit({std::string(bot),std::string(request),destination,project,routing.at("config")},
+                           messageId,source);
     auto task = load(id);
+    if (selectedSession)
+        task["selectedSession"] = {{"environmentId",destination},{"projectId",project},
+                                   {"threadId",selectedSession->threadId}};
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId,bot});
     task["sourceMessageCoversFullRequest"] = source.is_null() && message.next() && message.string(0) == request;

@@ -279,6 +279,55 @@ int main(int argc, char** argv) {
         check(followUps.at(0).at("message") == follow.instruction,
               "T3 receives all of the follow-up instruction");
 
+        Command selected = launch;
+        selected.tool = "start_in_session";
+        selected.actionId = "flock-selected-idle";
+        selected.target = {"human-selected",{},{}};
+        selected.instruction = "Add regression tests";
+        fixture({{"scenario","selected-session"}});
+        check(!adapter->preflight(selected),"an existing Session does not require a Flock Run");
+        delivery = adapter->send(selected);
+        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "human-selected" &&
+              delivery.run.runId == "selected-run","a previously unrelated idle Session starts the assigned Run");
+        check(restarted->reconcile(selected).run.runId == "selected-run",
+              "an existing Session's started Run can be recovered from its request");
+
+        selected.actionId = "flock-selected-busy";
+        selected.target = {"flock-selected",{},{}};
+        selected.instruction = std::string(1200,'x');
+        fixture({{"selectedBusy",true},{"selectedRunStatus",nullptr},{"selectedDropSendReply",true}});
+        const auto sendsBeforeQueue = effects("t3_thread_send").size();
+        check(adapter->send(selected).kind == Delivery::Kind::Unknown,"fixture lost the queued send response");
+        fixture({{"selectedDropSendReply",false}});
+        delivery = restarted->reconcile(selected);
+        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "flock-selected" &&
+              delivery.run.runId == "selected-run" && effects("t3_thread_send").size() == sendsBeforeQueue + 1,
+              "reconciliation recovers the assigned queued Run without resending");
+        const auto queued = adapter->observe("env-1",selected.config,delivery.run);
+        check(queued.kind == Observation::Kind::Running && queued.status == "queued",
+              "an earlier Run's pending question is not attributed to the queued Run");
+        check(adapter->interrupt("env-1",selected.config,delivery.run) == InterruptOutcome::Requested &&
+              effects("t3_queue") == Json::array({{{"action","cancel"},{"threadId","flock-selected"},
+                                                   {"queuedRunId","selected-run"}}}) &&
+              effects("t3_thread_interrupt").empty(),"stop removes only the assigned queued Run");
+        const auto cancellation = adapter->observe("env-1",selected.config,delivery.run);
+        check(cancellation.kind == Observation::Kind::Finished && cancellation.settled &&
+              cancellation.status == "cancelled" && cancellation.resultRunId == "selected-run",
+              "other active work does not hold cancellation of the assigned Run");
+
+        fixture({{"selectedBadReceipt",true}});
+        check(adapter->send(selected).kind == Delivery::Kind::Unknown,
+              "a receipt pointing to the previous active Run cannot claim that Run");
+        const auto selectedSends = effects("t3_thread_send").size();
+        fixture({{"selectedBadReceipt",false},{"selectedArchived",true}});
+        check(adapter->send(selected).kind == Delivery::Kind::Settings,
+              "an archived Session rejected the request before sending");
+        fixture({{"selectedArchived",false},{"selectedProject","another-project"}});
+        check(adapter->send(selected).kind == Delivery::Kind::Settings &&
+              effects("t3_thread_send").size() == selectedSends,
+              "a changed destination project rejected the request before sending");
+        fixture({{"scenario","settled"}});
+
         ReadRequest read;
         read.environmentId = "env-1";
         read.threadId = "thread";
@@ -396,6 +445,9 @@ int main(int argc, char** argv) {
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" &&
               delivery.run.runId == "root", "reauthorization with read scope recovers the original Run");
         const auto readOnly = other.authGeneration;
+        const auto [allProjects,allProjectsNext] = restarted->projectSessions("env-1",{},0,{});
+        check(allProjects == std::vector<std::string>{"first","second"} && !allProjectsNext,
+              "a connected Environment lists Sessions across readable projects");
         fixture({{"scenario","session-read"}});
         deletedSessionSearch(*restarted,home.parent_path()/"session-search.db",fixture);
         boundedSessionSearch(*restarted,home.parent_path()/"bounded-search.db",fixture,effects);

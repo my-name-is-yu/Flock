@@ -123,6 +123,7 @@ Json Store::Impl::taskState(const Json& task, const Message& message, bool fullC
     Json view = {{"generation",task.at("generation")},{"revisionId",task.value("currentRevision",Id{0})},
                  {"state",task.at("state")},
                  {"replanning",task.value("replanning",false)},{"wait",std::move(wait)}};
+    if (task.value("queuedInT3",false)) view["queuedInT3"] = true;
     const auto project = [&](const char* key, const std::string& value, std::size_t limit) {
         view[key] = fullContract ? value : bounded(value,limit);
         if (view[key].get_ref<const std::string&>().size() < value.size())
@@ -368,7 +369,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
-                                Seconds now) {
+                                Seconds now, const WorkSession* selectedSession) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -430,7 +431,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto doneWhen = text(args,"doneWhen",8000,false);
         const auto environment = text(args,"environment",256,false);
         const bool resume = args.value("resume",false);
-        if (field(routing,"environmentId").empty() || field(routing,"projectId").empty())
+        const auto sessionRef = text(args,"sessionRef",128,false);
+        if (!sessionRef.empty() && (!selectedSession || !permitsWorkSession(message,*selectedSession)))
+            throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
+        if (selectedSession && (!environment.empty() || resume))
+            throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
+        if (!selectedSession && (field(routing,"environmentId").empty() || field(routing,"projectId").empty()))
             throw ToolError("This Bot needs an execution environment and project before it can start work");
         if (!environment.empty() && verifiedEnvironment(routing,routing,environment).empty())
             throw ToolError("Unknown environment " + environment + "; use one of task.environments");
@@ -438,14 +444,16 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
         const auto id = startConversationTask(routing,bot,request,environment,message.id,
-                                              result.is_null() ? Json(nullptr) : sourceRef(result),resume);
+                                              result.is_null() ? Json(nullptr) : sourceRef(result),resume,selectedSession);
         if (!doneWhen.empty()) {
             auto task = load(id);
             task["requestedDoneWhen"] = doneWhen;
             task["criteriaSourceMessageId"] = message.id;
             save(task);
         }
-        return {{"ok",true},{"effect","started"},{"taskId",id}};
+        Json receipt{{"ok",true},{"effect","started"},{"taskId",id}};
+        if (selectedSession) receipt["existingSession"] = true;
+        return receipt;
     }
     if (tool == "send_to_task" || tool == "change_task") {
         auto task = ownTask(identifier(args,"taskId",true),message);
@@ -834,7 +842,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
             }
             ConversationModelCheckpoint checkpoint{0,step,Json::object(),ConversationModelFailure{}};
             try {
-                authorizeSessionHistory(message.bot,message.channelScope,input.event.at("turn"),t3);
+                authorizeSessionHistory(message,input.event.at("turn"),t3);
                 authorizeBotToolHistory(message.bot,id,input);
                 {
                     std::lock_guard lock(mutex);
@@ -974,6 +982,17 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 result = toolFailure(error.what());
             }
         }
+        std::optional<WorkSession> selectedSession;
+        if (decision.tool == "start_task" && decision.args.is_object() &&
+            !field(decision.args,"sessionRef").empty()) {
+            try {
+                selectedSession = resolveWorkSession(message,field(decision.args,"sessionRef"),t3);
+            } catch (const StorageError&) {
+                throw;
+            } catch (const std::exception&) {
+                result = toolFailure("The selected T3 Session could not be verified. Search for it again.");
+            }
+        }
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (!authorizeTurn(message)) { transaction.commit(); return; }
@@ -1045,7 +1064,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
             }
             exec("SAVEPOINT turn_tool");
             try {
-                result = applyTurnTool(message,step,decision,clock());
+                result = applyTurnTool(message,step,decision,clock(),selectedSession ? &*selectedSession : nullptr);
                 exec("RELEASE turn_tool");
             } catch (const StorageError&) {
                 throw;

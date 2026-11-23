@@ -421,6 +421,7 @@ ORDER BY id)SQL");
         task.erase("replanning");
         task.erase("pendingEnvironmentId");
         task.erase("environmentReleased");
+        task.erase("queuedInT3");
         if (hasPending(task)) task["cancelledInstructions"] = task.at("pendingInstructions");
         else task.erase("cancelledInstructions");
         task.erase("pendingInstructions");
@@ -674,6 +675,7 @@ AND s.status NOT IN ('completed','failed','stopped')
                 }
                 task["lastRun"] = task["activeRun"];
                 task["activeRun"] = nullptr;
+                task.erase("queuedInT3");
                 consumeEvent(task);
                 Json data = {{"kind","result"},{"run",task["lastRun"]},
                     {"resultRunId",observed.resultRunId.empty() ? run.runId : observed.resultRunId},
@@ -698,6 +700,22 @@ AND s.status NOT IN ('completed','failed','stopped')
             }
             if (state == "cancelling" || replanning) return false;
             if (!field(task,"actionId").empty()) return false;
+            bool leftQueue = false;
+            if (task.contains("selectedSession") && observed.kind != Observation::Kind::Unavailable) {
+                if (observed.kind == Observation::Kind::Running && observed.status == "queued") {
+                    if (connectionWait) {
+                        db.clearWait(task,"connection_restored");
+                        task["state"] = "running";
+                    }
+                    if (task.value("queuedInT3",false)) return connectionWait;
+                    task["queuedInT3"] = true;
+                    task["deadline"] = 0;
+                    return true;
+                }
+                leftQueue = task.erase("queuedInT3") != 0;
+                if (leftQueue)
+                    task["deadline"] = options.clock() + db.environmentTimeout(field(task,"botId"),field(task,"environmentId"),task.at("config"));
+            }
             if (observed.kind == Observation::Kind::Question) {
                 if (observed.question.requestId.empty()) return false;
                 if (field(task["question"],"requestId") == observed.question.requestId) {
@@ -755,7 +773,7 @@ AND s.status NOT IN ('completed','failed','stopped')
                 db.wait(task,"deadline",{{"text","The assigned Run reached its deadline"}});
                 return true;
             }
-            return false;
+            return leftQueue;
         }();
         if (changed) saveTask(task,std::move(resumedDecision));
         tx.commit();
@@ -840,6 +858,7 @@ AND s.status NOT IN ('completed','failed','stopped')
             if (target != old) {
                 current["environmentId"] = target;
                 current["newSessionRequired"] = true;
+                current.erase("selectedSession");
                 db.journal(current["id"],"session_destination_changed",{{"from",old},{"to",target},{"revisionId",revision(current)}});
             }
             closeQuestion(current,"user_instruction");
@@ -949,6 +968,8 @@ AND s.status NOT IN ('completed','failed','stopped')
         auto owner = db.query("SELECT action_id FROM runs WHERE environment_id=? AND thread_id=? AND run_id=?",
                               {task["environmentId"],run.threadId,run.runId});
         if (owner.next() && owner.string(0) != field(action,"id")) return false;
+        if (action["tool"] == "start_in_session")
+            return run.threadId == field(action.at("target"),"threadId");
         if (action["tool"] == "follow_up") {
             const auto target = runRef(action["target"]);
             if (run.threadId != target.threadId || run.runId == target.runId) return false;
@@ -1029,7 +1050,8 @@ AND s.status NOT IN ('completed','failed','stopped')
                         {"revisionId",task["activeRun"]["revisionId"]},
                         {"sourceResultRefs",action.at("sourceResultRefs")}});
                     instructionDelivery(task,action);
-                    if (action["tool"] == "delegate" && !task.value("replanning",false)) {
+                    if ((action["tool"] == "delegate" || action["tool"] == "start_in_session") &&
+                        !task.value("replanning",false)) {
                         task.erase("newSessionRequired");
                         task.erase("freshContextRequested");
                     }
@@ -1114,11 +1136,21 @@ AND s.status NOT IN ('completed','failed','stopped')
         auto cmd = command(task,action);
         const auto id = task["id"].get<Id>();
         Delivery outcome;
+        const bool usesExistingSession = cmd.tool == "follow_up" || cmd.tool == "start_in_session";
+        const bool preparesTaskContract = cmd.tool == "delegate" || cmd.tool == "start_in_session";
+        const auto selectedSessionAllowed = [&](const Json& current) {
+            if (!usesExistingSession || !current.contains("selectedSession")) return cmd.tool != "start_in_session";
+            const auto& selected = current.at("selectedSession");
+            if (field(selected,"environmentId") != cmd.environmentId || field(selected,"threadId") != cmd.target.threadId ||
+                field(selected,"projectId") != cmd.projectId) return false;
+            return db.permitsWorkSession(current.value("sourceMessageId",Id{}),
+                                         {cmd.environmentId,cmd.target.threadId,cmd.projectId});
+        };
         // A scoped launch must pass the live coordination check when reserving its slot.
         const bool specialistLaunch = scopedSpecialistLaunch(task,cmd.tool);
         std::optional<Resource> resource;
         if (cmd.tool == "delegate") resource = Resource{Action::environment_launch,cmd.environmentId};
-        else if (cmd.tool == "follow_up" || cmd.tool == "answer_session_question") {
+        else if (usesExistingSession || cmd.tool == "answer_session_question") {
             resource = Resource{Action::t3_send,Resource::sessionRead(cmd.environmentId,cmd.target.threadId).target,
                                 cmd.tool == "answer_session_question"};
         }
@@ -1144,9 +1176,10 @@ AND s.status NOT IN ('completed','failed','stopped')
         };
         const bool firstSend = action["phase"] == "ready";
         if (firstSend) {
+            if (!selectedSessionAllowed(task)) return refused(ApprovalGate::denied);
             if (resource && policy.mode() == "full" && policy.forbidden(cmd.ownerBotId,resource->action,resource->target))
                 return applyDelivery(id,action,{Delivery::Kind::Settings,{},"Session action denied by installation policy.",true});
-            if (cmd.tool == "delegate") {
+            if (preparesTaskContract) {
                 try {
                     std::lock_guard lock(db.mutex);
                     if (!action.contains("instruction")) {
@@ -1165,7 +1198,7 @@ AND s.status NOT IN ('completed','failed','stopped')
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},error.what(),true});
                 }
             }
-            if (cmd.tool == "delegate" || cmd.tool == "follow_up") {
+            if (preparesTaskContract || usesExistingSession) {
                 const auto scrub = db.redactor(cmd.ownerBotId);
                 const auto pin = field(task,"inputArtifactVersion");
                 if (scrub.text(pin) != pin)
@@ -1182,7 +1215,7 @@ AND s.status NOT IN ('completed','failed','stopped')
                                   {"config",cmd.config},{"environmentId",cmd.environmentId}};
             const auto assess = [&](const Json& current, bool claim) {
                 const auto origin = db.taskPolicyOrigin(current);
-                if (cmd.tool == "follow_up") {
+                if (usesExistingSession) {
                     const Resource launch{Action::environment_launch,cmd.environmentId,true};
                     const auto launchPolicy = policy.check(cmd.ownerBotId,launch);
                     if (launchPolicy == PolicyResult::deny) return ApprovalGate::denied;
@@ -1225,6 +1258,10 @@ AND s.status NOT IN ('completed','failed','stopped')
             auto policyGate = ApprovalGate::allow;
             if (!change(task,[&](Json& current) {
                 if (shutdown.stop_requested() || current["actionId"] != action["id"]) return false;
+                if (!selectedSessionAllowed(current)) {
+                    policyGate = ApprovalGate::denied;
+                    return false;
+                }
                 if (resource) {
                     policyGate = assess(current,true);
                     if (policyGate != ApprovalGate::allow) return false;
@@ -1251,8 +1288,9 @@ AND s.status NOT IN ('completed','failed','stopped')
             }
         } else if (action["phase"] != "started") return;
         try {
-            if (firstSend) outcome = (resource && policy.forbidden(cmd.ownerBotId,resource->action,resource->target)) ||
-                                     (cmd.tool == "follow_up" && policy.forbidden(cmd.ownerBotId,Action::environment_launch,cmd.environmentId))
+            if (firstSend) outcome = !selectedSessionAllowed(task) ||
+                                     (resource && policy.forbidden(cmd.ownerBotId,resource->action,resource->target)) ||
+                                     (usesExistingSession && policy.forbidden(cmd.ownerBotId,Action::environment_launch,cmd.environmentId))
                 ? Delivery{Delivery::Kind::NotAccepted,{},"Session action denied by installation policy.",true}
                 : t3.send(cmd);
             else {
@@ -1323,7 +1361,10 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         if (receiving && peer->kind == "consult") return {"reply_to_bot"};
         std::vector<std::string> tools{"delegate",receiving ? "reply_to_bot" : "ask_user"};
         if (hasSettledRun(task)) {
-            if (!task.value("newSessionRequired",false)) tools.push_back("follow_up");
+            if (!task.value("newSessionRequired",false)) {
+                tools.push_back("follow_up");
+                if (task.contains("selectedSession")) std::erase(tools,"delegate");
+            }
             if (event.contains("sessionReadViews")) tools.push_back("session_read");
         }
         if (!receiving) {
@@ -1331,7 +1372,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
             if (canComplete(task,event)) tools.push_back("complete");
         }
         if (canRead && event["evidence"].size() < maxEvidenceReads) tools.push_back("read_bot_evidence");
-        if (canSend) tools.push_back("send_bot_message");
+        if (canSend && (!task.contains("selectedSession") || hasSettledRun(task))) tools.push_back("send_bot_message");
         return tools;
     }
     void recordFailure(Json& task, const Json& event, std::string_view detail, bool transient) {
@@ -1646,6 +1687,15 @@ ORDER BY j.id
 
     void queueAction(Json& task, const std::string& action, std::string_view tool, std::string instruction,
                      const Json& args, const Json& event, bool charge) {
+        auto target = tool == "follow_up" ? task["lastRun"] : task["activeRun"];
+        if (tool == "delegate" && task.contains("selectedSession")) {
+            if (task.value("newSessionRequired",false)) task.erase("selectedSession");
+            else {
+                const auto& selected = task.at("selectedSession");
+                target = runJson({field(selected,"threadId"),{},{}});
+                tool = "start_in_session";
+            }
+        }
         WorkPrompt prompt;
         if (tool == "follow_up") {
             prompt = workPrompt(task,event,action.size());
@@ -1654,13 +1704,13 @@ ORDER BY j.id
             instruction += prompt.instruction;
             instruction = sessionPrompt(action,scrub.text(instruction));
         }
-        if (tool == "delegate" || tool == "follow_up") task["deadline"] = 0;
+        if (tool == "delegate" || tool == "follow_up" || tool == "start_in_session") task["deadline"] = 0;
         Json out = {{"id",action},{"tool",tool},{"environmentId",task["environmentId"]},
-            {"target",tool == "follow_up" ? task["lastRun"] : task["activeRun"]},
+            {"target",std::move(target)},
             {"instruction",std::move(instruction)},{"questionId",field(args,"requestId")},
             {"answers",args.value("answers",Json::object())},{"revisionId",revision(task)},
             {"instructions",prompt.pending},{"contextIds",prompt.contextIds},{"sourceResultRefs",prompt.resultReferences},{"chargesBudget",charge}};
-        if (tool == "delegate") {
+        if (tool == "delegate" || tool == "start_in_session") {
             out["instructionBase"] = db.redactor(field(task,"botId")).text(field(out,"instruction"));
             out.erase("instruction");
         }
@@ -2595,6 +2645,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
             {"doneWhen",task["doneWhen"]},
             {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
         if (task.contains("sourceMessageId")) summary["sourceMessageId"] = task.at("sourceMessageId");
+        if (task.contains("selectedSession") && !task.value("newSessionRequired",false)) summary["usesSelectedSession"] = true;
         if (task.contains("requestedDoneWhen")) summary["requestedDoneWhen"] = task.at("requestedDoneWhen");
         if (task.contains("restartContext")) summary["restartContext"] = task.at("restartContext");
         if (hasPending(task)) {
@@ -2830,7 +2881,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (!task["activeRun"].is_null() && (state == "running" || state == "waiting") &&
                 ingest(task,observe(task))) return;
             const bool reconcile = state == "waiting" &&
-                (task.contains("workflowId") || field(task,"specialistRole")=="executor") &&
+                (task.contains("workflowId") || field(task,"specialistRole")=="executor" || task.contains("selectedSession")) &&
                 !field(task,"actionId").empty();
             if (state != "sending" && !reconcile) return;
             Json action;
@@ -2841,8 +2892,11 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (action.is_null()) return;
             if (reconcile) {
                 const auto now = options.clock();
-                if (action.at("phase")!="started" || now<task.value("workflowReconcileAt",Seconds{})) return;
-                if (!change(task,[&](Json& current) { current["workflowReconcileAt"] = now+5; return true; })) return;
+                const bool selectedStart = field(action,"tool") == "start_in_session";
+                if (!selectedStart && !task.contains("workflowId") && field(task,"specialistRole")!="executor") return;
+                const auto key = selectedStart ? "sessionReconcileAt" : "workflowReconcileAt";
+                if (action.at("phase")!="started" || now<task.value(key,Seconds{})) return;
+                if (!change(task,[&](Json& current) { current[key] = now+5; return true; })) return;
             }
             deliver(task,action);
         }

@@ -309,9 +309,14 @@ HandoffAck SessionHandoff::openChannel(const T3Connection& connection, const Thr
         throw Conflict("T3 connection or Bot access changed");
     if (scope && !store_.policy().allows(bot,Action::t3_coordinate,target.environmentId))
         throw Conflict("T3 coordination denied by installation policy");
-    if (db.query("SELECT 1 FROM runs WHERE environment_id=? AND thread_id=?",
-                 {target.environmentId,target.threadId}).next())
-        throw Conflict("A Flock-owned Thread cannot open a handoff");
+    if (db.query(R"SQL(
+SELECT 1 FROM runs WHERE environment_id=?1 AND thread_id=?2 AND run_id=?3
+UNION ALL
+SELECT 1 FROM tasks WHERE environment_id=?1 AND state NOT IN ('completed','cancelled')
+AND json_extract(data,'$.activeRun.threadId')=?2 AND json_extract(data,'$.activeRun.runId')=?3
+LIMIT 1
+)SQL",{target.environmentId,target.threadId,proof.activeRunId}).next())
+        throw Conflict("A Run managed by Flock cannot open a handoff");
 
     auto existing = db.query(R"SQL(
 SELECT id,request_id,request_digest,person_id,project_id FROM return_channels

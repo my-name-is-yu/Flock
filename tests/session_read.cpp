@@ -1,5 +1,6 @@
 #include "flock/board_inbox.hpp"
 #include "flock/session_read.hpp"
+#include "flock/t3_connection.hpp"
 
 #include <iostream>
 #include <sqlite3.h>
@@ -13,6 +14,7 @@ constexpr auto staging = "internal-staging-thread";
 constexpr auto second = "internal-second-investigation";
 constexpr auto env = "desktop";
 constexpr auto otherEnv = "remote-desktop";
+constexpr auto nativeSession = "internal-native-session";
 constexpr auto timestamp = "2026-11-21T12:34:56.123Z";
 constexpr auto failureId = "internal-failed-event";
 constexpr auto logId = "internal-test-log";
@@ -30,6 +32,7 @@ struct Backend : T3 {
     bool denyAttachment = false;
     bool pagedCatalog = false;
     bool overlappingCatalog = false;
+    bool nativeCatalog = false;
     std::vector<Id> catalogOffsets;
 
     bool supportsRunTargetedSteer() const override { return true; }
@@ -49,11 +52,13 @@ struct Backend : T3 {
     bool allowed(const SessionTarget& target) {
         ++reads;
         if (onRead) onRead();
+        if (target.threadId == nativeSession)
+            return nativeCatalog && target.environmentId == otherEnv && !denied[target.threadId];
         return (target.environmentId == env || target.environmentId == otherEnv) && !denied[target.threadId] &&
             (target.threadId == staging || target.threadId == second || target.threadId == "foreign-thread");
     }
     std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
-        std::string_view environment, std::string_view, Id offset, SessionReadDeadline) override {
+        std::string_view environment, std::string_view project, Id offset, SessionReadDeadline) override {
         if (overlappingCatalog)
             return {environment == env ? std::vector<std::string>{staging} : std::vector<std::string>{},std::nullopt};
         if (pagedCatalog) {
@@ -63,12 +68,17 @@ struct Backend : T3 {
             if (offset == 1000) return {{second},std::nullopt};
             return {};
         }
-        if (environment == otherEnv) return {{staging},std::nullopt};
+        if (environment == otherEnv) {
+            if (nativeCatalog && project.empty()) return {{nativeSession,staging},std::nullopt};
+            return {{staging},std::nullopt};
+        }
         return {{staging,second,"internal-shared-but-denied"},std::nullopt};
     }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target,bool includeMessages,
                                                   SessionReadDeadline) override {
         if (!allowed(target)) return {};
+        if (target.threadId == nativeSession)
+            return SessionMetadata{"Native investigation","Other Project","other-project","completed",timestamp,timestamp,{},false};
         std::string title = target.threadId == second ? "Staging investigation 2" :
             target.threadId == "foreign-thread" ? "Foreign investigation" : "Staging investigation";
         if (!secret.empty()) title.append(235-title.size(),'x').append(secret);
@@ -404,6 +414,50 @@ void catalogResumesAfterPartialDiscovery() {
           f.t3.catalogOffsets == std::vector<Id>{0,1000},"Catalog restarted at offset zero");
 }
 
+void connectedSearchRespectsCurrentAccess() {
+    Fixture f;
+    f.t3.nativeCatalog = true;
+    T3Connections connections(*f.store);
+    connections.connect(env,localOwner.id,48120);
+    const auto search = "flock_session_search";
+    const auto events = "flock_session_events";
+    const Json filters{{"project","Other Project"}};
+    check(f.call(search,filters).at("sessions").empty(),"an unconnected environment entered the search");
+
+    connections.connect(otherEnv,localOwner.id,48120);
+    const auto found = f.call(search,filters);
+    check(found.at("sessions").size() == 1 && found.at("sessions").front().at("title") == "Native investigation",
+          "connected search remained limited to the Bot routing project");
+    check(found.dump().find(nativeSession) == std::string::npos,"connected search exposed an upstream ID");
+    const auto reference = found.at("sessions").front().at("sessionRef");
+    const Json read{{"sessionRef",reference},{"operation","counts"}};
+    const Json work{{"sessionRef",reference},{"request","Continue the investigation"}};
+    check(f.call(events,read).at("ok") == true,"connected Session reference could not be read");
+
+    auto& denied = f.t3.denied[nativeSession];
+    denied = true;
+    check(f.call(search,filters).at("sessions").empty() && f.call(events,read).at("ok") == false &&
+          f.call("start_task",work).at("ok") == false,"upstream denial did not revoke a discovered Session");
+    denied = false;
+
+    auto policy = f.store->policy();
+    policy.changeNeverRule(localOwner,Action::environment_inspect,otherEnv,true);
+    check(f.call(search,filters).at("sessions").empty() && f.call(events,read).at("ok") == false,
+          "a Never rule did not revoke connected search access");
+    policy.changeNeverRule(localOwner,Action::environment_inspect,otherEnv,false);
+
+    policy.setMember(localOwner,"alpha","guest",true);
+    check(f.call(search,filters).at("sessions").empty() && f.call(events,read).at("ok") == false &&
+          f.call("start_task",work).at("ok") == false,"sharing a Bot retained private connected Session access");
+    policy.setMember(localOwner,"alpha","guest",false);
+    check(f.call(events,read).at("ok") == true,"removing the share did not restore private scope");
+
+    connections.disconnect(otherEnv);
+    const int reads = f.t3.reads;
+    check(f.call(events,read).at("ok") == false && f.call("start_task",work).at("ok") == false &&
+          f.t3.reads == reads,"a disconnected environment remained reachable using a saved reference");
+}
+
 void approvedCallSurvivesReadPreflightContention() {
     Fixture f;
     f.model.next = {"flock_session_search",{{"query","regression"}},"Find the report"};
@@ -497,6 +551,7 @@ int main() {
         acceptance();
         catalogResumesAfterPartialDiscovery();
         catalogResultsAreDeduplicatedAcrossRecordedBatches();
+        connectedSearchRespectsCurrentAccess();
         redactionAndResumedHistory();
         approvedCallSurvivesReadPreflightContention();
     } catch (const std::exception& error) {

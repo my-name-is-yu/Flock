@@ -240,6 +240,7 @@ std::string displayState(const Json& task) {
     const auto state = field(task,"state");
     if (state == "cancelling" || ((state != "cancelled" && state != "completed") && task.value("replanning",false)))
         return "stopping";
+    if (state == "running" && task.value("queuedInT3",false)) return "queued";
     return state;
 }
 

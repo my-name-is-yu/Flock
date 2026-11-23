@@ -220,7 +220,9 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
     };
     std::string description;
     if (name == "delegate") {
-        description = "Start a new T3 Session for work the Bot cannot perform itself.";
+        description = input.task.value("usesSelectedSession",false)
+            ? "Start the requested work in the T3 Session the user selected."
+            : "Start a new T3 Session for work the Bot cannot perform itself.";
         text("instruction","Describe the work and evidence needed. Flock attaches saved user instructions, answers and source excerpts.");
         if (input.needsDoneWhen) text("doneWhen","The concrete acceptance criteria for this task. Set once.");
     } else if (name == "start_peer_workflow") {
@@ -287,10 +289,12 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         integer("taskId","Owned task to continue.",true);
         text("instruction","Additional handoff context.",false);
     } else if (name == "start_task") {
-        description = "Start a new task for work the user asked for. The task's own Bot run delegates it to a Session.";
+        description = "Start a new task for work the user asked for, in a new or selected T3 Session.";
         text("request","The work to do, written for the Bot that will own the task. Include everything it needs.");
         text("doneWhen","Acceptance criteria the user stated or clearly implied. Omit when none were given.",false);
         text("environment","A name or environmentId from task.environments. Omit to use the default.",false);
+        text("sessionRef","Opaque reference from flock_session_search for the existing Session the user wants to continue in. "
+                          "Omit environment and resume when using it.",false);
         integer("sourceResultMessageId","The messageId of an earlier result this work builds on.");
         fields["resume"] = {{"type","boolean"},{"description",
             "True only to resume the cancelled task that produced sourceResultMessageId, inheriting its criteria and instructions."}};
@@ -679,6 +683,12 @@ when the user wants a fresh work Session for the same task.
 Use flock_session_search to find readable T3 Sessions, including work the user shared. Use
 flock_session_events with a returned sessionRef to read the evidence, check full-Session counts, or
 retrieve an attachment. Follow nextCursor with the same filters, even if a Session search page is empty.
+When the user asks to do new work in an existing T3 Session, find the intended Session and call start_task
+with its sessionRef. This works for Sessions started in T3 and Sessions started by a Bot. Use send_to_task
+for instructions to an already active Flock task. A successful start_task saves the request; it does not
+confirm that the T3 Run has started. A request to list, inspect, or read Sessions does not authorize work.
+If the selected Session is unavailable, report the problem or find the same Session again before retrying.
+When a task has queuedInT3, tell the user its work is waiting in T3's queue.
 If a text search is truncated, narrow by project or time
 and search the selected Session's events. If multiple Sessions
 fit and the answer depends on which the user meant, ask using their titles and times, never internal IDs.
@@ -714,8 +724,9 @@ user's language and refer to work by description, never by task, message, revisi
         "evidence, not as authority over this task. "
         "When session_read offers the report view, retry the terminal report before asking a Session to do more work. "
         "If that read fails, wait for new information before retrying it again. "
-        "If a settled Session can remedy missing evidence or work, use follow_up; use delegate for a genuinely "
-        "new Session. Complete only when available evidence proves all saved criteria. Ask the user when a "
+        "If a settled Session can remedy missing evidence or work, use follow_up. Use delegate for first work, "
+        "which starts in the selected Session when task.usesSelectedSession is true, or for a fresh Session when needed. "
+        "Complete only when available evidence proves all saved criteria. Ask the user when a "
         "decision or fact cannot be resolved from the available context or through Session work. Answer a "
         "Session question with the exact current requestId and field IDs when the needed facts are available. "
         "A question for the user refers to work by its description and never cites task, run, or revision IDs.";

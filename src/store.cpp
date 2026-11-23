@@ -592,6 +592,7 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
     const auto& pending = task.at("pendingAction");
     if (!wait.is_object() || wait.at("id") != waitId || wait.at("reason") != "settings" ||
         (!pending.is_null() && pending.at("phase") != "ready")) return target;
+    if (pending.is_object() && pending.at("tool") == "start_in_session") return target;
 
     const auto current = intake(task.at("botId").get_ref<const std::string&>(),
                                 task.at("request").get_ref<const std::string&>());

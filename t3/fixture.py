@@ -161,7 +161,7 @@ class Fixture(BaseHTTPRequestHandler):
                     and state.get("dropAnswerReply")):
                 self.close_connection = True
                 return
-            if tool["name"] == "t3_thread_send" and state.get("stockDropSendReply"):
+            if tool["name"] == "t3_thread_send" and (state.get("stockDropSendReply") or state.get("selectedDropSendReply")):
                 self.close_connection = True
                 return
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
@@ -190,6 +190,7 @@ class Fixture(BaseHTTPRequestHandler):
         ]
         if (name in ("t3_project_read", "t3_thread_read", "t3_thread_list", "t3_thread_launch",
                      "t3_thread_send", "t3_thread_interrupt") or
+                (name == "t3_queue" and args["action"] == "cancel") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
@@ -217,14 +218,44 @@ class Fixture(BaseHTTPRequestHandler):
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
         if name == "t3_thread_send":
+            if scenario == "selected-session":
+                thread = args["threadId"]
+                assert thread in ("human-selected", "flock-selected") and args["mode"] == "queue"
+                assert args["message"].endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
+                state["selectedInput"] = args["message"]
+                state["selectedRunStatus"] = "queued" if state.get("selectedBusy") else "running"
+                run = "manual-run" if state.get("selectedBadReceipt") else "selected-run"
+                return {"threadId": thread, "runId": run, "messageId": "selected-message",
+                        "delivery": "queued" if state.get("selectedBusy") else "started", "link": "t3://" + thread}
             assert scenario == "settled" and args["mode"] == "queue" and args["threadId"] == "thread"
             assert args["clientRequestId"] == "flock-action-01234"
             state["followup"] = args["message"]
             return {"threadId": "thread", "runId": "follow", "delivery": "started", "link": "t3://thread"}
         if name == "t3_queue":
+            if scenario == "selected-session":
+                assert args["threadId"] in ("human-selected", "flock-selected")
+                action = args["action"]
+                if action in ("read", "cancel"):
+                    assert args["queuedRunId"] == "selected-run"
+                if action == "cancel":
+                    assert state["selectedRunStatus"] == "queued"
+                    state["selectedRunStatus"] = "cancelled"
+                    return {"sequence": 11}
+                if state["selectedRunStatus"] == "queued":
+                    text = state["selectedInput"]
+                    length = 1000 if action == "list" else 16000
+                    entry = {"queuedRunId": "selected-run", "text": text[:length], "truncated": len(text) > length}
+                    if action == "read":
+                        return entry
+                    return {"items": [entry], "nextCursor": None}
+                return {"items": [], "nextCursor": None}
             assert args["action"] == "list" and args["threadId"] == "thread"
             return {"items": [], "nextCursor": None}
         if name == "t3_thread_list":
+            if args.get("allProjects") is True:
+                assert "projectId" not in args and not args["includeSubagents"]
+                projects = [self.summary("first"), self.summary("second") | {"projectId": "another-project"}]
+                return {"projectId": None, "threads": projects, "total": len(projects), "nextCursor": None}
             assert args["projectId"] == "project"
             ids = ["thread", "duplicate"] if state.get("duplicate") else ["thread"]
             if scenario == "sparse-session-search":
@@ -241,6 +272,12 @@ class Fixture(BaseHTTPRequestHandler):
             return {"projectId": "project", "threads": [self.summary(t) for t in ids[start:end]],
                     "total": len(ids), "nextCursor": end if end < len(ids) else None}
         if name == "t3_thread_wait":
+            if scenario == "selected-session":
+                assert args["threadId"] in ("human-selected", "flock-selected") and args["runId"] == "selected-run"
+                status = state["selectedRunStatus"]
+                waiting_for_thread = args["untilDelegatedWorkSettled"] and state.get("selectedBusy")
+                return {"threadId": args["threadId"], "runId": args["runId"], "status": status,
+                        "timedOut": status == "queued" or status == "running" or waiting_for_thread}
             assert args["threadId"] == "thread" and args["runId"] == "root" and args["timeoutMs"] <= 400
             if state.get("waitFailure"):
                 return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "Wait is unavailable."}
@@ -291,6 +328,17 @@ class Fixture(BaseHTTPRequestHandler):
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]
         rows = [self.item(thread_id, 0, "root", "user_message", state["launched"], source="mcp"),
                 self.item(thread_id, 1, "root", "assistant_message", "root report")]
+        if scenario == "selected-session":
+            assert thread_id in ("human-selected", "flock-selected")
+            source = "web" if thread_id == "human-selected" else "mcp"
+            summary |= {"activeRunId": "manual-run" if state.get("selectedBusy") else None,
+                        "latestRunId": "manual-run", "pendingRequestCount": 1 if state.get("selectedBusy") else 0,
+                        "projectId": state.get("selectedProject", "project"),
+                        "archived": state.get("selectedArchived", False),
+                        "creationSource": source, "createdBy": "user" if source == "web" else "agent"}
+            rows = [self.item(thread_id, 0, "manual-run", "user_message", "Earlier work", source=source)]
+            if state.get("selectedRunStatus") == "running":
+                rows.append(self.item(thread_id, 1, "selected-run", "user_message", state["selectedInput"], source="mcp"))
         if scenario == "paged-report":
             rows[1]["text"] = "x" * 7000 + "end of report"
             rows.extend(self.item(thread_id, i, "other", "assistant_message", "unrelated report") for i in range(2, 5))
