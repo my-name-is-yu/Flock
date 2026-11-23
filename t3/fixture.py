@@ -42,6 +42,10 @@ class Fixture(BaseHTTPRequestHandler):
         origin = self.server.origin
         if self.path == "/fixture/effects":
             self.reply(self.server.state.get("effects", {}))
+        elif self.path == "/.well-known/t3/environment":
+            self.reply({"environmentId": self.server.state.get("descriptorEnvironment",
+                         self.server.state.get("claimedEnvironment", "env-1")),
+                        "label": "Local T3 fixture", "serverVersion": "0.1.11"})
         elif self.path == "/fixture/stock":
             self.reply({key: self.server.state[key] for key in ("stockPin", "stockHead")} |
                        {key: self.server.state.get(key, {}) for key in ("stockLaunches", "stockPromptSends")})
@@ -219,7 +223,20 @@ class Fixture(BaseHTTPRequestHandler):
         if self.server.stock_thread:
             return self.stock_tool(name, args)
         if name == "t3_environment_read":
-            return {"environmentId": state.get("claimedEnvironment", "env-1"), "serverVersion": "0.1.11"}
+            return {"environmentId": state.get("claimedEnvironment", "env-1"),
+                    "label": "T3 fixture", "serverVersion": "0.1.11"}
+        if name == "t3_project_list":
+            assert args["limit"] == 100
+            if args["cursor"] == 0:
+                return {"projects": [
+                    {"id": "project", "title": "Release Pipeline", "archivedAt": None,
+                     "workspaceRoot": "/fixture/release"},
+                    {"id": "archived", "title": "Archived Release", "archivedAt": "2026-01-01T00:00:00Z",
+                     "workspaceRoot": "/fixture/archive"},
+                ], "nextCursor": 100}
+            assert args["cursor"] == 100
+            return {"projects": [{"id": "docs", "title": "Documentation",
+                                  "workspaceRoot": r"C:\Fixture\docs"}], "nextCursor": None}
         if name == "t3_project_read":
             if args["projectId"] == "slow-search-project":
                 time.sleep(4)
@@ -597,7 +614,7 @@ class Fixture(BaseHTTPRequestHandler):
     def stock_tool(self, name, args):
         state = self.server.state
         if name == "t3_environment_read":
-            return {"environmentId": state.get("claimedEnvironment", "env-1")}
+            return {"environmentId": state.get("claimedEnvironment", "env-1"), "label": "T3 fixture"}
         if name == "t3_project_read":
             return {"id": "project", "workspaceRoot": state["stockRoot"]}
         if name == "t3_thread_launch":
@@ -807,6 +824,12 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills), FLOCK_CODEX_SKILLS_DIR=str(codex_skills))
     env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
+    t3_home = directory / "t3-fixture-home"
+    env["T3CODE_HOME"] = str(t3_home)
+    runtime_path = t3_home / "userdata" / "server-runtime.json"
+    runtime_path.parent.mkdir(parents=True)
+    runtime_path.write_text(json.dumps({"version": 1, "pid": os.getpid(), "port": server.server_port,
+                                       "origin": server.origin, "serverVersion": "0.1.11"}))
     original = 'model = "fixture"\n\n[mcp_servers.unrelated]\ncommand = "/usr/bin/true"\n'
     codex_config.write_text(original)
     profile = state / "bots" / "reviewer"
@@ -826,10 +849,11 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         with urllib.request.urlopen(request, timeout=5):
             pass
 
-    def connect(environment, flags, restart=False, expected_error=None, rewritten=True):
+    def connect(environment, flags, restart=False, expected_error=None, rewritten=True, source="url"):
         server.state["claimedEnvironment"] = environment
-        with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
-                                         *flags], env=env, text=True,
+        target = {"url": ["connect", server.origin + "/mcp"], "local": ["connect"],
+                  "saved": ["reconnect", environment]}[source]
+        with subprocess.Popen(command + ["t3", *target, *flags], env=env, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
             try:
                 with selectors.DefaultSelector() as selector:
@@ -847,7 +871,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 if process.poll() is None:
                     process.kill()
         details = json.loads(output)
-        assert "mode" not in details and details["port"] == port
+        assert "mode" not in details and details["port"] == port and details["environmentId"] == environment
         has_claude = env["FLOCK_CLAUDE_CLI"] == str(claude)
         providers = ["codex", "claude"] if has_claude else ["codex"]
         assert details["configuredProviders"] == (providers if rewritten else [])
@@ -886,15 +910,13 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     system_settings.write_text(json.dumps({"port": port}))
     system_settings.chmod(0o600)
     env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
-    old = connect("env-1", [], restart=True)
+    old = connect("env-1", [], restart=True, source="local")
     system_settings.unlink()
     assert claude_config.read_bytes() == original_claude
     env["FLOCK_CLAUDE_CLI"] = str(claude)
     token = connect("env-2", [])
     assert token != old
-    rotated = connect("env-2", [])
-    assert rotated != token
-    token = rotated
+    assert connect("env-2", [], rewritten=False, source="saved") == token
     assert connect("env-3", [], rewritten=False) == token
     subprocess.run(command + ["t3", "disconnect", "env-3"], env=env, check=True,
                    timeout=5, stdout=subprocess.DEVNULL)
@@ -911,7 +933,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         ("FIXTURE_CLAUDE_ALLOW_BEARER", "Bearer " + token),
     ]:
         env[setting] = value
-        connect("env-2", [], expected_error="Claude Code 2.1.327 or later is required")
+        connect("env-2", ["--port", str(port - 1)], expected_error="Claude Code 2.1.327 or later is required")
         del env[setting]
         assert {path.name: path.read_bytes() for path in credential_dir.glob("*.json")} == credentials
         assert codex_config.read_bytes() == previous_config and connector() == previous_connector
@@ -931,7 +953,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     system_settings.write_text(json.dumps({"port": port}))
     system_settings.chmod(0o600)
     configured = codex_config.read_bytes(), claude_config.read_bytes(), connector()
-    conflict = subprocess.run(command + ["t3", "connect", "env-2", server.origin + "/mcp",
+    conflict = subprocess.run(command + ["t3", "connect", server.origin + "/mcp",
                                         "--port", str(previous_port)],
                               env=env, text=True, capture_output=True, timeout=5)
     assert conflict.returncode != 0 and "Flock System settings select Web port" in conflict.stderr
@@ -1001,21 +1023,48 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 assert daemon.stdout.readline().rstrip().endswith(f":{port}")
             assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
 
-            server.state["claimedEnvironment"] = "env-from-url"
+            server.state["claimedEnvironment"] = "env-local-web"
+            server.state["descriptorEnvironment"] = "env-wrong"
             try:
-                settings("/t3-connect", {"mcpUrl": server.origin + "/mcp"}, member_credential)
+                settings("/t3-connect", {"source": "local"}, member_credential)
             except urllib.error.HTTPError as error:
                 assert error.code == 403
             else:
                 raise AssertionError("non-admin credential started Web T3 setup")
-            status, _ = settings("/t3-connect", {"mcpUrl": server.origin + "/mcp"})
+            status, _ = settings("/t3-connect", {"source": "local"})
             assert status == 202
             pending = await_t3_settings(lambda value: value["t3Setup"]["authorizationUrl"])
             approve(pending["t3Setup"]["authorizationUrl"])
-            await_t3_settings(lambda value: not value["t3Setup"]["running"] and
-                              "env-from-url" in value["t3"]["environments"])
-            assert settings("/t3-disconnect", {"environmentId":"env-from-url"})[0] == 200
-            assert "env-from-url" not in settings()[1]["t3"]["environments"] and ping(token) == 200
+            failed = await_t3_settings(lambda value: not value["t3Setup"]["running"])
+            assert failed["t3Setup"]["error"]
+            assert all(row["environmentId"] != "env-local-web" for row in failed["t3"]["environments"])
+            del server.state["descriptorEnvironment"]
+
+            def connect_web(target):
+                assert settings("/t3-connect", target)[0] == 202
+                pending = await_t3_settings(lambda value: value["t3Setup"]["authorizationUrl"])
+                approve(pending["t3Setup"]["authorizationUrl"])
+                connected = await_t3_settings(lambda value: not value["t3Setup"]["running"])
+                assert not connected["t3Setup"]["error"]
+                return {row["environmentId"]: row["authorization"] for row in connected["t3"]["environments"]}
+
+            authorized = connect_web({"source": "local"})["env-local-web"]
+            assert authorized["label"] == "T3 fixture" and not authorized["expired"]
+            credential_file = next(file for file in credential_dir.glob("*.json")
+                                   if json.loads(file.read_text())["environmentId"] == "env-local-web")
+            expired = json.loads(credential_file.read_text())
+            expired["expiresAt"] = 1
+            credential_file.write_text(json.dumps(expired))
+            assert next(row["authorization"]["expired"] for row in settings()[1]["t3"]["environments"]
+                        if row["environmentId"] == "env-local-web")
+            assert not connect_web({"source": "saved", "environmentId": "env-local-web"})["env-local-web"]["expired"]
+            assert settings("/t3-disconnect", {"environmentId":"env-local-web"})[0] == 200
+            assert all(row["environmentId"] != "env-local-web" for row in settings()[1]["t3"]["environments"])
+            assert ping(token) == 200
+
+            server.state["claimedEnvironment"] = "env-from-url"
+            assert "env-from-url" in connect_web({"source": "url", "mcpUrl": server.origin + "/mcp"})
+            assert settings("/t3-disconnect", {"environmentId": "env-from-url"})[0] == 200
 
             subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)

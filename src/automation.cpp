@@ -360,7 +360,7 @@ void Store::Impl::fireAutomation(Id id, const Statement& row, Seconds now) {
             if (def.contains("label")) trigger["label"] = def.at("label");
             auto scrub = redactor(bot);
             trigger = scrub.record(std::move(trigger));
-            const auto task = submit(intake(bot,field(def,"request"),row.json(2)),0,nullptr,RequestJournal::record,trigger);
+            const auto task = submit(intake(bot,field(def,"request"),row.json(2)),0,nullptr,TaskSource::request,trigger);
             const auto receipts = Json::array({{{"taskId",task},{"botId",bot},{"triggerId",id}}});
             exec("INSERT INTO automation_firings VALUES(?,?,?,?)",{key,bot,now,receipts});
         }
@@ -406,7 +406,7 @@ AND json_extract(definition,'$.source')=? ORDER BY id
         const auto id = rows.number(0);
         const Json trigger = {{"triggerKind","webhook"},{"triggerId",id},{"source",scrub.text(std::string(source))},
                               {"event",*payload},{"firedAt",now}};
-        const auto task = p_->submit(intake(bot,request,routing),0,nullptr,RequestJournal::record,trigger);
+        const auto task = p_->submit(intake(bot,request,routing),0,nullptr,TaskSource::request,trigger);
         receipts.push_back({{"taskId",task},{"botId",bot},{"triggerId",id}});
     }
     if (delivered.empty() && received.empty()) throw AccessDenied("Webhook source unavailable");

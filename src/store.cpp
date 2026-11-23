@@ -14,7 +14,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 6;
+constexpr Id schemaVersion = 7;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -142,16 +142,6 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS conversation_model_failures(
-  attempt_id INTEGER PRIMARY KEY REFERENCES model_attempts(id),
-  message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id),
-  step INTEGER NOT NULL,
-  reason TEXT NOT NULL,
-  repair_attempt_id INTEGER UNIQUE REFERENCES model_attempts(id) ON DELETE SET NULL)
-)SQL");
-    exec("CREATE UNIQUE INDEX IF NOT EXISTS conversation_model_repairs"
-         " ON conversation_model_failures(message_id) WHERE repair_attempt_id IS NOT NULL");
     exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
@@ -188,6 +178,9 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS t3_events(
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, item_type TEXT NOT NULL, item_id TEXT NOT NULL,
   PRIMARY KEY(environment_id,thread_id,item_type,item_id));
+CREATE TABLE IF NOT EXISTS bot_t3_projects(
+  bot_id TEXT NOT NULL, environment_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  PRIMARY KEY(bot_id,environment_id));
 CREATE TABLE IF NOT EXISTS waits(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   data TEXT NOT NULL, resolution TEXT);
@@ -212,18 +205,14 @@ CREATE TABLE IF NOT EXISTS peer_exchanges(
 CREATE UNIQUE INDEX IF NOT EXISTS peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
 CREATE VIEW IF NOT EXISTS project_execution_queue AS
 WITH candidates AS (
-  SELECT task.id,task.project_id,task.state,task.data,
-         CASE WHEN json_extract(task.data,'$.environmentReleased')
-              THEN COALESCE(json_extract(task.data,'$.pendingEnvironmentId'),task.environment_id)
-              ELSE task.environment_id END AS environment_id
+  SELECT task.id,task.state,task.data,task.project_id,task.environment_id
   FROM tasks task
-  WHERE task.state NOT IN ('completed','cancelled')
+  WHERE task.project_id<>'' AND task.state NOT IN ('completed','cancelled')
 )
 SELECT task.id,task.environment_id,task.project_id,task.state,
        ROW_NUMBER() OVER (
          PARTITION BY task.environment_id,task.project_id
-         ORDER BY (COALESCE(sender.state,task.state)='queued'
-                   OR COALESCE(json_extract(task.data,'$.environmentReleased'),0)),
+         ORDER BY COALESCE(sender.state,task.state)='queued',
            COALESCE(sender.id,task.id),
            CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
                 WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
@@ -250,6 +239,16 @@ FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
     initializeChannelSchema();
     initializeLocalMachineSchema();
     initializeModelBudgetSchema();
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS conversation_model_failures(
+  attempt_id INTEGER PRIMARY KEY REFERENCES model_attempts(id),
+  message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id),
+  step INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  repair_attempt_id INTEGER UNIQUE REFERENCES model_attempts(id) ON DELETE SET NULL)
+)SQL");
+    exec("CREATE UNIQUE INDEX IF NOT EXISTS conversation_model_repairs"
+         " ON conversation_model_failures(message_id) WHERE repair_attempt_id IS NOT NULL");
     initializeWorkspaceSchema();
     initializeAttachmentsSchema();
     initializeCompactionSchema();
@@ -309,8 +308,8 @@ Json Store::Impl::load(Id id) const {
 }
 void Store::Impl::save(Json& task) {
     task["generation"] = task["generation"].get<Id>() + 1;
-    exec("UPDATE tasks SET state=?,generation=?,data=json_remove(?,'$.wait'),environment_id=? WHERE id=?",
-         {task["state"], task["generation"], task, task["environmentId"], task["id"]});
+    exec("UPDATE tasks SET state=?,generation=?,data=json_remove(?,'$.wait'),environment_id=?,project_id=? WHERE id=?",
+         {task["state"],task["generation"],task,task["environmentId"],task["projectId"],task["id"]});
 }
 
 namespace {
@@ -368,24 +367,21 @@ std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
 }
 
 bool Store::Impl::peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const {
-    // A sender cannot move until its exchange closes. Reserve a recipient's pending destination
-    // while retaining the current dependency until the recipient releases that queue.
     return query(R"SQL(
 WITH RECURSIVE source(env,project) AS (
   SELECT environment_id,project_id FROM tasks WHERE id=?1
-), work_routes(source_env,source_project,current_env,target_project,pending_env,released) AS (
+), work_routes(source_env,source_project,current_env,current_project,pending_env,pending_project) AS (
   SELECT s.environment_id,s.project_id,r.environment_id,r.project_id,
-         CASE WHEN r.state<>'cancelling' AND json_extract(r.data,'$.replanning')
-              THEN json_extract(r.data,'$.pendingEnvironmentId') END,
-         COALESCE(json_extract(r.data,'$.environmentReleased'),0)
+         CASE WHEN r.state<>'cancelling' THEN json_extract(r.data,'$.pendingDestination.environmentId') END,
+         json_extract(r.data,'$.pendingDestination.projectId')
   FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks r ON r.id=p.recipient_task
   WHERE p.kind='work' AND p.phase<>'closed' AND p.sender_task<>?1
 ), dependencies(source_env,source_project,target_env,target_project) AS (
-  SELECT source_env,source_project,current_env,target_project FROM work_routes
-  WHERE NOT released
+  SELECT source_env,source_project,current_env,current_project FROM work_routes
+  WHERE current_project<>''
   UNION ALL
-  SELECT source_env,source_project,pending_env,target_project FROM work_routes
-  WHERE pending_env IS NOT NULL
+  SELECT source_env,source_project,pending_env,pending_project FROM work_routes
+  WHERE pending_env IS NOT NULL AND pending_project<>''
 ), reachable(env,project) AS (
   SELECT ?2,?3 FROM source WHERE env<>?2 OR project<>?3
   UNION
@@ -394,6 +390,13 @@ WITH RECURSIVE source(env,project) AS (
 )
 SELECT 1 FROM reachable JOIN source USING(env,project) LIMIT 1
 )SQL",{sender,environment,project}).next();
+}
+
+bool Store::Impl::recipientRouteWouldCycle(Id task, std::string_view environment, std::string_view project) const {
+    if (project.empty()) return false;
+    const auto peer = peerExchange(task);
+    return peer && peer->recipient == task && peer->kind == "work" &&
+        peerWorkRouteWouldCycle(peer->sender,environment,project);
 }
 
 bool Store::Impl::replanReady(const Json& task) const {
@@ -424,7 +427,7 @@ void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
         ? Json{{"sessionParticipationId",stop.participation},{"sessionStopId",stop.cutoff}}
         : Json::object());
     if (task["state"] == "queued" && !peer) {
-        for (const auto* key : {"replanning","pendingEnvironmentId","environmentReleased","pendingInstructions"})
+        for (const auto* key : {"replanning","pendingDestination","pendingInstructions"})
             task.erase(key);
         task["state"] = "cancelled";
         journal(id,"cancelled",Json::object());
@@ -573,11 +576,12 @@ Id Store::submit(const Intake& item, const Person* requester) {
 }
 
 Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& source,
-                      RequestJournal requestJournal, const Json& trigger) {
+                      TaskSource sourceKind, const Json& trigger) {
+    const bool consultation = sourceKind == TaskSource::consultation;
     if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
-        item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
+        item.request.size() > 16000 || (!consultation && item.environmentId.empty()) ||
         !item.config.is_object())
-        throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
+        throw Conflict("Bot, nonempty request (up to 16,000 bytes), and environment are required");
     if (botDeleted(item.botId)) throw Conflict("Bot has been deleted");
     const auto scrub = redactor(item.botId);
     scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.config});
@@ -594,10 +598,11 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         data["sourceResultRefs"] = Json::array({source});
     }
     if (!trigger.is_null()) data["trigger"] = trigger;
-    exec("INSERT INTO tasks(bot_id,environment_id,project_id,state,generation,data) VALUES(?,?,?,'queued',0,?)",
-         {item.botId,item.environmentId,item.projectId,data});
+    const auto state = consultation ? "deciding" : "queued";
+    exec("INSERT INTO tasks(bot_id,environment_id,project_id,state,generation,data) VALUES(?,?,?,?,0,?)",
+         {item.botId,item.environmentId,item.projectId,state,data});
     const auto id = last();
-    if (requestJournal == RequestJournal::record) {
+    if (sourceKind == TaskSource::request) {
         Json entry = {{"text",request},{"messageId",sourceMessageId},
                       {"source",sourceMessageId ? "conversation" : trigger.is_null() ? "manual" : "automation"}};
         if (!trigger.is_null()) entry["trigger"] = trigger;
@@ -617,8 +622,9 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
                                 task.at("request").get_ref<const std::string&>());
     const auto& environment = task.at("environmentId");
     const auto destinations = current.config.value("conversationEnvironments",Json::object());
-    if (task.at("projectId") != current.projectId ||
-        (environment != current.environmentId && std::ranges::find(destinations,environment) == destinations.end()))
+    if ((!current.projectId.empty() && environment == current.environmentId && task.at("projectId") != current.projectId) ||
+        (!current.environmentId.empty() && environment != current.environmentId &&
+         std::ranges::find(destinations,environment) == destinations.end()))
         throw Conflict("The project route changed. Cancel this task and submit a new request.");
     target["session"] = current.config.value("session",Json::object());
     return target;
@@ -670,15 +676,29 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         const auto answer = field(data,"text");
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > 8000)
             throw Conflict("A nonempty answer (up to 8,000 bytes) is required");
-        auto updated = currentEvent(task);
-        updated["userAnswer"] = answer;
-        updated["userQuestion"] = field(wait,"text");
-        for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
-        consumeEvent(task);
-        event(task, "answer/" + std::to_string(waitId), updated);
+        auto answerKind = "user_answer";
+        if (const auto projects = wait.find("projectChoices"); projects != wait.end()) {
+            const auto choice = projects->find(answer);
+            if (choice == projects->end()) throw Conflict("Choose one of the listed T3 projects");
+            const auto environment = field(task,"environmentId");
+            const auto& project = choice->get_ref<const std::string&>();
+            if (recipientRouteWouldCycle(id,environment,project))
+                throw Conflict("This project would make project queues wait for one another. Choose another project or move the task.");
+            task["projectId"] = *choice;
+            rememberT3Project(bot,environment,project);
+            next = "queued";
+            answerKind = "project_selected";
+        } else {
+            auto updated = currentEvent(task);
+            updated["userAnswer"] = answer;
+            updated["userQuestion"] = field(wait,"text");
+            for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
+            consumeEvent(task);
+            event(task, "answer/" + std::to_string(waitId), updated);
+        }
         Json entry = {{"text",answer},{"waitId",waitId},{"conversation",sourceMessage != 0}};
         if (sourceMessage) entry["messageId"] = sourceMessage;
-        journal(id, "user_answer", entry);
+        journal(id,answerKind,entry);
     } else if (operation == "approve" && reason == "budget") {
         task["remaining"] = task["remaining"].get<int>() + 1;
         journal(id, "budget_granted", {{"waitId",waitId},{"remaining",task["remaining"]}});
@@ -704,8 +724,10 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
                 throw Conflict("Session settings can only be corrected before an unsent action");
             task["config"]["session"] = normalizeSessionSettings(data["session"]);
         }
-        if (field(task,"actionId").empty()) next = task["activeRun"].is_null() ? "deciding" : "running";
-        else {
+        if (field(task,"actionId").empty()) {
+            if (!task["activeRun"].is_null()) next = "running";
+            else if (field(task,"projectId").empty()) next = "queued";
+        } else {
             const auto action = outbox(task);
             if (action.is_null()) throw Conflict("No delivery to reconcile");
             if (action.at("phase") == "ready" && action.at("tool") == "answer_session_question") {

@@ -25,6 +25,18 @@ void reply(httplib::Response& res, int status, const Json& value) {
     res.status = status;
     res.set_content(value.dump(),"application/json");
 }
+
+std::optional<T3ConnectRequest> parseT3ConnectRequest(const Json& args) {
+    using Source = T3ConnectRequest::Source;
+    if (!args.is_object()) return {};
+    const auto source = args.at("source").get<std::string>();
+    if (source == "local" && args.size() == 1) return T3ConnectRequest{Source::Local,{}};
+    if (args.size() != 2 || (source != "url" && source != "saved")) return {};
+    const bool saved = source == "saved";
+    auto value = args.at(saved ? "environmentId" : "mcpUrl").get<std::string>();
+    if (value.empty() || value.size() > 4096) return {};
+    return T3ConnectRequest{saved ? Source::Saved : Source::Url,std::move(value)};
+}
 }
 
 void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
@@ -51,13 +63,20 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         const auto connection = connections.settings(actor.id,actor.adminRoot);
         const bool canDisconnectT3 = canManage && bool(callbacks.t3Disconnect);
         const bool t3CleanupPending = canDisconnectT3 && connections.providerCleanupPending();
+        auto environments = Json::array();
+        if (connection) {
+            for (const auto& id : connection->environments) {
+                environments.push_back({{"environmentId",id},
+                    {"authorization",callbacks.t3Connection ? callbacks.t3Connection(id) : Json(nullptr)}});
+            }
+        }
         auto personActionNames = Json::array();
         for (const auto action : personOnlyActions) personActionNames.push_back(actionName(action));
         reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
                        {"canManagePolicy",canManage},{"model",std::move(model)},{"t3Setup",t3Setup},
                        {"personOnlyActions",std::move(personActionNames)},
                        {"canDisconnectT3",canDisconnectT3},{"t3CleanupPending",t3CleanupPending},
-                       {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
+                       {"t3",connection ? Json{{"port",connection->port},{"environments",std::move(environments)}}
                                         : Json(nullptr)}});
     });
     server.Get("/api/settings/installation",[&](const httplib::Request& req, httplib::Response& res) {
@@ -165,15 +184,10 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         try {
             const auto actor = person(callbacks,req);
             if (!store.policy().allows(actor,Action::rules_manage,"installation")) throw DecisionDenied{};
-            const auto args = Json::parse(req.body);
-            if (!args.is_object() || args.size() != (args.contains("environmentId") ? 2 : 1))
-                return reply(res,400,{{"error","invalid_input"}});
-            const auto environment = args.value("environmentId",std::string{});
-            const auto url = args.at("mcpUrl").get<std::string>();
-            if ((args.contains("environmentId") && environment.empty()) || url.empty())
-                return reply(res,400,{{"error","invalid_input"}});
+            const auto target = parseT3ConnectRequest(Json::parse(req.body));
+            if (!target) return reply(res,400,{{"error","invalid_input"}});
             if (!callbacks.t3Connect) return reply(res,409,{{"error","connect_unavailable"}});
-            if (!callbacks.t3Connect(actor,environment,url)) return reply(res,409,{{"error","connect_pending"}});
+            if (!callbacks.t3Connect(actor,*target)) return reply(res,409,{{"error","connect_pending"}});
             reply(res,202,{{"ok",true}});
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
         catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }

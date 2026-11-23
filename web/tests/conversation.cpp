@@ -138,6 +138,10 @@ struct FixedT3 : T3 {
     unsigned launches = 0, interruptions = 0;
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
+    std::vector<T3Project> projects(std::string_view environment) override {
+        check(environment == "backup-env","project discovery queried the wrong environment");
+        return {{"backup-release","Backup release","release"}};
+    }
     Delivery send(const Command& command) override {
         if (command.tool == "delegate") {
             ++launches;
@@ -389,8 +393,11 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     tick(runtime,4);
     const auto resolved = browser.get("/api/view?bot=release");
     const auto tasks = store.tasks("release");
-    check(tasks.size() == 1 && conversationReply(resolved,receipt.at("messageId")).at("actions").at(0).at("tool") == "start_task" &&
-          store.task(tasks[0]["id"]).at("runs").back().at("environmentId") == "backup-env",
+    check(tasks.size() == 1 && conversationReply(resolved,receipt.at("messageId")).at("actions").at(0).at("tool") == "start_task",
+          "the chosen destination did not create a Task");
+    const auto task = store.task(tasks.at(0).at("id"));
+    check(task.at("projectId") == "backup-release" && !task.at("runs").empty() &&
+          task.at("runs").back().at("environmentId") == "backup-env",
           "the chosen destination did not receive the new Run");
 }
 
@@ -840,7 +847,8 @@ void chatGPTConversation(const std::filesystem::path& home) {
     const auto& firstRuns = firstTask.at("runs");
     const auto& secondRuns = secondTask.at("runs");
     check(!firstRuns.empty() && !secondRuns.empty(),"both composer requests must launch a Run");
-    check(firstRuns.back().at("environmentId") == "local-env" && secondRuns.back().at("environmentId") == "backup-env",
+    check(firstRuns.back().at("environmentId") == "local-env" && firstTask.at("projectId") == "release" &&
+          secondRuns.back().at("environmentId") == "backup-env" && secondTask.at("projectId") == "backup-release",
           "the composer Runs did not keep each request on its own destination");
     const auto active = view().at("activeSessions");
     check(firstTask.at("state") == "running" && secondTask.at("state") == "running" &&

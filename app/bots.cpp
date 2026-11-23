@@ -259,6 +259,8 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if ((!bot.environmentId.empty() && !plainId(bot.environmentId)) ||
         (!bot.projectId.empty() && !plainId(bot.projectId)))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
+    if (!bot.projectId.empty() && bot.environmentId.empty())
+        throw Conflict("A pinned T3 project needs its environmentId");
     bot.settings = {{"botDisplayName",bot.name},{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
     for (const auto key : {"services","mcpServers"}) {
         if (!config.contains(key)) continue;
@@ -335,8 +337,7 @@ std::vector<PeerBot> Bots::peers(std::string_view id) const {
     if (!sender) return {};
     std::vector<PeerBot> result;
     for (const auto& peerId : sender->allowedBots) {
-        if (const auto peer = tryGetConfiguredBot(peerId);
-            peer && !peer->environmentId.empty() && !peer->projectId.empty())
+        if (const auto peer = tryGetConfiguredBot(peerId))
             result.push_back({peer->name,peer->intake(""),peer->role});
     }
     return result;

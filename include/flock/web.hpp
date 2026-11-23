@@ -7,6 +7,12 @@
 #include <string_view>
 
 namespace flockv0 {
+struct T3ConnectRequest {
+    enum class Source { Local, Url, Saved };
+    Source source;
+    std::string value;
+};
+
 struct WebCallbacks {
     // Array of objects with id, name, soul, cron, and optional avatar/role.
     std::function<Json()> bots;
@@ -28,7 +34,8 @@ struct WebCallbacks {
     std::function<Json()> modelStatus = {};
     // Optional: starts ChatGPT sign-in in the background (opens the browser on this machine).
     std::function<bool(const Person&, bool reconsent)> modelLogin = {};
-    std::function<bool(const Person&, const std::string& environmentId, const std::string& mcpUrl)> t3Connect = {};
+    std::function<bool(const Person&, const T3ConnectRequest&)> t3Connect = {};
+    std::function<Json(const std::string& environmentId)> t3Connection = {};
     std::function<Json(const Person&)> t3Setup = {};
     // A missing environment retries cleanup of a revoked provider registration.
     std::function<void(const std::optional<std::string>& environment)> t3Disconnect = {};
