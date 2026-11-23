@@ -32,8 +32,6 @@
         </button>
       </div>
       <div class="sidebar-scroll">
-        <a class="sidebar-link" href="/settings">Flock settings</a>
-        <a class="sidebar-link" href="/session-handoff.html">Session handoffs</a>
         <section class="nav-section bots" aria-labelledby="bots-heading">
           <div id="pinned" class="pins" role="group" aria-label="Pin" hidden></div>
           <div id="bot-list" class="bot-list"></div>
@@ -53,6 +51,15 @@
       </div>
       <div class="sidebar-foot">
         <div id="connection" class="connection" data-state="loading" role="status"><span class="status-dot" aria-hidden="true"></span><span id="connection-text">Connecting…</span></div>
+        <nav class="sidebar-foot-links" aria-label="Flock">
+        <a class="sidebar-handoffs sidebar-settings" href="/settings" aria-label="Flock settings" title="Flock settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </a>
+        <a class="sidebar-handoffs" href="/session-handoff.html" title="T3 Sessions paired with a Bot">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 7h11l-3.5-3.5M16 17H5l3.5 3.5"/></svg>
+          <span>Session handoffs</span>
+        </a>
+        </nav>
         <div id="theme-switch" class="theme-switch" role="group" aria-label="Theme">
           <button type="button" data-theme-mode="system" aria-pressed="true" aria-label="Use system theme" title="Use system theme">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16v4"/></svg>
