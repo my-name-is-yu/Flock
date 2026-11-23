@@ -76,9 +76,18 @@ Cards prompted by a person's message stay open, including messages from a
 linked Slack or iMessage sender. The approval is answered in Flock. Changing
 modes closes pending approvals for the prior mode.
 
-`GET /api/settings` returns the mode, rules, and T3 connection details.
-`POST /api/settings/mode` takes `mode` and `POST /api/settings/rule` removes a rule by
-`kind`, `action`, and `target`. Both require an installation root.
+`GET /api/settings` returns the mode, rules, T3 connection details and, for installation
+roots, the model connection (`model`) and T3 setup progress (`t3Setup`).
+These endpoints require an installation root:
+
+- `POST /api/settings/mode` takes `mode`.
+- `POST /api/settings/rule` takes `kind`, `action`, `target` and `add`: `true` adds the
+  rule and `false` removes it.
+- `POST /api/settings/model-login` takes `reconsent` and starts ChatGPT sign-in in the
+  browser on the machine running Flock.
+- `POST /api/settings/t3-connect` takes `environmentId` and `mcpUrl`, and starts T3
+  authorization. `t3Setup.authorizationUrl` is the link to approve.
+- `POST /api/settings/t3-disconnect` takes `environmentId`.
 
 ## Bot settings
 
