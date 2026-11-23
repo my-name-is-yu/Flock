@@ -797,6 +797,30 @@ void unansweredProjectChoiceDoesNotBlockAnotherBot() {
           f.t3.sent.front().projectId == "docs","an independent project could not start before the first Bot's answer");
 }
 
+void revisingWorkKeepsTheProjectChoice() {
+    Fixture f;
+    f.t3.projectsByEnvironment["desktop"] = {{"docs","Docs",{}},{"release","Release",{}}};
+    const auto id = f.store->submit(f.routing("Check the release","alpha","desktop",""));
+    f.reach(id,"waiting");
+    const auto original = f.task(id);
+    constexpr auto revision = "Include the test results";
+    f.script(revision,{change(id,{{"doneWhen",revision}})});
+    f.receive("revise-before-project",revision);
+    f.advanceUntil([&] {
+        const auto task = f.task(id);
+        return task["state"] == "waiting" && task["wait"]["id"] != original["wait"]["id"] &&
+            task["wait"].contains("choices");
+    },"revising the task did not open a new project choice");
+    const auto revised = f.task(id);
+    check(revised["wait"]["choices"] == Json::array({"Docs","Release"}) && f.t3.sent.empty(),
+          "revising the task bypassed its project choice");
+    f.store->operate(localOwner,TaskTarget::from(revised,revised["wait"]["id"]),"answer",{{"text","Release"}});
+    f.reach(id,"running");
+    check(f.t3.sent.size() == 1 && f.t3.sent.front().projectId == "release" &&
+          f.t3.sent.front().instruction.find(revision) != std::string::npos,
+          "launch after project selection lost the revised criteria");
+}
+
 void suggestionsStayWithTheBotMessage() {
     Fixture f;
     const auto suggest = [](Json choices) {
@@ -1798,14 +1822,24 @@ void queuedMoveWaitsForTheNewerDestinationOwner() {
 
 void moveAsksForTheDestinationProjectAfterSettlement() {
     Fixture f;
+    T3Connections connections(*f.store);
+    connections.connect("desktop",localOwner.id,48123);
+    connections.connect("cloud",localOwner.id,48123);
     f.t3.projectsByEnvironment["cloud"] = {
         {"cloud-docs","Cloud Docs","docs"},{"cloud-release","Cloud Release","release"}};
     const auto owner = f.store->submit(f.routing("Existing cloud work","beta","cloud","cloud-release"));
-    const auto moving = f.store->submit(f.routing("Move the desktop work"));
+    const Intake automatic{"alpha","","",""};
+    constexpr auto request = "Start work on desktop";
+    f.script(request,{start({{"environment","desktop"}})});
+    f.store->receive(localOwner,automatic,"create-on-desktop",request);
+    f.runtime->runConversations();
+    const Id moving = f.store->tasks("alpha").front().at("id");
     f.reach(owner,"running");
     f.reach(moving,"running");
     f.script("Move the work to cloud",{change(moving,{{"environment","cloud"}})});
-    f.receive("select-cloud-project","Move the work to cloud");
+    f.store->receive(localOwner,automatic,"select-cloud-project","Move the work to cloud");
+    f.runtime->runConversations();
+    check(f.task(moving)["pendingEnvironmentId"] == "cloud","the unpinned Bot could not move to a connected environment");
     f.t3.finish("run-2","Old Run still settling",false);
     f.tick(3);
     check(f.task(moving).at("environmentId") == "desktop" && f.task(moving).at("projectId") == "project" &&
@@ -2310,6 +2344,7 @@ int main() {
         destinationClarificationContinuesFromConversationHistory();
         connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot();
         unansweredProjectChoiceDoesNotBlockAnotherBot();
+        revisingWorkKeepsTheProjectChoice();
         directAnswersRemainInConversationHistory();
         queuedTurnsSeeEarlierReplies();
         pausedTurnDoesNotHoldCompletion();
