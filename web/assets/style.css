@@ -63,6 +63,24 @@
   background: var(--canvas);
   -webkit-font-smoothing: antialiased;
 }
+/* The open Bot's avatar color drives every accent token, so controls, focus rings and the user's
+   bubbles share one hue per conversation. app.js sets --bot-accent; the default keeps Flock purple.
+   An .accent-scope element re-derives the tokens from its own --bot-accent, e.g. the Bot editor's live color. */
+@property --bot-accent { syntax: '<color>'; inherits: true; initial-value: #5a45a3; }
+@supports (color: light-dark(red, blue)) and (color: oklch(from red .5 min(c, .15) h)) {
+  :root, .accent-scope {
+    --accent: light-dark(oklch(from var(--bot-accent) .47 min(c, .15) h), oklch(from var(--bot-accent) .8 min(c, .11) h));
+    --accent-fill: light-dark(oklch(from var(--bot-accent) .5 min(c, .15) h), oklch(from var(--bot-accent) .56 min(c, .13) h));
+    --accent-fill-hover: light-dark(oklch(from var(--bot-accent) .42 min(c, .14) h), oklch(from var(--bot-accent) .62 min(c, .13) h));
+    --accent-soft: light-dark(oklch(from var(--bot-accent) .96 min(c, .025) h), oklch(from var(--bot-accent) .26 min(c, .035) h));
+    --accent-soft-hover: light-dark(oklch(from var(--bot-accent) .93 min(c, .04) h), oklch(from var(--bot-accent) .3 min(c, .045) h));
+    --focus: light-dark(oklch(from var(--bot-accent) .55 min(c, .16) h), oklch(from var(--bot-accent) .74 min(c, .13) h));
+  }
+  :root { transition: --bot-accent var(--dur-medium) var(--ease-out); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { transition: none; }
+}
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }
 :root.theme-switching,

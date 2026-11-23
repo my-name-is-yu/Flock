@@ -849,13 +849,15 @@ function renderHeader() {
     scopeAvatar?.destroy();
     scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
     if (bot) elements['activity-scope-name'].textContent = bot.name;
+    // Accent tokens follow the open Bot, including its Bot-to-Bot DMs; the empty state keeps Flock purple.
+    if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
+    else document.documentElement.style.removeProperty('--bot-accent');
   }
   scopeKey = nextScopeKey;
   if (!bot || dm) {
     profileAvatar?.destroy();
     profileAvatar = null;
     profileKey = '';
-    elements.conversation.style.removeProperty('--bot-accent');
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
@@ -866,7 +868,6 @@ function renderHeader() {
     profileAvatar?.destroy();
     profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, ...look });
     profileKey = key;
-    elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
   } else if (profileMotion !== motion) {
     profileAvatar?.update(look);
   }
