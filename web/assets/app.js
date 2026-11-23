@@ -1523,8 +1523,11 @@ function eventCard(event, context, place, report) {
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
       const owner = bots.find((item) => item.id === blocker.botId)?.name ?? blocker.botId;
-      const note = node('p', 'msg-note', `Waiting for “${blocker.request}” (${owner}) to finish`);
-      note.title = blocker.request;
+      // Truncate only the blocking request so "Queued after" and the owner stay readable on narrow screens.
+      const note = node('p', 'msg-note msg-queued');
+      note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
+      if (blocker.botId !== context.bot?.id) note.append(node('span', 'msg-queued-owner', `· ${owner}`));
+      note.title = `Starts when “${blocker.request}” (${owner}) finishes`;
       extras.push(note);
     }
   }

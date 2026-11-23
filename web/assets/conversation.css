@@ -446,6 +446,10 @@
 .msg-quote { display: flex; align-items: center; gap: .3rem; }
 .msg-quote span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .msg-quote .glyph svg { width: .8rem; height: .8rem; }
+.msg-queued { display: flex; align-items: center; gap: .3rem; }
+.msg-queued > * { flex: none; }
+.msg-queued .glyph svg { width: .8rem; height: .8rem; }
+.msg-queued .msg-queued-request { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
 
 .msg.working {
   animation: working-enter .24s cubic-bezier(.22, 1.2, .36, 1) both;
