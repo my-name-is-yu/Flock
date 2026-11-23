@@ -95,11 +95,10 @@ struct RunEvidence {
     bool truncated = false;
 };
 struct Observation {
-    enum class Kind { Running, Question, ExternalInput, Finished, Unavailable } kind = Kind::Running;
+    enum class Kind { Running, Question, ExternalInput, Settling, Finished, Unavailable } kind = Kind::Running;
     Question question;
     std::string status, report, resultRunId, itemId;
     bool truncated = false;
-    bool settled = false; // True on Finished only after delegated work has settled.
     std::string detail;
     RunEvidence::Availability evidence = RunEvidence::Availability::Available;
 };

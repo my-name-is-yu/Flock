@@ -188,12 +188,11 @@ struct SimulatedT3 : T3 {
     }
     void finish(std::string_view run, std::string text, bool settled = true) {
         auto& report = observations.at(std::string(run));
-        report.kind = Observation::Kind::Finished;
+        report.kind = settled ? Observation::Kind::Finished : Observation::Kind::Settling;
         report.status = "completed";
         report.report = std::move(text);
         report.resultRunId = run;
         report.itemId = "report-" + std::string(run);
-        report.settled = settled;
     }
 };
 

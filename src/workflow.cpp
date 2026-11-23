@@ -441,8 +441,8 @@ void Store::Impl::appendStageRequirements(std::string& instruction, const Json& 
 
 void Store::Impl::stageObservation(const Json& task, const Observation& observed, Seconds now) {
     const bool unreachable = observed.kind==Observation::Kind::Unavailable;
-    const auto state = observed.kind!=Observation::Kind::Finished ? "running" :
-                       observed.settled ? observed.status : "settling";
+    const auto state = observed.kind == Observation::Kind::Finished ? observed.status :
+                       observed.kind == Observation::Kind::Settling ? "settling" : "running";
     exec("UPDATE workflow_stages SET unreachable=?,confirmed_state=CASE WHEN ? THEN confirmed_state ELSE ? END,"
          "confirmed_at=CASE WHEN ? THEN confirmed_at ELSE ? END WHERE task_id=?",
          {int(unreachable),int(unreachable),state,int(unreachable),now,task.at("id")});

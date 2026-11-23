@@ -31,11 +31,10 @@ Delivery result(Outcome kind, std::string message = {}, RunRef run = {}) {
     return {kind, std::move(run), std::move(message)};
 }
 
-Observation state(Observed kind, std::string status, bool settled = false) {
+Observation state(Observed kind, std::string status) {
     Observation observation;
     observation.kind = kind;
     observation.status = std::move(status);
-    observation.settled = settled;
     return observation;
 }
 
@@ -127,12 +126,26 @@ std::optional<std::string> readCompleteItemText(Client& client, Scan& scan, cons
     return output;
 }
 
-Json wait(Client& client, const RunRef& run, bool delegated, int timeout = 400) {
+enum class WaitFor { Run, DelegatedWork };
+
+Json wait(Client& client, const RunRef& run, WaitFor scope, int timeout = 400) {
     const auto response = client.call("t3_thread_wait", {{"threadId", run.threadId}, {"runId", run.runId},
-        {"timeoutMs", timeout}, {"untilDelegatedWorkSettled", delegated}});
+        {"timeoutMs", timeout}, {"untilDelegatedWorkSettled", scope == WaitFor::DelegatedWork}});
     if (str(response, "threadId") != run.threadId || str(response, "runId").empty()) invalidResponse();
     boolean(response, "timedOut");
     return response;
+}
+
+bool confirmsQueueCancellation(Client& client, const RunRef& assigned, const Json& head) {
+    for (const auto& run : array(head,"recentRuns")) {
+        if (str(run,"runId") != assigned.runId) continue;
+        const auto started = run.find("startedAt");
+        if (str(run,"status") != "cancelled" || started == run.end() || !started->is_null()) return false;
+        const auto exact = wait(client,assigned,WaitFor::Run,1);
+        return str(exact,"runId") == assigned.runId && str(exact,"status") == "cancelled" &&
+               !boolean(exact,"timedOut");
+    }
+    return false;
 }
 
 struct CompletionNotice { std::size_t count; std::string updatedAt; };
@@ -631,7 +644,7 @@ RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::stri
 }
 
 bool followUpReady(Client& client, const Command& command) {
-    const auto settled = wait(client, command.target, true, 1);
+    const auto settled = wait(client, command.target, WaitFor::DelegatedWork, 1);
     const auto effective = str(settled, "runId");
     const auto resultRun = str(settled.value("resultRun", Json::object()), "runId");
     if (boolean(settled, "timedOut") || !terminal(str(settled, "status")) || resultRun.empty() ||
@@ -654,7 +667,7 @@ bool followUpReady(Client& client, const Command& command) {
 Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
-    const auto watching = wait(client, command.target, false, 1);
+    const auto watching = wait(client, command.target, WaitFor::Run, 1);
     const auto runId = str(watching, "runId");
     // Codex's Run projection can stay "running" while its input activity
     // is "waiting". Attribution below checks the actual owned question.
@@ -848,21 +861,18 @@ public:
             auto connection = credential(environmentId,config);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
-            const auto reply = wait(client, run, true);
+            const auto reply = wait(client, run, WaitFor::DelegatedWork);
             const auto effective = str(reply, "runId");
             const auto status = str(reply, "status");
             const bool finished = terminal(status);
             if (status == "queued") return state(Observed::Running,status);
             const auto timedOut = boolean(reply,"timedOut");
-            bool settled = finished && !timedOut;
-            if (status == "cancelled" && timedOut) {
-                // A cancelled queue item can coexist with unrelated work in the Thread.
-                const auto exact = wait(client,{run.threadId,effective,run.link},false,1);
-                settled = str(exact,"runId") == effective && str(exact,"status") == status && !boolean(exact,"timedOut");
-            }
-            if (settled) {
+            std::optional<Json> head;
+            if (timedOut && status == "cancelled" && effective == run.runId)
+                head = threadHead(client,run.threadId,50);
+            if (finished && (!timedOut || (head && confirmsQueueCancellation(client,run,*head)))) {
                 auto source = RunRef{run.threadId, effective, run.link};
-                auto observed = state(Observed::Finished, status, true);
+                auto observed = state(Observed::Finished, status);
                 const auto later = reply.value("resultRun", Json::object());
                 const auto laterId = str(later, "runId");
                 if (!timedOut && (laterId.empty() || !terminal(str(later,"status")))) invalidResponse();
@@ -884,10 +894,10 @@ public:
                 return observed;
             }
             if (!finished && !active(status)) invalidResponse();
-            const auto head = threadHead(client, run.threadId);
-            const auto& thread = head.at("thread");
+            if (!head) head = threadHead(client,run.threadId);
+            const auto& thread = head->at("thread");
             const auto count = position(member(thread, "pendingRequestCount"));
-            if (count == 0) return state(finished ? Observed::Finished : Observed::Running, status);
+            if (count == 0) return state(finished ? Observed::Settling : Observed::Running, status);
             if (!finished && count == 1) {
                 const auto requests = pending(client, run.threadId);
                 if (requests.size() == 1) {
@@ -927,7 +937,7 @@ public:
         requireOperate(connection);
         Client client(std::move(connection));
         // An explicit wait can resolve T3's own restart continuation of the assigned Run.
-        const auto current = wait(client, run, false, 1);
+        const auto current = wait(client, run, WaitFor::Run, 1);
         const auto effective = str(current, "runId");
         const auto status = str(current,"status");
         if (terminal(status)) return InterruptOutcome::AlreadyTerminal;
