@@ -75,7 +75,7 @@ const sessionEndLabels = {
 };
 const stateLabels = {
   ...sessionEndLabels,
-  queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for input',
+  queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for you',
   cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
@@ -179,7 +179,7 @@ function linkToRun(run, label = 'Open in T3') {
   link.rel = 'noopener noreferrer';
   return link;
 }
-function waitLabel(reason) { return waitLabels[reason]?.[0] ?? 'Waiting for input'; }
+function waitLabel(reason) { return waitLabels[reason]?.[0] ?? 'Waiting for you'; }
 function waitText(wait) { return wait.text || waitLabels[wait.reason]?.[1] || 'Refresh the pending request.'; }
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
@@ -566,13 +566,13 @@ function createSidebarEntry(botId) {
   const presenceDot = node('span', 'presence-dot');
   const rowUnread = node('span', 'unread-dot row-unread');
   rowUnread.setAttribute('aria-hidden', 'true');
-  name.append(nameText, presenceDot);
+  name.append(nameText);
   const preview = node('span', 'bot-preview');
   const dots = node('span', 'working-dots');
   dots.setAttribute('aria-hidden', 'true');
   dots.append(node('i'), node('i'), node('i'));
   const previewText = document.createTextNode('');
-  preview.append(dots, previewText);
+  preview.append(presenceDot, dots, previewText);
   const text = node('span', 'bot-text');
   text.append(name, preview);
 
@@ -634,13 +634,17 @@ function createSidebarEntry(botId) {
         toggle.setAttribute('aria-label', `${bot.name} menu`);
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
-      if (!previousBot || previousBot.preview !== bot.preview) {
-        previewText.data = bot.preview || '';
-      }
+      // A Bot blocked on the person says so in place of its last message, so the row reads at a glance.
+      const waiting = bot.presence === 'waiting';
+      const previewLabel = waiting ? 'Waiting for you' : bot.preview || '';
+      if (previewText.data !== previewLabel) previewText.data = previewLabel;
+      preview.classList.toggle('waiting', waiting);
+      if (waiting) preview.setAttribute('aria-hidden', 'true');
+      else preview.removeAttribute('aria-hidden');
       const hasPresence = activePresence.has(bot.presence);
-      presenceDot.hidden = bot.presence !== 'waiting';
+      presenceDot.hidden = !waiting;
       dots.hidden = !busyPresence.has(bot.presence);
-      preview.hidden = !bot.preview && dots.hidden;
+      preview.hidden = !previewLabel && dots.hidden;
       pinPresence.hidden = !pinned || !hasPresence;
       pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
       const unread = hasUnread(bot);
@@ -832,7 +836,7 @@ function scheduleReadCheck() {
   });
 }
 
-const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for input', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
+const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for you', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
 const participant = (id) => bots.find((bot) => bot.id === id) ?? { id, name: id };
 const botPeers = (id) => participant(id).peers ?? [];
 
