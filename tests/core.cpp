@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -92,6 +92,8 @@ int main() {
             "CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES (1);");
         unsupportedSchemaLeavesDatabaseIntact(path / "unrelated-state.db",
             "PRAGMA application_id=123; PRAGMA user_version=1; CREATE TABLE items(id INTEGER PRIMARY KEY);");
+        unsupportedSchemaLeavesDatabaseIntact(path / "pre-policy-state.db",
+            "PRAGMA application_id=0x464c4f43; PRAGMA user_version=1; CREATE TABLE tasks(id INTEGER PRIMARY KEY);");
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;
@@ -100,7 +102,6 @@ int main() {
         {
             Store store(db);
             Runtime runtime(store,model,t3,notes);
-            store.access().resourceGrant({"fixture",true},"release",{"environment","env","launch"},GrantChange::grant);
             id = store.submit({"release","Check main","env","proj"});
             tickUntil(runtime, [&] { return store.task(id)["state"] == "running"; }, "delegate did not start");
             const auto callsBeforeIdle = model.calls;

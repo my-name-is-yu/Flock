@@ -2,6 +2,7 @@
 #include "flock/session_read.hpp"
 
 #include <map>
+#include <set>
 
 namespace flockv0 {
 namespace {
@@ -68,37 +69,48 @@ Json scopedResult(Json result, Json sessions = Json::array()) {
 
 class Store::Impl::SessionEvidence {
 public:
-    SessionEvidence(Store::Impl& store, Access& access, std::string_view bot, std::string_view channelScope, T3& t3)
+    SessionEvidence(Store::Impl& store, Policy& access, std::string_view bot, std::string_view channelScope, T3& t3)
         : store_(store), access_(access), bot_(bot), channelScope_(channelScope), t3_(t3) {}
 
-    Json search(const Json& args) {
+    Json search(const Json& args, const Json& routing) {
         const Filters filters(args);
         const auto project = argument(args,"project");
         const auto status = argument(args,"status",128);
         const auto limit = pageSize(args);
         const auto key = Json::array({filters.query,project,status,filters.from,filters.to});
-        const auto scopedKey = Json::array({key,channelScope_});
-        std::optional<Reference> anchor;
-        SessionTarget after;
-        if (hasCursor(args)) {
-            const auto cursor = reference(args,"cursor");
-            anchor = resolve(cursor,RefKind::search);
-            if (anchor) {
-                if (anchor->payload != scopedKey ||
-                    !permitted(anchor->target) || !readable(anchor->target,Clock::now()+searchTimeLimit))
-                    return scopedResult(failure(unavailable));
-                after = anchor->target;
-            } else {
-                const auto position = resolve(cursor,RefKind::searchPosition);
-                if (!position || position->payload != scopedKey) return scopedResult(failure(unavailable));
-                after = position->target;
-            }
+        const auto configuredProject = field(routing,"projectId");
+        std::set<std::string> environments;
+        if (channelScope_.empty()) {
+            const auto environment = field(routing,"environmentId");
+            if (!environment.empty()) environments.insert(environment);
+            for (const auto& id : routing.at("config").value("conversationEnvironments",Json::object()))
+                environments.insert(id.get<std::string>());
         }
-
+        const auto scopedKey = Json::array({key,channelScope_,configuredProject,environments});
+        std::optional<Reference> anchor;
+        Json progress{{"recorded",Json::array({"",""})},{"catalog",Json::object()}};
+        if (!configuredProject.empty())
+            for (const auto& environment : environments) progress["catalog"][environment] = 0;
+        std::vector<SessionTarget> batch;
+        const auto cursor = reference(args,"cursor");
+        if (hasCursor(args)) {
+            anchor = resolve(cursor,RefKind::search);
+            const auto position = anchor ? anchor : resolve(cursor,RefKind::searchPosition);
+            if (!position || !position->payload.is_object() || position->payload.at("scope") != scopedKey ||
+                (anchor && (!permitted(anchor->target) || !readable(anchor->target,Clock::now()+searchTimeLimit))))
+                return scopedResult(failure(unavailable));
+            progress = position->payload.at("progress");
+            for (const auto& target : position->payload.at("remaining"))
+                batch.push_back({target.at(0).get<std::string>(),target.at(1).get<std::string>()});
+        }
+        if (batch.empty()) {
+            batch = candidates(configuredProject,environments,progress);
+            if (!cursor.empty() && !batch.empty()) omitEmitted(batch,cursor);
+        }
+        const bool catalogTruncated = !progress.at("catalog").empty();
         const auto scrub = store_.sharedRedactor();
         std::vector<Candidate> matches;
         std::vector<SessionTarget> incomplete;
-        const auto batch = candidates(after);
         const auto scanLimit = std::min(searchCandidateLimit,batch.size());
         const auto scanDeadline = Clock::now()+searchTimeLimit;
         std::size_t scanned = 0;
@@ -123,7 +135,7 @@ public:
                     break;
                 }
                 ++scanned;
-                if (!item ||
+                if (!item || (channelScope_.empty() && item->projectId != configuredProject) ||
                     (!project.empty() && item->projectId != project &&
                      !session_read::contains(scrub.text(item->project),project)) ||
                     (!status.empty() && item->status != status) ||
@@ -147,11 +159,13 @@ public:
             if (anchor) scopes.push_back(issue(RefKind::session,anchor->target,nullptr));
             const auto latestScrub = store_.sharedRedactor();
             const auto unsearched = std::ranges::find_if(incomplete,[&](const SessionTarget& target) { return permitted(target); });
-            bool truncated = skippedSlowCandidate || unsearched != incomplete.end();
+            bool truncated = catalogTruncated || skippedSlowCandidate || unsearched != incomplete.end();
             if (unsearched != incomplete.end()) scopes.push_back(issue(RefKind::session,*unsearched,nullptr));
+            auto nextIndex = scanned;
+            auto emitted = Json::array();
             for (const auto& [target,item,match] : matches) {
                 if (items.size() == limit) {
-                    result["nextCursor"] = issue(RefKind::search,matches[limit-1].target,scopedKey);
+                    nextIndex = static_cast<std::size_t>(std::ranges::find(batch,target)-batch.begin());
                     scopes.push_back(issue(RefKind::session,target,nullptr));
                     break;
                 }
@@ -161,13 +175,22 @@ public:
                 };
                 const auto ref = issue(RefKind::session,target,nullptr);
                 scopes.push_back(ref);
+                emitted.push_back(Json::array({target.environmentId,target.threadId}));
                 items.push_back({{"sessionRef",ref},
                     {"title",display(item.title,240)},{"project",display(item.project,240)},
                     {"status",display(item.status,128)},{"createdAt",display(item.createdAt,30)},
                     {"updatedAt",display(item.updatedAt,30)},{"matchExcerpt",display(match.excerpt,480)}});
             }
-            if (result["nextCursor"].is_null() && scanned < batch.size())
-                result["nextCursor"] = issue(RefKind::searchPosition,batch[scanned-1],scopedKey);
+            if (nextIndex < batch.size() || catalogTruncated || !progress.at("recorded").is_null()) {
+                auto remaining = Json::array();
+                for (std::size_t i = nextIndex; i < batch.size(); ++i)
+                    remaining.push_back(Json::array({batch[i].environmentId,batch[i].threadId}));
+                const bool matchAnchor = nextIndex < scanned;
+                const auto target = matchAnchor ? matches[limit-1].target : SessionTarget{};
+                result["nextCursor"] = issue(matchAnchor ? RefKind::search : RefKind::searchPosition,target,
+                    {{"scope",scopedKey},{"progress",progress},{"remaining",std::move(remaining)},
+                     {"previous",cursor},{"emitted",std::move(emitted)}});
+            }
             result["truncated"] = truncated;
             transaction.commit();
             return scopedResult(std::move(result),std::move(scopes));
@@ -259,7 +282,7 @@ private:
         TextMatch match;
     };
     Store::Impl& store_;
-    Access& access_;
+    Policy& access_;
     std::string_view bot_;
     std::string_view channelScope_;
     T3& t3_;
@@ -272,7 +295,7 @@ SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN channel_tasks c ON c.ta
 WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
 )SQL",{bot_,channelScope_,target.environmentId,target.threadId}).next()) return false;
         }
-        return access_.permits(bot_,Scope::sessionRead(target.environmentId,target.threadId),true);
+        return access_.allows(bot_,Resource::sessionRead(target.environmentId,target.threadId));
     }
 
     bool readable(const SessionTarget& target, SessionReadDeadline deadline = {}) const {
@@ -295,22 +318,76 @@ WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
         }
     }
 
-    std::vector<SessionTarget> candidates(const SessionTarget& after) const {
-        std::lock_guard lock(store_.mutex);
-        auto rows = store_.query(R"SQL(
-WITH candidates(environment,thread) AS (
- SELECT r.environment_id,r.thread_id FROM runs r JOIN tasks t ON t.id=r.task_id
- LEFT JOIN channel_tasks c ON c.task_id=t.id WHERE t.bot_id=?1 AND (?5='' OR c.scope_key=?5)
- UNION
- SELECT json_extract(resource,'$[0]'),json_extract(resource,'$[1]') FROM bot_grants
-  WHERE bot=?1 AND kind='session' AND op='read' AND ?5=''
-)
-SELECT environment,thread FROM candidates WHERE (environment,thread) > (?2,?3)
-ORDER BY environment,thread LIMIT ?4
-)SQL",{bot_,after.environmentId,after.threadId,searchCandidateLimit+1,channelScope_});
+    std::vector<SessionTarget> candidates(const std::string& project, const std::set<std::string>& environments,
+                                          Json& progress) const {
         std::vector<SessionTarget> result;
-        while (rows.next()) result.push_back({rows.string(0),rows.string(1)});
+        auto& recorded = progress.at("recorded");
+        if (!recorded.is_null()) {
+            std::lock_guard lock(store_.mutex);
+            auto rows = store_.query(R"SQL(
+SELECT DISTINCT r.environment_id,r.thread_id FROM runs r JOIN tasks t ON t.id=r.task_id
+LEFT JOIN channel_tasks c ON c.task_id=t.id
+WHERE ((?5='' AND ?6<>'' AND t.project_id=?6 AND r.environment_id IN (SELECT value FROM json_each(?7)))
+       OR (?5<>'' AND t.bot_id=?1 AND c.scope_key=?5))
+  AND (r.environment_id,r.thread_id) > (?2,?3)
+ORDER BY r.environment_id,r.thread_id LIMIT ?4
+)SQL",{bot_,recorded.at(0),recorded.at(1),searchCandidateLimit+1,channelScope_,project,Json(environments).dump()});
+            while (rows.next()) result.push_back({rows.string(0),rows.string(1)});
+            recorded = nullptr;
+            if (result.size() > searchCandidateLimit) {
+                result.pop_back();
+                recorded = Json::array({result.back().environmentId,result.back().threadId});
+            }
+        }
+        auto& catalog = progress.at("catalog");
+        const auto deadline = Clock::now()+searchTimeLimit;
+        for (auto it = catalog.begin(); it != catalog.end() && Clock::now() < deadline;) {
+            const auto& id = it.key();
+            if (!access_.allows(bot_,Action::environment_inspect,id)) {
+                it = catalog.erase(it);
+                continue;
+            }
+            const auto offset = it.value().get<Id>();
+            try {
+                auto [threads,next] = t3_.projectSessions(id,project,offset,deadline);
+                for (auto& thread : threads) result.push_back({id,std::move(thread)});
+                if (next) {
+                    it.value() = *next;
+                    ++it;
+                } else it = catalog.erase(it);
+            } catch (const SessionReadTimeout&) {
+                break;
+            }
+        }
+        std::ranges::sort(result,[](const auto& a, const auto& b) {
+            return std::tie(a.environmentId,a.threadId) < std::tie(b.environmentId,b.threadId);
+        });
+        result.erase(std::unique(result.begin(),result.end()),result.end());
         return result;
+    }
+
+    void omitEmitted(std::vector<SessionTarget>& batch, std::string_view cursor) const {
+        auto targets = Json::array();
+        for (const auto& target : batch)
+            targets.push_back(Json::array({target.environmentId,target.threadId}));
+        std::set<std::pair<std::string,std::string>> emitted;
+        std::lock_guard lock(store_.mutex);
+        // Each cursor stores only its own page so lineage survives restarts without copying prior pages.
+        auto rows = store_.query(R"SQL(
+WITH RECURSIVE pages(payload) AS (
+    SELECT payload FROM session_read_refs WHERE ref=?1 AND bot=?2
+    UNION ALL
+    SELECT r.payload FROM pages JOIN session_read_refs r
+      ON r.ref=json_extract(pages.payload,'$.previous') AND r.bot=?2
+)
+SELECT DISTINCT json_extract(target.value,'$[0]'),json_extract(target.value,'$[1]')
+FROM pages, json_each(pages.payload,'$.emitted') entry
+JOIN json_each(?3) target ON target.value=entry.value
+)SQL",{cursor,bot_,targets.dump()});
+        while (rows.next()) emitted.emplace(rows.string(0),rows.string(1));
+        std::erase_if(batch,[&](const SessionTarget& target) {
+            return emitted.contains({target.environmentId,target.threadId});
+        });
     }
 
     std::optional<Reference> resolve(std::string_view ref, RefKind kind) const {
@@ -454,12 +531,12 @@ ORDER BY environment,thread LIMIT ?4
     }
 };
 
-Json Store::Impl::sessionReadTool(std::string_view bot, std::string_view channelScope, const Decision& decision, T3& t3) {
-    Access access(*this);
+Json Store::Impl::sessionReadTool(std::string_view bot, std::string_view channelScope, const Json& routing, const Decision& decision, T3& t3) {
+    Policy access(*this);
     SessionEvidence evidence(*this,access,bot,channelScope,t3);
     try {
         if (!decision.args.is_object()) throw Conflict("Tool arguments must be an object");
-        return decision.tool == "flock_session_search" ? evidence.search(decision.args) : evidence.events(decision.args);
+        return decision.tool == "flock_session_search" ? evidence.search(decision.args,routing) : evidence.events(decision.args);
     } catch (const Conflict& error) {
         return scopedResult(failure(error.what()));
     } catch (const SessionReadTimeout&) {
@@ -472,7 +549,7 @@ Json Store::Impl::sessionReadTool(std::string_view bot, std::string_view channel
 }
 
 void Store::Impl::authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3& t3) {
-    Access access(*this);
+    Policy access(*this);
     SessionEvidence(*this,access,bot,channelScope,t3).authorizeHistory(steps);
 }
 }

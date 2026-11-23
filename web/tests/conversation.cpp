@@ -261,7 +261,7 @@ void inspectors(const std::filesystem::path& path) {
     store.receive({"fixture",true},routing,"b","Summarize");
     store.receive({"fixture",true},routing,"c","Release");
     runtime.runConversations();
-    auto access = store.access();
+    auto access = store.policy();
     access.submitSecret({"fixture",true},"release",access.requestSecret("release",{"inspector-token"}),model.credential);
     const auto summaries = browser.get("/api/compactions?bot=release");
     const auto workflows = browser.get("/api/workflows?bot=release");
@@ -301,7 +301,7 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
         if (person == "reader") return false;
         return std::nullopt;
     };
-    store.access().personGrant({"owner",true},"release","reader",Role::view,GrantChange::grant);
+    store.policy().setMember({"owner",true},"release","reader",true);
     const auto server = startWeb(store,0,std::move(config));
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer owner"}});
@@ -344,8 +344,6 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
 
 void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     Store store(path);
-    for (auto env : {"local-env","backup-env"})
-        store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
@@ -381,11 +379,8 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
 
 void conversationEntry(const std::filesystem::path& path) {
     Store store(path);
-    for (auto env : {"local-env","backup-env"})
-        store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
-    store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     std::atomic_bool disableIntake = false;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     auto server = startWeb(store,0,callbacks(&disableIntake));
@@ -599,7 +594,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
         }));
         configureWebIdentities(store,identities,web);
         for (const auto* bot : {"ernest","reviewer"})
-            store.access().personGrant(author,bot,"fixture-shared-reader",Role::view,GrantChange::grant);
+            store.policy().setMember(author,bot,"fixture-shared-reader",true);
     }
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{.peers=peers});
     const auto server = startWeb(store,0,web);
@@ -661,44 +656,43 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     }
 }
 #ifdef FLOCK_TEST_CHATGPT
-void approvedProfiles(const std::filesystem::path& directory) {
+void fullModeProfiles(const std::filesystem::path& directory) {
     Store store(directory/"state.db");
     app::Bots bots(directory/"bots");
-    auto cb = callbacks();
-    bool failAfterWrite = true;
-    cb.applyBotChange = [&](const BotChange& change) {
-        bots.apply(change);
-        if (std::exchange(failAfterWrite,false)) throw Conflict("Interrupted profile operation");
+    auto policy = store.policy();
+    const Person creator{"creator"};
+    policy.setOwner(creator,"release");
+    struct ProfileModel final : Model {
+        Decision change;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("turn").empty()) return {{change}};
+            return {{{"reply",{{"text","Processed the profile change"}},""}}};
+        }
+    } model;
+    RuntimeOptions options;
+    options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; },options);
+    const auto send = [&](std::string_view operation, std::string_view name) {
+        model.change = {"request_bot_change",{{"operation",operation},{"targetBotId","reviewer"},{"name",name}},""};
+        store.receive(creator,{"release","","local-env","release"},name,name);
+        runtime.runConversations();
     };
-    auto server = startWeb(store,0,std::move(cb));
-    Browser browser(*server);
-    auto access = store.access();
-    auto decide = [&](Id id, bool approve, int status) {
-        browser.post("/api/access/bot-change",{{"botId","release"},{"requestId",id},{"approve",approve}},status);
-    };
-    access.resourceGrant({"root",true},"release",{"bot_admin","reviewer","create_bot"},GrantChange::grant);
-    Id create = access.requestBotChange("release","create_bot","reviewer","Review team");
-    check(bots.ids().empty(),"request created a profile before approval");
-    decide(create,true,202);
-    check(access.administration({"root",true},"release").at("botChanges").at(0).at("status")=="approved",
-          "interrupted write lost its durable approval");
-    decide(create,true,200);
-    check(bots.ids()==std::vector<std::string>{"reviewer"} && bots.cards().at(0).at("name")=="Review team",
-          "retry created a duplicate or changed the target ID");
-    access.resourceGrant({"root",true},"release",{"bot_admin","reviewer","rename_bot"},GrantChange::grant);
-    Id rename = access.requestBotChange("release","rename_bot","reviewer","Reviewer");
-    decide(rename,false,200);
-    decide(rename,true,403);
-    check(bots.cards().at(0).at("name")=="Review team","denied change was applied");
-    decide(access.requestBotChange("release","rename_bot","reviewer","Reviewer"),true,200);
-    check(bots.cards().at(0).at("name")=="Reviewer","approved rename missing from profile");
+    send("create_bot","Review team");
+    check(bots.ids() == std::vector<std::string>{"reviewer"} &&
+          policy.allows(creator,Action::bot_settings,"reviewer"),
+          "Full did not apply a Bot creation with the requesting person's ownership");
+    send("rename_bot","Reviewer");
+    check(bots.cards().at(0).at("name") == "Reviewer" && store.inbox(creator).empty(),
+          "Full did not apply a Bot rename directly");
+    policy.changeNeverRule(localOwner,Action::bot_rename,"review*",true);
+    send("rename_bot","Other name");
+    check(bots.cards().at(0).at("name") == "Reviewer","Never rule did not block the profile write");
 }
 
 void chatGPTConversation(const std::filesystem::path& home) {
     const app::Bots bots(home / "bots");
     Store store(home / "conversation.sqlite",[&](std::string_view bot) { return bots.initialMemory(bot); });
-    for (auto env : {"local-env","backup-env"})
-        store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     app::ChatGPTModel model(home / "credentials" / "chatgpt");
     FixedT3 t3;
     RuntimeOptions options;
@@ -827,8 +821,8 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
         return Json{{"id",id},{"name",profile.at("name")}};
     };
     const Person owner{"owner",true};
-    auto access = store.access();
-    access.personGrant(owner,"staging-triage","alice",Role::view,GrantChange::grant);
+    auto access = store.policy();
+    access.setMember(owner,"staging-triage","alice",true);
     const auto request = access.requestSecret("release",{"fixture-token"});
     const auto send = [&](std::string_view bot, std::string_view clientId, std::string_view text) {
         return store.receive(owner,{std::string(bot),"unused","local-env","fixture"},clientId,text)
@@ -841,7 +835,6 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     browser.post("/api/access/secret",{{"botId","release"},{"requestId",request},{"value","staging"}});
-    access.resourceGrant(owner,"staging-triage",{"secret","fixture-token","use"},GrantChange::grant);
     const auto saved = browser.post("/api/bots/profile",{{"botId","staging-triage"},{"name","Triage"}});
     check(saved.at("id")=="staging-triage","profile route changed the Bot ID");
 
@@ -870,7 +863,6 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
 
 void approveModelCallBeforeTask(const std::filesystem::path& path) {
     Store webStore(path);
-    webStore.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
     auto store = std::make_unique<Store>(path);
     FixedModel model;
     FixedT3 t3;
@@ -1005,10 +997,8 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         auto server = setup(store,Json::array({identity(demoted,localOwner.id,true),identity(removed,"removed",true),
             identity(retained,"retained",true),identity(granted,"granted",true),identity(alternate,"mixed",true)}));
         Browser browser(*server);
-        store.access().personGrant(localOwner,"release","granted",Role::decide,GrantChange::grant);
-        store.access().personGrant(localOwner,"release","removed",Role::decide,GrantChange::grant);
-        store.access().personGrant(localOwner,"release",localOwner.id,Role::view,GrantChange::grant);
-        store.access().resourceGrant(localOwner,"release",{"environment","local-env","launch"},GrantChange::grant);
+        store.policy().setMember(localOwner,"release","granted",true);
+        store.policy().setMember(localOwner,"release","removed",true);
         demotedPause = send(browser,demoted,"Paused demoted root");
         retainedPause = send(browser,retained,"Paused retained root");
         Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
@@ -1082,7 +1072,7 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
         if (credential == "Bearer reader") return Person{"reader",false};
         return Person{};
     };
-    store.access().personGrant({"owner",true},"release","reader",Role::view,GrantChange::grant);
+    store.policy().setMember({"owner",true},"release","reader",true);
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
     Browser::checked(browser.client.Get("/api/memory?bot=release"),401);
@@ -1133,7 +1123,9 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     };
     check(send(webhook("skip","test")).at("tasks").empty(),"Webhook filter did not match exactly");
     browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+    store.policy().setMember(localOwner,"release","reader",false);
     Browser::checked(browser.client.Post("/api/webhooks/deploy",headers,webhook("event-1","main"),"application/json"),403);
+    store.policy().setMember(localOwner,"release","reader",true);
     browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",2},{"content","Unauthorized"}},403);
     browser.client.set_default_headers({{"Authorization","Bearer owner"}});
     const auto accepted = send(webhook("event-1","main")), replayed = send(webhook("event-1","main"));
@@ -1161,7 +1153,7 @@ int main(int argc,char** argv) {
 #endif
         TestDirectory directory;
 #ifdef FLOCK_TEST_CHATGPT
-        approvedProfiles(directory.path / "profile-approvals");
+        fullModeProfiles(directory.path / "full-mode-profiles");
 #endif
         inspectors(directory.path / "inspectors.db");
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");

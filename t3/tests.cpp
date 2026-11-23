@@ -400,6 +400,15 @@ int main(int argc, char** argv) {
         deletedSessionSearch(*restarted,home.parent_path()/"session-search.db",fixture);
         boundedSessionSearch(*restarted,home.parent_path()/"bounded-search.db",fixture,effects);
         sessionSearchDeadline(*restarted,home.parent_path()/"search-deadline.db",fixture);
+        fixture({{"scenario","catalog-timeout"},{"delayCatalog",true}});
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        const auto [partial,offset] = restarted->projectSessions("env-1","project",0,deadline);
+        check(partial.size() == 50 && offset == 50,"Catalog timeout discarded a completed page");
+        fixture({{"delayCatalog",false}});
+        const auto [remaining,nextOffset] = restarted->projectSessions("env-1","project",*offset,{});
+        check(remaining == std::vector<std::string>{"catalog-50"} && !nextOffset,
+              "Catalog continuation did not resume the timed-out page");
+        fixture({{"scenario","session-read"}});
         const SessionTarget session{"env-1","manual"};
         const auto metadata = restarted->sessionMetadata(session,true);
         check(metadata && metadata->project == "Release Pipeline" && metadata->title == "Staging investigation" &&

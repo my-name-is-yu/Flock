@@ -61,7 +61,7 @@ SELECT 1 FROM git_pr_watches w JOIN tasks t ON t.id=w.task_id AND t.bot_id=w.bot
 WHERE w.host=? AND w.repo=? AND w.pr_number=? AND w.task_id=? AND w.bot_id=?
 AND t.state NOT IN ('cancelled','cancelling')
 )SQL",{repo.host,repo.repo,event.at("prNumber"),event.at("taskId"),bot}).next() &&
-        Access(*this).permits(bot,{"repository",repo.resource(),"read"},true);
+        Policy(*this).allows(bot,Action::repository_read,repo.resource());
 }
 
 void Store::Impl::deliverGitWebhooks() {

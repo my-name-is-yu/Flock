@@ -1,5 +1,5 @@
 #pragma once
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 #include "flock/participation.hpp"
 #include "flock/secrets.hpp"
 #include "workspace_internal.hpp"
@@ -130,7 +130,7 @@ struct Store::Impl {
     Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<ModelImage>* images = nullptr) const;
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
-    void initializeAccessSchema();
+    void initializePolicySchema();
     void initializeParticipationSchema();
     void initializeRootDeliverySchema();
     void initializeSessionHandoffSchema();
@@ -141,9 +141,9 @@ struct Store::Impl {
     void createMemory(std::string_view key, std::string_view bot, std::string_view id,
                       std::string_view content, Seconds now);
     std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
-    Json memory(std::string_view bot, const Person*, std::string_view operation, const Json&,
-                Seconds now);
-    Json automationTool(std::string_view bot, const Json& routing, const Decision&, Seconds now);
+    Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&,
+                Seconds now, bool fromBot = false);
+    Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
     Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
     void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
     Json automations(std::string_view bot, Id before) const;
@@ -176,8 +176,8 @@ struct Store::Impl {
     void recordTaskBlocker(Json&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
-    Json accessTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision&);
-    Json sessionReadTool(std::string_view bot, std::string_view channelScope, const Decision&, T3&);
+    Json accessTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
+    Json sessionReadTool(std::string_view bot, std::string_view channelScope, const Json& routing, const Decision&, T3&);
     void authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
@@ -222,7 +222,7 @@ struct Store::Impl {
     std::map<Id,std::unique_ptr<WorkspaceJob>> workspaceJobs;
     void validateWorkspace(const ToolContext&, const Decision&);
     Json workspaceTool(const ToolContext&, const Decision&);
-    std::optional<Scope> authorizedBotToolScope(std::string_view bot, const Decision&);
+    std::optional<Resource> authorizedBotToolScope(std::string_view bot, const Decision&);
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
     void saveTurnResults(Id, int step, const Json& results);
@@ -244,7 +244,7 @@ struct Store::Impl {
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
-                 const BotTools&, GitHost*, std::stop_token);
+                 const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, std::stop_token);
     bool runSessionEffect(const conversation::Message&, int step, const Decision&, bool offered, bool hasWebEvidence,
                           T3&, std::stop_token);
     bool isNextTurn(Id messageId) const;

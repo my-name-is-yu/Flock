@@ -51,10 +51,6 @@ std::optional<CoordinationRequest> permission(const Json& value) {
 
 }
 
-std::string_view t3ConnectionModeName(T3ConnectionMode mode) {
-    return mode == T3ConnectionMode::Full ? "full" : "consult";
-}
-
 std::string redactT3Tokens(std::string value) {
     std::size_t at = 0;
     while ((at = value.find(tokenPrefix,at)) != value.npos) {
@@ -90,13 +86,13 @@ CREATE TABLE IF NOT EXISTS session_controls(
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS t3_connector(
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
- mode TEXT NOT NULL CHECK(mode IN ('full','consult')), token_digest TEXT NOT NULL, port INTEGER NOT NULL)
+ token_digest TEXT NOT NULL, port INTEGER NOT NULL)
 )SQL");
     exec("CREATE TABLE IF NOT EXISTS t3_connected_environments(environment_id TEXT PRIMARY KEY)");
 }
 
 std::string T3Connections::connect(std::string_view environment, std::string_view person,
-                                  T3ConnectionMode mode, unsigned port,
+                                  unsigned port,
                                   const std::function<void(std::string_view)>& install, bool refreshProviders) {
     if (!validId(environment) || !validId(person) || port == 0 || port > 65535)
         throw Conflict("Invalid T3 connection");
@@ -116,12 +112,10 @@ std::string T3Connections::connect(std::string_view environment, std::string_vie
             throw std::runtime_error("Could not generate T3 connection token");
         token = std::string(tokenPrefix) + hex(bytes);
         db.exec(R"SQL(
-INSERT INTO t3_connector VALUES(1,?,?,?,?,?)
-ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id,mode=excluded.mode,
+INSERT INTO t3_connector VALUES(1,?,?,?,?)
+ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id,
  token_digest=excluded.token_digest,port=excluded.port
-)SQL",{actionId(),person,t3ConnectionModeName(mode),digest(token),static_cast<Id>(port)});
-    } else {
-        db.exec("UPDATE t3_connector SET mode=?",{t3ConnectionModeName(mode)});
+)SQL",{actionId(),person,digest(token),static_cast<Id>(port)});
     }
     db.exec("INSERT OR IGNORE INTO t3_connected_environments VALUES(?)",{environment});
     if (install) install(token);
@@ -157,22 +151,20 @@ std::optional<T3Connection> T3Connections::authenticate(std::string_view token) 
         token.substr(tokenPrefix.size()).find_first_not_of("0123456789abcdef") != token.npos) return {};
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
-    auto row = db.query("SELECT id,person_id,mode FROM t3_connector WHERE token_digest=?"
+    auto row = db.query("SELECT id,person_id FROM t3_connector WHERE token_digest=?"
                         " AND EXISTS(SELECT 1 FROM t3_connected_environments)",{digest(token)});
     if (!row.next()) return {};
-    return T3Connection{row.string(0),row.string(1),
-                        row.string(2) == "full" ? T3ConnectionMode::Full : T3ConnectionMode::Consult};
+    return T3Connection{row.string(0),row.string(1)};
 }
 
 std::optional<T3ConnectionSettings> T3Connections::settings(std::string_view person) const {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
-    auto rows = db.query("SELECT mode,port,environment_id FROM t3_connector CROSS JOIN t3_connected_environments"
+    auto rows = db.query("SELECT port,environment_id FROM t3_connector CROSS JOIN t3_connected_environments"
                          " WHERE person_id=? ORDER BY environment_id",{person});
     if (!rows.next()) return {};
-    T3ConnectionSettings result{rows.string(0) == "full" ? T3ConnectionMode::Full : T3ConnectionMode::Consult,
-                                static_cast<unsigned>(rows.number(1)),{}};
-    do { result.environments.push_back(rows.string(2)); } while (rows.next());
+    T3ConnectionSettings result{static_cast<unsigned>(rows.number(0)),{}};
+    do { result.environments.push_back(rows.string(1)); } while (rows.next());
     return result;
 }
 
@@ -212,19 +204,21 @@ bool matchesThreadInvocation(const Json& item, std::string_view threadId,
 Participation Store::Impl::authorizeParticipation(const Person& person, Id channel, bool requireConnection) {
     auto row = query(R"SQL(
 SELECT c.environment_id,c.project_id,c.thread_id,c.request_id,c.bot_id,c.person_id,c.context,
-       s.permission,s.consult_command,t.mode
+       s.permission,s.consult_command,t.id
 FROM return_channels c JOIN session_controls s ON s.channel_id=c.id
 LEFT JOIN t3_connected_environments e ON e.environment_id=c.environment_id
 LEFT JOIN t3_connector t ON t.person_id=c.person_id AND e.environment_id IS NOT NULL WHERE c.id=?
 )SQL",{channel});
-    if (!row.next() || person.id != row.string(5) || !Access(*this).permitsPerson(person,row.string(4),Role::decide))
+    if (!row.next() || person.id != row.string(5) || !Policy(*this).allows(person,Action::bot_decide,row.string(4)))
         throw Conflict("Session participation access denied");
     ThreadTarget target{row.string(0),row.string(1),row.string(2)};
     auto scope = permission(row.json(7));
-    if (requireConnection && (row.string(9).empty() || (scope && row.string(9) != "full")))
+    if (requireConnection && row.string(9).empty())
         throw Conflict("T3 connection no longer permits this handoff");
     ReturnChannel result{channel,{{std::move(target),row.string(3),row.string(4)},person.id},
                          row.json(6).at("request").get<std::string>()};
+    if (requireConnection && scope && !Policy(*this).allows(row.string(4),Action::t3_coordinate,row.string(0)))
+        throw Conflict("T3 coordination denied by installation policy");
     if (!scope) return ConsultPermit{std::move(result),row.string(8)};
     return CoordinationActivation{std::move(result),{std::move(*scope)}};
 }
@@ -258,11 +252,9 @@ HandoffAck SessionHandoff::invoke(const T3Connection& connection, const Json& ar
         ((mode == "coordinate" || arguments.contains("goal")) && !validText(goal)))
         throw Conflict("Invalid invocation arguments");
     const auto coordination = mode == "coordinate" ? std::optional(CoordinationRequest{goal,true}) : std::nullopt;
-    if (coordination && connection.mode != T3ConnectionMode::Full)
-        throw Conflict("This T3 connection is in consult mode. Coordination requires full mode.");
     const auto actor = person(connection);
     if (!botExists(bot)) throw Conflict("Unknown Bot");
-    if (!actor || actor->id != connection.personId || !store_.access().permitsPerson(*actor,bot,Role::decide))
+    if (!actor || actor->id != connection.personId || !store_.policy().allows(*actor,Action::bot_decide,bot))
         throw Conflict("Bot decision access is required");
 
     const auto settings = T3Connections(store_).settings(connection.personId);
@@ -308,12 +300,14 @@ HandoffAck SessionHandoff::openChannel(const T3Connection& connection, const Thr
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
     const auto actor = person(connection);
-    auto current = db.query("SELECT mode FROM t3_connector WHERE id=? AND person_id=? AND "
+    auto current = db.query("SELECT id FROM t3_connector WHERE id=? AND person_id=? AND "
                             "EXISTS(SELECT 1 FROM t3_connected_environments WHERE environment_id=?)",
                             {connection.id,connection.personId,target.environmentId});
-    if (!actor || actor->id != connection.personId || !store_.access().permitsPerson(*actor,bot,Role::decide) ||
-        !current.next() || (scope && current.string(0) != "full"))
+    if (!actor || actor->id != connection.personId || !store_.policy().allows(*actor,Action::bot_decide,bot) ||
+        !current.next())
         throw Conflict("T3 connection or Bot access changed");
+    if (scope && !store_.policy().allows(bot,Action::t3_coordinate,target.environmentId))
+        throw Conflict("T3 coordination denied by installation policy");
     if (db.query("SELECT 1 FROM runs WHERE environment_id=? AND thread_id=?",
                  {target.environmentId,target.threadId}).next())
         throw Conflict("A Flock-owned Thread cannot open a handoff");

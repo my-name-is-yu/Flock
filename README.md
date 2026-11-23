@@ -2,7 +2,7 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
-Flock reopens databases with the current schema version. Databases from development builds before schema versioning require a new state directory. Use `--home` to start the current build alongside your existing data.
+Flock reopens databases with the current schema version. Full policy uses schema version 2. Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
 
 ## Build
 
@@ -68,14 +68,13 @@ Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to us
 
 In a T3 Thread, ask for a Bot by name or select `/skill:flock-<bot>` or
 `$flock-<bot>` in the provider's skill menu. Flock replies in that Thread.
-The default connection permits one-off consultation and ongoing coordination.
-Choose `--mode consult` at setup to allow only one-off replies, or
-`--port PORT` to change the saved loopback port.
+The connection supports one-off consultation and ongoing coordination under the installation policy.
+Use `--port PORT` to change the saved loopback port.
 See [Session handoffs](web/README.md#session-handoffs) for connection details.
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.
 
-To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot, grant launch access, and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
+To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 
 ```sh
 build/app/flock --help
@@ -89,43 +88,52 @@ To check whether a live model applies different completion criteria, run `build/
 
 The Bot normally evaluates the Session's final report. It can retry an unavailable final report once Flock has verified which Run produced it. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime allows up to three evidence reads per event and saves history excerpts of up to 8 KiB each in SQLite.
 
-### Bot resource authorization
+### Installation policy
 
-Grant the Bot the environment’s `launch` operation before starting its first
-Session. A Bot can read its own Sessions. To share another Session, grant
-`session:read` on the exact environment and thread. Use `Scope::sessionRead`
-in C++, or the compact JSON pair `["environment-id","thread-id"]` as the resource
-ID in settings. T3 must permit each read. Set `services` and `mcpServers` to arrays of
-connection names for the conversation tools. Manage grants and protected input
-from **Access and credentials** in Bot settings.
+Full is the installation-wide mode. A Bot can use configured resources unless
+a Never rule matches its action and target. Upstream credentials and workspace
+isolation still apply. A Bot's creator owns it. The local owner or configured
+root can manage all Bots. Shared members can view a Bot, talk to it, and answer
+its decisions. The owner manages its profile and shared members.
 
-Session search scans up to 64 candidates per page with a shared two-second
+```sh
+flock rules list
+flock rules add never repository.pr 'github.com/acme/*'
+flock rules remove never repository.pr 'github.com/acme/*'
+```
+
+Use exact targets or `*` to match any sequence of characters. Settings shows
+the current mode and Never rules. Session read targets use compact JSON
+`["environment-id","thread-id"]`. Bot tools can request protected input,
+and fulfilled secret names are shared with Bots under `secret.use`. Secret
+values are resolved inside adapters.
+
+Session search uses recorded Runs and T3 thread lists for the configured
+project and environments. It scans up to 64 candidates per page with a shared two-second
 deadline for candidate reads. A cursor after a matched Session first rechecks
 that Session's readability with its own two-second deadline. Follow `nextCursor`
 with the same filters even when the page contains no matches. If a timeout occurs
 before the scan advances, retry with the same cursor.
 
 Adapters that perform resource operations should use the contracts in
-`include/flock/access.hpp`. At the execution boundary, pass the authenticated
-Session's environment and Run reference to `Access::executeSessionResource`,
+`include/flock/policy.hpp`. At the execution boundary, pass the authenticated
+Session's environment and Run reference to `Policy::executeSessionResource`,
 together with the exact scope, the upstream permission check and the action.
-Flock resolves the Run's owning task, checks current grants, and journals the
+Flock resolves the Run's owning task, checks current policy, and journals the
 completed action. The execution callback receives the verified owning task ID for
-resolving additional scoped resources. The transport must establish the calling Run's identity.
+resolving additional resource operations. The transport must establish the calling Run's identity.
 A peer's task and its Runs always resolve to the recipient Bot. Secret-consuming
-adapters use `Access::useSecret` with the owning task and a named `SecretRef`.
+adapters use `Policy::useSecret` with the owning task and a named `SecretRef`.
 External adapters must call these checks for each protected operation.
 
 ### GitHub repositories and PR notifications
 
 Build with libcurl 7.85 or newer. Set `FLOCK_GITHUB_TOKEN` in the daemon
-environment to connect GitHub. Give the
-token access to the intended repositories and API operations. In Bot settings,
-grant `repository` operations on the lowercase resource ID
-`github.com/owner/repo`. Use `read` for repository, PR, commit, CI and issue reads,
-`pr` to open and update PRs, request reviewers and write PR comments, `review`
-to submit reviews, and `issues` to change issues and write issue comments.
-A PR from a separate head repository also requires `read` there.
+environment to connect GitHub. Give the token access to the intended repositories and operations. Repository
+rules address lowercase `github.com/owner/repo` targets. Use `repository.read`
+for reads, `repository.pr` for PR changes, `repository.review` for reviews, and
+`repository.issues` for issue changes. Opening a PR from a different head
+repository also requires read access to that repository.
 
 Set `FLOCK_GITHUB_WEBHOOK_SECRET` to the secret configured for a GitHub JSON
 webhook. Forward signed deliveries to `POST /api/git/webhooks/github.com` on the
@@ -172,9 +180,9 @@ Set `FLOCK_CHANNEL_BRIDGES_FILE` to a host-controlled JSON file before starting
 ```
 
 Use a separate random bearer credential of at least 32 characters for each
-workspace. Configure Flock Web identities and grant each linked person the
-Bot's `decide` role. Grant the Bot `use` and `read` on the `service` resource
-identified by `["slack","T123"]` or `["imessage","messages-on-mac"]`.
+workspace. Configure Flock Web identities and share the Bot with its linked people. Channel rules
+use `channel.use`, `channel.read` and `channel.post` with targets such as
+`["slack","T123"]` or `["imessage","messages-on-mac"]`.
 
 The provider bridge authenticates native events and retrieves attachment
 bytes. It sends normalized JSON with `workspaceId`, `threadRef`,

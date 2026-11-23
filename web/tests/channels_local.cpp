@@ -50,8 +50,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     };
     Store store(database);
     const Person owner{"admin",true}, sender{"alice"};
-    store.access().personGrant(owner,"release",sender.id,Role::decide,GrantChange::grant);
-    store.access().resourceGrant(owner,"release",{"environment","local-env","launch"},GrantChange::grant);
+    store.policy().setMember(owner,"release",sender.id,true);
     const auto transport = std::make_shared<Transport>();
     const auto authenticate = [](auto credential,auto workspace) {
         return credential == "Bearer fixture-channel" && workspace == "W";
@@ -63,9 +62,6 @@ void channelEndpoints(const std::filesystem::path& database) {
     };
     for (const auto channel : {ChannelKind::slack,ChannelKind::imessage})
         store.connectChannel({channel,channelCapabilities(channel),authenticate,authorize,transport});
-    for (const auto channel : {ChannelKind::slack,ChannelKind::imessage})
-        for (const auto op : {"use","read"})
-            store.access().resourceGrant(owner,"release",channelScope({channel,"W","",""},op),GrantChange::grant);
     WebCallbacks cb{
         .bots = [] { return Json::array({{{"id","release"},{"name","Release"}}}); },
         .intake = [](std::string_view bot, std::string_view request) -> Intake {
@@ -77,7 +73,7 @@ void channelEndpoints(const std::filesystem::path& database) {
                                             {{"authorization","Bearer fixture-sender"},{"person",sender.id}}});
     std::filesystem::permissions(identities,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     configureWebIdentities(store,identities,cb);
-    check(!store.access().permitsPerson({owner.id},"release",Role::decide),"Machine owner has a redundant Bot grant");
+    check(!store.policy().allows(Person{owner.id},Action::bot_decide,"release"),"Machine owner has a redundant Bot grant");
     const std::string sessionCredential(32,'s');
     const auto config = database.parent_path() / "session-bridge.json";
     std::ofstream(config) << Json{{"localMachines",{{"fixture",owner.id}}},{"sessionBridgeCredentialEnv","FLOCK_HTTP_TEST_SESSION_KEY"},

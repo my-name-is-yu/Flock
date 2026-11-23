@@ -95,7 +95,8 @@ public:
 
     Json get(const std::string& path) { return checked(client.Get(path),200); }
     Json post(const std::string& path, const Json& data, int status = 200) {
-        return checked(client.Post(path,headers(),data.dump(),"application/json"),status);
+        try { return checked(client.Post(path,headers(),data.dump(),"application/json"),status); }
+        catch (const std::exception& error) { throw std::runtime_error(path + ": " + error.what()); }
     }
     Id request(std::string_view bot, std::string_view text) {
         return post("/api/requests",{{"botId",bot},{"clientRequestId",actionId()},{"request",text}},201).at("taskId");

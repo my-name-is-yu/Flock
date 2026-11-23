@@ -26,9 +26,9 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
 
   run [--fixed] [--no-web] [--port PORT] [--session-read off|on_demand|prefill]
   bots
-  access grant BOT KIND RESOURCE ACTION
-  access revoke BOT KIND RESOURCE ACTION
-  access list BOT
+  rules list
+  rules add never ACTION TARGET
+  rules remove never ACTION TARGET
   submit BOT REQUEST
   tasks [BOT] [--before ID] [--limit N]
   status TASK
@@ -39,7 +39,7 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   extend TASK WAIT REVISION GENERATION NEW_UNIX_DEADLINE
   reconcile TASK WAIT REVISION GENERATION [--thread ID] [--run ID] [--question ID]
   cancel TASK [WAIT REVISION GENERATION]
-  t3 connect ENVIRONMENT MCP_URL [--mode full|consult] [--port PORT]
+  t3 connect ENVIRONMENT MCP_URL [--port PORT]
   t3 disconnect ENVIRONMENT
   model login [--print-url] [--reconsent]
   model status
@@ -150,31 +150,22 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         return 0;
     }
     const auto url = args.pop("T3 MCP URL");
-    std::optional<T3ConnectionMode> mode;
     unsigned port = 0;
     while (!args.empty()) {
         const auto flag = args.pop("T3 connection option");
         if (flag == "--port") port = static_cast<unsigned>(number(args,"port",1,65535));
-        else if (flag == "--mode") {
-            const auto value = args.pop("connection mode");
-            if (value == "consult") mode = T3ConnectionMode::Consult;
-            else if (value == "full") mode = T3ConnectionMode::Full;
-            else throw Conflict("T3 connection mode must be full or consult");
-        } else throw Conflict("Unknown T3 connection option: " + flag);
+        else throw Conflict("Unknown T3 connection option: " + flag);
     }
     const T3SetupLock setup;
     auto store = openStore(home);
     if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE")) {
-        WebCallbacks callbacks;
-        configureWebIdentities(store,identities,callbacks);
-        if (!callbacks.configuredPerson(localOwner.id))
+        if (!loadIdentities(store,identities).resolvePerson(localOwner.id))
             throw Conflict("Configure a Web identity for local-owner before connecting T3");
-    } else if (store.access().requiresIdentity()) throw Conflict("Set FLOCK_WEB_IDENTITIES_FILE before connecting T3");
+    } else if (store.policy().requiresIdentity()) throw Conflict("Set FLOCK_WEB_IDENTITIES_FILE before connecting T3");
     T3Connections connections(store);
     const auto previous = connections.settings(localOwner.id);
     const auto savedPort = previous ? previous->port : 0;
     if (!port) port = savedPort ? savedPort : 4173;
-    const auto selectedMode = mode.value_or(previous ? previous->mode : T3ConnectionMode::Full);
     const auto providers = configureT3Providers("http://127.0.0.1:" + std::to_string(port) + "/mcp/flock",
         [&](const InstallT3Provider& install) {
             loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
@@ -183,7 +174,7 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                 const auto refreshProviders = t3ProvidersNeedRefresh([&](std::string_view token) {
                     return connections.ownsBearer(token);
                 });
-                connections.connect(environment,localOwner.id,selectedMode,port,[&](std::string_view token) {
+                connections.connect(environment,localOwner.id,port,[&](std::string_view token) {
                     if (!token.empty()) install(token);
                     saveCredential();
                 },refreshProviders);
@@ -195,7 +186,7 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     catch (const std::exception& error) {
         std::cerr << "Could not export T3 skills: " << error.what() << '\n';
     }
-    print({{"environmentId",environment},{"connected",true},{"mode",t3ConnectionModeName(selectedMode)},
+    print({{"environmentId",environment},{"connected",true},
            {"port",port},{"configuredProviders",providers}});
     return 0;
 }
@@ -248,9 +239,9 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const Runtime::SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
     const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
     auto identities = identityFile ? loadIdentities(store,identityFile) : ConfiguredIdentities{};
-    if (!identityFile && !store.access().requiresIdentity()) {
+    if (!identityFile && !store.policy().requiresIdentity()) {
         identities.resolvePerson = [&store](std::string_view id) -> std::optional<Person> {
-            if (id == localOwner.id && !store.access().requiresIdentity()) return localOwner;
+            if (id == localOwner.id && !store.policy().requiresIdentity()) return localOwner;
             return std::nullopt;
         };
     }
@@ -270,6 +261,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             return handoffSession->inputCommit(view.origin.invitation.target);
         };
     }
+    options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
+    options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store,*model,*t3,soul,options);
     bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
@@ -302,8 +295,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     WebCallbacks callbacks{
         [&] { return bots.cards(); },
         intake,
-        [&](const Json& profile,const std::optional<AvatarImage>& image) {
-            auto created = bots.create(profile,image);
+        [&](const Person& creator,const Json& profile,const std::optional<AvatarImage>& image) {
+            auto created = store.policy().createOwnedBot(creator,[&](const auto& publishOwned) {
+                return bots.create(profile,image,publishOwned);
+            });
             syncSkills();
             return created;
         },
@@ -315,10 +310,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         [&](std::string_view botId) { return bots.avatarImage(botId); },
         options.peers,
         identities.authenticate,
-        [&](const BotChange& change) { bots.apply(change); syncSkills(); },
         options.clock,
     };
     callbacks.resolveIdentity = identities.resolveRoot;
+    if (identityFile) callbacks.configuredPerson = identities.resolvePerson;
     const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
     if (bridges) configureChannelBridges(store,bridges,callbacks);
     callbacks.sessionHandoffs = handoffs;
@@ -436,23 +431,22 @@ void taskCommand(const std::filesystem::path& home, const std::string& command, 
     } else print(store.tasks(bot,cursor,limit));
 }
 
-void accessCommand(const std::filesystem::path& home, Arguments& args) {
-    const auto action = args.pop("access command (grant, revoke or list)");
-    if (action != "grant" && action != "revoke" && action != "list")
-        throw Conflict("Unknown access command: " + action);
-    const auto bot = args.pop("Bot ID");
-    if (!validBotId(bot)) throw Conflict("Invalid Bot ID");
-    std::optional<Scope> scope;
-    if (action != "list") {
-        scope = Scope{args.pop("resource kind"),args.pop("resource ID"),args.pop("resource action")};
-        if (!scope->valid()) throw Conflict("Invalid access scope. Check KIND, RESOURCE and ACTION.");
-    }
-    args.end();
+void rulesCommand(const std::filesystem::path& home, Arguments& args) {
+    const auto command = args.pop("rules command");
     auto store = openStore(home);
-    auto access = store.access();
-    if (scope)
-        access.resourceGrant(Person{"local-cli",true},bot,*scope,action == "grant" ? GrantChange::grant : GrantChange::revoke);
-    print(access.grants(bot));
+    auto policy = store.policy();
+    if (command == "list") {
+        args.end();
+    } else {
+        if (command != "add" && command != "remove") throw Conflict("Unknown rules command");
+        if (args.pop("rule kind") != "never") throw Conflict("Expected never rule");
+        const auto action = parseAction(args.pop("policy action"));
+        if (!action) throw Conflict("Unknown policy action");
+        const auto target = args.pop("target");
+        args.end();
+        policy.changeNeverRule(localOwner,*action,target,command == "add");
+    }
+    print(policy.rules());
 }
 
 int runCli(Arguments& args) {
@@ -473,7 +467,7 @@ int runCli(Arguments& args) {
         args.end();
         print(bots.cards());
     } else if (command == "run") daemon(args,home,bots);
-    else if (command == "access") accessCommand(home,args);
+    else if (command == "rules") rulesCommand(home,args);
     else if (command == "submit") {
         const auto botId = args.pop("Bot ID");
         const auto request = args.pop("request");

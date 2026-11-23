@@ -8,8 +8,8 @@ using enum InboxKind;
 constexpr std::pair<InboxKind,std::string_view> kinds[] = {
     {user_question,"user_question"}, {extra_run,"extra_run"}, {deadline,"deadline"},
     {model_budget,"model_budget"}, {conversation_model_budget,"conversation_model_budget"},
-    {unknown_delivery,"unknown_delivery"}, {grant_request,"grant_request"},
-    {protected_input,"protected_input"}, {bot_change,"bot_change"}, {pr_review,"pr_review"},
+    {unknown_delivery,"unknown_delivery"},
+    {protected_input,"protected_input"}, {pr_review,"pr_review"},
     {pr_reconciliation,"pr_reconciliation"}
 };
 
@@ -45,7 +45,6 @@ bool validDecision(InboxKind kind, std::string_view decision) {
     case extra_run: case model_budget: case conversation_model_budget: return decision == "approve";
     case deadline: return decision == "extend";
     case unknown_delivery: return decision == "reconcile";
-    case grant_request: case bot_change: return decision == "approve" || decision == "deny";
     case protected_input: return decision == "supply";
     case pr_reconciliation: return decision == "link_pr" || decision == "reject_pr";
     case pr_review: return decision == "approve" || decision == "request_changes";
@@ -71,10 +70,6 @@ std::string_view inboxKindName(InboxKind kind) {
 InboxKind parseInboxKind(std::string_view name) {
     for (const auto& [value,label] : kinds) if (name == label) return value;
     throw std::invalid_argument("Unknown inbox item kind");
-}
-
-Role inboxDecisionRole(InboxKind kind) {
-    return kind == grant_request || kind == protected_input || kind == bot_change ? Role::admin : Role::decide;
 }
 
 void Store::Impl::initializeBoardInboxSchema() {
@@ -103,16 +98,16 @@ CREATE INDEX IF NOT EXISTS inbox_decisions_by_bot ON inbox_decisions(bot_id,id);
 }
 
 std::vector<std::string> Store::Impl::visibleBoardBots(const Person& actor, std::string_view bot) {
-    const Access access(*this);
-    if (!bot.empty()) return access.permitsPerson(actor,bot,Role::view) ? std::vector{std::string(bot)} : std::vector<std::string>{};
+    const Policy access(*this);
+    if (!bot.empty()) return access.allows(actor,Action::bot_view,bot) ? std::vector{std::string(bot)} : std::vector<std::string>{};
     auto rows = actor.adminRoot ? query(R"SQL(
-SELECT bot_id FROM tasks UNION SELECT bot_id FROM messages UNION SELECT bot FROM grant_requests
+SELECT bot_id FROM tasks UNION SELECT bot_id FROM messages UNION SELECT bot FROM bot_owners UNION SELECT bot FROM bot_members
 UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION SELECT bot_id FROM inbox_decisions
-)SQL") : query("SELECT bot FROM person_bot_grants WHERE person=? ORDER BY bot",{actor.id});
+)SQL") : query("SELECT bot FROM bot_owners WHERE person=?1 UNION SELECT bot FROM bot_members WHERE person=?1 ORDER BY bot",{actor.id});
     std::vector<std::string> result;
     while (rows.next()) {
         auto id = rows.string(0);
-        if (access.permitsPerson(actor,id,Role::view)) result.push_back(std::move(id));
+        if (access.allows(actor,Action::bot_view,id)) result.push_back(std::move(id));
     }
     return result;
 }
@@ -120,12 +115,11 @@ UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION S
 Json Store::inbox(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     Transaction snapshot(p_->db,Transaction::Mode::read);
-    const Access access(*p_);
+    const Policy access(*p_);
     auto result = Json::array();
     for (const auto& id : p_->visibleBoardBots(actor,bot)) {
         const auto scrub = p_->redactor(id);
-        const bool canDecide = access.permitsPerson(actor,id,Role::decide);
-        const bool canAdmin = access.permitsPerson(actor,id,Role::admin);
+        const bool canDecide = access.allows(actor,Action::bot_decide,id);
         const auto anchorTime = [&](Id anchor) -> Id {
             if (anchor <= 0) return 0;
             auto row = p_->query("SELECT time FROM journal WHERE id=?",{anchor});
@@ -135,7 +129,7 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
             view = scrub.record(std::move(view));
             view.update(key(target));
             view["botName"] = id;
-            view["canDecide"] = inboxDecisionRole(target.itemKind) == Role::admin ? canAdmin : canDecide;
+            view["canDecide"] = canDecide;
             addAnchor(view,anchor);
             if (const auto ts = createdAt > 0 ? createdAt : anchorTime(anchor); ts > 0) view["createdAt"] = ts;
             result.push_back(std::move(view));
@@ -173,14 +167,6 @@ WHERE m.bot_id=? AND t.status='paused' ORDER BY t.pause_id DESC
                 {{"requestTitle",title(turns.string(1))},{"request",turns.string(1)},{"prompt",field(turns.json(3),"text")}},
                 turns.number(4) ? turns.number(2) : 0);
         }
-        auto grants = p_->query(R"SQL(
-SELECT g.id,g.op,g.kind,g.resource,m.text,m.id,coalesce(g.requestedAt,0) FROM grant_requests g
-LEFT JOIN messages m ON m.id=g.source_message_id AND m.bot_id=g.bot
-WHERE g.bot=? AND g.status='pending' ORDER BY g.id DESC
-)SQL",{id});
-        while (grants.next())
-            addAccess(grant_request,grants.number(0),"Resource access",grants.string(4),
-                      grants.string(1)+" "+grants.string(2)+" "+grants.string(3),grants.number(5),grants.number(6));
         auto inputs = p_->query(R"SQL(
 SELECT p.id,p.name,m.text,m.id FROM protected_inputs p
 LEFT JOIN messages m ON m.id=p.source_message_id AND m.bot_id=p.bot
@@ -190,15 +176,6 @@ ORDER BY p.id DESC
 )SQL",{id});
         while (inputs.next())
             addAccess(protected_input,inputs.number(0),"Protected input",inputs.string(2),"Supply a value for "+inputs.string(1),inputs.number(3));
-        auto changes = p_->query(R"SQL(
-SELECT c.id,c.operation,c.target,c.name,m.text,m.id FROM bot_changes c
-LEFT JOIN messages m ON m.id=c.source_message_id AND m.bot_id=c.bot
-WHERE c.bot=? AND c.status='pending' ORDER BY c.id DESC
-)SQL",{id});
-        while (changes.next())
-            addAccess(bot_change,changes.number(0),"Bot change",changes.string(4),
-                      (changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3),
-                      changes.number(5));
         auto reviews = p_->query(R"SQL(
 SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
@@ -263,10 +240,10 @@ FROM inbox_decisions WHERE bot_id=? ORDER BY id DESC LIMIT 100
 }
 
 void Store::decideInbox(const Person& actor, const InboxTarget& item, std::string_view decision,
-                        const Json& data, const ApplyBotChange& apply) {
+                        const Json& data) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    auto access = this->access();
+    auto access = this->policy();
     if (item.itemId <= 0 || !data.is_object() || !validDecision(item.itemKind,decision))
         throw std::invalid_argument("Invalid inbox decision");
     const auto textInput = [&](std::string_view fieldName) {
@@ -277,17 +254,11 @@ void Store::decideInbox(const Person& actor, const InboxTarget& item, std::strin
     };
 
     const auto kind = item.itemKind;
-    if (kind == grant_request || kind == protected_input || kind == bot_change) {
+    if (kind == protected_input) {
         if (item.waitId || item.taskId || item.targetRevision || item.targetGeneration) throw RequestChanged{};
-        if (kind == grant_request) access.decideGrant(actor,item.botId,item.itemId,decision == "approve");
-        else if (kind == protected_input) access.fulfillSecret(actor,item.botId,item.itemId,textInput("value"));
-        else {
-            const auto [change,status] = access.authorizedBotChange(actor,item.botId,item.itemId,decision == "approve",apply);
-            if (status != "pending") throw DecisionUnavailable{};
-            access.decideBotChange(actor,item.botId,item.itemId,decision == "approve",change);
-        }
+        access.fulfillSecret(actor,item.botId,item.itemId,textInput("value"));
     } else if (kind == conversation_model_budget) {
-        if (!access.permitsPerson(actor,item.botId,Role::decide)) throw DecisionDenied{};
+        if (!access.allows(actor,Action::bot_decide,item.botId)) throw DecisionDenied{};
         auto paused = p_->query(R"SQL(
 SELECT t.pause_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
 WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
@@ -298,7 +269,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         p_->approveMessageModelCall(item.itemId,item.waitId);
         p_->recordInboxDecision(actor,item,decision);
     } else if (kind == pr_review || kind == pr_reconciliation) {
-        if (!access.permitsPerson(actor,item.botId,Role::decide)) throw DecisionDenied{};
+        if (!access.allows(actor,Action::bot_decide,item.botId)) throw DecisionDenied{};
         if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?",{item.taskId,item.botId}).next())
             throw RequestChanged{};
         const auto task = p_->load(item.taskId);
@@ -327,10 +298,6 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         p_->operate(actor,{item.botId,item.taskId,item.waitId,item.targetRevision,item.targetGeneration},decision,args,0,kind);
     }
     transaction.commit();
-    if (kind == bot_change && decision == "approve") {
-        try { access.applyApprovedBotChange(actor,item.botId,item.itemId,apply); }
-        catch (const Conflict&) { throw BotChangePending{}; }
-    }
 }
 
 void Store::Impl::insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,

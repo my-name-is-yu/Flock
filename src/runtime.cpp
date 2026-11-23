@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS specialist_launches(
 
 struct Runtime::Impl {
     Store::Impl& db;
-    Access access;
+    Policy access;
     Model& model;
     T3& t3;
     SoulLoader soul;
@@ -164,11 +164,11 @@ struct Runtime::Impl {
     }
 
     void runTurn(Id id) {
-        db.runTurn(id,model,t3,soul,options.clock,*options.botTools,options.gitHost.get(),shutdown.get_token());
+        db.runTurn(id,model,t3,soul,options.clock,*options.botTools,options.gitHost.get(),options.applyBotChange,options.reconcileBotCreation,shutdown.get_token());
     }
 
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
-        : db(*store.p_), access(store.access()), model(m), t3(adapter),
+        : db(*store.p_), access(store.policy()), model(m), t3(adapter),
           soul(std::move(loader)), options(std::move(opts)) {
         if (!options.botTools) options.botTools = std::make_shared<BotTools>();
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
@@ -259,6 +259,7 @@ WHERE d.recipient_task=?1 OR d.id=(
 
     bool specialistAdmission(const SpecialistOrigin& origin, const Command& command, const Json& task) {
         if (!activeSpecialistCoordination(origin.channel,origin.generation) ||
+            !access.allows(command.ownerBotId,Action::environment_launch,command.environmentId) ||
             !task.at("activeRun").is_null() || !task.at("lastRun").is_null() || hasPending(task) ||
             taskIntent(task) != origin.purpose || field(task,"doneWhen") != origin.doneWhen ||
             field(task,"inputArtifactVersion") != origin.commit) return false;
@@ -1097,11 +1098,10 @@ AND s.status NOT IN ('completed','failed','stopped')
         // A scoped launch must pass the live coordination check when reserving its slot.
         const bool specialistLaunch = scopedSpecialistLaunch(task,cmd.tool);
         const auto launchAllowed = [&] {
-            return specialistLaunch || (cmd.tool != "delegate" && cmd.tool != "follow_up") ||
-                   access.permits(cmd.ownerBotId,{"environment",cmd.environmentId,"launch"},true);
+            return (cmd.tool != "delegate" && cmd.tool != "follow_up") ||
+                   access.allows(cmd.ownerBotId,Action::environment_launch,cmd.environmentId);
         };
-        const Delivery denied{Delivery::Kind::Settings,{},"Approve launch access in Access Settings (/settings/" +
-            cmd.ownerBotId + "/environment) or use 'flock access grant BOT environment ENVIRONMENT_ID launch'.",true};
+        const Delivery denied{Delivery::Kind::Settings,{},"Environment launch denied by installation policy.",true};
         const bool firstSend = action["phase"] == "ready";
         if (firstSend) {
             if (!launchAllowed()) return applyDelivery(id,action,denied);
@@ -1339,7 +1339,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
             if (row.next()) throw Conflict("History reference matches more than one Session");
         }
         if (req.threadId.empty() || req.runId.empty()) throw Conflict("History reference does not belong to this task");
-        if (!access.permits(field(task,"botId"),Scope::sessionRead(req.environmentId,req.threadId),true))
+        if (!access.allows(field(task,"botId"),Resource::sessionRead(req.environmentId,req.threadId)))
             throw Conflict("Session read access required");
         return persistExcerpt(task,event,readExcerpt(field(task,"botId"),req),"session_read",usage);
     }
@@ -1368,7 +1368,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
             return PrefillResult::NotNeeded;
         const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;
         const auto run = runRef(report["run"]);
-        if (!access.permits(field(task,"botId"),Scope::sessionRead(report.value("environmentId",field(task,"environmentId")),run.threadId),true))
+        if (!access.allows(field(task,"botId"),Resource::sessionRead(report.value("environmentId",field(task,"environmentId")),run.threadId)))
             return PrefillResult::NotNeeded;
         try {
             readEvidence(task,event,{{"threadId",run.threadId},{"runId",run.runId},{"view","activity"}});
@@ -1939,7 +1939,7 @@ AND json_extract(data,'$.resultRunId')=? AND json_extract(data,'$.status')=?
             throw Conflict("Choose the exact settled result Run to retry its terminal report");
         const auto env = field(retry->report,"environmentId");
         const auto thread = field(retry->report.at("run"),"threadId");
-        if (!access.permits(field(task,"botId"),Scope::sessionRead(env,thread),true))
+        if (!access.allows(field(task,"botId"),Resource::sessionRead(env,thread)))
             throw Conflict("Session read access required");
         const auto evidence = fetchRunEvidence(task,retry->report);
         const bool available = evidence.availability != RunEvidence::Availability::ReportUnavailable;
@@ -2220,7 +2220,7 @@ SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id WHERE s.work
             req.config = task.at("config");
         }
         if (req.threadId.empty() || req.runId.empty()) throw Conflict("The Bot result has no readable Run");
-        if (!access.permits(field(task,"botId"),Scope::sessionRead(req.environmentId,req.threadId),true)) throw Conflict("Session read access required");
+        if (!access.allows(field(task,"botId"),Resource::sessionRead(req.environmentId,req.threadId))) throw Conflict("Session read access required");
         auto entry = readExcerpt(field(task,"botId"),req);
         entry["messageId"] = messageId;
         entry["exchangeId"] = event["exchangeId"];
@@ -2263,7 +2263,7 @@ SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id WHERE s.work
         const auto addRef = [&](const Json& record, std::string_view kind, bool fromPeer) {
             const auto environment = field(record,"environmentId"), thread = field(record,"threadId"), run = field(record,"runId");
             if ((fromPeer && !peerAllowed) || run.empty() ||
-                !access.permits(field(task,"botId"),Scope::sessionRead(environment,thread),true)) return;
+                !access.allows(field(task,"botId"),Resource::sessionRead(environment,thread))) return;
             Json ref = {{"environmentId",environment},{"threadId",thread},{"runId",run},{"kind",kind}};
             if (const auto item = field(record,"itemId"); !item.empty()) ref["itemId"] = item;
             if (fromPeer) ref["messageId"] = event.at("messageId");

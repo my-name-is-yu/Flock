@@ -33,7 +33,7 @@ const std::vector<std::string> turnTools{"start_task","send_to_task","change_tas
                                          "find_tasks","flock_session_search","flock_session_events","read_tool_result","reply"};
 const std::vector<std::string> webTools{"start_workflow","workflow_status","instruct_workflow_stage",
     "stop_workflow_stage","stop_workflow","compact_conversation","expand_context","continue_fresh_session",
-    "list_grants","request_access","list_secrets","request_secret_input",
+    "list_secrets","request_secret_input",
     "list_connections","check_environment_readiness","update_bot_settings","request_bot_change",
     "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
     "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
@@ -199,7 +199,11 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             auto result = channelToolStatus(message.id,message.bot,results.at(i),&images);
             if (args.is_object() && args.contains("docId")) {
                 const bool reading = decision.at("tool") == "read_memory" || decision.at("tool") == "memory_history";
-                if (!Access(*this).permits(message.bot,{"shared_memory",field(args,"docId"),reading ? "read" : "write"},true)) {
+                const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
+                const auto document = field(args,"docId");
+                const auto policy = Policy(*this);
+                if (!policy.allows(turnActor(message),action,document) ||
+                    !policy.allows(message.bot,action,document)) {
                     args = Json::object();
                     result = {{"ok",false},{"error","Memory access denied"}};
                 } else {
@@ -392,9 +396,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" ||
             tool == "stop_workflow_stage" || tool == "stop_workflow")
             return workflowTool(tool,args,bot,message.id,step,routing);
-        auto result = accessTool(bot,message.id,routing,decision);
-        if (result.is_null()) result = memory(bot,nullptr,tool,args,now);
-        if (result.is_null()) result = automationTool(bot,routing,decision,now);
+        const auto actor = turnActor(message);
+        auto result = accessTool(bot,actor,message.id,routing,decision);
+        if (result.is_null()) result = memory(bot,actor,tool,args,now,true);
+        if (result.is_null()) result = automationTool(bot,actor,routing,decision,now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
         result["ok"] = true;
         return result;
@@ -480,7 +485,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         return {{"ok",true},{"effect","answered"},{"taskId",task.at("id")}};
     }
     if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
-        if (!Access(*this).permitsPerson(turnActor(message),bot,Role::decide)) throw DecisionDenied{};
+        if (!Policy(*this).allows(turnActor(message),Action::bot_decide,bot)) throw DecisionDenied{};
         auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
         active(task);
@@ -658,7 +663,8 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     }
     if (message.principalSource == PrincipalSource::channel) {
         if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot)) return true;
-    } else if (Access(*this).permitsPerson(turnActor(message),message.bot,Role::decide)) return true;
+    } else if (Policy(*this).allows(turnActor(message),Action::bot_talk,message.bot)) return true;
+    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(attempt);
     if (message.principalSource == PrincipalSource::channel)
         finishTurn(message,"This channel connection is no longer authorized.",nullptr,"channel_access");
     else finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
@@ -666,7 +672,8 @@ bool Store::Impl::authorizeTurn(const Message& message) {
 }
 
 void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
-                          const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost,
+                          const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
+                          const ReconcileBotCreation& reconcileBotCreation,
                           std::stop_token shutdown) {
     Message message;
     {
@@ -913,12 +920,39 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
         if (git) {
             result = gitConversationTool(gitHost,message,step,decision);
         } else if (readSession) {
-            result = sessionReadTool(message.bot,message.channelScope,decision,t3);
+            result = sessionReadTool(message.bot,message.channelScope,message.routing,decision,t3);
         } else if (checkEnvironment) {
             try {
                 result = readiness(message.bot,message.routing,decision.args,t3);
                 result["ok"] = true;
             } catch (const Conflict& error) { result = {{"ok",false},{"error",error.what()}}; }
+        }
+        if (decision.tool == "request_bot_change") {
+            std::lock_guard lock(mutex);
+            {
+                Transaction authorization(db);
+                const bool allowed = authorizeTurn(message);
+                authorization.commit();
+                if (!allowed || shutdown.stop_requested()) return;
+            }
+            try {
+                if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
+                const auto& args = decision.args;
+                constexpr int maxCreationAttempts = 4;
+                auto retries = query("SELECT failures FROM conversation_retries WHERE message_id=?",{id});
+                const bool exhausted = retries.next() && retries.number(0) >= maxCreationAttempts - 1;
+                const auto changeId = Policy(*this).applyBotChange(message.bot,turnActor(message),
+                    toolText(args,"operation",32),toolText(args,"targetBotId",128),toolText(args,"name",128),
+                    id,step,applyBotChange,exhausted ? &reconcileBotCreation : nullptr);
+                result = {{"ok",true},{"changeId",changeId},{"status","applied"}};
+            } catch (const Policy::BotCreationUncertain&) {
+                deferConversation(id,clock());
+                return;
+            } catch (const Conflict& error) {
+                result = toolFailure(error.what());
+            } catch (const ToolError& error) {
+                result = toolFailure(error.what());
+            }
         }
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -965,6 +999,8 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 result["error"] = error.what();
             }
         }
+        if (decision.tool == "request_bot_change")
+            exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
         saveTurnResults(id,step,Json::array({redactor(message.bot).record(result)}));
         transaction.commit();
     }

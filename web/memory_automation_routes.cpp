@@ -38,8 +38,8 @@ template<class F> void handle(const Request& req, Response& res, F run) {
 }
 
 std::string target(Store& store, const WebCallbacks& callbacks, const Person& actor,
-                   std::string bot, Role role) {
-    if (!store.access().permitsPerson(actor,bot,role)) throw AccessDenied("Bot access denied");
+                   std::string bot, Action action) {
+    if (!store.policy().allows(actor,action,bot)) throw AccessDenied("Bot access denied");
     const auto known = callbacks.bots();
     if (std::ranges::none_of(known,[&](const Json& item) { return item.value("id",std::string{}) == bot; }))
         throw Conflict("Bot not found");
@@ -51,7 +51,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
     server.Get(R"(/api/memory(/history)?)",[&](const Request& req, Response& res) {
         handle(req,res,[&] {
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Role::view);
+            const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Action::bot_view);
             Json args = Json::object();
             if (req.has_param("docId")) args["docId"] = req.get_param_value("docId");
             for (auto key : {"before","proposalsBefore","revisionId","proposalId"})
@@ -63,14 +63,14 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
         handle(req,res,[&] {
             const auto args = body(req);
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,args.at("botId").get<std::string>(),Role::decide);
+            const auto bot = target(store,callbacks,actor,args.at("botId").get<std::string>(),Action::bot_settings);
             reply(res,200,store.memory(actor,bot,req.matches[1].str()+"_memory_edit",args));
         });
     });
     server.Get("/api/schedules",[&](const Request& req, Response& res) {
         handle(req,res,[&] {
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Role::view);
+            const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Action::bot_view);
             reply(res,200,store.automations(actor,bot,req.has_param("before") ? queryId(req,"before") : 0));
         });
     });
@@ -78,7 +78,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
         handle(req,res,[&] {
             const auto args = body(req);
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,args.at("botId").get<std::string>(),Role::decide);
+            const auto bot = target(store,callbacks,actor,args.at("botId").get<std::string>(),Action::bot_settings);
             auto routing = callbacks.intake(bot,args.at("request").get<std::string>());
             if (routing.botId != bot) throw Conflict("Bot route changed");
             reply(res,201,store.createAutomation(actor,routing,args,callbacks.clock()));
@@ -87,7 +87,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
     server.Delete("/api/schedules",[&](const Request& req, Response& res) {
         handle(req,res,[&] {
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Role::decide);
+            const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Action::bot_settings);
             reply(res,200,store.cancelAutomation(actor,bot,queryId(req,"id")));
         });
     });

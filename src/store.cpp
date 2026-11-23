@@ -18,7 +18,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 1;
+constexpr Id schemaVersion = 2;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -239,7 +239,7 @@ SELECT q.id,CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId
 FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
 )SQL";
     if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
-    initializeAccessSchema();
+    initializePolicySchema();
     initializeParticipationSchema();
     initializeRootDeliverySchema();
     initializeSpecialistSchema();
@@ -569,7 +569,7 @@ Id Store::submitRequest(const Person& actor, std::string_view bot, std::string_v
         throw std::runtime_error("Could not hash the Task request");
     const auto encoded = encodeBase64({reinterpret_cast<const char*>(digest.data()),digest.size()});
     const auto receipt = [&]() -> std::optional<Id> {
-        if (!access().permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
+        if (!policy().allows(actor,Action::bot_decide,bot)) throw DecisionDenied{};
         auto row = p_->query("SELECT task_id,request_digest FROM task_request_receipts"
                              " WHERE bot_id=? AND person_id=? AND client_request_id=?", {bot,actor.id,clientId});
         if (!row.next()) return std::nullopt;
@@ -665,7 +665,7 @@ void Store::operate(const Person& actor, const TaskTarget& target, std::string_v
 void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::string_view operation,
                           const Json& input, Id sourceMessage, std::optional<InboxKind> expectedKind) {
     const auto& [bot,id,waitId,revision,generation] = target;
-    if (!Access(*this).permitsPerson(actor,bot,Role::decide)) {
+    if (!Policy(*this).allows(actor,Action::bot_decide,bot)) {
         if (operation!="answer") throw DecisionDenied{};
         auto origin = query(R"SQL(
 SELECT d.channel_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id

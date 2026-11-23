@@ -73,8 +73,6 @@ void notesAndRoutingOnRestart() {
     {
         Store store(db,seed);
         Runtime runtime(store,model,t3,soul);
-        for (auto bot : {"first","second"})
-            store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
         firstId = store.submit(bots.get("first").intake("Request for first Bot"));
         runtime.tick();
         runtime.tick();
@@ -186,8 +184,6 @@ void notesAcrossConversationAndWork() {
         if (!memory.empty()) memory += std::string(64,'X');
         return memory;
     });
-    for (auto bot : {"first","second"})
-        store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
     NotesT3 t3;
     t3.finished = true;
     std::optional<std::string> noteReadError;
@@ -356,8 +352,8 @@ void responseContract() {
                    "record_task_blocker","withdraw_task_question",
                    "message_session","interrupt_session","read_result","find_tasks","reply","start_workflow","workflow_status",
                    "instruct_workflow_stage","stop_workflow_stage","stop_workflow","compact_conversation",
-                   "expand_context","continue_fresh_session","list_grants",
-                   "request_access","list_secrets","request_secret_input","list_connections",
+                   "expand_context","continue_fresh_session",
+                   "list_secrets","request_secret_input","list_connections",
                    "check_environment_readiness","update_bot_settings","request_bot_change",
                    "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
                    "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger",
@@ -378,7 +374,6 @@ void responseContract() {
           turnTool("compact_conversation")["required"].back() == "summary" &&
           turnTool("expand_context")["properties"].contains("compactionId") &&
           turnTool("continue_fresh_session")["required"].back() == "taskId" &&
-          turnTool("request_access")["required"] == Json::array({"reason","resourceKind","resourceId","operation"}) &&
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
           turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
@@ -394,13 +389,12 @@ void responseContract() {
           turnTool("withdraw_task_question")["required"] == Json::array({"reason","taskId","generation","waitId"}) &&
           turnTool("withdraw_task_question")["properties"]["generation"]["minimum"] == 0,
           "blocker and withdrawal schemas must expose their exact task targets");
-    for (auto name : {"list_grants","list_secrets","list_connections","check_environment_readiness"})
+    for (auto name : {"list_secrets","list_connections","check_environment_readiness"})
         check(turnTool(name).at("required")==Json::array({"reason"}),"unexpected mandatory access-tool parameter");
     check(turnTool("update_bot_settings").at("required")==Json::array({"reason","environmentId","runTimeoutSeconds"}) &&
           turnTool("update_bot_settings").at("properties").at("runTimeoutSeconds").at("maximum")==2147483647 &&
           turnTool("request_bot_change").at("required")==Json::array({"reason","operation","targetBotId","name"}) &&
-          turnTool("request_bot_change").at("properties").at("operation").at("enum")==Json::array({"create_bot","rename_bot"}) &&
-          turnTool("request_access").at("properties").at("resourceKind").at("enum").size()==resourceOperations().size(),
+          turnTool("request_bot_change").at("properties").at("operation").at("enum")==Json::array({"create_bot","rename_bot"}),
           "access request and settings schemas do not match dispatch");
     const std::map<std::string,Json> memoryAutomationRequired{
         {"read_memory",{"reason"}}, {"memory_history",{"reason"}},
@@ -586,7 +580,6 @@ void acceptanceRunner() {
 void fixedDemoWithUserCriteriaAndContinuation() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
-    store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     struct ChangeModel final : Model {
         std::string tool;
         Json args;
@@ -656,7 +649,6 @@ void fixedDemoWithUserCriteriaAndContinuation() {
 void fixedDemoFollowUpKeepsTheExplainedResult() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
-    store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
     Runtime runtime(store,*demo,*t3,[](auto) { return std::string{}; });
@@ -682,7 +674,6 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
 void fixedDemoAnswersAnAnchoredQuestion() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
-    store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
     Runtime runtime(store,*demo,*t3,[](auto) { return std::string{}; });
@@ -701,9 +692,71 @@ void fixedDemoAnswersAnAnchoredQuestion() {
           }),"the fixed demo did not pass the anchored answer to its task");
 }
 
+void botCreationCollisionIsRecoverable() {
+    struct CreationModel final : Model {
+        Json result;
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& turn = input.event.at("turn");
+            if (!turn.empty()) {
+                result = turn.back().at("result");
+                return {{{"reply",{{"text","Finished"}},{}}}};
+            }
+            return {{{"request_bot_change",{{"operation","create_bot"},{"targetBotId","Target"},
+                                           {"name","Target Bot"}},{}}}};
+        }
+    } model;
+    Sandbox temp;
+    const auto directory = temp.path / "bots";
+    const auto target = directory / "Target";
+    std::filesystem::create_directories(target);
+    Bots bots(directory);
+    Store store(temp.path / "state.db");
+    const Person creator{"creator",false};
+    store.policy().setOwner(creator,"Source");
+    NotesT3 t3;
+    RuntimeOptions options;
+    options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
+    int sequence = 0;
+    const auto create = [&] {
+        store.receive(creator,Intake{"Source","","env","project"},std::to_string(++sequence),"Create a Bot");
+        runtime.runConversations();
+        return model.result;
+    };
+    for (const auto config : {"{",R"({"creationRequest":7})",R"({"creationRequest":"different"})"}) {
+        std::ofstream(target / "config.json") << config;
+        const auto result = create();
+        check(result.at("ok") == false && result.dump().find("Target Bot already exists") != std::string::npos,
+              "Existing Bot did not produce a collision tool error");
+    }
+    std::filesystem::remove_all(target);
+    check(create().at("status") == "applied","Collision left a creation intent blocking the next request");
+}
+
 void botProfilesAndAvatars() {
     Sandbox temp;
     Bots bots(temp.path / "bots");
+
+    {
+        Store store(temp.path / "creation.db");
+        auto policy = store.policy();
+        const Person creator{"bot-creator",false};
+        const Json profile{{"name","Blue Lake"},
+                           {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}};
+        policy.submitSecret(localOwner,"secrets",policy.requestSecret("secrets",{"creation-fixture"}),"blue-lake");
+        bool rejected = false;
+        try {
+            policy.createOwnedBot(creator,[&](const auto& publish) {
+                return bots.create(profile,std::nullopt,publish);
+            });
+        } catch (const Conflict&) {
+            rejected = true;
+        }
+        check(rejected && bots.cards().empty() &&
+              !std::filesystem::exists(temp.path/"bots"/".flock-issued-ids"/"blue-lake") &&
+              !policy.allows(creator,Action::bot_settings,"blue-lake"),
+              "Rejected owner registration left a profile, issued ID, or owner");
+    }
 
     // Create a Bot with role template and shape avatar without execution settings.
     const auto created = bots.create({
@@ -862,6 +915,7 @@ int main() {
         fixedDemoWithUserCriteriaAndContinuation();
         fixedDemoAnswersAnAnchoredQuestion();
         fixedDemoFollowUpKeepsTheExplainedResult();
+        botCreationCollisionIsRecoverable();
         botProfilesAndAvatars();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -121,9 +121,9 @@ public:
     }
 };
 
-T3Connection connect(Store& store, const Person& person = owner, T3ConnectionMode mode = T3ConnectionMode::Full) {
+T3Connection connect(Store& store, const Person& person = owner) {
     T3Connections connections(store);
-    return *connections.authenticate(connections.connect(first.environmentId,person.id,mode,4173));
+    return *connections.authenticate(connections.connect(first.environmentId,person.id,4173));
 }
 
 HandoffAck invoke(SessionHandoff& handoff, const T3Connection& connection, const ThreadTarget& target,
@@ -141,8 +141,8 @@ void multiEnvironment(const std::filesystem::path& path) {
     Sessions sessions;
     SessionHandoff handoff(store,sessions,resolve,intake);
     T3Connections connections(store);
-    const auto token = connections.connect(first.environmentId,owner.id,T3ConnectionMode::Full,4173);
-    check(connections.connect(remote.environmentId,owner.id,T3ConnectionMode::Full,4173).empty(),
+    const auto token = connections.connect(first.environmentId,owner.id,4173);
+    check(connections.connect(remote.environmentId,owner.id,4173).empty(),
           "adding an environment rotated the shared bearer");
     const auto connection = connections.authenticate(token);
     check(connection.has_value(),"adding an environment revoked the shared bearer");
@@ -183,18 +183,15 @@ void invocationAndRecovery(const std::filesystem::path& path) {
         Store store(path);
         SessionHandoff handoff(store,sessions,resolve,intake);
         const auto visitorConnection = connect(store,visitor);
-        store.access().personGrant(owner,"planner",visitor.id,Role::view,GrantChange::grant);
         denied([&] { invoke(handoff,visitorConnection,first,"request","Run a check"); });
-        store.access().personGrant(owner,"planner",visitor.id,Role::decide,GrantChange::grant);
+        store.policy().setMember(owner,"planner",visitor.id,true);
         sessions.beforeProof = [&] {
-            store.access().personGrant(owner,"planner",visitor.id,Role::decide,GrantChange::revoke);
+            store.policy().setMember(owner,"planner",visitor.id,false);
         };
         denied([&] { invoke(handoff,visitorConnection,first,"request","Recheck my access"); });
         sessions.beforeProof = {};
-        const auto consult = connect(store,owner,T3ConnectionMode::Consult);
-        denied([&] { invoke(handoff,consult,first,"request","Run a check","Coordinate"); });
         const auto connection = connect(store);
-        denied([&] { invoke(handoff,consult,first,"request","Old token"); });
+        denied([&] { invoke(handoff,visitorConnection,first,"request","Old token"); });
         denied([&] { invoke(handoff,connection,{"desktop","project","missing"},"request","Run a check"); });
 
         const auto a = invoke(handoff,connection,first,"client-request","Check first.");
@@ -390,8 +387,8 @@ void lateRedactionProjection(const std::filesystem::path& path) {
         return turn;
     };
     handoff.step(owner,channel,bot,soul);
-    const auto secretRequest=store.access().requestSecret("planner",{"late-secret"});
-    store.access().submitSecret(owner,"planner",secretRequest,secret);
+    const auto secretRequest=store.policy().requestSecret("planner",{"late-secret"});
+    store.policy().submitSecret(owner,"planner",secretRequest,secret);
     const auto view=handoff.view(owner,channel);
     const auto recent=handoff.recent(owner);
     check(view.latestDecision.dump().find(secret)==std::string::npos,

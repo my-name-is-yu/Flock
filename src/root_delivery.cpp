@@ -97,11 +97,15 @@ WHERE d.channel_id=? AND d.command_id=?
     const bool humanInput = coordination && std::ranges::any_of(page->events,[&](const auto& event) {
         return event.position > cursor && event.kind == "user_message" && event.createdBy == "user";
     });
-    const bool reject = humanInput || page->target != target || page->authGeneration != auth;
+    const bool stale = humanInput || page->target != target || page->authGeneration != auth;
     {
         std::lock_guard lock(db.mutex);
         Transaction tx(db.db);
-        db.authorizeParticipation(person,channel);
+        const auto participation = db.authorizeParticipation(person,channel);
+        const auto& origin = channelOf(participation).origin.invitation;
+        const bool denied = !Policy(db).allows(origin.botId,Action::t3_send,
+                                               Resource::sessionRead(target.environmentId,target.threadId).target);
+        const bool reject = stale || denied;
         db.exec(R"SQL(
 UPDATE thread_deliveries SET state=?,claimed_at=CASE WHEN ? THEN NULL ELSE ? END
 WHERE channel_id=? AND command_id=? AND state=? AND EXISTS(

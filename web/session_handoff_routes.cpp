@@ -205,7 +205,7 @@ void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Requ
             auto rows = Json::array();
             for (const auto& bot : bots) {
                 const auto botId = bot.value("id",std::string{});
-                if (!store.access().permitsPerson(*actor,botId,Role::decide)) continue;
+                if (!store.policy().allows(*actor,Action::bot_decide,botId)) continue;
                 try {
                     if (callbacks.intake(botId,"").botId != botId) continue;
                 } catch (const Conflict&) {
@@ -244,9 +244,8 @@ void sessionHandoffRoutes(httplib::Server& server, Store& store, const WebCallba
         const auto actor = person(callbacks,req);
         if (actor.id.empty()) return reply(res,401,{{"error","identity_required"}});
         const auto connection = T3Connections(store).settings(actor.id);
-        reply(res,200,connection ? Json{{"mode",t3ConnectionModeName(connection->mode)},
-                                        {"environments",connection->environments}}
-                                 : Json{{"mode",nullptr},{"environments",Json::array()}});
+        reply(res,200,connection ? Json{{"environments",connection->environments}}
+                                 : Json{{"environments",Json::array()}});
     });
     server.Get("/api/session-handoffs",[&callbacks](const httplib::Request& req, httplib::Response& res) {
         withHandoff(callbacks,req,res,[&](SessionHandoff& handoff, const Person& actor) {

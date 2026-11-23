@@ -952,9 +952,7 @@ const decisionKindLabels = {
   model_budget: 'Extra model call',
   conversation_model_budget: 'Extra model call',
   unknown_delivery: 'Delivery confirmation',
-  grant_request: 'Access request',
   protected_input: 'Protected input',
-  bot_change: 'Bot change',
 };
 let activityBotId = null;
 let activitySeen = false;

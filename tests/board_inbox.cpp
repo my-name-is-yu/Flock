@@ -170,14 +170,11 @@ void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store concurrent(path);
     Database db(path);
-    auto access = store.access();
-    for (const auto* bot : {"report","review","private"})
-        access.resourceGrant(owner,bot,{"environment","sandbox","launch"},GrantChange::grant);
-    git_fixture::grant(store,"report","repository",git_fixture::repoGrant,"pr");
-    access.personGrant(owner,"report",alice.id,Role::decide,GrantChange::grant);
-    access.personGrant(owner,"review",alice.id,Role::decide,GrantChange::grant);
-    access.personGrant(owner,"review",bob.id,Role::decide,GrantChange::grant);
-    access.personGrant(owner,"report",reader.id,Role::view,GrantChange::grant);
+    auto access = store.policy();
+    access.setMember(owner,"report",alice.id,true);
+    access.setMember(owner,"review",alice.id,true);
+    access.setMember(owner,"review",bob.id,true);
+    access.setMember(owner,"report",reader.id,true);
 
     const auto question = store.submit(intake("report","Report the work\nInclude the source","question"));
     const auto unknown = store.submit(intake("review","Recover the delivery","unknown"));
@@ -213,10 +210,7 @@ void exercise(const std::filesystem::path& path) {
     const auto report = store.task(question);
     const auto review = openReview(store,runtime,script,intake("report","unused","turn"),question,
                                    "published-report","Check the report and source");
-    const auto grant = access.request("review",{"repository","github.com/org/report","read"});
     const auto secret = access.requestSecret("review",{"report-credential"});
-    access.resourceGrant(owner,"review",{"bot_admin","review","rename_bot"},GrantChange::grant);
-    const auto botRequest = access.requestBotChange("review","rename_bot","review","Reviewer");
     const auto conversation = store.receive(localOwner,intake("review","unused","turn",{{"modelCallLimit",1}}),
                                             "pause","Pause this conversation");
     script.failConversation = true;
@@ -234,19 +228,19 @@ void exercise(const std::filesystem::path& path) {
           row(inbox,"itemKind","conversation_model_budget").at("itemId") == conversation.at("messageId") &&
           row(inbox,"itemKind","conversation_model_budget").at("request") == "Pause this conversation" &&
           row(inbox,"itemKind","protected_input").at("itemId") == secret &&
-          row(inbox,"itemKind","bot_change").at("itemId") == botRequest &&
-          row(inbox,"itemKind","grant_request").at("itemId") == grant &&
           row(inbox,"itemKind","pr_review").at("itemId") == review &&
           row(inbox,"itemKind","model_budget").at("taskId") == model &&
           row(inbox,"itemKind","deadline").at("taskId") == deadlineTask &&
           row(inbox,"itemKind","unknown_delivery").at("taskId") == unknown &&
-          inbox.size() == 11, "inbox omitted a pending decision or its prompt");
+          inbox.size() == 9, "inbox omitted a pending decision or its prompt");
     const auto readerQuestion = row(store.inbox(reader),"itemKind","user_question");
     const auto waitAnchor = report.at("wait").at("messageId");
-    check(!readerQuestion.at("canDecide").get<bool>() && readerQuestion.at("conversationEventId") == waitAnchor &&
+    check(readerQuestion.at("canDecide").get<bool>() && readerQuestion.at("conversationEventId") == waitAnchor &&
           readerQuestion.at("waitId") != waitAnchor &&
           row(store.conversation("report"),"id",waitAnchor).at("kind") == "waiting",
-          "view-only account got approval controls");
+          "member did not get answer controls");
+    db.exec("UPDATE tasks SET data=json_set(data,'$.wait',json((SELECT data FROM journal WHERE id="+
+            waitAnchor.dump()+"))) WHERE id="+std::to_string(question));
     db.exec(R"SQL(
 WITH RECURSIVE newer(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM newer WHERE n<129)
 INSERT INTO journal(task_id,time,kind,data)
@@ -271,32 +265,21 @@ SELECT )SQL"+std::to_string(question)+",1,'fixture_activity','{}' FROM newer");
           "a paused turn did not point to its conversation reply");
 
     const auto questionBefore = pending(store,user_question);
-    rejected<DecisionDenied>([&] { store.decideInbox(reader,questionBefore,"answer",{{"text","Final"}}); },
-                             "view-only person answered a question");
+    rejected<DecisionDenied>([&] { store.decideInbox(bob,questionBefore,"answer",{{"text","Final"}}); },
+                             "nonmember answered a question");
     const auto taskQuestion = TaskTarget::from(store.task(question),questionBefore.waitId);
-    rejected<DecisionDenied>([&] { store.operate(reader,taskQuestion,"answer",{{"text","Final"}}); },
-                             "view-only person answered through the direct controls");
-    rejected<DecisionDenied>([&] { store.decideInbox(alice,pending(store,grant_request),"approve"); },
-                             "decider approved a grant requiring admin");
+    rejected<DecisionDenied>([&] { store.operate(bob,taskQuestion,"answer",{{"text","Final"}}); },
+                             "nonmember answered through the direct controls");
     auto forged = questionBefore;
     ++forged.targetGeneration;
     rejected<RequestChanged>([&] { store.decideInbox(alice,forged,"answer",{{"text","Final"}}); },
                              "someone could submit a different task generation");
 
-    const ApplyBotChange apply = [](const BotChange& change) {
-        check(change.target == "review" && change.name == "Reviewer","wrong Bot change was applied");
-    };
     store.decideInbox(alice,pending(store,pr_review),"approve");
     check(db.exec("SELECT status='approved' FROM pr_review_items WHERE id="+std::to_string(review)) == 1,
           "PR approval failed to update the linked review");
-    store.decideInbox(owner,pending(store,grant_request),"approve");
-    check(access.permits("review",{"repository","github.com/org/report","read"},true),"inbox grant bypassed canonical approval");
     store.decideInbox(owner,pending(store,protected_input),"supply",{{"value","test-vault-value"}});
     check(store.decisionHistory(owner).dump().find("test-vault-value") == std::string::npos,"secret was journaled");
-    store.decideInbox(owner,pending(store,bot_change),"approve",Json::object(),apply);
-    check(access.administration(owner,"review").at("botChanges").at(0).at("status") == "applied",
-          "inbox Bot change bypassed canonical application");
-
     const auto old = target(row(store.inbox(alice),"taskId",changed));
     const auto staleReview = openReview(store,runtime,script,intake("report","unused","turn"),changed,
                                         "revision-a","Review the first source");
@@ -312,7 +295,7 @@ SELECT )SQL"+std::to_string(question)+",1,'fixture_activity','{}' FROM newer");
     rejected<RequestChanged>([&] { store.decideInbox(alice,{"report",pr_review,staleReview,0,changed,
         old.targetRevision,old.targetGeneration},"approve"); },"an old PR review approved a new revision");
     check(store.task(changed) == revisionB && sessions.sends == sent && sessions.interrupts == interrupted &&
-          store.decisionHistory(owner).size() == 4, "rejected approval changed task, delivery, or history");
+          store.decisionHistory(owner).size() == 2, "rejected approval changed task, delivery, or history");
 
     const auto extra = target(row(store.inbox(alice),"taskId",budget));
     const auto allowance = store.task(budget).at("remaining").get<int>();
@@ -384,14 +367,14 @@ SELECT )SQL"+std::to_string(question)+",1,'fixture_activity','{}' FROM newer");
     const auto turn = pending(store,conversation_model_budget);
     store.decideInbox(alice,turn,"approve");
     rejected<DecisionUnavailable>([&] { store.decideInbox(alice,turn,"approve"); },"turn approved twice");
-    check(store.pausedConversations("review").empty() && access.grants("review").size() >= 2,
+    check(store.pausedConversations("review").empty(),
           "conversation model approval did not release the pause");
-    access.request("review",{"repository","github.com/org/after-restart","read"});
+    access.requestSecret("review",{"after-restart"});
 }
 
 void protectedInputSource(const std::filesystem::path& path) {
     Store store(path);
-    auto access = store.access();
+    auto access = store.policy();
     const SecretRef ref{"report-credential"};
     const auto routing = intake("report","Prepare the report","question");
     const auto request = access.requestSecret("report",ref);
@@ -407,9 +390,8 @@ void protectedInputSource(const std::filesystem::path& path) {
 
 void chatDecision(const std::filesystem::path& path) {
     Store store(path);
-    auto access = store.access();
-    access.resourceGrant(owner,"report",{"environment","sandbox","launch"},GrantChange::grant);
-    access.personGrant(owner,"report",alice.id,Role::decide,GrantChange::grant);
+    auto access = store.policy();
+    access.setMember(owner,"report",alice.id,true);
     const auto routing = intake("report","Prepare the report","question");
     const auto taskId = store.submit(routing);
     Script script;
@@ -426,10 +408,10 @@ void chatDecision(const std::filesystem::path& path) {
     const auto& wait = task.at("wait");
     const auto item = pending(store,InboxKind::user_question,"report");
     store.receive(alice,routing,"revoked","Use Final",wait.at("messageId"));
-    access.personGrant(owner,"report",alice.id,Role::decide,GrantChange::revoke);
+    access.setMember(owner,"report",alice.id,false);
     runtime.runConversations();
     check(store.task(taskId) == task && store.decisionHistory(owner).empty(),"a queued chat answer survived access revocation");
-    access.personGrant(owner,"report",alice.id,Role::decide,GrantChange::grant);
+    access.setMember(owner,"report",alice.id,true);
     store.receive(alice,routing,"answer","Use Final",wait.at("messageId"));
     runtime.runConversations();
     const auto history = store.decisionHistory(owner);
@@ -443,7 +425,6 @@ void chatDecision(const std::filesystem::path& path) {
 
 void reviewReply(const std::filesystem::path& path) {
     Store store(path);
-    git_fixture::grant(store,"report","repository",git_fixture::repoGrant,"pr");
     const auto routing = intake("report","Prepare the report","review");
     const auto task = store.submit(routing);
     {
@@ -492,9 +473,9 @@ int main() {
         Store restarted(path);
         const auto history = restarted.decisionHistory(alice);
         const auto approval = row(history,"itemKind","extra_run");
-        check(history.size() == 9 && approval.at("decidedAt").get<Id>() > 0 &&
+        check(history.size() == 7 && approval.at("decidedAt").get<Id>() > 0 &&
               (approval.at("decidedBy") == "alice" || approval.at("decidedBy") == "bob") &&
-              row(restarted.inbox(alice),"itemKind","grant_request").at("prompt") == "read repository github.com/org/after-restart",
+              row(restarted.inbox(alice),"itemKind","protected_input").at("prompt") == "Supply a value for after-restart",
               "restart lost pending requests or recorded decisions");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

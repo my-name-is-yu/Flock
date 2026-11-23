@@ -109,8 +109,8 @@ std::string ChannelOrigin::key() const {
            segment(threadRef) + ":" + segment(externalMessageId);
 }
 
-Scope channelScope(const ChannelOrigin& origin, std::string_view operation) {
-    return {"service",Json::array({channelName(origin.kind),origin.workspaceId}).dump(),std::string(operation)};
+std::string channelPolicyTarget(const ChannelOrigin& origin) {
+    return Json::array({channelName(origin.kind),origin.workspaceId}).dump();
 }
 
 ChannelCapabilities channelCapabilities(ChannelKind kind) {
@@ -186,10 +186,11 @@ bool Store::Impl::permitsChannel(std::string_view bot, const ChannelOrigin& orig
     if (connector == channels.end()) return false;
     const auto linked = connector->second.resolveSender(origin.workspaceId,sender);
     if (!linked || linked->botId != bot || linked->personId != person) return false;
-    auto access = Access(const_cast<Impl&>(*this));
-    return access.permitsPerson({std::string(person),false},bot,Role::decide) &&
-           access.permits(bot,channelScope(origin,"use"),true) &&
-           (operation == "use" || access.permits(bot,channelScope(origin,operation),true));
+    auto access = Policy(const_cast<Impl&>(*this));
+    return access.allows(Person{std::string(person),false},Action::bot_talk,bot) &&
+           access.allows(bot,Action::channel_use,channelPolicyTarget(origin)) &&
+           (operation == "use" || access.allows(bot,operation == "read" ? Action::channel_read : Action::channel_post,
+                                                channelPolicyTarget(origin)));
 }
 
 Json Store::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event,
@@ -351,7 +352,7 @@ WHERE a.id=?)SQL",{id});
     if (!row.next()) return std::nullopt;
     const auto bot = row.string(3);
     const auto origin = originFrom(row.json(4));
-    if (!Access(*p_).permitsPerson(person,bot,Role::view) ||
+    if (!Policy(*p_).allows(person,Action::bot_view,bot) ||
         !p_->permitsChannel(bot,origin,row.string(5),row.string(6),"read")) return std::nullopt;
     ChannelResource file{row.string(0),row.string(1),row.string(2)};
     if (!canReadAttachment(p_->channels.at(origin.kind).capabilities,file.mimeType,file.bytes)) return std::nullopt;
@@ -562,7 +563,7 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
             bot = row.string(7);
             const auto found = channels.find(origin.kind);
             const auto sender = row.string(5), person = row.string(6);
-            if (found == channels.end() || (state == "unknown" && !permitsChannel(bot,origin,sender,person,"use"))) {
+            if (found == channels.end() || (state == "unknown" && !permitsChannel(bot,origin,sender,person,"post"))) {
                 exec("UPDATE channel_deliveries SET next_attempt=? WHERE id=?",{unixTime()+5,key});
                 tx.commit();
                 continue;
@@ -571,7 +572,7 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
             const auto& caps = found->second.capabilities;
             std::string blocked, reason;
             if (state == "pending") {
-                if (!permitsChannel(bot,origin,sender,person,"use")) blocked = "rejected";
+                if (!permitsChannel(bot,origin,sender,person,"post")) blocked = "rejected";
                 else if (operation == "channel_send_attachment") {
                     reason = attachmentLimitation(caps,field(payload,"mimeType"),payload.at("size"));
                     if (reason.empty() && payload.contains("attachmentId")) {

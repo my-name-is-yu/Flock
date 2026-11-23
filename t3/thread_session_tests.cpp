@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
         {
             Store store(database);
             T3Connections connections(store);
-            const auto token = connections.connect(target.environmentId,owner.id,T3ConnectionMode::Full,4173);
+            const auto token = connections.connect(target.environmentId,owner.id,4173);
             SessionHandoff handoff(store,*session,people,intake);
             channel = handoff.invoke(*connections.authenticate(token),invocation,
                                      [](std::string_view bot) { return bot == "planner"; }).channel;

@@ -1,5 +1,5 @@
 #include "flock/core.hpp"
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -85,13 +85,11 @@ struct Fixture {
     Seconds now = unixTime();
     std::unique_ptr<Store> store;
     std::unique_ptr<Runtime> runtime;
-    explicit Fixture(bool grantLaunch = true) {
+    explicit Fixture() {
         char name[] = "/tmp/flock-workflow-context-XXXXXX";
         if (!mkdtemp(name)) throw std::runtime_error("Cannot create test directory");
         dir = name;
         restart();
-        if (grantLaunch)
-            store->access().resourceGrant({"owner",true},"bot",{"environment","env","launch"},GrantChange::grant);
     }
     ~Fixture() {
         runtime.reset();
@@ -124,11 +122,11 @@ struct Fixture {
 
 const std::string shaA(40,'a'), shaB(40,'b');
 
-void workflowLaunchUsesGrantsAndRedactsQueuedPrompt() {
-    Fixture f(false);
-    auto access = f.store->access();
+void workflowLaunchUsesPolicyAndRedactsQueuedPrompt() {
+    Fixture f;
+    auto access = f.store->policy();
     const Person owner{"owner",true};
-    const auto grant = access.request("bot",{"environment","env","launch"});
+    access.changeNeverRule(owner,Action::environment_launch,"env",true);
     const std::string secret = "workflow-credential-registered-after-queueing";
     f.call("start_workflow",{{"request","Collect the release notes " + secret},{"stages",Json::array({
         {{"stageId","collect"},{"role","collect"}}})}});
@@ -138,7 +136,7 @@ void workflowLaunchUsesGrantsAndRedactsQueuedPrompt() {
     require(wait.at("reason")=="settings" && f.t3.commands.empty(),"unapproved workflow launch reached T3");
     const auto input = access.requestSecret("bot",{"workflow-credential"});
     access.submitSecret(owner,"bot",input,secret);
-    access.decide(owner,"bot",grant,true);
+    access.changeNeverRule(owner,Action::environment_launch,"env",false);
     f.store->operate(owner,TaskTarget::from(f.store->task(task),wait.at("id")),"reconcile");
     f.t3.loseReceipt = true;
     f.ticks(1);
@@ -158,7 +156,7 @@ void expansionRedactsBeforeSearchAndPaging() {
     const auto original = f.turn(prefix+secret+" tail");
     const auto compacted = f.call("compact_conversation",{{"endMessageId",original},{"summary","Notes: "+secret}});
     const auto compaction = compacted.at("compaction").at("compactionId");
-    auto access = f.store->access();
+    auto access = f.store->policy();
     access.submitSecret({"owner",true},"bot",access.requestSecret("bot",{"context-credential"}),secret);
     const auto first = f.call("expand_context",{{"compactionId",compaction},{"startMessageId",original}});
     const auto second = f.call("expand_context",{{"cursor",first.at("nextCursor")}});
@@ -192,7 +190,7 @@ void expansionRejectsStaleCursors() {
         const auto& steps = input.event.at("turn");
         if (steps.empty()) return {"expand_context",range,"Read the first page"};
         if (steps.size()==1) {
-            auto access = f.store->access();
+            auto access = f.store->policy();
             access.submitSecret({"owner",true},"bot",access.requestSecret("bot",{"paging-fixture"}),secret);
             return {"expand_context",continuation,"Continue the first page"};
         }
@@ -794,7 +792,7 @@ void compactAndContinue() {
 
 int main() {
     try {
-        workflowLaunchUsesGrantsAndRedactsQueuedPrompt();
+        workflowLaunchUsesPolicyAndRedactsQueuedPrompt();
         expansionRedactsBeforeSearchAndPaging();
         expansionRejectsStaleCursors();
         expansionCursorKeepsItsSearchRange();
