@@ -6,7 +6,6 @@ $('back').href = '/?' + new URLSearchParams({bot: botId});
 fetch('/api/bots').then(r => r.ok ? r.json() : []).then(bots => {
   const bot = bots.find(item => item.id === botId);
   $('back-label').textContent = bot?.name || botId;
-  // This page belongs to one Bot, so it wears that Bot's accent like its conversation does.
   if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
 }).catch(() => { $('back-label').textContent = botId; });
 function post(url, data) {
@@ -64,20 +63,19 @@ async function load() {
     });
   }
   $('secrets').hidden = !$('inputs').childElementCount;
-  // Always say who can use this Bot; an empty page reads as broken.
   $('sharing').hidden = false;
   $('members').hidden = !data.canManageMembers;
   for (const person of data.members) {
     const item = row('people',person);
     if (data.canManageMembers) button(item,'Remove',() => submit('members',{person,add:false}));
   }
-  if (!data.members.length) {
-    const [title, detail] = !data.canManage
-      ? ['Only you', 'The Bot’s owner decides who else can use it.']
-      : data.canManageMembers
-        ? ['Only you', 'Add a person ID below to let someone else talk to this Bot.']
-        : ['Only you', 'To share this Bot, set FLOCK_WEB_IDENTITIES_FILE and restart Flock so people can sign in.'];
-    note('people', title, detail);
+  if (!data.canManage) {
+    note('people', 'Sharing managed by the owner', 'The Bot’s owner decides who else can use it.');
+  } else if (!data.members.length) {
+    if (data.canManageMembers)
+      note('people', 'No shared members', 'Add a person ID below to share this Bot.');
+    else
+      note('people', 'Sharing setup required', 'Set FLOCK_WEB_IDENTITIES_FILE and restart Flock so people can sign in.');
   }
 }
 function note(id, title, detail) {
