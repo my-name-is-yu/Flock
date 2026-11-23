@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const supervised = $('supervised');
+const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
 const ruleLabels = {never: 'Never', ask: 'Ask first', allow: 'Allow'};
 const actionLabels = {
   'bot.view': 'View Bot conversations',
@@ -42,6 +42,17 @@ const actionLabels = {
   'data.destructive_write': 'Make destructive changes',
 };
 
+function emptyLabel(title, detail) {
+  const label = document.createElement('span');
+  label.className = 'row-label';
+  const heading = document.createElement('strong');
+  heading.textContent = title;
+  const sub = document.createElement('small');
+  sub.textContent = detail;
+  label.append(heading, sub);
+  return label;
+}
+
 function row(list, content) {
   const item = document.createElement('p');
   item.append(content);
@@ -53,12 +64,14 @@ async function load() {
   const response = await fetch('/api/settings');
   if (!response.ok) throw new Error();
   const {mode, rules, canManagePolicy, t3} = await response.json();
-  $('mode').textContent = mode === 'supervised' ? 'Supervised' : 'Full';
-  $('mode').hidden = canManagePolicy;
-  $('mode-control').hidden = !canManagePolicy;
-  supervised.checked = mode === 'supervised';
+  // Everyone sees both modes explained; only installation roots can switch.
+  for (const input of modeInputs) {
+    input.checked = input.value === mode;
+    input.disabled = !canManagePolicy;
+  }
+  $('mode-options').classList.toggle('read-only', !canManagePolicy);
   $('rules').replaceChildren();
-  if (!rules.length) row('rules', 'None');
+  if (!rules.length) row('rules', emptyLabel('No rules yet', 'Choosing Always allow on a request adds a rule here. You can also run flock rules add.'));
   for (const {kind, action, target} of rules) {
     const label = document.createElement('span');
     label.className = 'row-label';
@@ -77,10 +90,10 @@ async function load() {
   }
   $('connections').replaceChildren();
   if (t3) {
-    row('connections', `Port ${t3.port}`);
-    for (const environment of t3.environments) row('connections', environment);
+    row('connections', emptyLabel('Flock MCP endpoint', `Port ${t3.port}`));
+    for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Connected environment'));
   } else {
-    row('connections', 'No connected environments');
+    row('connections', emptyLabel('Not connected', 'Run flock t3 connect ENVIRONMENT MCP_URL on the machine running Flock.'));
   }
   $('policy').hidden = false;
 }
@@ -104,8 +117,13 @@ async function submit(path, data, controls) {
   }
 }
 
-supervised.onchange = async () => {
-  const nextMode = supervised.checked ? 'supervised' : 'full';
-  if (!await submit('mode', {mode: nextMode}, [supervised])) supervised.checked = nextMode === 'full';
-};
+for (const input of modeInputs) {
+  input.onchange = async () => {
+    if (!input.checked) return;
+    const nextMode = input.value;
+    if (!await submit('mode', {mode: nextMode}, modeInputs)) {
+      for (const other of modeInputs) other.checked = other.value !== nextMode;
+    }
+  };
+}
 load().catch(() => { $('status').textContent = 'Could not load Flock settings.'; });
