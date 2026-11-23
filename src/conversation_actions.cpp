@@ -28,9 +28,9 @@ struct SessionEffect {
             return {{"ok",true},{"effect","interrupt_requested"},{"taskId",taskId}};
         if (outcome == InterruptOutcome::AlreadyTerminal)
             return {{"ok",false},{"taskId",taskId},{"outcome","already_terminal"},
-                    {"error","The Session already finished"}};
+                    {"error","This work already ended"}};
         return {{"ok",false},{"taskId",taskId},{"outcome","no_active_run"},
-                {"error","The Session has no work in progress to stop"}};
+                {"error","There is no work in progress to stop for this request"}};
     }
 };
 }

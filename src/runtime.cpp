@@ -538,7 +538,7 @@ ORDER BY id)SQL");
             }
             if (state == "running" && task["deadline"].get<Seconds>() > 0 &&
                 options.clock() >= task["deadline"].get<Seconds>()) {
-                db.wait(task,"deadline",{{"text","The Session reached its deadline"}});
+                db.wait(task,"deadline",{{"text","This request reached its deadline"}});
                 return true;
             }
             return leftQueue;
@@ -576,10 +576,10 @@ ORDER BY id)SQL");
         const auto observed = observe(task);
         if (ingest(task,observed)) return;
         if (observed.kind == Observation::Kind::Settling)
-            return stopNote(task,"Waiting for the Session's remaining work to finish");
+            return stopNote(task,"Waiting for the remaining work on this request to finish");
         if (observed.kind == Observation::Kind::Unavailable &&
             !(task.contains("workflowId") && stop.at("intent") == "cancel"))
-            return stopNote(task,"Flock can't find this request's Session in T3");
+            return stopNote(task,"Flock couldn't check the status of this work in T3");
         const auto now = options.clock();
         if (now < stop.value("retryAt",Seconds{0})) return;
         Json requested;
@@ -592,7 +592,7 @@ ORDER BY id)SQL");
         try { outcome = t3.interrupt(field(task,"environmentId"),task["config"],runRef(stop.at("run"))); }
         catch (const std::exception&) { return stopNote(requested,"T3 did not confirm the interrupt request"); }
         if (outcome != InterruptOutcome::Requested)
-            return stopNote(requested,"Waiting for T3 to confirm the Session has stopped");
+            return stopNote(requested,"Waiting for T3 to confirm this work has stopped");
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         db.journal(task["id"],"interrupt_requested",stop);
