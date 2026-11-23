@@ -394,13 +394,18 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
     f.reach(id,"waiting");
     f.script("Include the table as CSV",{send(id)});
     const auto added = f.receive("format","Include the table as CSV");
-    f.script("Which accounts can I use?",{say("Choose an account for the measurement.")});
+    f.script("Which accounts can I use?",{[](const ModelInput&) {
+        return Decision{"reply",{{"text","Choose an account for the measurement."},{"continuesQuestion",true}},
+                        "Clarify the task question"};
+    }});
     const auto clarification = f.response(f.receive("clarify","Which accounts can I use?",f.task(id)["wait"].at("messageId")));
     f.script("Which one is for testing?",{[](const ModelInput&) {
-        return Decision{"reply",{{"text","Quartz-717 is the test account."},{"suggestions",{"Use account Quartz-717"}}},
+        return Decision{"reply",{{"text","Quartz-717 is the test account."},{"suggestions",{"Use account Quartz-717"}},
+                                 {"continuesQuestion",true}},
                         "Offer the test account"};
     }});
     const auto explanation = f.response(f.receive("explain","Which one is for testing?",clarification.at("messageId")));
+    f.restart();
     for (int i = 0; i < 16; ++i) f.store->submit(f.routing("Later queued task " + std::to_string(i)));
     f.script("Use account Quartz-717",{answer(id)});
     f.receive("account",explanation.at("suggestions").at(0).get<std::string>(),explanation.at("messageId"));
@@ -566,7 +571,7 @@ void latestSuggestionsTakePrecedenceOverAnInheritedQuestion() {
         return Decision{"reply",{{"text","Show a preview?"},{"suggestions",{"Yes","No"}}},"Offer a preview"};
     }});
     const auto preview = f.response(f.receive("request-preview","Can I see a preview first?",wait.at("messageId")));
-    f.script("Yes",{say("Here is a preview.")});
+    f.script("Yes",{answer(id),say("Here is a preview.")});
     const auto reply = f.response(f.receive("accept-preview","Yes",preview.at("messageId")));
     check(reply.at("text") == "Here is a preview." && f.task(id).at("wait") == wait &&
           f.event(id,"user_answer").is_null(),"a newer suggestion answered an older question");

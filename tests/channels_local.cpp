@@ -645,7 +645,11 @@ void taskQuestionChoices(const std::filesystem::path& database) {
 
     auto clarification = event("choice-thread","clarify-second","What happens if I say yes?");
     clarification["replyToExternalMessageId"] = secondPost;
-    model.decideNext = [](const ModelInput&) { return reply("The Session continues. Shall it proceed?"); };
+    model.decideNext = [](const ModelInput&) {
+        auto clarification = reply("The Session continues. Shall it proceed?");
+        clarification.args["continuesQuestion"] = true;
+        return clarification;
+    };
     store.receiveChannel(channel,"fixture-auth",clarification,intake);
     runtime.runConversations();
     auto followup = event("choice-thread","answer-clarification","Yes");
