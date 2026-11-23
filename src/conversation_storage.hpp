@@ -9,8 +9,7 @@ namespace flockv0::conversation {
 enum class PrincipalSource { gitWebhook = 0, trusted = 1, web = 2, channel = 3 };
 
 struct QuestionAnchor {
-    Id messageId, taskId, waitId;
-    bool matchesChoice;
+    Id messageId, taskId;
 };
 
 struct Message {

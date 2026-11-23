@@ -596,6 +596,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     };
     model.decideNext = [&](const ModelInput& input) -> Decision {
         if (input.event.at("turn").empty()) return answerQuestion(second,"No");
+        if (input.event.at("turn").size() == 1) return answerQuestion(first,"Yes");
         return reply("Done.");
     };
     const auto receipt = store.receiveChannel(channel,"fixture-auth",answer,intake);
@@ -615,7 +616,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     followup["replyToExternalMessageId"] = transport->effects.back().at("externalMessageId");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
-        if (input.event.at("turn").empty()) return answerQuestion(second,"No");
+        if (input.event.at("turn").empty()) return answerQuestion(second,"Yes");
         return reply("Done.");
     };
     const auto followed = store.receiveChannel(channel,"fixture-auth",followup,intake);
