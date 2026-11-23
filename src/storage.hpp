@@ -127,7 +127,7 @@ struct Store::Impl {
     void initializeLocalMachineSchema();
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource,
                            std::string_view clientId, std::string_view text, Id replyTo = 0,
-                           const SessionOrigin* origin = nullptr);
+                           const SessionOrigin* origin = nullptr, const Json& invitation = nullptr);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
     void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
@@ -280,8 +280,10 @@ struct Store::Impl {
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
     std::map<Id,Delivery> sessionSendReceipts;
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
-                 const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, std::stop_token);
+                 const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,
+                 std::stop_token);
     bool sendSessionMessage(const conversation::Message&, int, const Decision&, bool hasWebEvidence, T3&, std::stop_token);
+    bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&, std::stop_token);
     void wakeSessionMessages(T3&, std::stop_token);
     bool runSessionEffect(const conversation::Message&, int step, const Decision&, bool offered, bool hasWebEvidence,
                           T3&, std::stop_token);

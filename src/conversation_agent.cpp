@@ -29,7 +29,7 @@ constexpr std::size_t sourceSize = 8192;
 
 const std::vector<std::string> turnTools{"start_task","send_to_task","change_task","answer_task_question",
                                          "record_task_blocker","withdraw_task_question",
-                                         "cancel_task","message_session","interrupt_session","read_result",
+                                         "cancel_task","message_session","invite_bot","interrupt_session","read_result",
                                          "find_tasks","flock_session_search","flock_session_events","read_tool_result","reply"};
 const std::vector<std::string> webTools{"start_workflow","workflow_status","instruct_workflow_stage",
     "stop_workflow_stage","stop_workflow","compact_conversation","expand_context","continue_fresh_session",
@@ -366,7 +366,8 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
     Json event{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
                {"currentTime",now},{"replyTo",std::move(replyTo)},{"turn",std::move(turn)}};
     if (message.routing.contains("sessionOrigin")) event["sessionOrigin"] = message.routing.at("sessionOrigin");
-    if (message.routing.contains("sessionWake")) event["sessionWake"] = message.routing.at("sessionWake");
+    for (const auto* key : {"sessionWake","sessionInvitation"})
+        if (message.routing.contains(key)) event[key] = message.routing.at(key);
     event.update(channel);
     if (web) event["attachments"] = attachmentViews(message.id);
     Json task{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)},
@@ -706,7 +707,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
 void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
                           const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
                           const ReconcileBotCreation& reconcileBotCreation,
-                          std::stop_token shutdown) {
+                          const IntakeResolver& intake, std::stop_token shutdown) {
     Message message;
     {
         std::lock_guard lock(mutex);
@@ -934,6 +935,10 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
             if (!authorizeTurn(message)) { transaction.commit(); return; }
             saveTurnResults(id,step,Json::array({webEvidenceActionDenied()}));
             transaction.commit();
+            continue;
+        }
+        if (decision.tool == "invite_bot") {
+            if (!inviteSessionBot(message,step,decision,t3,intake,shutdown)) return;
             continue;
         }
 

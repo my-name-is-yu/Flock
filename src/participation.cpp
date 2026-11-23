@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS session_asks(
  PRIMARY KEY(person_id,request_id))
 )SQL");
     exec(R"SQL(
+CREATE TABLE IF NOT EXISTS session_invitations(
+ source_message_id INTEGER NOT NULL, step INTEGER NOT NULL,
+ inviter_participation_id INTEGER NOT NULL REFERENCES session_participations(id),
+ participation_id INTEGER NOT NULL REFERENCES session_participations(id),
+ depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),
+ message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+ PRIMARY KEY(source_message_id,step),
+ FOREIGN KEY(source_message_id,step) REFERENCES conversation_steps(message_id,step))
+)SQL");
+    exec(R"SQL(
 CREATE TABLE IF NOT EXISTS t3_connector(
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
  token_digest TEXT NOT NULL, port INTEGER NOT NULL)
@@ -263,6 +273,159 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     db.exec("INSERT INTO session_asks VALUES(?,?,?,?,?)",{actor.id,requestId,row.number(0),fingerprint,message});
     transaction.commit();
     return message;
+}
+
+bool Store::Impl::inviteSessionBot(const conversation::Message& message, int step, const Decision& decision,
+                                  T3& t3, const IntakeResolver& intake, std::stop_token shutdown) {
+    constexpr Id maxDepth = 3;
+    constexpr auto stopped = "This Bot's participation in the Session has stopped";
+    constexpr auto unavailable = "This Session is unavailable through your T3 connection";
+    const auto replay = [&]() -> Json {
+        auto row = query("SELECT message_id,depth FROM session_invitations WHERE source_message_id=? AND step=?",
+                         {message.id,step});
+        if (!row.next()) return nullptr;
+        return {{"ok",true},{"messageId",row.number(0)},{"depth",row.number(1)}};
+    };
+    const auto finish = [&](const auto& apply) {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (shutdown.stop_requested()) return false;
+        if (!authorizeTurn(message)) { transaction.commit(); return false; }
+        if (query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
+                  {message.id,step}).next()) {
+            auto result = replay();
+            if (result.is_null()) result = apply();
+            saveTurnResults(message.id,step,Json::array({result}));
+        }
+        transaction.commit();
+        return true;
+    };
+
+    try {
+        const auto& args = decision.args;
+        using conversation_storage::text;
+        if (!args.is_object() || args.size() != 4) throw Conflict("Invalid invite_bot arguments");
+        const auto bot = text(args,"botId",128,true);
+        const SessionTarget target{text(args,"environmentId",256,true),text(args,"threadId",256,true)};
+        const auto note = text(args,"note",maxRequestBytes,true);
+        if (!validBotId(bot) || !validId(target.environmentId,256) || !validId(target.threadId,256) ||
+            note.find('\0') != note.npos)
+            throw Conflict("Invalid invite_bot arguments");
+        if (bot == message.bot) throw Conflict("A Bot cannot invite itself");
+
+        struct Sender { Person actor; Id participation, depth; };
+        const auto participation = [&](std::string_view id) {
+            return query("SELECT id,person_id,state FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=?",
+                         {id,target.environmentId,target.threadId});
+        };
+        const auto authorize = [&]() -> Sender {
+            const auto actor = turnActor(message);
+            Policy policy(*this);
+            if (!policy.allows(actor,Action::bot_decide,message.bot) || !policy.allows(actor,Action::bot_decide,bot))
+                throw Conflict("Bot access is required");
+            if (!policy.allows(message.bot,Action::environment_inspect,target.environmentId) ||
+                !policy.allows(bot,Action::environment_inspect,target.environmentId) ||
+                !query("SELECT 1 FROM t3_connector CROSS JOIN t3_connected_environments "
+                       "WHERE person_id=? AND environment_id=?",{actor.id,target.environmentId}).next())
+                throw Conflict(unavailable);
+            if (message.routing.contains("sessionOrigin") && !activeSessionOrigin(message)) throw Conflict(stopped);
+
+            auto inviter = participation(message.bot);
+            auto depth = message.routing.value("sessionInvitationDepth",Id{0});
+            Id inviterId = 0;
+            if (inviter.next()) {
+                if (inviter.string(2) == "stopped") throw Conflict(stopped);
+                if (inviter.string(1) != actor.id) throw Conflict(unavailable);
+                inviterId = inviter.number(0);
+            } else {
+                auto launch = query(R"SQL(
+SELECT json_extract(m.routing,'$.sessionInvitationDepth'),
+       json_extract(t.data,'$.sessionOrigin.environmentId'),json_extract(t.data,'$.sessionOrigin.threadId')
+FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
+JOIN messages m ON m.id=json_extract(t.data,'$.sourceMessageId') AND m.bot_id=t.bot_id
+WHERE t.bot_id=? AND m.person_id=? AND r.environment_id=? AND r.thread_id=?
+  AND json_extract(o.data,'$.tool')='delegate'
+)SQL",{message.bot,actor.id,target.environmentId,target.threadId});
+                if (!launch.next()) throw Conflict("Invite a Bot into a Session you participate in or launched");
+                const SessionTarget origin{launch.string(1),launch.string(2)};
+                if (!origin.environmentId.empty() && !activeSessionOrigin(message.bot,actor.id,origin,target.environmentId))
+                    throw Conflict(unavailable);
+                depth = std::max(depth,launch.number(0));
+            }
+            if (depth >= maxDepth) throw Conflict("Invitations can reach a maximum depth of 3");
+
+            auto invitee = participation(bot);
+            if (invitee.next()) {
+                if (invitee.string(1) != actor.id) throw Conflict("This Session participation is unavailable");
+                if (invitee.string(2) == "stopped") throw Conflict("The invited Bot's participation in the Session has stopped");
+            }
+            const auto scrub = sharedRedactor();
+            for (const auto id : std::array<std::string_view,4>{bot,message.bot,target.environmentId,target.threadId}) {
+                scrub.requirePublic(id);
+                if (redactT3Tokens(std::string(id)) != id) throw Conflict("Invalid Session invitation identifier");
+            }
+            return {actor,inviterId,depth + 1};
+        };
+        {
+            std::lock_guard lock(mutex);
+            if (!replay().is_null()) return finish([] { return Json(); });
+            authorize();
+        }
+
+        std::optional<SessionMetadata> metadata;
+        try {
+            metadata = t3.sessionMetadata(target,false,std::chrono::steady_clock::now() + std::chrono::seconds(5));
+        } catch (const std::exception&) {
+            throw Conflict("Could not verify access to this T3 Session");
+        }
+        if (!metadata || metadata->projectId.empty()) throw Conflict(unavailable);
+
+        return finish([&] {
+            const auto sender = authorize();
+            const auto scrub = sharedRedactor();
+            const auto safeNote = redactT3Tokens(scrub.text(note));
+            const auto title = bounded(redactT3Tokens(scrub.text(metadata->title)),512);
+            const auto inviterName = redactT3Tokens(scrub.text(message.routing.at("config").value("botDisplayName",message.bot)));
+            const auto description = "Invited to Session " + (title.empty() ? target.threadId : title) +
+                " by " + inviterName + ", note: " + safeNote;
+            Intake routing;
+            try {
+                if (!intake) throw Conflict("Bot intake is unavailable");
+                routing = intake(bot,description);
+            } catch (const StorageError&) {
+                throw;
+            } catch (const std::exception&) {
+                throw Conflict("The invited Bot is unavailable");
+            }
+            if (routing.botId != bot) throw Conflict("The invited Bot is unavailable");
+
+            const auto admit = [&](std::string_view id) {
+                exec(R"SQL(
+INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state) VALUES(?,?,?,?,'active')
+ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
+)SQL",{id,target.environmentId,target.threadId,sender.actor.id});
+                auto row = participation(id);
+                if (!row.next()) throw Conflict("This Session participation is unavailable");
+                return row.number(0);
+            };
+            const auto inviter = sender.participation ? sender.participation : admit(message.bot);
+            const auto invitee = admit(bot);
+            const auto key = "session-invite:" + std::to_string(message.id) + ":" + std::to_string(step);
+            const SessionOrigin origin{target,title};
+            const Json invitation{{"environmentId",target.environmentId},{"threadId",target.threadId},
+                                  {"inviterBotId",message.bot},{"inviterName",inviterName},
+                                  {"note",safeNote},{"depth",sender.depth}};
+            const auto invited = enqueueConversation(sender.actor,routing,conversation::PrincipalSource::session,
+                                                      key,description,0,&origin,invitation);
+            exec("INSERT INTO session_invitations VALUES(?,?,?,?,?,?)",
+                 {message.id,step,inviter,invitee,sender.depth,invited});
+            return Json{{"ok",true},{"messageId",invited},{"depth",sender.depth}};
+        });
+    } catch (const Conflict& error) {
+        return finish([&] { return toolFailure(error.what()); });
+    } catch (const conversation_storage::ToolError& error) {
+        return finish([&] { return toolFailure(error.what()); });
+    }
 }
 
 void SessionParticipation::stop(const T3Connection& connection, std::string_view bot, std::string_view thread) {

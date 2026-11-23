@@ -7,7 +7,8 @@ using conversation_storage::messageSize;
 
 namespace {
 bool reservedMessageId(std::string_view id) {
-    return id.starts_with("channel:") || id.starts_with("session-wake:") || id.starts_with("session-ask:");
+    return id.starts_with("channel:") || id.starts_with("session-wake:") ||
+           id.starts_with("session-ask:") || id.starts_with("session-invite:");
 }
 
 Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
@@ -167,7 +168,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
 
 Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
                                     std::string_view clientId, std::string_view text, Id replyTo,
-                                    const SessionOrigin* origin) {
+                                    const SessionOrigin* origin, const Json& invitation) {
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     modelCallLimit(routing.config);
     Json saved{{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config}};
@@ -178,7 +179,7 @@ Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, 
     } else if (replyTo && (source == conversation::PrincipalSource::trusted ||
                            source == conversation::PrincipalSource::web)) {
         auto previous = query(R"SQL(
-SELECT json_extract(m.routing,'$.sessionOrigin') FROM journal j
+SELECT json_extract(m.routing,'$.sessionOrigin'),json_extract(m.routing,'$.sessionInvitationDepth') FROM journal j
 LEFT JOIN conversation_turns turn ON turn.reply_id=j.id
 LEFT JOIN tasks t ON t.id=j.task_id
 JOIN messages m ON m.id=coalesce(turn.message_id,json_extract(t.data,'$.sourceMessageId'),j.id)
@@ -188,11 +189,18 @@ WHERE j.id=? AND m.bot_id=? AND m.person_id=? AND json_type(m.routing,'$.session
             auto inherited = previous.json(0);
             inherited["title"] = scrub.text(field(inherited,"title"));
             saved["sessionOrigin"] = std::move(inherited);
+            if (const auto depth = previous.number(1)) saved["sessionInvitationDepth"] = depth;
         }
     }
+    Json event = Json::object();
+    if (!invitation.is_null()) {
+        event["sessionInvitation"] = scrub.record(invitation);
+        saved["sessionInvitation"] = event.at("sessionInvitation");
+        saved["sessionInvitationDepth"] = invitation.at("depth");
+    }
     scrub.requirePublic({routing.botId,actor.id,clientId,saved});
-    exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
-         {unixTime(),routing.botId});
+    exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message',?,?)",
+         {unixTime(),event,routing.botId});
     const auto id = last();
     exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)

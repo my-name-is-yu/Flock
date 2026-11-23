@@ -117,12 +117,13 @@ ORDER BY entry.id DESC LIMIT 24
     while (rows.next()) {
         const auto kind = rows.string(2);
         const auto data = rows.json(3);
-        const bool wake = kind=="conversation_message" && data.contains("sessionWake");
-        const bool user = !wake && (kind=="conversation_message" || kind=="user_answer");
+        const bool system = kind=="conversation_message" && (data.contains("sessionWake") || data.contains("sessionInvitation"));
+        const bool user = !system && (kind=="conversation_message" || kind=="user_answer");
         const bool reply = kind=="conversation_reply";
-        const char* role = wake ? "system" : user ? "user" : reply ? "bot" : "task";
+        const char* role = system ? "system" : user ? "user" : reply ? "bot" : "task";
         Json entry = {{"messageId",rows.number(0)},{"kind",kind},{"role",role},{"text",""}};
-        if (wake) entry["sessionWake"] = scrub.record(data.at("sessionWake"));
+        for (const auto* key : {"sessionWake","sessionInvitation"})
+            if (system && data.contains(key)) entry[key] = scrub.record(data.at(key));
         if (rows.number(1)) entry["taskId"] = rows.number(1);
         if (kind=="conversation_message" && message.channelScope.empty()) {
             auto media = attachmentViews(rows.number(0));

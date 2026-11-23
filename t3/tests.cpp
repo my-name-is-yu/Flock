@@ -80,11 +80,15 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     const Json origin{{"environmentId","env-1"},{"threadId","lineage-parent"},{"title","Deployment planning"}};
     struct LaunchModel final : Model {
         Decision next;
-        Json origin, result, tasks;
+        Json origin, result, tasks, invitation;
         int wakes = 0;
         ModelTurn decide(const ModelInput& input) override {
             if (input.event.at("kind") != "conversation_turn")
                 return {{{"delegate",{{"instruction","Check the fixture."},{"doneWhen","The fixture is checked."}},"Start work"}}};
+            if (input.event.contains("sessionInvitation")) {
+                invitation = input.event;
+                return {{{"reply",{{"text","Joined the child Session."}},"Finish the invitation turn"}}};
+            }
             const auto& steps = input.event.at("turn");
             if (steps.empty()) {
                 origin = input.event.value("sessionOrigin",Json(nullptr));
@@ -109,6 +113,7 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
         return {};
     });
     store.policy().setMember(localOwner,"release",member.id,true);
+    store.policy().setMember(localOwner,"triage",member.id,true);
     T3Connections connections(store);
     const auto credential = connections.connect("env-1",member.id,3210);
     const auto connection = connections.authenticate(credential);
@@ -120,7 +125,10 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     const auto message = participation.ask(*connection,start,resolve);
     check(participation.ask(*connection,start,resolve) == message,"The same Session ask created another turn");
     store.policy().setMode(localOwner,"supervised");
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    const RuntimeOptions options{.intake=[](std::string_view bot, std::string_view text) {
+        return Intake{std::string(bot),std::string(text),"env-1","project"};
+    }};
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
     model.next = {"start_task",{{"request","Check the release fixture."}},"Start work in a new Session"};
     runtime.runConversations();
     check(model.origin == origin && model.result.value("ok",false),"Session origin was not saved before starting the task");
@@ -177,6 +185,13 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     runtime.runConversations();
     check(model.wakes == 1 && model.origin == origin && model.result.value("ok",false),
           "The child send did not wake exactly once with the original Session and access to the child");
+    auto invite = target;
+    invite["botId"] = "triage";
+    invite["note"] = "Review the child Session";
+    check(call("invite-child","invite_bot",invite).value("depth",0) == 1 &&
+          model.invitation.at("sessionOrigin").at("threadId") == thread &&
+          model.invitation.at("sessionInvitation").at("inviterBotId") == "release",
+          "The Bot could not invite another Bot into the Session it launched");
 
     participation.stop(*connection,"release","lineage-parent");
     check(!call("stopped","message_session",send).value("ok",true) && effects("t3_thread_send").size() == sends + 1,

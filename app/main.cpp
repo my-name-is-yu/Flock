@@ -235,6 +235,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const IntakeResolver intake = [&](std::string_view botId, std::string_view request) {
         return bots.get(botId).intake(request);
     };
+    options.intake = intake;
     const Runtime::SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
     const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
     auto identities = identityFile ? loadIdentities(store,identityFile) : ConfiguredIdentities{};

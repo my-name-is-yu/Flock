@@ -343,6 +343,12 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         text("environmentId","Environment ID from flock_session_search.");
         text("threadId","Thread ID from flock_session_search.");
         text("text","Message to send to the Session.");
+    } else if (name == "invite_bot") {
+        description = "Invite another Flock Bot on the person's behalf into a T3 Session this Bot participates in or launched.";
+        text("botId","The exact ID of the Bot to invite.");
+        text("environmentId","The Session's environment ID.");
+        text("threadId","The Session's thread ID.");
+        text("note","What you want the invited Bot to do in the Session.");
     } else if (name == "interrupt_session") {
         description = "Interrupt the active Run in the task’s T3 Session. This affects the Session, and the task stays open. The Bot decides what "
                       "to do next. Use cancel_task to stop the whole task.";
@@ -719,6 +725,9 @@ user's language and refer to work by description, never by task, message, revisi
         "with \"For the person:\" so the coding agent can show it to them. Use reply to finish the Flock turn after sending. "
         "The task's session field provides the destination identifiers for reading or messaging its launched work. "
         "On event.sessionWake, read the indicated Session. Send another message only if the person's request calls for it.";
+    if (input.event.contains("sessionInvitation")) instructions +=
+        " The Bot named in event.sessionInvitation invited you into event.sessionOrigin. "
+        "Use the invitation note as context for your work there.";
     auto content = Json::array({{{"type","input_text"},
         {"text",context.dump(-1,' ',false,Json::error_handler_t::replace)}}});
     for (const auto& image : input.images) {

@@ -3,6 +3,8 @@
 #include "flock/t3_connection.hpp"
 #include "flock/t3_mcp.hpp"
 
+#include <sqlite3.h>
+
 #include <algorithm>
 #include <future>
 #include <iostream>
@@ -109,6 +111,176 @@ void stopDuringSendPreflight() {
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     runtime.runConversations();
     check(model.asks == 1 && stopped && t3.sends == 0,"A stop during Session access verification let the send through");
+}
+
+void sessionInvitations() {
+    struct InviteT3 : FixedT3 {
+        std::vector<Command> sends;
+        std::vector<std::string> checkedRuns;
+        bool reachable = true;
+        std::string completedRun = "someone-elses-run";
+        std::function<void()> duringRead;
+
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
+            if (duringRead) duringRead();
+            if (!reachable || target != SessionTarget{"env-1","thread"}) return {};
+            SessionMetadata metadata;
+            metadata.projectId = "origin-project";
+            metadata.title = "Staging follow-up";
+            return metadata;
+        }
+        Delivery send(const Command& command) override {
+            sends.push_back(command);
+            return {Delivery::Kind::Accepted,{"thread","triage-run",{}},{},false,"queued"};
+        }
+        std::string sessionMessageWake(const SessionTarget&, const RunRef& run) override {
+            checkedRuns.push_back(run.runId);
+            return run.runId == completedRun ? "finished" : "";
+        }
+    } t3;
+    struct InviteModel : Model {
+        std::string target = "triage";
+        std::string thread = "thread";
+        std::map<std::string,Json> events, receipts;
+        int wakes = 0, invitations = 0;
+
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& event = input.event;
+            const auto bot = input.config.at("botDisplayName").get<std::string>();
+            const auto& steps = event.at("turn");
+            const auto reply = []() -> ModelTurn {
+                return {{{"reply",{{"text","Done."}},"Finish this turn"}}};
+            };
+            if (event.contains("sessionWake")) {
+                check(!event.contains("sessionInvitation") && bot == "Triage Bot",
+                      "An invitation was reused as a wake, or woke the wrong Bot");
+                if (steps.empty()) ++wakes;
+                return reply();
+            }
+            const auto invite = [&](const std::string& recipient) -> ModelTurn {
+                return {{{"invite_bot",{{"botId",recipient},{"environmentId","env-1"},{"threadId",thread},
+                                        {"note","Review the staging checks."}},"Invite a Bot to the Session"}}};
+            };
+            if (steps.empty() && event.contains("sessionInvitation")) {
+                ++invitations;
+                events[bot] = event;
+                for (const auto* tool : {"flock_session_events","message_session","start_task","invite_bot"})
+                    check(std::ranges::find(input.tools,tool) != input.tools.end(),"The invited Bot lost an ordinary Session tool");
+                if (bot == "Triage Bot")
+                    return {{{"message_session",{{"environmentId","env-1"},{"threadId","thread"},
+                                                  {"text","I checked staging."}},"Reply in the Session"}}};
+                return invite(bot == "Settings Bot" ? "specialist" : "release");
+            }
+            if (steps.empty()) return invite(target);
+            receipts[bot] = steps.back().at("result");
+            if (bot == "Triage Bot" && steps.size() == 1) return invite("settings");
+            return reply();
+        }
+    } model;
+
+    TestDirectory dir;
+    const auto database = dir.path/"flock.sqlite3";
+    Store store(database);
+    auto cb = callbacks();
+    cb.sessionT3 = &t3;
+    cb.authenticate = [](std::string_view authorization) {
+        return authorization == aliceCredential ? alice : Person{};
+    };
+    cb.resolveIdentity = [](std::string_view id) -> std::optional<bool> {
+        if (id == alice.id) return true;
+        if (id == bob.id) return false;
+        return {};
+    };
+    cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
+        if (bot == "broken") throw std::runtime_error(privateValue);
+        const std::map<std::string_view,std::string_view> names{{"release","Release Bot"},{"triage","Triage Bot"},
+            {"settings","Settings Bot"},{"specialist","Specialist Bot"}};
+        return {std::string(bot),std::string(request),"env-1","bot-project",{{"botDisplayName",names.at(bot)}}};
+    };
+    for (const auto* bot : {"release","triage","settings","specialist","broken"})
+        store.policy().setMember(alice,bot,bob.id,true);
+    const auto token = T3Connections(store).connect("env-1",bob.id,4173);
+    const auto server = startWeb(store,0,cb);
+    Mcp mcp(*server,token);
+    const auto soul = [](std::string_view) { return std::string{}; };
+    const RuntimeOptions options{.intake=cb.intake};
+    auto runtime = std::make_unique<Runtime>(store,model,t3,soul,options);
+    store.policy().setMode(alice,"supervised");
+    const auto ask = mcp.call("flock_ask",{{"bot","release"},{"threadId","thread"},{"requestId","invite-chain"},
+                                         {"text","Invite a Bot to review staging."}});
+    check(ask.contains("structuredContent"),"Could not start the invitation chain: " + ask.dump());
+    const auto source = ask.at("structuredContent").at("messageId").get<Id>();
+    runtime->runConversations();
+
+    const auto first = model.receipts.at("Release Bot");
+    const auto invitation = model.events.at("Triage Bot");
+    check(first.at("depth") == 1 && first.at("messageId") == invitation.at("messageId") &&
+          invitation.at("sessionOrigin") == sessionOrigin &&
+          invitation.at("text") == "Invited to Session Staging follow-up by Release Bot, note: Review the staging checks." &&
+          invitation.at("sessionInvitation").at("inviterBotId") == "release","The invitation lost its Session origin or description");
+    check(t3.sends.empty() && t3.checkedRuns.empty() && model.wakes == 0,"An invitation caused a send without approval or a wake");
+    const auto approval = store.inbox(bob).at(0);
+    check(approval.at("botId") == "triage" && approval.at("conversationEventId") == first.at("messageId"),
+          "The invited Bot's send did not ask the Session requester for approval");
+    store.decideInbox(bob,{approval.at("botId"),InboxKind::policy_approval,approval.at("itemId"),approval.at("waitId"),
+                           approval.at("taskId"),approval.at("targetRevision"),approval.at("targetGeneration")},"allow_once");
+    runtime->runConversations();
+    check(t3.sends.size() == 1 && t3.sends.front().ownerBotId == "triage" &&
+          t3.sends.front().target.threadId == "thread" && t3.sends.front().instruction == "Triage Bot: I checked staging.",
+          "The invitee did not send under its own name to the origin Session");
+    check(model.receipts.at("Triage Bot").at("depth") == 2 && model.receipts.at("Settings Bot").at("depth") == 3 &&
+          model.receipts.at("Specialist Bot") == Json{{"ok",false},{"error","Invitations can reach a maximum depth of 3"}},
+          "The invitation depth limit did not hold across four Bots");
+
+    // Replay a saved step without its result to exercise the durable invitation key after a restart.
+    runtime.reset();
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open_v2(database.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> sql(raw,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not open the invitation database");
+    const auto where = " WHERE message_id=" + std::to_string(source);
+    const auto reset = "UPDATE conversation_steps SET result=NULL" + where + " AND step=1; "
+        "DELETE FROM conversation_steps" + where + " AND step>1; "
+        "UPDATE conversation_turns SET status='running',reply_id=NULL" + where;
+    check(sqlite3_exec(sql.get(),reset.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,"Could not replay the invitation step");
+    const auto before = store.conversation("triage");
+    runtime = std::make_unique<Runtime>(store,model,t3,soul,options);
+    runtime->runConversations();
+    check(model.receipts.at("Release Bot") == first && store.conversation("triage") == before &&
+          model.invitations == 3 && model.wakes == 0 && t3.checkedRuns == std::vector<std::string>{"triage-run"},
+          "A retried invitation duplicated an event or a different Run caused a wake");
+    check(std::ranges::count_if(before,[](const Json& row) { return row.at("data").contains("sessionInvitation"); }) == 1,
+          "The timeline did not contain exactly one system invitation");
+
+    t3.completedRun = "triage-run";
+    runtime->runConversations();
+    runtime->runConversations();
+    check(model.wakes == 1 && model.invitations == 3 && t3.sends.size() == 1,"The invitee's own send did not wake it once");
+
+    const auto reject = [&](const char* request, const char* recipient, std::string_view error) {
+        model.target = recipient;
+        store.receiveWeb(bob,cb.intake("release",""),request,"Try another invitation.");
+        runtime->runConversations();
+        check(model.receipts.at("Release Bot") == Json{{"ok",false},{"error",error}},
+              "Unexpected invitation result: " + model.receipts.at("Release Bot").dump());
+    };
+    reject("self","release","A Bot cannot invite itself");
+    reject("forbidden","unknown","Bot access is required");
+    reject("bad-intake","broken","The invited Bot is unavailable");
+    model.thread = "unrelated";
+    reject("unrelated","triage","Invite a Bot into a Session you participate in or launched");
+    model.thread = "thread";
+    t3.reachable = false;
+    reject("unreachable","triage","This Session is unavailable through your T3 connection");
+    t3.reachable = true;
+    t3.duringRead = [&] {
+        const auto result = mcp.call("flock_stop",{{"bot","release"},{"threadId","thread"}});
+        check(result.contains("structuredContent"),"Could not stop during the invitation preflight: " + result.dump());
+    };
+    reject("stop-race","triage","This Bot's participation in the Session has stopped");
+    t3.duringRead = {};
+    reject("stopped","triage","This Bot's participation in the Session has stopped");
+    check(model.invitations == 3 && model.wakes == 1 && t3.sends.size() == 1,"A rejected invitation produced a side effect");
 }
 
 void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& credentials) {
@@ -273,6 +445,7 @@ int main(int argc, char** argv) {
         check(argc == 3,"Expected fixture URL and credentials directory");
         sessionAsks(argv[1],argv[2]);
         stopDuringSendPreflight();
+        sessionInvitations();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

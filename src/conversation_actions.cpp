@@ -315,6 +315,7 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
         if (!sqlite3_changes(db)) continue;
         const auto source = loadTurnMessage(wait.message);
         auto routing = source.routing;
+        routing.erase("sessionInvitation");
         routing["sessionWake"] = {{"environmentId",wait.target.environmentId},{"threadId",wait.target.threadId},
                                   {"reason",reason},{"sourceMessageId",wait.message}};
         exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message',?,?)",

@@ -137,7 +137,8 @@ struct Runtime::Impl {
     }
 
     void runTurn(Id id) {
-        db.runTurn(id,model,t3,soul,options.clock,*options.botTools,options.gitHost.get(),options.applyBotChange,options.reconcileBotCreation,shutdown.get_token());
+        db.runTurn(id,model,t3,soul,options.clock,*options.botTools,options.gitHost.get(),options.applyBotChange,
+                   options.reconcileBotCreation,options.intake,shutdown.get_token());
     }
 
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)

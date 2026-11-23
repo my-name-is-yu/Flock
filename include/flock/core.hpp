@@ -353,6 +353,7 @@ struct RuntimeOptions {
     // Supply this when applyBotChange can throw after publishing. On exhaustion,
     // confirm publication by request key or release any unpublished reservation.
     ReconcileBotCreation reconcileBotCreation = {};
+    IntakeResolver intake = {};
 };
 class Runtime {
 public:
