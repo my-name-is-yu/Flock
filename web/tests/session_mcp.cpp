@@ -582,6 +582,13 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     db = std::make_unique<Store>(database);
     server = startWeb(*db,0,cb);
     runtime = std::make_unique<Runtime>(*db,model,*t3,soul,options);
+    // Simulate a non-Session-origin wake that was already queued for a model turn.
+    const auto queuedWake = db->receive(localOwner,cb.intake("release",""),"queued-before-stop","Pending wake");
+    const auto markWake = "UPDATE messages SET routing=json_set(routing,'$.sessionWake',json_object("
+        "'environmentId','env-1','threadId','thread','reason','finished')) WHERE id=" +
+        std::to_string(queuedWake.at("messageId").get<Id>());
+    check(sqlite3_exec(oldState.get(),markWake.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
+          "Could not prepare the queued wake");
     const auto result = stop("release");
     check(result.at("structuredContent") == Json{{"stopped",true},{"cancelled",1},{"alreadyStarted",1},
                                                 {"notCancellable",0},{"pending",1}} &&

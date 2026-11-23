@@ -693,7 +693,14 @@ bool Store::Impl::authorizeTurn(const Message& message) {
         exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
         return false;
     }
-    if (message.principalSource == PrincipalSource::session && !activeSessionOrigin(message)) {
+    const auto wake = message.routing.find("sessionWake");
+    const bool isWake = wake != message.routing.end();
+    const bool stoppedWake = isWake && sessionParticipationStopped(
+        message.bot,{field(*wake,"environmentId"),field(*wake,"threadId")});
+    const bool usesSessionOrigin = message.principalSource == PrincipalSource::session ||
+        (isWake && message.routing.contains("sessionOrigin"));
+    // A wake can be queued before a stop commits and reach this turn after it commits.
+    if (stoppedWake || (usesSessionOrigin && !activeSessionOrigin(message))) {
         finishTurn(message,"The T3 Session participation has ended.",nullptr,"session_access");
         return false;
     }
