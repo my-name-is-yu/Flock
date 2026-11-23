@@ -290,23 +290,29 @@ int listenOnLoopback() {
     return listener;
 }
 
-bool ready(int fd, Clock::time_point end) {
+void checkCancelled(std::stop_token stop) {
+    if (stop.stop_requested()) throw Failure(Failure::Kind::Settings, "T3 connection was cancelled");
+}
+
+bool ready(int fd, Clock::time_point end, std::stop_token stop) {
     for (;;) {
+        checkCancelled(stop);
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end - Clock::now());
         if (remaining.count() <= 0) return false;
         pollfd item{fd, POLLIN, 0};
-        const int result = poll(&item, 1, static_cast<int>(remaining.count()));
-        if (result < 0 && errno == EINTR) continue;
+        const auto timeout = static_cast<int>(remaining.count());
+        const int result = poll(&item, 1, stop.stop_possible() ? std::min(timeout,100) : timeout);
+        if ((result < 0 && errno == EINTR) || (result == 0 && stop.stop_possible())) continue;
         return result > 0 && (item.revents & POLLIN);
     }
 }
 
-std::string requestTarget(int client, Clock::time_point deadline) {
+std::string requestTarget(int client, Clock::time_point deadline, std::stop_token stop) {
     std::array<char, 2048> buffer{};
     std::string input;
     const auto end = std::min(deadline, Clock::now() + std::chrono::seconds(2));
     const auto lineEnd = [&] { return input.find("\r\n"); };
-    while (input.size() < 16384 && lineEnd() == std::string::npos && ready(client, end)) {
+    while (input.size() < 16384 && lineEnd() == std::string::npos && ready(client, end, stop)) {
         const auto received = recv(client, buffer.data(), buffer.size(), 0);
         if (received <= 0) return {};
         input.append(buffer.data(), static_cast<std::size_t>(received));
@@ -332,12 +338,12 @@ void callbackReply(int client, bool success) {
 #endif
 }
 
-std::string receiveCode(int listener, const std::string& state, const std::string& issuer) {
+std::string receiveCode(int listener, const std::string& state, const std::string& issuer, std::stop_token stop) {
     const auto deadline = Clock::now() + std::chrono::minutes(3);
-    while (ready(listener, deadline)) {
+    while (ready(listener, deadline, stop)) {
         Fd client(accept(listener, nullptr, nullptr));
         if (client.get() < 0 || fcntl(client.get(), F_SETFD, FD_CLOEXEC) != 0) continue;
-        const auto target = requestTarget(client.get(), deadline);
+        const auto target = requestTarget(client.get(), deadline, stop);
         const auto query = target.find('?');
         Headers parameters;
         if (query != std::string::npos && std::string_view(target).substr(0, query) == CallbackPath) {
@@ -394,15 +400,33 @@ Credential loadCredential(const std::filesystem::path& path, const std::string& 
 
 }
 
+namespace {
+t3detail::Url checkedResource(const std::string& mcpUrl) {
+    auto resource = t3detail::checkedUrl(mcpUrl);
+    if (resource.path != "/mcp") throw t3detail::Failure(t3detail::Failure::Kind::Settings, "The T3 URL must end in /mcp");
+    return resource;
+}
+}
+
+void validateT3ConnectTarget(const std::string& environmentId, const std::string& mcpUrl) {
+    try {
+        (void)t3detail::credentialName(environmentId);
+        (void)checkedResource(mcpUrl);
+    } catch (const t3detail::Failure&) {
+        throw Conflict("Use a valid T3 environment ID and MCP URL");
+    }
+}
+
 bool loginT3(const std::filesystem::path& credentialDirectory, const std::string& environmentId,
              const std::string& mcpUrl, const std::function<void(const std::string&)>& showAuthorizationUrl, bool requireOperate,
-             const std::function<void(const std::function<void()>&)>& install) {
+             const std::function<void(const std::function<void()>&)>& install, std::stop_token stop) {
     using namespace t3detail;
+    checkCancelled(stop);
     const auto name = credentialName(environmentId);
-    const auto resource = checkedUrl(mcpUrl);
-    if (resource.path != "/mcp") throw Failure(Failure::Kind::Settings, "The T3 URL must end in /mcp");
+    const auto resource = checkedResource(mcpUrl);
     const Fd directory(openDirectory(credentialDirectory, true));
     const auto oauth = discover(resource);
+    checkCancelled(stop);
     const Fd listener(listenOnLoopback());
     sockaddr_in addr{};
     socklen_t size = sizeof(addr);
@@ -412,6 +436,7 @@ bool loginT3(const std::filesystem::path& credentialDirectory, const std::string
         Json{{"client_name", "Flock"}, {"redirect_uris", Json::array({redirect})},
              {"token_endpoint_auth_method", "none"}, {"grant_types", Json::array({"authorization_code"})},
              {"response_types", Json::array({"code"})}}.dump());
+    checkCancelled(stop);
     const auto clientId = str(registration, "client_id");
     if (clientId.empty() || clientId.size() > 8192) invalidResponse();
     const auto state = randomValue();
@@ -420,7 +445,8 @@ bool loginT3(const std::filesystem::path& credentialDirectory, const std::string
     showAuthorizationUrl(oauth.authorization + '?' + form({{"response_type", "code"}, {"client_id", clientId},
         {"redirect_uri", redirect}, {"scope", scope}, {"resource", resource.full}, {"state", state},
         {"code_challenge", digest(verifier)}, {"code_challenge_method", "S256"}}));
-    const auto code = receiveCode(listener.get(), state, oauth.issuer);
+    const auto code = receiveCode(listener.get(), state, oauth.issuer, stop);
+    checkCancelled(stop);
     const auto tokenResult = oauthJson("token", oauth.token, {{"Content-Type", "application/x-www-form-urlencoded"}},
         form({{"grant_type", "authorization_code"}, {"code", code}, {"redirect_uri", redirect},
               {"client_id", clientId}, {"code_verifier", verifier}, {"resource", resource.full}}));
@@ -438,11 +464,13 @@ bool loginT3(const std::filesystem::path& credentialDirectory, const std::string
     if (!readScope) noCredential();
     if (requireOperate && !operateScope)
         throw Failure(Failure::Kind::Auth,"Authorize T3 read and operate access for the Flock connection");
+    checkCancelled(stop);
     Credential credential{resource.full, token, randomValue(), unixTime() + expires, operateScope};
     Client client(credential);
     const auto identity = client.call("t3_environment_read", Json::object());
     if (str(identity, "environmentId") != environmentId)
         throw Failure(Failure::Kind::Settings, "The OAuth endpoint belongs to a different T3 environment");
+    checkCancelled(stop);
     const auto save = [&] { saveCredential(directory.get(), name, environmentId, credential); };
     if (install) install(save);
     else save();

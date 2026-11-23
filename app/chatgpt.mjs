@@ -241,11 +241,14 @@ function openBrowser(url) {
   });
 }
 
-async function showBrowserOrPrintUrl(url, printUrl, callbackSettled) {
-  if (printUrl || (!await openBrowser(url) && !callbackSettled())) console.error(url);
+async function showBrowserOrPrintUrl(url, printUrl, callbackSettled, browserRequired) {
+  if (browserRequired) {
+    if (!await openBrowser(url) && !callbackSettled())
+      throw new Failure("Flock could not open a browser for ChatGPT sign-in on this machine");
+  } else if (printUrl || (!await openBrowser(url) && !callbackSettled())) console.error(url);
 }
 
-async function login({ printUrl = false, reconsent = false } = {}) {
+async function login({ printUrl = false, reconsent = false, browserRequired = false } = {}) {
   let profile = readProfile();
   if (!profile.hostId) {
     profile = { hostId: `urn:uuid:${randomUUID()}` };
@@ -277,7 +280,7 @@ async function login({ printUrl = false, reconsent = false } = {}) {
       error => { callbackSettled = true; throw error; },
     );
     const [{ code, clientId }] = await Promise.all([
-      callback, showBrowserOrPrintUrl(url.toString(), printUrl, () => callbackSettled),
+      callback, showBrowserOrPrintUrl(url.toString(), printUrl, () => callbackSettled, browserRequired),
     ]);
     if (!profile.clientId) {
       profile.clientId = clientId;
@@ -442,7 +445,12 @@ try {
   let result;
   if (operation === "login") result = await login(input);
   else if (operation === "status") result = status(readProfile());
-  else if (operation === "models") result = await models();
+  else if (operation === "web_status") {
+    const profile = readProfile();
+    const needsSignIn = Boolean(profile.subject && (!Array.isArray(profile.granted) ||
+      (profile.granted.includes(directScope) && (!profile.accessToken || !profile.refreshToken))));
+    result = { ...status(profile), needsSignIn };
+  } else if (operation === "models") result = await models();
   else if (operation === "infer") result = await infer(input);
   else throw new Failure("Unknown ChatGPT transport operation");
   console.log(JSON.stringify({ result }));

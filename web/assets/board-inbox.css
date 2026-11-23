@@ -124,6 +124,12 @@
 .board-inbox-card .board-inbox-source:hover:not(:disabled) { color: var(--text); text-decoration: underline; background: transparent; }
 .board-inbox-body { white-space: pre-wrap; font-size: .88rem; line-height: 1.62; color: var(--text); }
 .board-inbox-card .board-inbox-meta { color: var(--text-3); font-size: var(--text-xs); }
+/* History is a record to scan, so each entry is a compact title, what it was about, then who answered. */
+.board-inbox-card.history-card { gap: .2rem; }
+.history-card h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .5rem; font-size: .95rem; font-weight: 600; letter-spacing: -.005em; }
+.history-card h3 .board-inbox-target { color: var(--text-3); font-weight: 400; letter-spacing: 0; }
+.history-about { color: var(--text-2); font-size: var(--text-sm); }
+.history-card .board-inbox-meta { margin-top: .15rem; }
 
 .board-inbox-pr-card {
   position: relative; display: grid; gap: .35rem;
@@ -295,9 +301,11 @@
 }
 
 
+/* Lines up with the Bot's bubbles, whose avatar column it follows. */
 .board-inbox-card.policy-inline-card {
-  width: min(100%, 33rem);
+  width: min(100% - var(--avatar-col, 0px), 33rem);
   margin-block: .6rem;
+  margin-inline-start: var(--avatar-col, 0px);
   padding: .9rem 1rem;
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);

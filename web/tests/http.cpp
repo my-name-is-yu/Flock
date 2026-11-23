@@ -1,3 +1,4 @@
+#include "flock/t3_connection.hpp"
 #include "http_fixture.hpp"
 #include "../../tests/fake_git.hpp"
 #include "flock/memory_automation.hpp"
@@ -273,8 +274,9 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     check(browser.get(viewPath(updates)).at("sessionTasks").empty(),
           "refresh returned unchanged Session history");
 
+    constexpr auto creation = "2026-11-21T00:15:00.000Z";
     t3.observations["thread-separate-0"] = {.kind=Observation::Kind::Finished,.status="failed",
-        .report="The health check failed",.resultRunId="distinct-result-run"};
+        .report="The health check failed",.resultRunId="distinct-result-run",.sessionCreatedAt=creation};
     t3.observations["thread-separate-1"] = {.kind=Observation::Kind::Finished,
         .report="Historical report without a status"};
     tick(runtime,3);
@@ -283,9 +285,14 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     const std::map<Id,std::string_view> states = {{failed,"failed"},{historical,"ended"}};
     check(settled.at("sessionCursor") > updates.at("sessionCursor") && settledTasks.size() == states.size(),
           "settled Runs did not advance the Session cursor");
-    for (const auto& task : settledTasks)
-        check(task.at("sessions").size() == 1 && task.at("sessions").at(0).at("state") == states.at(task.at("id").get<Id>()),
+    for (const auto& task : settledTasks) {
+        const auto id = task.at("id").get<Id>();
+        const auto& session = task.at("sessions").at(0);
+        check(task.at("sessions").size() == 1 && session.at("state") == states.at(id),
               "a settled Run did not refresh its Session status with the same Session count");
+        check(id == failed ? session.at("createdAt") == creation : !session.contains("createdAt"),
+              "the Session timestamp must come from T3 and stay absent when unavailable");
+    }
 
     auto page = browser.get("/api/view?bot=triage");
     check(page.at("sessionsBefore").get<Id>() > 0,"session list did not offer older history");
@@ -1363,6 +1370,39 @@ void settingsEndpoints(const std::filesystem::path& path) {
     Store store(path);
     store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/org/private",true);
     auto cb = callbacks();
+    const Json t3Target{{"environmentId","env-1"},{"mcpUrl","https://t3.example/mcp"}};
+    std::atomic<bool> t3Started = false;
+    cb.t3Connect = [&](const Person& actor, const std::string& env, const std::string& url) {
+        check(actor.id == "owner" && env == "env-1" && url == "https://t3.example/mcp",
+              "T3 connection callback received the wrong requester or target");
+        return !t3Started.exchange(true);
+    };
+    cb.t3Setup = [&](const Person& actor) {
+        return Json{{"running",t3Started.load()},
+                    {"authorizationUrl",actor.id == "owner" && t3Started ? "https://t3.example/authorize" : ""}};
+    };
+    const std::string legacyEnvironment(513,'e');
+    auto connections = T3Connections(store);
+    const auto legacyBearer = connections.connect(legacyEnvironment,localOwner.id,4173);
+    cb.t3Disconnect = [&](const std::optional<std::string>& environment) {
+        if (environment) {
+            check(*environment == legacyEnvironment,"T3 disconnect callback received the wrong environment");
+            check(connections.disconnect(*environment),"last T3 environment did not leave cleanup pending");
+            throw std::runtime_error("fixture provider failure");
+        }
+        check(connections.providerCleanupPending(),"missing T3 provider registration to clean up");
+        connections.providerRemoved();
+    };
+    std::atomic<bool> unavailable = false;
+    std::atomic<unsigned> statusCalls = 0;
+    std::atomic<bool> reconsentRequested = false;
+    cb.modelLogin = [&](bool reconsent) { return reconsent && !reconsentRequested.exchange(true); };
+    cb.modelStatus = [&] {
+        ++statusCalls;
+        if (unavailable) throw std::runtime_error("private credential detail");
+        return Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
+                    {"needsSignIn",true},{"accessToken","internal fixture token"}};
+    };
     cb.intake = [original = cb.intake](std::string_view bot, std::string_view request) {
         auto intake = original(bot,request);
         intake.config.erase("token");
@@ -1370,7 +1410,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
     };
     const auto file = path.parent_path()/"identities.json";
     const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
-                                       {{"authorization","Bearer fixture-alice"},{"person","alice"}}});
+                                       {{"authorization","Bearer fixture-alice"},{"person","alice"}},
+                                       {{"authorization","Bearer fixture-root"},{"person","another-root"},{"adminRoot",true}}});
     std::ofstream(file) << accounts;
     std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
     configureWebIdentities(store,file,cb);
@@ -1400,8 +1441,16 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Bot settings exposed installation settings or lost membership");
     const auto settings = browser.get("/api/settings");
     check(settings.at("mode") == "full" && settings.at("canManagePolicy") == true &&
-          settings.at("rules").size() == 1 && !settings.contains("members") && settings.at("model").is_null(),
-          "Flock settings lost the installation policy or invented a model status");
+          settings.at("rules").size() == 1 && !settings.contains("members"),
+          "Flock settings lost the installation policy");
+    check(settings.at("model") == Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
+                                      {"demo",false},{"needsSignIn",true},{"unavailable",false},
+                                      {"signingIn",false},{"signInError",""},{"canSignIn",true}},
+          "Flock settings lost model status or exposed credential fields");
+    unavailable = true;
+    check(browser.get("/api/settings").at("model") == Json{{"unavailable",true}},
+          "A failed credential check exposed details or broke the rest of settings");
+    unavailable = false;
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
     check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&
@@ -1411,27 +1460,54 @@ void settingsEndpoints(const std::filesystem::path& path) {
     const auto rule = settings.at("rules").at(0);
     const Json removal{{"kind",rule.at("kind")},{"action",rule.at("action")},{"target",rule.at("target")},{"add",false}};
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    const auto beforeSharedRead = statusCalls.load();
     const auto sharedSettings = browser.get("/api/settings");
-    check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false,
-          "Shared member did not get the read-only installation mode");
+    check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false &&
+          sharedSettings.at("model").is_null() && statusCalls.load() == beforeSharedRead,
+          "Shared member lost read-only settings or gained access to model status");
     browser.post("/api/settings/mode",{{"mode","full"}},403);
     browser.post("/api/settings/rule",removal,403);
-    browser.post("/api/settings/model-login",{{"reconsent",false}},403);
-    browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl","https://t3.example/mcp"}},403);
-    browser.post("/api/settings/t3-disconnect",{{"environmentId","env-1"}},403);
+    browser.post("/api/settings/model-login",{{"reconsent",true}},403);
+    check(!reconsentRequested,"a non-root started model sign-in");
+    const Json addition{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",true}};
+    browser.post("/api/settings/rule",addition,403);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
-    browser.post("/api/settings/model-login",{{"reconsent",false}},409);
-    browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl","https://t3.example/mcp"}},409);
-    browser.post("/api/settings/t3-disconnect",{{"environmentId","env-1"}},409);
+    browser.post("/api/settings/model-login",{{"reconsent","true"}},400);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",false}},400);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",legacyEnvironment}},500);
+    const auto cleanup = browser.get("/api/settings");
+    check(cleanup.at("t3").is_null() && cleanup.at("t3CleanupPending") == true &&
+          !connections.authenticate(legacyBearer),"failed T3 cleanup retained access or could not be retried");
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",nullptr}});
+    check(browser.get("/api/settings").at("t3CleanupPending") == false,"retry did not clear T3 cleanup status");
+    browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl",false}},400);
+    browser.post("/api/settings/t3-connect",t3Target,202);
+    browser.post("/api/settings/t3-connect",t3Target,409);
+    check(browser.get("/api/settings").at("t3Setup").at("authorizationUrl") == "https://t3.example/authorize",
+          "T3 authorization link missing for its requester");
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-root"}});
+    check(browser.get("/api/settings").at("t3Setup").at("authorizationUrl") == "",
+          "T3 authorization link was exposed to a different administrator");
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    browser.post("/api/settings/model-login",{{"reconsent",true}},202);
+    check(reconsentRequested,"root could not request model reconsent");
+    browser.post("/api/settings/model-login",{{"reconsent",true}},409);
     browser.post("/api/settings/rule",removal);
     check(browser.get("/api/settings").at("rules").empty(),"Root could not remove the rule");
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target",""},{"add",true}},400);
-    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",true}});
+    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","  "},{"add",true}},400);
+    browser.post("/api/settings/rule",{{"kind","never"},{"action","bot.talk"},{"target","release"},{"add",true}},400);
+    check(browser.get("/api/settings").at("rules").empty(),"an invalid addition changed installation rules");
+    browser.post("/api/settings/rule",addition);
     const auto added = browser.get("/api/settings").at("rules");
     check(added.size() == 1 && added.at(0).at("kind") == "allow" && added.at(0).at("action") == "repository.pr" &&
           added.at(0).at("target") == "github.com/acme/app","Root could not add a rule from Flock settings");
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",false}});
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    check(browser.get("/api/settings").at("t3Setup").is_null(),"member could see administrator T3 setup status");
+    browser.post("/api/settings/t3-connect",t3Target,403);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",legacyEnvironment}},403);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",nullptr}},403);
     check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
     check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");

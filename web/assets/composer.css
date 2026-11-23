@@ -121,6 +121,22 @@
   font-size: var(--text-md); line-height: 1.5;
 }
 .composer textarea::placeholder { color: var(--text-3); white-space: nowrap; }
+/* The Bot's suggested next message sits where the placeholder would, with the key that takes it. */
+.composer-ghost {
+  grid-area: message; align-self: center; display: flex; align-items: center; gap: .45rem; min-width: 0;
+  padding-block: max(.35rem, calc((var(--composer-control-size) - 1.5em) / 2)); padding-inline: .15rem 0;
+  color: var(--text-3); line-height: 1.5; white-space: nowrap; pointer-events: none;
+  animation: ghost-in .2s ease-out both;
+}
+.composer-ghost[hidden] { display: none; }
+.composer-ghost span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.composer-ghost kbd {
+  flex: none; padding: 0 .3rem; border-radius: 5px; font: inherit; font-size: .78em; line-height: 1.45;
+  color: var(--text-3); background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+.composer textarea.has-ghost::placeholder { color: transparent; }
+@keyframes ghost-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .composer-ghost { animation: none; } }
 /* A placeholder can't take an ellipsis, so a long Bot name fades out before the send button. */
 .composer textarea:placeholder-shown { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }
 .composer textarea:focus-visible { outline: none; }

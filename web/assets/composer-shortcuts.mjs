@@ -9,10 +9,16 @@ function isSoftKeyboardEnter(event, browser) {
   return !!visualViewport && innerHeight - visualViewport.height * visualViewport.scale > 150;
 }
 
+// Safari can report the IME's confirmation as Enter with keyCode 229.
+const availableKey = (event) => !event.isComposing && event.keyCode !== 229 && !event.defaultPrevented;
+
+export function isComposerSuggestionKey(event, browser = window) {
+  if (!availableKey(event) || event.repeat || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
+  return event.key === 'Tab' || (event.key === 'Enter' && !isSoftKeyboardEnter(event, browser));
+}
+
 export function handleComposerEnter(event, send, browser = window) {
-  // Safari can report the IME's confirmation as Enter with keyCode 229.
-  if (event.isComposing || event.keyCode === 229 || event.defaultPrevented) return;
-  if (event.key !== 'Enter' || event.shiftKey || event.altKey || (event.ctrlKey && event.metaKey)) return;
+  if (!availableKey(event) || event.key !== 'Enter' || event.shiftKey || event.altKey || (event.ctrlKey && event.metaKey)) return;
   if (!event.ctrlKey && !event.metaKey && isSoftKeyboardEnter(event, browser)) return;
 
   event.preventDefault();
