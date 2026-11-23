@@ -85,7 +85,7 @@ const stateLabels = {
 const waitLabels = {
   user_question: ['Question from $BOT', '$BOT is waiting for your answer.', 'I’m waiting for your answer.'],
   budget: ['Approval for one more run', 'This request used all of its runs. Approving lets $BOT start one more run, which can use more model and T3 usage.',
-    'This request used all of its runs. If you approve, I’ll start one more run, which can use more model and T3 usage.'],
+    'This request used all of its runs. If you approve, I can start one more run, which can use more model and T3 usage.'],
   policy_approval: ['Approval needed', '$BOT is waiting for your approval before it continues.', 'I need your approval before I continue.'],
   model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
   model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
@@ -186,7 +186,7 @@ function linkToRun(run, label = 'Open in T3') {
   return link;
 }
 const openBotName = () => view?.data?.bot?.name ?? bots.find((bot) => bot.id === view?.id)?.name ?? 'The Bot';
-const withBotName = (text) => text?.replaceAll('$BOT', openBotName());
+const withBotName = (text) => text?.replaceAll('$BOT', openBotName);
 function waitLabel(reason) { return withBotName(waitLabels[reason]?.[0]) ?? 'Waiting for you'; }
 function waitText(wait, { spokenByBot = false } = {}) {
   const labels = waitLabels[wait.reason];
@@ -2656,7 +2656,8 @@ function renderDetail() {
     }
     return;
   }
-  if (changed('detail', detail, task)) replaceDetail(() => waitContent(view, task));
+  if (changed('detail', detail, task, waitLabel(task.wait.reason), waitText(task.wait)))
+    replaceDetail(() => waitContent(view, task));
   const busy = pendingWaits.has(task.wait.id);
   for (const control of elements['detail-body'].querySelectorAll('button, input')) {
     if (!control.closest('.question-choice-form')) control.disabled = busy;
