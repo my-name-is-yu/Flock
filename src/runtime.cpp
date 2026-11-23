@@ -378,6 +378,7 @@ ORDER BY id)SQL");
         data["truncated"] = !missing && (evidence.truncated || report.size() < evidence.report.size());
         data["detail"] = bounded(evidence.detail,2048);
         data["itemId"] = missing ? std::string{} : evidence.itemId;
+        if (!evidence.sessionCreatedAt.empty()) data["sessionCreatedAt"] = evidence.sessionCreatedAt;
         data.erase("evidenceStatus");
         if (missing) data["evidenceStatus"] = "report_unavailable";
         if (evidence.availability == Availability::DiagnosticUnavailable) data["evidenceStatus"] = "diagnostic_unavailable";
@@ -449,7 +450,8 @@ ORDER BY id)SQL");
                     {"resultRunId",observed.resultRunId.empty() ? run.runId : observed.resultRunId},
                     {"status",observed.status},{"environmentId",task["environmentId"]},
                     {"revisionId",task.at("lastRun").at("revisionId")}};
-                setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,observed.detail,observed.truncated});
+                setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,observed.detail,
+                    observed.truncated,observed.sessionCreatedAt});
                 db.exec("INSERT OR IGNORE INTO t3_events VALUES(?,?,'result',?)",{task["environmentId"],run.threadId,run.runId});
                 if (sqlite3_changes(db.db)) {
                     if (observed.evidence == RunEvidence::Availability::ReportUnavailable && !observed.resultRunId.empty() &&
