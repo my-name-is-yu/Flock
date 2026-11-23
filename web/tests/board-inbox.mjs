@@ -281,7 +281,7 @@ function liveFixture() {
   const wait = {id: 2, reason: 'policy_approval', text: approval.requestTitle};
   const stopWait = { id: 9, reason: 'model_failure', text: 'The last attempt failed.' };
   const stopTask = { id: 3, currentRevision: 5, generation: 7, request: 'Check the release', wait: stopWait };
-  const fixture = window.inboxFixture = { reads: 0, approvalReady: false, updated: false, failed: false,
+  const fixture = window.inboxFixture = { bot, reads: 0, approvalReady: false, updated: false, failed: false,
     showStop: false, canDecide: true, stopRequests: [] };
   window.EventSource = class extends EventTarget {
     constructor(path) {
@@ -367,9 +367,15 @@ async function exerciseLiveRetry() {
   const confirmStop = () => document.querySelector('#detail .wait-stop-confirm .danger');
   const openStop = () => document.querySelector('#event-6 .question-actions button');
   fixture.showStop = true;
+  fixture.bot.name = 'Release $$ $&';
   refreshView();
   await waitFor(openStop, 'The cancellable wait did not arrive');
   openStop().click();
+  const detailTitle = document.getElementById('detail-title');
+  if (detailTitle.textContent !== 'Release $$ $& got stuck') throw new Error('The Bot name was interpreted as a replacement pattern');
+  fixture.bot.name = 'Recovery';
+  refreshView();
+  await waitFor(() => detailTitle.textContent === 'Recovery got stuck', 'An open wait dialog kept the old Bot name');
   stop().click();
   const keep = document.querySelector('#detail .wait-stop-confirm .quiet');
   if (document.activeElement !== keep || fixture.stopRequests.length)
@@ -403,7 +409,7 @@ async function exerciseLiveRetry() {
 const assets = new URL('../assets/', import.meta.url);
 const read = (name) => readFile(new URL(name, assets), 'utf8');
 const index = await read('index.html');
-const withScript = (html, script) => html.replace('<script type="module" src="/app.js"></script>', script);
+const withScript = (html, script) => html.replace('<script type="module" src="/app.js"></script>', () => script);
 const boardPage = async () => withScript(index.replace(/<link\b[^>]*>/g, ''), `
   <style>${(await Promise.all(['style.css', 'sidebar.css', 'conversation.css', 'composer.css', 'dialog.css',
     'board-inbox.css'].map(read))).join('')}</style>
