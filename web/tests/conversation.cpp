@@ -906,13 +906,15 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const std::string formattedSemanticText = "A**x**B";
     const std::string adjacentSemanticText = "[A](https://example.com)B";
     const std::string encodedUrlText = "[credential](https://example.com/A%26B)";
+    const std::string doubleEncodedUrlText = "[credential](https://example.com/?token=A%2526B)";
     const std::string decodedUrlText = "[credential](https://example.com/?q=A&amp;B)";
     const std::string formUrlText = "[credential](https://example.com/?q=A+B)";
-    const std::string safeRichText = "**safe** [docs](https://example.com)";
+    const std::string safeRichText = "**safe** [docs](https://example.com/path%252Fpart)";
     const auto rawSemanticMessage = send("staging-triage","semantic-raw",rawSemanticText);
     const auto formattedSemanticMessage = send("staging-triage","semantic-formatted",formattedSemanticText);
     const auto adjacentSemanticMessage = send("staging-triage","semantic-adjacent",adjacentSemanticText);
     const auto encodedUrlMessage = send("staging-triage","semantic-url",encodedUrlText);
+    const auto doubleEncodedUrlMessage = send("staging-triage","semantic-double-encoded-url",doubleEncodedUrlText);
     const auto decodedUrlMessage = send("staging-triage","semantic-decoded-url",decodedUrlText);
     const auto formUrlMessage = send("staging-triage","semantic-form-url",formUrlText);
     for (int i = 0; i < 40; ++i) send("staging-triage","filler-" + std::to_string(i),"Later update");
@@ -972,7 +974,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
         });
         check(event != events.end() && event->at("data").at("text") == safeRichText &&
               event->at("data").at("textHtml") ==
-                  "<p><strong>safe</strong> <a href=\"https://example.com\">docs</a></p>",
+                  "<p><strong>safe</strong> <a href=\"https://example.com/path%252Fpart\">docs</a></p>",
               "ordinary safe Markdown lost rich rendering");
     };
     const auto verifyRecentSemanticMessages = [&](const Json& events) {
@@ -984,6 +986,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
         verifyProtectedHtml(events,formattedSemanticMessage,formattedSemanticText);
         verifyProtectedHtml(events,adjacentSemanticMessage,adjacentSemanticText);
         verifyProtectedHtml(events,encodedUrlMessage,encodedUrlText);
+        verifyProtectedHtml(events,doubleEncodedUrlMessage,doubleEncodedUrlText);
         verifyProtectedHtml(events,decodedUrlMessage,decodedUrlText);
         verifyProtectedHtml(events,formUrlMessage,formUrlText);
     };
@@ -1016,6 +1019,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     requireStored(formattedSemanticMessage,formattedSemanticText);
     requireStored(adjacentSemanticMessage,adjacentSemanticText);
     requireStored(encodedUrlMessage,encodedUrlText);
+    requireStored(doubleEncodedUrlMessage,doubleEncodedUrlText);
     requireStored(decodedUrlMessage,decodedUrlText);
     requireStored(formUrlMessage,formUrlText);
     const auto foreign = browser.get(history + "&before=" + std::to_string(otherBotMessage + 1));

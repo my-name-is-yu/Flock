@@ -64,7 +64,7 @@ std::optional<std::string> percentDecode(std::string_view source) {
     return result;
 }
 
-std::optional<std::string> formDecodeQuery(std::string_view source) {
+std::optional<std::string> queryFormVariant(std::string_view source) {
     const auto fragment = source.find('#');
     const auto query = source.find('?');
     if (query == source.npos || (fragment != source.npos && fragment < query)) return std::nullopt;
@@ -77,23 +77,24 @@ std::optional<std::string> formDecodeQuery(std::string_view source) {
             changed = true;
         }
     }
-    return changed ? percentDecode(form) : std::nullopt;
+    if (!changed) return std::nullopt;
+    return form;
 }
 
 bool sensitiveUrl(std::string_view source, const SensitiveText& sensitive) {
     if (source.empty()) return false;
-    if (sensitive(source)) return true;
-    const auto decoded = percentDecode(source);
-    if (!decoded || sensitive(*decoded)) return true;
-    const auto fragment = source.find('#');
-    const auto query = source.find('?');
-    const auto end = fragment == source.npos ? source.size() : fragment;
-    if (query != source.npos && (fragment == source.npos || query < fragment) &&
-        source.substr(query + 1,end - query - 1).find('+') != source.npos) {
-        const auto formDecoded = formDecodeQuery(source);
-        if (!formDecoded || sensitive(*formDecoded)) return true;
+    constexpr unsigned maxPercentDecodeLayers = 4;
+    std::string current(source);
+    for (unsigned layer = 0; layer <= maxPercentDecodeLayers; ++layer) {
+        if (sensitive(current)) return true;
+        if (const auto form = queryFormVariant(current); form && sensitive(*form)) return true;
+        const auto decoded = percentDecode(current);
+        if (!decoded) return true;
+        if (*decoded == current) return false;
+        if (layer == maxPercentDecodeLayers) return true;
+        current = *decoded;
     }
-    return false;
+    return true;
 }
 
 bool safeUrl(std::string_view source) {

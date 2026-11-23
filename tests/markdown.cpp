@@ -165,6 +165,7 @@ void protectedHtml() {
     const auto adjacent = [](std::string_view text) { return text.find("AB") != text.npos; };
     const auto formatted = [](std::string_view text) { return text.find("AxB") != text.npos; };
     const auto space = [](std::string_view text) { return text.find("A B") != text.npos; };
+    const auto literalPlus = [](std::string_view text) { return text.find("A+B") != text.npos; };
     const auto lines = [](std::string_view text) { return text == "A\nB"; };
     const auto redacted = "<p>[redacted]</p>";
 
@@ -187,6 +188,27 @@ void protectedHtml() {
           markdown::toHtml("[credential](https://example.com/?q=A&amp;B)",ampersand) == redacted &&
           markdown::toHtml("[credential](https://example.com/?q=A+B)",space) == redacted,
           "encoded link credentials bypassed URL-sensitive detection");
+    const auto nestedUrl = [](std::string credential, unsigned layers) {
+        for (unsigned layer = 0; layer < layers; ++layer) {
+            std::string encoded;
+            for (const char ch : credential) {
+                if (ch == '%') encoded += "%25";
+                else if (ch == '&') encoded += "%26";
+                else if (ch == '/') encoded += "%2F";
+                else encoded += ch;
+            }
+            credential = encoded;
+        }
+        return "[credential](https://example.com/?token=" + credential + ")";
+    };
+    check(markdown::toHtml("[credential](https://example.com/?token=A%2526B)",ampersand) == redacted &&
+          markdown::toHtml(nestedUrl("A&B",4),ampersand) == redacted &&
+          markdown::toHtml(nestedUrl("safe/value",5),ampersand) == redacted,
+          "nested URL percent encoding was missed or did not fail closed at the decoding bound");
+    check(markdown::toHtml("[credential](https://example.com/?token=A+B)",literalPlus) == redacted &&
+          markdown::toHtml("[credential](https://example.com/?token=A%2BB)",literalPlus) == redacted &&
+          markdown::toHtml("[credential](https://example.com/?token=A%2BB)",space) == redacted,
+          "query-form plus interpretation lost literal-plus credentials or skipped a decoded stage");
 
     const auto imageFallback = [](std::string_view text) {
         return text == "diagram (https://images.example/diagram.png)";
@@ -207,6 +229,9 @@ void protectedHtml() {
     check(markdown::toHtml("**safe** [docs](https://example.com)",ampersand) ==
               "<p><strong>safe</strong> <a href=\"https://example.com\">docs</a></p>",
           "safe Markdown lost rich HTML when no protected content was present");
+    check(markdown::toHtml("[docs](https://example.com/safe%252Fpath)",ampersand) ==
+              "<p><a href=\"https://example.com/safe%252Fpath\">docs</a></p>",
+          "ordinary safe percent-encoded URL lost rich HTML");
     const auto generatedTag = [](std::string_view text) { return text.find("<strong>") != text.npos; };
     const auto safeLinkSuffix = [](std::string_view text) {
         return text.find("docs (https://example.com)") != text.npos;
