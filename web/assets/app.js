@@ -1,5 +1,6 @@
 import { handleComposerEnter } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
+import { actionLabel, approvalSummary } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
@@ -82,6 +83,7 @@ const stateLabels = {
 const waitLabels = {
   user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
   budget: ['Approval for one more run', 'This request used all of its runs. Approving lets the Bot start one more run, which can use more model and T3 usage.'],
+  policy_approval: ['Approval needed', 'The Bot is waiting for approval before it can continue.'],
   model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
   model_failure: ['The Bot got stuck', 'The Bot could not choose its next step after several attempts. Try again to continue.'],
   t3_input: ['Action in T3', 'Open the session in T3 to approve or answer.'],
@@ -180,7 +182,10 @@ function linkToRun(run, label = 'Open in T3') {
   return link;
 }
 function waitLabel(reason) { return waitLabels[reason]?.[0] ?? 'Waiting for you'; }
-function waitText(wait) { return wait.text || waitLabels[wait.reason]?.[1] || 'Refresh the pending request.'; }
+function waitText(wait) {
+  if (wait.reason === 'policy_approval') return waitLabels.policy_approval[1];
+  return wait.text || waitLabels[wait.reason]?.[1] || 'Refresh the pending request.';
+}
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
   if (signatures.get(key) === signature) return false;
@@ -1009,7 +1014,7 @@ const decisionKindLabels = {
   conversation_model_budget: 'Approve another model call',
   unknown_delivery: 'Message to T3 unconfirmed',
   protected_input: 'Secret needed',
-  policy_approval: 'Approval',
+  policy_approval: 'Approval needed',
 };
 let activityBotId = null;
 let activitySeen = false;
@@ -1028,9 +1033,11 @@ function renderActivity() {
     elements['wait-list'].setAttribute('aria-busy', loading);
     const rows = pending.map((item) => {
       const status = decisionKindLabels[item.itemKind] ?? 'Needs you';
-      const row = activityRow('button', 'wait-row', item.requestTitle || item.request, status, 'waiting');
+      const title = item.itemKind === 'policy_approval' && item.action
+        ? [actionLabel(item.action), item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
+      const row = activityRow('button', 'wait-row', title, status, 'waiting');
       row.type = 'button';
-      row.title = item.prompt || item.requestTitle;
+      row.title = item.itemKind === 'policy_approval' ? approvalSummary(item.prompt) || title : item.prompt || title;
       row.addEventListener('click', () => {
         openNavigation(false);
         decisions.openItem(item, row);
@@ -1412,7 +1419,7 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
-function eventCard(event, context, place, report) {
+function eventCard(event, context, place, report, approval) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
@@ -1468,9 +1475,16 @@ function eventCard(event, context, place, report) {
     if (context.canDecide && pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
     else if (pendingWait) {
       const open = node('div', 'event-actions question-actions');
-      const label = pendingActionLabels[pendingWait.wait.reason] ?? 'Review…';
-      open.append(button(label, 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
-      extras.push(open);
+      if (pendingWait.wait.reason === 'policy_approval') {
+        if (approval) {
+          const control = button('Review approval…', 'button', () => decisions.openItem(approval, control));
+          open.append(control);
+        }
+      } else {
+        const label = pendingActionLabels[pendingWait.wait.reason] ?? 'Review…';
+        open.append(button(label, 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
+      }
+      if (open.childElementCount) extras.push(open);
     } else if (!context.readOnly || context.closed.has(data.id)) {
       const resolution = node('p', 'msg-resolution');
       resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? 'Request closed'));
@@ -1958,16 +1972,18 @@ function conversationRows(data, events, keep, source) {
     const place = messagePlacement(previous, event, shown[index + 1]?.event);
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
+    const approval = wait?.wait.reason === 'policy_approval'
+      ? approvals.find(item => item.taskId === wait.id && item.waitId === wait.wait.id) : null;
     const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
-        place.groupStart, place.taskStart, place.afterQuestion, wait,
+        place.groupStart, place.taskStart, place.afterQuestion, wait, approval,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
-      () => eventCard(event, timeline, place, report));
+      () => eventCard(event, timeline, place, report, approval));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
     row.classList.toggle('group-continues', !place.groupEnd);
     row.classList.toggle('conversation-source-target', event.id === source?.id);

@@ -270,7 +270,8 @@ FROM policy_approvals WHERE bot=? AND status IN ('pending','expired') ORDER BY i
         const auto label = rows.string(1) + " · " + rows.string(2);
         Json item{{"botId",bot},{"itemKind","policy_approval"},{"itemId",rows.number(0)},{"waitId",rows.number(14)},
             {"taskId",rows.number(6)},{"targetRevision",rows.number(7)},{"targetGeneration",rows.number(15)},
-            {"botName",bot},{"requestTitle",label},{"prompt",rows.string(3)},{"status",rows.string(11)},
+            {"botName",bot},{"requestTitle",label},{"action",rows.string(1)},{"target",rows.string(2)},
+            {"prompt",rows.string(3)},{"status",rows.string(11)},
             {"canDecide",canDecide},{"createdAt",rows.number(9)},{"expiresAt",rows.number(10)}};
         if (!canDecide && !Policy(*this).allows(actor,Action::bot_view,bot)) continue;
         if (rows.number(5)) {
