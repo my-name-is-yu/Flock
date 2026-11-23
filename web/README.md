@@ -1,6 +1,6 @@
 # Flock Web
 
-The executable serves the embedded UI on its IPv4 loopback listener. The Web UI and CLI share the same SQLite Store. The HTTP layer projects explicit display fields from Bot descriptors and Store rows. Local POSTs require the server's exact origin, JSON and the Web UI request header. Browser text is rendered as text, while Session links use T3's environment-scoped hosted route.
+The executable serves the embedded UI on its IPv4 loopback listener. The Web UI and CLI share the same SQLite Store. The HTTP layer projects explicit display fields from Bot descriptors and Store rows. Local POSTs require the server's exact origin, JSON and the Web UI request header. Conversation messages remain text, while Bot replies use server-rendered safe HTML and Session links use T3's environment-scoped hosted route.
 
 The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. For the same person and Bot, retrying the same payload with the same `clientMessageId` returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Select a task question's choice and press **Send answer** to answer directly through `POST /api/operations`. Written replies to questions go through the Bot.
 
@@ -11,6 +11,7 @@ The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `ses
 ## Dependencies
 
 - [cpp-httplib v0.67.0](https://github.com/yhirose/cpp-httplib/tree/v0.67.0) is pinned by release and SHA-256 in CMake.
+- [cmark 0.31.1](https://github.com/commonmark/cmark/tree/0.31.1) is pinned by release and SHA-256 in CMake for shared CommonMark rendering.
 - [Open Bot Avatar 0.3.0](https://www.npmjs.com/package/open-bot-avatar/v/0.3.0) is vendored as the runtime JavaScript files from the npm tarball under `assets/vendor/open-bot-avatar`, with its MIT license. Tarball integrity is `sha512-3P0o8eiClHHiLr7lIFZE/WxUtqHLjVb0xQ0PqYzA48XG/oQlWyeIdcY0egK6H8AgFuoY1aKVhc8QKSaj4z5ZOw==`. The UI uses the public `mountAvatar`, `getExample`, and `validateAvatar` APIs with static list avatars and system reduced-motion support in the conversation header.
 - [T3 Code v0.1.11 thread links](https://github.com/pingdotgg/t3code/blob/v0.1.11/packages/shared/src/threadLinks.ts) define the environment and Thread segments of the browser handoff.
 
@@ -21,6 +22,23 @@ has a unique `authorization` string (the complete Basic or Bearer authorization
 header), a `person` ID, and an optional boolean `adminRoot`. Keep one root
 identity for installation administration. Restart the listener after changing this file.
 Browsers can sign in through the Basic challenge.
+
+## Channel reply formatting
+
+The channel worker keeps reply Markdown unchanged in the conversation journal and
+delivery outbox. Immediately before `reply` delivery it sends a derived payload
+copy: Slack receives mrkdwn and iMessage receives plain text with link
+destinations. Other operations and payload fields, including suggestions,
+attachments, and approval state, are unchanged.
+
+The local bridge receives the derived `payload.text` and `origin` on `/deliver`.
+For Slack replies, `payload.deliveryMetadata` is
+`{"mrkdwn":true,"parse":"none","link_names":false,"disableAutoMentions":true}`.
+The provider sender must honor these settings, must not enable automatic
+mentions or link-name expansion, and must send the supplied text rather than
+reparse canonical Markdown. Text-like Markdown content is escaped before it
+reaches Slack. The provider sender is external to this repository; an adapter
+that ignores this contract can re-enable provider-specific notifications.
 
 Queued and resumed shared Web messages use the sender's current identity and
 Bot access. If a person has multiple credentials, their queued messages have

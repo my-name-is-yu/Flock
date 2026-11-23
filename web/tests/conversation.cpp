@@ -104,6 +104,7 @@ struct FixedModel : Model {
                          "追加・削除・更新を分けて数えられます。そのうち金額が変わった更新だけを人が確かめる手順です。");
         }
         if (text == missingBudgetQuestion) return reply("見積もりに必要な明細の件数を教えてください。");
+        if (text == "markdown fixture") return reply("**完了**：[結果を見る](https://example.com/result)");
         if (text == budgetDetail) {
             check(input.history.dump().find("見積もりに必要な明細の件数") != std::string::npos,
                   "The follow-up did not see the Bot's earlier question");
@@ -444,6 +445,20 @@ void conversationEntry(const std::filesystem::path& path) {
           sessionTasks.at(0).at("sessions").at(0).at("runId") == reportRun.at("runId") &&
           !sessionTasks.at(0).contains("config"),"the Session list omitted the comparison Run or exposed config");
     const auto runs = store.task(taskId).at("runs");
+
+    const auto markdownReceipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","markdown-reply"},
+        {"text","markdown fixture"}},201);
+    tick(runtime,3);
+    const auto markdownPage = browser.get("/api/view?bot=release");
+    const auto markdownReply = conversationReply(markdownPage,markdownReceipt.at("messageId"));
+    check(markdownReply.at("text") == "**完了**：[結果を見る](https://example.com/result)" &&
+          markdownReply.at("textHtml") == "<p><strong>完了</strong>：<a href=\"https://example.com/result\">結果を見る</a></p>",
+          "Web projection changed canonical reply text or omitted safe rendered HTML");
+    bool rawMessageUntouched = false;
+    for (const auto& event : markdownPage.at("events"))
+        if (event["kind"] == "conversation_message" && event["data"]["messageId"] == markdownReceipt.at("messageId"))
+            rawMessageUntouched = event["data"]["text"] == "markdown fixture" && !event["data"].contains("textHtml");
+    check(rawMessageUntouched,"Web projection changed a user message or exposed rendered HTML for it");
 
     const auto summary = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","options-summary"},
         {"text","2案目を要約して"}},201);

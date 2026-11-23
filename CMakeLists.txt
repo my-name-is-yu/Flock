@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(flock VERSION 0.1.0 LANGUAGES CXX)
+project(flock VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
@@ -29,6 +29,16 @@ function(flock_fetch_cctz)
 endfunction()
 flock_fetch_cctz()
 
+function(flock_fetch_cmark)
+  set(BUILD_TESTING OFF)
+  set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+  FetchContent_Declare(flock_cmark
+    URL https://codeload.github.com/commonmark/cmark/tar.gz/refs/tags/0.31.1
+    URL_HASH SHA256=3da93db5469c30588cfeb283d9d62edfc6ded9eb0edc10a4f5bbfb7d722ea802)
+  FetchContent_MakeAvailable(flock_cmark)
+endfunction()
+flock_fetch_cmark()
+
 add_executable(flock_workspace_supervisor src/workspace_supervisor.cpp)
 target_compile_options(flock_workspace_supervisor PRIVATE -Wall -Wextra -Wpedantic)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -39,6 +49,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
+                       src/markdown.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/policy.cpp src/policy_approval.cpp src/bot_settings_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/skill_export.cpp src/root_delivery.cpp
                        src/session_handoff.cpp src/board_inbox.cpp
@@ -53,7 +64,7 @@ else()
   target_link_libraries(flock_core PUBLIC SQLite::SQLite3)
 endif()
 target_sources(flock_core PRIVATE src/session_question.cpp src/session_settings.cpp)
-target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl PNG::PNG JPEG::JPEG OpenSSL::Crypto)
+target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl PNG::PNG JPEG::JPEG OpenSSL::Crypto cmark)
 add_dependencies(flock_core flock_workspace_supervisor)
 target_compile_definitions(flock_core PRIVATE FLOCK_WORKSPACE_SUPERVISOR="$<TARGET_FILE:flock_workspace_supervisor>")
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -99,6 +110,9 @@ if(BUILD_TESTING)
   add_executable(flock_conversation_store tests/conversation_store.cpp)
   target_link_libraries(flock_conversation_store PRIVATE flock_core)
   add_test(NAME flock_conversation_store COMMAND flock_conversation_store)
+  add_executable(flock_markdown_tests tests/markdown.cpp)
+  target_link_libraries(flock_markdown_tests PRIVATE flock_core)
+  add_test(NAME flock_markdown COMMAND flock_markdown_tests)
   add_executable(flock_conversation_runtime tests/conversation_runtime.cpp)
   target_link_libraries(flock_conversation_runtime PRIVATE flock_core)
   add_test(NAME flock_conversation_runtime COMMAND flock_conversation_runtime)

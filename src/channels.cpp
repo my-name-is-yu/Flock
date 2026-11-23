@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
 #include "flock/base64.hpp"
+#include "flock/markdown.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -657,8 +658,21 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
         }
         ChannelDelivery outcome;
         try {
-            outcome = state == "pending" ? transport->send(key,origin,operation,payload)
-                                          : transport->reconcile(key,origin);
+            if (state == "pending") {
+                auto deliveryPayload = payload;
+                if (operation == "reply" && deliveryPayload.contains("text") && deliveryPayload["text"].is_string()) {
+                    const auto source = deliveryPayload["text"].get<std::string>();
+                    if (origin.kind == ChannelKind::slack) {
+                        deliveryPayload["text"] = markdown::toSlack(source);
+                        deliveryPayload["deliveryMetadata"] = {
+                            {"mrkdwn",true},{"parse","none"},{"link_names",false},{"disableAutoMentions",true}
+                        };
+                    } else if (origin.kind == ChannelKind::imessage) {
+                        deliveryPayload["text"] = markdown::toPlain(source);
+                    }
+                }
+                outcome = transport->send(key,origin,operation,deliveryPayload);
+            } else outcome = transport->reconcile(key,origin);
         } catch (const std::exception&) {}
         if (outcome.state == ChannelDelivery::State::unknown) continue;
         std::lock_guard lock(mutex);

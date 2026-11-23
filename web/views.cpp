@@ -1,4 +1,5 @@
 #include "views.hpp"
+#include "flock/markdown.hpp"
 
 #include <charconv>
 #include <iterator>
@@ -179,6 +180,7 @@ Json eventView(const Json& event) {
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
+        if (kind == "conversation_reply") details["textHtml"] = markdown::toHtml(field(data,"text"));
         if (kind == "conversation_message") copyFields(details,data,{"imageAttachmentCount"});
         if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
             copyFields(details["channel"] = Json::object(),*channel,{"channelKind","fromViewer"});

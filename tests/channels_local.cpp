@@ -1,11 +1,14 @@
 #include "flock/channels.hpp"
 #include "flock/board_inbox.hpp"
 
+#include <sqlite3.h>
+
 #include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <thread>
 
 using namespace flockv0;
@@ -87,11 +90,19 @@ struct RecordedTransport final : ChannelTransport {
     std::map<std::string,std::string> sent;
     std::vector<Json> effects;
     int reconciliations = 0;
+    int notSentSlackReplies = 0;
     bool loseNextSlackReply = true;
     ChannelDelivery send(std::string_view key, const ChannelOrigin& origin, std::string_view action, const Json& payload) override {
+        if (notSentSlackReplies > 0 && origin.kind == ChannelKind::slack && action == "reply") {
+            --notSentSlackReplies;
+            effects.push_back({{"origin",origin.json()},{"action",action},{"payload",payload},
+                               {"externalMessageId",""},{"idempotencyKey",key}});
+            return {ChannelDelivery::State::notSent,{}};
+        }
         const auto [item,inserted] = sent.emplace(key,"out-"+std::to_string(sent.size()+1));
         check(inserted,"Duplicate outbound call");
-        effects.push_back({{"origin",origin.json()},{"action",action},{"payload",payload},{"externalMessageId",item->second}});
+        effects.push_back({{"origin",origin.json()},{"action",action},{"payload",payload},
+                           {"externalMessageId",item->second},{"idempotencyKey",key}});
         if (loseNextSlackReply && origin.kind == ChannelKind::slack && action == "reply") {
             loseNextSlackReply = false;
             return {};
@@ -315,6 +326,96 @@ void channels(const std::filesystem::path& database) {
     store.policy().changeNeverRule(root,Action::channel_use,channelPolicyTarget({slack,"workspace","",""}),true);
     check(!store.artifact(artifactId),"Public preview survived source channel revocation");
     check(ChannelOrigin{slack,"a:b","c","d"}.key() != ChannelOrigin{slack,"a","b:c","d"}.key(),"Dedupe delimiters collide");
+}
+
+std::vector<Json> persistedReplyPayloads(const std::filesystem::path& database) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open_v2(database.c_str(),&raw,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,"Could not open the channel outbox");
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_stmt* statementRaw = nullptr;
+    check(sqlite3_prepare_v2(db.get(),"SELECT payload FROM channel_deliveries WHERE operation='reply' ORDER BY rowid",
+                             -1,&statementRaw,nullptr) == SQLITE_OK,"Could not read channel reply outbox");
+    std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(statementRaw,sqlite3_finalize);
+    std::vector<Json> result;
+    while (sqlite3_step(statement.get()) == SQLITE_ROW) {
+        const auto* bytes = reinterpret_cast<const char*>(sqlite3_column_text(statement.get(),0));
+        const auto size = sqlite3_column_bytes(statement.get(),0);
+        result.push_back(Json::parse(std::string(bytes,static_cast<std::size_t>(size))));
+    }
+    return result;
+}
+
+void markdownDelivery(const std::filesystem::path& database) {
+    const std::string source = "**完了**：[結果を見る](https://example.com/result)\n\nNotify <!here> <@U123> @channel `**literal** <tag>`";
+    const std::string slackText = "*完了*：<https://example.com/result|結果を見る>\n\nNotify &lt;!here&gt; &lt;@U123&gt; @channel `**literal** &lt;tag&gt;`";
+    const std::string imessageText = "完了：結果を見る（https://example.com/result）\n\nNotify <!here> <@U123> @channel **literal** <tag>";
+    Script model;
+    model.decideNext = [&](const ModelInput&) { return reply(source); };
+    SessionAdapter t3;
+    auto transport = std::make_shared<RecordedTransport>();
+    transport->loseNextSlackReply = false;
+    transport->notSentSlackReplies = 1;
+    const auto notes = [](auto) { return std::string{}; };
+    {
+        Store store(database);
+        connect(store,transport);
+        shareBot(store,"release");
+        store.policy().setMode(root,"full");
+        store.receiveChannel(ChannelKind::slack,"fixture-auth",event("slack-markdown","slack-markdown","hello"),intake);
+        store.receiveChannel(ChannelKind::imessage,"fixture-auth",event("imessage-markdown","imessage-markdown","hello"),intake);
+        Runtime runtime(store,model,t3,notes);
+        runtime.runConversations();
+        check(transport->effects.size() == 2,"Channel replies were not both attempted");
+        const auto slack = std::ranges::find_if(transport->effects,[](const Json& item) {
+            return item["origin"]["threadRef"] == "slack-markdown";
+        });
+        const auto imessage = std::ranges::find_if(transport->effects,[](const Json& item) {
+            return item["origin"]["threadRef"] == "imessage-markdown";
+        });
+        check(slack != transport->effects.end() && imessage != transport->effects.end(),"Channel-specific replies were missing");
+        check(slack->at("payload").at("text") == slackText &&
+              slack->at("payload").at("deliveryMetadata") == Json({{"mrkdwn",true},{"parse","none"},
+                  {"link_names",false},{"disableAutoMentions",true}}),
+              "Slack reply did not escape notification text or disable automatic mentions");
+        check(imessage->at("payload").at("text") == imessageText && !imessage->at("payload").contains("deliveryMetadata"),
+              "iMessage reply did not preserve plain text and link destinations");
+        check(slack->at("payload").at("suggestions") == Json::array({"Start here","Show me more"}) &&
+              imessage->at("payload").at("suggestions") == Json::array({"Start here","Show me more"}),
+              "Channel formatting changed reply suggestions");
+        const auto conversation = store.conversation("release");
+        check(std::ranges::any_of(conversation,[&](const Json& item) {
+            return item["kind"] == "conversation_reply" && item["data"]["text"] == source;
+        }),"Conversation journal did not retain canonical Markdown");
+    }
+
+    const auto outbox = persistedReplyPayloads(database);
+    check(outbox.size() == 2 && std::ranges::all_of(outbox,[&](const Json& item) {
+        return item["text"] == source && item["suggestions"] == Json::array({"Start here","Show me more"});
+    }),"Channel outbox persisted rendered text instead of canonical Markdown");
+    const auto firstSlack = std::ranges::find_if(transport->effects,[](const Json& item) {
+        return item["origin"]["threadRef"] == "slack-markdown";
+    });
+    check(firstSlack != transport->effects.end() && firstSlack->at("externalMessageId") == "",
+          "The retry fixture did not record a not-sent Slack attempt");
+    const auto slackKey = firstSlack->at("idempotencyKey");
+
+    std::this_thread::sleep_for(std::chrono::seconds(6));
+    {
+        Store reopened(database);
+        connect(reopened,transport);
+        Runtime runtime(reopened,model,t3,notes);
+        runtime.runConversations();
+        check(transport->effects.size() == 3,"The pending Slack reply was not retried after reload");
+        const auto retry = transport->effects.back();
+        check(retry["origin"]["threadRef"] == "slack-markdown" &&
+              retry["payload"]["text"] == slackText && retry["payload"]["deliveryMetadata"]["parse"] == "none" &&
+              retry["payload"]["suggestions"] == Json::array({"Start here","Show me more"}) &&
+              retry["idempotencyKey"] == slackKey,
+              "Reloaded retry changed Slack output, metadata, suggestions, or idempotency key");
+        check(std::ranges::any_of(reopened.conversation("release"),[&](const Json& item) {
+            return item["kind"] == "conversation_reply" && item["data"]["text"] == source;
+        }),"Reloaded conversation projection changed canonical Markdown");
+    }
 }
 
 void taskUpdates(const std::filesystem::path& database) {
@@ -767,6 +868,7 @@ int main() {
         const auto path = temp.path / "notes";
         std::ofstream(path) << "fixture text";
         channels(temp.path / "channels.db");
+        markdownDelivery(temp.path / "markdown-delivery.db");
         taskUpdates(temp.path / "task-updates.db");
         workflowContextIsWebScoped(temp.path / "workflow-context-scope.db");
         sessionEvidence(temp.path / "session-evidence.db");
