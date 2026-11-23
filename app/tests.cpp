@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <set>
 #include <sstream>
 
@@ -126,9 +127,30 @@ void notesAndRoutingOnRestart() {
 
 Json requestContext(const Json& request) {
     auto context = Json::object();
+    std::map<std::string,Json> calls;
     for (const auto& message : request.at("input")) {
-        if (message.at("role") != "user") continue;
+        const auto type = message.value("type","");
+        if (type == "function_call") {
+            const auto added = calls.emplace(message.at("call_id").get<std::string>(),
+                Json{{"tool",message.at("name")},{"args",Json::parse(message.at("arguments").get<std::string>())}}).second;
+            check(added && message.at("namespace") == "flock","Invalid or duplicate replayed function call");
+            continue;
+        }
+        if (type == "function_call_output") {
+            auto call = calls.extract(message.at("call_id").get<std::string>());
+            check(!call.empty(),"Replayed function result is missing its call");
+            auto entry = Json::parse(message.at("output").get<std::string>());
+            entry.update(call.mapped());
+            context.at("event").at("turn").push_back(std::move(entry));
+            continue;
+        }
+        const auto role = message.value("role","");
+        if (role != "user" && role != "assistant") continue;
         auto block = Json::parse(message.at("content").at(0).at("text").get_ref<const std::string&>());
+        if (block.contains("historyEntry")) {
+            context.at("history").push_back(std::move(block.at("historyEntry")));
+            continue;
+        }
         if (block.contains("event") && block.at("event").contains("turn") &&
             context.contains("event") && context.at("event").contains("turn")) {
             for (auto& entry : block.at("event").at("turn"))
@@ -137,6 +159,7 @@ Json requestContext(const Json& request) {
         }
         context.update(block,true);
     }
+    check(calls.empty(),"A replayed function call is missing its result");
     return context;
 }
 
@@ -517,18 +540,36 @@ void responseContract() {
           "Changing invocation data preceded reusable conversation context");
     auto scopedInput = laterInput;
     scopedInput.conversationScope = "fixture scope";
-    scopedInput.event.at("turn").at(0)["step"] = 1;
+    scopedInput.history = Json::array({
+        {{"kind","conversation_message"},{"role","user"},{"messageId",5},{"text","Please gather evidence."}},
+        {{"kind","conversation_reply"},{"role","bot"},{"messageId",6},{"text","I will gather evidence."}}
+    });
+    scopedInput.event["messageId"] = 7;
+    scopedInput.event["turn"] = Json::array({{
+        {"tool","find_tasks"},{"args",{{"query","first"}}},{"step",1},{"callIndex",1},
+        {"result",{{"ok",true},{"text","Tool evidence"}}}
+    }});
     const auto scoped = responseRequest(scopedInput);
     scopedInput.event["currentTime"] = 1001;
-    scopedInput.event.at("turn").push_back({{"tool","find_tasks"},{"step",2},{"result",{{"text","New evidence"}}}});
+    scopedInput.event.at("turn").push_back({
+        {"tool","find_tasks"},{"args",{{"query","second"}}},{"step",2},{"callIndex",1},
+        {"result",{{"ok",true},{"text","New evidence"}}}
+    });
     const auto extended = responseRequest(scopedInput);
     const auto& scopedMessages = scoped.at("input");
     const auto& extendedMessages = extended.at("input");
-    check(extendedMessages.size() == scopedMessages.size()+1 &&
+    const auto extendedContext = requestContext(extended);
+    check(extendedMessages.size() == scopedMessages.size()+2 &&
           std::equal(scopedMessages.begin(),scopedMessages.end(),extendedMessages.begin()) &&
           extended.at("instructions") != scoped.at("instructions") &&
-          requestContext(extended).at("event").at("turn") == scopedInput.event.at("turn"),
+          extendedContext.at("history") == scopedInput.history &&
+          extendedContext.at("event").at("turn") == scopedInput.event.at("turn"),
           "A changed clock rewrote the retained messages or a tool batch lost evidence");
+    const auto historyReply = std::ranges::find_if(extendedMessages,[](const Json& item) {
+        return item.value("role","") == "assistant";
+    });
+    check(historyReply != extendedMessages.end() && historyReply->at("content").at(0).at("type") == "output_text",
+          "The saved Bot reply lost its assistant role");
     const std::map<std::string,Json> requiredChannelArgs{
         {"channel_edit_message",{"reason","externalMessageId","text"}},
         {"channel_react",{"reason","reaction"}},

@@ -5,6 +5,7 @@
 #include "model.hpp"
 #include "../src/workspace_internal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -96,8 +97,12 @@ struct Provider : Model {
                 for (const auto& action : next) emit(action);
             } else {
                 seen = steps;
-                content = request.at("input").back().at("content");
                 modelMessages = request.at("input");
+                const auto user = std::find_if(modelMessages.rbegin(),modelMessages.rend(),[](const Json& item) {
+                    return item.value("role","") == "user";
+                });
+                check(user != modelMessages.rend(),"The model request omitted user context");
+                content = user->at("content");
                 auto follow = followStep ? followStep(steps) : std::vector<Decision>{};
                 if (follow.empty()) emit(call("reply",{{"text","Checked."}}));
                 else for (const auto& action : follow) emit(action);
@@ -712,8 +717,17 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
     f.model.inspectRequest = [&](const Json& request) {
         ++requests;
         check(request.dump().size() <= 8 * 1024 * 1024,"Serialized request exceeded the production bridge limit");
-        const auto context = Json::parse(request.at("input").at(1).at("content").at(0).at("text").get_ref<const std::string&>());
-        check(context.at("event").at("text") == "Check the fixture","Tool evidence displaced the current user message");
+        const auto hasRequest = std::ranges::any_of(request.at("input"),[](const Json& item) {
+            if (item.value("role","") != "user") return false;
+            return std::ranges::any_of(item.at("content"),[](const Json& block) {
+                if (!block.contains("text")) return false;
+                const auto context = Json::parse(block.at("text").get_ref<const std::string&>(),nullptr,false);
+                if (!context.is_object()) return false;
+                const auto event = context.find("event");
+                return event != context.end() && event->is_object() && event->value("text","") == "Check the fixture";
+            });
+        });
+        check(hasRequest,"Tool evidence displaced the current user message");
     };
     Json firstRef, secondRef;
     bool recovered = false, revoked = false;

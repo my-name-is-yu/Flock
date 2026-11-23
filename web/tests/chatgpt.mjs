@@ -88,6 +88,40 @@ function output({ task, event }) {
   }
 }
 
+function requestContext(input) {
+  const context = { event: {}, history: [] };
+  const calls = new Map();
+  for (const item of input) {
+    if (item.type === "function_call") {
+      assert.equal(item.namespace, "flock");
+      assert.ok(item.call_id && !calls.has(item.call_id), "Replayed tool calls need distinct IDs");
+      calls.set(item.call_id, { tool: item.name, args: JSON.parse(item.arguments) });
+      continue;
+    }
+    if (item.type === "function_call_output") {
+      const call = calls.get(item.call_id);
+      assert.ok(call, "Replayed tool result is missing its call");
+      context.event.turn.push({ ...call, ...JSON.parse(item.output) });
+      calls.delete(item.call_id);
+      continue;
+    }
+    if (item.role !== "user" && item.role !== "assistant") continue;
+    const fragment = JSON.parse(item.content[0].text);
+    if (fragment.historyEntry) {
+      const entry = fragment.historyEntry;
+      assert.equal(item.role, entry.role === "bot" && entry.kind === "conversation_reply" ? "assistant" : "user");
+      context.history.push(entry);
+      continue;
+    }
+    const event = { ...context.event, ...fragment.event };
+    if (context.event.turn && fragment.event?.turn)
+      event.turn = [...context.event.turn, ...fragment.event.turn];
+    Object.assign(context, fragment, { event });
+  }
+  assert.equal(calls.size, 0, "Replayed tool call is missing its result");
+  return context;
+}
+
 function mockResponses() {
   globalThis.fetch = async (url, options) => {
     try {
@@ -98,13 +132,7 @@ function mockResponses() {
       assert.equal(request.stream, true);
       const namespace = request.tools[0];
       assert.equal(namespace.name, "flock");
-      const context = {};
-      for (const message of request.input) {
-        if (message.role !== "user") continue;
-        const fragment = JSON.parse(message.content[0].text);
-        const event = { ...context.event, ...fragment.event };
-        Object.assign(context, fragment, { event });
-      }
+      const context = requestContext(request.input);
       const result = output(context);
       const tool = namespace.tools.find(tool => tool.name === result.name);
       assert.ok(tool, `Response tool ${result.name} was missing from the production request`);

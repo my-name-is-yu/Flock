@@ -8,7 +8,7 @@ namespace {
 // The production bridge embeds the context JSON in an input_text string.
 constexpr std::size_t toolHistoryWireBytes = 768 * 1024;
 constexpr std::size_t olderLargeResultBytes = 16 * 1024;
-constexpr std::size_t webResultWindowBytes = 40 * 1024;
+constexpr std::size_t webResultWindowBytes = 192 * 1024;
 constexpr std::size_t largeResultBytes = 4 * 1024;
 
 std::size_t wireBytes(const Json& value) {

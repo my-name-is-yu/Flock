@@ -22,7 +22,8 @@ constexpr auto archivePrefix = "LEDGER VERIFIED";
 constexpr auto archiveCode = "NZ-7184-Q";
 constexpr auto firstTicket = "NORTH-413";
 constexpr auto finalTicket = "SOUTH-982";
-constexpr int pageCount = 6;
+constexpr int pageCount = 22;
+constexpr int pageEvidenceBytes = 9600;
 constexpr int limitPages = 22;
 constexpr int seriesPages = 7;
 constexpr int seriesCount = 5;
@@ -104,7 +105,7 @@ struct FakeWeb : WebTools {
             if (url != pageUrl(page)) continue;
             const auto ticket = page == 1 ? firstTicket : page == pageCount ? finalTicket : "INTERMEDIATE";
             return {{"ticket",fetches.at(std::string(url)) == 1 ? ticket : "REGENERATED"},
-                    {"nextUrl",page == pageCount ? "" : pageUrl(page+1)},{"rows",auditRows(page,8500)}};
+                    {"nextUrl",page == pageCount ? "" : pageUrl(page+1)},{"rows",auditRows(page,pageEvidenceBytes)}};
         }
         for (int series = 0; series <= seriesCount; ++series) {
             for (int page = 1; page <= chainLength(series); ++page) {
@@ -182,13 +183,31 @@ struct PromptSnapshot {
         const bool clock = instructions.starts_with("Current event.currentTime");
         if (!instructions.empty() && !clock)
             parts.push_back({"instructions","instructions",payload.at("instructions").dump()});
-        for (const auto& message : payload.at("input")) {
-            if (message.at("role") == "developer")
+        for (const auto& message : messages) {
+            if (field(message,"role") == "developer")
                 parts.push_back({"instructions","input.developer",message.at("content").dump()});
         }
         parts.push_back({"tool_definitions","tools",payload.at("tools").dump()});
-        for (const auto& message : payload.at("input")) {
-            if (message.at("role") != "user") continue;
+        std::map<std::string,Json> calls;
+        for (const auto& message : messages) {
+            const auto type = field(message,"type");
+            if (type == "function_call") {
+                calls.emplace(field(message,"call_id"),Json{{"tool",message.at("name")},
+                    {"args",Json::parse(field(message,"arguments"))}});
+                contextText += message.dump() + '\n';
+                parts.push_back({"tool_results","function_call",message.dump()});
+                continue;
+            }
+            if (type == "function_call_output") {
+                auto entry = std::move(calls.at(field(message,"call_id")));
+                entry.update(Json::parse(field(message,"output")));
+                context.at("event").at("turn").push_back(std::move(entry));
+                contextText += message.dump() + '\n';
+                parts.push_back({"tool_results","function_call_output",message.dump()});
+                continue;
+            }
+            const auto role = field(message,"role");
+            if (role != "user" && role != "assistant") continue;
             for (const auto& block : message.at("content")) {
                 const auto text = field(block,"text");
                 if (!text.starts_with('{')) {
@@ -197,6 +216,12 @@ struct PromptSnapshot {
                 }
                 contextText += text + '\n';
                 auto fields = nlohmann::ordered_json::parse(text);
+                if (fields.contains("historyEntry")) {
+                    auto& history = context.at("history");
+                    parts.push_back({"history","history["+std::to_string(history.size())+"]",fields.at("historyEntry").dump()});
+                    history.push_back(Json(std::move(fields.at("historyEntry"))));
+                    continue;
+                }
                 if (fields.contains("event") && fields.at("event").contains("turn") &&
                     context.contains("event") && context.at("event").contains("turn")) {
                     auto& turn = context.at("event").at("turn");
@@ -435,6 +460,7 @@ Case longFollowup(Fixture& f) {
 }
 
 Case largeToolResults(Fixture& f, bool requireReread) {
+    f.config["modelCallLimit"] = 48;
     return {"large-results",
         "Read the synthetic audit manifest at https://audit.example.test/page-1. Each manifest has a ticket and a nextUrl. "
         "Read each nextUrl in sequence until it is empty. Ignore the rows. If earlier saved results are omitted, recover "
@@ -452,7 +478,7 @@ Case largeToolResults(Fixture& f, bool requireReread) {
                 int page = 1;
                 while (page <= pageCount && pageUrl(page) != url) ++page;
                 check(page <= pageCount &&
-                      field(recovered.at("result").at("data"),"rows") == auditRows(page,8500),
+                      field(recovered.at("result").at("data"),"rows") == auditRows(page,pageEvidenceBytes),
                       "Reread did not recover the original full result");
                 const auto& terminal = turn.at(turn.size()-2).at("result").at("data");
                 return reply(field(first.at("data"),"ticket")+" / "+field(terminal,"ticket"));
@@ -515,6 +541,63 @@ Case oldReference(Fixture& f) {
         [&f] { return std::ranges::any_of(f.model.calls,[](const auto& record) {
             return std::ranges::find(record.at("actions"),"expand_context") != record.at("actions").end();
         }); }};
+}
+
+Case qualityReplay(Fixture& f) {
+    static constexpr std::string_view receipt = "17 crates sealed at bay 04 on tag Q7-MER-081.";
+    static const auto statusUrl = std::string(portal) + "quality-status";
+    const auto evidence = f.seed("Archive the receiving receipt.\nAudit scope: production only",
+                                 "Receipt: "+std::string(receipt));
+    f.model.script = [evidence,compacted = false](const auto&) mutable {
+        if (compacted) return reply("Archived.");
+        compacted = true;
+        return action("compact_conversation",{{"endMessageId",evidence},
+            {"summary","The previous audit scope was production only. The original receiving receipt is in the Bot reply at endMessageId."}});
+    };
+    f.send("Compact the old receipt conversation.");
+    check(f.store.compactions("audit").size() == 1,"Fixture did not compact the original receipt");
+    f.seed("Correction for the audit.\nAudit scope: staging only","I recorded the scope correction.");
+
+    return {"quality-replay",
+        "An old dashboard label said PASS. Check the current status once at "+statusUrl+
+        ". If that fetch fails, report UNVERIFIED. Use the latest audit scope from our conversation. "
+        "Use expand_context to read the original Bot receipt at the compaction's endMessageId "
+        "with that exact ID as both bounds. Return only the current scope, the exact sentence following "
+        "'Receipt: ' in the original reply, and the verified current status, separated by ' | '.",
+        "staging only | "+std::string(receipt)+" | UNVERIFIED",
+        [](const Json& context) {
+            const auto& history = context.at("history");
+            const auto summary = std::ranges::find_if(history,[](const auto& item) {
+                return item.value("kind","") == "conversation_compaction";
+            });
+            check(summary != history.end() && field(*summary,"summary").find("production only") != std::string::npos &&
+                  history.dump().find(receipt) == std::string::npos,"The fixture lost the archived source boundary");
+            const auto& turn = context.at("event").at("turn");
+            const auto expanded = std::ranges::find_if(turn,[](const auto& item) {
+                return item.at("tool") == "expand_context";
+            });
+            if (expanded == turn.end())
+                return action("expand_context",{{"compactionId",summary->at("compactionId")},
+                    {"startMessageId",summary->at("endMessageId")},{"endMessageId",summary->at("endMessageId")}});
+            const auto status = std::ranges::find_if(turn,[](const auto& item) {
+                return item.at("tool") == "web_fetch";
+            });
+            if (status == turn.end()) return fetch(statusUrl);
+
+            const auto& result = status->at("result");
+            check(result.at("ok") == false && !field(result,"error").empty(),"The status fetch unexpectedly succeeded");
+            const auto& original = expanded->at("result").at("messages").at(0);
+            check(field(original,"text") == "Receipt: "+std::string(receipt),"The original receipt was not restored exactly");
+            return reply(historyValue(history,"Audit scope: ")+" | "+lineAfter(field(original,"text"),"Receipt: ")+" | UNVERIFIED");
+        },
+        [&f] {
+            const auto fetched = f.web->fetches.find(statusUrl);
+            std::size_t expansions = 0;
+            for (const auto& record : f.model.calls)
+                expansions += std::ranges::count(record.at("actions"),"expand_context");
+            return f.web->fetches.size() == 1 && fetched != f.web->fetches.end() && fetched->second == 1 &&
+                expansions == 1;
+        }};
 }
 
 Json::const_iterator latestFetch(const Json& turn) {
@@ -660,7 +743,7 @@ std::vector<Case> auditSeries(Fixture& f) {
                     return call.at("turnIndex") == seriesCount && call.at("firstInTurn") == true &&
                         call.at("omittedHistoryEntries") > 0 && call.at("compactionId").is_null();
                 }) && std::ranges::any_of(f.model.calls,[](const auto& call) {
-                    return !call.at("compactionId").is_null() && call.at("omittedToolResults") > 0;
+                    return !call.at("compactionId").is_null();
                 }) && f.model.calls.size() >= 30 && f.model.calls.size() <= 60;
             }});
     }
@@ -754,6 +837,7 @@ int main(int argc, char** argv) {
         run("long-followup",longFollowup);
         run("large-results",[&](auto& fixture) { return largeToolResults(fixture,!baseline && !live); });
         run("old-reference",oldReference);
+        run("quality-replay",qualityReplay);
         run("near-limit",nearLimit);
         run("multi-turn",auditSeries);
         check(matched,"Unknown fixture case");
