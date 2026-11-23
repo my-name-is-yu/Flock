@@ -353,6 +353,7 @@ void taskUpdates(const std::filesystem::path& database) {
     screenshot["attachments"] = Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},
                                                {"contentBase64",encodeAttachment(image)}}});
     const auto channelTarget = channelPolicyTarget({channel,"workspace","",""});
+    store.policy().setMode(root,"supervised");
     store.policy().changeRule(root,RuleKind::ask,Action::channel_read,channelTarget,true);
     bool inspected = false;
     auto taskModel = model.decideNext;
@@ -366,6 +367,7 @@ void taskUpdates(const std::filesystem::path& database) {
     runtime.runConversations();
     check(inspected && transport->effects.size()==3,"Image approval was not exercised");
     store.policy().changeRule(root,RuleKind::ask,Action::channel_read,channelTarget,false);
+    store.policy().setMode(root,"full");
     model.decideNext = std::move(taskModel);
     const auto receipt = store.receiveChannel(channel,"fixture-auth",original,intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
@@ -385,6 +387,7 @@ void taskUpdates(const std::filesystem::path& database) {
         return reply("Unexpected turn");
     };
     const auto target = channelPolicyTarget({channel,"workspace","",""});
+    store.policy().setMode(root,"supervised");
     store.policy().changeRule(root,RuleKind::ask,Action::channel_post,target,true);
     for (int i = 0; i < 4; ++i) runtime.tick();
     check(transport->effects.size() == 4,"Task question sent before Ask-first approval");
@@ -398,6 +401,7 @@ void taskUpdates(const std::filesystem::path& database) {
     check(transport->effects.size() == 5 && transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
           transport->effects.back().at("payload").at("suggestions") == Json::array({"Preview","Production"}),
           "Task question was not delivered to the originating thread");
+    store.policy().setMode(root,"full");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
         check(input.task.at("tasks").empty() && input.history.empty(),"Another thread received private task context");

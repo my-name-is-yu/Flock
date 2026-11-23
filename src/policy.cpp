@@ -210,6 +210,7 @@ bool Policy::forbidden(std::string_view bot, Action action, std::string_view tar
 PolicyResult Policy::check(std::string_view bot, const Resource& resource) const {
     std::lock_guard lock(db_.mutex);
     if (forbidden(bot,resource.action,resource.target)) return PolicyResult::deny;
+    if (mode() == "full") return PolicyResult::allow;
     auto rows = db_.query("SELECT kind,target,exact FROM policy_rules WHERE kind<>'never' AND action=?"
                           " ORDER BY kind DESC",{actionName(resource.action)});
     while (rows.next()) {
@@ -217,7 +218,7 @@ PolicyResult Policy::check(std::string_view bot, const Resource& resource) const
         if (rows.number(2) ? pattern == resource.target : targetMatches(pattern,resource.target))
             return rows.string(0) == "ask" ? PolicyResult::ask : PolicyResult::allow;
     }
-    return mode() == "supervised" && !resource.routine && supervisedCategory(resource.action)
+    return !resource.routine && supervisedCategory(resource.action)
         ? PolicyResult::ask : PolicyResult::allow;
 }
 

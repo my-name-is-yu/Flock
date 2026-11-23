@@ -90,8 +90,8 @@ The Bot normally evaluates the Session's final report. It can retry an unavailab
 
 ### Installation policy
 
-The installation starts in **Full**. Bots can use configured resources subject
-to the installation rules. Switch to **Supervised** to approve actions with external
+The installation starts in **Full**. Bots can use configured resources unless
+a Never rule matches. Switch to **Supervised** to approve actions with external
 effects as they come up. Installation roots manage the mode and rules in **Flock settings**.
 Workspace isolation, upstream credentials, and Bot
 ownership apply in both modes.
@@ -103,11 +103,12 @@ ownership apply in both modes.
 | T3 Session launch or a send outside the originating Thread | Ask |
 | Bot creation or rename, schedule, reminder, or trigger changes | Ask |
 | Distinct destructive operations or secret use at a new destination | Ask |
-| MCP tool calls | Ask |
+| MCP tool calls | Allow when discovery returns `annotations.readOnlyHint: true` for the tool. Hints apply to the configured server and exact tool for two minutes. Ask otherwise |
 | Reads, workspace work, and replies, reactions, edits, and attachments in the originating conversation | Allow |
 
-Targets match exactly or with a `*` glob. **Never** and **Ask first** apply in both modes.
-Flock evaluates **Ask first** ahead of **Allow**, then uses the defaults for the active mode. The installation can have up to 20 Allow rules and 20 Ask-first rules.
+Targets match exactly or with a `*` glob. **Never** applies in both modes.
+Supervised evaluates **Ask first** ahead of **Allow**, then uses the defaults
+above. The installation can have up to 20 Allow rules and 20 Ask-first rules.
 When a card adds a 21st Allow rule, Flock replaces the oldest Allow rule.
 
 ```sh

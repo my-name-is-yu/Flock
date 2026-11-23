@@ -85,9 +85,9 @@ void rules(const std::filesystem::path& path) {
     policy.changeRule(localOwner,RuleKind::never,action,"github.com/acme/release",true);
     check(policy.forbidden("release",action,"github.com/acme/release"),"Never did not override Ask first");
     policy.setMode(localOwner,"full");
-    check(policy.forbidden("release",action,"github.com/acme/release") &&
-          policy.check("release",action,"github.com/another/release") == PolicyResult::ask,
-          "Full bypassed an explicit rule");
+    check(policy.check("release",action,"github.com/acme/release") == PolicyResult::deny &&
+          policy.check("release",action,"github.com/another/release") == PolicyResult::allow,
+          "Full must enforce Never and ignore Ask first");
     rejected([&] { policy.setMode(requester,"supervised"); });
 }
 

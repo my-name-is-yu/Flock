@@ -107,9 +107,11 @@ with HTTPServer(("127.0.0.1", 0), Fixture) as server:
         ("delete", "session-1", None),
     ]
     for name in (*TOOL_RESULTS, "rejected", None):
-        session = f"session-{len(expected) + 1}"
-        expected.extend([("initialize", None, None), ("notifications/initialized", session, None)])
-        if name is not None:
-            expected.append(("tools/call", session, name))
-        expected.append(("delete", session, None))
+        repetitions = 2 if name == "extension" else 1
+        for _ in range(repetitions):
+            session = f"session-{len(expected) + 1}"
+            expected.extend([("initialize", None, None), ("notifications/initialized", session, None)])
+            if name is not None:
+                expected.append(("tools/call", session, name))
+            expected.append(("delete", session, None))
     assert Fixture.calls == expected, Fixture.calls

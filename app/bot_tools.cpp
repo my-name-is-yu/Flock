@@ -361,6 +361,28 @@ class ConfiguredMcp final : public McpTools {
     const std::map<std::string,Server,std::less<>> servers_;
     std::mutex mutex_;
     std::map<std::string,Page,std::less<>> pages_;
+    std::map<std::string,std::map<std::string,Clock::time_point,std::less<>>,std::less<>> readOnlyTools_;
+
+    void cacheToolHints(const std::string& server, const Json& result) {
+        const auto tools = result.find("tools");
+        if (tools == result.end() || !tools->is_array()) return;
+        const auto now = Clock::now();
+        const auto expires = now + std::chrono::minutes(2);
+        std::lock_guard lock(mutex_);
+        auto& hints = readOnlyTools_[server];
+        std::erase_if(hints,[&](const auto& hint) { return hint.second <= now; });
+        for (const auto& tool : *tools) {
+            const auto entry = tool.find("name");
+            if (entry == tool.end() || !entry->is_string()) continue;
+            const auto& name = entry->get_ref<const std::string&>();
+            if (name.empty() || name.size() > 128) continue;
+            const auto annotations = tool.find("annotations");
+            if (annotations != tool.end() && annotations->is_object() &&
+                annotations->contains("readOnlyHint") && annotations->at("readOnlyHint") == true) {
+                if (hints.size() < 256 || hints.contains(name)) hints.insert_or_assign(name,expires);
+            } else hints.erase(name);
+        }
+    }
 
     Page takePage(std::string_view bot, std::string_view server, McpCollection collection, std::string_view cursor) {
         std::vector<std::unique_ptr<McpSession>> expired;
@@ -383,6 +405,13 @@ class ConfiguredMcp final : public McpTools {
 public:
     explicit ConfiguredMcp(std::map<std::string,Server,std::less<>> servers) : servers_(std::move(servers)) {}
     bool hasServer(std::string_view server) const override { return servers_.contains(server); }
+    bool readOnlyHint(std::string_view server, std::string_view tool) override {
+        std::lock_guard lock(mutex_);
+        const auto catalog = readOnlyTools_.find(server);
+        if (catalog == readOnlyTools_.end()) return false;
+        const auto hint = catalog->second.find(tool);
+        return hint != catalog->second.end() && hint->second > Clock::now();
+    }
     Json discover(std::string_view bot, std::string_view server, McpCollection collection, std::string_view cursor) override {
         auto page = takePage(bot,server,collection,cursor);
         if (!page.session) page.session = std::make_unique<McpSession>(servers_.at(page.server));
@@ -393,6 +422,7 @@ public:
         if (!page.cursor.empty()) params["cursor"] = page.cursor;
         auto result = page.session->callRaw(tools ? "tools/list" : "resources/list",std::move(params));
         page.cursor = result.value("nextCursor","");
+        if (tools) cacheToolHints(page.server,result);
         result.erase("nextCursor");
         result = page.session->scrub(std::move(result));
         if (page.cursor.empty()) return result;

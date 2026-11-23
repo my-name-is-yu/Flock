@@ -510,10 +510,12 @@ void accessAndActions() {
     const auto find = invoke(store,runtime,script,"find","git_find_repos",{{"host",hostName},{"query","FLOCK"}});
     check(find.at("repos") == Json::array({repoName}),"repository discovery exposed ungranted repositories");
     const auto repoTarget = GitRepository{hostName,repoName}.resource();
+    store.policy().setMode(localOwner,"supervised");
     store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,repoTarget,true);
     const auto askFirst = invoke(store,runtime,script,"ask-first-repos","git_find_repos",{{"host",hostName},{"query","FLOCK"}});
     check(askFirst.at("repos").empty(),"Discovery exposed a repository requiring approval");
     store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,repoTarget,false);
+    store.policy().setMode(localOwner,"full");
     const auto later = invoke(store,runtime,script,"later-repos","git_find_repos",
         {{"host",hostName},{"query","FLOCK"},{"page",11}});
     check(later.at("repos").empty() && later.at("nextPage") == 12,
@@ -767,6 +769,8 @@ void approvedTaskReadProjects() {
               "Ask-first hid its approved Git read");
         return {"complete",{{"report","Reviewed repository information"}},{}};
     };
+    store.policy().setMode(localOwner,"supervised");
+    store.policy().changeRule(localOwner,RuleKind::allow,Action::environment_launch,intake().environmentId,true);
     store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,GitRepository{hostName,repoName}.resource(),true);
     Runtime runtime(store,script,sessions,[](auto) { return std::string{}; },options(host));
     const auto task = store.submit(intake(),&localOwner);
