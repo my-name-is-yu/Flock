@@ -119,19 +119,12 @@ struct FixtureModel : Model {
         ++now;
         const auto begin = Clock::now();
         const auto request = app::responseRequest(input);
-        Json context = Json::object();
-        std::string contextText;
-        for (const auto& message : request.at("input")) {
-            if (message.at("role") != "user") continue;
-            for (const auto& block : message.at("content")) {
-                const auto text = field(block,"text");
-                if (!text.starts_with('{')) continue;
-                context.update(Json::parse(text),true);
-                contextText += text + '\n';
-            }
-        }
+        const auto& messages = request.at("input");
+        check(messages.size() == 1 && messages.front().at("role") == "user","Expected one user context");
+        const auto& contextText = messages.front().at("content").front().at("text").get_ref<const std::string&>();
+        const auto context = Json::parse(contextText);
         const auto prefixBytes = std::ranges::mismatch(previousContext,contextText).in1-previousContext.begin();
-        previousContext = std::move(contextText);
+        previousContext = contextText;
         auto& record = calls.emplace_back(Json{
             {"localRequestBytes",request.dump().size()},{"historyBytes",wireBytes(context.at("history"))},
             {"toolHistoryBytes",wireBytes(context.at("event").at("turn"))},
@@ -282,8 +275,8 @@ Case longFollowup(Fixture& f) {
 Case largeToolResults(Fixture& f, bool requireReread) {
     return {"large-results",
         "Read the synthetic audit manifest at https://audit.example.test/page-1. Each manifest has a ticket and a nextUrl. "
-        "Read each nextUrl in sequence until it is empty. Ignore the rows. If earlier saved results are omitted, recover "
-        "them from Flock's saved tool evidence instead of fetching the page again. Reply with only the first and last "
+        "Read each nextUrl in sequence until it is empty. Ignore the rows. Recover any missing ticket from Flock's "
+        "saved tool evidence. Reply with only the first and last "
         "tickets separated by ' / '.",
         "NORTH-413 / SOUTH-982",
         [](const Json& context) {
@@ -293,24 +286,19 @@ Case largeToolResults(Fixture& f, bool requireReread) {
             const auto& first = turn.front().at("result");
             if (latest.at("tool") == "read_tool_result") {
                 const auto& recovered = latest.at("result");
-                const auto url = field(recovered.at("args"),"url");
-                int page = 1;
-                while (page <= pageCount && pageUrl(page) != url) ++page;
-                check(page <= pageCount &&
-                      field(recovered.at("result").at("data"),"rows") == auditRows(page,8500),
-                      "Reread did not recover the original full result");
+                const auto& data = recovered.at("result").at("data");
+                check(recovered.at("args").at("url") == pageUrl(1) && recovered.at("resultRef") == first.at("resultRef") &&
+                      data == Json{{"rows",auditRows(1,8500)},{"ticket",firstTicket},{"nextUrl",pageUrl(2)}},
+                      "Reread did not recover the original result and reference");
                 const auto& terminal = turn.at(turn.size()-2).at("result").at("data");
-                return reply(field(first.at("data"),"ticket")+" / "+field(terminal,"ticket"));
+                return reply(field(data,"ticket")+" / "+field(terminal,"ticket"));
             }
             const auto& data = latest.at("result").at("data");
             if (const auto next = field(data,"nextUrl"); !next.empty()) return fetch(next);
-            for (const auto& step : turn) {
-                const auto& result = step.at("result");
-                if (result.value("evidenceOmitted",false)) {
-                    check(result.at("data").contains("ticket") && !result.at("data").contains("rows"),
-                          "Omitted result lost its ticket or still contains the large body");
-                    return action("read_tool_result",result.at("resultRef"));
-                }
+            if (first.value("evidenceOmitted",false)) {
+                check(!first.contains("data") && !first.contains("continuation"),
+                      "Omission exposed arbitrary external fields as result data or pagination");
+                return action("read_tool_result",first.at("resultRef"));
             }
             return reply(field(first.at("data"),"ticket")+" / "+field(data,"ticket"));
         },

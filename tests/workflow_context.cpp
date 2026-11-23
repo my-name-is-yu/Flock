@@ -750,6 +750,74 @@ void historyKeepsLargestFittingPrefix() {
             "the next multi-byte character should exceed the remaining serialized bytes");
 }
 
+void escapedResultsStayAvailableTogether() {
+    Fixture f;
+    f.bot.work = [](const ModelInput& input) -> Decision {
+        if (input.event.at("kind") == "intake")
+            return {"delegate",{{"instruction","Inspect the evidence"}},"Obtain the report"};
+        return {"complete",{{"report","Evidence saved"}},"Close the fixture task"};
+    };
+    std::vector<Id> reports;
+    const std::string chunk(6000,'\t');
+    for (const auto* tail : {"Report A","Report B"}) {
+        const Id task = f.call("start_task",{{"request","Collect evidence"},{"doneWhen","Save the report"}}).at("taskId");
+        f.ticks(3);
+        require(f.t3.commands.size() == reports.size()+1,"The fixture did not launch its report Session");
+        auto& observation = f.t3.observations["run-"+std::to_string(reports.size()+1)];
+        observation.kind = Observation::Kind::Finished;
+        observation.status = "completed";
+        observation.report = chunk + tail;
+        f.ticks(3);
+        const auto history = f.store->history(task);
+        const auto report = std::ranges::find_if(history,[](const Json& item) { return item.at("kind") == "report"; });
+        require(report != history.end(),"The fixture did not save its report");
+        reports.push_back(report->at("id"));
+    }
+
+    bool checked = false;
+    f.bot.conversation = [&](const ModelInput& input) -> Decision {
+        const auto& turn = input.event.at("turn");
+        const auto result = [&](std::size_t index) -> const Json& { return turn.at(index).at("result"); };
+        const auto read = [&](std::size_t index, int offset = 0) -> Decision {
+            return {"read_result",{{"messageId",reports.at(index)},{"offset",offset}},"Read a saved report chunk"};
+        };
+        switch (turn.size()) {
+        case 0: return read(0);
+        case 1:
+            require(result(0).at("text") == chunk,"The first escaped chunk was altered");
+            return read(1);
+        case 2:
+            for (std::size_t i = 0; i < reports.size(); ++i)
+                require(result(i).at("messageId") == reports.at(i) && result(i).at("text") == chunk,
+                        "Sequential escaped chunks did not coexist");
+            return read(0,1);
+        case 3: return read(1,1);
+        case 4:
+            require(result(0).value("evidenceOmitted",false) && !result(0).contains("text") &&
+                    result(0).at("continuation") == Json{{"nextOffset",6000}},
+                    "The older chunk lost its continuation or retained its full contents past the budget");
+            return {"read_tool_result",result(0).at("resultRef"),"Reopen the first chunk"};
+        case 5: return {"read_tool_result",result(1).at("resultRef"),"Reopen the second chunk"};
+        case 6: return {"find_tasks",Json::object(),"Check the task list before answering"};
+        case 7:
+            require(result(6).at("ok") == true,"The fixture's intervening task lookup failed");
+            for (std::size_t i = 0; i < reports.size(); ++i) {
+                const auto& reopened = result(4+i);
+                const Json ref{{"messageId",input.event.at("messageId")},{"step",i+1},{"callIndex",1}};
+                require(result(i).at("resultRef") == ref && reopened.at("resultRef") == ref &&
+                        reopened.at("result").at("messageId") == reports.at(i) && reopened.at("result").at("text") == chunk &&
+                        reopened.at("result").at("nextOffset") == 6000 && !result(i).contains("text"),
+                        "The reopened chunk lost its original identity, continuation, or contents");
+            }
+            checked = true;
+            return {"reply",{{"text","Compared both reports"}},"Finish comparison"};
+        default: throw std::runtime_error("Unexpected report comparison step");
+        }
+    };
+    f.turn("Compare the two escaped reports");
+    require(checked,"The model never received both reopened chunks after the task lookup");
+}
+
 void omittedHistoryCanBeRecovered() {
     Fixture f;
     const auto instruction = std::string(700,'u') + " Preserve the retry window before release.";
@@ -886,6 +954,7 @@ int main() {
         stopBeforeFirstSend();
         scopedCompactionPages();
         historyKeepsLargestFittingPrefix();
+        escapedResultsStayAvailableTogether();
         omittedHistoryCanBeRecovered();
         compactAndContinue();
     } catch (const std::exception& error) {
