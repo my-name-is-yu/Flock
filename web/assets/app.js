@@ -2576,11 +2576,31 @@ function waitContent(context, task) {
   } else if (['unknown_delivery', 'auth', 'settings'].includes(wait.reason)) {
     primary.append(action('Check again', 'reconcile'));
   }
-  actions.append(button('Stop this request', 'wait-cancel', () => {
-    const name = task.request.split('\n')[0];
-    if (window.confirm(`Stop “${name}”?\n\nThe Bot will stop working on this request and interrupt its T3 session if one is running.`))
+  // Stopping can't be undone, so it asks in place, with the safe choice focused, instead of a browser dialog.
+  const stop = button('Stop this request', 'wait-cancel', () => {
+    const botName = context.data.bot?.name ?? 'The Bot';
+    const confirm = node('div', 'wait-stop-confirm');
+    confirm.setAttribute('role', 'group');
+    const prompt = node('p', 'wait-stop-text');
+    prompt.id = 'wait-stop-text';
+    prompt.append(node('strong', null, 'Stop this request?'),
+      ` ${botName} stops working on it and interrupts its T3 Session if one is running.`);
+    confirm.setAttribute('aria-labelledby', prompt.id);
+    const keep = button('Keep working', 'dialog-button quiet', () => {
+      actions.replaceChildren(stop, primary);
+      stop.focus();
+    });
+    const confirmStop = button('Stop request', 'dialog-button danger', () => {
+      keep.disabled = confirmStop.disabled = true;
       perform('cancel');
-  }), primary);
+    });
+    const choices = node('div', 'wait-primary');
+    choices.append(keep, confirmStop);
+    confirm.append(prompt, choices);
+    actions.replaceChildren(confirm);
+    keep.focus();
+  });
+  actions.append(stop, primary);
   const feedback = node('p', 'dialog-feedback');
   feedback.id = 'detail-feedback';
   feedback.setAttribute('role', 'status');
