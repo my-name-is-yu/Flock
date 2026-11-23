@@ -1,7 +1,6 @@
 #include "flock/board_inbox.hpp"
 #include "flock/workspace_tools.hpp"
 
-#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -228,34 +227,27 @@ void approval(bool allow) {
 }
 
 void storeRemainsResponsiveDuringMcpCapabilityChecks() {
-    struct Gate {
+    for (const auto callback : {&FakeMcp::onHasServer,&FakeMcp::onReadOnlyHint}) {
         std::promise<void> entered, release;
-        std::future<void> released = release.get_future();
-
-        void pause() {
+        auto released = release.get_future();
+        Fixture f;
+        f.mcp.get()->*callback = [&] {
             entered.set_value();
             released.wait();
-        }
-    };
-    std::array<Gate,2> gates;
-    Fixture f;
-    f.mcp->onHasServer = [&] { gates[0].pause(); };
-    f.mcp->onReadOnlyHint = [&] { gates[1].pause(); };
-    f.receive({invoke,search});
-    auto batch = std::async(std::launch::async,[&] { f.runtime->runConversations(); });
-    bool reachedChecks = true, servedInbox = true;
-    for (auto& gate : gates) {
-        reachedChecks &= gate.entered.get_future().wait_for(3s) == std::future_status::ready;
+        };
+        f.receive({invoke,search});
+        auto batch = std::async(std::launch::async,[&] { f.runtime->runConversations(); });
+        const bool reachedCheck = entered.get_future().wait_for(3s) == std::future_status::ready;
         auto inbox = std::async(std::launch::async,[&] { return f.store->inbox(localOwner); });
-        servedInbox &= inbox.wait_for(3s) == std::future_status::ready;
-        gate.release.set_value();
+        const bool servedInbox = inbox.wait_for(3s) == std::future_status::ready;
+        release.set_value();
         inbox.get();
+        batch.get();
+        check(reachedCheck,"The batch did not reach the MCP capability check");
+        check(servedInbox,"An MCP capability check held the store mutex");
+        f.checkFinished(2);
+        check(f.mcp->calls == 1,"The MCP call did not complete after checking capabilities");
     }
-    batch.get();
-    check(reachedChecks,"The batch did not reach both MCP capability checks");
-    check(servedInbox,"An MCP capability check held the store mutex");
-    f.checkFinished(2);
-    check(f.mcp->calls == 1,"The MCP call did not complete after checking capabilities");
 }
 
 void followUpNeeded(const Decision& action, std::string_view guidance) {
