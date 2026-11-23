@@ -135,49 +135,51 @@ Json wait(Client& client, const RunRef& run, bool delegated, int timeout = 400) 
     return response;
 }
 
-bool sameDelegateTitle(std::string_view activity, std::string_view notice) {
-    if (activity == notice) return true;
-    // T3 truncates the activity title and the completion notice independently.
-    const auto stem = [](std::string_view title) {
-        if (title.ends_with("...")) return title.substr(0,title.size()-3);
-        if (title.ends_with("…")) return title.substr(0,title.size()-std::string_view("…").size());
-        return title;
-    };
-    const auto first = stem(activity);
-    const auto second = stem(notice);
-    return (first.size() >= 48 && first.size() != activity.size() && second.starts_with(first)) ||
-           (second.size() >= 48 && second.size() != notice.size() && first.starts_with(second));
-}
-
-struct CompletionNotice { std::string title, updatedAt; };
+struct CompletionNotice { std::size_t count; std::string updatedAt; };
 struct DelegatedChild {
-    std::string parentRun, title, settledAt;
+    std::string parentRun, settledAt;
     bool consumed = false;
 };
 
 std::optional<CompletionNotice> completionNotice(const Json& item) {
-    constexpr std::string_view header = "Delegated task \"";
-    constexpr std::string_view footer = "\" finished";
     const auto text = str(item,"text");
     const auto updatedAt = str(item,"updatedAt");
-    if (str(item,"status") != "completed" || boolean(item,"textTruncated") || updatedAt.empty() ||
-        !text.starts_with(header) || !text.ends_with(footer) || text.size() <= header.size() + footer.size())
+    if (str(item,"status") != "completed" || boolean(item,"textTruncated") || updatedAt.empty())
         return std::nullopt;
-    return CompletionNotice{text.substr(header.size(),text.size() - header.size() - footer.size()),updatedAt};
-}
 
-bool consumeCompletion(const CompletionNotice& notice, std::map<std::string,DelegatedChild>& children,
-                       const std::set<std::string>& ownedRuns) {
-    DelegatedChild* match = nullptr;
-    for (auto& [id,child] : children) {
-        if (!sameDelegateTitle(child.title,notice.title)) continue;
-        if (match) return false;
-        match = &child;
+    constexpr std::string_view single = "Delegated task ";
+    const auto verb = [](std::string_view value) {
+        return value == "finished" || value == "failed" || value == "stopped";
+    };
+    std::string_view frame = text;
+    if (frame.starts_with(single)) {
+        frame.remove_prefix(single.size());
+        if (verb(frame)) return CompletionNotice{1,updatedAt};
+        const auto endQuote = frame.rfind('"');
+        if (frame.starts_with('"') && endQuote > 1 && endQuote != frame.npos &&
+            frame.substr(endQuote + 1).starts_with(' ') && verb(frame.substr(endQuote + 2)))
+            return CompletionNotice{1,updatedAt};
+        return std::nullopt;
     }
-    if (!match || match->consumed || !ownedRuns.contains(match->parentRun) ||
-        match->settledAt.empty() || match->settledAt > notice.updatedAt) return false;
-    match->consumed = true;
-    return true;
+
+    constexpr std::string_view batch = " delegated tasks ";
+    const auto countEnd = frame.find(batch);
+    if (countEnd == frame.npos) return std::nullopt;
+    const auto counts = frame.substr(0,countEnd);
+    const auto outcome = frame.substr(countEnd + batch.size());
+    if (!verb(outcome.substr(0,outcome.find(": ")))) return std::nullopt;
+
+    const auto parseCount = [](std::string_view value, std::size_t& count) {
+        const auto end = value.data() + value.size();
+        const auto result = std::from_chars(value.data(),end,count);
+        return result.ec == std::errc{} && result.ptr == end && count > 0;
+    };
+    const auto of = counts.find(" of ");
+    std::size_t count = 0, total = 0;
+    if (!parseCount(counts.substr(0,of),count) ||
+        (of != counts.npos && (!parseCount(counts.substr(of + 4),total) || count > total)))
+        return std::nullopt;
+    return CompletionNotice{count,updatedAt};
 }
 
 bool ownsResult(Client& client, const RunRef& requested, const std::string& effectiveRunId,
@@ -209,9 +211,8 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
         const auto type = str(item,"type");
         if (type == "subagent") {
             const auto id = str(item,"subagentId");
-            const auto title = str(item,"title");
-            if (!id.empty() && !title.empty())
-                children.emplace(id,DelegatedChild{run,title,terminal(str(item,"status")) ? str(item,"updatedAt") : ""});
+            if (!id.empty())
+                children.emplace(id,DelegatedChild{run,terminal(str(item,"status")) ? str(item,"updatedAt") : ""});
         }
         const auto candidate = notices.find(run);
         if (candidate == notices.end()) return true;
@@ -225,13 +226,29 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
     });
     if (!complete) return false;
 
+    std::vector<DelegatedChild*> settled;
+    for (auto& [id,child] : children)
+        if (!child.settledAt.empty()) settled.push_back(&child);
+    // Preserve subagent ID order for children with the same settlement time.
+    std::stable_sort(settled.begin(),settled.end(),[](const auto* a, const auto* b) {
+        return a->settledAt < b->settledAt;
+    });
+
     std::set<std::string> ownedRuns{requested.runId,effectiveRunId};
     for (auto ordinal = base + 1; ordinal <= ending; ++ordinal) {
         const auto& run = ordered.at(ordinal);
         const auto& inputs = notices.at(run);
         if (inputs.empty()) return false;
-        for (const auto& notice : inputs)
-            if (!consumeCompletion(notice,children,ownedRuns)) return false;
+        for (const auto& notice : inputs) {
+            auto remaining = notice.count;
+            for (auto* child : settled) {
+                if (child->settledAt > notice.updatedAt) break;
+                if (child->consumed || !ownedRuns.contains(child->parentRun)) continue;
+                child->consumed = true;
+                if (--remaining == 0) break;
+            }
+            if (remaining != 0) return false;
+        }
         ownedRuns.insert(run);
     }
     return true;

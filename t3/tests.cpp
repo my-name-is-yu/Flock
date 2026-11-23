@@ -200,7 +200,18 @@ int main(int argc, char** argv) {
         checkResult("nested-result", true);
         checkResult("mixed-result", false);
         checkResult("server-input-result", false);
-        checkResult("ambiguous-title-result", false);
+        checkResult("ambiguous-title-result", true);
+        checkResult("failed-result", true);
+        checkResult("stopped-result", true);
+        checkResult("unlabeled-result", true);
+        checkResult("batch-result", true);
+        checkResult("partial-batch-result", true);
+        checkResult("batch-overcount-result", false);
+        checkResult("invalid-batch-count-result", false);
+        checkResult("zero-batch-count-result", false);
+        checkResult("malformed-batch-count-result", false);
+        checkResult("late-settlement-result", false);
+        checkResult("foreign-child-result", false);
         checkResult("reused-result", false);
 
         fixture({{"scenario", "paged-report"}});
