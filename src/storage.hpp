@@ -51,6 +51,9 @@ std::string taskIntent(const Json& task);
 std::string effectiveDoneWhen(const Json& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
+Json& verificationRun(Json& task, std::string_view action);
+bool verificationRunOutstanding(const Json& run);
+void setReportEvidence(Json&, const RunEvidence&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 std::string gitWebhookKey(Id event, Id pr);
 
@@ -398,6 +401,8 @@ struct Store::Impl {
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
+    void initializeProjectQueue();
+    bool projectRouteReady(Id task, std::string_view action) const;
     std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;
     void rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project);
     bool projectQuestionOpen(std::string_view bot, std::string_view environment) const;
@@ -424,6 +429,7 @@ struct Store::Impl {
     Json currentEvent(const Json&) const;
     void wait(Json&, std::string_view reason, Json data = Json::object());
     void clearWait(Json&, std::string_view resolution);
+    bool recordVerificationReport(Json& task, Json& run, const Observation&);
     void consumeEvent(const Json&);
     Json outbox(const Json&, std::string_view actionId = {}) const;
     void unlockQuestion(Json&, std::string_view reason);

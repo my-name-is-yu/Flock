@@ -142,54 +142,7 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
-    // Existing state directories already have the single-route views.
-    constexpr auto outdatedQueue = "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sqlite_schema "
-                                   "WHERE name='project_execution_queue' AND instr(sql,'$.runResults')>0)";
-    if (query(outdatedQueue).next()) {
-        Transaction update(db);
-        constexpr auto queueViews = R"SQL(
-DROP VIEW IF EXISTS project_slots;
-DROP VIEW IF EXISTS project_execution_queue;
-CREATE VIEW project_execution_queue AS
-WITH candidates AS (
-  SELECT task.id,task.state,task.data,task.project_id,task.environment_id
-  FROM tasks task
-  WHERE json_type(task.data,'$.runTargets') IS NULL AND task.project_id<>''
-    AND task.state NOT IN ('completed','cancelled')
-  UNION ALL
-  SELECT task.id,task.state,task.data,json_extract(route.value,'$.projectId'),json_extract(route.value,'$.environmentId')
-  FROM tasks task CROSS JOIN json_each(task.data,'$.runTargets') route
-  WHERE task.state NOT IN ('completed','cancelled')
-    AND coalesce(json_extract(task.data,'$.runResults[' || route.key || '].status'),'queued')
-          IN ('queued','running','confirmation_pending')
-)
-SELECT task.id,task.environment_id,task.project_id,task.state,
-       ROW_NUMBER() OVER (
-         PARTITION BY task.environment_id,task.project_id
-         ORDER BY COALESCE(sender.state,task.state)='queued',
-           COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
-                WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
-       ) AS position
-FROM candidates task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN candidates sender ON sender.id=peer.sender_task
-  AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
-  AND peer.phase<>'closed'
-WHERE COALESCE(peer.kind,'')<>'consult';
-CREATE VIEW project_slots AS
-WITH queue AS (
-  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
-  FROM project_execution_queue
-)
-SELECT q.id,MIN(CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
-             json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN q.head_id END) AS blocker_id
-FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id GROUP BY q.id;
-)SQL";
-        if (query(outdatedQueue).next() && sqlite3_exec(db,queueViews,nullptr,nullptr,nullptr) != SQLITE_OK)
-            sqlError(db);
-        update.commit();
-    }
+    initializeProjectQueue();
     exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
@@ -497,7 +450,7 @@ void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     clearWait(task, "superseded");
     data["reason"] = reason;
     data["eventId"] = task.value("eventId", Id{});
-    data["run"] = task["activeRun"];
+    if (!data.contains("run")) data["run"] = task["activeRun"];
     if (data["run"].is_null() && reason == "unknown_delivery") {
         const auto action = outbox(task);
         if (action.is_object() && action.contains("candidate") && !field(action["candidate"],"link").empty())
@@ -739,9 +692,11 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     } else if (operation == "extend" && reason == "deadline") {
         if (!data.contains("deadline") || !data["deadline"].is_number_integer() ||
             data["deadline"].get<Seconds>() <= unixTime()) throw Conflict("The new deadline must be in the future");
-        task["deadline"] = data["deadline"];
+        const auto action = field(wait,"runActionId");
+        auto& timed = action.empty() ? task : verificationRun(task,action);
+        timed["deadline"] = data.at("deadline");
         next = "running";
-        journal(id, "deadline_extended", {{"deadline",task["deadline"]},{"waitId",waitId}});
+        journal(id,"deadline_extended",{{"deadline",timed.at("deadline")},{"waitId",waitId}});
     } else if (operation == "reconcile" && (reason == "unknown_delivery" || reason == "auth" || reason == "settings")) {
         if (data.contains("session")) {
             const auto action = outbox(task);

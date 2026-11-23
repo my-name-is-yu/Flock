@@ -106,7 +106,9 @@ struct Runtime::Impl {
     std::future<void> channelWorker, sessionWakeWorker;
     std::stop_source shutdown;
     int lockFd = -1;
-    std::map<Id,std::future<void>> workers;
+    // An empty action denotes a Task step. Verification Runs are scheduled by their own outbox action.
+    using Work = std::pair<Id,std::string>;
+    std::map<Work,std::future<void>> workers;
     // Keep provider outcomes until the Task decision and attempt usage are committed together.
     std::map<Id,TaskInference> taskInferences;
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
@@ -212,48 +214,56 @@ struct Runtime::Impl {
         },saved);
     }
 
-    std::vector<Id> eligible() {
+    std::vector<Work> eligible() {
         std::lock_guard lock(db.mutex);
         auto rows = db.query(R"SQL(
-SELECT id FROM project_slots WHERE blocker_id IS NULL
-UNION
-SELECT id FROM tasks WHERE project_id='' AND state NOT IN ('completed','cancelled') AND (
-  state IN ('queued','cancelling') OR COALESCE(json_extract(data,'$.replanning'),0)=1
+WITH runnable AS (
+  SELECT id FROM project_slots WHERE blocker_id IS NULL
+  UNION
+  SELECT id FROM tasks WHERE project_id='' AND state NOT IN ('completed','cancelled') AND (
+    state IN ('queued','cancelling') OR COALESCE(json_extract(data,'$.replanning'),0)=1
+  )
+  UNION
+  SELECT id FROM tasks WHERE state='queued' AND json_extract(data,'$.replanning')=1
+    AND json_extract(data,'$.pendingDestination.environmentId')<>environment_id
+  UNION
+  SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
+  WHERE kind='consult' AND state NOT IN ('completed','cancelled')
+  UNION
+  SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
+  WHERE state='cancelling' AND json_extract(tasks.data,'$.activeRun') IS NULL AND NOT EXISTS (
+    SELECT 1 FROM outbox WHERE outbox.id=json_extract(tasks.data,'$.actionId') AND phase='started'
+  )
 )
-UNION
-SELECT id FROM tasks WHERE state='queued' AND json_extract(data,'$.replanning')=1
-  AND json_extract(data,'$.pendingDestination.environmentId')<>environment_id
-UNION
-SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
-WHERE kind='consult' AND state NOT IN ('completed','cancelled')
-UNION
-SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
-WHERE state='cancelling' AND json_extract(tasks.data,'$.activeRun') IS NULL AND NOT EXISTS (
-  SELECT 1 FROM outbox WHERE outbox.id=json_extract(tasks.data,'$.actionId') AND phase='started'
+SELECT task.id,'' AS action_id FROM runnable JOIN tasks task ON task.id=runnable.id
+WHERE json_type(task.data,'$.runResults') IS NULL AND NOT EXISTS (
+  SELECT 1 FROM policy_approvals approval WHERE approval.task=task.id AND turn=0 AND status='pending'
 )
-ORDER BY id)SQL");
-        std::vector<Id> result;
-        while (rows.next()) result.push_back(rows.number(0));
+UNION ALL
+SELECT slot.id,slot.action_id FROM project_route_slots slot JOIN tasks task ON task.id=slot.id
+WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR (
+  slot.blocker_id IS NULL AND NOT EXISTS (
+    SELECT 1 FROM policy_approvals WHERE operation=?1 || slot.action_id AND status='pending'
+  )
+))
+ORDER BY 1,2)SQL",{runOutboxOperation});
+        std::vector<Work> result;
+        while (rows.next()) result.emplace_back(rows.number(0),rows.string(1));
         return result;
     }
     static constexpr unsigned batchLimit = 4;
-    Id lastScheduled = 0;
+    Work lastScheduled;
 
-    std::vector<Id> nextProjects(std::size_t slots) {
+    std::vector<Work> nextProjects(std::size_t slots) {
         if (slots == 0) return {};
-        auto ids = eligible();
-        std::erase_if(ids,[&](Id id) {
-            if (workers.contains(id)) return true;
-            std::lock_guard lock(db.mutex);
-            return db.query("SELECT 1 FROM policy_approvals WHERE task=? AND turn=0 AND status='pending' "
-                            "AND operation NOT GLOB 'run-outbox/*'",{id}).next();
-        });
-        if (ids.size() > slots) {
-            std::rotate(ids.begin(),std::upper_bound(ids.begin(),ids.end(),lastScheduled),ids.end());
-            ids.resize(slots);
+        auto jobs = eligible();
+        std::erase_if(jobs,[&](const Work& work) { return workers.contains(work); });
+        if (jobs.size() > slots) {
+            std::rotate(jobs.begin(),std::upper_bound(jobs.begin(),jobs.end(),lastScheduled),jobs.end());
+            jobs.resize(slots);
         }
-        if (!ids.empty()) lastScheduled = ids.back();
-        return ids;
+        if (!jobs.empty()) lastScheduled = jobs.back();
+        return jobs;
     }
 
     Json snapshot(Id id) {
@@ -382,20 +392,6 @@ ORDER BY id)SQL");
             task["pendingStageReport"] = reportId;
             db.settleStageReport(task);
         }
-    }
-
-    void setReportEvidence(Json& data, const RunEvidence& evidence) {
-        using Availability = RunEvidence::Availability;
-        const bool missing = evidence.availability == Availability::ReportUnavailable;
-        const auto report = missing ? std::string{} : bounded(evidence.report,8192);
-        data["report"] = report;
-        data["truncated"] = !missing && (evidence.truncated || report.size() < evidence.report.size());
-        data["detail"] = bounded(evidence.detail,2048);
-        data["itemId"] = missing ? std::string{} : evidence.itemId;
-        if (!evidence.sessionCreatedAt.empty()) data["sessionCreatedAt"] = evidence.sessionCreatedAt;
-        data.erase("evidenceStatus");
-        if (missing) data["evidenceStatus"] = "report_unavailable";
-        if (evidence.availability == Availability::DiagnosticUnavailable) data["evidenceStatus"] = "diagnostic_unavailable";
     }
 
     RunEvidence fetchRunEvidence(const Json& task, const Json& report) {
@@ -564,14 +560,13 @@ ORDER BY id)SQL");
         return changed;
     }
 
-    Observation observe(const Json& task) {
+    Observation observeRun(const std::string& bot, const std::string& environment, const Json& config, const RunRef& run) {
         try {
-            const auto& run = task.at("activeRun");
-            auto observed = t3.observe(run.value("environmentId",field(task,"environmentId")),task["config"],runRef(run));
-            const auto scrub = db.redactor(field(task,"botId"));
+            auto observed = t3.observe(environment,config,run);
+            const auto scrub = db.redactor(bot);
             scrub.requirePublic(observed.question.requestId);
-            if (scrub.text(observed.resultRunId)!=observed.resultRunId) observed.resultRunId.clear();
-            if (scrub.text(observed.itemId)!=observed.itemId) observed.itemId.clear();
+            for (auto* value : {&observed.resultRunId,&observed.itemId,&observed.checkedCommit})
+                if (scrub.text(*value) != *value) value->clear();
             observed.question.fields = scrub.payload(observed.question.fields);
             observed.report = scrub.text(observed.report);
             observed.detail = scrub.text(observed.detail);
@@ -584,6 +579,11 @@ ORDER BY id)SQL");
             observation.kind = Observation::Kind::Unavailable;
             return observation;
         }
+    }
+
+    Observation observe(const Json& task) {
+        const auto& run = task.at("activeRun");
+        return observeRun(field(task,"botId"),run.value("environmentId",field(task,"environmentId")),task.at("config"),runRef(run));
     }
 
     void interruptRun(const Json& task) {
@@ -773,115 +773,84 @@ ORDER BY id)SQL");
 
     enum class DeliveryOutcome { Accepted, DefinitelyUnsent, Unknown };
 
-    static bool checkOutstanding(const Json& run) {
-        const auto status = field(run,"status");
-        return status == "queued" || status == "running" || status == "confirmation_pending";
+    DeliveryOutcome classifyDelivery(const Json& task, const Json& action, Delivery& outcome, bool reply) {
+        const auto scrub = db.redactor(field(task,"botId"));
+        if (scrub.payload(runJson(outcome.run)) != runJson(outcome.run))
+            outcome = {Delivery::Kind::Unknown,{},"T3 returned a protected Run identifier"};
+        outcome.detail = scrub.text(outcome.detail);
+        if (outcome.kind == Delivery::Kind::Accepted) {
+            if (reply || (hasRun(outcome.run) && assignedRunMatches(task,action,outcome.run)))
+                return DeliveryOutcome::Accepted;
+            outcome.detail = "The returned Run does not identify the assigned work";
+            outcome.run = {};
+        } else if (outcome.definitelyUnsent || outcome.kind == Delivery::Kind::NotAccepted)
+            return DeliveryOutcome::DefinitelyUnsent;
+        return DeliveryOutcome::Unknown;
     }
 
-    void finishChecks(Json& task) {
-        const auto& results = task.at("runResults");
-        if (std::ranges::any_of(results,checkOutstanding)) return;
-        if (task.at("state") == "cancelling") return cancelDone(task);
-        const auto passed = std::ranges::count_if(results,[](const Json& run) { return run.at("status") == "completed"; });
-        task["runOutcome"] = passed == 2 ? "all_completed" : passed == 1 ? "partial_failure" : "failed";
-        task["state"] = "completed";
-        db.journal(task.at("id"),"completed",{{"text",std::to_string(passed) + " of 2 T3 Runs completed with a verified commit."},
-            {"runOutcome",task.at("runOutcome")},{"requestedCommit",task.at("requestedCommit")},
-            {"doneWhen",task.at("doneWhen")},{"revisionId",revision(task)}});
+    void recordRunAssignment(const Json& task, const Json& action, const RunRef& ref, Json& run) {
+        db.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)",
+                {action.at("id"),task.at("id"),action.at("environmentId"),ref.threadId,ref.runId,ref.link});
+        run.update(runJson(ref));
+        run["ownerBotId"] = task.at("botId");
+        run["environmentId"] = action.at("environmentId");
+        run["projectId"] = action.value("projectId",field(task,"projectId"));
+        run["revisionId"] = action.at("revisionId");
+        db.journal(task.at("id"),"run_started",{{"run",run},{"actionId",action.at("id")},
+            {"revisionId",run.at("revisionId")},{"sourceResultRefs",action.at("sourceResultRefs")}});
+    }
+
+    void rememberRunCandidate(Json action, const RunRef& ref) {
+        action.erase("phase");
+        action.erase("authGeneration");
+        action["candidate"] = runJson(ref);
+        if (action.at("tool") == "delegate") action["launchReceiptThreadId"] = ref.threadId;
+        db.exec("UPDATE outbox SET data=? WHERE id=?",{action,action.at("id")});
     }
 
     void writeCheckReport(Json& task, Json& run, const Observation& observed) {
-        const auto ref = runRef(run);
-        auto status = observed.status;
-        if (status.empty()) status = "failed";
-        auto detail = observed.detail;
-        if (status == "completed" && observed.checkedCommit != field(task,"requestedCommit")) {
-            status = "failed";
-            if (detail.empty()) detail = "The Run did not verify the requested commit.";
-        }
-        Json data = {{"kind","result"},{"run",runJson(ref)},{"environmentId",run.at("environmentId")},
-            {"projectId",run.at("projectId")},{"destination",run.at("name")},{"status",status},
-            {"commit",observed.checkedCommit},{"requestedCommit",task.at("requestedCommit")},
-            {"revisionId",revision(task)},{"resultRunId",observed.resultRunId.empty() ? ref.runId : observed.resultRunId}};
-        setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,std::move(detail),
-            observed.truncated,observed.sessionCreatedAt});
-        for (const auto* key : {"status","commit","report","detail","evidenceStatus","sessionCreatedAt"})
-            if (data.contains(key)) run[key] = data.at(key);
-        run.erase("retryAt");
-        run.erase("stopRetryAt");
-        run.erase("evidenceAttempts");
-        db.journal(task.at("id"),"report",data);
-        finishChecks(task);
+        if (db.recordVerificationReport(task,run,observed) && task.at("state") == "cancelling")
+            cancelDone(task);
     }
 
-    Json& savedCheck(Json& task, std::string_view action) {
-        auto& results = task.at("runResults");
-        const auto match = std::ranges::find_if(results,[&](const Json& run) { return field(run,"actionId") == action; });
-        if (match == results.end()) throw Conflict("The saved Run is outside this task");
-        return *match;
+    static bool setCheckStatus(Json& run, std::string_view status, std::string detail) {
+        if (run.at("status") == status && field(run,"detail") == detail) return false;
+        run["status"] = status;
+        run["detail"] = std::move(detail);
+        return true;
     }
 
     void checkStatus(Id id, std::string_view action, std::string_view status, std::string detail) {
         changeTask(id,[&](Json& task) {
-            auto& run = savedCheck(task,action);
-            if (!checkOutstanding(run) || (run.at("status") == status && field(run,"detail") == detail)) return false;
-            run["status"] = status;
-            run["detail"] = std::move(detail);
-            return true;
+            auto& run = verificationRun(task,action);
+            return verificationRunOutstanding(run) && setCheckStatus(run,status,std::move(detail));
         });
     }
 
-    void applyCheckDelivery(Id id, const Json& action, Delivery outcome) {
-        changeTask(id,[&](Json& task) {
-            const auto key = field(action,"id");
-            auto& run = savedCheck(task,key);
-            const auto current = db.outbox(task,key);
-            const auto phase = field(current,"phase");
-            if (phase != "ready" && phase != "started") return false;
-            const auto scrub = db.redactor(field(task,"botId"));
-            const bool cancelling = task.at("state") == "cancelling";
-            const bool safeRef = scrub.payload(runJson(outcome.run)) == runJson(outcome.run);
-            if (phase == "started" && outcome.kind == Delivery::Kind::Accepted && safeRef &&
-                hasRun(outcome.run) && assignedRunMatches(task,action,outcome.run)) {
-                db.exec("UPDATE outbox SET phase='accepted' WHERE id=?",{key});
-                db.exec("INSERT INTO runs VALUES(?,?,?,?,?,?)",
-                    {key,id,action.at("environmentId"),outcome.run.threadId,outcome.run.runId,outcome.run.link});
-                run.update(runJson(outcome.run));
-                run["status"] = "running";
-                run.erase("detail");
-                run.erase("retryAt");
-                db.journal(id,"run_started",{{"run",run},{"actionId",key},{"revisionId",revision(task)},
-                    {"sourceResultRefs",action.at("sourceResultRefs")}});
-                return true;
-            }
-            const auto detail = bounded(scrub.text(outcome.detail.empty() ?
-                "T3 has not confirmed the assigned Run." : outcome.detail),2048);
-            // Only an explicit pre-send failure can close a delivery. Reconciliation never sends again.
-            const bool unsent = outcome.definitelyUnsent || outcome.kind == Delivery::Kind::NotAccepted;
-            const bool rejected = outcome.kind == Delivery::Kind::NotAccepted || outcome.kind == Delivery::Kind::Settings;
-            if (unsent && (cancelling || phase == "started" || rejected)) {
-                db.exec("UPDATE outbox SET phase='closed' WHERE id=?",{key});
-                Observation observed;
-                observed.status = cancelling ? "cancelled" : "failed";
-                observed.detail = detail;
-                writeCheckReport(task,run,observed);
-                return true;
-            }
-            if (phase == "started" && safeRef && !outcome.run.threadId.empty() && !current.contains("candidate")) {
-                auto saved = current;
-                saved.erase("phase");
-                saved.erase("authGeneration");
-                saved["candidate"] = runJson(outcome.run);
-                saved["launchReceiptThreadId"] = outcome.run.threadId;
-                db.exec("UPDATE outbox SET data=? WHERE id=?",{saved,key});
-                run["link"] = outcome.run.link;
-                run["threadId"] = outcome.run.threadId;
-            }
-            run["status"] = "confirmation_pending";
-            run["detail"] = detail;
-            run["retryAt"] = options.clock() + 5;
+    bool deferVerificationDelivery(Json& task, Json& run, const Json& action, const Delivery& outcome,
+                                  DeliveryOutcome delivery) {
+        const bool cancelling = task.at("state") == "cancelling";
+        const auto key = action.at("id");
+        const auto phase = field(action,"phase");
+        const auto detail = bounded(outcome.detail.empty() ? "T3 has not confirmed the assigned Run." : outcome.detail,2048);
+        // Only an explicit pre-send failure can close a delivery. Reconciliation never sends again.
+        const bool rejected = outcome.kind == Delivery::Kind::NotAccepted || outcome.kind == Delivery::Kind::Settings;
+        if (delivery == DeliveryOutcome::DefinitelyUnsent && (cancelling || phase == "started" || rejected)) {
+            db.exec("UPDATE outbox SET phase='closed' WHERE id=?",{key});
+            Observation observed;
+            observed.status = cancelling ? "cancelled" : "failed";
+            observed.detail = detail;
+            writeCheckReport(task,run,observed);
             return true;
-        });
+        }
+        if (phase == "started" && !outcome.run.threadId.empty() && !action.contains("candidate")) {
+            rememberRunCandidate(action,outcome.run);
+            run["link"] = outcome.run.link;
+            run["threadId"] = outcome.run.threadId;
+        }
+        setCheckStatus(run,"confirmation_pending",detail);
+        run["retryAt"] = options.clock() + 5;
+        return true;
     }
 
     void stepCheck(const Json& task, const Json& run) {
@@ -896,29 +865,26 @@ ORDER BY id)SQL");
         const auto now = options.clock();
         const bool cancelling = task.at("state") == "cancelling";
         if (cancelling && phase == "ready") {
-            applyCheckDelivery(id,action,{Delivery::Kind::NotAccepted,{},"Cancelled before dispatch",true});
+            applyDelivery(id,action,{Delivery::Kind::NotAccepted,{},"Cancelled before dispatch",true});
             return;
         }
         if (now < run.value("retryAt",Seconds{})) return;
+        if (phase == "ready") {
+            std::lock_guard lock(db.mutex);
+            if (!db.projectRouteReady(id,key)) return;
+        }
         if (phase == "ready" || phase == "started") return deliver(task,std::move(action));
         if (phase != "accepted") return;
         const auto cmd = command(task,action);
         const auto ref = runRef(run);
-        Observation observed;
-        try { observed = t3.observe(cmd.environmentId,cmd.config,ref); }
-        catch (const std::exception&) { observed.kind = Observation::Kind::Unavailable; }
+        const auto observed = observeRun(cmd.ownerBotId,cmd.environmentId,cmd.config,ref);
         if (observed.kind == Observation::Kind::Finished) {
-            const auto scrub = db.redactor(cmd.ownerBotId);
-            observed.report = scrub.text(observed.report);
-            observed.detail = scrub.text(observed.detail);
-            for (auto* value : {&observed.resultRunId,&observed.itemId,&observed.checkedCommit})
-                if (scrub.text(*value) != *value) value->clear();
             changeTask(id,[&](Json& current) {
-                auto& saved = savedCheck(current,key);
-                if (!checkOutstanding(saved)) return false;
+                auto& saved = verificationRun(current,key);
+                if (!verificationRunOutstanding(saved)) return false;
                 if (current.at("state") != "cancelling" &&
                     (observed.commitEvidenceUnavailable || observed.evidence == RunEvidence::Availability::ReportUnavailable) &&
-                    saved.value("evidenceAttempts",0) < 2) {
+                    saved.value("evidenceAttempts",std::size_t{}) + 1 < maxEvidenceReads) {
                     saved["evidenceAttempts"] = saved.value("evidenceAttempts",0) + 1;
                     saved["status"] = "confirmation_pending";
                     saved["detail"] = "The Run ended. Flock is retrieving its commit and report.";
@@ -931,17 +897,30 @@ ORDER BY id)SQL");
             return;
         }
         using Kind = Observation::Kind;
-        if (observed.kind == Kind::Unavailable)
-            checkStatus(id,key,"confirmation_pending","Flock could not confirm the Run's status in T3.");
-        else if (observed.kind == Kind::Question || observed.kind == Kind::ExternalInput)
-            checkStatus(id,key,"confirmation_pending","Review the pending input or approval in this T3 Session.");
-        else if (!cancelling)
-            checkStatus(id,key,observed.status == "queued" ? "queued" : "running",{});
+        changeTask(id,[&](Json& current) {
+            auto& saved = verificationRun(current,key);
+            if (!verificationRunOutstanding(saved) || current.at("state") == "cancelling") return false;
+            bool changed = false;
+            if (observed.kind == Kind::Unavailable)
+                changed = setCheckStatus(saved,"confirmation_pending","Flock could not confirm the Run's status in T3.");
+            else if (observed.kind == Kind::Question || observed.kind == Kind::ExternalInput)
+                changed = setCheckStatus(saved,"confirmation_pending","Review the pending input or approval in this T3 Session.");
+            else
+                changed = setCheckStatus(saved,observed.status == "queued" ? "queued" : "running",{});
+            const auto deadline = saved.value("deadline",Seconds{});
+            if (current.at("wait").is_null() && deadline > 0 && now >= deadline) {
+                db.wait(current,"deadline",{{"text",field(saved,"name") + " reached its deadline"},
+                    {"runActionId",key},{"run",{{"threadId",ref.threadId},{"runId",ref.runId},
+                                               {"link",ref.link},{"environmentId",cmd.environmentId}}}});
+                return true;
+            }
+            return changed;
+        });
         if (!cancelling || observed.kind == Kind::Settling || observed.kind == Kind::Unavailable ||
             now < run.value("stopRetryAt",Seconds{})) return;
         if (!changeTask(id,[&](Json& current) {
             if (shutdown.stop_requested() || current.at("state") != "cancelling") return false;
-            savedCheck(current,key)["stopRetryAt"] = now + 5;
+            verificationRun(current,key)["stopRetryAt"] = now + 5;
             return true;
         })) return;
         try { t3.interrupt(cmd.environmentId,cmd.config,ref); }
@@ -950,47 +929,40 @@ ORDER BY id)SQL");
         }
     }
 
-    void stepChecks(const Json& task) {
-        std::vector<std::future<void>> checks;
-        for (const auto& run : task.at("runResults"))
-            if (checkOutstanding(run))
-                checks.push_back(std::async(std::launch::async,[&,run] { stepCheck(task,run); }));
-        for (auto& check : checks) check.get();
-    }
-
     void applyDelivery(Id id, const Json& action, Delivery outcome) {
-        if (action.contains("expectedCommit"))
-            return applyCheckDelivery(id,action,std::move(outcome));
         changeTask(id,[&](Json& task) {
-            if (task["actionId"] != action["id"] || terminal(task)) return false;
-            const auto scrub = db.redactor(field(task,"botId"));
+            if (terminal(task)) return false;
+            const auto key = field(action,"id");
+            const bool verification = action.contains("expectedCommit");
+            Json saved = verification ? db.outbox(task,key) : Json(nullptr);
+            if (verification ? (saved.is_null() || (saved.at("phase") != "ready" && saved.at("phase") != "started"))
+                             : task.at("actionId") != action.at("id")) return false;
             if (!outcome.launchWarning.empty()) {
-                task["launchWarning"] = scrub.text(outcome.launchWarning);
-                db.journal(id,"session_lineage_unavailable",{{"actionId",action["id"]},{"text",task["launchWarning"]}});
+                task["launchWarning"] = db.redactor(field(task,"botId")).text(outcome.launchWarning);
+                db.journal(id,"session_lineage_unavailable",{{"actionId",key},{"text",task["launchWarning"]}});
             }
-            if (scrub.payload(runJson(outcome.run)) != runJson(outcome.run))
-                outcome = {Delivery::Kind::Unknown,{},"T3 returned a protected Run identifier"};
-            outcome.detail = scrub.text(outcome.detail);
             const bool cancelling = task["state"] == "cancelling";
             const bool reply = action["tool"] == "answer_session_question";
-            DeliveryOutcome delivery = DeliveryOutcome::Unknown;
-            if (outcome.kind == Delivery::Kind::Accepted) {
-                if (reply || (hasRun(outcome.run) && assignedRunMatches(task,action,outcome.run)))
-                    delivery = DeliveryOutcome::Accepted;
-                else {
-                    outcome.detail = "The returned Run does not identify the assigned work";
-                    outcome.run = {};
-                }
-            } else if (outcome.definitelyUnsent || outcome.kind == Delivery::Kind::NotAccepted)
-                delivery = DeliveryOutcome::DefinitelyUnsent;
+            const auto delivery = classifyDelivery(task,action,outcome,reply);
 
-            if (delivery == DeliveryOutcome::Accepted) {
-                db.exec("UPDATE outbox SET phase='accepted' WHERE id=?", {action["id"]});
+            const bool accepted = delivery == DeliveryOutcome::Accepted &&
+                (!verification || saved.at("phase") == "started");
+            if (accepted) db.exec("UPDATE outbox SET phase='accepted' WHERE id=?",{key});
+            if (verification) {
+                auto& run = verificationRun(task,key);
+                if (!accepted) return deferVerificationDelivery(task,run,saved,outcome,delivery);
+                run["status"] = "running";
+                run.erase("detail");
+                run.erase("retryAt");
+                recordRunAssignment(task,action,outcome.run,run);
+                return true;
+            }
+            if (accepted) {
                 db.clearWait(task,"delivery_confirmed");
                 if (reply) db.unlockQuestion(task,"answered");
                 else {
-                    db.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)", {action["id"],id,
-                        action["environmentId"],outcome.run.threadId,outcome.run.runId,outcome.run.link});
+                    task["activeRun"] = Json::object();
+                    recordRunAssignment(task,action,outcome.run,task["activeRun"]);
                     if (const auto participation = action.value("sessionParticipationId",Id{}); participation)
                         db.exec(R"SQL(
 INSERT OR IGNORE INTO session_queue_cancellations(participation_id,run,stop_id)
@@ -1003,14 +975,6 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                                 "deadline=CASE WHEN deadline=0 AND json_extract(spec,'$.softDeadlineSeconds')>0 "
                                 "THEN ?+json_extract(spec,'$.softDeadlineSeconds') ELSE deadline END WHERE task_id=?", {now,now,id});
                     }
-                    task["activeRun"] = runJson(outcome.run);
-                    task["activeRun"]["ownerBotId"] = task["botId"];
-                    task["activeRun"]["environmentId"] = action["environmentId"];
-                    task["activeRun"]["projectId"] = action.value("projectId",field(task,"projectId"));
-                    task["activeRun"]["revisionId"] = action.at("revisionId");
-                    db.journal(id,"run_started",{{"run",task["activeRun"]},{"actionId",action["id"]},
-                        {"revisionId",task["activeRun"]["revisionId"]},
-                        {"sourceResultRefs",action.at("sourceResultRefs")}});
                     instructionDelivery(task,action);
                     if ((action["tool"] == "delegate" || action["tool"] == "start_in_session") &&
                         !task.value("replanning",false)) {
@@ -1032,12 +996,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             }
             if (delivery == DeliveryOutcome::Unknown && !outcome.run.threadId.empty() &&
                 action["phase"] == "ready" && !reply && !cancelling) {
-                auto saved = action;
-                saved.erase("phase");
-                saved.erase("authGeneration");
-                saved["candidate"] = runJson(outcome.run);
-                if (action["tool"] == "delegate") saved["launchReceiptThreadId"] = outcome.run.threadId;
-                db.exec("UPDATE outbox SET data=? WHERE id=?", {saved,action["id"]});
+                rememberRunCandidate(action,outcome.run);
                 db.journal(id,"run_id_pending",{{"actionId",action["id"]},{"thread",runJson(outcome.run)}});
                 return true;
             }
@@ -1216,7 +1175,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 if (shutdown.stop_requested()) return false;
                 if (check) {
                     if (current.at("state") == "cancelling" || terminal(current) ||
-                        !db.query("SELECT 1 FROM outbox WHERE id=? AND phase='ready'",{cmd.actionId}).next()) return false;
+                        !db.projectRouteReady(id,cmd.actionId)) return false;
                 } else if (current["actionId"] != action["id"]) return false;
                 if (!sessionActionAllowed(current)) {
                     policyGate = ApprovalGate::denied;
@@ -1242,8 +1201,9 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                 db.exec("UPDATE outbox SET phase='started',auth_generation=?,data=?"
                         " WHERE id=? AND phase='ready'",{cmd.authGeneration,payload,action["id"]});
                 if (!sqlite3_changes(db.db)) return false;
-                if (!check && cmd.tool != "answer_session_question" && current["deadline"] == 0)
-                    current["deadline"] = options.clock() + db.environmentTimeout(cmd.ownerBotId,cmd.environmentId,current.at("config"));
+                auto& timed = check ? verificationRun(current,cmd.actionId) : current;
+                if (cmd.tool != "answer_session_question" && timed.value("deadline",Seconds{}) == 0)
+                    timed["deadline"] = options.clock() + db.environmentTimeout(cmd.ownerBotId,cmd.environmentId,current.at("config"));
                 db.journal(current["id"],"send_started",{{"actionId",action["id"]}});
                 return true;
             };
@@ -2477,13 +2437,18 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         return true;
     }
 
-    void step(Id id) {
+    void step(const Work& work) {
         if (shutdown.stop_requested()) return;
-        const auto task = snapshot(id);
+        const auto& [id,action] = work;
+        auto task = snapshot(id);
         const auto state = field(task,"state");
-        if (task.contains("runResults") && (state == "running" || state == "cancelling"))
-            stepChecks(task);
-        else if (task.contains("pendingStageReport"))
+        if (!action.empty()) {
+            auto& run = verificationRun(task,action);
+            if (verificationRunOutstanding(run)) stepCheck(task,run);
+            return;
+        }
+        if (task.contains("runResults")) return;
+        if (task.contains("pendingStageReport"))
             change(task,[&](Json& current) { return db.settleStageReport(current); });
         else if (shouldStop(task)) stop(task);
         else if (task.contains("pendingRunReport")) recoverRunReport(task);
@@ -2548,7 +2513,7 @@ void Runtime::tick() {
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit,p_->options.clock()))
         p_->runTurn(id);
     p_->db.advanceWorkflows(p_->options.clock());
-    for (auto id : p_->nextProjects(Impl::batchLimit)) p_->step(id);
+    for (const auto& work : p_->nextProjects(Impl::batchLimit)) p_->step(work);
     p_->db.deliverChannels(p_->shutdown.get_token());
 }
 void Runtime::tickConcurrent() {
@@ -2595,8 +2560,8 @@ void Runtime::tickConcurrent() {
     p_->deferContendedWork("workflows",[&] { p_->db.advanceWorkflows(p_->options.clock()); });
     p_->deferContendedWork("task scheduling",[&] {
         p_->persistTaskInferences();
-        for (auto id : p_->nextProjects(Impl::batchLimit - p_->workers.size()))
-            p_->workers.emplace(id,std::async(std::launch::async,[impl = p_.get(),id] { impl->step(id); }));
+        for (const auto& work : p_->nextProjects(Impl::batchLimit - p_->workers.size()))
+            p_->workers.emplace(work,std::async(std::launch::async,[impl = p_.get(),work] { impl->step(work); }));
     });
 }
 } // namespace flockv0

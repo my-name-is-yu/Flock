@@ -95,7 +95,7 @@ bool Store::Impl::currentPolicyApproval(Id turn, Id task, Id revision, Id genera
     if (operation.starts_with(runOutboxOperation))
         return query(R"SQL(
 SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
-WHERE o.id=? AND t.id=? AND o.phase='ready' AND t.state IN ('sending','running')
+WHERE o.id=? AND t.id=? AND o.phase='ready' AND t.state IN ('running','waiting')
   AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
 )SQL",{operation.substr(runOutboxOperation.size()),task,revision}).next();
     return query("SELECT 1 FROM tasks WHERE id=? AND generation=?"

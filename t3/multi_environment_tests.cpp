@@ -13,6 +13,7 @@ using flockv0::t3detail::http;
 namespace {
 constexpr auto bot = "release";
 constexpr auto request = "Verify the release fixture";
+constexpr auto holdLocal = "Hold the local project";
 constexpr auto threadId = "shared-thread";
 constexpr auto runId = "shared-run";
 
@@ -65,6 +66,8 @@ struct Script final : Model {
             if (!turn.empty()) startResult = turn.back().at("result");
             return {{{"reply",{{"text","I have the fixture request."}},"End this turn"}}};
         }
+        if (kind == "intake" && input.task.at("request") == holdLocal)
+            return {{{"ask_user",{{"question","Can the project be released?"}},"Hold the local slot"}}};
         if (kind == "intake")
             return {{{"delegate",{{"instruction",request},{"doneWhen","The checks have a result"}},"Run the checks"}}};
         if (kind == "result")
@@ -167,6 +170,66 @@ void normal(Scenario& fixture) {
           "the original request must contain both outcomes");
     fixture.checkResult(fixture.local,Scenario::result(task,fixture.local),"completed",fixture.model.commit);
     fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"completed",fixture.model.commit);
+}
+
+void independentSlots(Scenario& fixture) {
+    const auto blocker = fixture.store.submit({"owner",holdLocal,fixture.local.id(),fixture.local.project()});
+    fixture.start();
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.mini).value("status","") == "running";
+    },"the free route must start while the other project is blocked");
+    check(fixture.store.task(blocker).at("state") == "waiting" &&
+          fixture.local.effects("t3_thread_launch").empty() &&
+          Scenario::result(fixture.task(),fixture.local).at("status") == "queued",
+          "the blocked Run was dispatched before its project became free");
+    fixture.mini.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.mini).value("status","") == "completed";
+    },"the free route must settle independently of the blocked sibling");
+    fixture.store.operate(localOwner,TaskTarget::from(fixture.store.task(blocker),0),"cancel");
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.local).value("status","") == "running";
+    },"the waiting route must launch once its project is free");
+    fixture.local.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },
+                         "the batch must complete once both Runs settle");
+    fixture.checkLaunches();
+}
+
+void deadlines(Scenario& fixture) {
+    fixture.start();
+    fixture.awaitBothRunning();
+    const auto started = fixture.task();
+    const auto local = Scenario::result(started,fixture.local);
+    const auto mini = Scenario::result(started,fixture.mini);
+    fixture.now = std::max(local.at("deadline").get<Seconds>(),mini.at("deadline").get<Seconds>()) + 1;
+    fixture.advanceUntil([](const Json& task) {
+        const auto& wait = task.at("wait");
+        return wait.is_object() && wait.value("reason","") == "deadline";
+    },
+                         "an expired Run must notify the user");
+    const auto waiting = fixture.task();
+    const auto wait = waiting.at("wait");
+    const bool localExpiredFirst = wait.at("runActionId") == local.at("actionId");
+    const auto& overdue = localExpiredFirst ? fixture.local : fixture.mini;
+    const auto& sibling = localExpiredFirst ? fixture.mini : fixture.local;
+    check(wait.at("run").at("environmentId") == overdue.id() && wait.at("run").at("link") == overdue.link(),
+          "the deadline must point to its own Run and environment");
+    sibling.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,sibling).value("status","") == "completed";
+    },"a deadline wait must not stop another Run from settling");
+    const auto stillWaiting = fixture.task();
+    const auto waitId = wait.at("id").get<Id>();
+    check(stillWaiting.at("wait").at("id") == waitId, "a sibling settling cleared the wrong deadline");
+    const auto extension = fixture.now.load() + 120;
+    fixture.store.operate(localOwner,TaskTarget::from(stillWaiting,waitId),"extend",{{"deadline",extension}});
+    check(fixture.task().at("wait").is_null() &&
+          Scenario::result(fixture.task(),overdue).at("deadline") == extension, "extending changed the wrong deadline");
+    overdue.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },
+                         "the extended Run must finish normally");
+    fixture.checkLaunches();
 }
 
 void partial(Scenario& fixture) {
@@ -344,6 +407,8 @@ int main(int argc, char** argv) {
             local.login(directory);
             mini.login(directory);
             { Scenario fixture(local,mini,directory,commit,"normal"); normal(fixture); }
+            { Scenario fixture(local,mini,directory,commit,"independent"); independentSlots(fixture); }
+            { Scenario fixture(local,mini,directory,commit,"deadlines"); deadlines(fixture); }
             { Scenario fixture(local,mini,directory,commit,"partial"); partial(fixture); }
             { Scenario fixture(local,mini,directory,commit,"mismatch"); mismatch(fixture); }
             { Scenario fixture(local,mini,directory,commit,"supervised"); supervised(fixture); }
