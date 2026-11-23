@@ -3414,6 +3414,39 @@ int main() {
             {"pinned specialist admission in Full mode",[] { specialistAdmission(SpecialistMode::Single); }},
             {"Never rule blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::PolicyRevoked); }},
             {"disconnect blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::Disconnected); }},
+            {"Pending conversation approval leaves an unrelated task free to complete",[] {
+                Fixture f;
+                f.model.script = [](const ModelInput& input) {
+                    if (input.event.at("kind") == "intake") return work();
+                    if (input.event.at("kind") == "conversation_turn")
+                        return Decision{"request_bot_change",{{"operation","create_bot"},{"targetBotId","new-bot"},
+                                                              {"name","New Bot"}},"Create"};
+                    return complete();
+                };
+                const auto task = f.submit();
+                f.reach(task,"running");
+                f.store->policy().setMode(localOwner,"supervised");
+                f.store->receive(localOwner,{"alpha","","e","separate"},"unrelated","Create another Bot");
+                f.runtime->runConversations();
+                check(f.store->inbox(localOwner).size()==1,"The unrelated turn did not await approval");
+                f.t3.finish("run-1");
+                f.reach(task,"completed");
+                check(f.store->inbox(localOwner).size()==1,"Task completion settled an unrelated approval");
+            }},
+            {"Never blocks a follow-up launch in the Session environment",[] {
+                Fixture f;
+                f.model.script = [](const ModelInput& input) {
+                    if (input.event.at("kind") == "intake") return work();
+                    if (input.event.at("kind") == "result") return work("follow_up",false);
+                    return ask();
+                };
+                const auto task = f.submit();
+                f.reach(task,"running");
+                f.store->policy().changeNeverRule(localOwner,Action::environment_launch,"e",true);
+                f.t3.finish("run-1","failed");
+                f.wait(task,"user_question");
+                check(f.t3.launches==1 && f.t3.follows==0,"An environment launch ban allowed a follow-up Run");
+            }},
             {"Never blocks ordinary launch with a T3 connection",[] {
                 Fixture f;
                 f.store->policy().changeNeverRule(localOwner,Action::environment_launch,"e",true);

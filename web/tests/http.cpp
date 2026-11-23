@@ -1,3 +1,4 @@
+#include "flock/board_inbox.hpp"
 #include "http_fixture.hpp"
 #include "flock/memory_automation.hpp"
 
@@ -515,6 +516,13 @@ void directRequestApproval(const std::filesystem::path& path) {
     check(approvals.size()==1 && approvals.at(0).at("taskId")==supervised &&
           approvals.at(0).at("itemKind")=="policy_approval" && approvals.at(0).at("canDecide")==true,
           "The direct HTTP request did not retain an approval requester");
+    check(t3.launches.empty(),"HTTP task launched before approval");
+    const auto& item = approvals.at(0);
+    store.decideInbox(localOwner,{item.at("botId"),InboxKind::policy_approval,item.at("itemId"),item.at("waitId"),
+          item.at("taskId"),item.at("targetRevision"),item.at("targetGeneration")},"allow_once");
+    tick(runtime,4);
+    check(t3.launches["release"]==1,"The HTTP request could not launch with approval");
+
 }
 
 void exercise(const std::filesystem::path& path) {

@@ -130,7 +130,8 @@ Json Store::Impl::memory(std::string_view bot, const Person& actor, std::string_
     const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
     auto access = Policy(*this);
     if (!access.allows(actor,reading ? Action::bot_view : Action::bot_settings,bot) ||
-        (shared && (!access.allows(actor,action,id) || !access.allows(bot,action,id))))
+        (shared && (!access.allows(actor,action,id) ||
+                    (fromBot ? access.forbidden(bot,action,id) : !access.allows(bot,action,id)))))
         throw AccessDenied("Memory access denied");
 
     const auto key = shared ? "shared:" + id : privateKey(bot);

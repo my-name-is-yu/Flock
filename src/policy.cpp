@@ -143,6 +143,13 @@ Resource Resource::sessionRead(std::string_view environment, std::string_view th
 Policy Store::policy() { return Policy(*p_); }
 
 void Store::Impl::initializePolicySchema() {
+    Transaction migration(db);
+    const bool legacy = query("SELECT 1 FROM sqlite_schema WHERE name='policy_settings'"
+                              " AND instr(sql,'revision')=0").next();
+    if (legacy) {
+        exec("ALTER TABLE policy_settings RENAME TO policy_settings_previous");
+        exec("ALTER TABLE policy_rules RENAME TO policy_rules_previous");
+    }
     const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TABLE IF NOT EXISTS policy_settings(id INTEGER PRIMARY KEY CHECK(id=1),mode TEXT NOT NULL CHECK(mode IN ('full','supervised')), revision INTEGER NOT NULL);
@@ -174,7 +181,16 @@ CREATE TABLE IF NOT EXISTS bot_creation_intents(
  request_key TEXT PRIMARY KEY,target TEXT UNIQUE NOT NULL,person TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 )SQL";
-    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Cannot initialize policy schema");
+    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw StorageError(db);
+    if (legacy) {
+        exec("UPDATE policy_settings SET mode=(SELECT mode FROM policy_settings_previous WHERE id=1)"
+             " WHERE EXISTS (SELECT 1 FROM policy_settings_previous WHERE id=1)");
+        exec("INSERT INTO policy_rules(kind,action,target,created_at,exact)"
+             " SELECT kind,action,target,created_at,0 FROM policy_rules_previous");
+        exec("DROP TABLE policy_rules_previous");
+        exec("DROP TABLE policy_settings_previous");
+    }
+    migration.commit();
 }
 
 
@@ -194,7 +210,6 @@ bool Policy::forbidden(std::string_view bot, Action action, std::string_view tar
 PolicyResult Policy::check(std::string_view bot, const Resource& resource) const {
     std::lock_guard lock(db_.mutex);
     if (forbidden(bot,resource.action,resource.target)) return PolicyResult::deny;
-    if (mode() == "full") return PolicyResult::allow;
     auto rows = db_.query("SELECT kind,target,exact FROM policy_rules WHERE kind<>'never' AND action=?"
                           " ORDER BY kind DESC",{actionName(resource.action)});
     while (rows.next()) {
@@ -202,7 +217,8 @@ PolicyResult Policy::check(std::string_view bot, const Resource& resource) const
         if (rows.number(2) ? pattern == resource.target : targetMatches(pattern,resource.target))
             return rows.string(0) == "ask" ? PolicyResult::ask : PolicyResult::allow;
     }
-    return !resource.routine && supervisedCategory(resource.action) ? PolicyResult::ask : PolicyResult::allow;
+    return mode() == "supervised" && !resource.routine && supervisedCategory(resource.action)
+        ? PolicyResult::ask : PolicyResult::allow;
 }
 
 PolicyResult Policy::check(Id task, Action action, std::string_view target) const {

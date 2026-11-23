@@ -1170,9 +1170,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                                 cmd.tool == "answer_session_question"};
         }
         const auto operation = "outbox/" + cmd.actionId;
-        const auto payload = Json{{"tool",cmd.tool},{"instruction",cmd.instruction},{"questionId",cmd.questionId},
-                                  {"answers",cmd.answers},{"run",runJson(cmd.target)},{"projectId",cmd.projectId},
-                                  {"config",cmd.config}};
         const auto refused = [&](ApprovalGate gate) {
             change(task,[&](Json& current) {
                 if (current["actionId"] != action["id"]) return false;
@@ -1196,21 +1193,20 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         if (firstSend) {
             if (resource && policy.mode() == "full" && policy.forbidden(cmd.ownerBotId,resource->action,resource->target))
                 return applyDelivery(id,action,{Delivery::Kind::Settings,{},"Session action denied by installation policy.",true});
-            if (resource) {
-                ApprovalGate gate;
-                {
-                    std::lock_guard lock(db.mutex);
-                    Transaction tx(db.db);
-                    gate = db.approveAction(db.taskPolicyOrigin(task),*resource,operation,payload,options.clock(),false);
-                    tx.commit();
-                }
-                if (gate == ApprovalGate::waiting) return;
-                if (gate != ApprovalGate::allow) return refused(gate);
-            }
             if (cmd.tool == "delegate") {
                 try {
                     std::lock_guard lock(db.mutex);
-                    prepareDelegation(task,action);
+                    if (!action.contains("instruction")) {
+                        prepareDelegation(task,action);
+                        auto prepared = action;
+                        prepared.erase("phase");
+                        prepared.erase("authGeneration");
+                        db.exec("UPDATE outbox SET data=? WHERE id=? AND phase='ready' "
+                                "AND json_type(data,'$.instruction') IS NULL",{prepared,cmd.actionId});
+                        auto saved = db.query("SELECT data FROM outbox WHERE id=? AND phase='ready'",{cmd.actionId});
+                        if (!saved.next()) return;
+                        action.update(saved.json(0));
+                    }
                     cmd.instruction = field(action,"instruction");
                 } catch (const Conflict& error) {
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},error.what(),true});
@@ -1227,6 +1223,33 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 if (cmd.instruction.size() > maxSessionPromptBytes)
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},SessionContextLimit{}.what(),true});
                 action["instruction"] = cmd.instruction;
+            }
+            const auto payload = Json{{"tool",cmd.tool},{"instruction",cmd.instruction},{"questionId",cmd.questionId},
+                                  {"answers",cmd.answers},{"run",runJson(cmd.target)},{"projectId",cmd.projectId},
+                                  {"config",cmd.config},{"environmentId",cmd.environmentId}};
+            const auto assess = [&](const Json& current, bool claim) {
+                const auto origin = db.taskPolicyOrigin(current);
+                if (cmd.tool == "follow_up") {
+                    const Resource launch{Action::environment_launch,cmd.environmentId,true};
+                    const auto launchPolicy = policy.check(cmd.ownerBotId,launch);
+                    if (launchPolicy == PolicyResult::deny) return ApprovalGate::denied;
+                    if (launchPolicy == PolicyResult::ask &&
+                        policy.check(cmd.ownerBotId,*resource) == PolicyResult::allow)
+                        return db.approveAction(origin,launch,operation,payload,options.clock(),claim);
+                }
+                return resource ? db.approveAction(origin,*resource,operation,payload,options.clock(),claim)
+                                : ApprovalGate::allow;
+            };
+            if (resource) {
+                ApprovalGate gate;
+                {
+                    std::lock_guard lock(db.mutex);
+                    Transaction tx(db.db);
+                    gate = assess(task,false);
+                    tx.commit();
+                }
+                if (gate == ApprovalGate::waiting) return;
+                if (gate != ApprovalGate::allow) return refused(gate);
             }
             std::optional<Delivery> stopped;
             try {
@@ -1250,7 +1273,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             if (!change(task,[&](Json& current) {
                 if (shutdown.stop_requested() || current["actionId"] != action["id"]) return false;
                 if (resource) {
-                    policyGate = db.approveAction(db.taskPolicyOrigin(current),*resource,operation,payload,options.clock());
+                    policyGate = assess(current,true);
                     if (policyGate != ApprovalGate::allow) return false;
                 }
                 if (specialistLaunch && (!origin || !reserveSpecialistLaunch(*origin,cmd,current,pinned))) {
@@ -1275,7 +1298,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             }
         } else if (action["phase"] != "started") return;
         try {
-            if (firstSend) outcome = resource && policy.forbidden(cmd.ownerBotId,resource->action,resource->target)
+            if (firstSend) outcome = (resource && policy.forbidden(cmd.ownerBotId,resource->action,resource->target)) ||
+                                     (cmd.tool == "follow_up" && policy.forbidden(cmd.ownerBotId,Action::environment_launch,cmd.environmentId))
                 ? Delivery{Delivery::Kind::NotAccepted,{},"Session action denied by installation policy.",true}
                 : t3.send(cmd);
             else {
@@ -1695,7 +1719,7 @@ ORDER BY j.id
         auto prompt = workPrompt(task,event,field(action,"id").size(),&contract);
         const auto scrub = db.redactor(field(task,"botId"));
         instruction += prompt.instruction;
-        action["instruction"] = std::move(instruction);
+        action["instruction"] = scrub.text(instruction);
         action["instructions"] = scrub.record(std::move(prompt.pending),SecretRedactor::Fields::external);
         action["contextIds"] = std::move(prompt.contextIds);
         action["sourceResultRefs"] = std::move(prompt.resultReferences);

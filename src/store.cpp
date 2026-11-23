@@ -202,7 +202,18 @@ FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
         initializeRootDeliverySchema();
         initializeSpecialistSchema();
         initializeSessionHandoffSchema();
+        const bool legacyTurns = query("SELECT 1 FROM sqlite_schema WHERE name='conversation_turns'"
+                                       " AND instr(sql,'policy_waiting')=0").next();
+        if (legacyTurns) {
+            // Keep references to conversation_turns pointed at the rebuilt table.
+            exec("PRAGMA foreign_keys=OFF");
+            exec("PRAGMA legacy_alter_table=ON");
+        }
         initializeConversationSchema();
+        if (legacyTurns) {
+            exec("PRAGMA legacy_alter_table=OFF");
+            exec("PRAGMA foreign_keys=ON");
+        }
         initializeChannelSchema();
         initializeLocalMachineSchema();
         initializeModelBudgetSchema();

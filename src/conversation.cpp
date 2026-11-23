@@ -22,6 +22,13 @@ void Store::Impl::initializeConversationSchema() {
     Transaction transaction(db);
     const bool initializeTurnState = !query("SELECT 1 FROM sqlite_schema WHERE type='view'"
                                            " AND name='conversation_input_status'").next();
+    const bool legacy = query("SELECT 1 FROM sqlite_schema WHERE name='conversation_turns'"
+                              " AND instr(sql,'policy_waiting')=0").next();
+    if (legacy) {
+        exec("DROP VIEW IF EXISTS conversation_input_status");
+        exec("DROP INDEX IF EXISTS conversation_turns_running");
+        exec("ALTER TABLE conversation_turns RENAME TO conversation_turns_previous");
+    }
     if (sqlite3_exec(db,R"SQL(
 CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
@@ -70,6 +77,11 @@ CREATE TABLE IF NOT EXISTS task_revisions(
   UNIQUE(task_id,number));
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK)
         throw StorageError(db);
+    if (legacy) {
+        exec("INSERT INTO conversation_turns(message_id,status,pause_id,reserved_attempt,reply_id)"
+             " SELECT message_id,status,pause_id,reserved_attempt,reply_id FROM conversation_turns_previous");
+        exec("DROP TABLE conversation_turns_previous");
+    }
     if (!query("SELECT 1 FROM pragma_table_info('messages') WHERE name='principal_source'").next())
         exec("ALTER TABLE messages ADD COLUMN principal_source INTEGER NOT NULL DEFAULT 0 CHECK(principal_source IN (0,1,2,3))");
     if (initializeTurnState || query("SELECT 1 FROM sqlite_schema WHERE type='index' AND name='journal_pending_turn'").next()) {
@@ -107,7 +119,7 @@ bool Store::Impl::conversationPending(std::string_view bot) const {
     // Start with the running-turn index so long Bot histories do not add work.
     return query(R"SQL(
 SELECT 1 FROM conversation_turns t CROSS JOIN messages m ON m.id=t.message_id JOIN journal j ON j.id=m.id
-WHERE t.status IN ('running','policy_waiting') AND m.bot_id=? AND j.kind='conversation_message' LIMIT 1
+WHERE t.status='running' AND m.bot_id=? AND j.kind='conversation_message' LIMIT 1
 )SQL",{bot}).next();
 }
 

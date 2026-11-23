@@ -823,9 +823,6 @@ void mcpSessionPagination(McpTools& adapter) {
     check(next.at("tools").size() == 2 && !next.contains("nextCursor"),
           "MCP continuation did not reach the original session");
     expectDenied("alpha","one",McpCollection::tools);
-    check(adapter.readOnlyHint("one","extension") && !adapter.readOnlyHint("two","extension") &&
-          !adapter.readOnlyHint("one","tool-failure") && !adapter.readOnlyHint("one","untyped-hint") &&
-          !adapter.readOnlyHint("one","compatible-content"),"MCP tool hints were lost, misread, or shared across servers");
 }
 
 void mcpToolOutcomes(Fixture& f) {

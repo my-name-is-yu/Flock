@@ -1023,7 +1023,11 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 }
                 const auto changeId = Policy(*this).applyBotChange(message.bot,actor,operation,target,name,
                     id,step,applyBotChange);
-                result = {{"ok",true},{"changeId",changeId},{"status","applied"}};
+                Transaction completed(db);
+                exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'",{key});
+                saveTurnResults(id,step,Json::array({Json{{"ok",true},{"changeId",changeId},{"status","applied"}}}));
+                completed.commit();
+                continue;
             } catch (const Conflict& error) {
                 result = toolFailure(error.what());
             } catch (const ToolError& error) {
