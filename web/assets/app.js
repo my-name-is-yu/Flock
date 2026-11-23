@@ -13,7 +13,7 @@ import { replyArrivalId } from '/reply-arrival.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 import { mountConversationFind } from '/conversation-find.mjs';
-import { diagramPreview } from '/diagram-preview.js';
+import { diagramCard, expandedDiagram } from '/diagram-preview.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -1507,70 +1507,9 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
-function diagramCard(replyId, artifact) {
-  const title = artifact.title || 'Diagram';
-  const selection = { kind: 'diagram', replyId, artifactId: artifact.id, title };
-  const card = node('figure', 'conversation-diagram');
-  const caption = node('figcaption', 'diagram-caption');
-  const expand = button(null, 'text-button diagram-expand', () => openDetail(selection));
-  expand.disabled = true;
-  expand.dataset.timelineAction = `expand:${artifact.id}`;
-  expand.setAttribute('aria-label', `Expand ${title}`);
-  expand.setAttribute('aria-haspopup', 'dialog');
-  expand.append(icon('expand'), document.createTextNode('Expand'));
-  caption.append(icon('diagram'), node('span', 'diagram-title', title), expand);
-  const preview = diagramPreview(selection, expand);
-  preview.addEventListener('diagram-layout', () => {
-    const scroller = elements.conversation;
-    if (!view?.source && scroller.classList.contains('follow-newest')) scroller.scrollTop = scroller.scrollHeight;
-  });
-  card.append(caption, preview);
-  return card;
-}
-function expandedDiagram(selection) {
-  const preview = diagramPreview(selection);
-  const actions = node('div', 'diagram-controls');
-  const magnification = node('div', 'diagram-magnification');
-  magnification.setAttribute('role', 'group');
-  magnification.setAttribute('aria-label', 'Diagram zoom');
-  const iconControl = (name, label, click) => {
-    const control = button(null, 'icon-button', click);
-    control.setAttribute('aria-label', label);
-    control.title = label;
-    control.append(icon(name));
-    return control;
-  };
-  let zoom = 100;
-  const lower = 50;
-  const upper = 200;
-  const setZoom = (percent) => {
-    const scale = percent / zoom;
-    const top = preview.scrollTop * scale;
-    const left = preview.scrollLeft * scale;
-    zoom = percent;
-    preview.style.setProperty('--diagram-zoom', zoom / 100);
-    preview.scrollTo(left, top);
-    zoomOut.disabled = zoom === lower;
-    zoomIn.disabled = zoom === upper;
-    reset.textContent = `${zoom}%`;
-    reset.setAttribute('aria-description', `Current zoom ${zoom}%`);
-  };
-  const zoomOut = iconControl('minus', 'Zoom out', () => setZoom(Math.max(lower, zoom - 25)));
-  const zoomIn = iconControl('plus', 'Zoom in', () => setZoom(Math.min(upper, zoom + 25)));
-  const reset = button(null, 'text-button diagram-zoom-reset', () => setZoom(100));
-  reset.setAttribute('aria-label', 'Reset zoom');
-  setZoom(100);
-  const size = iconControl('expand', 'Full screen', () => {
-    const fullscreen = elements.detail.classList.toggle('diagram-fullscreen');
-    const label = fullscreen ? 'Exit full screen' : 'Full screen';
-    size.setAttribute('aria-label', label);
-    size.title = label;
-    size.replaceChildren(icon(fullscreen ? 'contract' : 'expand'));
-  });
-  size.classList.add('diagram-fullscreen-toggle');
-  magnification.append(zoomOut, reset, zoomIn);
-  actions.append(magnification, size);
-  return [actions, preview];
+function followDiagramLayout() {
+  const scroller = elements.conversation;
+  if (!view?.source && scroller.classList.contains('follow-newest')) scroller.scrollTop = scroller.scrollHeight;
 }
 function eventCard(event, context, place, report) {
   const data = event.data;
@@ -1781,8 +1720,8 @@ function eventCard(event, context, place, report) {
     extras.push(link);
   }
   for (const artifact of data.artifacts ?? []) {
-    if (event.kind === 'conversation_reply' && /^web-[a-f0-9]{32}$/.test(artifact.id)) {
-      extras.push(diagramCard(event.id, artifact));
+    if (artifact.kind === 'html_diagram') {
+      extras.push(diagramCard(artifact, { icon, open: openDetail, onLayout: followDiagramLayout }));
       continue;
     }
     const link = node('a', 'button', artifact.title);
@@ -2484,10 +2423,7 @@ elements.detail.addEventListener('close', () => {
   clearDetailSectionTransition();
   releaseDetailAvatar();
   roleSize.disconnect();
-  if (elements.detail.classList.contains('diagram-detail')) {
-    elements.detail.classList.remove('diagram-fullscreen');
-    elements['detail-body'].replaceChildren();
-  }
+  if (detail?.kind === 'diagram') elements['detail-body'].replaceChildren();
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
@@ -2912,9 +2848,8 @@ function renderDetail() {
   renderDetailNav([], null);
   if (detail.kind === 'diagram') {
     if (changed('detail', detail)) {
-      elements.detail.classList.remove('diagram-fullscreen');
       elements['detail-title'].textContent = detail.title;
-      replaceDetail(() => expandedDiagram(detail));
+      replaceDetail(() => expandedDiagram(detail, icon));
     }
     return;
   }

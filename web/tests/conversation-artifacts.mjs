@@ -57,27 +57,41 @@ async function exercise(artifactPath) {
   expand.click();
   const viewport = dialog.querySelector('.diagram-preview');
   const frame = () => viewport?.querySelector('iframe');
-  await waitFor(() => frame() && content(frame(), 'diagram-end') && viewport.scrollHeight > viewport.clientHeight + 800,
-    'The expanded viewport did not size itself to a tall diagram');
-  check(dialog.open && dialog.querySelector('h2').textContent === inline.title && frame().inert &&
-    frame().getAttribute('sandbox') === 'allow-same-origin' && viewport.tabIndex === 0,
-    'The diagram dialog did not provide a focusable scroller around a static frame');
+  await waitFor(() => frame() && content(frame(), 'diagram-end'), 'The expanded diagram did not load');
+  const page = frame().contentDocument;
+  const scroller = page.scrollingElement;
+  const frameSize = () => frame().getBoundingClientRect();
+  check(dialog.open && dialog.querySelector('h2').textContent === inline.title && !frame().inert &&
+    frame().getAttribute('sandbox') === 'allow-same-origin' &&
+    Math.abs(frameSize().height - viewport.clientHeight) < 2 && scroller.scrollHeight > 20000,
+    'The expanded frame did not provide a bounded viewport for the entire diagram');
   await waitFor(() => diagramColor(frame()) === 'rgb(21, 32, 43)', 'The expanded diagram did not use Flock’s theme');
-  viewport.focus();
-  check(document.activeElement === viewport, 'Keyboard focus could not enter the diagram scroller');
-  viewport.scrollTop = viewport.scrollHeight;
-  const scale = () => frame().getBoundingClientRect().width / frame().offsetWidth;
-  const lastLabel = content(frame(), 'diagram-end').getBoundingClientRect();
-  const labelTop = frame().getBoundingClientRect().top + lastLabel.top * scale();
-  const labelBottom = labelTop + lastLabel.height * scale();
-  const scrollBounds = viewport.getBoundingClientRect();
-  check(viewport.scrollTop > 800 && labelTop >= scrollBounds.top && labelBottom <= scrollBounds.bottom + 2,
-    'The final step was clipped at the end of the expanded diagram');
+  frame().focus();
+  check(document.activeElement === frame(), 'Keyboard focus could not enter the diagram frame');
+  const visible = (id, container = page.documentElement) => {
+    const label = page.getElementById(id).getBoundingClientRect();
+    const top = container === page.documentElement ? 0 : container.getBoundingClientRect().top;
+    return label.top >= top - 2 && label.bottom <= top + container.clientHeight + 2;
+  };
+  const nested = page.getElementById('nested');
+  nested.scrollIntoView({ block: 'center' });
+  nested.focus();
+  nested.scrollTop = nested.scrollHeight;
+  check(page.activeElement === nested && nested.scrollTop > 800 && visible('nested-end', nested),
+    'The bottom of the nested scroller could not be reached');
+  page.getElementById('diagram-end').scrollIntoView({ block: 'end' });
+  check(scroller.scrollTop > 800 && visible('diagram-end'), 'The viewport-relative final step was clipped');
+  scroller.scrollTop = scroller.scrollHeight;
+  check(scroller.scrollTop > 20000 && visible('long-end'), 'Content beyond 20,000px was clipped');
 
   const control = (label) => dialog.querySelector(`button[aria-label="${label}"]`);
+  const scale = () => frameSize().width / frame().offsetWidth;
   const initialScale = scale();
   control('Zoom in').click();
   await waitFor(() => scale() > initialScale + .15, 'Zoom in did not magnify the diagram');
+  scroller.scrollTop = scroller.scrollHeight;
+  check(Math.abs(frameSize().height - viewport.clientHeight) < 2 && visible('long-end'),
+    `Zoom clipped the diagram or resized its on-screen viewport (${frameSize().height}, ${viewport.clientHeight}, ${visible('long-end')})`);
   control('Reset zoom').click();
   await waitFor(() => Math.abs(scale() - initialScale) < .02, 'Reset did not restore the diagram scale');
   control('Zoom out').click();
@@ -95,9 +109,14 @@ async function exercise(artifactPath) {
       control('Full screen').getClientRects().length === 0,
       'The mobile diagram did not open across the full viewport');
   }
-  document.getElementById('close-detail').click();
+  page.getElementById('preview-link').click();
+  check(frame().contentDocument === page && frame().contentWindow.location.hash === '',
+    'An artifact link navigated the preview');
+  frame().focus();
+  const { KeyboardEvent } = frame().contentWindow;
+  page.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }));
   check(!dialog.open && document.activeElement === expand && inline.isConnected,
-    'Closing the diagram lost the inline preview or its keyboard focus');
+    'Escape in the expanded frame did not close the viewer and restore focus');
   check(!window.artifactScriptRan, 'A script executed inside the diagram frame');
   check(!window.artifactEventRan, 'An inline event handler executed inside the diagram frame');
 }
@@ -113,11 +132,12 @@ const bot = { id: 'release', name: 'Release' };
 const time = Math.floor(Date.now() / 1000);
 const message = (id, text, artifact) => ({ id, kind: artifact ? 'conversation_reply' : 'conversation_message', time: time + id,
   data: { text, ...(artifact && { artifacts: [artifact] }) } });
+const diagram = (id, title, previewPath) => ({ id, title, kind: 'html_diagram', previewPath });
 const events = [message(1, 'Diagram the flow from Flock to T3.'),
-  message(2, 'Flock forwards the request to T3.', { id: id('1'), title: 'Request and result' }),
-  message(3, 'The reply is still available.', { id: id('2'), title: 'Missing diagram' }),
+  message(2, 'Flock forwards the request to T3.', diagram('opaque-id', 'Request and result', path)),
+  message(3, 'The reply is still available.', diagram(id('2'), 'Missing diagram', `/api/messages/3/artifacts/${id('2')}`)),
   message(4, 'An external reply.', { id: `flock-${'3'.repeat(32)}`, title: 'External preview' }),
-  message(5, 'A compact diagram.', { id: id('5'), title: 'Compact flow' })];
+  message(5, 'A compact diagram.', diagram(id('5'), 'Compact flow', compactPath))];
 const view = { bot, events, olderBefore: 0, presence: 'idle', activeSessions: [], sessionTasks: [], waits: [], canDecide: true };
 const mimeTypes = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 const appPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-src 'self'";
@@ -149,12 +169,18 @@ const server = createServer(async (request, response) => {
       if (request.method === 'GET') frameRequests++;
       response.end(`<!doctype html><style>
         body{margin:0}
-        #diagram{background:rgb(230,240,250);min-height:1750px;display:flex;flex-direction:column;justify-content:space-between}
+        #diagram{background:rgb(230,240,250);min-height:calc(1750px + 100vh);display:flex;flex-direction:column;justify-content:space-between}
         @media(prefers-color-scheme:dark){#diagram{background:rgb(21,32,43)}}
         svg{width:100%;height:auto}
+        #nested{height:128px;overflow:auto}
+        #nested-spacer{height:1200px}
+        #long{height:21000px;display:flex;align-items:end}
         </style><main id="diagram">
         <svg viewBox="0 0 300 80"><text y="35">Flock → T3 → Flock</text></svg>
+        <div id="nested" tabindex="0"><div id="nested-spacer"></div><span id="nested-end">Nested final step</span></div>
         <p id="diagram-end">Final step</p></main>
+        <a id="preview-link" href="#long-end">Jump to the last step</a>
+        <div id="long"><span id="long-end">End of long content</span></div>
         <img src="http://127.0.0.1:${imageServer.address().port}/image" alt="">
         <img src="/diagram-test-image" alt="">
         <img src="data:image/png;base64,bm90X2FfcG5n" alt="" onerror="parent.postMessage('diagram-event-fixture', '*')">

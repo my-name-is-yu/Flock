@@ -24,23 +24,6 @@ void Store::setWebIdentityResolver(WebIdentityResolver resolver, bool liveIntera
     p_->liveInteractiveRoles = liveInteractiveRoles;
 }
 
-std::optional<std::string> Store::conversationArtifact(const Person& actor, Id reply, std::string_view id) const {
-    std::lock_guard lock(p_->mutex);
-    auto row = p_->query(R"SQL(
-SELECT j.conversation_bot_id,a.html
-FROM conversation_artifacts a JOIN conversation_turns t ON t.message_id=a.message_id
-JOIN journal j ON j.id=t.reply_id
-WHERE a.id=? AND j.id=? AND j.kind='conversation_reply'
-  AND EXISTS (SELECT 1 FROM json_each(j.data,'$.artifacts') WHERE json_extract(value,'$.id')=a.id)
-)SQL",{id,reply});
-    if (!row.next()) return std::nullopt;
-    const auto bot = row.string(0);
-    if (!Policy(*p_).allows(actor,Action::bot_view,bot)) return std::nullopt;
-    auto html = row.string(1);
-    if (p_->redactor(bot).containsProtected(html)) return std::nullopt;
-    return html;
-}
-
 void Store::Impl::initializeConversationSchema() {
     if (sqlite3_exec(db,R"SQL(
 CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;

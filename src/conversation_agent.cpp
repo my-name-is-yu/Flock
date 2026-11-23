@@ -24,8 +24,6 @@ constexpr int findLimit = 10;
 constexpr int maxSteps = 24;
 constexpr std::size_t resultChunk = 6000;
 constexpr std::size_t sourceSize = 8192;
-constexpr std::size_t artifactSize = 256 * 1024;
-constexpr std::string_view artifactImageRef = "{{flock-image:";
 
 const std::vector<std::string> turnTools{"start_task","send_to_task","change_task","answer_task_question",
                                          "record_task_blocker","withdraw_task_question",
@@ -37,33 +35,6 @@ const std::vector<std::string> webTools{"start_workflow","workflow_status","inst
     "list_connections","check_environment_readiness","update_bot_settings","request_bot_change",
     "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
     "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
-
-bool canPublishConversationArtifact(const Message& message) {
-    return message.principalSource == PrincipalSource::web || message.principalSource == PrincipalSource::trusted;
-}
-
-std::string embedArtifactImages(std::string_view html, Id source, const std::vector<ModelImage>& images) {
-    std::string expanded;
-    auto marker = html.find(artifactImageRef);
-    while (marker != html.npos) {
-        const auto idStart = marker + artifactImageRef.size();
-        const auto end = html.find("}}",idStart);
-        if (end == html.npos) throw ToolError("Unclosed diagram image reference");
-        const auto id = html.substr(idStart,end-idStart);
-        const auto image = std::ranges::find_if(images,[&](const ModelImage& candidate) {
-            return candidate.messageId == source && candidate.attachmentId == id;
-        });
-        if (image == images.end()) throw ToolError("Inspect the referenced image on the current message before publishing it");
-        expanded.append(html.substr(0,marker));
-        expanded += "data:" + image->mimeType + ";base64," + image->dataBase64;
-        if (expanded.size() > artifactSize) throw ToolError("HTML exceeds the diagram size limit after embedding images");
-        html.remove_prefix(end+2);
-        marker = html.find(artifactImageRef);
-    }
-    expanded.append(html);
-    if (expanded.size() > artifactSize) throw ToolError("HTML exceeds the diagram size limit after embedding images");
-    return expanded;
-}
 
 std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
@@ -444,22 +415,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             throw ToolError("Unknown tool result in this turn");
         return {{"ok",true}};
     }
-    if (tool == "publish_artifact" && canPublishConversationArtifact(message)) {
-        const auto title = text(args,"title",255,true);
-        auto html = text(args,"html",artifactSize,true);
-        if (title.find('\0') != title.npos || html.find('\0') != html.npos)
-            throw ToolError("Artifact title and HTML must not contain NUL bytes");
-        if (html.find(artifactImageRef) != html.npos) {
-            if (Policy(*this).forbidden(bot,Action::attachment_inspect,bot)) throw ToolError("Bot attachment access denied");
-            std::vector<ModelImage> channelImages;
-            const auto steps = conversationSteps(message,step,channelImages);
-            html = embedArtifactImages(html,message.id,inspectedImages(bot,message.id,steps));
-        }
-        redactor(bot).requirePublic({title,html});
-        const auto id = actionId("web-");
-        exec("INSERT INTO conversation_artifacts(id,message_id,html) VALUES(?,?,?)",{id,message.id,html});
-        return {{"ok",true},{"artifact",{{"id",id},{"title",title}}}};
-    }
+    if (tool == "publish_artifact" && conversation::canPublishArtifact(message))
+        return publishConversationArtifact(message,step,args);
     if (auto result = channelTool(message.id,bot,decision); !result.is_null()) return result;
     if (auto result = localMachineTool(bot,message.channelScope,decision); !result.is_null()) return result;
     if (std::ranges::find(webTools,tool) != webTools.end()) {
@@ -802,7 +759,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         tools.insert(tools.end(),webTools.begin(),webTools.end());
         tools.insert(tools.end(),botToolNames().begin(),botToolNames().end());
     }
-    if (canPublishConversationArtifact(message)) tools.push_back("publish_artifact");
+    if (conversation::canPublishArtifact(message)) tools.push_back("publish_artifact");
     if (!message.channelScope.empty()) tools.insert(tools.end(),channelTools.begin(),channelTools.end());
     const auto available = [&] {
         auto offered = tools;

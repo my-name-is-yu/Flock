@@ -24,7 +24,7 @@
 .detail.diagram-detail {
   width: min(68rem, calc(100% - 2rem)); height: min(80dvh, 51rem); max-height: none;
 }
-.detail.diagram-detail.diagram-fullscreen {
+.detail.diagram-detail:has(.diagram-viewer-fullscreen) {
   width: 100%; height: 100dvh; margin: 0; border: 0; border-radius: 0;
 }
 .diagram-detail .dialog-body { gap: .5rem; overflow: hidden; }
@@ -32,11 +32,14 @@
 .diagram-controls { justify-content: flex-end; gap: .45rem; }
 .diagram-zoom-reset { min-width: 3.65rem; color: var(--text); font-variant-numeric: tabular-nums; }
 .diagram-detail .diagram-preview {
-  flex: 1; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
+  flex: 1; overflow: hidden;
   border-radius: var(--radius-md); background: Canvas;
 }
-.diagram-detail .diagram-preview:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.diagram-detail .diagram-frame { zoom: var(--diagram-zoom, 1); }
+.diagram-detail .diagram-preview:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.diagram-detail .diagram-frame {
+  zoom: var(--diagram-zoom, 1);
+  height: 100%;
+}
 .detail.has-nav {
   width: min(56rem, calc(100% - 3rem));
   height: min(37rem, calc(100dvh - 3rem));

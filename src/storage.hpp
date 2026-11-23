@@ -290,6 +290,11 @@ struct Store::Impl {
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
     void initializeConversationSchema();
+    void initializeConversationArtifactsSchema();
+    void classifyLegacyConversationArtifacts(Id reply, Json& artifacts) const;
+    Json publishConversationArtifact(const conversation::Message&, int step, const Json& args);
+    std::string conversationArtifactImage(const conversation::Message&, int step, std::string_view attachmentId) const;
+    std::string embedConversationArtifactImages(const conversation::Message&, int step, std::string_view html);
     void initializeModelBudgetSchema();
     void initializeWorkspaceSchema();
     void initializeAttachmentsSchema();

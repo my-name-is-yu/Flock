@@ -200,6 +200,12 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
             const auto items = data.find(key);
             if (items != data.end() && items->is_array()) details[key] = *items;
         }
+        if (kind == "conversation_reply" && details.contains("artifacts")) {
+            const auto prefix = "/api/messages/" + std::to_string(event.at("id").get<Id>()) + "/artifacts/";
+            for (auto& artifact : details["artifacts"])
+                if (field(artifact,"kind") == "html_diagram")
+                    artifact["previewPath"] = prefix + threadSegment(field(artifact,"id"));
+        }
         if (const auto actions = data.find("actions"); actions != data.end() && actions->is_array()) {
             details["actions"] = Json::array();
             for (const auto& action : *actions) {

@@ -545,9 +545,9 @@
 .diagram-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: var(--text-sm); font-weight: 600; }
 .diagram-expand { display: inline-flex; align-items: center; gap: .25rem; min-height: 2.25rem; }
 .diagram-expand:hover:not(:disabled) { background: var(--hover); text-decoration: none; }
-.conversation-diagram .diagram-preview { max-block-size: min(22.5rem, 55dvh); overflow: hidden; }
+.conversation-diagram .diagram-frame { max-height: min(22.5rem, 55dvh); pointer-events: none; }
 .diagram-preview { display: block; min-width: 0; min-height: 0; }
-.diagram-frame { display: block; width: 100%; height: 11rem; border: 0; background: Canvas; pointer-events: none; }
+.diagram-frame { display: block; width: 100%; height: 11rem; border: 0; background: Canvas; }
 .diagram-status { margin: .85rem; text-align: center; color: var(--text-2); font-size: var(--text-sm); }
 
 @container conversation-layout (max-width: 700px) {

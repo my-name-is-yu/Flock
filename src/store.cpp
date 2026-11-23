@@ -144,11 +144,7 @@ void Store::Impl::openSchema() {
         initialize.commit();
     }
     exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS conversation_artifacts(
-  id TEXT PRIMARY KEY NOT NULL, message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id),
-  html TEXT NOT NULL)
-)SQL");
+    initializeConversationArtifactsSchema();
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
   host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,
@@ -984,6 +980,8 @@ ORDER BY page.id DESC)SQL",
         auto event = journalRow(rows);
         if (event["kind"] == "conversation_message")
             event["data"].update(p_->channelContext(rows.number(0),bot,nullptr,viewer));
+        else if (event["kind"] == "conversation_reply" && event["data"].contains("artifacts"))
+            p_->classifyLegacyConversationArtifacts(rows.number(0),event["data"]["artifacts"]);
         result.push_back(std::move(event));
     }
     std::reverse(result.begin(),result.end());

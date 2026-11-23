@@ -6,6 +6,7 @@
 #endif
 
 #include <httplib.h>
+#include <sqlite3.h>
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
@@ -371,6 +372,9 @@ void conversationArtifacts(const std::filesystem::path& path) {
         "<svg viewBox='0 0 200 32'><text y='24'>Flock → T3 → Flock</text></svg>";
     static const auto html = std::string(diagram) + "<img src='{{flock-image:1}}' alt='Screenshot'>";
     struct DiagramModel : Model {
+        explicit DiagramModel(Store& store) : store(store) {}
+        Store& store;
+        Id earlier = 0;
         unsigned calls = 0;
         ModelTurn decide(const ModelInput& input) override {
             ++calls;
@@ -379,18 +383,39 @@ void conversationArtifacts(const std::filesystem::path& path) {
             if (input.event.at("text") != prompt)
                 return {{{"reply",{{"text","Plain reply"}},"Reply"}}};
             const auto& turn = input.event.at("turn");
-            if (turn.empty() || turn.size() == 2)
-                return {{{"publish_artifact",{{"title","Flock と T3 の流れ"},{"html",html}},"Draw the diagram"}}};
-            if (turn.size() == 1) {
-                check(turn.at(0).at("result").at("ok") == false,"an uninspected image could be published");
-                return {{{"inspect_attachment",{{"messageId",input.event.at("messageId")},{"attachmentId","1"}},"Inspect the screenshot"}}};
+            const auto publish = Decision{"publish_artifact",{{"title","Flock と T3 の流れ"},{"html",html}},"Draw the diagram"};
+            const auto inspect = [](Id message, std::string_view attachment) {
+                return Decision{"inspect_attachment",{{"messageId",message},{"attachmentId",attachment}},"Inspect the screenshot"};
+            };
+            const auto ok = [&](std::size_t i) { return turn.at(i).at("result").at("ok") == true; };
+            const auto source = input.event.at("messageId").get<Id>();
+            switch (turn.size()) {
+                case 0: return {{publish}};
+                case 1:
+                    check(!ok(0),"an uninspected image could be published");
+                    return {{inspect(earlier,"1")}};
+                case 2:
+                    check(ok(1),"the earlier attachment could not be inspected");
+                    return {{publish}};
+                case 3:
+                    check(!ok(2),"an inspection of an earlier message authorized the current attachment");
+                    return {{inspect(source,"2"),inspect(source,"1")}};
+                case 5:
+                    check(!ok(3) && ok(4),"the batched inspection did not save its results in call order");
+                    store.policy().changeNeverRule({"owner",true},Action::attachment_inspect,"release",true);
+                    return {{publish}};
+                case 6:
+                    check(!ok(5),"revoking attachment inspection did not block publication");
+                    store.policy().changeNeverRule({"owner",true},Action::attachment_inspect,"release",false);
+                    return {{publish}};
+                case 7:
+                    check(!turn.at(6).at("args").contains("html") && ok(6),
+                          "the artifact was not saved or its HTML was echoed into tool history");
+                    return {{{"reply",{{"text",explanation}},"Explain the diagram"}}};
+                default: throw std::runtime_error("Unexpected diagram tool history");
             }
-            check(turn.at(1).at("result").at("ok") == true,"the attachment could not be inspected");
-            check(!turn.at(2).at("args").contains("html") && turn.at(2).at("result").at("ok") == true,
-                  "the artifact was not saved or its HTML was echoed into tool history");
-            return {{{"reply",{{"text",explanation}},"Explain the diagram"}}};
         }
-    } model;
+    };
 
     auto config = callbacks();
     config.authenticate = [](std::string_view credential) {
@@ -414,12 +439,15 @@ void conversationArtifacts(const std::filesystem::path& path) {
     {
         Store store(path);
         store.policy().setMember({"owner",true},"release","reader",true);
+        DiagramModel model(store);
         FixedT3 t3;
         Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
         const auto server = startWeb(store,0,config);
         Browser browser(*server);
         browser.client.set_default_headers({{"Authorization","Bearer owner"}});
         const Json image = {{"name","screenshot.png"},{"mimeType","image/png"},{"dataBase64",onePixelPng}};
+        model.earlier = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","plain"},{"text","Hello"},
+            {"attachments",Json::array({image})}},201).at("messageId");
         source = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","diagram"},{"text",prompt},
             {"attachments",Json::array({image})}},201)
             .at("messageId");
@@ -431,13 +459,19 @@ void conversationArtifacts(const std::filesystem::path& path) {
         refs = reply.at("artifacts");
         const auto& ref = refs.at(0);
         artifactId = ref.at("id");
-        check(ref.size() == 2 && artifactId.starts_with("web-") && ref.at("title") == "Flock と T3 の流れ",
+        check(ref.size() == 4 && ref.at("kind") == "html_diagram" && ref.at("previewPath") == artifactUrl(replyId) &&
+              ref.at("title") == "Flock と T3 の流れ",
               "the reply did not project a private Web artifact reference");
-        const auto plain = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","plain"},{"text","Hello"}},201)
-            .at("messageId").get<Id>();
-        runtime.runConversations();
-        otherReplyId = conversationReply(browser.get(feed),plain).at("messageId");
-        check(model.calls == 5,"the fixture did not reject the uninspected image, inspect it, publish, and reply");
+        otherReplyId = conversationReply(browser.get(feed),model.earlier).at("messageId");
+        check(model.calls == 8,"the fixture did not exercise the diagram publication and reply sequence");
+    }
+    {
+        sqlite3* raw = nullptr;
+        const auto opened = sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+        const auto sql = "UPDATE journal SET data=json_remove(data,'$.artifacts[0].kind') WHERE id=" + std::to_string(replyId);
+        check(opened == SQLITE_OK && sqlite3_exec(db.get(),sql.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
+              "could not recreate the legacy saved reply shape");
     }
 
     Store reopened(path);
@@ -446,7 +480,7 @@ void conversationArtifacts(const std::filesystem::path& path) {
     reader.client.set_default_headers({{"Authorization","Bearer reader"}});
     const auto saved = conversationReply(reader.get(feed),source);
     check(saved.at("artifacts") == refs && saved.at("text") == explanation,
-          "reopening the database did not preserve the artifact reference and text");
+          "reopening a legacy reply did not recover its explicit artifact reference");
     const auto url = artifactUrl(replyId);
     const auto document = reader.client.Get(url);
     const auto expected = std::string(diagram) + "<img src='data:image/png;base64," + onePixelPng + "' alt='Screenshot'>";

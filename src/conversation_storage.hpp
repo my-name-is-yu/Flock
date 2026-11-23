@@ -20,6 +20,8 @@ struct Message {
     PrincipalSource principalSource = PrincipalSource::gitWebhook;
     std::optional<QuestionAnchor> question;
 };
+
+bool canPublishArtifact(const Message&);
 }
 
 namespace flockv0::conversation_storage {
