@@ -69,6 +69,7 @@ const noHover = matchMedia('(hover: none)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long', day: 'numeric' });
 const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
+const shortDay = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
 const sessionEndLabels = {
   completed: 'Complete', cancelled: 'Cancelled', failed: 'Failed',
@@ -1071,8 +1072,14 @@ function renderActivity() {
     for (const task of groups.sort((a, b) => b.id - a.id)) {
       for (const session of task.sessions) {
         if (activeKeys.has(key(task.id, session))) continue;
-        const status = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
-        ended.push(sessionRow(task, session, status, session.state === 'failed' ? 'failed' : ''));
+        // A completed Session is the expected outcome, so its row shows when it started; other endings keep their status.
+        const started = task.createdAt ? startedLabel(task.createdAt) : '';
+        const completed = session.state === 'completed' && started;
+        const status = completed ? started
+          : [sessionEndLabels[session.state] ?? sessionEndLabels.ended, started].filter(Boolean).join(' · ');
+        const row = sessionRow(task, session, status, completed ? 'quiet' : session.state === 'failed' ? 'failed' : '');
+        if (completed) row.querySelector('.activity-mark').after(node('span', 'sr-only', 'Complete, started '));
+        ended.push(row);
       }
     }
     const rows = [];
@@ -1671,6 +1678,10 @@ function workingLine(data) {
   line.append(dots, text);
   row.append(line);
   return row;
+}
+function startedLabel(seconds) {
+  const day = dayLabel(seconds);
+  return day === 'Today' ? clock.format(seconds * 1000) : day === 'Yesterday' ? day : shortDay.format(seconds * 1000);
 }
 function dayLabel(seconds) {
   const today = new Date();
