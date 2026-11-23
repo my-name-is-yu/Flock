@@ -68,6 +68,8 @@ if(BUILD_TESTING)
   if(FLOCK_NODE_EXECUTABLE)
     add_test(NAME flock_web_chat_grouping
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat-grouping.mjs")
+    add_test(NAME flock_web_find_match_time
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/find-match-time.mjs")
     add_test(NAME flock_web_composer_drafts
       COMMAND "${FLOCK_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-drafts.mjs")
     add_test(NAME flock_web_event_history
