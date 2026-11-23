@@ -116,7 +116,7 @@ void turns(const std::filesystem::path& path) {
     };
     auto card = [&] {
         const auto items = store.inbox(requester);
-        check(items.size()==1,"expected one card");
+        check(items.size()==1,"expected one card at message " + std::to_string(sequence) + ": " + items.dump());
         return items.at(0);
     };
     rename();

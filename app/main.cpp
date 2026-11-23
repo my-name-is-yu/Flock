@@ -286,8 +286,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     WebCallbacks callbacks{
         [&] { return bots.cards(); },
         [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
-        [&](const Json& profile,const std::optional<AvatarImage>& image) {
-            auto created = bots.create(profile,image);
+        [&](const Person& creator,const Json& profile,const std::optional<AvatarImage>& image) {
+            auto created = store.policy().createOwnedBot(creator,[&](const auto& publishOwned) {
+                return bots.create(profile,image,publishOwned);
+            });
             syncSkills();
             return created;
         },
@@ -312,10 +314,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             -> std::optional<Person> {
             return id == localOwner.id && !store.policy().requiresIdentity() ? std::optional(localOwner) : std::nullopt;
         };
-        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,&runtime,options.peers);
+        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,callbacks.intake,&runtime,options.peers);
         handoffs->recover();
         callbacks.sessionHandoffs = handoffs;
-        handoffWorker = std::jthread([handoffs, person=handoffPeople, intake=callbacks.intake,
+        handoffWorker = std::jthread([handoffs, person=handoffPeople,
                                      soul=[&](std::string_view botId) { return bots.soul(botId); },
                                      &model](std::stop_token stop) {
             Id after = 0;
@@ -330,8 +332,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                         if (!actor) continue;
                         try {
                             const auto view = handoffs->view(*actor,channel);
-                            if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
-                            else handoffs->consult(*actor,channel,*model,intake,soul);
+                            if (view.coordination) handoffs->step(*actor,channel,*model,soul);
+                            else handoffs->consult(*actor,channel,*model,soul);
                         } catch (const std::exception&) {
                         }
                     }

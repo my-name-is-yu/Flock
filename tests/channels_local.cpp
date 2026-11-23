@@ -54,12 +54,12 @@ struct SessionAdapter final : T3 {
     }
     InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
     bool listBackground = false;
-    std::pair<std::vector<std::string>,bool> projectSessions(
-        std::string_view, std::string_view, SessionReadDeadline) override {
+    std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
+        std::string_view, std::string_view, Id, SessionReadDeadline) override {
         if (!listBackground) return {};
         std::vector<std::string> threads;
         for (int i = 0; i < 65; ++i) threads.push_back("background-" + std::to_string(i));
-        return {std::move(threads),false};
+        return {std::move(threads),std::nullopt};
     }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
         evidenceReads.push_back(target);

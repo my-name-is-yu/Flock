@@ -507,7 +507,15 @@ void accessAndActions() {
           host->hostCalls == 0,"upstream permission was ignored");
     host->upstreamPermitted = true;
     const auto find = invoke(store,runtime,script,"find","git_find_repos",{{"host",hostName},{"query","FLOCK"}});
-    check(find.at("repos") == Json::array({repoName}),"repository discovery exposed blocked repositories");
+    check(find.at("repos") == Json::array({repoName}),"repository discovery exposed ungranted repositories");
+    const auto later = invoke(store,runtime,script,"later-repos","git_find_repos",
+        {{"host",hostName},{"query","FLOCK"},{"page",11}});
+    check(later.at("repos").empty() && later.at("nextPage") == 12,
+          "An empty filtered page lost the GitHub continuation");
+    const auto last = invoke(store,runtime,script,"last-repos","git_find_repos",
+        {{"host",hostName},{"query","FLOCK"},{"page",later.at("nextPage")}});
+    check(last.at("repos") == Json::array({repoName}) && last.at("nextPage").is_null(),
+          "Repository discovery could not reach a later page");
     const auto tasklessIssueWrite = invoke(store,runtime,script,"taskless-issue-write","git_manage_issue",
         {{"host",hostName},{"repo",repoName},{"action","create"},{"title","Change"}});
     check(tasklessIssueWrite.at("error") == "Select an owned task for the Git mutation" && host->hostCalls == 0,
@@ -736,6 +744,29 @@ void taskReadRecovery() {
     for (int i = 0; i < 8 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
     check(store.task(task).at("state") == "completed" && phase == 3 && host->logCalls == 5,
           "recovery did not use saved snapshots through both access checks");
+}
+
+void discoveryReplayRevocation() {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    int phase = 0;
+    script.onTaskResult = [&](const ModelInput& input) -> Decision {
+        if (phase++ == 0) {
+            host->storedDiscoveryPermitted = false;
+            return {"git_find_repos",{{"host",hostName},{"query","flock"}},{}};
+        }
+        const auto& recent = input.event.at("gitResults").back();
+        check(recent.at("result").at("ok") == false && !recent.contains("target"),
+              "Discovery replay exposed a repository after upstream revocation");
+        return {"complete",{{"report","Checked discovery authorization"}},{}};
+    };
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+    const auto task = store.submit(intake());
+    for (int i = 0; i < 10 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
+    check(phase == 2 && store.task(task).at("state") == "completed","Discovery replay was not exercised");
 }
 
 void boundedTaskReadAndForeignReference(bool comments) {
@@ -971,6 +1002,7 @@ int main() {
         taskMutationRestart(false);
         taskMutationRestart(true);
         taskReadRecovery();
+        discoveryReplayRevocation();
         boundedTaskReadAndForeignReference(false);
         boundedTaskReadAndForeignReference(true);
         redaction();

@@ -57,12 +57,14 @@ Optional `modelCallLimit` sets the initial allowance per request (20 by default)
 
 ```sh
 build/app/flock model login
+build/app/flock model status
 build/app/flock model models
 build/app/flock t3 connect <environment-id> <MCP-URL>
+build/app/flock access grant release environment <environment-id> launch
 build/app/flock run
 ```
 
-Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to use your plan. In T3, choose permissions that cover Flock's Session settings. Open the Web UI at the local URL printed by the CLI. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
+Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to use your plan and check that `model status` shows `planUsage: true`. In T3, approve Operate access and choose permissions that cover Flock's Session settings. The `access grant` command gives the Bot permission to launch in that same environment. Open the Web UI at the local URL printed by the CLI. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
 
 In a T3 Thread, ask for a Bot by name or select `/skill:flock-<bot>` or
 `$flock-<bot>` in the provider's skill menu. Flock replies in that Thread.

@@ -79,28 +79,36 @@ public:
         const auto status = argument(args,"status",128);
         const auto limit = pageSize(args);
         const auto key = Json::array({filters.query,project,status,filters.from,filters.to});
-        const auto scopedKey = Json::array({key,channelScope_});
+        const auto configuredProject = field(routing,"projectId");
+        std::set<std::string> environments;
+        if (channelScope_.empty()) {
+            const auto environment = field(routing,"environmentId");
+            if (!environment.empty()) environments.insert(environment);
+            for (const auto& id : routing.at("config").value("conversationEnvironments",Json::object()))
+                environments.insert(id.get<std::string>());
+        }
+        const auto scopedKey = Json::array({key,channelScope_,configuredProject,environments});
         std::optional<Reference> anchor;
-        SessionTarget after;
+        Json progress{{"recorded",Json::array({"",""})},{"catalog",Json::object()}};
+        if (!configuredProject.empty())
+            for (const auto& environment : environments) progress["catalog"][environment] = 0;
+        std::vector<SessionTarget> batch;
         if (hasCursor(args)) {
             const auto cursor = reference(args,"cursor");
             anchor = resolve(cursor,RefKind::search);
-            if (anchor) {
-                if ((anchor->payload != scopedKey && anchor->payload != key) ||
-                    !permitted(anchor->target) || !readable(anchor->target,Clock::now()+searchTimeLimit))
-                    return scopedResult(failure(unavailable));
-                after = anchor->target;
-            } else {
-                const auto position = resolve(cursor,RefKind::searchPosition);
-                if (!position || position->payload != scopedKey) return scopedResult(failure(unavailable));
-                after = position->target;
-            }
+            const auto position = anchor ? anchor : resolve(cursor,RefKind::searchPosition);
+            if (!position || !position->payload.is_object() || position->payload.at("scope") != scopedKey ||
+                (anchor && (!permitted(anchor->target) || !readable(anchor->target,Clock::now()+searchTimeLimit))))
+                return scopedResult(failure(unavailable));
+            progress = position->payload.at("progress");
+            for (const auto& target : position->payload.at("remaining"))
+                batch.push_back({target.at(0).get<std::string>(),target.at(1).get<std::string>()});
         }
-
+        if (batch.empty()) batch = candidates(configuredProject,environments,progress);
+        const bool catalogTruncated = !progress.at("catalog").empty();
         const auto scrub = store_.sharedRedactor();
         std::vector<Candidate> matches;
         std::vector<SessionTarget> incomplete;
-        const auto [batch,catalogTruncated] = candidates(after,routing);
         const auto scanLimit = std::min(searchCandidateLimit,batch.size());
         const auto scanDeadline = Clock::now()+searchTimeLimit;
         std::size_t scanned = 0;
@@ -125,7 +133,7 @@ public:
                     break;
                 }
                 ++scanned;
-                if (!item ||
+                if (!item || (channelScope_.empty() && item->projectId != configuredProject) ||
                     (!project.empty() && item->projectId != project &&
                      !session_read::contains(scrub.text(item->project),project)) ||
                     (!status.empty() && item->status != status) ||
@@ -151,9 +159,10 @@ public:
             const auto unsearched = std::ranges::find_if(incomplete,[&](const SessionTarget& target) { return permitted(target); });
             bool truncated = catalogTruncated || skippedSlowCandidate || unsearched != incomplete.end();
             if (unsearched != incomplete.end()) scopes.push_back(issue(RefKind::session,*unsearched,nullptr));
+            auto nextIndex = scanned;
             for (const auto& [target,item,match] : matches) {
                 if (items.size() == limit) {
-                    result["nextCursor"] = issue(RefKind::search,matches[limit-1].target,scopedKey);
+                    nextIndex = static_cast<std::size_t>(std::ranges::find(batch,target)-batch.begin());
                     scopes.push_back(issue(RefKind::session,target,nullptr));
                     break;
                 }
@@ -168,8 +177,15 @@ public:
                     {"status",display(item.status,128)},{"createdAt",display(item.createdAt,30)},
                     {"updatedAt",display(item.updatedAt,30)},{"matchExcerpt",display(match.excerpt,480)}});
             }
-            if (result["nextCursor"].is_null() && scanned < batch.size())
-                result["nextCursor"] = issue(RefKind::searchPosition,batch[scanned-1],scopedKey);
+            if (nextIndex < batch.size() || catalogTruncated || !progress.at("recorded").is_null()) {
+                auto remaining = Json::array();
+                for (std::size_t i = nextIndex; i < batch.size(); ++i)
+                    remaining.push_back(Json::array({batch[i].environmentId,batch[i].threadId}));
+                const bool matchAnchor = nextIndex < scanned;
+                const auto target = matchAnchor ? matches[limit-1].target : SessionTarget{};
+                result["nextCursor"] = issue(matchAnchor ? RefKind::search : RefKind::searchPosition,target,
+                    {{"scope",scopedKey},{"progress",progress},{"remaining",std::move(remaining)}});
+            }
             result["truncated"] = truncated;
             transaction.commit();
             return scopedResult(std::move(result),std::move(scopes));
@@ -322,48 +338,52 @@ WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
         }
     }
 
-    std::pair<std::vector<SessionTarget>,bool> candidates(const SessionTarget& after, const Json& routing) const {
+    std::vector<SessionTarget> candidates(const std::string& project, const std::set<std::string>& environments,
+                                          Json& progress) const {
         std::vector<SessionTarget> result;
-        {
+        auto& recorded = progress.at("recorded");
+        if (!recorded.is_null()) {
             std::lock_guard lock(store_.mutex);
             auto rows = store_.query(R"SQL(
 SELECT DISTINCT r.environment_id,r.thread_id FROM runs r JOIN tasks t ON t.id=r.task_id
 LEFT JOIN channel_tasks c ON c.task_id=t.id
-WHERE (?5='' OR (t.bot_id=?1 AND c.scope_key=?5)) AND (r.environment_id,r.thread_id) > (?2,?3)
+WHERE ((?5='' AND ?6<>'' AND t.project_id=?6 AND r.environment_id IN (SELECT value FROM json_each(?7)))
+       OR (?5<>'' AND t.bot_id=?1 AND c.scope_key=?5))
+  AND (r.environment_id,r.thread_id) > (?2,?3)
 ORDER BY r.environment_id,r.thread_id LIMIT ?4
-)SQL",{bot_,after.environmentId,after.threadId,searchCandidateLimit+1,channelScope_});
+)SQL",{bot_,recorded.at(0),recorded.at(1),searchCandidateLimit+1,channelScope_,project,Json(environments).dump()});
             while (rows.next()) result.push_back({rows.string(0),rows.string(1)});
+            recorded = nullptr;
+            if (result.size() > searchCandidateLimit) {
+                result.pop_back();
+                recorded = Json::array({result.back().environmentId,result.back().threadId});
+            }
         }
-        bool truncated = false;
-        const auto project = field(routing,"projectId");
-        if (channelScope_.empty() && !project.empty()) {
-            std::set<std::string> environments;
-            const auto environment = field(routing,"environmentId");
-            if (!environment.empty()) environments.insert(environment);
-            for (const auto& id : routing.at("config").value("conversationEnvironments",Json::object()))
-                environments.insert(id.get<std::string>());
-            const auto deadline = Clock::now()+searchTimeLimit;
-            for (const auto& id : environments) {
-                if (id < after.environmentId || !policy_.allows(bot_,Action::environment_inspect,id)) continue;
-                if (Clock::now() >= deadline) { truncated = true; break; }
-                try {
-                    auto [threads,more] = t3_.projectSessions(id,project,deadline);
-                    truncated |= more;
-                    for (auto& thread : threads)
-                        if (id > after.environmentId || thread > after.threadId)
-                            result.push_back({id,std::move(thread)});
-                } catch (const SessionReadTimeout&) {
-                    truncated = true;
-                    break;
-                }
+        auto& catalog = progress.at("catalog");
+        const auto deadline = Clock::now()+searchTimeLimit;
+        for (auto it = catalog.begin(); it != catalog.end() && Clock::now() < deadline;) {
+            const auto& id = it.key();
+            if (!policy_.allows(bot_,Action::environment_inspect,id)) {
+                it = catalog.erase(it);
+                continue;
+            }
+            const auto offset = it.value().get<Id>();
+            try {
+                auto [threads,next] = t3_.projectSessions(id,project,offset,deadline);
+                for (auto& thread : threads) result.push_back({id,std::move(thread)});
+                if (next) {
+                    it.value() = *next;
+                    ++it;
+                } else it = catalog.erase(it);
+            } catch (const SessionReadTimeout&) {
+                break;
             }
         }
         std::ranges::sort(result,[](const auto& a, const auto& b) {
             return std::tie(a.environmentId,a.threadId) < std::tie(b.environmentId,b.threadId);
         });
         result.erase(std::unique(result.begin(),result.end()),result.end());
-        if (result.size() > searchCandidateLimit+1) result.resize(searchCandidateLimit+1);
-        return {std::move(result),truncated};
+        return result;
     }
 
     std::optional<Reference> resolve(std::string_view ref, RefKind kind) const {

@@ -434,8 +434,7 @@ private:
             const auto creator = web::person(callbacks_,req);
             if (!store_.policy().allows(creator,Action::bot_create,"")) return error(res,403,"access_denied");
             auto parsed = parseBotProfile(body,true);
-            const auto created = callbacks_.createBot(parsed.profile,parsed.image);
-            store_.policy().setOwner(creator,web::field(created,"id"));
+            const auto created = callbacks_.createBot(creator,parsed.profile,parsed.image);
             changes_.rescan();
             return json(res,201,redactBot(web::field(created,"id"),web::botSettings(created)));
         } catch (const InputError& e) { error(res,400,e.what()); }

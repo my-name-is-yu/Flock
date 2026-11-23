@@ -57,6 +57,7 @@ public:
     State state = State::open;
     bool upstreamPermitted = true;
     bool rejectComment = false;
+    bool storedDiscoveryPermitted = true;
     GitLog log{"linker: missing symbol in build\nextra output the adapter failed to trim",false};
     Json result{{"headSha",sha},{"status","ok"}};
     int createCalls = 0, lookupCalls = 0, logCalls = 0, hostCalls = 0, comments = 0, edits = 0;
@@ -66,9 +67,15 @@ public:
     std::function<void(std::string_view)> onPrStateUpdate;
     std::function<void(const GitContext&, const GitOpenPr&)> inspect;
     std::string_view name() const override { return hostName; }
-    std::pair<std::vector<GitRepository>,bool> repositories(const GitContext&, std::string_view query) override {
+    std::pair<std::vector<GitRepository>,bool> repositories(const GitContext&, std::string_view query, Id page) override {
+        if (page == 11) return {{},true};
+        if (page != 1 && page != 12) return {};
         if (std::string_view(repoName).find(query) == std::string_view::npos) return {};
         return {{{hostName,repoName}},false};
+    }
+
+    bool permitsStoredRead(const GitContext& context, const GitRepository& repo, const Decision& read) override {
+        return permits(context,repo,"read") && (read.tool != "git_find_repos" || storedDiscoveryPermitted);
     }
 
     bool permits(const GitContext&, const GitRepository&, std::string_view) const override {

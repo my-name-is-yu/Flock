@@ -44,8 +44,9 @@ Example `bots/release/config.json`
 
 Use the exact environment and project IDs from T3. The optional `session`
 object accepts `model`, `providerInstanceId`, `runtimeMode`, and
-`workspaceStrategy`. Omitted Session settings use the T3 project's defaults.
-Set `model` and `providerInstanceId` together. Runtime modes are
+`workspaceStrategy`. Omitted Session settings use T3's defaults. If T3 cannot
+select a model for the project, set `model` and `providerInstanceId` together
+using a pair listed by T3's `orchestrator_capabilities`. Runtime modes are
 `approval-required`, `auto-accept-edits`, `auto`, and `full-access`.
 For the project checkout, use `{"type":"root"}`. For a new worktree, use
 `{"type":"worktree","baseRef":"origin/main","startFromOrigin":true}` and
@@ -88,14 +89,18 @@ build/app/flock model login
 build/app/flock model status
 build/app/flock model models
 build/app/flock t3 connect ENVIRONMENT_ID https://T3_HOST/mcp
+build/app/flock access grant release environment ENVIRONMENT_ID launch
 build/app/flock run
 ```
 
 Approve the two Flock connections in your browser. For ChatGPT sign-in, grant
-permission to use the eligible ChatGPT plan. Copy a slug from `flock model
-models` into each Bot configuration. The CLI supports a re-consent flow
-through `flock model login --reconsent`. The active connection and a link to
-manage plan usage appear in `flock model status`.
+permission to use the eligible ChatGPT plan and check for `planUsage: true` in
+`flock model status`. Copy a slug from `flock model models` into each Bot
+configuration. Use `flock model login --reconsent` if plan usage is missing.
+For T3, approve Operate access. Use the same environment ID for the Bot configuration,
+connection, and launch grant. For T3 on this machine, use the loopback MCP URL
+published by T3. If a Task already stopped for missing launch access, grant
+access and reconcile the Task to retry the unsent launch.
 
 The foreground process prints the local Web URL. Use `flock run --no-web`
 for headless operation. T3 skills require the Web listener on the port saved by

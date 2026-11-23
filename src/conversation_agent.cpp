@@ -217,7 +217,11 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             auto result = channelToolStatus(message.id,message.bot,results.at(i),&images);
             if (args.is_object() && args.contains("docId")) {
                 const bool reading = decision.at("tool") == "read_memory" || decision.at("tool") == "memory_history";
-                if (Policy(*this).forbidden(message.bot,reading ? Action::shared_memory_read : Action::shared_memory_write,field(args,"docId"))) {
+                const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
+                const auto document = field(args,"docId");
+                const auto policy = Policy(*this);
+                if (!policy.allows(turnActor(message),action,document) ||
+                    policy.forbidden(message.bot,action,document)) {
                     args = Json::object();
                     result = {{"ok",false},{"error","Memory access denied"}};
                 } else {
@@ -381,7 +385,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
-                                Seconds now, const ApplyBotChange& applyBotChange) {
+                                Seconds now) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -409,15 +413,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" ||
             tool == "stop_workflow_stage" || tool == "stop_workflow")
             return workflowTool(tool,args,bot,message.id,step,routing);
-        if (tool == "request_bot_change") {
-            const auto id = Policy(*this).applyBotChange(bot,turnActor(message),
-                toolText(args,"operation",32),toolText(args,"targetBotId",128),toolText(args,"name",128),
-                message.id,step,applyBotChange);
-            return {{"ok",true},{"changeId",id},{"status","applied"}};
-        }
-        auto result = botSettingsTool(bot,message.id,routing,decision);
-        if (result.is_null()) result = memory(bot,nullptr,tool,args,now);
-        if (result.is_null()) result = automationTool(bot,routing,decision,now);
+        const auto actor = turnActor(message);
+        auto result = botSettingsTool(bot,actor,message.id,routing,decision);
+        if (result.is_null()) result = memory(bot,actor,tool,args,now,true);
+        if (result.is_null()) result = automationTool(bot,actor,routing,decision,now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
         result["ok"] = true;
         return result;
@@ -635,8 +634,8 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
         queueChannelReply(message.id,reply,data);
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     exec("UPDATE journal SET task_id=? WHERE id=?",{linked,message.id});
-    exec("UPDATE conversation_turns SET status='done',reply_id=?,reserved_attempt=NULL WHERE message_id=?",
-         {reply,message.id});
+    releaseModelCall(takeReservedConversationCall(message.id));
+    exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
 }
 
@@ -678,14 +677,15 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     if (!isNextTurn(message.id)) return false;
     if (message.routing.contains("gitEvent")) {
         if (canReceiveGitWebhook(message.bot,message.routing.at("gitEvent"))) return true;
-        exec("UPDATE conversation_turns SET status='done',reserved_attempt=NULL WHERE message_id=?",{message.id});
+        releaseModelCall(takeReservedConversationCall(message.id));
+        exec("UPDATE conversation_turns SET status='done' WHERE message_id=?",{message.id});
         exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
         if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot)) return true;
     } else if (Policy(*this).allows(turnActor(message),Action::bot_talk,message.bot)) return true;
-    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
+    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(attempt);
     if (message.principalSource == PrincipalSource::channel)
         finishTurn(message,"This channel connection is no longer authorized.",nullptr,"channel_access");
     else finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
@@ -743,10 +743,7 @@ UNION ALL SELECT 1 FROM conversation_steps WHERE message_id=?1 AND result IS NUL
     AND (decision IS NOT NULL OR effect IS NOT NULL)
 LIMIT 1
 )SQL",{id}).next()) {
-            if (authorizeTurn(message)) {
-                if (const auto attempt = takeReservedConversationCall(id)) releaseModelCall(messageModelBudget(id),attempt);
-                resolveOfferedAnswer(message);
-            }
+            if (authorizeTurn(message)) resolveOfferedAnswer(message);
             transaction.commit();
             return;
         }
@@ -881,37 +878,44 @@ LIMIT 1
                 return;
             }
             ModelInput input;
-            Id attempt = 0;
             {
                 std::lock_guard lock(mutex);
                 Transaction transaction(db);
                 if (shutdown.stop_requested()) return;
                 if (!authorizeTurn(message)) { transaction.commit(); return; }
+                if (!query(R"SQL(
+SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
+ SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL))
+)SQL",{messageModelBudget(id),id}).next()) {
+                    pauseTurn(message);
+                    transaction.commit();
+                    return;
+                }
                 std::vector<ModelImage> images;
                 auto [offered,machines] = available();
                 const auto context = turnInput(message,step,now,std::move(machines),images);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = std::move(offered),.feedback = {},.config = message.routing.at("config"),
                          .images = std::move(images)};
-                attempt = takeReservedConversationCall(id);
-                if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
-                if (!attempt) pauseTurn(message);
-                else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
-                          " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
                 transaction.commit();
             }
-            if (!attempt) return;
-            ConversationModelCheckpoint checkpoint{attempt,step,Json::object(),ConversationModelFailure{}};
+            ConversationModelCheckpoint checkpoint{0,step,Json::object(),ConversationModelFailure{}};
             try {
                 authorizeSessionHistory(message.bot,message.channelScope,input.event.at("turn"),t3);
                 authorizeBotToolHistory(message.bot,id,input);
                 {
                     std::lock_guard lock(mutex);
                     Transaction transaction(db);
-                    const bool allowed = authorizeTurn(message) && !shutdown.stop_requested();
-                    if (!allowed) releaseModelCall(messageModelBudget(id),attempt);
+                    if (shutdown.stop_requested()) return;
+                    if (!authorizeTurn(message)) { transaction.commit(); return; }
+                    auto& attempt = checkpoint.attempt;
+                    attempt = takeReservedConversationCall(id);
+                    if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
+                    if (!attempt) pauseTurn(message);
+                    else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
+                              " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
                     transaction.commit();
-                    if (!allowed) return;
+                    if (!attempt) return;
                 }
                 auto response = callModel(message.bot,model,input,0);
                 checkpoint.usage = std::move(response.usage);
@@ -991,6 +995,41 @@ LIMIT 1
                 result["ok"] = true;
             } catch (const Conflict& error) { result = {{"ok",false},{"error",error.what()}}; }
         }
+        if (decision.tool == "request_bot_change") {
+            std::lock_guard lock(mutex);
+            try {
+                if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
+                const auto& args = decision.args;
+                const auto operation = toolText(args,"operation",32);
+                const auto target = toolText(args,"targetBotId",128);
+                const auto name = toolText(args,"name",128);
+                const auto actor = turnActor(message);
+                const auto action = operation == "create_bot" ? Action::bot_create : Action::bot_rename;
+                if ((operation != "create_bot" && operation != "rename_bot") || !validBotId(target) ||
+                    !Policy(*this).allows(actor,operation == "create_bot" ? Action::bot_create : Action::bot_settings,target))
+                    throw ToolError("Bot change denied by policy");
+                const auto key = "turn/" + std::to_string(id) + "/" + std::to_string(step);
+                const auto payload = Json::array({decision.tool,args});
+                {
+                    Transaction authorization(db);
+                    if (!authorizeTurn(message) || shutdown.stop_requested()) {
+                        authorization.commit();
+                        return;
+                    }
+                    const auto gate = approveAction(policyOrigin(message),{action,target},key,payload,clock(),false);
+                    authorization.commit();
+                    if (gate == ApprovalGate::waiting) return;
+                    if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
+                }
+                const auto changeId = Policy(*this).applyBotChange(message.bot,actor,operation,target,name,
+                    id,step,applyBotChange);
+                result = {{"ok",true},{"changeId",changeId},{"status","applied"}};
+            } catch (const Conflict& error) {
+                result = toolFailure(error.what());
+            } catch (const ToolError& error) {
+                result = toolFailure(error.what());
+            }
+        }
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (!authorizeTurn(message)) { transaction.commit(); return; }
@@ -1032,13 +1071,7 @@ LIMIT 1
         } else if (result.is_null()) {
             if (shutdown.stop_requested()) return;
             std::optional<Resource> resource;
-            if (decision.tool == "request_bot_change") {
-                const auto operation = field(decision.args,"operation");
-                if (operation == "create_bot" || (operation == "rename_bot" &&
-                    Policy(*this).allows(turnActor(message),Action::bot_settings,field(decision.args,"targetBotId"))))
-                    resource = Resource{operation == "create_bot" ? Action::bot_create : Action::bot_rename,
-                                        field(decision.args,"targetBotId")};
-            } else if (decision.tool == "create_schedule" || decision.tool == "create_reminder" ||
+            if (decision.tool == "create_schedule" || decision.tool == "create_reminder" ||
                        decision.tool == "create_trigger" || decision.tool == "remove_schedule") {
                 resource = Resource{Action::automation_change,message.bot};
             } else if (decision.tool == "update_bot_settings") {
@@ -1068,7 +1101,7 @@ LIMIT 1
             }
             exec("SAVEPOINT turn_tool");
             try {
-                result = applyTurnTool(message,step,decision,clock(),applyBotChange);
+                result = applyTurnTool(message,step,decision,clock());
                 exec("RELEASE turn_tool");
             } catch (const StorageError&) {
                 throw;

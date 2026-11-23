@@ -46,7 +46,7 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     return {{"ready",true}};
 }
 
-Json Store::Impl::botSettingsTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision& decision) {
+Json Store::Impl::botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision& decision) {
     Policy policy(*this);
     const auto& tool = decision.tool;
     const auto& args = decision.args;
@@ -59,7 +59,13 @@ Json Store::Impl::botSettingsTool(std::string_view bot, Id sourceMessage, const 
         return {{"names",names}};
     }
     if (tool == "request_secret_input") {
-        auto id = policy.requestSecret(bot,{argument(args,"name")},sourceMessage);
+        const SecretRef ref{argument(args,"name")};
+        if (!ref.valid()) throw Conflict("Invalid secret reference");
+        if (query("SELECT 1 FROM protected_inputs WHERE name=? AND status='fulfilled'",{ref.name}).next()) {
+            if (!policy.allows(bot,Action::secret_use,ref.name)) throw AccessDenied("Protected input unavailable");
+            return {{"status","available"}};
+        }
+        const auto id = policy.requestSecret(bot,ref,sourceMessage);
         return {{"requestId",id},{"status","pending"},{"settingsLink","/settings/"+std::string(bot)+"#secrets"}};
     }
     if (tool == "list_connections") {
@@ -74,6 +80,7 @@ Json Store::Impl::botSettingsTool(std::string_view bot, Id sourceMessage, const 
         return result;
     }
     if (tool == "update_bot_settings") {
+        if (!policy.allows(actor,Action::bot_settings,bot)) throw AccessDenied("Bot settings access denied");
         const auto id = argument(args,"environmentId");
         if (!environments(routing).contains(id) || policy.forbidden(bot,Action::environment_configure,id)) throw Conflict("Environment configure access required");
         if (!args.contains("runTimeoutSeconds") || !args.at("runTimeoutSeconds").is_number_integer()) throw Conflict("Integer timeout required");

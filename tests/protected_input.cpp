@@ -1,5 +1,6 @@
 #include "flock/policy.hpp"
 #include <barrier>
+#include <sqlite3.h>
 #include <filesystem>
 #include <future>
 #include <fstream>
@@ -160,6 +161,52 @@ void freshPendingSecretRequests(const std::filesystem::path& path) {
     check(policy.botSettings(owner,"Ernest").at("secretInputs") ==
           Json::array({{{"id",id},{"name",ref.name},{"status","fulfilled"}}}),"duplicate request remained after fulfillment");
     denied([&]{ policy.requestSecret("Ernest",ref); });
+    denied([&]{ policy.requestSecret("Reviewer",ref); });
+}
+
+void creationRecoversWithOriginalOwner(const std::filesystem::path& path) {
+    const Person creator{"creator",false};
+    Store store(path);
+    store.policy().setOwner(creator,"Ernest");
+    ToolModel model;
+    Adapter t3;
+    RuntimeOptions options;
+    std::string appliedKey;
+    options.applyBotChange = [&](const BotChange& change) {
+        sqlite3* connection = nullptr;
+        const auto opened = sqlite3_open_v2(path.c_str(),&connection,SQLITE_OPEN_READONLY,nullptr);
+        std::unique_ptr<sqlite3,decltype(&sqlite3_close)> checkDb(connection,sqlite3_close);
+        check(opened == SQLITE_OK,"Could not open a separate connection for creation recovery");
+        sqlite3_stmt* statement = nullptr;
+        check(sqlite3_prepare_v2(connection,"SELECT request_key,person FROM bot_creation_intents",-1,&statement,nullptr)
+              == SQLITE_OK,"Could not read committed creation intent");
+        std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> row(statement,sqlite3_finalize);
+        check(sqlite3_step(statement) == SQLITE_ROW &&
+              std::string_view(reinterpret_cast<const char*>(sqlite3_column_text(statement,0))) == change.requestKey &&
+              std::string_view(reinterpret_cast<const char*>(sqlite3_column_text(statement,1))) == creator.id,
+              "Bot creation ran before its original intent was durable");
+        if (appliedKey.empty()) {
+            appliedKey = change.requestKey;
+            throw std::runtime_error("Interrupted after profile publication");
+        }
+        check(appliedKey == change.requestKey,"Recovery used a different publication key");
+    };
+    const auto run = [&](Store& db) {
+        Runtime runtime(db,model,t3,[](std::string_view){return std::string{};},options);
+        runtime.runConversations();
+    };
+    model.next = {"request_bot_change",{{"operation","create_bot"},{"targetBotId","NewBot"},{"name","New Bot"}},{}};
+    store.receive(creator,Intake{"Ernest","","env","project"},"create","Create a Bot");
+    try { run(store); }
+    catch (const std::runtime_error& error) {
+        check(std::string_view(error.what()) == "Interrupted after profile publication","Unexpected creation failure");
+    }
+    check(!appliedKey.empty() && !store.policy().allows(creator,Action::bot_settings,"NewBot"),
+          "Interrupted creation finalized ownership prematurely");
+    Store restarted(path);
+    run(restarted);
+    check(restarted.policy().allows(creator,Action::bot_settings,"NewBot") &&
+          model.result.at("turn").back().at("result").at("status") == "applied","Creation did not recover with the original owner");
 }
 
 void exercise(const std::filesystem::path& dir) {
@@ -278,6 +325,7 @@ int main() {
         freshLaunch(directory/"fresh.db");
         runningSessions(directory/"peers.db");
         freshPendingSecretRequests(directory/"secret-requests"/"state.db");
+        creationRecoversWithOriginalOwner(directory/"creation-recovery.db");
         exercise(directory);
     }
     catch(const std::exception& e){std::cerr<<e.what()<<'\n';std::filesystem::remove_all(tmp);return 1;}

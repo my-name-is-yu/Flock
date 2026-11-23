@@ -162,9 +162,9 @@ struct Store::Impl {
     void createMemory(std::string_view key, std::string_view bot, std::string_view id,
                       std::string_view content, Seconds now);
     std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
-    Json memory(std::string_view bot, const Person*, std::string_view operation, const Json&,
-                Seconds now);
-    Json automationTool(std::string_view bot, const Json& routing, const Decision&, Seconds now);
+    Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&,
+                Seconds now, bool fromBot = false);
+    Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
     Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
     void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
     Json automations(std::string_view bot, Id before) const;
@@ -197,7 +197,7 @@ struct Store::Impl {
     void recordTaskBlocker(Json&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
-    Json botSettingsTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision&);
+    Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
     Json sessionReadTool(const conversation::Message&, int step, const Decision&, T3&);
     void authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
@@ -253,7 +253,8 @@ struct Store::Impl {
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Id takeReservedConversationCall(Id messageId);
-    void releaseModelCall(std::string_view budget, Id attempt);
+    Id takeReservedTaskCall(Id event);
+    void releaseModelCall(Id attempt);
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                      bool gitNotification) const;
@@ -279,7 +280,7 @@ struct Store::Impl {
     Json gitConversationTool(GitHost*, const conversation::Message&, int step, const Decision&);
     bool gitConversationEffectStarted(Id message, int step) const;
     bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
-    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now, const ApplyBotChange&);
+    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);
     Json ownTask(Id taskId, const conversation::Message&) const;

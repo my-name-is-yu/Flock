@@ -117,6 +117,26 @@ void memoryFlow(const std::filesystem::path& db) {
           revisions.at(0).at("revertedFrom") == first.at("id") && revisions.at(0).at("author") == "person:owner",
           "Revert did not preserve the original revision and restore content");
 
+    const Person member{"memory-member",false};
+    policy.setMember(localOwner,"alpha",member.id,true);
+    bool sharedDenied = false;
+    try { store.memory(member,"alpha","read_memory",{{"docId",path}}); }
+    catch (const AccessDenied&) { sharedDenied = true; }
+    check(sharedDenied,"Bot membership granted shared memory access");
+    const auto memberStep = bot.inputs.size();
+    bot.choices = {
+        {"apply_memory_edit",{{"baseVersion",2},{"content","Member edit"}},"Change memory"},
+        {"remove_schedule",{{"id",1}},"Remove schedule"},
+        {"update_bot_settings",{{"environmentId",alpha.environmentId},{"runTimeoutSeconds",1}},"Change timeout"},
+        reply()
+    };
+    store.receive(member,alpha,"member-mutation","Change memory and schedules");
+    runtime.runConversations();
+    check(lastResult(bot.inputs.at(memberStep+1)).at("error") == "Memory access denied" &&
+          lastResult(bot.inputs.at(memberStep+2)).at("error") == "Automation change denied" &&
+          lastResult(bot.inputs.at(memberStep+3)).at("error") == "Bot settings access denied",
+          "Member chat bypassed owner-only mutations");
+
     const auto shared = turn(alpha,"Update the staging playbook",{
         {"apply_memory_edit",{{"docId",path},{"baseVersion",0},{"content","Staging playbook"}},"Update shared file"},
     });
@@ -158,8 +178,7 @@ void memoryFlow(const std::filesystem::path& db) {
             return false;
         }
     };
-    const Person editor{"editor",false};
-    policy.setMember(owner,"beta",editor.id,true);
+    const Person editor{"editor",true};
     auto firstEdit = std::async(std::launch::async,[&] { return personEdit(left,owner,alpha,"Alpha version"); });
     auto secondEdit = std::async(std::launch::async,[&] { return personEdit(right,editor,beta,"Beta version"); });
     const auto alphaWon = firstEdit.get(), betaWon = secondEdit.get();

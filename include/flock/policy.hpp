@@ -90,6 +90,8 @@ public:
     void changeRule(const Person&, RuleKind, Action, std::string_view target, bool add);
     Json rules() const;
     void changeNeverRule(const Person&, Action, std::string_view target, bool add);
+    using PublishOwnedBot = std::function<void(std::string_view, const std::function<void()>&)>;
+    Json createOwnedBot(const Person&, const std::function<Json(const PublishOwnedBot&)>&);
     void setOwner(const Person& creator, std::string_view bot);
     void setMember(const Person&, std::string_view bot, std::string_view person, bool add);
     Json botSettings(const Person&, std::string_view bot) const;

@@ -192,7 +192,7 @@ public:
             if (!validDestination(thread,target)) return {};
             const auto& running = member(thread,"activeRunId");
             if (!running.is_null() && (!running.is_string() || str(thread,"activeRunId").empty())) invalidResponse();
-            ThreadPage page{target,after.value_or(-1),generation,str(thread,"activeRunId"),{}};
+            ThreadPage page{target,after.value_or(-1),generation,str(thread,"activeRunId"),{},boolean(reply,"hasMore")};
             auto rows = array(reply,"items").get<Json::array_t>();
             if (!after)
                 std::ranges::sort(rows,{},[](const auto& item) { return position(member(item,"position")); });
@@ -203,7 +203,10 @@ public:
                 const auto status = str(item,"status");
                 const auto local = localItem(item,target.threadId);
                 // Streaming assistant messages retain their position when finalized.
-                if (local && kind == "assistant_message" && !completeMessage(status)) break;
+                if (local && kind == "assistant_message" && !completeMessage(status)) {
+                    page.hasMore = true;
+                    break;
+                }
                 page.cursor = current;
                 if (!local || (kind != "user_message" && kind != "assistant_message")) continue;
                 const auto id = str(item,"itemId");
@@ -308,6 +311,22 @@ public:
             return {};
         }
         return {};
+    }
+
+    bool runFailed(const ThreadTarget& target, std::string_view runId) override {
+        if (runId.empty()) return false;
+        try {
+            auto credential = loadCredential(directory_,target.environmentId);
+            if (!credential.operate) return false;
+            Client client(std::move(credential));
+            verifyEnvironment(client,target);
+            const auto reply = client.call("t3_thread_wait",{{"threadId",target.threadId},{"runId",runId},
+                {"timeoutMs",1},{"untilDelegatedWorkSettled",false}});
+            return str(reply,"threadId") == target.threadId && str(reply,"runId") == runId &&
+                   !boolean(reply,"timedOut") && str(reply,"status") == "failed";
+        } catch (const Failure&) {
+            return false;
+        }
     }
 
     ThreadSend send(const ThreadTarget& target, std::string_view generation,

@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
             return Json::parse(response.body).value(std::string(tool), Json::array());
         };
         auto signIn = [&](const std::string& environment) {
-            loginT3(home, environment, endpoint, [&](const std::string& authorization) {
+            return loginT3(home, environment, endpoint, [&](const std::string& authorization) {
                 fixture({{"authorization", authorization}});
             });
         };
@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
             check(diagnosed, "OAuth failure identifies stage, HTTP status and error");
         }
         fixture({{"oauthFailure", false}});
-        signIn("env-1");
+        check(signIn("env-1"), "login reports Operate approval");
         auto ownerOnly = [](const std::filesystem::path& path) {
             struct stat st{};
             return stat(path.c_str(), &st) == 0 && st.st_uid == geteuid() && (st.st_mode & 0077) == 0;
@@ -380,7 +380,7 @@ int main(int argc, char** argv) {
         check(effects("t3_thread_launch").size() == 1, "stale authorization never launches another T3 thread");
 
         fixture({{"scope", "orchestration:read"}});
-        signIn("env-1");
+        check(!signIn("env-1"), "login reports read-only approval");
         other.authGeneration = adapter->authGeneration("env-1", launch.config);
         checkPreflight(other, Delivery::Kind::Auth, "read-only OAuth cannot operate");
         check(adapter->send(other).kind == Delivery::Kind::Auth &&
@@ -393,6 +393,15 @@ int main(int argc, char** argv) {
         deletedSessionSearch(*restarted,home.parent_path()/"session-search.db",fixture);
         boundedSessionSearch(*restarted,home.parent_path()/"bounded-search.db",fixture,effects);
         sessionSearchDeadline(*restarted,home.parent_path()/"search-deadline.db",fixture);
+        fixture({{"scenario","catalog-timeout"},{"delayCatalog",true}});
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        const auto [partial,offset] = restarted->projectSessions("env-1","project",0,deadline);
+        check(partial.size() == 50 && offset == 50,"Catalog timeout discarded a completed page");
+        fixture({{"delayCatalog",false}});
+        const auto [remaining,nextOffset] = restarted->projectSessions("env-1","project",*offset,{});
+        check(remaining == std::vector<std::string>{"catalog-50"} && !nextOffset,
+              "Catalog continuation did not resume the timed-out page");
+        fixture({{"scenario","session-read"}});
         const SessionTarget session{"env-1","manual"};
         const auto metadata = restarted->sessionMetadata(session,true);
         check(metadata && metadata->project == "Release Pipeline" && metadata->title == "Staging investigation" &&

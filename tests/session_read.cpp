@@ -2,6 +2,7 @@
 #include "flock/session_read.hpp"
 
 #include <iostream>
+#include <sqlite3.h>
 #include <map>
 #include <unistd.h>
 
@@ -27,6 +28,8 @@ struct Backend : T3 {
     std::function<void()> onRead;
     std::string secret;
     bool denyAttachment = false;
+    bool pagedCatalog = false;
+    std::vector<Id> catalogOffsets;
 
     std::string authGeneration(const std::string&,const Json&) override { return "connected"; }
     Delivery send(const Command& command) override {
@@ -43,10 +46,17 @@ struct Backend : T3 {
         return (target.environmentId == env || target.environmentId == otherEnv) && !denied[target.threadId] &&
             (target.threadId == staging || target.threadId == second || target.threadId == "foreign-thread");
     }
-    std::pair<std::vector<std::string>,bool> projectSessions(
-        std::string_view environment, std::string_view, SessionReadDeadline) override {
-        if (environment == otherEnv) return {{staging},false};
-        return {{staging,second,"internal-shared-but-denied"},false};
+    std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
+        std::string_view environment, std::string_view, Id offset, SessionReadDeadline) override {
+        if (pagedCatalog) {
+            if (environment == otherEnv) return {};
+            catalogOffsets.push_back(offset);
+            if (offset == 0) return {{staging},1000};
+            if (offset == 1000) return {{second},std::nullopt};
+            return {};
+        }
+        if (environment == otherEnv) return {{staging},std::nullopt};
+        return {{staging,second,"internal-shared-but-denied"},std::nullopt};
     }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target,bool includeMessages,
                                                   SessionReadDeadline) override {
@@ -298,7 +308,13 @@ void acceptance() {
     const auto foreign = Resource::sessionRead(env,"foreign-thread");
     check(f.store->policy().allows("beta",foreign) && f.store->policy().allows("alpha",foreign),
           "Full did not allow Session reads for both Bots");
-    check(f.call(search,{{"query","Foreign"}},"beta").at("sessions").size() == 1,"owned Session missing in Full mode");
+    check(f.call(search,{{"query","Foreign"}},"beta").at("sessions").size() == 1,"owned Session missing without a grant");
+    auto outside = f.intake("outside");
+    outside.projectId = "elsewhere";
+    f.model.next = {search,{{"query","Foreign"}},"Check configured project"};
+    f.store->receive(localOwner,outside,"outside-project","Search my project");
+    f.runtime->runConversations();
+    check(f.model.result.at("sessions").empty(),"Search included a recorded run from a different project");
     f.t3.denied["foreign-thread"] = true;
     check(f.call(search,{{"query","Foreign"}},"beta") == empty,"T3 denial did not override Session ownership");
     f.t3.denied["foreign-thread"] = false;
@@ -336,6 +352,50 @@ void acceptance() {
           request("counts") == missing,"revoked Session references still exposed evidence");
     f.blockSession("foreign-thread",true);
     check(f.call(search,filters) == empty,"revoked or unauthorized Sessions returned to search");
+}
+
+void catalogResumesAfterPartialDiscovery() {
+    Fixture f;
+    f.t3.pagedCatalog = true;
+    const auto first = f.call("flock_session_search",Json::object());
+    check(first.at("sessions").size() == 1 && first.at("truncated") == true &&
+          first.at("nextCursor").is_string(),"Partial catalog lost its results or continuation");
+    f.restart();
+    const auto secondPage = f.call("flock_session_search",{{"cursor",first.at("nextCursor")}});
+    check(secondPage.at("sessions").size() == 1 && secondPage.at("nextCursor").is_null() &&
+          secondPage.at("sessions").front().at("title") == "Staging investigation 2" &&
+          f.t3.catalogOffsets == std::vector<Id>{0,1000},"Catalog restarted at offset zero");
+}
+
+void approvedCallSurvivesReadPreflightContention() {
+    Fixture f;
+    f.model.next = {"flock_session_search",{{"query","regression"}},"Find the report"};
+    auto intake = f.intake("alpha");
+    intake.config["modelCallLimit"] = 1;
+    const auto receipt = f.store->receive(localOwner,intake,"preflight-busy","Look for the failure");
+    f.runtime->runConversations();
+    const auto paused = f.store->pausedConversations("alpha");
+    check(paused.size() == 1 && f.model.result.is_null(),"turn did not pause after reading evidence");
+    const Id pauseId = paused.front().at("messageId");
+    f.store->decideInbox(localOwner,{"alpha",InboxKind::conversation_model_budget,receipt.at("messageId"),pauseId,0,0,pauseId},
+                         "approve");
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the second writer");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(raw,sqlite3_close);
+    bool locked = false;
+    f.t3.onRead = [&] {
+        if (!std::exchange(locked,true))
+            check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,"lock writer");
+    };
+    bool contended = false;
+    try { f.runtime->runConversations(); }
+    catch (const std::runtime_error& error) { contended = std::string_view(error.what()) == "database is locked"; }
+    check(locked && contended && f.model.result.is_null(),"pre-provider write contention was not exercised");
+    check(sqlite3_exec(writer.get(),"ROLLBACK",nullptr,nullptr,nullptr) == SQLITE_OK,"could not release writer");
+    f.t3.onRead = {};
+    f.runtime->runConversations();
+    const auto after = f.store->pausedConversations("alpha");
+    check(!f.model.result.is_null() && after.empty(),"Conversation lost its approved call before model dispatch");
 }
 
 void redactionAndResumedHistory() {
@@ -398,7 +458,9 @@ void redactionAndResumedHistory() {
 int main() {
     try {
         acceptance();
+        catalogResumesAfterPartialDiscovery();
         redactionAndResumedHistory();
+        approvedCallSurvivesReadPreflightContention();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

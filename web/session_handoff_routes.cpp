@@ -206,6 +206,11 @@ void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Requ
             for (const auto& bot : bots) {
                 const auto botId = bot.value("id",std::string{});
                 if (!store.policy().allows(*actor,Action::bot_decide,botId)) continue;
+                try {
+                    if (callbacks.intake(botId,"").botId != botId) continue;
+                } catch (const Conflict&) {
+                    continue;
+                }
                 rows.push_back({{"id",botId},{"name",bot.value("name",botId)},
                                 {"role",bot.value("role",std::string("custom"))},{"skill",names.at(botId)}});
             }

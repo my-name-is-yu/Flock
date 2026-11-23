@@ -19,12 +19,12 @@ void sessionConversationDispatch(Store& store, const Json& config) {
         Delivery reconcile(const Command&) override { throw std::runtime_error("Unexpected reconcile"); }
         Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
         InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
-        std::pair<std::vector<std::string>,bool> projectSessions(
-            std::string_view, std::string_view, SessionReadDeadline) override {
+        std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
+            std::string_view, std::string_view, Id, SessionReadDeadline) override {
             std::vector<std::string> sessions;
             for (int i = 0; i < 64; ++i) sessions.push_back("background-" + std::to_string(i));
             sessions.push_back("manual-staging");
-            return {std::move(sessions),false};
+            return {std::move(sessions),std::nullopt};
         }
         std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages,
                                                       SessionReadDeadline) override {

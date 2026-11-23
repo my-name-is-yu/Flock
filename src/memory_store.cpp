@@ -113,28 +113,28 @@ std::string Store::Impl::seedPrivateMemory(std::string_view key, std::string_vie
 Json Store::memory(const Person& actor, std::string_view bot, std::string_view operation, const Json& args) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    auto result = p_->memory(bot,&actor,operation,args,unixTime());
+    auto result = p_->memory(bot,actor,operation,args,unixTime());
     if (result.is_null()) throw Conflict("Unknown memory operation");
     tx.commit();
     return result;
 }
 
-Json Store::Impl::memory(std::string_view bot, const Person* actor, std::string_view operation, const Json& args,
-                         Seconds now) {
+Json Store::Impl::memory(std::string_view bot, const Person& actor, std::string_view operation, const Json& args,
+                         Seconds now, bool fromBot) {
     const bool reading = operation == "read_memory" || operation == "memory_history";
     if (!reading && operation != "propose_memory_edit" && operation != "apply_memory_edit" &&
-        operation != "revert_memory_edit" && !(actor && operation == "reject_memory_edit")) return nullptr;
+        operation != "revert_memory_edit" && !(!fromBot && operation == "reject_memory_edit")) return nullptr;
     if (!validBotId(bot) || !args.is_object()) throw Conflict("Invalid memory arguments");
     const bool shared = args.contains("docId");
     const auto id = shared ? field(args,"docId") : "memory";
     const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
-    auto policy = Policy(*this);
-    if ((actor && !policy.allows(*actor,reading ? Action::bot_view : Action::bot_decide,bot)) ||
-        (shared && !actor && policy.forbidden(bot,action,id)))
+    auto access = Policy(*this);
+    if (!access.allows(actor,reading ? Action::bot_view : Action::bot_settings,bot) ||
+        (shared && (!access.allows(actor,action,id) || !access.allows(bot,action,id))))
         throw AccessDenied("Memory access denied");
 
     const auto key = shared ? "shared:" + id : privateKey(bot);
-    const auto author = actor ? "person:" + actor->id : "bot:" + std::string(bot);
+    const auto author = fromBot ? "bot:" + std::string(bot) : "person:" + actor.id;
     const auto scrub = shared ? sharedRedactor() : redactor(bot);
     scrub.requirePublic({key,author});
     auto doc = findMemory(db,key);

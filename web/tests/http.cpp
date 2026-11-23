@@ -1050,8 +1050,9 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
         return {std::string(bot),std::string(request),"local-env","proj",Json::object()};
     };
-    cb.createBot = [&](const Json& profile, const std::optional<AvatarImage>& image) {
+    cb.createBot = [&](const Person& creator, const Json& profile, const std::optional<AvatarImage>& image) {
         const auto id = "bot-" + std::to_string(++counter);
+        store.policy().setOwner(creator,id);
         Json avatar = profile.at("avatar");
         if (image) {
             images.insert_or_assign(id,*image);

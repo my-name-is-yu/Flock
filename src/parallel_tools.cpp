@@ -117,7 +117,7 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
             result = {{"inFlight",true}};
             reserved.push_back(i);
         }
-        if (approved) releaseModelCall(budget,approved);
+        releaseModelCall(approved);
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=?",
              {results,ctx.messageId,step});
         transaction.commit();
