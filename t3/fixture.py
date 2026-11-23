@@ -932,7 +932,24 @@ def test_multi_environment(local, runner, temp):
                     if process.poll() is None:
                         process.kill()
                     mini.allow_launch_disconnect.set()
+            with sqlite3.connect(Path(temp) / "recovery.db") as db:
+                legacy_views = db.execute("""
+                    SELECT name,sql FROM sqlite_schema
+                    WHERE name IN ('project_execution_queue','project_slots') ORDER BY name
+                """).fetchall()
+                assert len(legacy_views) == 2
+                db.executescript("""
+                    DROP VIEW task_project_slots;
+                    DROP VIEW project_route_slots;
+                    DROP VIEW project_route_queue;
+                    UPDATE tasks SET data=json_remove(data,'$.runResults[0].deadline','$.runResults[1].deadline');
+                """)
             subprocess.run(command + ["recover"], timeout=20, check=True)
+            with sqlite3.connect(Path(temp) / "recovery.db") as db:
+                assert db.execute("""
+                    SELECT name,sql FROM sqlite_schema
+                    WHERE name IN ('project_execution_queue','project_slots') ORDER BY name
+                """).fetchall() == legacy_views, "an older Runtime's views changed during migration"
         finally:
             mini.shutdown()
 

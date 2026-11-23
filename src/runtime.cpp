@@ -292,7 +292,7 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
     void activate(Json task) {
         if (field(task,"projectId").empty() && !selectProject(task)) return;
         change(task,[&](Json& current) {
-            auto turn = db.query("SELECT 1 FROM project_slots WHERE id=? AND blocker_id IS NULL",{current["id"]});
+            auto turn = db.query("SELECT 1 FROM task_project_slots WHERE id=? AND blocker_id IS NULL",{current["id"]});
             if (!turn.next()) return false;
             if (current.contains("workflowId") && current["lastRun"].is_null()) {
                 queueAction(current,actionId(),"delegate","",Json::object(),Json::object(),false);
@@ -861,6 +861,27 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
         return true;
     }
 
+    bool checkVerificationDeadline(Json& task, Json& run, Seconds now) {
+        if (task.at("state") == "cancelling" || !verificationRunOutstanding(run)) return false;
+        const auto action = field(run,"actionId");
+        const auto environment = field(run,"environmentId");
+        const bool missing = !run.contains("deadline");
+        if (missing) {
+            auto launch = db.query(R"SQL(
+SELECT time FROM journal WHERE task_id=? AND kind='send_started'
+AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),action});
+            const auto startedAt = launch.next() ? launch.number(0) : now;
+            run["deadline"] = startedAt + db.environmentTimeout(field(task,"botId"),environment,task.at("config"));
+        }
+        const auto deadline = run.at("deadline").get<Seconds>();
+        if (deadline <= 0 || now < deadline || !task.at("wait").is_null()) return missing;
+        auto session = runJson(runRef(run));
+        session["environmentId"] = environment;
+        db.wait(task,"deadline",{{"text",field(run,"name") + " reached its deadline"},
+            {"deadline",deadline},{"runActionId",action},{"run",std::move(session)}});
+        return true;
+    }
+
     void stepCheck(const Json& task, const Json& run) {
         const auto id = task.at("id").get<Id>();
         const auto key = field(run,"actionId");
@@ -876,6 +897,12 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
             applyDelivery(id,action,{Delivery::Kind::NotAccepted,{},"Cancelled before dispatch",true});
             return;
         }
+        // A reconciliation can be overdue before T3 confirms an assigned Run ID.
+        if (phase == "started" && !cancelling &&
+            (!run.contains("deadline") || (task.at("wait").is_null() && now >= run.at("deadline").get<Seconds>())))
+            changeTask(id,[&](Json& current) {
+                return checkVerificationDeadline(current,verificationRun(current,key),now);
+            });
         if (now < run.value("retryAt",Seconds{})) return;
         if (phase == "ready") {
             std::lock_guard lock(db.mutex);
@@ -916,14 +943,7 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
                 changed = setCheckStatus(saved,"confirmation_pending","Review the pending input or approval in this T3 Session.");
             else if (!stopping)
                 changed = setCheckStatus(saved,observed.status == "queued" ? "queued" : "running",{});
-            const auto deadline = saved.value("deadline",Seconds{});
-            if (!stopping && current.at("wait").is_null() && deadline > 0 && now >= deadline) {
-                db.wait(current,"deadline",{{"text",field(saved,"name") + " reached its deadline"},
-                    {"runActionId",key},{"run",{{"threadId",ref.threadId},{"runId",ref.runId},
-                                               {"link",ref.link},{"environmentId",cmd.environmentId}}}});
-                return true;
-            }
-            return changed;
+            return checkVerificationDeadline(current,saved,now) || changed;
         });
         if (!cancelling || observed.kind == Kind::Settling || observed.kind == Kind::Unavailable ||
             now < run.value("stopRetryAt",Seconds{})) return;

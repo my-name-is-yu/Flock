@@ -2765,7 +2765,10 @@ function waitContent(context, task) {
   const content = [request, reason];
   const actions = node('div', 'wait-actions');
   const primary = node('div', 'wait-primary');
-  const perform = (operation, fields) => void operate(context, task, operation, fields);
+  const perform = (operation, fields) => {
+    const current = context.data.waits.find(item => item.id === task.id && item.wait.id === wait.id);
+    if (current) void operate(context, current, operation, fields);
+  };
   const action = (label, operation) => button(label, 'dialog-button primary', () => perform(operation));
   const approveInT3 = canDecide && wait.reason === 't3_input';
   const runLink = linkToRun(wait.run, approveInT3 ? 'Approve in T3' : 'Open in T3');
@@ -2885,7 +2888,9 @@ function renderDetail() {
     }
     return;
   }
-  if (changed('detail', detail, task, waitLabel(task.wait.reason), waitText(task.wait)))
+  // Sibling Runs can advance the Task while this deadline form is still open.
+  const content = task.wait.reason === 'deadline' ? { ...task, generation: undefined } : task;
+  if (changed('detail', detail, content, waitLabel(task.wait.reason), waitText(task.wait)))
     replaceDetail(() => waitContent(view, task));
   const busy = pendingWaits.has(task.wait.id);
   for (const control of elements['detail-body'].querySelectorAll('button, input')) {

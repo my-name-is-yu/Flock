@@ -204,6 +204,34 @@ CREATE TABLE IF NOT EXISTS peer_exchanges(
   recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
   sender_environment TEXT NOT NULL, sender_revision INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
+CREATE VIEW IF NOT EXISTS project_execution_queue AS
+WITH candidates AS (
+  SELECT task.id,task.state,task.data,task.project_id,task.environment_id
+  FROM tasks task
+  WHERE task.project_id<>'' AND task.state NOT IN ('completed','cancelled')
+)
+SELECT task.id,task.environment_id,task.project_id,task.state,
+       ROW_NUMBER() OVER (
+         PARTITION BY task.environment_id,task.project_id
+         ORDER BY COALESCE(sender.state,task.state)='queued',
+           COALESCE(sender.id,task.id),
+           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
+                WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
+       ) AS position
+FROM candidates task
+LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
+LEFT JOIN candidates sender ON sender.id=peer.sender_task
+  AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
+  AND peer.phase<>'closed'
+WHERE COALESCE(peer.kind,'')<>'consult';
+CREATE VIEW IF NOT EXISTS project_slots AS
+WITH queue AS (
+  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
+  FROM project_execution_queue
+)
+SELECT q.id,CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
+             json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN q.head_id END AS blocker_id
+FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
 )SQL";
     if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
     initializePolicySchema();
@@ -292,7 +320,7 @@ blockers AS (
   SELECT requested.id,owner.id AS owner_id,owner.bot_id,
          json_extract(owner.data,'$.request') AS request,owner.state
   FROM requested
-  CROSS JOIN project_slots slot ON slot.id=requested.id
+  CROSS JOIN task_project_slots slot ON slot.id=requested.id
   JOIN tasks owner ON owner.id=slot.blocker_id
 )
 )SQL";
@@ -640,8 +668,11 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         throw DecisionUnavailable{};
     }
     if (task.at("state") != "waiting") throw DecisionUnavailable{};
-    if (task.at("generation") != generation) throw RequestChanged{};
     const auto reason = field(wait,"reason");
+    const auto deadlineRun = reason == "deadline" ? field(wait,"runActionId") : std::string{};
+    // A sibling Run updates the Task generation while this deadline keeps the same wait ID and revision.
+    if (task.at("generation") != generation && (operation != "extend" || deadlineRun.empty()))
+        throw RequestChanged{};
     const auto kind = inboxWaitKind(reason);
     if (expectedKind && kind != expectedKind) throw RequestChanged{};
     std::string next = "deciding";
@@ -690,8 +721,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     } else if (operation == "extend" && reason == "deadline") {
         if (!data.contains("deadline") || !data["deadline"].is_number_integer() ||
             data["deadline"].get<Seconds>() <= unixTime()) throw Conflict("The new deadline must be in the future");
-        const auto action = field(wait,"runActionId");
-        auto& timed = action.empty() ? task : verificationRun(task,action);
+        auto& timed = deadlineRun.empty() ? task : verificationRun(task,deadlineRun);
+        if (!deadlineRun.empty() && !verificationRunOutstanding(timed)) throw RequestChanged{};
         timed["deadline"] = data.at("deadline");
         next = "running";
         journal(id,"deadline_extended",{{"deadline",timed.at("deadline")},{"waitId",waitId}});

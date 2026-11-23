@@ -282,6 +282,7 @@ Json currentWait(const Json& task) {
     const auto& wait = task.at("wait");
     const auto env = field(task,"environmentId");
     auto& view = result["wait"] = waitView(wait);
+    copyFields(result,wait,{"deadline"});
     view["run"] = runView(wait.at("run"),env);
     if (view["run"].is_null()) view["run"] = runView(task.at("lastRun"),env);
     return result;

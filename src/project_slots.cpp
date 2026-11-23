@@ -2,16 +2,13 @@
 
 namespace flockv0 {
 void Store::Impl::initializeProjectQueue() {
-    // A previous installation can already have the task-wide queue views.
-    constexpr auto installed = "SELECT 1 FROM sqlite_schema WHERE type='view' AND name='project_route_slots'";
+    // An older Runtime can still be running when a newer process opens the database.
+    constexpr auto installed = "SELECT 1 FROM sqlite_schema WHERE type='view' AND name='task_project_slots'";
     if (query(installed).next()) return;
     Transaction update(db);
     if (query(installed).next()) return;
     constexpr auto sql = R"SQL(
-DROP VIEW IF EXISTS project_slots;
-DROP VIEW IF EXISTS project_route_slots;
-DROP VIEW IF EXISTS project_execution_queue;
-CREATE VIEW project_execution_queue AS
+CREATE VIEW project_route_queue AS
 WITH candidates AS (
   SELECT task.id,task.state,task.project_id,task.environment_id,NULL AS action_id
   FROM tasks task
@@ -45,14 +42,14 @@ CREATE VIEW project_route_slots AS
 WITH queue AS (
   SELECT id,environment_id,project_id,action_id,
          FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
-  FROM project_execution_queue
+  FROM project_route_queue
 )
 SELECT q.id,q.environment_id,q.project_id,q.action_id,
        CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
          json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId'))
        THEN q.head_id END AS blocker_id
 FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
-CREATE VIEW project_slots AS
+CREATE VIEW task_project_slots AS
 SELECT id,CASE WHEN count(blocker_id)=count(*) THEN min(blocker_id) END AS blocker_id
 FROM project_route_slots GROUP BY id;
 )SQL";
