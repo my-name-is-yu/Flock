@@ -739,17 +739,16 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         if (entry == conversationCheckpoints.end()) return true;
         const auto& checkpoint = entry->second;
         Transaction transaction(db);
-        const auto* decisions = std::get_if<std::vector<ModelCall>>(&checkpoint.outcome);
-        const bool isHead = isNextTurn(id);
-        // An approval can restore an older turn while this message is inferring.
-        if (!isHead && !decisions) return false;
+        const auto* completedCalls = std::get_if<std::vector<ModelCall>>(&checkpoint.outcome);
+        const bool ownsTurnQueue = isNextTurn(id);
+        if (!ownsTurnQueue && !completedCalls) return false;
         if (!checkpoint.usage.empty())
             exec("UPDATE model_attempts SET usage=? WHERE id=?",{checkpoint.usage,checkpoint.attempt});
         bool hasDecision = false;
-        if (!isHead || authorizeTurn(message)) {
-            if (decisions) {
+        if (!ownsTurnQueue || authorizeTurn(message)) {
+            if (completedCalls) {
                 exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",
-                     {encodeCalls(*decisions),id,checkpoint.step});
+                     {encodeCalls(*completedCalls),id,checkpoint.step});
                 exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
                 hasDecision = true;
             } else if (const auto retry = std::get<ConversationModelFailure>(checkpoint.outcome).retryFrom) {
@@ -858,7 +857,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                     transaction.commit();
                     if (!attempt) return;
                 }
-                auto response = callModel(message.bot,model,input,0);
+                auto response = callModel(message.bot,model,input);
                 checkpoint.usage = std::move(response.usage);
                 calls = std::move(response.calls);
                 if (calls.empty() || calls.size() > maxToolCalls)

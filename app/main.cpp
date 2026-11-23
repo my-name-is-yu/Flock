@@ -337,18 +337,18 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                     const auto pending = handoffs->pending(after);
                     pollingFailed = false;
                     if (pending.empty()) after = 0;
-                    for (const auto& [channel, personId] : pending) {
+                    for (const auto& [channel, personId, coordination] : pending) {
                         if (stop.stop_requested()) return;
                         after = channel;
                         try {
                             const auto actor = identities.resolvePerson(personId);
                             if (!actor) {
+                                handoffs->discardModelDecision(channel);
                                 if (reportedFailures.insert(channel).second)
                                     std::cerr << "Session handoff " << channel << " has no configured identity.\n";
                                 continue;
                             }
-                            const auto view = handoffs->view(*actor,channel);
-                            if (view.coordination) handoffs->step(*actor,channel,*model,soul);
+                            if (coordination) handoffs->step(*actor,channel,*model,soul);
                             else handoffs->consult(*actor,channel,*model,soul);
                             reportedFailures.erase(channel);
                         } catch (const std::exception&) {

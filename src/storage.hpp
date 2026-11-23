@@ -271,7 +271,7 @@ struct Store::Impl {
                                      bool gitNotification) const;
     ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered,
                              bool gitNotification);
-    CheckedModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
+    CheckedModelTurn callModel(std::string_view bot, Model&, const ModelInput&);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;

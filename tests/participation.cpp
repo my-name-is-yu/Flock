@@ -472,6 +472,76 @@ void lateRedactionProjection(const std::filesystem::path& path) {
           "recent projection exposed a late secret or changed an opaque ID");
 }
 
+enum class Recovery { Send, Revoked, NewHumanInput };
+
+void modelOutcomeSurvivesWriterContention(const std::filesystem::path& path, bool coordination,
+                                         Recovery recovery = Recovery::Send) {
+    Store store(path);
+    Sessions sessions;
+    SessionHandoff handoff(store,sessions,resolve,intakeWithLimit(1));
+    const bool revoke = recovery == Recovery::Revoked;
+    const auto& actor = revoke ? visitor : owner;
+    if (revoke) store.policy().setMember(owner,"planner",visitor.id,true);
+    const auto channel = invoke(handoff,connect(store,actor),first,"one-call","Keep the completed response.",
+                                coordination ? "Retain the decision" : "").channel;
+    sqlite3* handle = nullptr;
+    const auto opened = sqlite3_open(path.c_str(),&handle);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(handle,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not open the fixture writer");
+    Bot bot;
+    bot.response = [&](const ModelInput&) {
+        check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,
+              "Could not contend with the handoff writer");
+        const auto* tool = recovery == Recovery::NewHumanInput ? "complete_handoff" :
+                           coordination ? "root_guidance" : "reply";
+        return ModelTurn{{{tool,{{"text","Completed with one call"}},""}},{{"outputTokens",71}}};
+    };
+    const auto run = [&] {
+        if (coordination) handoff.step(actor,channel,bot,soul);
+        else handoff.consult(actor,channel,bot,soul);
+    };
+    bool contended = false;
+    try { run(); }
+    catch (const std::exception& error) {
+        contended = std::string_view(error.what()).find("database is locked") != std::string_view::npos;
+    }
+    check(contended && bot.seen.size() == 1 && sessions.sent.empty(),
+          "The completed model call did not encounter the intended SQLite contention");
+    check(sqlite3_exec(writer.get(),"COMMIT",nullptr,nullptr,nullptr) == SQLITE_OK,
+          "Could not release the fixture writer");
+    if (revoke) {
+        denied([&] { handoff.step(owner,channel,bot,soul); });
+        store.policy().setMember(owner,"planner",visitor.id,false);
+        denied(run);
+        check(bot.seen.size() == 1 && sessions.sent.empty(),
+              "Recovery acted after the consultation or coordination lost authorization");
+    } else if (recovery == Recovery::NewHumanInput) {
+        sessions.dispatchUnavailable = true;
+        run();
+        check(bot.seen.size() == 1 && handoff.view(owner,channel).state == "active",
+              "A contended completion acted or spent another call without current Thread history");
+        sessions.dispatchUnavailable = false;
+        sessions.event(first,"user_message","user","web","new-input","I have one more question.");
+        run();
+        check(bot.seen.size() == 1 && sessions.sent.empty() && handoff.view(owner,channel).state == "active",
+              "A contended completion ignored newer input");
+    } else {
+        if (coordination) denied([&] { handoff.consult(actor,channel,bot,soul); });
+        else denied([&] { handoff.step(actor,channel,bot,soul); });
+        run();
+        check(bot.seen.size() == 1 && sessions.sent.size() == 1 &&
+              sessions.sent.front().text.ends_with("Completed with one call"),
+              "SQLite contention discarded the completed handoff outcome and exhausted its last call");
+    }
+    sqlite3_stmt* raw = nullptr;
+    const auto prepared = sqlite3_prepare_v2(writer.get(),
+        "SELECT json_extract(usage,'$.outputTokens') FROM model_attempts",-1,&raw,nullptr);
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> attempts(raw,sqlite3_finalize);
+    check(prepared == SQLITE_OK && sqlite3_step(attempts.get()) == SQLITE_ROW &&
+          sqlite3_column_int(attempts.get(),0) == 71 && sqlite3_step(attempts.get()) == SQLITE_DONE,
+          "Recovery did not persist usage for exactly the original handoff model call");
+}
+
 void modelAttemptBudget(const std::filesystem::path& path, bool coordination, bool throws) {
     Sessions sessions;
     const auto routing = intakeWithLimit(2);
@@ -588,6 +658,10 @@ int main() {
         concurrentHumanAndBudget(path / "human-policy.sqlite3");
         dispatchHistoryCoverage(path);
         lateRedactionProjection(path);
+        modelOutcomeSurvivesWriterContention(path / "consult-contention.sqlite3",false);
+        modelOutcomeSurvivesWriterContention(path / "coordinate-contention.sqlite3",true);
+        modelOutcomeSurvivesWriterContention(path / "model-contention-revoked.sqlite3",true,Recovery::Revoked);
+        modelOutcomeSurvivesWriterContention(path / "model-contention-new-input.sqlite3",true,Recovery::NewHumanInput);
         std::size_t attemptCase = 0;
         for (const auto coordination : {false,true})
             for (const auto throws : {false,true})

@@ -330,8 +330,73 @@ WHERE c.person_id=? ORDER BY s.channel_id DESC LIMIT 25
     return result;
 }
 
+bool SessionHandoff::commitModelDecision(const Person* person, Id channel, bool coordination, bool retry) {
+    const auto pending = modelCommits_.find(channel);
+    if (pending == modelCommits_.end()) return false;
+    const auto& checkpoint = pending->second;
+    if (person && (person->id != checkpoint.personId || coordination != checkpoint.coordination))
+        throw Conflict("This Session handoff decision belongs to another request");
+    auto& db = *store_.p_;
+    auto failure = person ? checkpoint.failure : std::exception_ptr{};
+    const auto canSave = [&] {
+        const auto active = db.query("SELECT 1 FROM session_controls WHERE channel_id=? AND generation=? AND state='active'",
+                                     {channel,checkpoint.generation}).next();
+        if (!person || !active || !checkpoint.save || failure) return false;
+        try { db.authorizeParticipation(*person,channel); }
+        catch (const Conflict&) {
+            failure = std::current_exception();
+            return false;
+        }
+        return true;
+    };
+    bool current = true;
+    if (checkpoint.checkEvidence) {
+        {
+            std::lock_guard lock(db.mutex);
+            current = canSave();
+        }
+        if (current) {
+            const auto valid = checkpoint.checkEvidence(retry);
+            if (!valid) return true;
+            current = *valid;
+        }
+    }
+    {
+        std::lock_guard lock(db.mutex);
+        Transaction tx(db.db);
+        if (!checkpoint.usage.empty())
+            db.exec("UPDATE model_attempts SET usage=? WHERE id=?",{checkpoint.usage,checkpoint.attempt});
+        if (current && canSave()) checkpoint.save();
+        tx.commit();
+    }
+    modelCommits_.erase(pending);
+    if (failure) std::rethrow_exception(failure);
+    return true;
+}
+
+template <typename Prepare>
+void SessionHandoff::checkpointModelDecision(const Person& person, Id channel, Id generation, Id attempt,
+                                             bool coordination, std::string_view bot, Model& model, const ModelInput& input,
+                                             Prepare prepare) {
+    ModelCommit checkpoint{attempt,generation,person.id,coordination,Json::object(),{},{},{}};
+    try {
+        auto turn = store_.p_->callModel(bot,model,input);
+        checkpoint.usage = std::move(turn.usage);
+        prepare(checkpoint,turn);
+    } catch (const ModelError& error) {
+        checkpoint.usage = error.usage;
+        checkpoint.failure = std::current_exception();
+    } catch (const Conflict&) {
+        checkpoint.failure = std::current_exception();
+    }
+    modelCommits_.emplace(channel,std::move(checkpoint));
+    commitModelDecision(&person,channel,coordination,false);
+}
+
 void SessionHandoff::consult(const Person& person, Id channel, Model& model,
                               const Runtime::SoulLoader& soul) {
+    std::lock_guard modelLock(modelMutex_);
+    commitModelDecision(&person,channel,false);
     RootDelivery delivery(store_,session_);
     delivery.reconcile(person,channel);
     const auto current = view(person,channel);
@@ -366,14 +431,17 @@ void SessionHandoff::consult(const Person& person, Id channel, Model& model,
             {{"kind","session_consultation"},{"request",redactT3Tokens(scrub.text(permit.channel.request))}},
             Json::array(),std::move(notes),{"reply"},{},Json::array(),routing.config
         };
-        const auto turn = db.callModel(origin.botId,model,input,attempt);
-        if (turn.calls.size() != 1 || !turn.calls.front().rejection.empty() || turn.calls.front().tool != "reply")
-            throw Conflict("The Bot did not produce one consultation reply");
-        const auto text = bounded(scrub.text(field(turn.calls.front().args,"text")),8192);
-        if (trimSessionQuestionText(text).empty()) throw Conflict("The consultation reply is empty");
-        std::lock_guard lock(db.mutex);
-        db.authorizeParticipation(person,channel);
-        delivery.prepare(channel,current.generation,permit.commandId,origin.botId,origin.requestId,text,current.eventCursor);
+        checkpointModelDecision(person,channel,current.generation,attempt,false,origin.botId,model,input,
+            [&](ModelCommit& checkpoint, const CheckedModelTurn& turn) {
+                if (turn.calls.size() != 1 || !turn.calls.front().rejection.empty() || turn.calls.front().tool != "reply")
+                    throw Conflict("The Bot did not produce one consultation reply");
+                auto text = bounded(scrub.text(field(turn.calls.front().args,"text")),8192);
+                if (trimSessionQuestionText(text).empty()) throw Conflict("The consultation reply is empty");
+                checkpoint.save = [this,channel,generation=current.generation,command=permit.commandId,
+                                   bot=origin.botId,request=origin.requestId,text=std::move(text),cursor=current.eventCursor] {
+                    RootDelivery(store_,session_).prepare(channel,generation,command,bot,request,text,cursor);
+                };
+            });
     }
     const auto reply = delivery.deliver(person,channel,permit.commandId);
     if (reply.state == State::Observed) freezeAs(person,channel,"completed");
@@ -382,6 +450,8 @@ void SessionHandoff::consult(const Person& person, Id channel, Model& model,
 
 SessionHandoffView SessionHandoff::step(const Person& person, Id channel, Model& model,
                                         const Runtime::SoulLoader& soul) {
+    std::lock_guard modelLock(modelMutex_);
+    const bool recoveredModelDecision = commitModelDecision(&person,channel,true);
     RootDelivery delivery(store_,session_);
     delivery.reconcile(person,channel);
     const auto current = view(person,channel);
@@ -445,7 +515,7 @@ AND s.kind IN ('root_guidance','delegate_specialist') ORDER BY s.rowid LIMIT 1
         db.exec("UPDATE session_decisions SET settled=1 WHERE command_id=?",{job.command});
         return false;
     };
-    if (recoverEffect()) return view(person,channel);
+    if (recoverEffect() || recoveredModelDecision) return view(person,channel);
     bool exhausted;
     {
         std::lock_guard lock(db.mutex);
@@ -586,78 +656,98 @@ UPDATE session_controls SET event_cursor=? WHERE channel_id=? AND generation=? A
             runtime_->freezeSpecialistWork(person,channel,current.generation);
         return view(person,channel);
     }
-    const auto turn = db.callModel(bot,model,input,attempt);
-    if (turn.calls.size() != 1 || !turn.calls.front().rejection.empty())
-        throw Conflict("The coordinator did not choose one action");
-    const auto& decision = turn.calls.front();
-    const auto& kind = decision.tool;
-    const auto text = bounded(clean(field(decision.args,"text")),8192);
-    if (std::ranges::find(tools,kind) == tools.end() ||
-        (kind != "wait_for_root" && trimSessionQuestionText(text).empty()))
-        throw Conflict("Invalid coordinator action");
-    std::string specialist, doneWhen;
-    if (kind == "delegate_specialist") {
-        specialist = field(decision.args,"botId");
-        doneWhen = bounded(clean(field(decision.args,"doneWhen")),8192);
-        if (doneWhen.empty() || !std::ranges::any_of(peers,[&](const Json& item) { return item.at("botId") == specialist; }))
-            throw Conflict("Invalid specialist selection");
-    }
-    if (kind == "complete_handoff" && !evidenceSha.empty()) {
-        const auto latestPin = session_.inputCommit(target);
-        if (!latestPin || *latestPin != evidenceSha) return view(person,channel);
-    }
-    const bool effect = kind == "root_guidance" || kind == "delegate_specialist";
-    {
-        std::lock_guard lock(db.mutex);
-        Transaction tx(db.db);
-        db.authorizeParticipation(person,channel);
-        auto row = db.query(R"SQL(
-SELECT event_cursor,initial_pending FROM session_controls WHERE channel_id=? AND generation=? AND state='active'
-)SQL",{channel,current.generation});
-        if (!row.next() || row.number(0) != current.eventCursor || (row.number(1) != 0) != initial) {
-            tx.commit();
-            return view(person,channel);
-        }
-        const auto event = answer ? "flock-answer:" + answer->command :
-            workResult ? "flock-result:" + std::to_string(workResult->first) + ":" + pin.value_or("unavailable") :
-            initial ? "flock-activation:" + std::to_string(current.generation) : lastEvent;
-        const auto command = actionId();
-        db.exec(R"SQL(
+    bool effect = false;
+    checkpointModelDecision(person,channel,current.generation,attempt,true,bot,model,input,
+        [&](ModelCommit& checkpoint, const CheckedModelTurn& turn) {
+            if (turn.calls.size() != 1 || !turn.calls.front().rejection.empty())
+                throw Conflict("The coordinator did not choose one action");
+            const auto& decision = turn.calls.front();
+            const auto& kind = decision.tool;
+            auto text = bounded(clean(field(decision.args,"text")),8192);
+            if (std::ranges::find(tools,kind) == tools.end() ||
+                (kind != "wait_for_root" && trimSessionQuestionText(text).empty()))
+                throw Conflict("Invalid coordinator action");
+            std::string specialist, doneWhen, commit;
+            if (kind == "delegate_specialist") {
+                specialist = field(decision.args,"botId");
+                doneWhen = bounded(clean(field(decision.args,"doneWhen")),8192);
+                if (doneWhen.empty() || !std::ranges::any_of(peers,[&](const Json& item) { return item.at("botId") == specialist; }))
+                    throw Conflict("Invalid specialist selection");
+                commit = *pin;
+            }
+            if (kind == "complete_handoff") {
+                checkpoint.checkEvidence = [this,target,evidenceSha,auth,cursor=page->cursor](bool retry) -> std::optional<bool> {
+                    if (retry) {
+                        const auto latest = session_.dispatchHistory(target,cursor);
+                        if (!latest || latest->cursor < cursor) return std::nullopt;
+                        if (latest->target != target || latest->authGeneration != auth) return false;
+                        if (std::ranges::any_of(latest->events,[cursor](const auto& event) {
+                            return event.position > cursor && event.kind == "user_message" && event.createdBy == "user";
+                        })) return false;
+                    }
+                    if (evidenceSha.empty()) return true;
+                    const auto latestPin = session_.inputCommit(target);
+                    if (!latestPin) return std::nullopt;
+                    return *latestPin == evidenceSha;
+                };
+            }
+            effect = kind == "root_guidance" || kind == "delegate_specialist";
+            const auto event = answer ? "flock-answer:" + answer->command :
+                workResult ? "flock-result:" + std::to_string(workResult->first) + ":" + pin.value_or("unavailable") :
+                initial ? "flock-activation:" + std::to_string(current.generation) : lastEvent;
+            checkpoint.save = [this,channel,generation=current.generation,initial,previousCursor=current.eventCursor,
+                               cursor=page->cursor,humanInput,kind,text=std::move(text),effect,event,
+                               specialist=std::move(specialist),doneWhen=std::move(doneWhen),commit=std::move(commit),
+                               evidenceSha,bot,requestId=invitation.requestId,
+                               answerEvent=answer ? std::optional(answer->event) : std::nullopt,
+                               resultId=workResult ? Json(workResult->first) : Json(nullptr)] {
+                auto& db = *store_.p_;
+                auto row = db.query("SELECT event_cursor,initial_pending FROM session_controls WHERE channel_id=?", {channel});
+                if (!row.next() || row.number(0) != previousCursor || (row.number(1) != 0) != initial) return;
+                const auto command = actionId();
+                db.exec(R"SQL(
 INSERT OR IGNORE INTO session_decisions(channel_id,event_id,position,generation,command_id,kind,text,settled,
 specialist,done_when,commit_sha,evidence_sha,journal_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-)SQL",{channel,event,page->cursor,current.generation,command,kind,text,static_cast<int>(!effect),
-        specialist,doneWhen,kind == "delegate_specialist" ? *pin : "",evidenceSha,
-        workResult ? Json(workResult->first) : Json(nullptr)});
-        if (sqlite3_changes(db.db)) {
-            db.exec("UPDATE session_controls SET human_input_position=max(human_input_position,?) WHERE channel_id=?",
-                    {humanInput,channel});
-            if (kind == "root_guidance")
-                delivery.prepare(channel,current.generation,command,bot,invitation.requestId,text,page->cursor);
-            if (answer)
-                db.exec("UPDATE session_decisions SET answer_consumed=1 WHERE channel_id=? AND event_id=?",
-                        {channel,answer->event});
-            if (kind == "complete_handoff")
-                db.exec("UPDATE session_controls SET state='completed',generation=generation+1 WHERE channel_id=?",{channel});
-        }
-        db.exec("UPDATE session_controls SET event_cursor=?,initial_pending=0 WHERE channel_id=?",{page->cursor,channel});
-        tx.commit();
-    }
+)SQL",{channel,event,cursor,generation,command,kind,text,static_cast<int>(!effect),
+        specialist,doneWhen,commit,evidenceSha,resultId});
+                if (sqlite3_changes(db.db)) {
+                    db.exec("UPDATE session_controls SET human_input_position=max(human_input_position,?) WHERE channel_id=?",
+                            {humanInput,channel});
+                    if (kind == "root_guidance")
+                        RootDelivery(store_,session_).prepare(channel,generation,command,bot,requestId,text,cursor);
+                    if (answerEvent)
+                        db.exec("UPDATE session_decisions SET answer_consumed=1 WHERE channel_id=? AND event_id=?",
+                                {channel,*answerEvent});
+                    if (kind == "complete_handoff")
+                        db.exec("UPDATE session_controls SET state='completed',generation=generation+1 WHERE channel_id=?",{channel});
+                }
+                db.exec("UPDATE session_controls SET event_cursor=?,initial_pending=0 WHERE channel_id=?",{cursor,channel});
+            };
+        });
     if (effect) recoverEffect();
     return view(person,channel);
 }
 
-std::vector<std::pair<Id,std::string>> SessionHandoff::pending(Id after) const {
+std::vector<PendingHandoff> SessionHandoff::pending(Id after) const {
+    std::lock_guard modelLock(modelMutex_);
+    auto modelCommits = Json::array();
+    for (const auto& [channel,checkpoint] : modelCommits_) modelCommits.push_back(channel);
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     auto rows = db.query(R"SQL(
-SELECT c.id,c.person_id FROM return_channels c JOIN session_controls s ON s.channel_id=c.id
-WHERE c.id>? AND (s.state='active' OR EXISTS(
+SELECT c.id,c.person_id,s.consult_command='' FROM return_channels c JOIN session_controls s ON s.channel_id=c.id
+WHERE c.id>? AND (s.state='active' OR c.id IN (SELECT value FROM json_each(?)) OR EXISTS(
  SELECT 1 FROM thread_deliveries d WHERE d.channel_id=c.id AND d.state IN (1,2,3,7)))
 ORDER BY c.id LIMIT 16
-)SQL",{after});
-    std::vector<std::pair<Id,std::string>> result;
-    while (rows.next()) result.emplace_back(rows.number(0),rows.string(1));
+)SQL",{after,modelCommits});
+    std::vector<PendingHandoff> result;
+    while (rows.next()) result.push_back({rows.number(0),rows.string(1),rows.number(2) != 0});
     return result;
+}
+
+void SessionHandoff::discardModelDecision(Id channel) {
+    std::lock_guard modelLock(modelMutex_);
+    commitModelDecision(nullptr,channel,false);
 }
 
 }
