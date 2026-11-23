@@ -1695,21 +1695,46 @@ function syncTimelineAvatar(row, show, bot) {
   if (show && current?.classList.contains('msg-avatar-space')) current.replaceWith(avatar(bot, 'msg-avatar'));
   else if (!show && current?.classList.contains('msg-avatar')) current.replaceWith(node('span', 'msg-avatar-space'));
 }
-function workingLine(data) {
+const workingText = (data) => data.presence === 'working'
+  ? data.activeSessions?.[0]?.request ?? presenceLabels.working : presenceLabels.thinking;
+// The working row stays mounted while the Bot works; only its status changes, sliding the old one out.
+function workingLine(bot) {
   const row = node('div', 'msg bot working group-start');
   const line = node('div', 'msg-line');
   const dots = node('span', 'typing');
   dots.setAttribute('aria-hidden', 'true');
   dots.append(node('span'), node('span'), node('span'));
-  let label = presenceLabels.thinking;
-  if (data.presence === 'working') {
-    label = data.activeSessions?.[0]?.request ?? presenceLabels.working;
-  }
-  const text = node('span', 'working-label', label);
-  text.title = label;
-  line.append(dots, text);
+  const status = node('span', 'working-status');
+  line.append(avatar(bot, 'msg-avatar'), dots, status);
   row.append(line);
   return row;
+}
+function setWorkingText(row, label) {
+  const status = row.querySelector('.working-status');
+  const current = status.querySelector('.working-label:not(.leaving)');
+  if (current?.textContent === label) return;
+  status.querySelector('.working-label.leaving')?.remove();
+  const next = node('span', 'working-label', label);
+  next.title = label;
+  if (current && !reducedMotion.matches) {
+    current.setAttribute('aria-hidden', 'true');
+    current.classList.add('leaving');
+    next.classList.add('entering');
+    const removeLeaving = ({ animationName }) => {
+      if (animationName === 'working-label-out') current.remove();
+    };
+    const clearEntering = ({ animationName }) => {
+      if (animationName !== 'working-label-in') return;
+      next.classList.remove('entering');
+      next.removeEventListener('animationend', clearEntering);
+      next.removeEventListener('animationcancel', clearEntering);
+    };
+    current.addEventListener('animationend', removeLeaving);
+    current.addEventListener('animationcancel', removeLeaving);
+    next.addEventListener('animationend', clearEntering);
+    next.addEventListener('animationcancel', clearEntering);
+  } else current?.remove();
+  status.append(next);
 }
 function startedLabel(timestamp) {
   const day = dayLabel(timestamp / 1000);
@@ -2104,7 +2129,9 @@ function conversationRows(data, events, keep, source) {
     }));
   }
   if (data && (data.presence === 'working' || data.presence === 'thinking')) {
-    rows.push(keep('working', [botVersion, data.presence, data.activeSessions?.[0]?.request], () => workingLine(data)));
+    const row = keep('working', botVersion, () => workingLine(bot));
+    setWorkingText(row, workingText(data));
+    rows.push(row);
   }
   return rows;
 }
@@ -2248,8 +2275,9 @@ function renderComposer() {
   elements['compose-label'].textContent = decision ? `Replying to ${decision.item.requestTitle}` :
     review ? `Replying to ${review.summary}` : reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
+  const working = ['working', 'thinking'].includes(context.data.presence);
   elements.message.placeholder = (decision || review) ? 'Ask a question or give direction' :
-    reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
+    reply ? 'Write a reply' : working ? `Guide ${context.data.bot.name} while it works` : `Message ${context.data.bot.name}`;
   if (!composition && elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();

@@ -9,7 +9,12 @@ import { promisify } from 'node:util';
 function fixtures() {
   const nativeMatchMedia = window.matchMedia.bind(window);
   window.noHoverFixture = Object.assign(new EventTarget(), { matches: true });
-  window.matchMedia = (query) => query === '(hover: none)' ? window.noHoverFixture : nativeMatchMedia(query);
+  window.reducedMotionFixture = Object.assign(new EventTarget(), { matches: false });
+  window.matchMedia = (query) => {
+    if (query === '(hover: none)') return window.noHoverFixture;
+    if (query === '(prefers-reduced-motion: reduce)') return window.reducedMotionFixture;
+    return nativeMatchMedia(query);
+  };
   window.EventSource = undefined;
   const bot = { id: 'release', name: 'Release' };
   const peer = { id: 'triage', name: 'Triage' };
@@ -69,11 +74,17 @@ function fixtures() {
     dm(12, 1000, 'triage', { text: 'Triage resumes after a break' }),
     dm(13, 12 * 3600, 'triage', { text: 'Triage follows up tomorrow' }),
   ];
+  let activeSessions = [];
+  window.showWorking = (request) => {
+    activeSessions = request ? [{ taskId: 18, threadId: 'working', environmentId: 'local', state: 'running', request }] : [];
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   window.fetch = async (path) => {
     if (path === '/api/bots') return Response.json([bot, peer]);
     if (path.startsWith('/api/peer-conversation?')) return Response.json(path.includes('before=')
       ? { messages: [older], hasOlder: false } : { messages: peerEvents, hasOlder: true });
-    return Response.json({ bot, events, olderBefore: 0, presence: 'idle', sessionTasks, sessionsBefore: 0, sessionCursor: 0, waits: [],
+    return Response.json({ bot, events, olderBefore: 0, presence: activeSessions.length ? 'working' : 'idle',
+      activeSessions, sessionTasks, sessionsBefore: 0, sessionCursor: 0, waits: [],
       canDecide: true, composerPerson: null });
   };
 }
@@ -176,6 +187,28 @@ async function exercise() {
   window.noHoverFixture.dispatchEvent(new Event('change'));
   tap(document.querySelector('#event-1 .event-text'));
   check(!shown().length, 'The tap timestamp remained enabled with hover support');
+
+  const workingLabel = () => document.querySelector('.working-label:not(.leaving)');
+  const leavingLabels = () => document.querySelectorAll('.working-label.leaving');
+  const showWorking = async (text) => {
+    window.showWorking(text);
+    for (let attempt = 0; attempt < 20 && workingLabel()?.textContent !== text; attempt++)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    check(workingLabel()?.textContent === text, 'The working status did not update');
+  };
+  await showWorking('Check staging');
+  const workingRow = workingLabel().closest('.msg.working');
+  await showWorking('Check production');
+  check(workingLabel().closest('.msg.working') === workingRow && leavingLabels()[0]?.getAttribute('aria-hidden') === 'true',
+    'Working text lost its stable row or left the old status exposed');
+  await showWorking('Verify the result');
+  check(leavingLabels().length === 1, 'Fast working updates left multiple outgoing labels');
+  leavingLabels()[0].dispatchEvent(new AnimationEvent('animationcancel', { animationName: 'working-label-out' }));
+  check(!leavingLabels().length, 'Cancelling the exit animation left an old status in the row');
+  window.reducedMotionFixture.matches = true;
+  await showWorking('Finish the check');
+  check(!leavingLabels().length && !workingLabel().classList.contains('entering'),
+    'Reduced-motion working statuses still entered or exited with animation');
 
   window.noHoverFixture.matches = true;
   window.noHoverFixture.dispatchEvent(new Event('change'));
