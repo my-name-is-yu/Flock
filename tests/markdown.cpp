@@ -160,6 +160,63 @@ void linkedImages() {
           "unsafe linked-image plain text lost its destinations");
 }
 
+void protectedHtml() {
+    const auto ampersand = [](std::string_view text) { return text.find("A&B") != text.npos; };
+    const auto adjacent = [](std::string_view text) { return text.find("AB") != text.npos; };
+    const auto formatted = [](std::string_view text) { return text.find("AxB") != text.npos; };
+    const auto space = [](std::string_view text) { return text.find("A B") != text.npos; };
+    const auto lines = [](std::string_view text) { return text == "A\nB"; };
+    const auto redacted = "<p>[redacted]</p>";
+
+    check(markdown::toHtml("",ampersand).empty(),"empty HTML changed when sensitive-text detection was enabled");
+    const auto entityHtml = markdown::toHtml("A&amp;B",ampersand);
+    const auto formattedHtml = markdown::toHtml("A**x**B",formatted);
+    check(entityHtml == redacted && formattedHtml == redacted &&
+          markdown::toHtml("A**&**B",ampersand) == "<p>A**&amp;**B</p>",
+          "HTML text entity or valid inline formatting bypassed sensitive-text detection");
+    check(markdown::toHtml("[A](https://example.com)B",adjacent) == redacted,
+          "HTML text split by a link bypassed sensitive-text detection");
+    check(markdown::toHtml("A\nB",lines) == redacted && markdown::toHtml("A  \nB",lines) == redacted &&
+          markdown::toHtml("A\n\nB",lines) == redacted && markdown::toHtml("- A\n- B",adjacent) == redacted,
+          "HTML textContent did not preserve soft-break, paragraph, or list boundaries");
+    const auto visibleMarkup = [](std::string_view text) { return text == "> A" || text == "---"; };
+    check(markdown::toHtml("> A",visibleMarkup) == "<blockquote><p>A</p></blockquote>" &&
+          markdown::toHtml("---",visibleMarkup) == "<hr>",
+          "block quote markers or thematic breaks were included in HTML textContent");
+    check(markdown::toHtml("[credential](https://example.com/A%26B)",ampersand) == redacted &&
+          markdown::toHtml("[credential](https://example.com/?q=A&amp;B)",ampersand) == redacted &&
+          markdown::toHtml("[credential](https://example.com/?q=A+B)",space) == redacted,
+          "encoded link credentials bypassed URL-sensitive detection");
+
+    const auto imageFallback = [](std::string_view text) {
+        return text == "diagram (https://images.example/diagram.png)";
+    };
+    const auto unsafeFallback = [](std::string_view text) {
+        return text == "label (javascript:credential)";
+    };
+    const auto codeLiteral = [](std::string_view text) { return text.find("code-secret") != text.npos; };
+    const auto codeBlockLiteral = [](std::string_view text) { return text.find("block-secret") != text.npos; };
+    const auto htmlLiteral = [](std::string_view text) { return text.find("<span>html-secret</span>") != text.npos; };
+    check(markdown::toHtml("![diagram](https://images.example/diagram.png)",imageFallback) == redacted &&
+          markdown::toHtml("[label](javascript:credential)",unsafeFallback) == redacted &&
+          markdown::toHtml("`code-secret`",codeLiteral) == redacted &&
+          markdown::toHtml("```\nblock-secret\n```",codeBlockLiteral) == redacted &&
+          markdown::toHtml("<span>html-secret</span>",htmlLiteral) == redacted,
+          "HTML textContent omitted image, unsafe-link, code, or raw-HTML literals");
+
+    check(markdown::toHtml("**safe** [docs](https://example.com)",ampersand) ==
+              "<p><strong>safe</strong> <a href=\"https://example.com\">docs</a></p>",
+          "safe Markdown lost rich HTML when no protected content was present");
+    const auto generatedTag = [](std::string_view text) { return text.find("<strong>") != text.npos; };
+    const auto safeLinkSuffix = [](std::string_view text) {
+        return text.find("docs (https://example.com)") != text.npos;
+    };
+    check(markdown::toHtml("**safe**",generatedTag) == "<p><strong>safe</strong></p>" &&
+          markdown::toHtml("[docs](https://example.com)",safeLinkSuffix) ==
+              "<p><a href=\"https://example.com\">docs</a></p>",
+          "HTML markup or a safe-link destination was incorrectly included in textContent");
+}
+
 void nestedAndStable() {
     const std::string source = "## Title\n\n- one **bold _nested_**\n- [two](https://example.org)\n  - third `code`";
     const auto html = markdown::toHtml(source);
@@ -200,6 +257,7 @@ int main() {
         definitionOnlySource();
         linksAndRawHtml();
         linkedImages();
+        protectedHtml();
         nestedAndStable();
         std::cout << "Markdown rendering behavior passed\n";
     } catch (const std::exception& error) {

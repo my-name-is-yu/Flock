@@ -885,6 +885,10 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const auto request = policy.requestSecret("release",{"fixture-token"});
     const auto ampRequest = policy.requestSecret("release",{"renderer-amp"});
     const auto markdownRequest = policy.requestSecret("release",{"renderer-markdown"});
+    const auto semanticRequest = policy.requestSecret("staging-triage",{"renderer-semantic"});
+    const auto formattedRequest = policy.requestSecret("staging-triage",{"renderer-formatted"});
+    const auto adjacentRequest = policy.requestSecret("staging-triage",{"renderer-adjacent"});
+    const auto formRequest = policy.requestSecret("staging-triage",{"renderer-form"});
     const auto send = [&](std::string_view bot, std::string_view clientId, std::string_view text) {
         return store.receive(owner,{std::string(bot),"unused","local-env","fixture"},clientId,text)
             .at("messageId").get<Id>();
@@ -897,15 +901,35 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const auto otherBotMessage = send("release","other","Unrelated handoff");
     const auto historyAmpMessage = send("staging-triage","history-amp",ampText);
     const auto historyMarkdownMessage = send("staging-triage","history-markdown",markdownText);
+    const std::string rawSemanticText = "A&B";
+    const std::string entitySemanticText = "A&amp;B";
+    const std::string formattedSemanticText = "A**x**B";
+    const std::string adjacentSemanticText = "[A](https://example.com)B";
+    const std::string encodedUrlText = "[credential](https://example.com/A%26B)";
+    const std::string decodedUrlText = "[credential](https://example.com/?q=A&amp;B)";
+    const std::string formUrlText = "[credential](https://example.com/?q=A+B)";
+    const std::string safeRichText = "**safe** [docs](https://example.com)";
+    const auto rawSemanticMessage = send("staging-triage","semantic-raw",rawSemanticText);
+    const auto formattedSemanticMessage = send("staging-triage","semantic-formatted",formattedSemanticText);
+    const auto adjacentSemanticMessage = send("staging-triage","semantic-adjacent",adjacentSemanticText);
+    const auto encodedUrlMessage = send("staging-triage","semantic-url",encodedUrlText);
+    const auto decodedUrlMessage = send("staging-triage","semantic-decoded-url",decodedUrlText);
+    const auto formUrlMessage = send("staging-triage","semantic-form-url",formUrlText);
     for (int i = 0; i < 40; ++i) send("staging-triage","filler-" + std::to_string(i),"Later update");
     const auto viewAmpMessage = send("staging-triage","view-amp",ampText);
     const auto viewMarkdownMessage = send("staging-triage","view-markdown",markdownText);
+    const auto entitySemanticMessage = send("staging-triage","semantic-entity",entitySemanticText);
+    const auto safeRichMessage = send("staging-triage","semantic-safe-rich",safeRichText);
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",request},{"value","staging"}});
     browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",ampRequest},{"value",ampSecret}});
     browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",markdownRequest},{"value",markdownSecret}});
+    browser.post("/api/bot-settings/secret",{{"botId","staging-triage"},{"requestId",semanticRequest},{"value","A&B"}});
+    browser.post("/api/bot-settings/secret",{{"botId","staging-triage"},{"requestId",formattedRequest},{"value","AxB"}});
+    browser.post("/api/bot-settings/secret",{{"botId","staging-triage"},{"requestId",adjacentRequest},{"value","AB"}});
+    browser.post("/api/bot-settings/secret",{{"botId","staging-triage"},{"requestId",formRequest},{"value","A B"}});
     const auto saved = browser.post("/api/bots/profile",{{"botId","staging-triage"},{"name","Triage"}});
     check(saved.at("id")=="staging-triage","profile route changed the Bot ID");
 
@@ -930,6 +954,40 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     };
     verifyRenderedMessage(viewResponse.at("events"),viewAmpMessage,"Amp handoff [redacted] end");
     verifyRenderedMessage(viewResponse.at("events"),viewMarkdownMessage,"Markdown handoff [redacted] end");
+    const auto verifyProtectedHtml = [&](const Json& events, Id id, std::string_view expectedText) {
+        const auto event = std::ranges::find_if(events,[&](const Json& row) {
+            return row.at("id").get<Id>() == id;
+        });
+        check(event != events.end(),"protected Markdown message was missing from its response page");
+        const auto& data = event->at("data");
+        const auto actualText = data.at("text").get<std::string>();
+        const auto actualHtml = data.at("textHtml").get<std::string>();
+        check(actualText == expectedText && actualHtml == "<p>[redacted]</p>",
+              "protected HTML semantics were not replaced for message " + std::to_string(id) + ": " +
+                  actualText + " / " + actualHtml);
+    };
+    const auto verifySafeRichHtml = [&](const Json& events) {
+        const auto event = std::ranges::find_if(events,[&](const Json& row) {
+            return row.at("id").get<Id>() == safeRichMessage;
+        });
+        check(event != events.end() && event->at("data").at("text") == safeRichText &&
+              event->at("data").at("textHtml") ==
+                  "<p><strong>safe</strong> <a href=\"https://example.com\">docs</a></p>",
+              "ordinary safe Markdown lost rich rendering");
+    };
+    const auto verifyRecentSemanticMessages = [&](const Json& events) {
+        verifyProtectedHtml(events,entitySemanticMessage,entitySemanticText);
+        verifySafeRichHtml(events);
+    };
+    const auto verifyOlderSemanticMessages = [&](const Json& events) {
+        verifyProtectedHtml(events,rawSemanticMessage,"[redacted]");
+        verifyProtectedHtml(events,formattedSemanticMessage,formattedSemanticText);
+        verifyProtectedHtml(events,adjacentSemanticMessage,adjacentSemanticText);
+        verifyProtectedHtml(events,encodedUrlMessage,encodedUrlText);
+        verifyProtectedHtml(events,decodedUrlMessage,decodedUrlText);
+        verifyProtectedHtml(events,formUrlMessage,formUrlText);
+    };
+    verifyRecentSemanticMessages(viewResponse.at("events"));
     const auto storedAmp = store.conversation("staging-triage",viewAmpMessage + 1,1);
     const auto storedMarkdown = store.conversation("staging-triage",viewMarkdownMessage + 1,1);
     check(storedAmp.size() == 1 && storedAmp.front().at("data").at("text") == ampText &&
@@ -941,11 +999,25 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const auto exact = browser.get(history + "&before=" + std::to_string(oldMessage + 1));
     check(latest.at("events").front().at("id") > oldMessage && older.at("events").front().at("id") == oldMessage,
           "An older match must be reachable through the same Bot conversation projection");
+    verifyRecentSemanticMessages(latest.at("events"));
+    verifyOlderSemanticMessages(older.at("events"));
     verifyRenderedMessage(older.at("events"),historyAmpMessage,"Amp handoff [redacted] end");
     verifyRenderedMessage(older.at("events"),historyMarkdownMessage,"Markdown handoff [redacted] end");
     check(exact.at("events").size() == 1 && exact.at("events").back().at("id") == oldMessage &&
           exact.at("events").back().at("data").at("text") == "Original handoff for [redacted]",
           "The older conversation projection must redact its text and omit other Bots' messages");
+    const auto requireStored = [&](Id id, std::string_view text) {
+        const auto stored = store.conversation("staging-triage",id + 1,1);
+        check(stored.size() == 1 && stored.front().at("data").at("text") == text,
+              "render-time redaction mutated canonical journal text");
+    };
+    requireStored(rawSemanticMessage,rawSemanticText);
+    requireStored(entitySemanticMessage,entitySemanticText);
+    requireStored(formattedSemanticMessage,formattedSemanticText);
+    requireStored(adjacentSemanticMessage,adjacentSemanticText);
+    requireStored(encodedUrlMessage,encodedUrlText);
+    requireStored(decodedUrlMessage,decodedUrlText);
+    requireStored(formUrlMessage,formUrlText);
     const auto foreign = browser.get(history + "&before=" + std::to_string(otherBotMessage + 1));
     check(foreign.at("events").back().at("id") != otherBotMessage,
           "An exact source lookup must stay in the selected Bot");

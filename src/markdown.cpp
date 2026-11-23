@@ -12,14 +12,14 @@
 
 namespace flockv0::markdown {
 namespace {
-enum class Target { html, slack, slack_plain, plain };
+enum class Target { html, html_text, slack, slack_plain, plain };
 
 std::string value(const char* source) {
     return source ? source : "";
 }
 
 std::string escape(std::string_view source, Target target, bool attribute = false) {
-    if (target == Target::plain) return std::string(source);
+    if (target == Target::plain || target == Target::html_text) return std::string(source);
     std::string result;
     for (const char ch : source) {
         if (ch == '&') result += "&amp;";
@@ -44,6 +44,58 @@ std::optional<std::string> urlPart(CURLU* url, CURLUPart part) {
     return copy;
 }
 
+bool curlReady() {
+    static std::once_flag initialized;
+    static bool ready = false;
+    std::call_once(initialized,[] { ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK; });
+    return ready;
+}
+
+std::optional<std::string> percentDecode(std::string_view source) {
+    if (!curlReady()) return std::nullopt;
+    std::unique_ptr<CURL,decltype(&curl_easy_cleanup)> curl(curl_easy_init(),curl_easy_cleanup);
+    if (!curl) return std::nullopt;
+    const std::string input(source);
+    int length = 0;
+    auto* decoded = curl_easy_unescape(curl.get(),input.c_str(),0,&length);
+    if (!decoded) return std::nullopt;
+    std::string result(decoded,static_cast<std::size_t>(length));
+    curl_free(decoded);
+    return result;
+}
+
+std::optional<std::string> formDecodeQuery(std::string_view source) {
+    const auto fragment = source.find('#');
+    const auto query = source.find('?');
+    if (query == source.npos || (fragment != source.npos && fragment < query)) return std::nullopt;
+    const auto end = fragment == source.npos ? source.size() : fragment;
+    std::string form(source);
+    bool changed = false;
+    for (auto index = query + 1; index < end; ++index) {
+        if (form[index] == '+') {
+            form[index] = ' ';
+            changed = true;
+        }
+    }
+    return changed ? percentDecode(form) : std::nullopt;
+}
+
+bool sensitiveUrl(std::string_view source, const SensitiveText& sensitive) {
+    if (source.empty()) return false;
+    if (sensitive(source)) return true;
+    const auto decoded = percentDecode(source);
+    if (!decoded || sensitive(*decoded)) return true;
+    const auto fragment = source.find('#');
+    const auto query = source.find('?');
+    const auto end = fragment == source.npos ? source.size() : fragment;
+    if (query != source.npos && (fragment == source.npos || query < fragment) &&
+        source.substr(query + 1,end - query - 1).find('+') != source.npos) {
+        const auto formDecoded = formDecodeQuery(source);
+        if (!formDecoded || sensitive(*formDecoded)) return true;
+    }
+    return false;
+}
+
 bool safeUrl(std::string_view source) {
     if (source.empty() || source.find_first_of("<>|\\") != source.npos) return false;
     for (const unsigned char ch : source)
@@ -53,10 +105,7 @@ bool safeUrl(std::string_view source) {
     std::string rawScheme(source.substr(0,colon));
     std::ranges::transform(rawScheme,rawScheme.begin(),[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     if ((rawScheme != "http" && rawScheme != "https") || source.substr(colon,3) != "://") return false;
-    static std::once_flag initialized;
-    static bool curlReady = false;
-    std::call_once(initialized,[] { curlReady = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK; });
-    if (!curlReady) return false;
+    if (!curlReady()) return false;
     std::unique_ptr<CURLU,decltype(&curl_url_cleanup)> parsed(curl_url(),curl_url_cleanup);
     if (!parsed || curl_url_set(parsed.get(),CURLUPART_URL,std::string(source).c_str(),0) != CURLUE_OK)
         return false;
@@ -94,7 +143,8 @@ std::string children(cmark_node* node, Target target, unsigned depth) {
     bool previousBlock = false;
     for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child)) {
         const bool currentBlock = block(cmark_node_get_type(child));
-        if (previousBlock && currentBlock) result += target == Target::html ? "\n" : "\n\n";
+        if (previousBlock && currentBlock)
+            result += (target == Target::html || target == Target::html_text) ? "\n" : "\n\n";
         result += render(child,target,depth);
         previousBlock = currentBlock;
     }
@@ -143,6 +193,12 @@ std::string listItems(cmark_node* node, Target target, unsigned depth) {
 }
 
 std::string renderList(cmark_node* node, Target target, unsigned depth) {
+    if (target == Target::html_text) {
+        std::string result;
+        for (auto* item = cmark_node_first_child(node); item; item = cmark_node_next(item))
+            result += children(item,target,depth+1);
+        return result;
+    }
     if (target != Target::html) return listItems(node,target,depth);
     const bool ordered = cmark_node_get_list_type(node) == CMARK_ORDERED_LIST;
     const int start = cmark_node_get_list_start(node);
@@ -176,7 +232,12 @@ std::string fallbackLink(cmark_node* node, Target target, unsigned depth) {
 std::string link(cmark_node* node, Target target, unsigned depth) {
     const auto destination = value(cmark_node_get_url(node));
     const auto label = inlineChildren(node,target,depth);
-    if (!safeUrl(destination)) return fallbackLink(node,target,depth);
+    const auto safe = safeUrl(destination);
+    if (target == Target::html_text) {
+        if (destination.empty() || safe) return label;
+        return label + " (" + destination + ")";
+    }
+    if (!safe) return fallbackLink(node,target,depth);
     if (target == Target::html)
         return "<a href=\"" + escape(destination,target,true) + "\">" + label + "</a>";
     if (target == Target::slack) {
@@ -197,6 +258,7 @@ std::string image(cmark_node* node, Target target, unsigned depth) {
     const auto alt = inlineChildren(node,target,depth);
     const auto destination = value(cmark_node_get_url(node));
     if (destination.empty()) return alt;
+    if (target == Target::html_text) return alt + " (" + destination + ")";
     const auto safe = safeUrl(destination);
     const auto linked = insideLink(node);
     if (target == Target::html) {
@@ -213,6 +275,7 @@ std::string image(cmark_node* node, Target target, unsigned depth) {
 }
 
 std::string code(std::string_view content, Target target, bool fenced) {
+    if (target == Target::html_text) return std::string(content);
     if (target == Target::html) {
         if (fenced) return "<pre><code>" + escape(content,target) + "</code></pre>";
         return "<code>" + escape(content,target) + "</code>";
@@ -247,6 +310,7 @@ std::string render(cmark_node* node, Target target, unsigned depth) {
         case CMARK_NODE_BLOCK_QUOTE: {
             const auto content = children(node,target,depth+1);
             if (target == Target::html) return "<blockquote>" + content + "</blockquote>";
+            if (target == Target::html_text) return content;
             return quoteLines(content);
         }
         case CMARK_NODE_LIST:
@@ -259,7 +323,7 @@ std::string render(cmark_node* node, Target target, unsigned depth) {
         case CMARK_NODE_HTML_INLINE:
             return escape(value(cmark_node_get_literal(node)),target);
         case CMARK_NODE_THEMATIC_BREAK:
-            return target == Target::html ? "<hr>" : "---";
+            return target == Target::html ? "<hr>" : target == Target::html_text ? "" : "---";
         case CMARK_NODE_TEXT:
             return escape(value(cmark_node_get_literal(node)),target);
         case CMARK_NODE_SOFTBREAK:
@@ -293,6 +357,16 @@ std::string render(cmark_node* node, Target target, unsigned depth) {
     }
 }
 
+bool hasSensitiveUrl(cmark_node* node, const SensitiveText& sensitive) {
+    const auto type = cmark_node_get_type(node);
+    if ((type == CMARK_NODE_LINK || type == CMARK_NODE_IMAGE) &&
+        sensitiveUrl(value(cmark_node_get_url(node)),sensitive))
+        return true;
+    for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child))
+        if (hasSensitiveUrl(child,sensitive)) return true;
+    return false;
+}
+
 bool slackMrkdwnRepresentable(cmark_node* node) {
     const auto type = cmark_node_get_type(node);
     const auto literal = value(cmark_node_get_literal(node));
@@ -306,12 +380,16 @@ bool slackMrkdwnRepresentable(cmark_node* node) {
     return true;
 }
 
-std::string convert(std::string_view source, Target target) {
+std::string convert(std::string_view source, Target target, const SensitiveText& sensitive = {}) {
     static constexpr char empty[] = "";
     const auto* bytes = source.empty() ? empty : source.data();
     auto* document = cmark_parse_document(bytes,source.size(),CMARK_OPT_DEFAULT);
     if (!document) return escape(source,target);
     std::unique_ptr<cmark_node,decltype(&cmark_node_free)> root(document,cmark_node_free);
+    if (target == Target::html && sensitive) {
+        if (sensitive(render(root.get(),Target::html_text,0)) || hasSensitiveUrl(root.get(),sensitive))
+            return "<p>[redacted]</p>";
+    }
     const auto rendered = render(root.get(),target,0);
     if (rendered.empty() && hasNonWhitespace(source)) return escape(source,target);
     return rendered;
@@ -319,6 +397,9 @@ std::string convert(std::string_view source, Target target) {
 }
 
 std::string toHtml(std::string_view source) { return convert(source,Target::html); }
+std::string toHtml(std::string_view source, const SensitiveText& sensitive) {
+    return convert(source,Target::html,sensitive);
+}
 SlackReply toSlack(std::string_view source) {
     static constexpr char empty[] = "";
     const auto* bytes = source.empty() ? empty : source.data();

@@ -137,7 +137,12 @@ Json waitView(const Json& wait) {
     return view;
 }
 
-Json eventView(const Json& event) {
+bool containsProtectedText(const Policy& policy, std::string_view bot, std::string_view text) {
+    const Json probe = {{"text",std::string(text)}};
+    return policy.redactSecrets(bot,probe).at("text") != probe.at("text");
+}
+
+Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     auto view = Json::object();
     const auto kind = field(event,"kind");
     copyFields(view,event,{"id","time","kind"});
@@ -181,7 +186,7 @@ Json eventView(const Json& event) {
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
-        details["textHtml"] = markdown::toHtml(field(data,"text"));
+        details["textHtml"] = markdown::toHtml(field(data,"text"),sensitive);
         if (kind == "conversation_message") copyFields(details,data,{"imageAttachmentCount"});
         if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
             copyFields(details["channel"] = Json::object(),*channel,{"channelKind","fromViewer"});
@@ -346,35 +351,43 @@ Json botList(Store& store, const Json& bots) {
 }
 
 Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
-    const auto events = store.policy().redactSecrets(bot,
+    const auto policy = store.policy();
+    const auto events = policy.redactSecrets(bot,
         store.conversation(bot,before,conversationSize + 1,Store::ConversationEvents::all,viewer));
+    const markdown::SensitiveText sensitive = [&](std::string_view text) {
+        return containsProtectedText(policy,bot,text);
+    };
     const bool more = events.size() > conversationSize;
     Json result = {{"events",Json::array()},{"olderBefore",0}};
     auto& page = result["events"];
     for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event)
-        page.push_back(eventView(*event));
+        page.push_back(eventView(*event,sensitive));
     if (more) result["olderBefore"] = page.front().at("id");
     return result;
 }
 
 Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before, Id anchor,
                       std::string_view viewer) {
+    const auto policy = store.policy();
+    const markdown::SensitiveText sensitive = [&](std::string_view text) {
+        return containsProtectedText(policy,bot,text) || containsProtectedText(policy,peer,text);
+    };
     const auto olderSize = anchor ? conversationSize / 2 : conversationSize;
     auto events = store.peerConversation(bot,peer,anchor ? anchor : before,olderSize + 1,0,viewer);
-    events = store.policy().redactSecrets(bot,events);
-    events = store.policy().redactSecrets(peer,events);
+    events = policy.redactSecrets(bot,events);
+    events = policy.redactSecrets(peer,events);
     const bool more = events.size() > olderSize;
     Json result = {{"messages",Json::array()},{"hasOlder",more}};
     auto& page = result["messages"];
     for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event)
-        page.push_back(eventView(*event));
+        page.push_back(eventView(*event,sensitive));
     if (anchor) {
         result["anchorId"] = anchor;
         auto newer = store.peerConversation(bot,peer,0,conversationSize - olderSize,anchor,viewer);
-        newer = store.policy().redactSecrets(bot,newer);
-        newer = store.policy().redactSecrets(peer,newer);
+        newer = policy.redactSecrets(bot,newer);
+        newer = policy.redactSecrets(peer,newer);
         for (const auto& event : newer)
-            page.push_back(eventView(event));
+            page.push_back(eventView(event,sensitive));
     }
     return result;
 }
