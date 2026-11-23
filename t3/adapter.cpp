@@ -663,7 +663,6 @@ std::string checkedCommit(Client& client, const RunRef& assigned, const RunRef& 
     const auto preCommand = marked ? commit_check::before : commit_check::legacy;
     const auto postCommand = marked ? commit_check::after : commit_check::legacy;
     bool sawCommand = false, finalReport = false;
-    // The initial command belongs to the assigned work. The final command and report belong to its result.
     walkThreadHistoryForward(client,scan,assigned.threadId,"activity",512,-1,[&](const Json& item) {
         const bool fromResult = fromRun(item,result);
         const bool fromWork = fromRun(item,assigned) || fromRun(item,effective);
@@ -1060,9 +1059,7 @@ public:
                         observed.checkedCommit = checkedCommit(client,run,{run.threadId,effective,run.link},source,
                                                                evidence,str(*verification,"expectedCommit"),
                                                                verification->value("markedChecks",true));
-                    } catch (const Failure&) {
-                        // A completed Run can be read again if its evidence has not arrived yet.
-                    }
+                    } catch (const Failure&) {}
                     observed.commitEvidenceUnavailable = observed.status == "completed" && observed.checkedCommit.empty();
                 }
                 observed.evidence = evidence.availability;

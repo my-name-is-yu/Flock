@@ -674,7 +674,6 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     if (task.at("state") != "waiting") throw DecisionUnavailable{};
     const auto reason = field(wait,"reason");
     const auto deadlineRun = reason == "deadline" ? field(wait,"runActionId") : std::string{};
-    // A sibling Run updates the Task generation while this deadline keeps the same wait ID and revision.
     if (task.at("generation") != generation && (operation != "extend" || deadlineRun.empty()))
         throw RequestChanged{};
     const auto kind = inboxWaitKind(reason);

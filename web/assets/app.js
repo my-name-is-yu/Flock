@@ -2889,7 +2889,6 @@ function renderDetail() {
     }
     return;
   }
-  // Sibling Runs can advance the Task while this deadline form is still open.
   const content = task.wait.reason === 'deadline' ? { ...task, generation: undefined } : task;
   if (changed('detail', detail, content, waitLabel(task.wait.reason), waitText(task.wait))) {
     const input = elements['detail-body'].querySelector('#wait-deadline-form input');

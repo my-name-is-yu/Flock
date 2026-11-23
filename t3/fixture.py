@@ -636,7 +636,6 @@ class Fixture(BaseHTTPRequestHandler):
         state = self.server.state
         env = state["claimedEnvironment"]
         project = state["multiProject"]
-        # The two environments deliberately have overlapping Run and Thread IDs.
         thread, run = "shared-thread", "shared-run"
         evidence = state.get("multiEvidence", "full")
         final_run = "continued-run" if evidence == "restarted" else run

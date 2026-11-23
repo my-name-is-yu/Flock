@@ -388,7 +388,6 @@ void single(const Endpoint& local, const Endpoint& mini, const std::filesystem::
         taskId = fixture.taskId;
     }
     {
-        // Reopen a Run saved before the outbox and active Run stored a project ID.
         const auto path = directory.parent_path()/(name+".db");
         sqlite3* connection = nullptr;
         const auto opened = sqlite3_open_v2(path.c_str(),&connection,SQLITE_OPEN_READWRITE,nullptr);

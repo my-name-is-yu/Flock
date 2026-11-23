@@ -2,7 +2,6 @@
 
 namespace flockv0 {
 void Store::Impl::initializeProjectQueue() {
-    // An older Runtime can still be running when a newer process opens the database.
     constexpr auto installed = "SELECT 1 FROM sqlite_schema WHERE type='view' AND name='task_project_slots'";
     if (query(installed).next()) return;
     Transaction update(db);
@@ -15,7 +14,6 @@ WITH candidates AS (
   WHERE json_type(task.data,'$.runTargets') IS NULL AND task.project_id<>''
     AND task.state NOT IN ('completed','cancelled')
   UNION ALL
-  -- An active verification Run reserves its own project. Its pending sibling keeps its queue position.
   SELECT task.id,CASE WHEN outbox.phase IN ('started','accepted') THEN task.state ELSE 'queued' END,
          json_extract(route.value,'$.projectId'),json_extract(route.value,'$.environmentId'),outbox.id
   FROM tasks task

@@ -107,7 +107,6 @@ struct Runtime::Impl {
     std::future<void> channelWorker, sessionWakeWorker;
     std::stop_source shutdown;
     int lockFd = -1;
-    // An empty action denotes a Task step. Verification Runs are scheduled by their own outbox action.
     using Work = std::pair<Id,std::string>;
     std::map<Work,std::future<void>> workers;
     // Keep provider outcomes until the Task decision and attempt usage are committed together.
@@ -842,7 +841,6 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
         const auto key = action.at("id");
         const auto phase = field(action,"phase");
         const auto detail = bounded(outcome.detail.empty() ? "T3 has not confirmed the assigned Run." : outcome.detail,2048);
-        // Only an explicit pre-send failure can close a delivery. Reconciliation never sends again.
         const bool rejected = outcome.kind == Delivery::Kind::NotAccepted || outcome.kind == Delivery::Kind::Settings;
         if (delivery == DeliveryOutcome::DefinitelyUnsent && (cancelling || phase == "started" || rejected)) {
             db.exec("UPDATE outbox SET phase='closed' WHERE id=?",{key});
@@ -898,7 +896,6 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             applyDelivery(id,action,{Delivery::Kind::NotAccepted,{},"Cancelled before dispatch",true});
             return;
         }
-        // A reconciliation can be overdue before T3 confirms an assigned Run ID.
         if (phase == "started" && !cancelling &&
             (!run.contains("deadline") || (task.at("wait").is_null() && now >= run.at("deadline").get<Seconds>())))
             changeTask(id,[&](Json& current) {
