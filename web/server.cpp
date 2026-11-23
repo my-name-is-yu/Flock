@@ -28,7 +28,7 @@ using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
 constexpr std::size_t maxStandardPayload = 128 * 1024;
 constexpr std::size_t maxProfilePayload = 7 * 1024 * 1024 + 128 * 1024;
-enum class Mutation { Message, Request, Operation };
+enum class Mutation { Message, Operation };
 
 void json(Response& res, int status, const Json& body) {
     res.status = status;
@@ -50,7 +50,6 @@ std::string_view verifiedViewer(const WebCallbacks& callbacks, const Person& per
 }
 
 struct InputError : std::runtime_error { using std::runtime_error::runtime_error; };
-struct RequestIntakeError { int status; const char* code; };
 
 Id queryId(const Request& req, const char* key, bool optional) {
     const auto error = optional ? "invalid_cursor" : "invalid_id";
@@ -158,7 +157,6 @@ bool localApprovalNavigation(const Request& req) {
     constexpr std::string_view prefix = "/settings/";
     if (!path.starts_with(prefix)) return false;
     path.remove_prefix(prefix.size());
-    if (path.ends_with("/access")) path.remove_suffix(std::string_view("/access").size());
     return validBotId(path);
 }
 
@@ -207,10 +205,6 @@ public:
                     res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
                 });
         }
-        server_.Get(R"(/settings/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})/access)",
-            [](const Request& req, Response& res) {
-                res.set_redirect("/settings/" + req.matches[1].str() + "#local-connections",302);
-            });
         web::settingsRoutes(server_,store_,callbacks_);
         web::memoryAutomationRoutes(server_,store_,callbacks_);
         web::boardInboxRoutes(server_,store_,callbacks_);
@@ -274,7 +268,6 @@ public:
         server_.Post("/api/bots",[this](const Request& req, Response& res) { saveBot(req,res,false); });
         server_.Post("/api/bots/profile",[this](const Request& req, Response& res) { saveBot(req,res,true); });
         server_.Post("/api/messages",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Message); });
-        server_.Post("/api/requests",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Request); });
         server_.Post("/api/operations",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Operation); });
 
         const auto bound = port ? (server_.bind_to_port(loopback,static_cast<int>(port)) ? static_cast<int>(port) : -1)
@@ -558,17 +551,6 @@ private:
         try {
             const auto bot = requiredText(body,"botId",1024);
             const auto actor = web::person(callbacks_,req);
-            if (mutation == Mutation::Request) {
-                const auto request = requiredText(body,"request",16000);
-                const auto clientId = requiredText(body,"clientRequestId",256);
-                const auto taskId = store_.submitRequest(actor,bot,clientId,request,
-                    [this](std::string_view id, std::string_view text) {
-                        if (!botById(bots(),id)) throw RequestIntakeError{404,"bot_not_found"};
-                        try { return callbacks_.intake(id,text); }
-                        catch (const std::exception&) { throw RequestIntakeError{422,"intake_settings"}; }
-                    });
-                return json(res,201,{{"taskId",taskId}});
-            }
             if (!store_.policy().allows(actor,Action::bot_decide,bot)) return error(res,403,"access_denied");
             if (!botById(bots(),bot)) return error(res,404,"bot_not_found");
             if (mutation == Mutation::Message) {
@@ -601,13 +583,10 @@ private:
             store_.operate(actor,{bot,id,wait,bodyId(body,"targetRevision",0),bodyId(body,"targetGeneration",0)},operation,data);
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
-        catch (const RequestIntakeError& e) { error(res,e.status,e.code); }
         catch (const DecisionDenied&) { error(res,403,"access_denied"); }
         catch (const RequestChanged&) { error(res,409,"request_changed"); }
         catch (const Conflict&) {
-            const auto code = mutation == Mutation::Message ? "message_conflict" :
-                mutation == Mutation::Request ? "request_conflict" : "operation_conflict";
-            error(res,409,code);
+            error(res,409,mutation == Mutation::Message ? "message_conflict" : "operation_conflict");
         }
     }
 

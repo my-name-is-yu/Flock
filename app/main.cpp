@@ -12,6 +12,7 @@
 #include "flock/t3_mcp.hpp"
 #include "flock/web.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -30,7 +31,7 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   mode [full|supervised]
   rules add allow|ask|never ACTION TARGET
   rules remove allow|ask|never ACTION TARGET
-  submit BOT REQUEST
+  message BOT TEXT
   tasks [BOT] [--before ID] [--limit N]
   status TASK
   history TASK [--after ID] [--limit N]
@@ -47,7 +48,7 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   model models
   model acceptance MODEL_SLUG
 
-State defaults to $FLOCK_HOME or ~/.config/flock. Quote requests and answers
+State defaults to $FLOCK_HOME or ~/.config/flock. Quote messages and answers
 containing spaces. Run --fixed uses local demo adapters for both model and T3.
 )";
 
@@ -479,14 +480,21 @@ int runCli(Arguments& args) {
         }
         std::cout << store.policy().mode() << '\n';
     }
-    else if (command == "submit") {
+    else if (command == "message") {
         const auto botId = args.pop("Bot ID");
-        const auto request = args.pop("request");
+        const auto message = args.pop("message");
         args.end();
-        const auto intake = bots.get(botId).intake(request);
+        Intake intake;
+        try { intake = bots.get(botId).intake(message); }
+        catch (const std::exception&) {
+            const auto known = bots.ids();
+            if (std::ranges::find(known,botId) == known.end()) throw;
+            // A known Bot can accept messages before its Session settings are complete.
+            intake.botId = botId;
+            intake.request = message;
+        }
         auto store = openStore(home);
-        const auto id = store.submit(intake,&localOwner);
-        print(store.task(id));
+        print(store.receive(localOwner,intake,actionId(),message));
     } else if (command == "status") {
         const auto id = number(args,"task ID");
         args.end();

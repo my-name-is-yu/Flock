@@ -43,8 +43,6 @@ CREATE TABLE IF NOT EXISTS thread_deliveries(
  observed_run_id TEXT NOT NULL DEFAULT '', cursor INTEGER NOT NULL, input_position INTEGER,
  claimed_at INTEGER, approval_anchor INTEGER NOT NULL DEFAULT 0)
 )SQL");
-    if (!query("SELECT 1 FROM pragma_table_info('thread_deliveries') WHERE name='approval_anchor'").next())
-        exec("ALTER TABLE thread_deliveries ADD COLUMN approval_anchor INTEGER NOT NULL DEFAULT 0");
     exec("CREATE INDEX IF NOT EXISTS thread_deliveries_channel ON thread_deliveries(channel_id,state)");
 }
 

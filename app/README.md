@@ -89,7 +89,6 @@ build/app/flock model login
 build/app/flock model status
 build/app/flock model models
 build/app/flock t3 connect ENVIRONMENT_ID https://T3_HOST/mcp
-build/app/flock access grant release environment ENVIRONMENT_ID launch
 build/app/flock run
 ```
 
@@ -97,23 +96,27 @@ Approve the two Flock connections in your browser. For ChatGPT sign-in, grant
 permission to use the eligible ChatGPT plan and check for `planUsage: true` in
 `flock model status`. Copy a slug from `flock model models` into each Bot
 configuration. Use `flock model login --reconsent` if plan usage is missing.
-For T3, approve Operate access. Use the same environment ID for the Bot configuration,
-connection, and launch grant. For T3 on this machine, use the loopback MCP URL
-published by T3. If a Task already stopped for missing launch access, grant
-access and reconcile the Task to retry the unsent launch.
+For T3, approve Operate access. Use the connected environment ID in the Bot
+configuration. For T3 on this machine, use the loopback MCP URL published by T3.
+If Flock pauses a launch because of the installation policy, check the active
+mode and rules in **Flock settings**.
 
 The foreground process prints the local Web URL. Use `flock run --no-web`
 for headless operation. T3 skills require the Web listener on the port saved by
-`flock t3 connect`. Once the daemon is running, submit work with the Web
-conversation or with CLI commands such as the following.
+`flock t3 connect`. Send a Bot message from the Web conversation or from the CLI.
 
 ```sh
-build/app/flock submit release "Check the upcoming release"
+build/app/flock message release "Check the upcoming release"
 build/app/flock tasks
 build/app/flock status TASK_ID
 build/app/flock history TASK_ID
 build/app/flock answer TASK_ID WAIT_ID REVISION_ID GENERATION "Use main"
 ```
+
+`flock message` queues the message as the local owner and returns a receipt
+with `messageId` and a status of `received`. The running daemon processes the
+message in the Bot's conversation. If the Bot starts a Task, `flock tasks`
+shows the same message ID in the Task's `sourceMessageId` field.
 
 ## Offline demo
 
@@ -124,15 +127,15 @@ configure the `release` Bot there. Start the demo runtime.
 build/app/flock run --fixed --no-web
 ```
 
-In a second terminal using the same Flock home, submit a task.
+In a second terminal using the same Flock home, send the Bot a message.
 
 ```sh
-build/app/flock submit release "Check the upcoming release"
+build/app/flock message release "Check the upcoming release"
 ```
 
 Full mode is the default. Use `flock mode` to show the current mode and
-`flock mode supervised` or `flock mode full` to change it. A direct
-`flock submit` uses the local owner's identity. Confirm actions in Web.
+`flock mode supervised` or `flock mode full` to change it. Use the Web UI to
+confirm actions that require policy approval.
 
 Use `flock rules list` and `flock rules add|remove allow|ask|never ACTION TARGET`
 to manage installation rules. Quote glob targets, such as `'demo-*'` for
