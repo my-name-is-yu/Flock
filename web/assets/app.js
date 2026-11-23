@@ -81,13 +81,17 @@ const stateLabels = {
   cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
+// Wait copy names the open Bot (`$BOT`) rather than a generic "the Bot". An optional third entry is the
+// Bot's own first-person wording for its conversation bubble.
 const waitLabels = {
-  user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
-  budget: ['Approval for one more run', 'This request used all of its runs. Approving lets the Bot start one more run, which can use more model and T3 usage.'],
-  policy_approval: ['Approval needed', 'The Bot is waiting for approval before it can continue.'],
+  user_question: ['Question from $BOT', '$BOT is waiting for your answer.', 'I’m waiting for your answer.'],
+  budget: ['Approval for one more run', 'This request used all of its runs. Approving lets $BOT start one more run, which can use more model and T3 usage.',
+    'This request used all of its runs. If you approve, I can start one more run, which can use more model and T3 usage.'],
+  policy_approval: ['Approval needed', '$BOT is waiting for your approval before it continues.', 'I need your approval before I continue.'],
   model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
-  model_failure: ['The Bot got stuck', 'The Bot could not choose its next step after several attempts. Try again to continue.'],
-  t3_input: ['Action in T3', 'Open the session in T3 to approve or answer.'],
+  model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
+    'I couldn’t choose my next step after several attempts. Try again to continue.'],
+  t3_input: ['Action in T3', 'Open the Session in T3 to approve or answer.'],
   deadline: ['Deadline extension', 'This request reached its deadline. You can set a new one.'],
   unknown_delivery: ['Message to T3 unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Check again asks T3 without resending anything.'],
   auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then check again.'],
@@ -201,10 +205,14 @@ function linkToRun(run, label = 'Open in T3') {
   link.rel = 'noopener noreferrer';
   return link;
 }
-function waitLabel(reason) { return waitLabels[reason]?.[0] ?? 'Waiting for you'; }
-function waitText(wait) {
-  if (wait.reason === 'policy_approval') return waitLabels.policy_approval[1];
-  return wait.text || waitLabels[wait.reason]?.[1] || 'Refresh the pending request.';
+const openBotName = () => view?.data?.bot?.name ?? bots.find((bot) => bot.id === view?.id)?.name ?? 'The Bot';
+const withBotName = (text) => text?.replaceAll('$BOT', openBotName);
+function waitLabel(reason) { return withBotName(waitLabels[reason]?.[0]) ?? 'Waiting for you'; }
+function waitText(wait, { spokenByBot = false } = {}) {
+  const labels = waitLabels[wait.reason];
+  const fallback = withBotName((spokenByBot && labels?.[2]) || labels?.[1]);
+  if (wait.reason === 'policy_approval') return fallback;
+  return wait.text || fallback || 'Refresh the pending request.';
 }
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
@@ -1519,7 +1527,7 @@ function eventCard(event, context, place, report) {
   const pendingWait = event.kind === 'waiting' && !context.readOnly ? context.waits.get(data.id) : null;
 
   if (event.kind === 'waiting') {
-    copy = waitText(data);
+    copy = waitText(data, { spokenByBot: true });
     text.textContent = copy;
     bubble.append(text);
     if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
@@ -2727,7 +2735,8 @@ function renderDetail() {
     }
     return;
   }
-  if (changed('detail', detail, task)) replaceDetail(() => waitContent(view, task));
+  if (changed('detail', detail, task, waitLabel(task.wait.reason), waitText(task.wait)))
+    replaceDetail(() => waitContent(view, task));
   const busy = pendingWaits.has(task.wait.id);
   for (const control of elements['detail-body'].querySelectorAll('button, input')) {
     if (!control.closest('.question-choice-form')) control.disabled = busy;
