@@ -300,7 +300,8 @@ public:
             if (!html) return error(res,404,"artifact_not_found");
             res.headers.erase("Content-Security-Policy");
             res.headers.erase("X-Frame-Options");
-            res.set_header("Content-Security-Policy","sandbox; default-src 'none'; style-src 'unsafe-inline'; "
+            // The parent measures the document; the document itself cannot execute scripts.
+            res.set_header("Content-Security-Policy","sandbox allow-same-origin; default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; "
                            "img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'");
             res.set_content(std::move(*html),"text/html; charset=utf-8");
         });

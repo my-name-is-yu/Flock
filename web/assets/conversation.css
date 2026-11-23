@@ -545,15 +545,14 @@
 .diagram-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: var(--text-sm); font-weight: 600; }
 .diagram-expand { display: inline-flex; align-items: center; gap: .25rem; min-height: 2.25rem; }
 .diagram-expand:hover:not(:disabled) { background: var(--hover); text-decoration: none; }
-.conversation-diagram .diagram-preview:not(.diagram-unavailable) { aspect-ratio: 16 / 9; min-block-size: 11rem; }
-.diagram-preview { display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); min-width: 0; min-height: 0; }
-.diagram-frame { display: block; width: 100%; height: 100%; border: 0; background: #fff; color-scheme: light; pointer-events: none; }
-.diagram-status { place-self: center; margin: .85rem; text-align: center; color: var(--text-2); font-size: var(--text-sm); }
+.conversation-diagram .diagram-preview { max-block-size: min(22.5rem, 55dvh); overflow: hidden; }
+.diagram-preview { display: block; min-width: 0; min-height: 0; }
+.diagram-frame { display: block; width: 100%; height: 11rem; border: 0; background: Canvas; pointer-events: none; }
+.diagram-status { margin: .85rem; text-align: center; color: var(--text-2); font-size: var(--text-sm); }
 
 @container conversation-layout (max-width: 700px) {
   .event-message.bot, .peer-exchange-link, .policy-inline-card { --avatar-col: 0px; }
   :is(.event-message.bot, .msg.working) .msg-line > :is(.msg-avatar, .msg-avatar-space) { display: none; }
-  .conversation-diagram .diagram-preview:not(.diagram-unavailable) { aspect-ratio: 4 / 3; min-block-size: 15rem; }
 }
 @media (max-width: 700px) {
   .conversation-header { --profile-avatar-size: 2.625rem; }

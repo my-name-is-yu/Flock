@@ -13,6 +13,7 @@ import { replyArrivalId } from '/reply-arrival.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 import { mountConversationFind } from '/conversation-find.mjs';
+import { diagramPreview } from '/diagram-preview.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -1186,6 +1187,9 @@ const icons = {
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   diagram: '<rect x="9" y="3" width="6" height="5" rx="1"/><rect x="3" y="16" width="6" height="5" rx="1"/><rect x="15" y="16" width="6" height="5" rx="1"/><path d="M12 8v4m-6 4v-4h12v4"/>',
   expand: '<path d="M9 4.5H4.5V9M15 4.5h4.5V9M19.5 15v4.5H15m-6 0H4.5V15"/>',
+  contract: '<path d="M4.5 9H9V4.5M19.5 9H15V4.5M15 19.5V15h4.5M9 19.5V15H4.5"/>',
+  plus: '<path d="M6 12h12M12 6v12"/>',
+  minus: '<path d="M6 12h12"/>',
   open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
 };
 function icon(name, className = 'glyph') {
@@ -1503,41 +1507,6 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
-function diagramPreview({ replyId, artifactId, title }, expand = null) {
-  const path = `/api/messages/${replyId}/artifacts/${encodeURIComponent(artifactId)}`;
-  const preview = node('div', 'diagram-preview');
-  const status = node('p', 'diagram-status', 'Loading diagram…');
-  status.setAttribute('role', 'status');
-  if (!expand) {
-    preview.tabIndex = 0;
-    preview.setAttribute('role', 'region');
-    preview.setAttribute('aria-label', title);
-  }
-  preview.append(status);
-  void (async () => {
-    try {
-      const response = await fetch(path, { method: 'HEAD', credentials: 'same-origin', redirect: 'error' });
-      if (!response.ok) throw new Error('Diagram unavailable');
-      if (!preview.isConnected) return;
-      const frame = node('iframe', 'diagram-frame');
-      frame.title = title;
-      frame.setAttribute('sandbox', '');
-      frame.referrerPolicy = 'no-referrer';
-      frame.inert = true;
-      if (expand) {
-        frame.loading = 'lazy';
-        expand.disabled = false;
-      }
-      frame.src = path;
-      preview.replaceChildren(frame);
-    } catch {
-      status.textContent = 'Diagram unavailable.';
-      preview.classList.add('diagram-unavailable');
-      if (expand) expand.hidden = true;
-    }
-  })();
-  return preview;
-}
 function diagramCard(replyId, artifact) {
   const title = artifact.title || 'Diagram';
   const selection = { kind: 'diagram', replyId, artifactId: artifact.id, title };
@@ -1550,8 +1519,58 @@ function diagramCard(replyId, artifact) {
   expand.setAttribute('aria-haspopup', 'dialog');
   expand.append(icon('expand'), document.createTextNode('Expand'));
   caption.append(icon('diagram'), node('span', 'diagram-title', title), expand);
-  card.append(caption, diagramPreview(selection, expand));
+  const preview = diagramPreview(selection, expand);
+  preview.addEventListener('diagram-layout', () => {
+    const scroller = elements.conversation;
+    if (!view?.source && scroller.classList.contains('follow-newest')) scroller.scrollTop = scroller.scrollHeight;
+  });
+  card.append(caption, preview);
   return card;
+}
+function expandedDiagram(selection) {
+  const preview = diagramPreview(selection);
+  const actions = node('div', 'diagram-controls');
+  const magnification = node('div', 'diagram-magnification');
+  magnification.setAttribute('role', 'group');
+  magnification.setAttribute('aria-label', 'Diagram zoom');
+  const iconControl = (name, label, click) => {
+    const control = button(null, 'icon-button', click);
+    control.setAttribute('aria-label', label);
+    control.title = label;
+    control.append(icon(name));
+    return control;
+  };
+  let zoom = 100;
+  const lower = 50;
+  const upper = 200;
+  const setZoom = (percent) => {
+    const scale = percent / zoom;
+    const top = preview.scrollTop * scale;
+    const left = preview.scrollLeft * scale;
+    zoom = percent;
+    preview.style.setProperty('--diagram-zoom', zoom / 100);
+    preview.scrollTo(left, top);
+    zoomOut.disabled = zoom === lower;
+    zoomIn.disabled = zoom === upper;
+    reset.textContent = `${zoom}%`;
+    reset.setAttribute('aria-description', `Current zoom ${zoom}%`);
+  };
+  const zoomOut = iconControl('minus', 'Zoom out', () => setZoom(Math.max(lower, zoom - 25)));
+  const zoomIn = iconControl('plus', 'Zoom in', () => setZoom(Math.min(upper, zoom + 25)));
+  const reset = button(null, 'text-button diagram-zoom-reset', () => setZoom(100));
+  reset.setAttribute('aria-label', 'Reset zoom');
+  setZoom(100);
+  const size = iconControl('expand', 'Full screen', () => {
+    const fullscreen = elements.detail.classList.toggle('diagram-fullscreen');
+    const label = fullscreen ? 'Exit full screen' : 'Full screen';
+    size.setAttribute('aria-label', label);
+    size.title = label;
+    size.replaceChildren(icon(fullscreen ? 'contract' : 'expand'));
+  });
+  size.classList.add('diagram-fullscreen-toggle');
+  magnification.append(zoomOut, reset, zoomIn);
+  actions.append(magnification, size);
+  return [actions, preview];
 }
 function eventCard(event, context, place, report) {
   const data = event.data;
@@ -2465,7 +2484,10 @@ elements.detail.addEventListener('close', () => {
   clearDetailSectionTransition();
   releaseDetailAvatar();
   roleSize.disconnect();
-  if (elements.detail.classList.contains('diagram-detail')) elements['detail-body'].replaceChildren();
+  if (elements.detail.classList.contains('diagram-detail')) {
+    elements.detail.classList.remove('diagram-fullscreen');
+    elements['detail-body'].replaceChildren();
+  }
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
@@ -2890,8 +2912,9 @@ function renderDetail() {
   renderDetailNav([], null);
   if (detail.kind === 'diagram') {
     if (changed('detail', detail)) {
+      elements.detail.classList.remove('diagram-fullscreen');
       elements['detail-title'].textContent = detail.title;
-      replaceDetail(() => [diagramPreview(detail)]);
+      replaceDetail(() => expandedDiagram(detail));
     }
     return;
   }

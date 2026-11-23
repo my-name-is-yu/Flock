@@ -22,6 +22,7 @@ constexpr auto comparisonRequest = "3案を比較して";
 constexpr auto compoundExplanation = "2案目を詳しく。2案目を要約して";
 constexpr auto missingBudgetQuestion = "2案目にいくらかかる？";
 constexpr auto budgetDetail = "明細は100件です";
+constexpr auto onePixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 constexpr auto proposedOptions = "1. 手動で照合する\n"
     "2. 差分を先に集計する\n"
     "   - 前回と今回の明細を ID で突き合わせる。\n"
@@ -308,7 +309,7 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer owner"}});
     const Json image = {{"name","private-screenshot.png"},{"mimeType","image/png"},
-        {"dataBase64","iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}};
+        {"dataBase64",onePixelPng}};
     const Json audio = {{"name","private-audio.mp3"},{"mimeType","audio/mpeg"},{"dataBase64","SUQzAA=="}};
     const auto submit = [&](std::string_view key, const Json& attachments, std::string_view text) {
         return browser.post("/api/messages",{{"botId","release"},{"clientMessageId",key},
@@ -366,8 +367,9 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
 void conversationArtifacts(const std::filesystem::path& path) {
     static constexpr auto prompt = "依頼がFlockからT3に渡り、結果が戻る流れを図にして";
     static constexpr auto explanation = "Flock が依頼を T3 に渡し、作業結果をこの会話に返します。";
-    static constexpr auto html = "<!doctype html><style>svg{max-width:100%}</style>"
+    static constexpr std::string_view diagram = "<!doctype html><style>svg{max-width:100%}</style>"
         "<svg viewBox='0 0 200 32'><text y='24'>Flock → T3 → Flock</text></svg>";
+    static const auto html = std::string(diagram) + "<img src='{{flock-image:1}}' alt='Screenshot'>";
     struct DiagramModel : Model {
         unsigned calls = 0;
         ModelTurn decide(const ModelInput& input) override {
@@ -377,9 +379,14 @@ void conversationArtifacts(const std::filesystem::path& path) {
             if (input.event.at("text") != prompt)
                 return {{{"reply",{{"text","Plain reply"}},"Reply"}}};
             const auto& turn = input.event.at("turn");
-            if (turn.empty())
+            if (turn.empty() || turn.size() == 2)
                 return {{{"publish_artifact",{{"title","Flock と T3 の流れ"},{"html",html}},"Draw the diagram"}}};
-            check(!turn.at(0).at("args").contains("html") && turn.at(0).at("result").at("ok") == true,
+            if (turn.size() == 1) {
+                check(turn.at(0).at("result").at("ok") == false,"an uninspected image could be published");
+                return {{{"inspect_attachment",{{"messageId",input.event.at("messageId")},{"attachmentId","1"}},"Inspect the screenshot"}}};
+            }
+            check(turn.at(1).at("result").at("ok") == true,"the attachment could not be inspected");
+            check(!turn.at(2).at("args").contains("html") && turn.at(2).at("result").at("ok") == true,
                   "the artifact was not saved or its HTML was echoed into tool history");
             return {{{"reply",{{"text",explanation}},"Explain the diagram"}}};
         }
@@ -412,7 +419,9 @@ void conversationArtifacts(const std::filesystem::path& path) {
         const auto server = startWeb(store,0,config);
         Browser browser(*server);
         browser.client.set_default_headers({{"Authorization","Bearer owner"}});
-        source = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","diagram"},{"text",prompt}},201)
+        const Json image = {{"name","screenshot.png"},{"mimeType","image/png"},{"dataBase64",onePixelPng}};
+        source = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","diagram"},{"text",prompt},
+            {"attachments",Json::array({image})}},201)
             .at("messageId");
         runtime.runConversations();
         const auto reply = conversationReply(browser.get("/api/view?bot=release"),source);
@@ -428,7 +437,7 @@ void conversationArtifacts(const std::filesystem::path& path) {
             .at("messageId").get<Id>();
         runtime.runConversations();
         otherReplyId = conversationReply(browser.get(feed),plain).at("messageId");
-        check(model.calls == 3,"the fixture did not publish, reply, and handle the second message");
+        check(model.calls == 5,"the fixture did not reject the uninspected image, inspect it, publish, and reply");
     }
 
     Store reopened(path);
@@ -440,12 +449,13 @@ void conversationArtifacts(const std::filesystem::path& path) {
           "reopening the database did not preserve the artifact reference and text");
     const auto url = artifactUrl(replyId);
     const auto document = reader.client.Get(url);
-    check(document && document->status == 200 && document->body == html &&
+    const auto expected = std::string(diagram) + "<img src='data:image/png;base64," + onePixelPng + "' alt='Screenshot'>";
+    check(document && document->status == 200 && document->body == expected &&
           document->get_header_value("Content-Type") == "text/html; charset=utf-8" &&
           document->get_header_value("Cache-Control") == "no-store" && !document->has_header("X-Frame-Options"),
           "the authorized viewer could not frame the saved diagram");
     check(document->get_header_value("Content-Security-Policy") ==
-          "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; "
+          "sandbox allow-same-origin; default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; "
           "form-action 'none'; frame-ancestors 'self'", "the diagram lost its isolated document policy");
     const auto head = reader.client.Head(url);
     check(head && head->status == 200 && head->body.empty(),"the frame availability request failed");

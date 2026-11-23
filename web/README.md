@@ -171,6 +171,11 @@ side and 4,194,304 pixels total. A message still requires text. The sent message
 shows the number of images attached. Bot inspection follows the `attachment.inspect` rule. Screenshot drafts and their retry keys live
 in the current page and are cleared on reload.
 
+In a Web reply, `publish_artifact` can embed an inspected image from the current
+message. Use `{{flock-image:ATTACHMENT_ID}}` as the image's `src`. The saved HTML
+contains the image bytes, so readers can reopen the diagram without a separate
+attachment request. The 256 KiB diagram limit includes embedded images.
+
 ## Memory and automation
 
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared

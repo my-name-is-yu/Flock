@@ -521,8 +521,9 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         description = "Publish a diagram or chart beside the Flock Web reply, or an HTML preview link in the originating external channel. "
             "When asked for a diagram, publish it first, then use reply to give a standalone explanation.";
         text("title","Display title.");
-        text("html","Self-contained static HTML document with inline CSS or SVG. Fit the width of the conversation on mobile. "
-                    "Scripts and external resources are disabled.");
+        text("html","Self-contained static HTML document with inline CSS or SVG. Fit narrow screens, keep content in normal flow, "
+                    "and support light and dark themes with prefers-color-scheme. Scripts and external resources are disabled. "
+                    "In a Flock Web reply, inspect an image on the current message first, then use {{flock-image:ATTACHMENT_ID}} as its image src.");
     } else if (name == "request_local_machine_connection") {
         description = "Request machine-owner approval for exact local operations in an active Session.";
         text("threadId","Active Session thread ID.");
