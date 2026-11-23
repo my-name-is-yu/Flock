@@ -259,7 +259,16 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
                 ? std::ranges::all_of(result.at("repos"),[&](const Json& repo) {
                     return localReadAllowed(repo.get_ref<const std::string&>());
                 })
-                : localReadAllowed(field(source.args,"repo"));
+                : [&] {
+                    const auto target = GitRepository::parse(host.name(),field(source.args,"repo")).resource();
+                    if (policy.forbidden(context.botId,Action::repository_read,target)) return false;
+                    return localReadAllowed(field(source.args,"repo")) || query(R"SQL(
+SELECT 1 FROM git_task_reads r JOIN policy_approvals a
+ ON a.operation='git/' || r.task_id || '/' || r.invocation
+WHERE r.task_id=? AND r.id=? AND a.task=r.task_id AND a.bot=?
+ AND a.action='repository.read' AND a.target=? AND a.status='used'
+)SQL",{context.taskId,id,context.botId,target}).next();
+                }();
             if (localAllowed) {
                 entry.update({{"sourceTool",source.tool},{"target",scrub.payload(source.args)},
                               {"result",scrub.payload(result)}});
@@ -308,7 +317,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
         Json repos = Json::array();
         bool truncated = more;
         for (const auto& candidate : candidates) {
-            if (!permits(candidate,op)) continue;
+            if (!permits(candidate,op) || !policy.allows(bot,Action::repository_read,candidate.resource())) continue;
             if (repos.size() == 100) {
                 truncated = true;
                 break;

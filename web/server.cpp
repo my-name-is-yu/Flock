@@ -158,6 +158,7 @@ bool localApprovalNavigation(const Request& req) {
     constexpr std::string_view prefix = "/settings/";
     if (!path.starts_with(prefix)) return false;
     path.remove_prefix(prefix.size());
+    if (path.ends_with("/access")) path.remove_suffix(std::string_view("/access").size());
     return validBotId(path);
 }
 
@@ -206,6 +207,10 @@ public:
                     res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
                 });
         }
+        server_.Get(R"(/settings/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})/access)",
+            [](const Request& req, Response& res) {
+                res.set_redirect("/settings/" + req.matches[1].str() + "#local-connections",302);
+            });
         web::settingsRoutes(server_,store_,callbacks_);
         web::memoryAutomationRoutes(server_,store_,callbacks_);
         web::boardInboxRoutes(server_,store_,callbacks_);
@@ -587,7 +592,7 @@ private:
                         : store_.receive(actor,intake,clientMessageId,request,replyTo,attachments);
                     return json(res,201,receipt);
                 }
-                return json(res,201,{{"taskId",store_.submit(intake)}});
+                return json(res,201,{{"taskId",store_.submit(intake,&actor)}});
             }
             const auto operation = requiredText(body,"operation",32);
             const auto id = bodyId(body,"taskId");

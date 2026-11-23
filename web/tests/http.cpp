@@ -57,6 +57,13 @@ void boundary(Browser& browser) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
     }
+    const httplib::Headers channelNavigation{{"Sec-Fetch-Site","cross-site"},
+        {"Sec-Fetch-Mode","navigate"},{"Sec-Fetch-Dest","document"}};
+    const auto oldApproval = browser.client.Get("/settings/release/access",channelNavigation);
+    check(oldApproval && oldApproval->status == 302 &&
+          oldApproval->get_header_value("Location") == "/settings/release#local-connections",
+          "Previously sent channel approval link did not redirect");
+    Browser::checked(browser.client.Get("/settings/release/access/extra",channelNavigation),403);
     const auto draft = R"({"botId":"release","request":"do not accept this"})";
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/",httplib::Headers{{"Host","rebound.invalid"}}),403);
@@ -492,6 +499,22 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get(primary + "&anchor=-1"),400);
     check(Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=settings" + anchor),404)
         == Json{{"error","peer_message_not_found"}},"a different readable pair resolved the anchor");
+}
+
+void directRequestApproval(const std::filesystem::path& path) {
+    Store store(path);
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    store.policy().setMode(localOwner,"supervised");
+    const auto supervised = browser.request("release","Build a supervised release");
+    tick(runtime,4);
+    const auto approvals = store.inbox(localOwner);
+    check(approvals.size()==1 && approvals.at(0).at("taskId")==supervised &&
+          approvals.at(0).at("itemKind")=="policy_approval" && approvals.at(0).at("canDecide")==true,
+          "The direct HTTP request did not retain an approval requester");
 }
 
 void exercise(const std::filesystem::path& path) {
@@ -1285,6 +1308,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
 int main() {
     try {
         TestDirectory directory;
+        directRequestApproval(directory.path/"direct-approval.db");
         exercise(directory.path / "state.db");
         sidebarReplies(directory.path / "sidebar.db");
         failedCompletion(directory.path / "failed-completion.db");

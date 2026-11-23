@@ -1,4 +1,5 @@
 #include "fake_git.hpp"
+#include "flock/board_inbox.hpp"
 #include "model.hpp"
 
 #include <fstream>
@@ -508,6 +509,11 @@ void accessAndActions() {
     host->upstreamPermitted = true;
     const auto find = invoke(store,runtime,script,"find","git_find_repos",{{"host",hostName},{"query","FLOCK"}});
     check(find.at("repos") == Json::array({repoName}),"repository discovery exposed ungranted repositories");
+    const auto repoTarget = GitRepository{hostName,repoName}.resource();
+    store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,repoTarget,true);
+    const auto askFirst = invoke(store,runtime,script,"ask-first-repos","git_find_repos",{{"host",hostName},{"query","FLOCK"}});
+    check(askFirst.at("repos").empty(),"Discovery exposed a repository requiring approval");
+    store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,repoTarget,false);
     const auto later = invoke(store,runtime,script,"later-repos","git_find_repos",
         {{"host",hostName},{"query","FLOCK"},{"page",11}});
     check(later.at("repos").empty() && later.at("nextPage") == 12,
@@ -744,6 +750,35 @@ void taskReadRecovery() {
     for (int i = 0; i < 8 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
     check(store.task(task).at("state") == "completed" && phase == 3 && host->logCalls == 5,
           "recovery did not use saved snapshots through both access checks");
+}
+
+void approvedTaskReadProjects() {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    int phase = 0;
+    script.onTaskResult = [&](const ModelInput& input) -> Decision {
+        if (phase++ == 0)
+            return {"git_repo_info",{{"host",hostName},{"repo",repoName}},{}};
+        const auto& read = input.event.at("gitResults").back();
+        check(read.at("sourceTool") == "git_repo_info" && read.at("result").at("ok") == true,
+              "Ask-first hid its approved Git read");
+        return {"complete",{{"report","Reviewed repository information"}},{}};
+    };
+    store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,GitRepository{hostName,repoName}.resource(),true);
+    Runtime runtime(store,script,sessions,[](auto) { return std::string{}; },options(host));
+    const auto task = store.submit(intake(),&localOwner);
+    for (int i=0; i<8 && store.inbox(localOwner).empty(); ++i) runtime.tick();
+    const auto items = store.inbox(localOwner);
+    check(items.size()==1 && host->hostCalls==0,"Git read reached the host before approval");
+    const auto& card = items.at(0);
+    store.decideInbox(localOwner,{card.at("botId"),InboxKind::policy_approval,card.at("itemId"),card.at("waitId"),
+        card.at("taskId"),card.at("targetRevision"),card.at("targetGeneration")},"allow_once");
+    for (int i=0; i<8 && store.task(task).at("state")!="completed"; ++i) runtime.tick();
+    check(phase==2 && host->hostCalls==1 && store.task(task).at("state")=="completed",
+          "Approved Git read did not settle through the task");
 }
 
 void discoveryReplayRevocation() {
@@ -1002,6 +1037,7 @@ int main() {
         taskMutationRestart(false);
         taskMutationRestart(true);
         taskReadRecovery();
+        approvedTaskReadProjects();
         discoveryReplayRevocation();
         boundedTaskReadAndForeignReference(false);
         boundedTaskReadAndForeignReference(true);

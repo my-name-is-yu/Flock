@@ -847,15 +847,8 @@ void mcpToolOutcomes(Fixture& f) {
         expectUnknown(f.run(invoke(name)),name);
 
     f.store->policy().setMode(owner,"supervised");
-    const auto success = f.run(invoke("extension"));
-    check(success.at("ok") == true && success.at("untrustedData") == true &&
-          success.at("data").at("content").at(0).at("text") == "Tool evidence" &&
-          success.at("data").at("content").at(1).at("payload") == 7 &&
-          success.at("data").at("structuredContent").at("count") == 1,
-          "Valid MCP content and extensions did not reach the model");
-
     const auto approveMcp = [&](std::string_view name) {
-        check(f.batch({invoke(name)}).is_null(),"An MCP tool without a read-only hint ran before approval");
+        check(f.batch({invoke(name)}).is_null(),"An MCP tool ran before approval");
         const auto items = f.store->inbox(owner);
         check(items.size() == 1 && items.at(0).at("itemKind") == "policy_approval","MCP tool did not create an approval");
         const auto& item = items.at(0);
@@ -863,6 +856,13 @@ void mcpToolOutcomes(Fixture& f) {
         f.runtime->runConversations();
         return f.model.seen.at(0).at("result");
     };
+    const auto success = approveMcp("extension");
+    check(success.at("ok") == true && success.at("untrustedData") == true &&
+          success.at("data").at("content").at(0).at("text") == "Tool evidence" &&
+          success.at("data").at("content").at(1).at("payload") == 7 &&
+          success.at("data").at("structuredContent").at("count") == 1,
+          "Valid MCP content and extensions did not reach the model");
+
     const auto compatible = approveMcp("compatible-content");
     check(compatible.at("ok") == true && compatible.at("data").at("content").size() == 3,
           "Valid resource alternatives or legacy extensions were rejected");
