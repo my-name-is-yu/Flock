@@ -750,6 +750,67 @@ void historyKeepsLargestFittingPrefix() {
             "the next multi-byte character should exceed the remaining serialized bytes");
 }
 
+void omittedHistoryCanBeRecovered() {
+    Fixture f;
+    const auto instruction = std::string(700,'u') + " Preserve the retry window before release.";
+    const auto original = std::string(2400,'a') + " 根拠: the timeout was 90 seconds.";
+    const auto recent = std::string(700,'b') + " The follow-up measurement is pending.";
+    const auto reply = [&](const std::string& request, const std::string& answer) {
+        f.bot.conversation = [&](const ModelInput&) -> Decision {
+            return {"reply",{{"text",answer}},"Record the fixture result"};
+        };
+        const auto source = f.turn(request);
+        f.bot.conversation = {};
+        const auto saved = f.store->conversation("bot",0,1).at(0);
+        require(saved.at("kind")=="conversation_reply" && saved.at("data").at("replyToMessageId")==source,
+                "The fixture reply was not saved for its request");
+        return std::pair{source,saved.at("id").get<Id>()};
+    };
+    const auto [instructionId,oldReply] = reply(instruction,original);
+    for (int i=0; i<3; ++i) f.turn("Intermediate exchange " + std::to_string(i));
+    const auto recentReply = reply("Check the remaining work",recent).second;
+    f.turn("Use the original release criteria and compare the measurements");
+
+    const auto historyEntry = [&](Id id) -> const Json& {
+        const auto entry = std::ranges::find_if(f.bot.history,[&](const Json& item) { return item["messageId"]==id; });
+        require(entry!=f.bot.history.end(),"The model history lost an entry needed for the follow-up");
+        return *entry;
+    };
+    const auto& shortened = historyEntry(oldReply);
+    const auto preview = shortened.at("text").get<std::string>();
+    require(shortened.value("evidenceOmitted",false) && !preview.empty() && preview.size()<=512 &&
+            original.starts_with(preview),"The old Bot reply was not provided as an explicitly recoverable preview");
+    require(historyEntry(instructionId).at("text")==instruction && historyEntry(recentReply).at("text")==recent,
+            "The old user instruction or recent Bot reply lost its text");
+    require(f.store->compactions("bot").empty(),"The fixture unexpectedly has a conversation summary");
+
+    const Json exactReply{{"startMessageId",oldReply},{"endMessageId",oldReply}};
+    const auto expanded = f.call("expand_context",exactReply);
+    require(expanded.at("messages").size()==1 && expanded.at("messages").at(0).at("messageId")==oldReply &&
+            expanded.contains("nextCursor"),"The omitted reply did not return a first page and continuation");
+    f.restart();
+    const auto rest = f.call("expand_context",{{"cursor",expanded.at("nextCursor")}});
+    require(rest.at("messages").size()==1 && rest.at("messages").at(0).at("messageId")==oldReply &&
+            !rest.contains("nextCursor") && expanded.at("messages").at(0).at("text").get<std::string>() +
+            rest.at("messages").at(0).at("text").get<std::string>()==original,
+            "The cursor lost the exact reply range or changed the original text");
+
+    const auto summary = f.call("compact_conversation",{{"endMessageId",instructionId},{"summary","Keep the retry window"}});
+    auto scoped = exactReply;
+    scoped["compactionId"] = summary.at("compaction").at("compactionId");
+    f.turn("Try outside the selected compaction","expand_context",scoped);
+    require(!f.bot.result.value("ok",true) && !f.bot.result.contains("messages"),
+            "An exact expansion bypassed its requested compaction boundary");
+
+    f.bot.action = {};
+    const auto foreign = f.store->receive({"owner",true},{"other","","env","project",Json::object()},
+                                         "other-bot-message","Other Bot's private evidence").at("messageId");
+    f.runtime->runConversations();
+    f.turn("Try another Bot's message","expand_context",{{"startMessageId",foreign},{"endMessageId",foreign}});
+    require(!f.bot.result.contains("messages") || f.bot.result.at("messages").empty(),
+            "An exact expansion read another Bot's messages");
+}
+
 void compactAndContinue() {
     Fixture f;
     const std::string original = "Keep original instruction and artifact "+shaA;
@@ -825,6 +886,7 @@ int main() {
         stopBeforeFirstSend();
         scopedCompactionPages();
         historyKeepsLargestFittingPrefix();
+        omittedHistoryCanBeRecovered();
         compactAndContinue();
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n';

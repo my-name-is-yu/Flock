@@ -98,7 +98,13 @@ function mockResponses() {
       assert.equal(request.stream, true);
       const namespace = request.tools[0];
       assert.equal(namespace.name, "flock");
-      const context = JSON.parse(request.input[0].content[0].text);
+      const context = {};
+      for (const message of request.input) {
+        if (message.role !== "user") continue;
+        const fragment = JSON.parse(message.content[0].text);
+        const event = { ...context.event, ...fragment.event };
+        Object.assign(context, fragment, { event });
+      }
       const result = output(context);
       const tool = namespace.tools.find(tool => tool.name === result.name);
       assert.ok(tool, `Response tool ${result.name} was missing from the production request`);
@@ -106,7 +112,7 @@ function mockResponses() {
       assert.ok(tool.parameters.required.every(key => key in args));
       assert.ok(Object.keys(args).every(key => key in tool.parameters.properties));
       if (context.event.kind === "conversation_turn")
-        assert.match(request.instructions, /You are a Flock Bot talking with your user/);
+        assert.match(request.input[0].content[0].text, /You are a Flock Bot talking with your user/);
       if (context.event.kind === "bot_request")
         assert.match(tool.parameters.properties.kind.description, /Use result to return work or consultation advice/);
       const response = { type: "response.completed", response: { output: [result] } };

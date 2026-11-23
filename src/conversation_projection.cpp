@@ -6,6 +6,8 @@ namespace flockv0::conversation_storage {
 namespace {
 // The production bridge embeds the context JSON in an input_text string.
 constexpr std::size_t toolHistoryWireBytes = 768 * 1024;
+constexpr std::size_t olderLargeResultBytes = 16 * 1024;
+constexpr std::size_t largeResultBytes = 4 * 1024;
 
 std::size_t wireBytes(const Json& value) {
     const auto encoded = value.dump(-1,' ',false,Json::error_handler_t::replace);
@@ -22,18 +24,37 @@ Json omitted(const Json& entry) {
     const auto& source = entry.at("result");
     const auto& tool = entry.at("tool").get_ref<const std::string&>();
     Json result{{"evidenceOmitted",true}};
-    for (const auto* key : {"ok","notRun","untrustedData","accessRevoked","unsupported","cursorStale","stale","applied","taskId","waitId"}) {
+    for (const auto* key : {"ok","notRun","untrustedData","accessRevoked","unsupported","cursorStale","stale",
+                           "applied","taskId","waitId","nextOffset","nextCursor","truncated"}) {
         const auto value = source.find(key);
         if (value != source.end() && (value->is_boolean() || value->is_number_integer()))
             result[key] = *value;
     }
-    for (const auto* key : {"delivery","error"}) {
+    if (const auto cursor = field(source,"nextCursor"); !cursor.empty() && cursor.size() <= 1024)
+        result["nextCursor"] = cursor;
+    for (const auto* key : {"delivery","effect","error"}) {
         const auto value = field(source,key);
         if (!value.empty()) result[key] = bounded(value,128);
     }
+    if (const auto data = source.find("data"); data != source.end() && data->is_object()) {
+        // Keep small identifiers and pagination fields alongside the saved result reference.
+        auto preview = Json::object();
+        std::size_t remaining = 1024;
+        for (const auto& [key,value] : data->items()) {
+            if (!value.is_primitive() || key.size() > 256 ||
+                (value.is_string() && value.get_ref<const std::string&>().size() > 256)) continue;
+            const auto bytes = wireBytes(Json{{key,value}});
+            if (bytes > std::min(remaining,std::size_t{256})) continue;
+            preview[key] = value;
+            remaining -= bytes;
+        }
+        if (!preview.empty()) result["data"] = std::move(preview);
+    }
     if (canRereadToolResult(tool)) result["resultRef"] = entry.at("_ref");
+    else if (tool == "read_tool_result" && source.value("ok",false))
+        result["resultRef"] = entry.at("args");
     Json compact{{"tool",tool},{"step",entry.at("step")},{"callIndex",entry.at("callIndex")},{"result",std::move(result)}};
-    if (tool == "expand_context" && wireBytes(entry.at("args")) <= 4096) {
+    if (wireBytes(entry.at("args")) <= (tool == "expand_context" ? 4096u : 1024u)) {
         compact["args"] = entry.at("args");
         return compact;
     }
@@ -44,6 +65,7 @@ Json omitted(const Json& entry) {
 }
 
 void projectToolHistory(Json& turn, const Json& redactionRevision) {
+    if (turn.empty()) return;
     std::map<CallRef,const Json*> sources;
     for (auto& entry : turn) {
         const auto& tool = entry.at("tool");
@@ -80,17 +102,29 @@ void projectToolHistory(Json& turn, const Json& redactionRevision) {
         used += wireBytes(compact)+1;
         projection.push_back(std::move(compact));
     }
-    for (std::size_t i = turn.size(); i > 0; --i) {
-        auto& full = turn.at(i-1);
-        auto& compact = projection.at(i-1);
+    const auto latestStep = turn.back().at("step").get<Id>();
+    auto remainingOlderResults = olderLargeResultBytes;
+    const auto keepFull = [&](std::size_t index) {
+        auto& full = turn.at(index);
+        auto& compact = projection.at(index);
         full.erase("_ref");
-        const auto base = used-wireBytes(compact);
-        if (const auto bytes = wireBytes(full); bytes <= toolHistoryWireBytes &&
-            base <= toolHistoryWireBytes-bytes) {
-            used = base+bytes;
-            compact = std::move(full);
+        const auto compactBytes = wireBytes(compact);
+        const auto bytes = wireBytes(full);
+        const auto base = used-compactBytes;
+        if (bytes > toolHistoryWireBytes || base > toolHistoryWireBytes-bytes) return;
+        if (full.at("step") != latestStep && compact.at("result").contains("resultRef") &&
+            bytes > compactBytes + largeResultBytes) {
+            if (bytes-compactBytes > remainingOlderResults) return;
+            remainingOlderResults -= bytes-compactBytes;
         }
-    }
+        used = base+bytes;
+        compact = std::move(full);
+    };
+    // Keep the current batch first, then the initial result that may anchor a chain of reads.
+    auto older = turn.size();
+    while (older && turn.at(older-1).at("step") == latestStep) keepFull(--older);
+    if (older) keepFull(0);
+    while (older > 1) keepFull(--older);
     turn = std::move(projection);
 }
 }

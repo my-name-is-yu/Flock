@@ -1,0 +1,426 @@
+#include "flock/policy.hpp"
+#include "flock/workspace_tools.hpp"
+#include "model.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <iostream>
+#include <map>
+#include <mutex>
+#include <unistd.h>
+
+using namespace flockv0;
+
+namespace {
+using Clock = std::chrono::steady_clock;
+namespace fs = std::filesystem;
+
+constexpr std::string_view portal = "https://audit.example.test/";
+constexpr auto question = "Who signs the audit?";
+constexpr auto archivePrefix = "LEDGER VERIFIED";
+constexpr auto archiveCode = "NZ-7184-Q";
+constexpr auto firstTicket = "NORTH-413";
+constexpr auto finalTicket = "SOUTH-982";
+constexpr int pageCount = 6;
+const Person owner{"fixture-owner",true};
+
+void check(bool condition, std::string_view description) {
+    if (!condition) throw std::runtime_error(std::string(description));
+}
+
+double elapsedMs(Clock::time_point begin) {
+    return std::chrono::duration<double,std::milli>(Clock::now()-begin).count();
+}
+
+std::string field(const Json& object, const char* key) {
+    const auto value = object.find(key);
+    return value != object.end() && value->is_string() ? value->get<std::string>() : "";
+}
+
+std::string lineAfter(std::string_view text, std::string_view label) {
+    const auto start = text.find(label);
+    if (start == text.npos) return {};
+    const auto rest = text.substr(start+label.size());
+    return std::string(rest.substr(0,rest.find('\n')));
+}
+
+Decision action(std::string tool, Json args = Json::object()) {
+    return {std::move(tool),std::move(args),"Use fixture evidence to answer the request"};
+}
+
+Decision reply(std::string text) {
+    return action("reply",{{"text",std::move(text)}});
+}
+
+Decision fetch(const std::string& url) {
+    return action("web_fetch",{{"url",url}});
+}
+
+std::string pageUrl(int page) {
+    return std::string(portal) + "page-" + std::to_string(page);
+}
+
+std::string auditRows(int page, int length) {
+    std::string text;
+    for (int row = 0; static_cast<int>(text.size()) < length; ++row) {
+        text += "Northstar audit row " + std::to_string(page*1000+row) +
+                ": receiving manifest matched the inventory and retained the original evidence.\n";
+    }
+    text.resize(static_cast<std::size_t>(length));
+    return text;
+}
+
+struct FakeWeb : WebTools {
+    std::mutex mutex;
+    std::map<std::string,int> fetches;
+
+    Json search(std::string_view) override { throw Conflict("Fixture permits only its audit pages"); }
+    Json fetch(std::string_view url) override {
+        const std::lock_guard lock(mutex);
+        ++fetches[std::string(url)];
+        if (url == std::string(portal) + "status") return {{"status","PASS"}};
+        for (int page = 1; page <= pageCount; ++page) {
+            if (url != pageUrl(page)) continue;
+            const auto ticket = page == 1 ? firstTicket : page == pageCount ? finalTicket : "INTERMEDIATE";
+            return {{"ticket",fetches.at(std::string(url)) == 1 ? ticket : "REGENERATED"},
+                    {"nextUrl",page == pageCount ? "" : pageUrl(page+1)},{"rows",auditRows(page,8500)}};
+        }
+        throw Conflict("Fixture permits only its audit pages");
+    }
+};
+
+struct NoT3 : T3 {
+    std::string authGeneration(const std::string&,const Json&) override { return "fixture"; }
+    Delivery send(const Command&) override { throw Conflict("Fixture cannot launch a Session"); }
+    Delivery reconcile(const Command&) override { return {}; }
+    Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override {
+        return InterruptOutcome::NoActiveRun;
+    }
+};
+
+std::size_t wireBytes(const Json& value) {
+    return Json(value.dump()).dump().size()-2;
+}
+
+struct FixtureModel : Model {
+    using Script = std::function<Decision(const Json&)>;
+    Script script;
+    Model* live = nullptr;
+    bool measuring = false;
+    Seconds now = 1795449600;
+    std::string previousContext;
+    Json calls = Json::array();
+
+    ModelTurn decide(const ModelInput& input) override {
+        if (!measuring)
+            return {{script({})}};
+        ++now;
+        const auto begin = Clock::now();
+        const auto request = app::responseRequest(input);
+        Json context = Json::object();
+        std::string contextText;
+        for (const auto& message : request.at("input")) {
+            if (message.at("role") != "user") continue;
+            for (const auto& block : message.at("content")) {
+                const auto text = field(block,"text");
+                if (!text.starts_with('{')) continue;
+                context.update(Json::parse(text),true);
+                contextText += text + '\n';
+            }
+        }
+        const auto prefixBytes = std::ranges::mismatch(previousContext,contextText).in1-previousContext.begin();
+        previousContext = std::move(contextText);
+        auto& record = calls.emplace_back(Json{
+            {"localRequestBytes",request.dump().size()},{"historyBytes",wireBytes(context.at("history"))},
+            {"toolHistoryBytes",wireBytes(context.at("event").at("turn"))},
+            {"commonContextPrefixBytes",prefixBytes},{"providerInputTokens",nullptr},
+            {"providerCachedInputTokens",nullptr},{"providerCacheWriteTokens",nullptr},{"actions",Json::array()}});
+        const auto finish = [&](const Json& usage) {
+            record["localCallMs"] = elapsedMs(begin);
+            if (usage.contains("input_tokens")) record["providerInputTokens"] = usage.at("input_tokens");
+            if (const auto details = usage.find("input_tokens_details"); details != usage.end()) {
+                if (details->contains("cached_tokens")) record["providerCachedInputTokens"] = details->at("cached_tokens");
+                if (details->contains("cache_write_tokens")) record["providerCacheWriteTokens"] = details->at("cache_write_tokens");
+            }
+            if (usage.contains("wallMs")) record["adapterWallMs"] = usage.at("wallMs");
+        };
+        try {
+            ModelTurn turn;
+            if (live) {
+                turn = live->decide(input);
+            } else {
+                const auto decision = script(context);
+                auto args = decision.args;
+                args["reason"] = decision.reason;
+                turn = app::responseDecision(Json::array({{{"type","function_call"},{"namespace","flock"},
+                    {"status","completed"},{"name",decision.tool},{"arguments",args.dump()}}}),request);
+            }
+            for (const auto& call : turn.calls) {
+                record["actions"].push_back(call.tool);
+                if (live && call.tool != "reply" && call.tool != "web_fetch" && call.tool != "find_tasks" &&
+                    call.tool != "expand_context" && call.tool != "read_tool_result")
+                    throw ModelError("Live fixture permits only its read tools and reply",false,turn.usage);
+            }
+            finish(turn.usage);
+            return turn;
+        } catch (const ModelError& error) {
+            finish(error.usage);
+            record["error"] = error.what();
+            throw;
+        } catch (const std::exception& error) {
+            finish(Json::object());
+            record["error"] = error.what();
+            throw;
+        }
+    }
+};
+
+struct Directory {
+    fs::path path;
+    Directory() {
+        auto pattern = (fs::temp_directory_path()/"flock-model-context-XXXXXX").string();
+        const auto* created = mkdtemp(pattern.data());
+        check(created != nullptr,"Could not create fixture directory");
+        path = created;
+    }
+    ~Directory() {
+        std::error_code error;
+        fs::remove_all(path,error);
+    }
+};
+
+struct Fixture {
+    Directory directory;
+    Store store{directory.path/"state.db"};
+    FixtureModel model;
+    NoT3 t3;
+    std::shared_ptr<FakeWeb> web = std::make_shared<FakeWeb>();
+    Runtime runtime{store,model,t3,[](auto) { return std::string{}; },
+                    {.clock = [this] { return model.now; },.botTools = std::make_shared<BotTools>(BotTools{.skills = {},.web = web,.mcp = {}})}};
+    Json config;
+    int sequence = 0;
+
+    explicit Fixture(std::string_view slug, Model* live)
+        : config{{"modelProvider","chatgpt"},{"model",slug},{"modelCallLimit",20}} {
+        model.live = live;
+    }
+
+    Intake intake(std::string request = {}) const {
+        return {"audit",std::move(request),"fixture-environment","fixture-project",config};
+    }
+
+    Json send(std::string_view message) {
+        const auto id = store.receive(owner,intake(),std::to_string(++sequence),message).at("messageId");
+        runtime.runConversations();
+        for (const auto& item : store.conversation("audit",0,100)) {
+            const auto& data = item.at("data");
+            if (item.at("kind") == "conversation_reply" && data.at("replyToMessageId") == id)
+                return {{"reply",data},{"id",item.at("id")}};
+        }
+        return Json::object();
+    }
+
+    Id seed(std::string_view message, std::string answer) {
+        model.script = [answer = std::move(answer)](const auto&) { return reply(answer); };
+        return send(message).at("id").get<Id>();
+    }
+};
+
+std::string historyValue(const Json& history, std::string_view label) {
+    for (auto entry = history.rbegin(); entry != history.rend(); ++entry) {
+        if (entry->value("role","") != "user") continue;
+        if (auto value = lineAfter(field(*entry,"text"),label); !value.empty()) return value;
+    }
+    return {};
+}
+
+struct Case {
+    std::string_view name, message, expected;
+    FixtureModel::Script script;
+    std::function<bool()> evidenceChecked = [] { return true; };
+};
+
+Case shortRequest() {
+    return {"short","Reply with only the word:\nMARIGOLD","MARIGOLD",[](const Json& context) {
+        return reply(lineAfter(field(context.at("event"),"text"),"word:\n"));
+    }};
+}
+
+Case longFollowup(Fixture& f) {
+    f.model.script = [](const auto&) { return action("ask_user",{{"question",question}}); };
+    const auto task = f.store.submit(f.intake("Northstar audit"));
+    for (int tick = 0; tick < 5 && !f.store.task(task).at("wait").is_object(); ++tick) f.runtime.tick();
+    check(field(f.store.task(task).at("wait"),"text") == question,"Fixture did not open the audit question");
+    f.seed("Kickoff code: ORCHID-45\nAudit scope: production only","I recorded the kickoff and original scope.");
+    for (int i = 0; i < 9; ++i)
+        f.seed("Prior Northstar audit material.\n"+auditRows(i,600),auditRows(i,1450));
+    f.seed("Correction to the Northstar audit.\nAudit scope: staging only","I recorded the scope correction.");
+    return {"long-followup",
+        "For the Northstar audit, read https://audit.example.test/status to check the status. Use the latest audit scope "
+        "and the kickoff code from our earlier conversation. Tell me the unresolved task question without answering it. "
+        "Reply with exactly the scope, kickoff code, status, and question separated by ' | '.",
+        "staging only | ORCHID-45 | PASS | Who signs the audit?",
+        [](const Json& context) {
+            const auto& turn = context.at("event").at("turn");
+            if (turn.empty()) return fetch(std::string(portal) + "status");
+            const auto& history = context.at("history");
+            const auto& tasks = context.at("task").at("tasks");
+            const auto& wait = tasks.at(0).at("wait");
+            const auto status = field(turn.back().at("result").at("data"),"status");
+            return reply(historyValue(history,"Audit scope: ")+" | "+historyValue(history,"Kickoff code: ") +
+                         " | "+status+" | "+field(wait,"text"));
+        },
+        [&f,task] {
+            const auto status = f.web->fetches.find(std::string(portal) + "status");
+            return status != f.web->fetches.end() && status->second == 1 &&
+                field(f.store.task(task).at("wait"),"text") == question;
+        }};
+}
+
+Case largeToolResults(Fixture& f, bool requireReread) {
+    return {"large-results",
+        "Read the synthetic audit manifest at https://audit.example.test/page-1. Each manifest has a ticket and a nextUrl. "
+        "Read each nextUrl in sequence until it is empty. Ignore the rows. If earlier saved results are omitted, recover "
+        "them from Flock's saved tool evidence instead of fetching the page again. Reply with only the first and last "
+        "tickets separated by ' / '.",
+        "NORTH-413 / SOUTH-982",
+        [](const Json& context) {
+            const auto& turn = context.at("event").at("turn");
+            if (turn.empty()) return fetch(pageUrl(1));
+            const auto& latest = turn.back();
+            const auto& first = turn.front().at("result");
+            if (latest.at("tool") == "read_tool_result") {
+                const auto& recovered = latest.at("result");
+                const auto url = field(recovered.at("args"),"url");
+                int page = 1;
+                while (page <= pageCount && pageUrl(page) != url) ++page;
+                check(page <= pageCount &&
+                      field(recovered.at("result").at("data"),"rows") == auditRows(page,8500),
+                      "Reread did not recover the original full result");
+                const auto& terminal = turn.at(turn.size()-2).at("result").at("data");
+                return reply(field(first.at("data"),"ticket")+" / "+field(terminal,"ticket"));
+            }
+            const auto& data = latest.at("result").at("data");
+            if (const auto next = field(data,"nextUrl"); !next.empty()) return fetch(next);
+            for (const auto& step : turn) {
+                const auto& result = step.at("result");
+                if (result.value("evidenceOmitted",false)) {
+                    check(result.at("data").contains("ticket") && !result.at("data").contains("rows"),
+                          "Omitted result lost its ticket or still contains the large body");
+                    return action("read_tool_result",result.at("resultRef"));
+                }
+            }
+            return reply(field(first.at("data"),"ticket")+" / "+field(data,"ticket"));
+        },
+        [&f,requireReread] {
+            if (f.web->fetches.size() != pageCount ||
+                !std::ranges::all_of(f.web->fetches,[](const auto& entry) { return entry.second == 1; })) return false;
+            return !requireReread || std::ranges::any_of(f.model.calls,[](const auto& record) {
+                return std::ranges::find(record.at("actions"),"read_tool_result") != record.at("actions").end();
+            });
+        }};
+}
+
+Case oldReference(Fixture& f) {
+    f.seed("For any future archive check, use this exact reply prefix: "+std::string(archivePrefix),"Understood.");
+    const auto evidence = f.seed("Record the Northstar handoff for future audit checks.",
+                                 "The Northstar handoff batch code was recorded as:\n"+std::string(archiveCode));
+    f.model.script = [evidence,step = 0](const auto&) mutable {
+        if (step++ == 0) return action("compact_conversation",{{"endMessageId",evidence},
+            {"summary","Archive reply prefix: "+std::string(archivePrefix)+
+                       "\nThe old Northstar handoff has a saved batch code. Expand the original Bot message at message ID "
+                       +std::to_string(evidence)+" before reporting it."}});
+        return reply("Archived.");
+    };
+    f.send("Compact the old archive notes.");
+    check(f.store.compactions("audit").size() == 1,"Fixture did not save the cumulative summary");
+    for (int i = 0; i < 9; ++i)
+        f.seed("Earlier unrelated audit discussion.\n"+auditRows(i,600),auditRows(i,1450));
+    return {"old-reference",
+        "What batch code was recorded in the Northstar handoff? Reply in my established archive format, with the prefix "
+        "followed by a colon and the exact code. Use the original saved evidence.",
+        "LEDGER VERIFIED: NZ-7184-Q",
+        [](const Json& context) {
+            const auto& history = context.at("history");
+            const auto summary = std::ranges::find_if(history,[](const auto& item) {
+                return item.value("kind","") == "conversation_compaction";
+            });
+            check(summary != history.end(),"Cumulative summary omitted");
+            const auto prefix = lineAfter(field(*summary,"summary"),"Archive reply prefix: ");
+            const auto& turn = context.at("event").at("turn");
+            check(history.dump().find(archiveCode) == std::string::npos,"Archived code was unexpectedly sent inline");
+            if (turn.empty()) return action("expand_context",{{"compactionId",summary->at("compactionId")},
+                {"startMessageId",summary->at("endMessageId")},{"endMessageId",summary->at("endMessageId")}});
+            const auto& result = turn.back().at("result");
+            const auto code = lineAfter(field(result.at("messages").at(0),"text"),"recorded as:\n");
+            return reply(prefix+": "+code);
+        },
+        [&f] { return std::ranges::any_of(f.model.calls,[](const auto& record) {
+            return std::ranges::find(record.at("actions"),"expand_context") != record.at("actions").end();
+        }); }};
+}
+
+Json totalUsage(const Json& calls, const char* key) {
+    if (calls.empty()) return nullptr;
+    Id total = 0;
+    for (const auto& call : calls) {
+        const auto& count = call.at(key);
+        if (!count.is_number_integer()) return nullptr;
+        total += count.get<Id>();
+    }
+    return total;
+}
+
+bool measure(Fixture& fixture, const Case& test, std::string_view slug, bool live) {
+    fixture.model.script = test.script;
+    fixture.model.measuring = true;
+    const auto begin = Clock::now();
+    const auto message = fixture.send(test.message);
+    const auto wallMs = elapsedMs(begin);
+    const auto reply = message.value("reply",Json::object());
+    const auto actual = field(reply,"text");
+    const auto success = field(reply,"route") == "reply" && actual == test.expected && test.evidenceChecked();
+    std::size_t totalBytes = 0;
+    for (const auto& call : fixture.model.calls)
+        totalBytes += call.at("localRequestBytes").get<std::size_t>();
+    std::cout << Json{{"case",test.name},{"mode",live ? "live" : "fixed"},{"model",slug},
+        {"calls",fixture.model.calls},{"callCount",fixture.model.calls.size()},{"totalLocalRequestBytes",totalBytes},
+        {"totalProviderInputTokens",totalUsage(fixture.model.calls,"providerInputTokens")},
+        {"totalProviderCachedInputTokens",totalUsage(fixture.model.calls,"providerCachedInputTokens")},
+        {"totalProviderCacheWriteTokens",totalUsage(fixture.model.calls,"providerCacheWriteTokens")},{"wallMs",wallMs},
+        {"success",success},{"reply",actual},{"expected",test.expected}}.dump() << '\n';
+    return success;
+}
+}
+
+int main(int argc, char** argv) {
+    try {
+        const bool baseline = argc == 2 && std::string_view(argv[1]) == "--measure-baseline";
+        const bool live = argc == 5 && std::string_view(argv[1]) == "--live";
+        check(argc == 1 || baseline || live,
+              "Usage: flock_model_context [--measure-baseline | --live PROFILE_DIR MODEL CASE]");
+        const std::string_view slug = live ? argv[3] : "gpt-6.2-sol";
+        const std::string_view selected = live ? argv[4] : "all";
+        std::optional<app::ChatGPTModel> provider;
+        if (live) provider.emplace(argv[2]);
+        auto* adapter = live ? &*provider : nullptr;
+        bool success = true, matched = false;
+        const auto run = [&](std::string_view name, const auto& build) {
+            if (selected != "all" && selected != name) return;
+            matched = true;
+            Fixture fixture(slug,adapter);
+            success = measure(fixture,build(fixture),slug,live) && success;
+        };
+        run("short",[](auto&) { return shortRequest(); });
+        run("long-followup",longFollowup);
+        run("large-results",[&](auto& fixture) { return largeToolResults(fixture,!baseline && !live); });
+        run("old-reference",oldReference);
+        check(matched,"Unknown fixture case");
+        return success ? 0 : 1;
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}

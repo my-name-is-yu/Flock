@@ -87,14 +87,15 @@ struct Provider : Model {
             emit(call("delegate",{{"instruction","Read private history"},{"doneWhen","Private fixture checked"}}));
         } else {
             if (beforeTurn) beforeTurn(input);
-            check(request.at("instructions").get<std::string>().find("untrustedData") != std::string::npos,
+            const auto& prompt = request.at("input").front().at("content").front().at("text").get_ref<const std::string&>();
+            check(prompt.find("untrustedData") != std::string::npos,
                   "Tool output trust was not explained in the prompt");
             const auto& steps = input.event.at("turn");
             if (steps.empty()) {
                 for (const auto& action : next) emit(action);
             } else {
                 seen = steps;
-                content = request.at("input").at(0).at("content");
+                content = request.at("input").back().at("content");
                 auto follow = followStep ? followStep(steps) : std::vector<Decision>{};
                 if (follow.empty()) emit(call("reply",{{"text","Checked."}}));
                 else for (const auto& action : follow) emit(action);
@@ -709,7 +710,7 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
     f.model.inspectRequest = [&](const Json& request) {
         ++requests;
         check(request.dump().size() <= 8 * 1024 * 1024,"Serialized request exceeded the production bridge limit");
-        const auto context = Json::parse(request.at("input").at(0).at("content").at(0).at("text").get<std::string>());
+        const auto context = Json::parse(request.at("input").at(1).at("content").at(0).at("text").get_ref<const std::string&>());
         check(context.at("event").at("text") == "Check the fixture","Tool evidence displaced the current user message");
     };
     Json firstRef, secondRef;

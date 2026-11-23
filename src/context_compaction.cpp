@@ -7,6 +7,9 @@ using conversation_storage::identifier;
 using conversation_storage::expandedContextBytes;
 
 namespace {
+constexpr std::size_t recentHistoryEntries = 6;
+constexpr std::size_t olderEvidencePreviewBytes = 512;
+
 std::string boundedJsonText(std::string_view text, std::size_t limit, std::size_t bytes) {
     auto prefix = bounded(text,std::min(limit,bytes));
     if (Json(prefix).dump().size()-2 <= bytes) return prefix;
@@ -134,10 +137,17 @@ ORDER BY entry.id DESC LIMIT 24
                 if (data.contains(key)) entry[key] = scrub.record(data.at(key));
         } else if (kind=="waiting") entry["waitId"] = rows.json(3).at("id");
         else if (kind=="user_answer") entry["waitId"] = conversation_storage::integer(rows.json(3),"waitId");
-        const std::size_t limit = user ? 4000 : reply ? 1500 : 700;
+        const auto body = scrub.text(rows.string(4));
+        std::size_t limit = user ? 4000 : reply ? 1500 : 700;
+        const bool evidence = reply || kind=="report" || kind=="completed" || kind=="cancelled";
+        if (message.channelScope.empty() && history.size() >= recentHistoryEntries && evidence &&
+            rows.number(0)<message.id && body.size()>olderEvidencePreviewBytes) {
+            limit = olderEvidencePreviewBytes;
+            entry["evidenceOmitted"] = true;
+        }
         const auto bytes = entry.dump().size() + (history.empty() && summary.is_null() ? 0 : 1);
         if (bytes>remaining) break;
-        entry["text"] = boundedJsonText(scrub.text(rows.string(4)),limit,remaining-bytes);
+        entry["text"] = boundedJsonText(body,limit,remaining-bytes);
         remaining -= bytes + (entry.at("text").dump().size()-2);
         history.push_back(std::move(entry));
     }
@@ -177,16 +187,20 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
         return {{"ok",true},{"compaction",compactions(bot,0,1).front()}};
     }
 
+    Id start = args.contains("startMessageId") ? identifier(args,"startMessageId",true) : 1;
+    const Id requestedEnd = args.contains("endMessageId") ? identifier(args,"endMessageId",true) : 0;
     Id end = std::min(boundary,message.id-1);
     if (args.contains("compactionId")) {
         auto row = query("SELECT end_message_id FROM conversation_compactions WHERE bot_id=? AND id=?",{bot,identifier(args,"compactionId",true)});
         if (!row.next()) throw Conflict("Unknown compaction");
         end = std::min(end,row.number(0));
+    } else if (start==requestedEnd || args.contains("cursor")) {
+        // Exact reads and saved cursors can recover entries shortened in the recent history.
+        end = message.id-1;
     }
-    if (args.contains("endMessageId")) end = std::min(end,identifier(args,"endMessageId",true));
+    if (requestedEnd) end = std::min(end,requestedEnd);
     Json revision;
     const auto scrub = redactor(bot,&revision);
-    Id start = args.contains("startMessageId") ? identifier(args,"startMessageId",true) : 1;
     Id offset = 0;
     Id queryMessage = message.id, queryStep = step;
     auto needle = conversation_storage::text(args,"query",512,false);
@@ -212,7 +226,7 @@ WHERE c.bot_id=? AND c.id=?
         queryStep = saved.number(5);
         needle = std::move(originalNeedle);
     }
-    if (end<start) throw Conflict("No compacted messages in this range");
+    if (end<start) throw Conflict("No prior messages in this range");
     auto rows = query("SELECT id,kind,text FROM compactable_messages WHERE bot_id=? AND id BETWEEN ? AND ? ORDER BY id",
                       {bot,start,end});
     Json result = {{"ok",true},{"messages",Json::array()}};
