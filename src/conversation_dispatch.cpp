@@ -66,9 +66,9 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     if (tool == "request_bot_change") return executeConversationBotChange(message,step,decision,key,ctx);
 
     const bool git = isGitTool(tool);
-    const bool networkRead = tool_batch::conversationRead(tool) == tool_batch::ConversationRead::network &&
-        (tool != "check_environment_readiness" || message.channelScope.empty());
-    if (!git && !networkRead)
+    using enum tool_batch::ConversationRead;
+    const auto read = tool_batch::conversationRead(tool);
+    if (!git && (read == none || read == store))
         return executeLocalConversationCall(message,step,decision,key,ctx);
 
     {
@@ -80,28 +80,38 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
         if (!allowed) return stop;
     }
 
-    auto result = git ? gitConversationTool(ctx.gitHost,message,decision,key) :
-                        executeConversationRead(message,decision,ctx.t3,key,ApprovalWait::pause).value;
-    if (result.value("policyWaiting",false)) return waiting;
+    ToolCallResult result;
+    if (git) {
+        auto value = gitConversationTool(ctx.gitHost,message,decision,key);
+        if (value.value("policyWaiting",false)) return waiting;
+        result = CompletedToolCall{std::move(value)};
+    } else {
+        result = executeConversationRead(message,decision,ctx.t3,key,ApprovalWait::pause);
+        if (!result) return waiting;
+    }
 
     std::lock_guard lock(mutex);
     Transaction transaction(db);
     if (!authorizeTurn(message)) { transaction.commit(); return stop; }
-    saveConversationCallResult(message,step,std::move(result));
+    saveConversationCallResult(message,step,std::move(result->value));
+    if (result->consumeApproval) consumePolicyApproval(key);
     transaction.commit();
     return advance;
 }
 
 Store::Impl::ToolCallResult Store::Impl::executeConversationRead(
     const Message& message, const Decision& decision, T3& t3, std::string_view key, ApprovalWait waitMode) {
-    if (decision.tool == "flock_session_search" || decision.tool == "flock_session_events")
+    using enum tool_batch::ConversationRead;
+    const auto read = tool_batch::conversationRead(decision.tool);
+    if (read == session)
         return sessionReadTool(message,decision,t3,key,waitMode);
-    if (decision.tool != "check_environment_readiness") throw Conflict("Unsupported conversation read");
+    if (read != environment_readiness) throw std::logic_error("Unsupported network conversation read");
+    if (!message.channelScope.empty()) return CompletedToolCall{toolFailure("Use Flock Web for this action")};
     try {
         auto result = readiness(message.bot,message.routing,decision.args,t3);
         result["ok"] = true;
-        return {std::move(result)};
-    } catch (const Conflict& error) { return {toolFailure(error.what())}; }
+        return CompletedToolCall{std::move(result)};
+    } catch (const Conflict& error) { return CompletedToolCall{toolFailure(error.what())}; }
 }
 
 Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(
@@ -141,7 +151,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(
             const auto changeId = Policy(*this).applyBotChange(message.bot,actor,operation,target,name,
                 id,step,ctx.applyBotChange,exhausted ? &ctx.reconcileBotCreation : nullptr);
             Transaction completed(db);
-            exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'",{key});
+            consumePolicyApproval(key);
             saveTurnResults(id,step,Json::array({Json{{"ok",true},{"changeId",changeId},{"status","applied"}}}));
             completed.commit();
             return advance;
@@ -259,24 +269,20 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
         return advance;
     }
     if (ctx.shutdown.stop_requested()) return stop;
-    result = applyLocalConversationCall(message,step,decision,key,ctx.clock(),ApprovalWait::pause,
-                                        selectedSession ? &*selectedSession : nullptr);
-    if (result.value("policyWaiting",false)) {
-        transaction.commit();
-        return waiting;
-    }
-    saveConversationCallResult(message,step,std::move(result));
+    auto completed = applyLocalConversationCall(message,step,decision,key,ctx.clock(),ApprovalWait::pause,
+                                                selectedSession ? &*selectedSession : nullptr);
+    if (completed) saveConversationCallResult(message,step,std::move(*completed));
     transaction.commit();
-    return advance;
+    return completed ? advance : waiting;
 }
 
-Json Store::Impl::applyLocalConversationCall(const Message& message, int step, const Decision& decision,
-                                             std::string_view key, Seconds now, ApprovalWait waitMode,
-                                             const WorkSession* selectedSession) {
+std::optional<Json> Store::Impl::applyLocalConversationCall(
+    const Message& message, int step, const Decision& decision, std::string_view key, Seconds now,
+    ApprovalWait waitMode, const WorkSession* selectedSession) {
     if (const auto resource = conversationCallResource(message,decision)) {
         const auto gate = approveAction(policyOrigin(message),*resource,key,
             Json::array({decision.tool,decision.args}),now,true,waitMode);
-        if (gate == ApprovalGate::waiting) return {{"policyWaiting",true}};
+        if (gate == ApprovalGate::waiting) return std::nullopt;
         if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
     }
     exec("SAVEPOINT turn_tool");

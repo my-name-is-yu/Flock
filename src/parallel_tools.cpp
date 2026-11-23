@@ -7,13 +7,12 @@
 
 namespace flockv0 {
 bool allowedAfterWebEvidence(const Decision& call) {
-    if (gitOperation(call) == "read") return true;
+    if (tool_batch::conversationRead(call.tool) != tool_batch::ConversationRead::none || gitOperation(call) == "read")
+        return true;
     constexpr std::string_view readOnly[]{
-        "reply","web_search","web_fetch","read_result","find_tasks","flock_session_search","flock_session_events",
-        "list_secrets","list_connections","check_environment_readiness","workspace_read_file",
+        "reply","web_search","web_fetch","workspace_read_file",
         "workspace_search","workspace_command_status","mcp_discover","mcp_read_resource",
-        "skill_list","skill_read","inspect_attachment","workflow_status","expand_context","read_tool_result",
-        "read_memory","memory_history","list_schedules"
+        "skill_list","skill_read","inspect_attachment","expand_context"
     };
     return std::ranges::find(readOnly,call.tool) != std::end(readOnly);
 }
@@ -32,9 +31,8 @@ namespace {
 void recoverSlot(Json& result, const Decision& call) {
     if (!result.contains("inFlight")) return;
     using enum tool_batch::CallClass;
-    const auto classification = tool_batch::classify(call);
-    if (classification == parallel_read ||
-        (classification == gated_read && tool_batch::conversationRead(call.tool) != tool_batch::ConversationRead::none))
+    if (tool_batch::conversationRead(call.tool) != tool_batch::ConversationRead::none ||
+        tool_batch::classify(call) == parallel_read)
         result = nullptr;
     else result = {{"ok",false},{"delivery","unknown"},
                    {"error","Flock restarted during this tool call. Its outcome is unknown."}};
@@ -211,7 +209,7 @@ private:
                     recordResult(slot,executeCall(slot));
                 }));
             } catch (const std::system_error&) {
-                recordResult(slot,{toolFailure("Could not start the tool call")});
+                recordResult(slot,CompletedToolCall{toolFailure("Could not start the tool call")});
             }
         }
         for (const auto slot : reserved)
@@ -225,8 +223,8 @@ private:
         if (authorize()) {
             auto result = store_.applyLocalConversationCall(message_,step_,calls_[slot],callKey(slot),
                                                             ctx_.clock(),ApprovalWait::defer);
-            if (result.value("policyWaiting",false)) approvalWaiting_ = true;
-            else saveSlot(slot,store_.redactor(message_.bot).record(std::move(result)));
+            if (result) saveSlot(slot,store_.redactor(message_.bot).record(std::move(*result)));
+            else approvalWaiting_ = true;
         }
         transaction.commit();
     }
@@ -238,15 +236,15 @@ private:
             if (!bot) return store_.executeConversationRead(message_,call,ctx_.t3,callKey(slot),ApprovalWait::defer);
             auto result = store_.executeBotTool(tools_,call);
             if (!result.contains("ok")) result["ok"] = true;
-            return {std::move(result)};
+            return CompletedToolCall{std::move(result)};
         } catch (const ToolOutcomeUnknown& error) {
-            return {Json{{"ok",false},{"error",error.what()},{"delivery","unknown"}}};
+            return CompletedToolCall{{{"ok",false},{"error",error.what()},{"delivery","unknown"}}};
         } catch (const Conflict& error) {
-            return {toolFailure(error.what())};
+            return CompletedToolCall{toolFailure(error.what())};
         } catch (const StorageError&) {
             throw;
         } catch (const std::exception&) {
-            return {toolFailure(bot ? "Bot tool execution failed" : "Conversation read failed")};
+            return CompletedToolCall{toolFailure(bot ? "Bot tool execution failed" : "Conversation read failed")};
         }
     }
 
@@ -259,10 +257,7 @@ private:
 
     void recordResult(std::size_t slot, ToolCallResult execution) {
         std::lock_guard lock(store_.mutex);
-        if (!isBotTool(calls_[slot].tool) && execution.value.value("policyWaiting",false)) {
-            approvalWaiting_ = true;
-            execution.value = nullptr;
-        }
+        if (!execution) approvalWaiting_ = true;
         store_.unpersistedToolResults[{message_.id,step_}].insert_or_assign(slot,std::move(execution));
         flushResults();
     }
@@ -276,12 +271,10 @@ private:
             const auto& tool = calls_.at(it->first).tool;
             const auto scrub = !isBotTool(tool) || tool == "inspect_attachment" ?
                 store_.redactor(message_.bot) : store_.sharedRedactor();
+            const auto& result = it->second;
             Transaction transaction(store_.db);
-            saveSlot(it->first,scrub.record(it->second.value));
-            // Keep a one-time approval available until the event result can survive a restart.
-            if (it->second.claimApproval)
-                store_.exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'",
-                            {callKey(it->first)});
+            saveSlot(it->first,result ? scrub.record(result->value) : Json(nullptr));
+            if (result && result->consumeApproval) store_.consumePolicyApproval(callKey(it->first));
             transaction.commit();
             it = slots.erase(it);
         }

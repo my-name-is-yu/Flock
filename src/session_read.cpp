@@ -222,21 +222,16 @@ public:
         }
     }
 
-    ApprovalGate authorizeEventTool(const conversation::Message& message, const Decision& call, std::string_view key,
-                                    ApprovalWait waitMode, bool& claimApproval) {
+    std::optional<ApprovalGate> authorizeEventTool(const Decision& call, std::string_view key, ApprovalWait waitMode) {
         std::lock_guard lock(store_.mutex);
         Transaction tx(store_.db);
         const auto session = eventSession(call.args);
-        if (!session || !inSessionScope(session->target,session->payload == connectedScope)) return ApprovalGate::allow;
+        if (!session || !inSessionScope(session->target,session->payload == connectedScope)) return std::nullopt;
         const auto resource = Resource::sessionRead(session->target.environmentId,session->target.threadId);
-        if (policy_.forbidden(bot_,resource.action,resource.target)) return ApprovalGate::allow;
-        const auto gate = store_.approveAction(store_.policyOrigin(message),resource,key,
-                                               Json::array({call.tool,call.args}),store_.policyClock(),
-                                               waitMode == ApprovalWait::pause,waitMode);
-        if (gate == ApprovalGate::allow) {
-            approved_ = session->target;
-            claimApproval = waitMode == ApprovalWait::defer;
-        }
+        if (policy_.forbidden(bot_,resource.action,resource.target)) return std::nullopt;
+        const auto gate = store_.approveAction(store_.policyOrigin(message_),resource,key,
+                                               Json::array({call.tool,call.args}),store_.policyClock(),false,waitMode);
+        if (gate == ApprovalGate::allow) approved_ = session->target;
         tx.commit();
         return gate;
     }
@@ -629,22 +624,25 @@ Store::Impl::ToolCallResult Store::Impl::sessionReadTool(
     ApprovalWait waitMode) {
     Policy policy(*this);
     SessionEvidence evidence(*this,policy,message,t3);
-    bool claimApproval = false;
+    bool consumeApproval = false;
     try {
         if (!decision.args.is_object()) throw Conflict("Tool arguments must be an object");
-        if (decision.tool == "flock_session_search") return {evidence.search(decision.args)};
-        const auto gate = evidence.authorizeEventTool(message,decision,key,waitMode,claimApproval);
-        if (gate == ApprovalGate::waiting) return {Json{{"policyWaiting",true}}};
-        if (gate != ApprovalGate::allow) return {scopedResult(failure(std::string(approvalError(gate))))};
-        return {evidence.events(decision.args),claimApproval};
+        if (decision.tool == "flock_session_search") return CompletedToolCall{evidence.search(decision.args)};
+        if (const auto gate = evidence.authorizeEventTool(decision,key,waitMode)) {
+            if (*gate == ApprovalGate::waiting) return std::nullopt;
+            if (*gate != ApprovalGate::allow)
+                return CompletedToolCall{scopedResult(failure(approvalError(*gate)))};
+            consumeApproval = true;
+        }
+        return CompletedToolCall{evidence.events(decision.args),consumeApproval};
     } catch (const Conflict& error) {
-        return {scopedResult(failure(error.what())),claimApproval};
+        return CompletedToolCall{scopedResult(failure(error.what())),consumeApproval};
     } catch (const SessionReadTimeout&) {
-        return {scopedResult(failure(searchTimedOut)),claimApproval};
+        return CompletedToolCall{scopedResult(failure(searchTimedOut)),consumeApproval};
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception&) {
-        return {scopedResult(failure("Session evidence could not be read")),claimApproval};
+        return CompletedToolCall{scopedResult(failure("Session evidence could not be read")),consumeApproval};
     }
 }
 

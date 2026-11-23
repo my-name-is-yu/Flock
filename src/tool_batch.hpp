@@ -6,7 +6,7 @@
 
 namespace flockv0::tool_batch {
 enum class CallClass { parallel_read, gated_read, exclusive, terminal };
-enum class ConversationRead { none, store, network };
+enum class ConversationRead { none, store, session, environment_readiness };
 
 CallClass classify(const Decision&);
 ConversationRead conversationRead(std::string_view tool);

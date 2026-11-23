@@ -188,6 +188,7 @@ struct Store::Impl {
     enum class ApprovalWait { pause, defer };
     ApprovalGate approveAction(const PolicyOrigin&, const Resource&, std::string_view operation,
                                const Json& payload, Seconds now, bool claim = true, ApprovalWait = ApprovalWait::pause);
+    void consumePolicyApproval(std::string_view operation);
     bool currentPolicyApproval(Id turn, Id task, Id revision, Id generation) const;
     void settlePolicyApprovals(std::optional<Seconds> now = {});
     void decidePolicyApproval(const Person&, const InboxTarget&, std::string_view);
@@ -254,7 +255,8 @@ struct Store::Impl {
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
-    struct ToolCallResult { Json value; bool claimApproval = false; };
+    struct CompletedToolCall { Json value; bool consumeApproval = false; };
+    using ToolCallResult = std::optional<CompletedToolCall>;
     ToolCallResult sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key, ApprovalWait);
     void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
     std::set<std::string> connectedSessionEnvironments(const conversation::Message&);
@@ -355,8 +357,9 @@ struct Store::Impl {
                                           std::string_view key, const std::function<Seconds()>&);
     CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&,
                                              std::string_view key, const ConversationCallContext&);
-    Json applyLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                    Seconds now, ApprovalWait, const WorkSession* selectedSession = nullptr);
+    std::optional<Json> applyLocalConversationCall(const conversation::Message&, int step, const Decision&,
+                                                   std::string_view key, Seconds now, ApprovalWait,
+                                                   const WorkSession* selectedSession = nullptr);
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,

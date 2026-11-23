@@ -11,9 +11,9 @@ struct ReadSpec {
     CallClass classification = CallClass::parallel_read;
 };
 constexpr ReadSpec conversationBatchReads[]{
-    {"flock_session_search",ConversationRead::network},
-    {"check_environment_readiness",ConversationRead::network},
-    {"flock_session_events",ConversationRead::network,CallClass::gated_read},
+    {"flock_session_search",ConversationRead::session},
+    {"check_environment_readiness",ConversationRead::environment_readiness},
+    {"flock_session_events",ConversationRead::session,CallClass::gated_read},
     {"find_tasks",ConversationRead::store},
     {"read_result",ConversationRead::store},
     {"workflow_status",ConversationRead::store},
