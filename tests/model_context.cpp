@@ -335,7 +335,7 @@ struct FixtureModel : Model {
             for (const auto& call : turn.calls) {
                 record["actions"].push_back(call.tool);
                 if (live && call.tool != "reply" && call.tool != "web_fetch" && call.tool != "find_tasks" &&
-                    call.tool != "expand_context" && call.tool != "read_tool_result" &&
+                    call.tool != "expand_context" && call.tool != "read_tool_result" && call.tool != "read_memory" &&
                     !(allowCompaction && call.tool == "compact_conversation"))
                     throw ModelError("Live fixture permits only its read tools and reply",false,turn.usage);
             }
