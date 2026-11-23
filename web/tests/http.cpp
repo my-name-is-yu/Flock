@@ -1369,6 +1369,17 @@ void settingsEndpoints(const std::filesystem::path& path) {
     Store store(path);
     store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/org/private",true);
     auto cb = callbacks();
+    const Json t3Target{{"environmentId","env-1"},{"mcpUrl","https://t3.example/mcp"}};
+    std::atomic<bool> t3Started = false;
+    cb.t3Connect = [&](const Person& actor, const std::string& env, const std::string& url) {
+        check(actor.id == "owner" && env == "env-1" && url == "https://t3.example/mcp",
+              "T3 connection callback received the wrong requester or target");
+        return !t3Started.exchange(true);
+    };
+    cb.t3Setup = [&](const Person& actor) {
+        return Json{{"running",t3Started.load()},
+                    {"authorizationUrl",actor.id == "owner" && t3Started ? "https://t3.example/authorize" : ""}};
+    };
     std::atomic<bool> unavailable = false;
     std::atomic<unsigned> statusCalls = 0;
     std::atomic<bool> reconsentRequested = false;
@@ -1386,7 +1397,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
     };
     const auto file = path.parent_path()/"identities.json";
     const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
-                                       {{"authorization","Bearer fixture-alice"},{"person","alice"}}});
+                                       {{"authorization","Bearer fixture-alice"},{"person","alice"}},
+                                       {{"authorization","Bearer fixture-root"},{"person","another-root"},{"adminRoot",true}}});
     std::ofstream(file) << accounts;
     std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
     configureWebIdentities(store,file,cb);
@@ -1448,6 +1460,15 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.post("/api/settings/rule",addition,403);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     browser.post("/api/settings/model-login",{{"reconsent","true"}},400);
+    browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl",false}},400);
+    browser.post("/api/settings/t3-connect",t3Target,202);
+    browser.post("/api/settings/t3-connect",t3Target,409);
+    check(browser.get("/api/settings").at("t3Setup").at("authorizationUrl") == "https://t3.example/authorize",
+          "T3 authorization link missing for its requester");
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-root"}});
+    check(browser.get("/api/settings").at("t3Setup").at("authorizationUrl") == "",
+          "T3 authorization link was exposed to a different administrator");
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     browser.post("/api/settings/model-login",{{"reconsent",true}},202);
     check(reconsentRequested,"root could not request model reconsent");
     browser.post("/api/settings/model-login",{{"reconsent",true}},409);
@@ -1463,6 +1484,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
           added.at(0).at("target") == "github.com/acme/app","Root could not add a rule from Flock settings");
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",false}});
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    check(browser.get("/api/settings").at("t3Setup").is_null(),"member could see administrator T3 setup status");
+    browser.post("/api/settings/t3-connect",t3Target,403);
     check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
     check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");

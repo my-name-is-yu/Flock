@@ -66,10 +66,11 @@ for (const input of themeInputs) {
 
 async function load() {
   const modelAtStart = modelRequest;
+  const connectionsAtStart = connectionsRequest;
   const response = await fetch('/api/settings');
   if (!response.ok) throw new Error();
   const data = await response.json();
-  const {mode, rules, t3, model} = data;
+  const {mode, rules, model} = data;
   canManagePolicy = data.canManagePolicy === true;
   if (modelAtStart === modelRequest && !watchingSignIn) renderModel(model);
   currentMode = mode;
@@ -95,17 +96,7 @@ async function load() {
     remove.onclick = () => void submit('rule', {kind, action, target, add: false});
     item.append(remove);
   }
-  $('connections').replaceChildren();
-  if (t3) {
-    for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
-    row('connections', emptyLabel('Coding agents', 'Flock is configured to use port ', command(String(t3.port)),
-      ' for local Codex and Claude Code connections.'));
-  } else if (canManagePolicy) {
-    row('connections', emptyLabel('Not connected',
-      'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on the machine running Flock.'));
-  } else {
-    row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
-  }
+  if (connectionsAtStart === connectionsRequest && !watchingT3) renderConnections(data);
   $('rule-form').hidden = !canManagePolicy;
   if (canManagePolicy) populateRuleActions(data.personOnlyActions);
   updatePolicyControls();
@@ -253,6 +244,90 @@ function renderModel(model) {
     if (model.canSignIn) actionButton(item, 'Sign in with ChatGPT', (event) => void signIn(false, event.currentTarget), true);
   }
 }
+
+let connectionsRequest = 0;
+let t3Poll = 0;
+let watchingT3 = false;
+let startingT3 = false;
+
+function pollConnections() {
+  clearTimeout(t3Poll);
+  t3Poll = setTimeout(() => void refreshConnections(), 2000);
+}
+
+async function refreshConnections() {
+  const request = ++connectionsRequest;
+  try {
+    const response = await fetch('/api/settings');
+    if (request !== connectionsRequest) return;
+    if (response.status === 401 || response.status === 403) return renderConnections({});
+    if (!response.ok) throw new Error();
+    const data = await response.json();
+    if (request === connectionsRequest) renderConnections(data);
+  } catch {
+    if (request === connectionsRequest && watchingT3) pollConnections();
+  }
+}
+
+function renderConnections({t3, t3Setup, canManagePolicy: editable}) {
+  clearTimeout(t3Poll);
+  $('t3-form').hidden = !t3Setup || t3Setup.running;
+  watchingT3 = t3Setup?.running === true;
+  $('connections').replaceChildren();
+  if (t3) {
+    for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
+    row('connections', emptyLabel('Coding agents', 'Flock is configured to use port ', command(String(t3.port)),
+      ' for local Codex and Claude Code connections.'));
+  } else if (editable && t3Setup) {
+    row('connections', emptyLabel('Not connected', 'Connect a T3 environment so its Sessions can ask your Bots.'));
+  } else if (editable) {
+    row('connections', emptyLabel('Not connected',
+      'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on the machine running Flock.'));
+  } else {
+    row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
+  }
+  if (watchingT3) {
+    const authorization = t3Setup.authorizationUrl;
+    const item = row('connections', emptyLabel(authorization ? 'Authorize Flock in T3' : 'Connecting to T3…',
+      authorization ? 'Approve read and operate access in T3. This page updates when you’re done.' : 'Starting T3 authorization.'));
+    if (authorization) {
+      const open = link('Open T3', authorization, 'Open T3 authorization');
+      open.classList.add('primary');
+      open.target = '_blank';
+      open.rel = 'noopener noreferrer';
+      item.append(open);
+    }
+    pollConnections();
+  } else if (t3Setup?.error) {
+    row('connections', emptyLabel('Connection didn’t finish', t3Setup.error)).classList.add('settings-row-error');
+  }
+}
+
+$('t3-form').onsubmit = async (event) => {
+  event.preventDefault();
+  if (!canManagePolicy || startingT3 || watchingT3) return;
+  const form = event.currentTarget;
+  const {environmentId, mcpUrl} = Object.fromEntries(new FormData(form));
+  startingT3 = true;
+  ++connectionsRequest;
+  for (const control of form.elements) control.disabled = true;
+  try {
+    const response = await fetch('/api/settings/t3-connect', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
+      body: JSON.stringify({environmentId: environmentId.trim(), mcpUrl: mcpUrl.trim()}),
+    });
+    if (response.ok) form.reset();
+    else if (response.status !== 409 || (await response.json()).error !== 'connect_pending') throw new Error();
+    watchingT3 = true;
+    $('status').textContent = '';
+    await refreshConnections();
+  } catch {
+    $('status').textContent = 'Could not start the T3 connection. Check the environment ID and MCP URL.';
+  } finally {
+    startingT3 = false;
+    for (const control of form.elements) control.disabled = false;
+  }
+};
 
 async function submit(path, data) {
   if (!canManagePolicy || savingPolicy) return false;

@@ -28,6 +28,8 @@ struct WebCallbacks {
     std::function<Json()> modelStatus = {};
     // Optional: starts ChatGPT sign-in in the background (opens the browser on this machine).
     std::function<bool(bool reconsent)> modelLogin = {};
+    std::function<bool(const Person&, const std::string& environmentId, const std::string& mcpUrl)> t3Connect = {};
+    std::function<Json(const Person&)> t3Setup = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);

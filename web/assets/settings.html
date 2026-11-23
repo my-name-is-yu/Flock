@@ -77,7 +77,13 @@
       </section>
       <section aria-labelledby="connections-heading">
         <h2 id="connections-heading">T3 connections</h2>
-        <div id="connections" class="settings-group"></div>
+        <div class="settings-group"><div id="connections"></div>
+          <form id="t3-form" class="settings-row rule-form" hidden>
+            <label>Environment ID <input name="environmentId" required autocomplete="off" spellcheck="false"></label>
+            <label class="rule-target">T3 MCP URL <input name="mcpUrl" type="url" required autocomplete="off" placeholder="https://…/mcp"></label>
+            <button class="button primary">Connect</button>
+          </form>
+        </div>
       </section>
     </div>
   </main>

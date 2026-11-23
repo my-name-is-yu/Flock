@@ -25,7 +25,6 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
     server.Get("/api/settings",[&](const httplib::Request& req, httplib::Response& res) {
         const auto actor = person(callbacks,req);
         auto policy = store.policy();
-        const auto connection = T3Connections(store).settings(actor.id,actor.adminRoot);
         const bool canManage = policy.allows(actor,Action::rules_manage,"installation");
         Json model = nullptr;
         if (canManage && callbacks.modelStatus) {
@@ -38,10 +37,12 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                          {"canSignIn",bool(callbacks.modelLogin)}};
             } catch (const std::exception&) { model = {{"unavailable",true}}; }
         }
+        const auto t3Setup = canManage && callbacks.t3Setup ? callbacks.t3Setup(actor) : Json(nullptr);
+        const auto connection = T3Connections(store).settings(actor.id,actor.adminRoot);
         auto personActionNames = Json::array();
         for (const auto action : personOnlyActions) personActionNames.push_back(actionName(action));
         reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
-                       {"canManagePolicy",canManage},{"model",std::move(model)},
+                       {"canManagePolicy",canManage},{"model",std::move(model)},{"t3Setup",t3Setup},
                        {"personOnlyActions",std::move(personActionNames)},
                        {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
                                         : Json(nullptr)}});
@@ -68,6 +69,24 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
         catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
         catch (const std::exception&) { reply(res,503,{{"error","sign_in_unavailable"}}); }
+    });
+    server.Post("/api/settings/t3-connect",[&](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 8192) return reply(res,413,{{"error","payload_too_large"}});
+        try {
+            const auto actor = person(callbacks,req);
+            if (!store.policy().allows(actor,Action::rules_manage,"installation")) throw DecisionDenied{};
+            const auto args = Json::parse(req.body);
+            if (!args.is_object() || args.size() != 2) return reply(res,400,{{"error","invalid_input"}});
+            const auto environment = args.at("environmentId").get<std::string>();
+            const auto url = args.at("mcpUrl").get<std::string>();
+            if (environment.empty() || url.empty()) return reply(res,400,{{"error","invalid_input"}});
+            if (!callbacks.t3Connect) return reply(res,409,{{"error","connect_unavailable"}});
+            if (!callbacks.t3Connect(actor,environment,url)) return reply(res,409,{{"error","connect_pending"}});
+            reply(res,202,{{"ok",true}});
+        } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
+        catch (const Conflict&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const std::exception&) { reply(res,503,{{"error","connect_unavailable"}}); }
     });
     server.Post(R"(/api/settings/(mode|rule))",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 4096) return reply(res,413,{{"error","payload_too_large"}});
