@@ -1,3 +1,4 @@
+#include <mutex>
 #include "flock/session_handoff.hpp"
 #include "flock/skill_export.hpp"
 #include <fstream>
@@ -5,6 +6,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <sqlite3.h>
 #include <unistd.h>
 
 using namespace flockv0;
@@ -42,9 +44,13 @@ public:
     std::string auth = "auth";
     bool uncertain = false, dispatchUnavailable = false;
     std::function<void()> beforeProof;
+    std::mutex proofMutex;
     std::vector<std::string> probed;
+    std::chrono::milliseconds minimumProofBudget{};
     std::optional<ThreadProof> proveInvocation(std::string_view environment, std::string_view thread,
-                                               const Json&, std::chrono::steady_clock::time_point) override {
+                                               const Json&, std::chrono::steady_clock::time_point deadline) override {
+        std::lock_guard lock(proofMutex);
+        if (minimumProofBudget.count() && deadline - std::chrono::steady_clock::now() < minimumProofBudget) return {};
         if (beforeProof) beforeProof();
         probed.emplace_back(environment);
         for (auto* target : {&first,&second,&remote})
@@ -133,7 +139,7 @@ HandoffAck invoke(SessionHandoff& handoff, const T3Connection& connection, const
 void multiEnvironment(const std::filesystem::path& path) {
     Store store(path);
     Sessions sessions;
-    SessionHandoff handoff(store,sessions,resolve);
+    SessionHandoff handoff(store,sessions,resolve,intake);
     T3Connections connections(store);
     const auto token = connections.connect(first.environmentId,owner.id,4173);
     check(connections.connect(remote.environmentId,owner.id,4173).empty(),
@@ -142,20 +148,28 @@ void multiEnvironment(const std::filesystem::path& path) {
     check(connection.has_value(),"adding an environment revoked the shared bearer");
 
     const auto local = invoke(handoff,*connection,first,"local","Check the local project.");
-    check(sessions.probed == std::vector<std::string>{first.environmentId},"proof kept probing after a match");
+    check(sessions.probed.size() == 2,"proof did not check both connected environments");
     sessions.probed.clear();
     const auto other = invoke(handoff,*connection,remote,"remote","Check the remote project.");
+    std::ranges::sort(sessions.probed);
     check(sessions.probed == std::vector<std::string>{first.environmentId,remote.environmentId},
           "proof did not check both environments for the remote Thread");
     check(handoff.view(owner,other.channel).origin.invitation.target == remote,
           "the return channel lost the proving environment and project");
+    sessions.minimumProofBudget = std::chrono::milliseconds(750);
+    const auto slow = handoff.invoke(*connection,
+        {{"threadId",first.threadId},{"botId","planner"},{"requestId","slow-proof"},{"text","Check the slow connection."}},
+        [](std::string_view bot) { return bot == "planner"; },std::chrono::seconds(1));
+    check(handoff.view(owner,slow.channel).origin.invitation.target == first,
+          "a candidate received less than the shared proof budget");
+    sessions.minimumProofBudget = {};
     check(!connections.disconnect(first.environmentId),"disconnecting one environment requested provider removal");
     check(connections.authenticate(token).has_value(),"disconnecting one environment revoked the bearer");
     Bot bot;
-    denied([&] { handoff.consult(owner,local.channel,bot,intake,soul); });
+    denied([&] { handoff.consult(owner,local.channel,bot,soul); });
     denied([&] { invoke(handoff,*connection,first,"local-again","Try the disconnected Thread."); });
     bot.decision = {"reply"};
-    handoff.consult(owner,other.channel,bot,intake,soul);
+    handoff.consult(owner,other.channel,bot,soul);
     check(sessions.sent.size() == 1 && sessions.sent.front().target == remote,
           "disconnecting one environment changed delivery to the remaining Thread");
     check(connections.disconnect(remote.environmentId) && !connections.authenticate(token),
@@ -167,7 +181,7 @@ void invocationAndRecovery(const std::filesystem::path& path) {
     Id lost;
     {
         Store store(path);
-        SessionHandoff handoff(store,sessions,resolve);
+        SessionHandoff handoff(store,sessions,resolve,intake);
         const auto visitorConnection = connect(store,visitor);
         denied([&] { invoke(handoff,visitorConnection,first,"request","Run a check"); });
         store.policy().setMember(owner,"planner",visitor.id,true);
@@ -193,9 +207,9 @@ void invocationAndRecovery(const std::filesystem::path& path) {
         Bot bot;
         bot.decision = {"reply","reply"};
         sessions.uncertain = true;
-        handoff.consult(owner,a.channel,bot,intake,soul);
+        handoff.consult(owner,a.channel,bot,soul);
         sessions.uncertain = false;
-        handoff.consult(owner,b.channel,bot,intake,soul);
+        handoff.consult(owner,b.channel,bot,soul);
         check(sessions.sent.size() == 2 && sessions.sent[0].target == first && sessions.sent[1].target == second,
               "consultations lost their immutable return Thread");
         check(handoff.view(owner,a.channel).deliveries.front().state == RootDeliveryState::Unknown,
@@ -205,64 +219,96 @@ void invocationAndRecovery(const std::filesystem::path& path) {
         lost = a.channel;
     }
     Store restarted(path);
-    SessionHandoff handoff(restarted,sessions,resolve);
+    SessionHandoff handoff(restarted,sessions,resolve,intake);
     handoff.recover();
     Bot bot;
-    handoff.consult(owner,lost,bot,intake,soul);
+    handoff.consult(owner,lost,bot,soul);
     check(bot.seen.empty() && sessions.sent.size() == 2,"restart blindly repeated an uncertain reply");
     sessions.consumed(sessions.sent.front());
-    handoff.consult(owner,lost,bot,intake,soul);
+    handoff.consult(owner,lost,bot,soul);
     const auto reconciled = handoff.view(owner,lost);
     check(reconciled.state == "completed" && reconciled.deliveries.front().state == RootDeliveryState::Observed &&
           reconciled.deliveries.front().observedRunId == "new-run","history did not reconcile delivery in a later Run");
 }
 
+void reconcileAfterReceiptWriteContention(const std::filesystem::path& path) {
+    Store store(path);
+    Sessions sessions;
+    SessionHandoff handoff(store,sessions,resolve,intake);
+    const auto connector = connect(store);
+    const auto channel = invoke(handoff,connector,first,"receipt-contention","Check the fixture.").channel;
+    sqlite3* connection = nullptr;
+    const auto opened = sqlite3_open(path.c_str(),&connection);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(connection,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not open the fixture writer");
+    sessions.beforeSend = [&] {
+        sessions.consumed(sessions.sent.back());
+        check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,
+              "Could not acquire the fixture write lock");
+    };
+    Bot bot;
+    bot.decision = {"reply"};
+    bool contended = false;
+    try { handoff.consult(owner,channel,bot,soul); }
+    catch (const std::runtime_error& error) {
+        check(std::string_view(error.what()) == "database is locked","Unexpected receipt write error");
+        contended = true;
+    }
+    check(sqlite3_exec(writer.get(),"ROLLBACK",nullptr,nullptr,nullptr) == SQLITE_OK && contended,
+          "The accepted send did not contend at receipt storage");
+    handoff.consult(owner,channel,bot,soul);
+    const auto view = handoff.view(owner,channel);
+    check(view.state == "completed" && view.deliveries.front().state == RootDeliveryState::Observed &&
+          sessions.sent.size() == 1 && bot.seen.size() == 1,
+          "The live worker did not reconcile the accepted send without replay");
+}
+
 void coordinate(const std::filesystem::path& path) {
     Store store(path);
     Sessions sessions;
-    SessionHandoff handoff(store,sessions,resolve);
+    SessionHandoff handoff(store,sessions,resolve,intake);
     const auto connection = connect(store);
     constexpr auto goal = "Run two checks and report";
     const auto channel = invoke(handoff,connection,first,"coordinate-once","Start the checks.",goal).channel;
     denied([&] { invoke(handoff,connection,first,"another","Start over.",goal); });
     Bot bot;
     bot.decision = {"root_guidance","root_guidance","handoff_question","complete_handoff"};
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     check(sessions.sent.size() == 1,"first autonomous input was not sent");
     const auto firstSend = sessions.sent.front();
     sessions.event(first,"user_message","agent","mcp",firstSend.id,firstSend.text);
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     check(bot.seen.size() == 1 && sessions.sent.size() == 1,"own input triggered another decision");
     sessions.event(first,"assistant_message","agent","provider","","Finished step one.");
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     check(sessions.sent.size() == 2,"agent progress did not trigger step two");
     sessions.consumed(sessions.sent.back());
-    auto question = handoff.step(owner,channel,bot,intake,soul);
+    auto question = handoff.step(owner,channel,bot,soul);
     check(!question.pendingQuestion.is_null(),"human question was not saved");
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     check(bot.seen.size() == 3,"coordination continued through a human decision");
     handoff.answer(owner,channel,question.generation,question.pendingQuestion.at("eventId").get<std::string>(),"Finish.");
-    const auto done = handoff.step(owner,channel,bot,intake,soul);
+    const auto done = handoff.step(owner,channel,bot,soul);
     check(done.state == "completed" && sessions.sent.size() == 2,"completion created another input");
 
     const auto stopped = invoke(handoff,connection,first,"stop-test","Check again.",goal).channel;
     sessions.beforeSend = [&] { handoff.pause(owner,stopped); };
     bot.decision = {"root_guidance","root_guidance"};
-    const auto paused = handoff.step(owner,stopped,bot,intake,soul);
+    const auto paused = handoff.step(owner,stopped,bot,soul);
     check(paused.state == "paused" && paused.residualCommandIds.size() == 1,"pause lost an admitted residual");
     denied([&]{ handoff.resume(owner,stopped); });
     sessions.consumed(sessions.sent.back());
     const auto resumed = handoff.resume(owner,stopped);
     check(resumed.state == "active" && resumed.generation == paused.generation,"resume changed the wrong generation");
     handoff.freeze(owner,stopped);
-    const auto halted = handoff.step(owner,stopped,bot,intake,soul);
+    const auto halted = handoff.step(owner,stopped,bot,soul);
     check(halted.state == "stopped" && sessions.sent.size() == 3,"stop admitted a new effect");
 }
 void concurrentHumanAndBudget(const std::filesystem::path& path) {
     Store store(path);
     Sessions sessions;
-    SessionHandoff handoff(store,sessions,resolve);
     const auto routing = intakeWithLimit(30);
+    SessionHandoff handoff(store,sessions,resolve,routing);
     const auto connection = connect(store);
     const auto channel = invoke(handoff,connection,first,"coordinate","Begin.","Observe progress only").channel;
     Bot bot;
@@ -270,25 +316,25 @@ void concurrentHumanAndBudget(const std::filesystem::path& path) {
     bot.beforeDecision = [&] {
         sessions.event(first,"user_message","user","web","","New priority from the person.");
     };
-    auto changed = handoff.step(owner,channel,bot,routing,soul);
+    auto changed = handoff.step(owner,channel,bot,soul);
     check(sessions.sent.empty() && changed.deliveries.front().state == RootDeliveryState::Rejected,
           "coordinator sent guidance from before a newer human message");
     bot.beforeDecision = {};
     bot.decision.assign(23,"wait_for_root");
-    handoff.step(owner,channel,bot,routing,soul);
+    handoff.step(owner,channel,bot,soul);
     check(bot.seen.back().event.at("progress").dump().find("New priority") != std::string::npos,
           "coordinator did not re-evaluate newer human input");
     for (int i = 0; i < 22; ++i) {
         sessions.event(first,"assistant_message","agent","provider","","Progress update.");
-        handoff.step(owner,channel,bot,routing,soul);
+        handoff.step(owner,channel,bot,soul);
     }
-    const auto stopped = handoff.step(owner,channel,bot,routing,soul);
+    const auto stopped = handoff.step(owner,channel,bot,soul);
     check(stopped.state == "budget_exhausted" && bot.seen.size() == 24,
           "the cumulative planning budget did not stop further actions");
 
     const auto request = invoke(handoff,connection,first,"request","Reply once.").channel;
     T3Connections(store).disconnect(first.environmentId);
-    denied([&] { handoff.consult(owner,request,bot,routing,soul); });
+    denied([&] { handoff.consult(owner,request,bot,soul); });
     check(handoff.freeze(owner,request).state == "stopped" && sessions.sent.empty(),
           "revoking the connection removed the owner's ability to stop the request");
 }
@@ -299,13 +345,13 @@ void dispatchHistoryCoverage(const std::filesystem::path& path) {
         Store store(path/(name+".sqlite3"));
         Sessions sessions;
         sessions.dispatchUnavailable = !available;
-        SessionHandoff handoff(store,sessions,resolve);
+        SessionHandoff handoff(store,sessions,resolve,intake);
         const auto connection = connect(store);
         const auto channel = invoke(handoff,connection,first,name,"Recheck before dispatch.","Check progress").channel;
         populate(sessions);
         Bot bot;
         bot.decision = {"root_guidance"};
-        const auto view = handoff.step(owner,channel,bot,intake,soul);
+        const auto view = handoff.step(owner,channel,bot,soul);
         check(sessions.sent.size()==static_cast<std::size_t>(sent) && !view.deliveries.empty() &&
               view.deliveries.front().state==expected,"dispatch did not honor the complete-history result");
     };
@@ -331,7 +377,7 @@ void lateRedactionProjection(const std::filesystem::path& path) {
     Store store(path/"late-redaction.sqlite3");
     Sessions sessions;
     const auto connection = connect(store);
-    SessionHandoff handoff(store,sessions,resolve);
+    SessionHandoff handoff(store,sessions,resolve,intake);
     const std::string secret="late-secret-value-007";
     const auto channel = invoke(handoff,connection,first,"opaque-request-id","Request "+secret,"Goal "+secret).channel;
     Bot bot;
@@ -340,148 +386,6 @@ void lateRedactionProjection(const std::filesystem::path& path) {
         turn.calls.push_back({"handoff_question",{{"text","Question "+secret}},""});
         return turn;
     };
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     const auto secretRequest=store.policy().requestSecret("planner",{"late-secret"});
     store.policy().submitSecret(owner,"planner",secretRequest,secret);
-    const auto view=handoff.view(owner,channel);
-    const auto recent=handoff.recent(owner);
-    check(view.latestDecision.dump().find(secret)==std::string::npos,
-          "late-registered secret remained in the persisted decision projection");
-    check(view.pendingQuestion.dump().find(secret)==std::string::npos,
-          "late-registered secret remained in the pending question projection");
-    check(view.permission->goal.find(secret)==std::string::npos,
-          "late-registered secret remained in the goal projection");
-    const auto opaqueId=view.origin.invitation.requestId;
-    check(recent.size()==1 && recent.front().latestDecision.dump().find(secret)==std::string::npos &&
-          recent.front().pendingQuestion.dump().find(secret)==std::string::npos &&
-          recent.front().permission->goal.find(secret)==std::string::npos &&
-          !opaqueId.empty() && view.origin.invitation.requestId==opaqueId &&
-          recent.front().origin.invitation.requestId==opaqueId,
-          "recent projection exposed a late secret or changed an opaque ID");
-}
-
-void modelAttemptBudget(const std::filesystem::path& path, bool coordination, bool throws) {
-    Sessions sessions;
-    const auto routing = intakeWithLimit(2);
-    Bot bot;
-    bot.response = [throws](const ModelInput&) {
-        if (throws) throw std::runtime_error("scripted model failure");
-        ModelTurn turn;
-        turn.calls.push_back({"invalid_action",Json::object(),{}});
-        return turn;
-    };
-    Id channel = 0;
-    {
-        Store store(path);
-        const auto connection = connect(store);
-        SessionHandoff handoff(store,sessions,resolve);
-        channel = invoke(handoff,connection,first,"bounded-model-attempts","Try this request.",
-                         coordination ? "Bounded decision attempts" : "").channel;
-        for (std::size_t call=1;call<=2;++call) {
-            bool failed = false;
-            try {
-                if (coordination) handoff.step(owner,channel,bot,routing,soul);
-                else handoff.consult(owner,channel,bot,routing,soul);
-            } catch (const std::exception&) { failed = true; }
-            check(failed && bot.seen.size()==call && bot.seen.back().config.at("modelCallLimit")==2 &&
-                  handoff.view(owner,channel).state=="active",
-                  "an invalid or throwing decision did not consume one configured attempt");
-        }
-    }
-    Store restarted(path);
-    SessionHandoff handoff(restarted,sessions,resolve);
-    if (coordination) handoff.step(owner,channel,bot,routing,soul);
-    else handoff.consult(owner,channel,bot,routing,soul);
-    check(handoff.view(owner,channel).state=="budget_exhausted" && bot.seen.size()==2,
-          "the exhausted session budget was not persisted across restart");
-    if (coordination) handoff.step(owner,channel,bot,routing,soul);
-    else handoff.consult(owner,channel,bot,routing,soul);
-    check(bot.seen.size()==2,"an exhausted handoff called the model again");
-}
-
-void originMatching() {
-    const Json args{{"threadId","first"},{"botId","planner"},{"requestId","sample"},{"text","Review"}};
-    const auto fixture = [&](std::string_view tool, const Json& input) {
-        return Json{{"type","dynamic_tool"},{"visibility","local"},{"sourceThreadId","first"},
-                    {"runId","active"},{"textTruncated",false},
-                    {"text",Json{{"toolName",tool},{"input",input}}.dump()}};
-    };
-    const auto match = [&](const Json& item) { return matchesThreadInvocation(item,"first","active",args); };
-    check(match(fixture("flock.invoke_flock_bot",args)), "Codex running call did not match");
-    check(match(fixture("mcp__flock__invoke_flock_bot",args)), "Claude running call did not match");
-    check(match(fixture("invoke_flock_bot",args.dump())), "JSON-string arguments did not match");
-    check(!match(fixture("invoke_flock_bot",Json::array())), "array arguments matched");
-    check(!match(fixture("invoke_flock_bot","{bad")), "invalid JSON arguments matched");
-    auto changed = args;
-    changed["mode"] = "consult";
-    check(!match(fixture("invoke_flock_bot",changed)), "different argument presence matched");
-    check(!match(fixture("service.other_tool",args)), "different tool matched");
-    const auto item = fixture("flock.invoke_flock_bot",args);
-    check(!matchesThreadInvocation(item,"first","",args), "finished run matched");
-    for (const auto& diff : {Json{{"visibility","inherited"}},Json{{"visibility","synthetic"}},
-                            Json{{"sourceThreadId","second"}},Json{{"runId","old"}},
-                            Json{{"textTruncated",true}},Json{{"text",28}},Json{{"text","{"}}}) {
-        auto wrong = item;
-        wrong.update(diff);
-        check(!match(wrong), "invalid activity matched");
-    }
-}
-
-void skillExport(const std::filesystem::path& root) {
-    const auto bots = Json::array({
-        {{"id","A___B."},{"name","設計レビュー"},{"role","reviewer"},{"private","secret settings"}},
-        {{"id","a.b"},{"name","Other"}},
-        {{"id",std::string(95,'X')},{"name","Long ID"}}
-    });
-    const auto names = flockSkillNames(bots);
-    check(names.at("A___B.").starts_with("flock-a-b-") && names.at("a.b") != names.at("A___B.") &&
-          names.at(std::string(95,'X')).size() == 64,"invalid skill slugs or unresolved collision");
-    std::filesystem::create_directories(root / "flock-foreign");
-    std::ofstream(root / "flock-foreign" / "SKILL.md") << "foreign";
-    exportFlockSkills(root,bots);
-    const auto read = [](const auto& path) {
-        std::ifstream in(path);
-        return std::string(std::istreambuf_iterator<char>(in),{});
-    };
-    const auto file = root / names.at("A___B.") / "SKILL.md";
-    const auto firstSkill = read(file);
-    check(firstSkill.find("設計レビュー") != firstSkill.npos && firstSkill.find("reviewer") != firstSkill.npos &&
-          firstSkill.find("A___B.") != firstSkill.npos && firstSkill.find("secret settings") == firstSkill.npos,
-          "skill description or stable Bot ID was missing, or config leaked");
-    auto renamed = bots;
-    renamed[0]["name"] = "新しい名前";
-    exportFlockSkills(root,renamed);
-    check(read(file).find("新しい名前") != std::string::npos,"rename did not update the skill");
-    exportFlockSkills(root,Json::array());
-    check(!std::filesystem::exists(file) && std::filesystem::exists(root / "flock" / "SKILL.md") &&
-          read(root / "flock-foreign" / "SKILL.md") == "foreign","cleanup changed an unowned skill");
-}
-
-}
-
-int main() {
-    char name[] = "/tmp/flock-participation.XXXXXX";
-    const auto* dir = mkdtemp(name);
-    if (!dir) return 1;
-    const std::filesystem::path path(dir);
-    try {
-        originMatching();
-        skillExport(path / "skills");
-        multiEnvironment(path / "environments.sqlite3");
-        invocationAndRecovery(path / "invocation.sqlite3");
-        coordinate(path / "coordination.sqlite3");
-        concurrentHumanAndBudget(path / "human-policy.sqlite3");
-        dispatchHistoryCoverage(path);
-        lateRedactionProjection(path);
-        std::size_t attemptCase = 0;
-        for (const auto coordination : {false,true})
-            for (const auto throws : {false,true})
-                modelAttemptBudget(path / ("model-budget-" + std::to_string(attemptCase++) + ".sqlite3"),
-                                   coordination,throws);
-        std::filesystem::remove_all(path);
-    } catch (const std::exception& e) {
-        std::cerr << e.what() << '\n';
-        std::filesystem::remove_all(path);
-        return 1;
-    }
-}

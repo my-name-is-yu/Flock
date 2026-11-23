@@ -392,7 +392,7 @@ Credential loadCredential(const std::filesystem::path& path, const std::string& 
 
 }
 
-void loginT3(const std::filesystem::path& credentialDirectory, const std::string& environmentId,
+bool loginT3(const std::filesystem::path& credentialDirectory, const std::string& environmentId,
              const std::string& mcpUrl, const std::function<void(const std::string&)>& showAuthorizationUrl, bool requireOperate) {
     using namespace t3detail;
     const auto name = credentialName(environmentId);
@@ -441,5 +441,6 @@ void loginT3(const std::filesystem::path& credentialDirectory, const std::string
     if (str(identity, "environmentId") != environmentId)
         throw Failure(Failure::Kind::Settings, "The OAuth endpoint belongs to a different T3 environment");
     saveCredential(directory.get(), name, environmentId, credential);
+    return operateScope;
 }
 }
