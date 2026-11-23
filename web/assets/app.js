@@ -76,7 +76,7 @@ const sessionEndLabels = {
 };
 const stateLabels = {
   ...sessionEndLabels,
-  queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for input',
+  queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for you',
   cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
@@ -176,7 +176,7 @@ function linkToRun(run, label = 'Open in T3') {
   link.rel = 'noopener noreferrer';
   return link;
 }
-function waitLabel(reason) { return waitLabels[reason]?.[0] ?? 'Waiting for input'; }
+function waitLabel(reason) { return waitLabels[reason]?.[0] ?? 'Waiting for you'; }
 function waitText(wait) { return wait.text || waitLabels[wait.reason]?.[1] || 'Refresh the pending request.'; }
 function startedText(seconds, precise = false) {
   return seconds ? `started ${(precise ? preciseClock : clock).format(seconds * 1000)}` : '';
@@ -825,7 +825,7 @@ function scheduleReadCheck() {
   });
 }
 
-const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for input', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
+const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for you', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
 const participant = (id) => bots.find((bot) => bot.id === id) ?? { id, name: id };
 const botPeers = (id) => participant(id).peers ?? [];
 
