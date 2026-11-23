@@ -14,7 +14,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 5;
+constexpr Id schemaVersion = 6;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -396,14 +396,16 @@ void Store::Impl::peerMessage(const PeerExchange& exchange, const Json& message)
     journal(exchange.recipient,"bot_message",message);
 }
 
-void Store::Impl::requestCancellation(Json& task) {
+void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
     const Id id = task["id"];
     const auto peer = peerExchange(id);
     if (!task.value("pendingInstructions",Json::array()).empty())
         task["cancelledInstructions"] = task.at("pendingInstructions");
     clearWait(task,"cancel");
     consumeEvent(task);
-    journal(id,"cancel_requested",Json::object());
+    journal(id,"cancel_requested",stop.participation
+        ? Json{{"sessionParticipationId",stop.participation},{"sessionStopId",stop.cutoff}}
+        : Json::object());
     if (task["state"] == "queued" && !peer) {
         for (const auto* key : {"replanning","pendingEnvironmentId","environmentReleased","pendingInstructions"})
             task.erase(key);
@@ -413,7 +415,15 @@ void Store::Impl::requestCancellation(Json& task) {
     save(task);
     if (peer && peer->sender == id) {
         auto recipient = load(peer->recipient);
-        if (!terminal(recipient) && recipient["state"] != "cancelling") requestCancellation(recipient);
+        if (stop.participation) {
+            // The Session exit owns this task's Run, while the peer still owns its own task and Run.
+            exec("UPDATE peer_exchanges SET phase='closed' WHERE id=?",{peer->id});
+            if (recipient["state"] == "peer_waiting") {
+                event(recipient,"peer-closed/" + peer->id,{{"kind","intake"}});
+                recipient["state"] = "deciding";
+                save(recipient);
+            }
+        } else if (!terminal(recipient) && recipient["state"] != "cancelling") requestCancellation(recipient);
     }
 }
 
@@ -861,7 +871,7 @@ WITH visible AS NOT MATERIALIZED (
   WHERE id<=?2
     AND (?3=0 OR kind IN ('conversation_reply','report','completed','pr_review_requested')
          OR (kind='waiting' AND json_extract(data,'$.reason')='user_question'))
-    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','conversation_budget_approved'))
+    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','conversation_budget_approved','session_participation_stop'))
       OR (conversation_bot_id IS NULL
         AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')

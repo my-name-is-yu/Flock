@@ -104,6 +104,10 @@ struct PolicyOrigin {
     bool background = false;
 };
 struct SessionStopResult;
+enum class SessionExit { removed, left };
+struct SessionStop {
+    Id participation = 0, cutoff = 0;
+};
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
 std::string_view approvalError(ApprovalGate);
 
@@ -166,10 +170,10 @@ struct Store::Impl {
     Person sessionActor(std::string_view person);
     bool activeSessionOrigin(const conversation::Message&) const;
     bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
-                             std::string_view destinationEnvironment) const;
-    bool sessionParticipationStopped(std::string_view bot, const SessionTarget&) const;
-    Id stopSessionParticipation(const Person&, std::string_view bot, const SessionTarget&);
-    SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, Id participation = 0);
+                             std::string_view destinationEnvironment, Id message) const;
+    bool sessionParticipationStopped(std::string_view bot, const SessionTarget&, Id message) const;
+    SessionStop stopSessionParticipation(const Person&, std::string_view bot, const SessionTarget&, SessionExit, Id message = 0);
+    SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     void initializeMemorySchema();
     void initializeAutomationSchema();
@@ -330,7 +334,7 @@ struct Store::Impl {
     bool peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const;
     bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
-    void requestCancellation(Json&);
+    void requestCancellation(Json&, SessionStop stop = {});
     Id journal(Id, std::string_view kind, const Json&);
     Id event(Json&, std::string_view key, Json data);
     Json currentEvent(const Json&) const;

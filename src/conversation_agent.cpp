@@ -696,7 +696,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     const auto wake = message.routing.find("sessionWake");
     const bool isWake = wake != message.routing.end();
     const bool stoppedWake = isWake && sessionParticipationStopped(
-        message.bot,{field(*wake,"environmentId"),field(*wake,"threadId")});
+        message.bot,{field(*wake,"environmentId"),field(*wake,"threadId")},message.id);
     const bool usesSessionOrigin = message.principalSource == PrincipalSource::session ||
         (isWake && message.routing.contains("sessionOrigin"));
     // A wake can be queued before a stop commits and reach this turn after it commits.

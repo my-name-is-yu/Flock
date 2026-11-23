@@ -165,7 +165,7 @@ void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& rec
     if (!acceptedSessionSend(target,delivery)) return;
     exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified) VALUES(?,?,?,?,?,?,?)",
          {message,bot,target.environmentId,target.threadId,delivery.run.runId,title,
-          sessionParticipationStopped(bot,target) ? 1 : 0});
+          sessionParticipationStopped(bot,target,message) ? 1 : 0});
 }
 
 bool Store::Impl::sendSessionMessage(const conversation::Message& message, int step, const Decision& decision,
@@ -212,7 +212,7 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
                 recordSessionSendRun(id,receipt->second);
                 saveReceipt(receipt->second.delivery);
             } else save({{"ok",false},{"delivery","unknown"},{"error","Flock restarted while sending this. Check the Session before sending again."}});
-        } else if (sessionParticipationStopped(message.bot,target)) {
+        } else if (sessionParticipationStopped(message.bot,target,id)) {
             save(toolFailure(stopped));
         } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
             save(webEvidenceActionDenied());
@@ -245,7 +245,7 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         Transaction transaction(db);
         if (shutdown.stop_requested()) return false;
         if (!authorizeTurn(message)) { transaction.commit(); return false; }
-        if (sessionParticipationStopped(message.bot,target)) {
+        if (sessionParticipationStopped(message.bot,target,id)) {
             save(toolFailure(stopped));
             transaction.commit();
             return true;
@@ -308,7 +308,7 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
         if (shutdown.stop_requested()) return;
         const auto authorized = [&] {
             const auto message = loadTurnMessage(wait.message);
-            return !sessionParticipationStopped(wait.bot,wait.target) &&
+            return !sessionParticipationStopped(wait.bot,wait.target,wait.message) &&
                 (message.principalSource != conversation::PrincipalSource::session || activeSessionOrigin(message)) &&
                 connectedSessionAccess(message,wait.target);
         };

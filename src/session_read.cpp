@@ -671,7 +671,7 @@ bool Store::Impl::connectedSessionAccess(const conversation::Message& message, c
         const SessionTarget parent{origin->at("environmentId"),origin->at("threadId")};
         const auto authorized = [&] {
             const auto actor = turnActor(message);
-            return activeSessionOrigin(message.bot,actor.id,parent,target.environmentId) &&
+            return activeSessionOrigin(message.bot,actor.id,parent,target.environmentId,message.id) &&
                 policy.allows(actor,Action::bot_decide,message.bot);
         };
         if (target == parent) return authorized();

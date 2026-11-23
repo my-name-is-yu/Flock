@@ -350,8 +350,8 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         text("threadId","The Session's thread ID.");
         text("note","What you want the invited Bot to do in the Session.");
     } else if (name == "leave_session") {
-        description = "Stop your participation in this T3 Session and stop all Bots you invited, including their invitees. "
-                      "Cancel your group's queued Bot messages and report any that already started. The person's work continues.";
+        description = "Step out of this T3 Session with the Bots you invited, including their invitees. Cancel your group's queued "
+                      "messages and stop child Sessions you launched from here. You can be asked or invited back.";
         text("environmentId","The Session's environment ID.");
         text("threadId","The Session's thread ID.");
     } else if (name == "interrupt_session") {

@@ -2,7 +2,7 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
-Flock reopens databases with the current schema version (5). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
+Flock reopens databases with the current schema version (6). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
 
 ## Build
 

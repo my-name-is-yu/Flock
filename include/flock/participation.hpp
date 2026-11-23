@@ -9,7 +9,7 @@ struct SessionAsk {
 };
 
 struct SessionStopResult {
-    Id cancelled = 0, alreadyStarted = 0, notCancellable = 0, pending = 0;
+    Id cancelled = 0, alreadyStarted = 0, notCancellable = 0, pending = 0, stoppedChildSessions = 0;
     Json data() const;
     std::string summary() const;
 };

@@ -870,12 +870,13 @@ ORDER BY id)SQL");
                 const auto source = db.loadTurnMessage(current.at("sourceMessageId"));
                 const auto actor = db.turnActor(source);
                 const SessionTarget parent{field(*origin,"environmentId"),field(*origin,"threadId")};
-                if (!db.activeSessionOrigin(cmd.ownerBotId,actor.id,parent,cmd.environmentId) ||
+                if (!db.activeSessionOrigin(cmd.ownerBotId,actor.id,parent,cmd.environmentId,source.id) ||
                     !policy.allows(actor,Action::bot_decide,cmd.ownerBotId) ||
                     !policy.allows(cmd.ownerBotId,Action::environment_inspect,parent.environmentId)) return false;
                 if (!sendsToSession) return true;
             }
-            if (db.sessionParticipationStopped(cmd.ownerBotId,{cmd.environmentId,cmd.target.threadId})) return false;
+            if (db.sessionParticipationStopped(cmd.ownerBotId,{cmd.environmentId,cmd.target.threadId},
+                                               current.value("sourceMessageId",Id{}))) return false;
             if (!usesExistingSession || !current.contains("selectedSession")) return cmd.tool != "start_in_session";
             const auto& selected = current.at("selectedSession");
             if (field(selected,"environmentId") != cmd.environmentId || field(selected,"threadId") != cmd.target.threadId ||

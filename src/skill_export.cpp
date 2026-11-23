@@ -15,7 +15,7 @@ constexpr std::string_view askInstructions = R"(Get threadId from currentThreadI
 Call flock_ask with bot, threadId, the request text, and a fresh requestId. Retry the same request with identical arguments.
 Bot messages arrive in this Session prefixed with the Bot's name. No polling is needed.
 Show messages addressed to the person and let them answer. Forward their reply with flock_ask using the same bot and threadId and a new requestId.
-Use flock_stop with bot and threadId when the person asks the Bot to leave the Session.
+Use flock_stop with bot and threadId when the person asks to remove the Bot from the Session. A new flock_ask brings it back.
 )";
 
 std::string slug(std::string_view id) {

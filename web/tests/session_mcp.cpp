@@ -18,6 +18,21 @@ constexpr auto aliceCredential = "Bearer flock-fixture-alice";
 const Person alice{"alice",true}, bob{"bob"};
 const Json sessionOrigin{{"environmentId","env-1"},{"threadId","thread"},{"title","Staging follow-up"}};
 
+std::string participationState(const std::filesystem::path& database, const char* bot) {
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open_v2(database.c_str(),&raw,SQLITE_OPEN_READONLY,nullptr);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> sql(raw,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not read the Session participation database");
+    sqlite3_stmt* statement = nullptr;
+    const auto prepared = sqlite3_prepare_v2(sql.get(),
+        "SELECT state FROM session_participations WHERE bot_id=? AND environment_id='env-1' AND thread_id='thread'",
+        -1,&statement,nullptr);
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> row(statement,sqlite3_finalize);
+    check(prepared == SQLITE_OK && sqlite3_bind_text(row.get(),1,bot,-1,SQLITE_TRANSIENT) == SQLITE_OK &&
+          sqlite3_step(row.get()) == SQLITE_ROW,"Could not find the Session participation");
+    return reinterpret_cast<const char*>(sqlite3_column_text(row.get(),0));
+}
+
 class Mcp {
 public:
     Mcp(const WebServer& server, std::string_view token) : client("127.0.0.1",static_cast<int>(server.port())) {
@@ -246,6 +261,8 @@ void webSendParticipation() {
     send("web-send-after-stop");
     check(t3.sends == 1 && model.send == Json{{"ok",false},{"error","This Bot's participation in the Session has stopped"}},
           "A Web send reopened the stopped participation");
+    check(participationState(dir.path/"flock.sqlite3","release") == "removed",
+          "A Web send changed the removed participation");
 }
 
 void sessionInvitations() {
@@ -283,6 +300,7 @@ void sessionInvitations() {
         std::string thread = "thread";
         std::map<std::string,Json> events, receipts;
         int wakes = 0, invitations = 0;
+        bool inviteOnly = false;
 
         ModelTurn decide(const ModelInput& input) override {
             const auto& event = input.event;
@@ -301,9 +319,15 @@ void sessionInvitations() {
                 return {{{"invite_bot",{{"botId",recipient},{"environmentId","env-1"},{"threadId",thread},
                                         {"note","Review the staging checks."}},"Invite a Bot to the Session"}}};
             };
+            if (event.at("text") == "Leave this Session") {
+                check(steps.empty(),"A Bot reached the model again after leaving its Session");
+                return {{{"leave_session",{{"environmentId","env-1"},{"threadId","thread"}},"Leave the Session"}}};
+            }
+            if (event.at("text") == "Rejoin the Session") return reply();
             if (steps.empty() && event.contains("sessionInvitation")) {
                 ++invitations;
                 events[bot] = event;
+                if (inviteOnly) return reply();
                 for (const auto* tool : {"flock_session_events","message_session","start_task","invite_bot"})
                     check(std::ranges::find(input.tools,tool) != input.tools.end(),"The invited Bot lost an ordinary Session tool");
                 if (bot == "Triage Bot")
@@ -428,7 +452,7 @@ void sessionInvitations() {
     };
     check(stop("specialist").at("structuredContent").at("stopped") == true && t3.cancellationAttempts.empty(),
           "Stopping an invitee stopped its inviter");
-    reject("stopped-invitee","specialist","The invited Bot's participation in the Session has stopped");
+    reject("stopped-invitee","specialist","The person removed this Bot from the Session");
     t3.duringRead = [&] {
         const auto result = stop("release");
         check(result.at("structuredContent").at("alreadyStarted") == 1,
@@ -438,14 +462,42 @@ void sessionInvitations() {
     t3.duringRead = {};
     reject("stopped","triage","This Bot's participation in the Session has stopped");
     for (const auto* bot : {"release","triage","settings","specialist"}) {
-        const auto result = mcp.call("flock_ask",{{"bot",bot},{"threadId","thread"},{"requestId",std::string("after-stop-")+bot},
-                                                 {"text","Check whether this participation is still active."}});
-        check(result.value("isError",false),"The cascade left an invited Bot active: " + result.dump());
+        check(participationState(database,bot) == "removed","The stop cascade did not remove an invited Bot");
     }
     check(t3.cancellationAttempts == std::vector<std::string>{"triage-run"} &&
           stop("triage").at("structuredContent").at("alreadyStarted") == 1,
           "Repeated stops did not share the cascade's terminal cancellation receipt");
     check(model.invitations == 3 && model.wakes == 1 && t3.sends.size() == 1,"A rejected invitation produced a side effect");
+
+    const auto reask = [&](const char* bot, const char* key, const char* text) {
+        return mcp.call("flock_ask",{{"bot",bot},{"threadId","thread"},{"requestId",key},{"text",text}});
+    };
+    // Rejoin the inviter first. A former invitee still requires a person's ask.
+    model.target = "triage";
+    const auto back = reask("release","restore-inviter","Resume in this Session");
+    check(back.contains("structuredContent") && reask("release","restore-inviter","Resume in this Session") == back,
+          "Reactivation did not preserve the ask receipt");
+    check(participationState(database,"release") == "active" && participationState(database,"triage") == "removed",
+          "Reactivating an inviter also reactivated its former invitee");
+    runtime->runConversations();
+    check(model.receipts.at("Release Bot") == Json{{"ok",false},{"error","The person removed this Bot from the Session"}},
+          "A reactivated inviter could invite a removed Bot back");
+
+    reask("triage","restore-triage","Rejoin the Session").at("structuredContent");
+    reask("settings","restore-settings","Rejoin the Session").at("structuredContent");
+    reask("release","leave-cascade","Leave this Session").at("structuredContent");
+    runtime->runConversations();
+    for (const auto* bot : {"release","triage","settings"})
+        check(participationState(database,bot) == "left","Leaving did not cascade to an invited Bot");
+    check(participationState(database,"specialist") == "removed","Leaving weakened a person's earlier removal");
+
+    // Reinvite a Bot that left using a fresh turn with an active inviter.
+    model.target = "triage";
+    model.inviteOnly = true;
+    reask("release","return-after-leave","Invite the Bot that left").at("structuredContent");
+    runtime->runConversations();
+    check(model.receipts.at("Release Bot").value("ok",false) && participationState(database,"triage") == "active" &&
+          participationState(database,"settings") == "left","Inviting a Bot back did not reactivate just that Bot");
 }
 
 void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& credentials) {
@@ -584,24 +636,20 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
     check(stopped.at("structuredContent").at("stopped") == true && mcp.call("flock_stop",stop) == stopped,
           "Stop did not end the participation idempotently");
     check(mcp.call("flock_ask",ask) == accepted,"Stop changed the receipt for an already accepted request");
+    check(participationState(database,"release") == "removed","Replaying a previous ask reactivated the removed Bot");
     pending["requestId"] = "ask-4";
-    check(mcp.call("flock_ask",pending).value("isError",false),"A fresh ask reopened a stopped participation");
+    const auto reactivated = mcp.call("flock_ask",pending);
+    check(reactivated.contains("structuredContent") && mcp.call("flock_ask",pending) == reactivated &&
+          participationState(database,"release") == "active","A fresh ask did not reactivate a removed Bot exactly once");
 
     runtime.reset();
     server.reset();
     db = makeStore();
     runtime = std::make_unique<Runtime>(*db,model,*t3,soul);
-    configure({{"botRunStatus","completed"}});
+    configure({{"botRunStatus","queued"}});
     runtime->runConversations();
-    check(model.asks == 2 && model.wakes == 1 && sends().size() == 2,
-          "A pending ask or wake survived stop and restart");
-    db->policy().setMember(alice,"release",bob.id,false);
-    T3Connections(*db).connect("env-1",alice.id,4173);
-    db->receiveWeb(alice,cb.intake("release",""),"web-after-stop","Send another update");
-    runtime->runConversations();
-    check(model.webTools == model.sessionTools,"A Session ask did not get the Web Bot's tools");
-    check(sends().size() == 2 && model.send.at("error") == "This Bot's participation in the Session has stopped",
-          "The Web send path bypassed the stop");
+    check(model.asks == 3 && model.wakes == 1 && sends().size() == 3 && model.send.value("ok",false),
+          "The reactivated Bot could not send, or a pending ask or wake survived stop and restart");
 }
 
 void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& credentials) {
@@ -633,6 +681,8 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     struct StopModel final : Model {
         AskModel ask;
         ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("text") == "Return without sending")
+                return {{{"reply",{{"text","Returned."}},"Finish the turn"}}};
             if (input.event.at("text") == "Leave this Session") {
                 check(input.event.at("turn").empty(),"A stopped Session-origin turn reached the model again");
                 return {{{"leave_session",{{"environmentId","env-1"},{"threadId","thread"}},"Leave this Session"}}};
@@ -675,7 +725,7 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     }
     const auto result = stop("release");
     check(result.at("structuredContent") == Json{{"stopped",true},{"cancelled",1},{"alreadyStarted",1},
-                                                {"notCancellable",0},{"pending",1}} &&
+                                                {"notCancellable",0},{"pending",1},{"stoppedChildSessions",0}} &&
           result.at("content").at(0).at("text").get<std::string>().find("1 message had already started") != std::string::npos &&
           stop("release") == result,"The stop report did not distinguish started Runs and a lost cancellation reply");
     check(effects().at("t3_queue") == Json::array({cancel("bot-run-1"),cancel("bot-run-2"),cancel("bot-run-3")}) &&
@@ -690,24 +740,137 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     server = startWeb(*db,0,cb);
     now += 10;
     runtime = std::make_unique<Runtime>(*db,model,*t3,soul,options);
-    runtime->runConversations();
-    runtime->runConversations();
     const auto released = stop("release");
     check(released.at("structuredContent") == Json{{"stopped",true},{"cancelled",2},{"alreadyStarted",1},
-                                                  {"notCancellable",0},{"pending",0}} &&
-          stop("release") == released && model.ask.wakes == 0 &&
+                                                  {"notCancellable",0},{"pending",0},{"stoppedChildSessions",0}} &&
+          stop("release") == released &&
           effects().at("t3_queue") == Json::array({cancel("bot-run-1"),cancel("bot-run-2"),cancel("bot-run-3"),cancel("bot-run-3")}),
-          "Restart did not retry only the unknown cancellation or woke the stopped Bot");
+          "Restart did not retry only the unknown cancellation");
+    ask("release","return-after-restart","Return without sending").at("structuredContent");
+    runtime->runConversations();
+    runtime->runConversations();
+    check(model.ask.wakes == 0,"A wake queued before removal reached the returned Bot after restart");
 
     check(ask("triage","leave","Leave this Session").contains("structuredContent"),"The other Bot stopped participating");
     runtime->runConversations();
-    const auto left = stop("triage");
-    check(left.at("structuredContent").at("cancelled") == 1 &&
-          db->conversation("triage").back().at("data").at("text") == left.at("content").at(0).at("text") &&
+    check(participationState(database,"triage") == "left" &&
+          db->conversation("triage").back().at("data").at("text").get<std::string>().find("cancelled 1 queued message") != std::string::npos &&
           effects().at("t3_queue").back() == cancel("bot-run-4") && effects().at("t3_queue").size() == 5 &&
           !effects().contains("t3_thread_interrupt") && runs().at("person-queued") == "queued",
           "leave_session did not perform and report the same stop as flock_stop");
-    check(ask("triage","after-leave","Send an update").value("isError",false),"An ask reopened a Bot that left");
+    db->receive(localOwner,cb.intake("triage",""),"web-after-leave","Send another update");
+    runtime->runConversations();
+    check(model.ask.webTools == model.ask.sessionTools,"A Session ask did not receive the Web Bot's tools");
+    check(participationState(database,"triage") == "left" && effects().at("t3_thread_send").size() == 4 &&
+          model.ask.send.at("error") == "This Bot's participation in the Session has stopped",
+          "A send reactivated a Bot that left");
+    const auto back = ask("triage","after-leave","Send an update");
+    check(back.contains("structuredContent") && ask("triage","after-leave","Send an update") == back,
+          "A person could not ask a Bot back after it left");
+    runtime->runConversations();
+    check(participationState(database,"triage") == "active" && effects().at("t3_thread_send").size() == 5 &&
+          model.ask.send.value("ok",false) && effects().at("t3_queue").size() == 5,
+          "The returned Bot could not send, or reactivation repeated a queue cancellation");
+}
+
+void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path& credentials) {
+    httplib::Client fixture(fixtureUrl.data());
+    Browser::checked(fixture.Post("/fixture",Json{{"effects",Json::object()},{"lineageFixture",true},
+        {"lineageSessions",Json::object()},{"sessionWakeFixture",false}}.dump(),"application/json"),200);
+    const auto interrupts = [&] {
+        return Browser::checked(fixture.Get("/fixture/effects"),200).value("t3_thread_interrupt",Json::array());
+    };
+    struct ChildModel : Model {
+        Id task = 0, peer = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") != "conversation_turn") {
+                if (input.task.at("request") == "Ask a peer first.")
+                    return {{{"send_bot_message",{{"botId","triage"},{"kind","work"},{"text","Check a detail."},
+                               {"doneWhen","The detail is checked."}},"Ask the peer Bot"}}};
+                if (input.task.at("request") == "Check a detail.") {
+                    peer = input.task.at("id");
+                    if (input.event.at("kind") == "bot_request")
+                        return {{{"reply_to_bot",{{"kind","question"},{"text","Which detail?"}},"Get the detail"}}};
+                    return {{{"ask_user",{{"question","Which detail?"}},"Identify the detail to check"}}};
+                }
+                return {{{"delegate",{{"instruction","Run the child trial."},{"doneWhen","Child trial has finished."}},
+                           "Launch the child Session"}}};
+            }
+            if (input.event.at("text") == "Confirm reactivation")
+                return {{{"reply",{{"text","Back in the Session."}},"Confirm reactivation"}}};
+            const auto& steps = input.event.at("turn");
+            if (steps.empty()) return {{{"start_task",{{"request",input.event.at("text")}},"Start a child task"}}};
+            task = steps.back().at("result").at("taskId");
+            return {{{"reply",{{"text","Task started."}},"End the turn"}}};
+        }
+    } model;
+    TestDirectory dir;
+    const auto database = dir.path/"flock.sqlite3";
+    auto db = std::make_unique<Store>(database);
+    auto t3 = makeT3Mcp(credentials);
+    auto cb = callbacks();
+    cb.sessionT3 = t3.get();
+    cb.intake = [](std::string_view bot,std::string_view request) -> Intake {
+        return {std::string(bot),std::string(request),"env-1",request == "Ask a peer first." ? "peer-project" : "project",Json::object()};
+    };
+    const RuntimeOptions options{.peers=[](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot == "release") return {{"Triage",{"triage","","env-1","peer-project",Json::object()}}};
+        return {};
+    }};
+    db->policy().setMode(localOwner,"full");
+    const auto token = T3Connections(*db).connect("env-1",localOwner.id,4173);
+    auto server = startWeb(*db,0,cb);
+    const auto soul = [](std::string_view) { return std::string{}; };
+    auto runtime = std::make_unique<Runtime>(*db,model,*t3,soul,options);
+    const auto start = [&](const char* bot, const char* thread, const char* key, const char* text = "Start a child Session.") {
+        Mcp(*server,token).call("flock_ask",{{"bot",bot},{"threadId",thread},{"requestId",key},
+                                            {"text",text}}).at("structuredContent");
+        runtime->runConversations();
+        check(model.task != 0,"Bot did not start a task");
+        return std::exchange(model.task,0);
+    };
+    const auto child = start("release","lineage-parent","matching-child");
+    tick(*runtime,3);
+    const auto launching = db->task(child);
+    check(launching.at("state") == "running" && launching.at("activeRun").at("threadId") == "lineage-child-1",
+          "Child launch did not assign a Run in its own Session: " + launching.at("wait").dump());
+    const auto beforeLaunch = start("release","lineage-parent","peer-before-child","Ask a peer first.");
+    tick(*runtime,4);
+    check(model.peer && db->task(model.peer).at("state") == "peer_waiting",
+          "The peer needed by the other child task did not reach its question");
+    const auto otherOrigin = start("release","lineage-unrelated","unrelated-origin");
+    const auto otherBot = start("triage","lineage-parent","unrelated-bot");
+    const Json stop{{"bot","release"},{"threadId","lineage-parent"}};
+    const auto stopped = Mcp(*server,token).call("flock_stop",stop);
+    check(stopped.at("structuredContent").at("stoppedChildSessions") == 2 &&
+          stopped.at("content").at(0).at("text").get<std::string>().find("2 child Sessions.") != std::string::npos &&
+          Mcp(*server,token).call("flock_stop",stop) == stopped,"Stop did not report the exact child cancellation once");
+    check(db->task(child).at("state") == "cancelling" && db->task(otherOrigin).at("state") == "queued" &&
+          db->task(otherBot).at("state") == "queued" && interrupts().empty(),
+          "Stop targeted unrelated tasks or failed to durably admit the cancellation");
+
+    // Restart before the cancellation worker ever sees the stopped task.
+    runtime.reset();
+    server.reset();
+    db = std::make_unique<Store>(database);
+    server = startWeb(*db,0,cb);
+    runtime = std::make_unique<Runtime>(*db,model,*t3,soul,options);
+    tick(*runtime,3);
+    check(db->task(child).at("state") == "cancelled" &&
+          db->task(beforeLaunch).at("state") == "cancelled" && db->task(model.peer).at("state") == "waiting" &&
+          db->task(otherOrigin).at("state") != "cancelled" && db->task(otherOrigin).at("state") != "cancelling" &&
+          db->task(otherBot).at("state") == "queued" &&
+          interrupts() == Json::array({{{"threadId","lineage-child-1"},{"runId","root"}}}) &&
+          Mcp(*server,token).call("flock_stop",stop) == stopped,
+          "Restart did not settle precisely the child's Run, or the origin Session was interrupted");
+    Mcp(*server,token).call("flock_ask",{{"bot","release"},{"threadId","lineage-parent"},
+                                      {"requestId","return-without-child"},{"text","Confirm reactivation"}}).at("structuredContent");
+    runtime->runConversations();
+    const auto stoppedAgain = Mcp(*server,token).call("flock_stop",stop);
+    check(stoppedAgain.at("structuredContent").at("stoppedChildSessions") == 0 &&
+          Mcp(*server,token).call("flock_stop",stop) == stoppedAgain &&
+          interrupts() == Json::array({{{"threadId","lineage-child-1"},{"runId","root"}}}),
+          "A later stop counted or repeated the previous participation's child cancellation");
 }
 }
 
@@ -727,6 +890,8 @@ int main(int argc, char** argv) {
         webSendParticipation();
         scenario = "Session invitations";
         sessionInvitations();
+        scenario = "stop child Sessions";
+        stopChildSessions(argv[1],argv[2]);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << scenario << ": " << error.what() << '\n';

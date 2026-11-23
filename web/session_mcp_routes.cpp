@@ -69,9 +69,9 @@ Json toolDefinitions() {
                          {"properties",{{"bot",bot},{"threadId",thread},
                              {"requestId",{{"type","string"},{"minLength",1},{"maxLength",128},{"pattern","^[A-Za-z0-9._:-]+$"}}},
                              {"text",{{"type","string"},{"minLength",1},{"maxLength",maxRequestText}}}}}}}},
-        {{"name",stopTool},{"description","Stop this Bot's participation in the T3 Session and stop all Bots it invited, "
-                                       "including their invitees. Cancel their queued Bot messages and report any that already started. "
-                                       "The person's work continues."},
+        {{"name",stopTool},{"description","Remove this Bot and its invitees from the T3 Session. Cancel their queued messages "
+                                       "and report any that already started. Stop child Sessions they launched from here. The person's work continues. "
+                                       "A new flock_ask to a removed Bot brings it back."},
          {"annotations",{{"idempotentHint",true}}},
          {"inputSchema",{{"type","object"},{"additionalProperties",false},{"required",{"bot","threadId"}},
                          {"properties",{{"bot",bot},{"threadId",thread}}}}}}

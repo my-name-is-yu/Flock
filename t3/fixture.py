@@ -346,9 +346,12 @@ class Fixture(BaseHTTPRequestHandler):
                     status = state.get("lineageFollowupStatus", "queued")
                 else:
                     assert args["runId"] == "root", args
-                    status = "running"
-                return {"threadId": child["threadId"], "runId": args["runId"], "status": status,
-                        "timedOut": status != "completed"}
+                    status = child.get("status", "running")
+                result = {"threadId": child["threadId"], "runId": args["runId"], "status": status,
+                          "timedOut": status in ("running", "queued")}
+                if status == "interrupted" and args["untilDelegatedWorkSettled"]:
+                    result["resultRun"] = {"runId": args["runId"], "status": status}
+                return result
             if state.get("sessionWakeFixture"):
                 assert args["threadId"] == "thread"
                 assert not args["untilDelegatedWorkSettled"]
@@ -393,6 +396,11 @@ class Fixture(BaseHTTPRequestHandler):
                                       "status": terminal_status}
             return reply
         if name == "t3_thread_interrupt":
+            if state.get("lineageFixture"):
+                child = next(entry for entry in state["lineageSessions"].values() if entry["threadId"] == args["threadId"])
+                assert args["runId"] == "root" and child.get("status", "running") == "running"
+                child["status"] = "interrupted"
+                return {**args, "status": "interrupt_requested"}
             assert scenario == "running" and args == {"threadId": "thread", "runId": "root"}
             status = state.get("interruptReply") or "interrupt_requested"
             return {"threadId": "thread", "runId": None if status == "no_active_run" else "root", "status": status}
@@ -428,11 +436,12 @@ class Fixture(BaseHTTPRequestHandler):
                 return {"_tag": "OrchestratorMcpFailure", "code": "thread_not_found"}
             title = child["arguments"]["title"] if child else "Deployment planning"
             actor = {"creationSource": "mcp" if child else "web", "createdBy": "agent" if child else "user"}
+            status = child.get("status", "running") if child else "running"
             summary = self.summary(thread_id) | actor | {
-                "activeRunId": "root", "latestRunId": "root", "archived": False, "pendingRequestCount": 0,
-                "title": title, "status": "running", "runCount": 1,
+                "activeRunId": "root" if status == "running" else None, "latestRunId": "root",
+                "archived": False, "pendingRequestCount": 0, "title": title, "status": status, "runCount": 1,
                 "createdAt": "2026-11-21T01:00:00.000Z", "updatedAt": "2026-11-21T13:00:00.000Z"}
-            run = {"runId": "root", "ordinal": 1, "status": "running"}
+            run = {"runId": "root", "ordinal": 1, "status": status}
             prompt = child["arguments"]["message"] if child else "Parent planning message"
             # A reconciliation page uses the launch marker to identify the initial Run.
             items = [] if args["view"] == "activity" else [
