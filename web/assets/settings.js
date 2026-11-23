@@ -3,6 +3,8 @@ import { actionLabel } from '/action-labels.mjs';
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
 let currentMode;
+let canManagePolicy = false;
+let savingPolicy = false;
 const ruleLabels = {never: 'Never', ask: 'Ask first', allow: 'Allow'};
 
 function emptyLabel(title, ...detail) {
@@ -32,16 +34,27 @@ function row(list, content) {
 
 const modeDescriptions = {
   full: 'Bots use the access they’re given without asking. Never rules still apply.',
-  supervised: 'Bots ask before actions with outside effects, such as opening pull requests, posting to channels or starting Sessions.',
+  supervised: 'By default, Bots ask before actions with outside effects, such as opening pull requests, posting to channels or starting Sessions.',
 };
 function describeMode(mode) { $('mode-description').textContent = modeDescriptions[mode] ?? ''; }
+function reflectMode(mode) {
+  for (const input of modeInputs) input.checked = input.value === mode;
+  describeMode(mode);
+}
+function updatePolicyControls() {
+  const disabled = savingPolicy || !canManagePolicy;
+  for (const control of document.querySelectorAll('#mode-options input, #rules button')) control.disabled = disabled;
+}
 
 // Theme is a per-browser preference shared with the sidebar switch; theme.js applies it.
 const themeInputs = [...document.querySelectorAll('input[name="theme"]')];
-let theme = 'system';
-try { theme = JSON.parse(localStorage.getItem('flock-theme')) ?? 'system'; } catch {}
+function reflectTheme() {
+  const mode = document.documentElement.dataset.theme ?? 'system';
+  for (const input of themeInputs) input.checked = input.value === mode;
+}
+reflectTheme();
+document.addEventListener('flock-theme', reflectTheme);
 for (const input of themeInputs) {
-  input.checked = input.value === theme;
   input.onchange = () => {
     if (!input.checked) return;
     try { localStorage.setItem('flock-theme', JSON.stringify(input.value)); } catch {}
@@ -52,14 +65,12 @@ for (const input of themeInputs) {
 async function load() {
   const response = await fetch('/api/settings');
   if (!response.ok) throw new Error();
-  const {mode, rules, canManagePolicy, t3} = await response.json();
+  const data = await response.json();
+  const {mode, rules, t3} = data;
+  canManagePolicy = data.canManagePolicy === true;
   currentMode = mode;
-  for (const input of modeInputs) {
-    input.checked = input.value === mode;
-    input.disabled = !canManagePolicy;
-  }
   $('mode-options').classList.toggle('read-only', !canManagePolicy);
-  describeMode(mode);
+  reflectMode(mode);
   $('rules').replaceChildren();
   if (!rules.length) row('rules', canManagePolicy
     ? emptyLabel('No rules yet', 'Choosing Always allow on a request adds one here. You can also run ', command('flock rules add'), '.')
@@ -77,7 +88,7 @@ async function load() {
     const remove = document.createElement('button');
     remove.textContent = 'Remove';
     remove.className = 'button quiet-danger';
-    remove.onclick = () => void submit('rule', {kind, action, target}, [remove]);
+    remove.onclick = () => void submit('rule', {kind, action, target});
     item.append(remove);
   }
   $('connections').replaceChildren();
@@ -92,10 +103,13 @@ async function load() {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
   $('policy').hidden = false;
+  updatePolicyControls();
 }
 
-async function submit(path, data, controls) {
-  for (const control of controls) control.disabled = true;
+async function submit(path, data) {
+  if (!canManagePolicy || savingPolicy) return;
+  savingPolicy = true;
+  updatePolicyControls();
   let saved = false;
   try {
     const response = await fetch('/api/settings/' + path, {
@@ -104,21 +118,24 @@ async function submit(path, data, controls) {
     });
     saved = response.ok;
   } catch {}
+  if (saved && path === 'mode') currentMode = data.mode;
   try {
     await load();
     $('status').textContent = saved ? 'Saved.' : 'Could not save this change.';
   } catch {
-    for (const input of modeInputs) input.checked = input.value === currentMode;
-    describeMode(currentMode);
+    reflectMode(currentMode);
     $('status').textContent = saved ? 'Saved. Reload to see the current settings.' : 'Could not reload settings.';
+  } finally {
+    savingPolicy = false;
+    updatePolicyControls();
   }
 }
 
 for (const input of modeInputs) {
   input.onchange = async () => {
-    if (!input.checked) return;
+    if (!input.checked || savingPolicy || !canManagePolicy) return;
     describeMode(input.value);
-    await submit('mode', {mode: input.value}, modeInputs);
+    await submit('mode', {mode: input.value});
   };
 }
 load().catch(() => { $('status').textContent = 'Could not load Flock settings.'; });
