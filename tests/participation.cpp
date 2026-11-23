@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <sqlite3.h>
 #include <unistd.h>
 
 using namespace flockv0;
@@ -156,6 +157,39 @@ void pairingAndRecovery(const std::filesystem::path& path) {
     const auto reconciled = handoff.view(owner,lost);
     check(reconciled.state == "completed" && reconciled.deliveries.front().state == RootDeliveryState::Observed &&
           reconciled.deliveries.front().observedRunId == "new-run","history did not reconcile delivery in a later Run");
+}
+
+void reconcileAfterReceiptWriteContention(const std::filesystem::path& path) {
+    Store store(path);
+    Sessions sessions;
+    SessionHandoff handoff(store,sessions,resolve);
+    access(store,first);
+    const auto ticket = handoff.pair(owner,first,"planner",{});
+    const auto channel = handoff.intake(ticket.code,"receipt-contention","Check the fixture.").channel;
+    sqlite3* connection = nullptr;
+    const auto opened = sqlite3_open(path.c_str(),&connection);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(connection,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not open the fixture writer");
+    sessions.beforeSend = [&] {
+        sessions.consumed(sessions.sent.back());
+        check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,
+              "Could not acquire the fixture write lock");
+    };
+    Bot bot;
+    bot.decision = {"reply"};
+    bool contended = false;
+    try { handoff.consult(owner,channel,bot,intake,soul); }
+    catch (const std::runtime_error& error) {
+        check(std::string_view(error.what()) == "database is locked","Unexpected receipt write error");
+        contended = true;
+    }
+    check(sqlite3_exec(writer.get(),"ROLLBACK",nullptr,nullptr,nullptr) == SQLITE_OK && contended,
+          "The accepted send did not contend at receipt storage");
+    handoff.consult(owner,channel,bot,intake,soul);
+    const auto view = handoff.view(owner,channel);
+    check(view.state == "completed" && view.deliveries.front().state == RootDeliveryState::Observed &&
+          sessions.sent.size() == 1 && bot.seen.size() == 1,
+          "The live worker did not reconcile the accepted send without replay");
 }
 
 void coordinate(const std::filesystem::path& path) {
@@ -358,6 +392,7 @@ int main() {
     const std::filesystem::path path(dir);
     try {
         pairingAndRecovery(path / "pairing.sqlite3");
+        reconcileAfterReceiptWriteContention(path / "receipt-contention.sqlite3");
         coordinate(path / "coordination.sqlite3");
         concurrentHumanAndBudget(path / "human-policy.sqlite3");
         dispatchHistoryCoverage(path);
