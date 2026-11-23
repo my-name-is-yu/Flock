@@ -20,7 +20,7 @@ const elements = Object.fromEntries([
   'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
-  'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
@@ -1208,6 +1208,15 @@ function pausedActions(turn) {
   actions.append(approve);
   return actions;
 }
+// The latest reply's first suggestion, offered in an empty composer as the likely next message.
+function nextSuggestion(context) {
+  if (context.data.canDecide !== true || context.dm) return null;
+  let latest = null;
+  for (const event of context.events.values()) if (event.kind !== 'wait_closed' && (!latest || event.id > latest.id)) latest = event;
+  if (latest?.kind !== 'conversation_reply' || !latest.data.suggestions?.length) return null;
+  if (context.data.pausedConversations?.some((item) => item.messageId === latest.data.messageId)) return null;
+  return { text: latest.data.suggestions[0], target: { kind: 'message', messageId: latest.id, summary: latest.data.text } };
+}
 function suggestionActions(event) {
   const actions = node('div', 'event-actions');
   const target = { kind: 'message', messageId: event.id, summary: event.data.text };
@@ -2186,6 +2195,13 @@ function renderComposer() {
   elements['cancel-reply'].disabled = busy;
   elements.message.placeholder = (decision || review) ? 'Ask a question or give direction' :
     reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
+  const working = ['working', 'thinking'].includes(context.data.presence);
+  const suggestion = decision || review || reply || working || body ? null : nextSuggestion(context);
+  const ghost = elements['composer-ghost'];
+  ghost.hidden = !suggestion;
+  ghost.firstElementChild.textContent = suggestion?.text ?? '';
+  elements.message.classList.toggle('has-ghost', !!suggestion);
+  if (suggestion) elements.message.placeholder = `${suggestion.text} (press Enter to use this suggestion)`;
   if (!composition && elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
@@ -3174,6 +3190,15 @@ elements.message.addEventListener('input', (event) => {
 // Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
 elements.composer.addEventListener('keydown', (event) => {
   if (composition || event.isComposing || event.keyCode === 229) return;
+  if (event.target === elements.message && !elements['composer-ghost'].hidden && !elements.message.value &&
+      ((event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) || (event.key === 'Tab' && !event.shiftKey))) {
+    const suggestion = nextSuggestion(view);
+    if (suggestion) {
+      event.preventDefault();
+      beginReply(suggestion.target, suggestion.text);
+      return;
+    }
+  }
   if (event.target === elements.message) handleComposerEnter(event, elements.send);
   if (event.key === 'Escape' && !elements['reply-context'].hidden) {
     event.preventDefault();
