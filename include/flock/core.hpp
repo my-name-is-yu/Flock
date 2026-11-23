@@ -261,9 +261,6 @@ public:
     bool receiveGitWebhook(const GitWebhook&);
     void protectGitCredential(std::string value);
     Id submit(const Intake&, const Person* requester = nullptr);
-    // Creates an explicit Task for an authorized person. An identical retry returns its Task ID.
-    Id submitRequest(const Person&, std::string_view botId, std::string_view clientRequestId,
-                     std::string_view request, const IntakeResolver&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0, const Json& attachments = Json::array());

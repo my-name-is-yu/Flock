@@ -187,9 +187,6 @@ public:
     Json post(const std::string& path, const Json& data, int status = 200) {
         return checked(client.Post(path,headers(),data.dump(),"application/json"),status);
     }
-    Id request(std::string_view bot, std::string_view text) {
-        return post("/api/requests",{{"botId",bot},{"clientRequestId",actionId()},{"request",text}},201).at("taskId");
-    }
     httplib::Headers headers() const { return {{"Origin",origin},{"Sec-Fetch-Site","same-origin"},{"X-Flock-Action","1"}}; }
     static Json checked(const httplib::Result& response, int status) {
         if (!response) throw std::runtime_error("HTTP request failed: " + httplib::to_string(response.error()));
@@ -383,9 +380,10 @@ void conversationEntry(const std::filesystem::path& path) {
     FixedT3 t3;
     std::atomic_bool disableIntake = false;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
-    auto server = startWeb(store,0,callbacks(&disableIntake));
+    const auto web = callbacks(&disableIntake);
+    auto server = startWeb(store,0,web);
     Browser browser(*server);
-    const auto taskId = browser.request("release",comparisonRequest);
+    const auto taskId = store.submit(web.intake("release",comparisonRequest));
     tick(runtime,3);
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished, .status = "completed", .report = proposedOptions,
@@ -481,7 +479,7 @@ void conversationEntry(const std::filesystem::path& path) {
     check(statusReplyText.find(comparisonRequest) != std::string::npos && statusReplyText.find("完了") != std::string::npos &&
           store.tasks().size() == 1 && t3.launches == 1,"progress inquiry with changed settings failed to report completion without creating work");
     disableIntake = false;
-    const auto firstWaitTask = browser.request("triage","掲載する範囲を決める");
+    const auto firstWaitTask = store.submit(web.intake("triage","掲載する範囲を決める"));
     const auto secondWaitTask = store.submit({"triage","次回の掲載範囲を決める","linked env","next-scope"});
     tick(runtime,3);
     t3.observations["thread-triage"] = {
@@ -876,9 +874,9 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
         intake.config["modelCallLimit"] = 2;
         return intake;
     };
+    const auto task = store->submit(webCallbacks.intake("release",comparisonRequest));
     auto server = startWeb(webStore,0,std::move(webCallbacks));
     Browser browser(*server);
-    const auto task = browser.request("release",comparisonRequest);
     tick(*runtime,3);
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished,.status = "completed",.report = proposedOptions,

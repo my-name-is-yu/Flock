@@ -60,11 +60,10 @@ build/app/flock model login
 build/app/flock model status
 build/app/flock model models
 build/app/flock t3 connect <environment-id> <MCP-URL>
-build/app/flock access grant release environment <environment-id> launch
 build/app/flock run
 ```
 
-Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to use your plan and check that `model status` shows `planUsage: true`. In T3, approve Operate access and choose permissions that cover Flock's Session settings. The `access grant` command gives the Bot permission to launch in that same environment. Open the Web UI at the local URL printed by the CLI. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
+Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to use your plan and check that `model status` shows `planUsage: true`. In T3, approve Operate access and choose permissions that cover Flock's Session settings. Use the connected environment ID in the Bot configuration. Open the Web UI at the local URL printed by the CLI. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
 
 In a T3 Thread, ask for a Bot by name or select `/skill:flock-<bot>` or
 `$flock-<bot>` in the provider's skill menu. Flock replies in that Thread.
@@ -74,7 +73,7 @@ See [Session handoffs](web/README.md#session-handoffs) for connection details.
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.
 
-To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
+To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock message release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 
 ```sh
 build/app/flock --help

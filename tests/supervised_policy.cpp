@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <memory>
+#include <sqlite3.h>
 
 using namespace flockv0;
 namespace {
@@ -117,6 +119,42 @@ void reopen(const std::filesystem::path& path) {
     reopened.decideInbox(requester,target(items.at(0)),"allow_once");
     runtime.runConversations();
     check(applied==1,"Reopened turn could not consume approval");
+}
+
+void reopenDirectTask(const std::filesystem::path& path) {
+    Id task;
+    {
+        Store store(path);
+        store.policy().setOwner(requester,"release");
+        store.policy().setMode(localOwner,"supervised");
+        task = store.submit({"release","Build the release","env","project"},&requester);
+    }
+    {
+        sqlite3* handle = nullptr;
+        const auto opened = sqlite3_open(path.c_str(),&handle);
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(handle,sqlite3_close);
+        check(opened==SQLITE_OK,"Could not open the direct-request fixture");
+        const char* receipts = R"SQL(
+CREATE TABLE task_request_receipts(
+  bot_id TEXT NOT NULL, person_id TEXT NOT NULL, client_request_id TEXT NOT NULL,
+  request_digest TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
+  PRIMARY KEY(bot_id,person_id,client_request_id));
+INSERT INTO task_request_receipts SELECT bot_id,'requester','existing','digest',id FROM tasks;
+)SQL";
+        check(sqlite3_exec(db.get(),receipts,nullptr,nullptr,nullptr)==SQLITE_OK,
+              "Fresh v3 state must omit the old receipt table before it is added to the fixture");
+    }
+    Store reopened(path);
+    FixtureModel model;
+    Adapter adapter;
+    Runtime runtime(reopened,model,adapter,[](auto) { return std::string{}; });
+    for (int i=0;i<6;++i) runtime.tick();
+    const auto items = reopened.inbox(requester);
+    check(items.size()==1 && items.at(0).at("taskId")==task && items.at(0).at("expiresAt")==0 && adapter.sends==0,
+          "A saved direct request lost its approval for the original requester");
+    reopened.decideInbox(requester,target(items.at(0)),"allow_once");
+    for (int i=0;i<6;++i) runtime.tick();
+    check(adapter.sends==1,"The saved direct request did not launch after approval");
 }
 
 void turns(const std::filesystem::path& path) {
@@ -405,6 +443,7 @@ int main() {
     try {
         rules(root/"rules.db");
         reopen(root/"reopen.db");
+        reopenDirectTask(root/"direct-request.db");
         turns(root/"turns.db");
         downstreamApproval(root/"one-shot.db");
         scheduled(root/"scheduled.db");

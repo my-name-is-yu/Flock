@@ -1,7 +1,7 @@
-#include "flock/board_inbox.hpp"
 #include "http_fixture.hpp"
 #include "../../tests/fake_git.hpp"
 #include "flock/memory_automation.hpp"
+#include "flock/policy.hpp"
 
 #include <sqlite3.h>
 
@@ -61,23 +61,20 @@ void boundary(Browser& browser) {
     }
     const httplib::Headers channelNavigation{{"Sec-Fetch-Site","cross-site"},
         {"Sec-Fetch-Mode","navigate"},{"Sec-Fetch-Dest","document"}};
-    const auto oldApproval = browser.client.Get("/settings/release/access",channelNavigation);
-    check(oldApproval && oldApproval->status == 302 &&
-          oldApproval->get_header_value("Location") == "/settings/release#local-connections",
-          "Previously sent channel approval link did not redirect");
-    Browser::checked(browser.client.Get("/settings/release/access/extra",channelNavigation),403);
-    const auto draft = R"({"botId":"release","clientRequestId":"draft","request":"do not accept this"})";
+    Browser::checked(browser.client.Get("/settings/release/access",channelNavigation),403);
+    Browser::checked(browser.client.Get("/settings/release/access"),404);
+    const auto draft = R"({"botId":"release","clientMessageId":"draft","text":"do not accept this"})";
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Origin","https://other.invalid"}}),403);
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Sec-Fetch-Site","same-site"}}),403);
-    Browser::checked(browser.client.Post("/api/requests",draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/requests",{{"Origin",browser.origin}},draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/requests",{{"Origin","null"},{"X-Flock-Action","1"}},draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/requests",browser.headers(),draft,"text/plain"),415);
-    Browser::checked(browser.client.Post("/api/requests",browser.headers(),"{","application/json"),400);
-    Browser::checked(browser.client.Post("/api/requests",browser.headers(),std::string(140000,'x'),"application/json"),413);
-    const auto preflight = browser.client.Options("/api/requests",{{"Origin","https://other.invalid"}});
+    Browser::checked(browser.client.Post("/api/messages",draft,"application/json"),403);
+    Browser::checked(browser.client.Post("/api/messages",{{"Origin",browser.origin}},draft,"application/json"),403);
+    Browser::checked(browser.client.Post("/api/messages",{{"Origin","null"},{"X-Flock-Action","1"}},draft,"application/json"),403);
+    Browser::checked(browser.client.Post("/api/messages",browser.headers(),draft,"text/plain"),415);
+    Browser::checked(browser.client.Post("/api/messages",browser.headers(),"{","application/json"),400);
+    Browser::checked(browser.client.Post("/api/messages",browser.headers(),std::string(140000,'x'),"application/json"),413);
+    const auto preflight = browser.client.Options("/api/messages",{{"Origin","https://other.invalid"}});
     check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
     Browser::checked(browser.client.Get("/api/view?bot=missing"),404);
@@ -86,10 +83,10 @@ void boundary(Browser& browser) {
         check(browser.get(path+"?bot=release").is_array(),"Missing inspector collection");
         Browser::checked(browser.client.Get(path+"?bot=missing"),404);
     }
-    browser.post("/api/requests",{{"botId","broken"},{"clientRequestId","broken-request"},{"request","test"}},422);
+    browser.post("/api/requests",{{"botId","release"},{"clientRequestId","draft"},{"request","test"}},404);
 }
 
-void explicitRequestReceipts(const std::filesystem::path& path) {
+void messageReceipts(const std::filesystem::path& path) {
     const Person owner{"owner",true};
     auto web = callbacks();
     web.authenticate = [](std::string_view credential) {
@@ -97,7 +94,11 @@ void explicitRequestReceipts(const std::filesystem::path& path) {
         if (credential == "Bearer other") return Person{"other",false};
         return Person{};
     };
-    const Json request{{"botId","release"},{"clientRequestId","draft"},{"request","Draft the release notes"}};
+    web.resolveIdentity = [](std::string_view person) -> std::optional<bool> {
+        if (person == "requester" || person == "other") return false;
+        return std::nullopt;
+    };
+    const Json message{{"botId","release"},{"clientMessageId","draft"},{"text","Draft the release notes"}};
     Json accepted;
     {
         Store store(path);
@@ -116,38 +117,43 @@ void explicitRequestReceipts(const std::filesystem::path& path) {
         requester.client.set_default_headers({{"Authorization","Bearer requester"}});
         other.client.set_default_headers({{"Authorization","Bearer other"}});
 
-        auto missingId = request;
-        missingId.erase("clientRequestId");
-        requester.post("/api/requests",missingId,400);
-        accepted = requester.post("/api/requests",request,201);
-        check(requester.post("/api/requests",request,201) == accepted,"identical retry created a new Task");
-        check(other.post("/api/requests",request,201) != accepted,"different actors shared a receipt");
-        auto otherBot = request;
+        auto missingId = message;
+        missingId.erase("clientMessageId");
+        requester.post("/api/messages",missingId,400);
+        accepted = requester.post("/api/messages",message,201);
+        check(accepted.at("status") == "received" && accepted.at("messageId").get<Id>() > 0,
+              "HTTP intake did not return a message receipt");
+        check(requester.post("/api/messages",message,201) == accepted,"identical retry created a new message");
+        check(other.post("/api/messages",message,201) != accepted,"different actors shared a receipt");
+        auto otherBot = message;
         otherBot["botId"] = "triage";
-        check(requester.post("/api/requests",otherBot,201) != accepted,"different Bots shared a receipt");
+        check(requester.post("/api/messages",otherBot,201) != accepted,"different Bots shared a receipt");
 
-        const Json revoked{{"botId","release"},{"clientRequestId","revoked"},{"request","Revoke while loading settings"}};
-        requester.post("/api/requests",revoked,403);
-        requester.post("/api/requests",request,403);
-        check(store.tasks().size() == 3,"denied request or retry inserted another Task");
+        const Json revoked{{"botId","release"},{"clientMessageId","revoked"},{"text","Revoke while loading settings"}};
+        requester.post("/api/messages",revoked,403);
+        requester.post("/api/messages",message,403);
+        check(store.conversation("release").size() == 2 && store.conversation("triage").size() == 1 && store.tasks().empty(),
+              "denied or replayed messages duplicated conversation entries or started work");
         access.setMember(owner,"release","requester",true);
     }
     {
         Store store(path);
-        web.bots = [] { return Json::array(); };
-        web.intake = [](std::string_view, std::string_view) -> Intake {
+        std::atomic_uint intakeCalls = 0;
+        web.intake = [&](std::string_view, std::string_view) -> Intake {
+            ++intakeCalls;
             throw std::runtime_error("The Bot settings are temporarily unavailable");
         };
         const auto server = startWeb(store,0,web);
         Browser requester(*server);
         requester.client.set_default_headers({{"Authorization","Bearer requester"}});
-        check(requester.post("/api/requests",request,201) == accepted,
-              "Task receipt was lost on reopen or needed current Bot settings");
-        auto changed = request;
-        changed["request"] = "Draft something else";
-        check(requester.post("/api/requests",changed,409).at("error") == "request_conflict",
-              "changing the request behind a receipt did not conflict");
-        check(store.tasks().size() == 3,"opening or replaying persisted receipts inserted a Task");
+        check(requester.post("/api/messages",message,201) == accepted && intakeCalls == 0,
+              "message receipt was lost on reopen or needed current Bot settings");
+        auto changed = message;
+        changed["text"] = "Draft something else";
+        check(requester.post("/api/messages",changed,409).at("error") == "message_conflict",
+              "changing the text behind a receipt did not conflict");
+        check(store.conversation("release").size() == 2 && store.conversation("triage").size() == 1 && store.tasks().empty(),
+              "replaying persisted receipts duplicated conversation entries or started work");
     }
 }
 
@@ -327,8 +333,8 @@ std::vector<PeerBot> fixturePeers(std::string_view sender) {
     return {{"Triage",{"triage","","local-env","release"}}};
 }
 
-Id seedPeerHistory(Browser& browser, Runtime& runtime, const FixedT3& t3) {
-    const auto task = browser.request("release","判定基準の確認");
+void seedPeerHistory(Store& store, Browser& browser, Runtime& runtime, const FixedT3& t3) {
+    store.submit({"release","判定基準の確認","local-env","release"});
     Json waiting;
     for (unsigned attempt = 0; attempt < 8; ++attempt) {
         runtime.tick();
@@ -341,7 +347,6 @@ Id seedPeerHistory(Browser& browser, Runtime& runtime, const FixedT3& t3) {
     const auto finished = browser.get("/api/view?bot=release");
     check(hasEvent(finished.at("events"),"completed","text","判定基準を確認しました") && t3.launches.empty(),
           "consultation did not show the result without starting a T3 Session");
-    return task;
 }
 
 void peerHistory(const std::filesystem::path& path) {
@@ -353,7 +358,7 @@ void peerHistory(const std::filesystem::path& path) {
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
     const auto server = startWeb(store,0,callbacks());
     Browser browser(*server);
-    seedPeerHistory(browser,runtime,t3);
+    seedPeerHistory(store,browser,runtime,t3);
 
     for (int i = 0; i < 2001; ++i) store.submit({"release","Newer request " + std::to_string(i),"local-env","release"});
     const auto newest = browser.get("/api/view?bot=release");
@@ -447,7 +452,7 @@ void peerConversation(const std::filesystem::path& path) {
         check(store.tasks().empty() && t3.launches.empty(),"opening a DM or posting to the old route started work");
         Browser::checked(browser.client.Get("/api/peer-conversation?bot=triage&peer=settings"),403);
 
-        seedPeerHistory(browser,runtime,t3);
+        seedPeerHistory(store,browser,runtime,t3);
         history = browser.get(primary).at("messages");
         check(history.size() == 2 && history == browser.get(reverse).at("messages"),
               "an exchange was missing, duplicated, or different from the opposite Bot page");
@@ -565,27 +570,56 @@ void peerConversationAnchor(const std::filesystem::path& path) {
         == Json{{"error","peer_message_not_found"}},"a different readable pair resolved the anchor");
 }
 
-void directRequestApproval(const std::filesystem::path& path) {
+void conversationRequestApproval(const std::filesystem::path& path) {
     Store store(path);
-    FixedModel model;
+    struct ConversationModel : FixedModel {
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") != "conversation_turn") return FixedModel::decide(input);
+            if (input.event.at("turn").empty())
+                return {{{"start_task",{{"request",input.event.at("text")}},"Start the requested work"}}};
+            return {{{"reply",{{"text","I queued your request."}},"Report the queued Task"}}};
+        }
+    } model;
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
-    auto server = startWeb(store,0,callbacks());
+    const Person requester{"requester",false};
+    auto web = callbacks();
+    web.authenticate = [&](std::string_view credential) {
+        return credential == "Bearer requester" ? requester : Person{};
+    };
+    web.resolveIdentity = [&](std::string_view person) -> std::optional<bool> {
+        if (person == requester.id) return requester.adminRoot;
+        return std::nullopt;
+    };
+    auto policy = store.policy();
+    policy.setMember(localOwner,"release",requester.id,true);
+    policy.setMode(localOwner,"supervised");
+    const auto server = startWeb(store,0,web);
     Browser browser(*server);
-    store.policy().setMode(localOwner,"supervised");
-    const auto supervised = browser.request("release","Build a supervised release");
+    browser.client.set_default_headers({{"Authorization","Bearer requester"}});
+    const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","supervised-release"},
+        {"text","Build a supervised release"},{"environmentId","ignored"},{"projectId","ignored"},
+        {"trigger",{{"triggerKind","ignored"}}}},201);
+    check(receipt.at("status") == "received" && store.tasks().empty(),"HTTP intake did not wait for the conversation turn");
     tick(runtime,4);
-    const auto approvals = store.inbox(localOwner);
-    check(approvals.size()==1 && approvals.at(0).at("taskId")==supervised &&
-          approvals.at(0).at("itemKind")=="policy_approval" && approvals.at(0).at("canDecide")==true,
-          "The direct HTTP request did not retain an approval requester");
-    check(t3.launches.empty(),"HTTP task launched before approval");
+    const auto tasks = store.tasks("release");
+    check(tasks.size() == 1 && tasks.at(0).at("sourceMessageId") == receipt.at("messageId"),
+          "the Task did not retain its conversation message");
+    const auto& task = tasks.at(0);
+    check(task.at("environmentId") == "local-env" && task.at("projectId") == "release" && !task.contains("trigger"),
+          "the HTTP client changed routing or schedule");
+    const auto approvals = store.inbox(requester);
+    check(approvals.size() == 1 && approvals.at(0).at("taskId") == task.at("id") &&
+          approvals.at(0).at("itemKind") == "policy_approval" && approvals.at(0).at("canDecide") == true,
+          "the message sender could not approve the Task they requested");
+    check(t3.launches.empty(),"the Task launched before approval");
     const auto& item = approvals.at(0);
-    store.decideInbox(localOwner,{item.at("botId"),InboxKind::policy_approval,item.at("itemId"),item.at("waitId"),
-          item.at("taskId"),item.at("targetRevision"),item.at("targetGeneration")},"allow_once");
+    browser.post("/api/inbox/decide",{{"botId",item.at("botId")},{"itemKind",item.at("itemKind")},
+        {"itemId",item.at("itemId")},{"waitId",item.at("waitId")},{"taskId",item.at("taskId")},
+        {"targetRevision",item.at("targetRevision")},{"targetGeneration",item.at("targetGeneration")},
+        {"decision","allow_once"}});
     tick(runtime,4);
-    check(t3.launches["release"]==1,"The HTTP request could not launch with approval");
-
+    check(t3.launches["release"] == 1,"the Task could not launch with approval");
 }
 
 void exercise(const std::filesystem::path& path) {
@@ -595,14 +629,15 @@ void exercise(const std::filesystem::path& path) {
     FixedT3 t3;
     const auto notes = [](std::string_view) { return std::string{}; };
     auto runtime = std::make_unique<Runtime>(store,model,t3,notes);
-    auto server = startWeb(store,0,callbacks());
+    const auto web = callbacks();
+    auto server = startWeb(store,0,web);
     const auto port = server->port();
     Browser browser(*server);
     boundary(browser);
-    check(cli.tasks().empty(),"rejected HTTP requests still submitted work");
-    const auto release = browser.request("release","下書きの掲載範囲を確認する");
-    const auto triage = browser.request("triage","昨日届いた不具合を確認する");
-    const auto settings = browser.request("settings","接続設定を確認する");
+    check(cli.tasks().empty() && cli.conversation("release").empty(),"rejected HTTP requests still submitted messages or work");
+    const auto release = cli.submit(web.intake("release","下書きの掲載範囲を確認する"));
+    const auto triage = cli.submit(web.intake("triage","昨日届いた不具合を確認する"));
+    const auto settings = cli.submit(web.intake("settings","接続設定を確認する"));
     tick(*runtime,3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
     t3.observations["thread-release"].question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
@@ -649,14 +684,11 @@ void exercise(const std::filesystem::path& path) {
         return row["kind"] == "waiting" && row["data"]["id"] == waitId;
     }),"question fixture did not cross a history page boundary");
 
-    const auto next = browser.post("/api/requests",{{"botId","release"},{"clientRequestId","next-release"},
-        {"request","次の版の変更点を調べる"},
-        {"environmentId","ignored"},{"projectId","ignored"},{"trigger",{{"triggerKind","ignored"}}}},201).at("taskId").get<Id>();
+    const auto next = cli.submit(web.intake("release","次の版の変更点を調べる"));
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
     checkPresence(browser,browser.get("/api/bots"),"release","waiting");
-    check(cli.task(next)["environmentId"] == "local-env" && !cli.task(next).contains("trigger"),"client changed routing or schedule");
     const auto& visibleWait = afterSubmit.at("waits").at(0);
     Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"},
                   {"targetRevision",visibleWait.at("currentRevision")},{"targetGeneration",visibleWait.at("generation")}};
@@ -1146,7 +1178,7 @@ void peerEventStream(const std::filesystem::path& path) {
         if (change.contains("dm")) check(change.at("dm") == pair,"the DM stream sent the wrong scope");
         if (std::exchange(initial,false)) {
             check(change == Json{{"list",true},{"bot","release"},{"dm",pair}},"missing initial DM scope");
-            seedPeerHistory(browser,runtime,t3);
+            seedPeerHistory(store,browser,runtime,t3);
             return true;
         }
         return !change.contains("dm");
@@ -1399,9 +1431,9 @@ void settingsEndpoints(const std::filesystem::path& path) {
 int main() {
     try {
         TestDirectory directory;
-        directRequestApproval(directory.path/"direct-approval.db");
+        conversationRequestApproval(directory.path / "conversation-approval.db");
         exercise(directory.path / "state.db");
-        explicitRequestReceipts(directory.path / "request-receipts.db");
+        messageReceipts(directory.path / "message-receipts.db");
         sidebarReplies(directory.path / "sidebar.db");
         failedCompletion(directory.path / "failed-completion.db");
         recurringRequestStatus(directory.path / "recurring-requests.db");
