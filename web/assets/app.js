@@ -306,8 +306,8 @@ function setTheme(mode) {
     }
     void document.documentElement.offsetWidth;
   }
-  document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
   renderTheme(mode, true);
+  document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
 }
 const mainElement = byId('main');
 const navBackdrop = byId('nav-backdrop');
@@ -3121,8 +3121,11 @@ const decisions = mountBoardInbox({
   },
 });
 
-const savedTheme = saved('flock-theme', 'system');
-renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system', false);
+function reflectTheme() {
+  renderTheme(document.documentElement.dataset.theme ?? 'system');
+}
+reflectTheme();
+document.addEventListener('flock-theme', reflectTheme);
 if (typeof ResizeObserver !== 'undefined') {
   new ResizeObserver(() => syncThemeIndicator(false)).observe(elements['theme-switch']);
 }
