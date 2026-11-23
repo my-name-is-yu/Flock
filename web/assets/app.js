@@ -100,6 +100,10 @@ const pendingActionLabels = {
 const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
   session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
+  approve: 'Approved', extend: 'Deadline extended', reconcile: 'Checked again', supply: 'Secret saved',
+  allow_once: 'Allowed once', always_allow: 'Always allowed', deny: 'Denied', expired: 'Approval expired',
+  stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
+  superseded: 'Replaced by a newer request', superseded_instruction: 'Replaced by a newer request',
 };
 const errors = {
   invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
@@ -1970,7 +1974,21 @@ function conversationRows(data, events, keep, source) {
   const bot = timeline.bot;
   const botVersion = JSON.stringify([bot?.id, bot?.name, bot?.avatar]);
   const approvals = source ? [] : decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval');
-  const shown = timelineMessages(events, dayLabel);
+  // A pending approval's card takes the place of the Bot's "waiting for approval" note, so the
+  // conversation shows the request once, right where the Bot stopped.
+  const cardAnchors = new Map(approvals.map(item => [item.itemId, item.conversationEventId]));
+  const approvalWaits = new Set();
+  let lastShown = null;
+  for (const event of events) {
+    const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
+    const item = wait?.wait.reason === 'policy_approval'
+      ? approvals.find(entry => entry.taskId === wait.id && entry.waitId === wait.wait.id) : null;
+    if (item && lastShown != null) {
+      approvalWaits.add(event.id);
+      cardAnchors.set(item.itemId, lastShown);
+    } else if (!['wait_closed', 'bot_message'].includes(event.kind)) lastShown = event.id;
+  }
+  const shown = timelineMessages(events.filter(event => !approvalWaits.has(event.id)), dayLabel);
   const rows = [];
   let peerMessages = [];
   const appendPeerMessages = () => {
@@ -2014,7 +2032,7 @@ function conversationRows(data, events, keep, source) {
     row.classList.toggle('conversation-source-target', event.id === source?.id);
     rows.push(row);
     for (const item of approvals) {
-      if (item.conversationEventId === event.id)
+      if (cardAnchors.get(item.itemId) === event.id || (report && cardAnchors.get(item.itemId) === report.id))
         rows.push(keep(`policy-${item.itemId}`, item, () => decisions.inlinePolicyCard(item)));
     }
     previous = event;

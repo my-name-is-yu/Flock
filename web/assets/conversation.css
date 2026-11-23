@@ -505,7 +505,7 @@
 .msg.bot > .event-actions { margin-top: .15rem; padding-left: var(--avatar-col); }
 
 @container conversation-layout (max-width: 700px) {
-  .event-message.bot, .peer-exchange-link { --avatar-col: 0px; }
+  .event-message.bot, .peer-exchange-link, .policy-inline-card { --avatar-col: 0px; }
   .event-message.bot .msg-line > :is(.msg-avatar, .msg-avatar-space) { display: none; }
 }
 @media (max-width: 700px) {
