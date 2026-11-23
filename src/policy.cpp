@@ -184,6 +184,7 @@ PolicyResult Policy::check(std::string_view bot, Action action, std::string_view
 bool Policy::forbidden(std::string_view bot, Action action, std::string_view target) const {
     if (!validBotId(bot) || target.empty()) return true;
     std::lock_guard lock(db_.mutex);
+    if (botDeleted(bot)) return true;
     auto rows = db_.query("SELECT target FROM policy_rules WHERE kind='never' AND action=?",{actionName(action)});
     while (rows.next())
         if (targetMatches(rows.string(0),target)) return true;
@@ -217,6 +218,7 @@ PolicyResult Policy::check(const Person& actor, Action action, std::string_view 
     if (action == Action::rules_manage || action == Action::shared_memory_read || action == Action::shared_memory_write) return actor.adminRoot ? PolicyResult::allow : PolicyResult::deny;
     if (!validBotId(target)) return PolicyResult::deny;
     std::lock_guard lock(db_.mutex);
+    if (botDeleted(target)) return PolicyResult::deny;
     if (actor.adminRoot || db_.query("SELECT 1 FROM bot_owners WHERE bot=? AND person=?",{target,actor.id}).next())
         return PolicyResult::allow;
     if ((action == Action::bot_view || action == Action::bot_talk || action == Action::bot_decide) &&
@@ -298,9 +300,41 @@ Json Policy::createOwnedBot(const Person& creator,
     });
 }
 
+bool Policy::botDeleted(std::string_view bot) const {
+    std::lock_guard lock(db_.mutex);
+    return db_.query("SELECT 1 FROM deleted_bots WHERE bot=?",{bot}).next();
+}
+
+void Policy::deleteBot(const Person& actor, std::string_view bot) {
+    std::lock_guard lock(db_.mutex);
+    Transaction tx(db_.db);
+    if (!allows(actor,Action::bot_settings,bot)) throw DecisionDenied{};
+    // Admission and retirement share the write transaction, even across Store connections.
+    if (db_.query(R"SQL(
+SELECT 1 WHERE
+  EXISTS (SELECT 1 FROM tasks WHERE bot_id=?1 AND state NOT IN ('completed','cancelled'))
+  OR EXISTS (SELECT 1 FROM messages m JOIN conversation_turns t ON t.message_id=m.id
+             WHERE m.bot_id=?1 AND t.status<>'done')
+  OR EXISTS (SELECT 1 FROM workflows w JOIN workflow_stages s ON s.workflow_id=w.id
+             WHERE w.bot_id=?1 AND w.stop_requested=0 AND s.task_id IS NULL AND s.status='pending')
+  OR EXISTS (SELECT 1 FROM session_message_waits WHERE bot=?1 AND notified=0)
+  OR EXISTS (SELECT 1 FROM messages m JOIN channel_deliveries d ON d.source_id=m.id
+             WHERE m.bot_id=?1 AND d.state IN ('pending','unknown'))
+)SQL",{bot}).next()) throw BotBusy{};
+    db_.exec("INSERT INTO deleted_bots VALUES(?)",{bot});
+    db_.exec(R"SQL(
+UPDATE automations SET status=CASE WHEN config_id IS NULL THEN 'canceled' ELSE 'inactive' END,
+  next_run_at=NULL,error=NULL WHERE bot_id=? AND status IN ('active','failed')
+)SQL",{bot});
+    db_.exec("DELETE FROM git_pr_watches WHERE bot_id=?",{bot});
+    audit(actor,bot,"delete_bot",Json::object());
+    tx.commit();
+}
+
 void Policy::setOwner(const Person& creator, std::string_view bot) {
     std::lock_guard lock(db_.mutex);
     if (!validBotId(bot) || !allows(creator,Action::bot_create,bot)) throw DecisionDenied{};
+    if (botDeleted(bot)) throw Conflict("This Bot ID has already been used");
     db_.sharedRedactor().requirePublic({creator.id,bot});
     if (db_.query("SELECT 1 FROM bot_creation_intents WHERE target=?",{bot}).next())
         throw Conflict("Bot creation is already in progress");
@@ -351,6 +385,7 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
     std::lock_guard lock(db_.mutex);
     if (auto completed = db_.query("SELECT id FROM bot_changes WHERE request_key=?",{requestKey}); completed.next())
         return completed.number(0);
+    if (botDeleted(target)) throw Conflict("This Bot ID has already been used");
 
     std::string owner;
     if (create) {

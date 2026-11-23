@@ -142,6 +142,9 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
+    // An additive table lets installed schema-6 databases retain their conversations.
+    if (!query("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='deleted_bots'").next())
+        exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
     exec("PRAGMA journal_mode=WAL");
     // Open the WAL now so a read-only peer can use a freshly initialized database.
     exec("PRAGMA user_version");
@@ -561,6 +564,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
+    if (Policy(*this).botDeleted(item.botId)) throw Conflict("Bot has been deleted");
     const auto scrub = redactor(item.botId);
     scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.config});
     modelCallLimit(item.config);

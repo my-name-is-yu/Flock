@@ -211,6 +211,7 @@ std::vector<ScheduleImportError> Store::syncSchedules(
     if (now < 0 || now > lastAutomationTime) throw Conflict("Clock is outside the supported range");
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
+    if (policy().botDeleted(bot)) return {};
     const auto scrub = p_->redactor(bot);
     std::map<std::string_view,std::size_t> counts;
     for (const auto& schedule : schedules) ++counts[schedule.id];

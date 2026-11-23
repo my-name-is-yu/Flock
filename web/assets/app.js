@@ -22,7 +22,8 @@ const elements = Object.fromEntries([
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
-  'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
+  'bot-editor', 'bot-delete', 'bot-delete-title', 'bot-delete-feedback', 'bot-delete-cancel', 'bot-delete-confirm',
+  'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
   'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
@@ -157,6 +158,7 @@ const notices = new Map();
 const signatures = new Map();
 const readingPositions = new Map();
 let bots = [];
+let rosterGeneration = 0;
 let listLoaded = false;
 let view = null;
 let visibilityGeneration = 0;
@@ -480,6 +482,7 @@ function peerLink(botId, peerId, label, className, anchor = 0) {
 }
 
 const sidebarIcons = {
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M9 6V4h6v2M6 6l1 14h10l1-14M10 10v6m4-6v6"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>',
   pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z"/><path d="M12 14v6"/></svg>',
   inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>',
@@ -560,11 +563,17 @@ function menuPopover(bot) {
     }],
     ['Open settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
-  actions.forEach(([label, icon, run], index) => {
-    const item = button(null, null, run);
+  if (bot.canDelete) actions.push(['Delete Bot…', sidebarIcons.trash, () => {
+    const current = bots.find(({ id }) => id === bot.id);
+    closeMenu();
+    openDeleteBot(current, document.activeElement);
+  }, 'danger']);
+  actions.forEach(([label, icon, run, style], index) => {
+    const item = button(null, style, run);
     item.innerHTML = icon;
     item.append(node('span', null, label));
     item.setAttribute('role', 'menuitem');
+    if (style === 'danger') item.setAttribute('aria-haspopup', 'dialog');
     item.tabIndex = -1;
     item.dataset.focus = `item:${bot.id}:${index}`;
     list.append(item);
@@ -695,6 +704,11 @@ function createSidebarEntry(botId) {
       toggle.setAttribute('aria-expanded', expanded);
       if (expanded) {
         toggle.setAttribute('aria-controls', 'bot-menu');
+        if (popover && previousBot?.canDelete !== bot.canDelete) {
+          if (popover.contains(document.activeElement)) toggle.focus();
+          popover.remove();
+          popover = null;
+        }
         if (!popover) {
           popover = menuPopover(bot);
           row.append(popover);
@@ -2511,6 +2525,87 @@ function openEditAppearance(bot) {
   botEditor.openEdit(bot, { bots, origin: headerFocusTarget() });
 }
 
+const deleteDialog = elements['bot-delete'];
+const deleteCancel = elements['bot-delete-cancel'];
+const deleteConfirm = elements['bot-delete-confirm'];
+const deleteFeedback = elements['bot-delete-feedback'];
+let deleteTarget = null;
+function openDeleteBot(bot, origin) {
+  if (!bot?.canDelete || deleteDialog.open) return;
+  deleteTarget = { id: bot.id, origin };
+  elements['bot-delete-title'].textContent = `Delete ${bot.name}?`;
+  deleteFeedback.textContent = '';
+  deleteFeedback.classList.remove('error');
+  origin?.focus({ preventScroll: true });
+  deleteDialog.showModal();
+}
+
+function focusAfterBotDeletion(origin) {
+  if (origin?.isConnected) {
+    origin.focus();
+    if (document.activeElement === origin) return;
+  }
+  if (elements.detail.open) {
+    (elements['detail-body'].querySelector('.settings-row.danger') ?? elements['close-detail']).focus();
+    return;
+  }
+  if (narrow.matches && !workspace.classList.contains('nav-open')) {
+    elements['open-navigation'].focus();
+    return;
+  }
+  if (!narrow.matches && workspace.classList.contains('sidebar-collapsed')) {
+    byId('toggle-chat-sidebar').focus();
+    return;
+  }
+  if (view) focusKey(`bot:${view.id}`);
+  if (!sidebar.contains(document.activeElement)) elements['new-bot-button'].focus();
+}
+
+deleteCancel.addEventListener('click', () => deleteDialog.close());
+deleteDialog.addEventListener('cancel', (event) => {
+  if (deleteConfirm.disabled) event.preventDefault();
+});
+deleteDialog.addEventListener('close', () => {
+  if (deleteDialog.open || !deleteTarget) return;
+  focusAfterBotDeletion(deleteTarget.origin);
+  deleteTarget = null;
+});
+deleteConfirm.addEventListener('click', async () => {
+  if (!deleteTarget || deleteConfirm.disabled) return;
+  const { id } = deleteTarget;
+  deleteCancel.disabled = deleteConfirm.disabled = true;
+  deleteFeedback.classList.remove('error');
+  deleteFeedback.textContent = 'Deleting Bot…';
+  try {
+    await api('bots/delete', { botId: id });
+  } catch (error) {
+    if (error.message !== 'bot_not_found') {
+      deleteFeedback.classList.add('error');
+      deleteFeedback.textContent = {
+        bot_busy: 'Finish or stop this Bot’s active work, then try again.',
+        access_denied: 'You do not have permission to delete this Bot.',
+      }[error.message] ?? 'Could not delete this Bot. Try again.';
+      deleteCancel.disabled = deleteConfirm.disabled = false;
+      deleteConfirm.focus();
+      return;
+    }
+  }
+  if (pins.delete(id)) save('flock-pins', [...pins]);
+  if (settingsReturnFocus === id) settingsReturnFocus = null;
+  // A roster response already in flight may still include the deleted Bot.
+  rosterGeneration++;
+  bots = bots.filter((bot) => bot.id !== id);
+  readState.delete(id);
+  if (view?.id === id) selectLocation();
+  else if (view?.dm?.peerId === id) leavePeerConversation(false);
+  render();
+  deleteTarget = null;
+  deleteCancel.disabled = deleteConfirm.disabled = false;
+  deleteDialog.close();
+  focusAfterBotDeletion();
+  void refreshBots();
+});
+
 const pencilIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 function generalContent(bot) {
   const hero = node('div', 'settings-hero');
@@ -2600,6 +2695,11 @@ function generalContent(bot) {
   settings.append(node('span', 'settings-row-label', 'Sharing and connections'));
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
+  if (bot.canDelete) {
+    const remove = button('Delete Bot…', 'settings-row danger', (event) => openDeleteBot(bot, event.currentTarget));
+    remove.setAttribute('aria-haspopup', 'dialog');
+    rows.append(remove);
+  }
   if (!bot.soul) return [hero, rows];
   const role = node('section', 'settings-card settings-role');
   const heading = node('h3', 'settings-card-label', 'Role');
@@ -2878,6 +2978,10 @@ async function refreshPeerConversation(context, scroll) {
     }
   } catch (error) {
     if (!isCurrent()) return;
+    if ([403, 404].includes(error.status) && dm.newestEvent != null) {
+      leavePeerConversation(false);
+      return;
+    }
     if (dm.newestEvent == null) dm.error = errors[error.message] ?? 'Could not load this conversation.';
     if (![403, 404].includes(error.status)) retrySync();
   }
@@ -2921,8 +3025,10 @@ async function refreshView(context, scroll, liveGeneration) {
   }
 }
 const refreshBots = coalescedRefresh(async () => {
+  const generation = rosterGeneration;
   try {
     const latest = await api('bots');
+    if (generation !== rosterGeneration) return;
     const viewer = responseViewers.get(latest) ?? null;
     const previous = viewer === sidebarViewer ? readState : null;
     sidebarViewer = viewer;
@@ -2941,6 +3047,7 @@ const refreshBots = coalescedRefresh(async () => {
     render();
     await decisions.refresh();
   } catch (error) {
+    if (generation !== rosterGeneration) return;
     if (error.status === 401 || error.status === 403) {
       sidebarViewer = null;
       decisions.setContext(null, null);
@@ -3408,6 +3515,7 @@ document.addEventListener('click', (event) => {
   if (!conversationActions.contains(event.target)) closeConversationActions();
 });
 document.addEventListener('keydown', (event) => {
+  if (deleteDialog.open) return;
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
   if (digit && !event.isComposing && !elements.detail.open && !elements['bot-editor'].open &&
       !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {

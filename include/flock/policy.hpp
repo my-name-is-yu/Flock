@@ -91,6 +91,9 @@ public:
     void changeNeverRule(const Person&, Action, std::string_view target, bool add);
     using PublishOwnedBot = std::function<void(std::string_view, const std::function<void()>&)>;
     Json createOwnedBot(const Person&, const std::function<Json(const PublishOwnedBot&)>&);
+    bool botDeleted(std::string_view bot) const;
+    struct BotBusy : Conflict { BotBusy() : Conflict("Bot has unfinished work") {} };
+    void deleteBot(const Person&, std::string_view bot);
     void setOwner(const Person& creator, std::string_view bot);
     void setMember(const Person&, std::string_view bot, std::string_view person, bool add);
     Json botSettings(const Person&, std::string_view bot) const;

@@ -292,6 +292,7 @@ public:
         }
         server_.Post("/api/bots",[this](const Request& req, Response& res) { saveBot(req,res,false); });
         server_.Post("/api/bots/profile",[this](const Request& req, Response& res) { saveBot(req,res,true); });
+        server_.Post("/api/bots/delete",[this](const Request& req, Response& res) { deleteBot(req,res); });
         server_.Post("/api/messages",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Message); });
         server_.Post("/api/operations",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Operation); });
 
@@ -479,6 +480,23 @@ private:
         catch (const Conflict&) { error(res,400,"invalid_bot_profile"); }
     }
 
+    void deleteBot(const Request& req, Response& res) {
+        if (req.body.size() > maxStandardPayload) return error(res,413,"payload_too_large");
+        const auto body = Json::parse(req.body,nullptr,false);
+        if (!body.is_object()) return error(res,400,"invalid_json");
+        const auto bot = web::field(body,"botId");
+        if (!validBotId(bot)) return error(res,400,"invalid_bot");
+        const auto actor = web::person(callbacks_,req);
+        auto policy = store_.policy();
+        if (!policy.allows(actor,Action::bot_settings,bot)) return error(res,403,"access_denied");
+        if (findBot(bot).is_null()) return error(res,404,"bot_not_found");
+        try { policy.deleteBot(actor,bot); }
+        catch (const DecisionDenied&) { return error(res,403,"access_denied"); }
+        catch (const Policy::BotBusy&) { return error(res,409,"bot_busy"); }
+        changes_.rescan();
+        json(res,200,{{"ok",true}});
+    }
+
     Json bots() const {
         auto list = callbacks_.bots();
         if (!list.is_array()) throw std::runtime_error("Bot descriptors must be an array");
@@ -515,7 +533,9 @@ private:
     }
 
     Json withConversationAccess(const Person& actor, std::string_view bot, Json view) const {
-        view["canDecide"] = store_.policy().allows(actor,Action::bot_decide,bot);
+        auto policy = store_.policy();
+        view["canDecide"] = policy.allows(actor,Action::bot_decide,bot);
+        view["bot"]["canDelete"] = policy.allows(actor,Action::bot_settings,bot);
         return view;
     }
 
@@ -562,6 +582,7 @@ private:
         for (auto& bot : list) {
             const auto id = web::field(bot,"id");
             bot = redactBot(id,bot);
+            bot["canDelete"] = policy.allows(person,Action::bot_settings,id);
             if (auto about = bot.find("about"); about != bot.end()) {
                 const auto& soul = about->get_ref<const std::string&>();
                 const auto firstLine = std::string_view(soul).substr(0,soul.find_first_of("\r\n"));
