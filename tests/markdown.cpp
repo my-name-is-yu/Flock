@@ -86,6 +86,21 @@ void codeAndNewlines() {
           "inline code content collapsed repeated spaces");
 }
 
+void definitionOnlySource() {
+    const std::string source = "[ref]: https://example.com/?q=a&b=c \"title <tag> * _ ~ `\"";
+    const std::string escaped = "[ref]: https://example.com/?q=a&amp;b=c \"title &lt;tag&gt; * _ ~ `\"";
+    const auto slack = markdown::toSlack(source);
+    check(markdown::toHtml(source) == escaped && slack.text == escaped && !slack.mrkdwn &&
+          markdown::toPlain(source) == source,
+          "definition-only Markdown did not preserve its source as safe literal text");
+
+    const std::string whitespace = " \t\r\n ";
+    const auto whitespaceSlack = markdown::toSlack(whitespace);
+    check(markdown::toHtml(whitespace).empty() && whitespaceSlack.text.empty() && whitespaceSlack.mrkdwn &&
+          markdown::toPlain(whitespace).empty(),
+          "whitespace-only Markdown behavior changed");
+}
+
 void linksAndRawHtml() {
     const std::string unsafe = "[scheme](javascript:alert%281%29) [entity](java&#x73;cript:alert%281%29) [encoded](https%3A%2F%2Fevil.example) [relative](//evil.example/path)";
     const auto html = markdown::toHtml(unsafe);
@@ -182,6 +197,7 @@ int main() {
         slackCodeDelimiters();
         slackTextFallback();
         codeAndNewlines();
+        definitionOnlySource();
         linksAndRawHtml();
         linkedImages();
         nestedAndStable();

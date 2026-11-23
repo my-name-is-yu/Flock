@@ -32,6 +32,10 @@ std::string escape(std::string_view source, Target target, bool attribute = fals
     return result;
 }
 
+bool hasNonWhitespace(std::string_view source) {
+    return std::ranges::any_of(source,[](unsigned char ch) { return !std::isspace(ch); });
+}
+
 std::optional<std::string> urlPart(CURLU* url, CURLUPart part) {
     char* result = nullptr;
     if (curl_url_get(url,part,&result,0) != CURLUE_OK) return std::nullopt;
@@ -308,7 +312,9 @@ std::string convert(std::string_view source, Target target) {
     auto* document = cmark_parse_document(bytes,source.size(),CMARK_OPT_DEFAULT);
     if (!document) return escape(source,target);
     std::unique_ptr<cmark_node,decltype(&cmark_node_free)> root(document,cmark_node_free);
-    return render(root.get(),target,0);
+    const auto rendered = render(root.get(),target,0);
+    if (rendered.empty() && hasNonWhitespace(source)) return escape(source,target);
+    return rendered;
 }
 }
 
@@ -321,7 +327,9 @@ SlackReply toSlack(std::string_view source) {
     std::unique_ptr<cmark_node,decltype(&cmark_node_free)> root(document,cmark_node_free);
     const bool mrkdwn = slackMrkdwnRepresentable(root.get());
     const auto target = mrkdwn ? Target::slack : Target::slack_plain;
-    return {render(root.get(),target,0),mrkdwn};
+    const auto rendered = render(root.get(),target,0);
+    if (rendered.empty() && hasNonWhitespace(source)) return {escape(source,Target::slack_plain),false};
+    return {rendered,mrkdwn};
 }
 std::string toPlain(std::string_view source) { return convert(source,Target::plain); }
 }
