@@ -134,6 +134,27 @@ Json Store::Impl::taskState(const Json& task, const Message& message, bool fullC
                  {"state",task.at("state")},
                  {"replanning",task.value("replanning",false)},{"wait",std::move(wait)}};
     if (task.value("queuedInT3",false)) view["queuedInT3"] = true;
+    if (task.contains("runTargets")) {
+        view["requestedCommit"] = task.at("requestedCommit");
+        if (task.contains("runOutcome")) view["runOutcome"] = task.at("runOutcome");
+        auto& results = view["runResults"] = Json::array();
+        if (task.contains("runResults")) {
+            for (const auto& run : task.at("runResults")) {
+                Json summary = Json::object();
+                for (const auto* key : {"name","environmentId","projectId","status","commit","threadId","runId","link","evidenceStatus"})
+                    if (run.contains(key)) summary[key] = run.at(key);
+                if (fullContract && run.contains("report")) summary["report"] = bounded(field(run,"report"),2000);
+                if (run.contains("detail")) summary["detail"] = bounded(field(run,"detail"),320);
+                results.push_back(std::move(summary));
+            }
+        } else {
+            for (const auto& target : task.at("runTargets")) {
+                auto summary = target;
+                summary["status"] = task.at("state") == "cancelled" ? "cancelled" : "queued";
+                results.push_back(std::move(summary));
+            }
+        }
+    }
     const auto taskOrigin = task.value("sessionOrigin",Json::object());
     const auto turnOrigin = message.routing.value("sessionOrigin",Json::object());
     if (!taskOrigin.empty() && !turnOrigin.empty() && taskOrigin.at("environmentId") == turnOrigin.at("environmentId") &&
@@ -419,6 +440,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     if (auto result = localMachineTool(bot,message.channelScope,decision); !result.is_null()) return result;
     if (std::ranges::find(webTools,tool) != webTools.end()) {
         if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
+        if (tool == "continue_fresh_session" && ownTask(identifier(args,"taskId",true),message).contains("runTargets"))
+            throw ToolError("Use a new request to run more work across T3 environments");
         if (tool == "compact_conversation" || tool == "expand_context" || tool == "continue_fresh_session")
             return contextTool(tool,args,message,step);
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" ||
@@ -459,11 +482,43 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto environment = text(args,"environment",256,false);
         const bool resume = args.value("resume",false);
         const auto sessionRef = text(args,"sessionRef",128,false);
+        auto commit = text(args,"commit",64,false);
+        Json targets = Json::array();
+        const auto environments = args.find("environments");
+        if (environments != args.end()) {
+            if (!message.channelScope.empty() || routing.contains("sessionOrigin"))
+                throw ToolError("Start work across T3 environments from a Flock conversation");
+            if (!environment.empty() || !sessionRef.empty() || selectedSession || resume)
+                throw ToolError("Choose either two environments or a single destination for this request");
+            if (!environments->is_array() || environments->size() != 2)
+                throw ToolError("Choose two distinct names or IDs from task.environments");
+            if ((commit.size() != 40 && commit.size() != 64) ||
+                commit.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+                throw ToolError("Supply the full commit SHA to verify on both environments");
+            std::ranges::transform(commit,commit.begin(),[](char ch) {
+                return ch >= 'A' && ch <= 'F' ? static_cast<char>(ch - 'A' + 'a') : ch;
+            });
+            std::set<std::string> seen;
+            for (const auto& choice : *environments) {
+                const auto name = text(Json{{"environment",choice}},"environment",256,true);
+                const auto id = taskEnvironment(bot,routing,name);
+                if (id.empty() || !seen.insert(id).second)
+                    throw ToolError("Choose two distinct names or IDs from task.environments");
+                auto project = configuredT3Project(routing,id,name);
+                if (project.empty()) project = rememberedT3Project(bot,id);
+                if (project.empty())
+                    throw ToolError("Choose a T3 project for " + name +
+                                    " first, or configure its projectId in conversationEnvironments");
+                targets.push_back({{"environmentId",id},{"projectId",std::move(project)},{"name",name}});
+            }
+            redactor(bot).requirePublic({targets,commit});
+        } else if (!commit.empty()) throw ToolError("A pinned commit requires two T3 environments");
         if (!sessionRef.empty() && (!selectedSession || !permitsWorkSession(message,*selectedSession)))
             throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
         if (selectedSession && (!environment.empty() || resume))
             throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
-        const auto destination = selectedSession ? selectedSession->environmentId : taskEnvironment(bot,routing,environment);
+        const auto destination = !targets.empty() ? field(targets.front(),"environmentId") :
+            selectedSession ? selectedSession->environmentId : taskEnvironment(bot,routing,environment);
         if (destination.empty())
             throw ToolError(environment.empty()
                 ? "Choose a connected T3 environment to start work. Use task.environments or connect T3 in Settings."
@@ -471,12 +526,27 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto result = source(nullptr);
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
-        const auto id = startConversationTask(routing,bot,request,destination,message.id,
+        auto taskRouting = routing;
+        if (!selectedSession) {
+            const auto project = targets.empty() ? configuredT3Project(routing,destination,environment)
+                : field(targets.front(),"projectId");
+            if (!project.empty()) {
+                taskRouting["environmentId"] = destination;
+                taskRouting["projectId"] = project;
+            }
+        }
+        const auto id = startConversationTask(taskRouting,bot,request,destination,message.id,
                                               result.is_null() ? Json(nullptr) : sourceRef(result),resume,selectedSession);
-        if (!doneWhen.empty()) {
+        if (!doneWhen.empty() || !targets.empty()) {
             auto task = load(id);
-            task["requestedDoneWhen"] = doneWhen;
-            task["criteriaSourceMessageId"] = message.id;
+            if (!doneWhen.empty()) {
+                task["requestedDoneWhen"] = doneWhen;
+                task["criteriaSourceMessageId"] = message.id;
+            }
+            if (!targets.empty()) {
+                task["runTargets"] = std::move(targets);
+                task["requestedCommit"] = std::move(commit);
+            }
             save(task);
         }
         Json receipt{{"ok",true},{"effect","started"},{"taskId",id}};
@@ -487,6 +557,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
         active(task);
+        if (task.contains("runTargets"))
+            throw ToolError("Use cancel_task to stop both Runs, then start a new request for changed work");
         const auto instruction = text(args,"instruction",messageSize,true);
         const auto result = source(&task);
         std::optional<TaskChange> change;

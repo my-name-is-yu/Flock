@@ -142,6 +142,54 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
+    // Existing state directories already have the single-route views.
+    constexpr auto outdatedQueue = "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sqlite_schema "
+                                   "WHERE name='project_execution_queue' AND instr(sql,'$.runResults')>0)";
+    if (query(outdatedQueue).next()) {
+        Transaction update(db);
+        constexpr auto queueViews = R"SQL(
+DROP VIEW IF EXISTS project_slots;
+DROP VIEW IF EXISTS project_execution_queue;
+CREATE VIEW project_execution_queue AS
+WITH candidates AS (
+  SELECT task.id,task.state,task.data,task.project_id,task.environment_id
+  FROM tasks task
+  WHERE json_type(task.data,'$.runTargets') IS NULL AND task.project_id<>''
+    AND task.state NOT IN ('completed','cancelled')
+  UNION ALL
+  SELECT task.id,task.state,task.data,json_extract(route.value,'$.projectId'),json_extract(route.value,'$.environmentId')
+  FROM tasks task CROSS JOIN json_each(task.data,'$.runTargets') route
+  WHERE task.state NOT IN ('completed','cancelled')
+    AND coalesce(json_extract(task.data,'$.runResults[' || route.key || '].status'),'queued')
+          IN ('queued','running','confirmation_pending')
+)
+SELECT task.id,task.environment_id,task.project_id,task.state,
+       ROW_NUMBER() OVER (
+         PARTITION BY task.environment_id,task.project_id
+         ORDER BY COALESCE(sender.state,task.state)='queued',
+           COALESCE(sender.id,task.id),
+           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
+                WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
+       ) AS position
+FROM candidates task
+LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
+LEFT JOIN candidates sender ON sender.id=peer.sender_task
+  AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
+  AND peer.phase<>'closed'
+WHERE COALESCE(peer.kind,'')<>'consult';
+CREATE VIEW project_slots AS
+WITH queue AS (
+  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
+  FROM project_execution_queue
+)
+SELECT q.id,MIN(CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
+             json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN q.head_id END) AS blocker_id
+FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id GROUP BY q.id;
+)SQL";
+        if (query(outdatedQueue).next() && sqlite3_exec(db,queueViews,nullptr,nullptr,nullptr) != SQLITE_OK)
+            sqlError(db);
+        update.commit();
+    }
     exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
@@ -203,34 +251,6 @@ CREATE TABLE IF NOT EXISTS peer_exchanges(
   recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
   sender_environment TEXT NOT NULL, sender_revision INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
-CREATE VIEW IF NOT EXISTS project_execution_queue AS
-WITH candidates AS (
-  SELECT task.id,task.state,task.data,task.project_id,task.environment_id
-  FROM tasks task
-  WHERE task.project_id<>'' AND task.state NOT IN ('completed','cancelled')
-)
-SELECT task.id,task.environment_id,task.project_id,task.state,
-       ROW_NUMBER() OVER (
-         PARTITION BY task.environment_id,task.project_id
-         ORDER BY COALESCE(sender.state,task.state)='queued',
-           COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
-                WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
-       ) AS position
-FROM candidates task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN candidates sender ON sender.id=peer.sender_task
-  AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
-  AND peer.phase<>'closed'
-WHERE COALESCE(peer.kind,'')<>'consult';
-CREATE VIEW IF NOT EXISTS project_slots AS
-WITH queue AS (
-  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
-  FROM project_execution_queue
-)
-SELECT q.id,CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
-             json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN q.head_id END AS blocker_id
-FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
 )SQL";
     if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
     initializePolicySchema();
@@ -429,6 +449,8 @@ void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
     if (task["state"] == "queued" && !peer) {
         for (const auto* key : {"replanning","pendingDestination","pendingInstructions"})
             task.erase(key);
+        if (auto checks = task.find("runResults"); checks != task.end())
+            for (auto& check : *checks) check["status"] = "cancelled";
         task["state"] = "cancelled";
         journal(id,"cancelled",Json::object());
     } else task["state"] = "cancelling";
@@ -501,10 +523,11 @@ void Store::Impl::clearWait(Json& task, std::string_view resolution) {
     task["wait"] = nullptr;
     journal(task["id"], "wait_closed", data);
 }
-Json Store::Impl::outbox(const Json& task) const {
-    if (field(task, "actionId").empty()) return nullptr;
+Json Store::Impl::outbox(const Json& task, std::string_view actionId) const {
+    const auto id = actionId.empty() ? field(task,"actionId") : std::string(actionId);
+    if (id.empty()) return nullptr;
     auto row = query("SELECT data,phase,auth_generation FROM outbox WHERE id=? AND task_id=?",
-                     {task["actionId"], task["id"]});
+                     {id, task["id"]});
     if (!row.next()) return nullptr;
     auto result = row.json(0);
     result["phase"] = row.string(1);
@@ -620,11 +643,13 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
 
     const auto current = intake(task.at("botId").get_ref<const std::string&>(),
                                 task.at("request").get_ref<const std::string&>());
-    const auto& environment = task.at("environmentId");
+    const auto environment = field(task,"environmentId");
     const auto destinations = current.config.value("conversationEnvironments",Json::object());
     if ((!current.projectId.empty() && environment == current.environmentId && task.at("projectId") != current.projectId) ||
         (!current.environmentId.empty() && environment != current.environmentId &&
-         std::ranges::find(destinations,environment) == destinations.end()))
+         std::ranges::none_of(destinations,[&](const Json& alias) {
+             return conversationEnvironmentId(alias) == environment;
+         })))
         throw Conflict("The project route changed. Cancel this task and submit a new request.");
     target["session"] = current.config.value("session",Json::object());
     return target;
@@ -820,14 +845,14 @@ void Store::Impl::addTaskDetails(Json& result) const {
             {"intent",revisions.string(2)},{"doneWhen",revisions.string(3)},
             {"sourceMessageId",revisions.number(4)}});
     auto runs = query("SELECT runs.thread_id,runs.run_id,runs.link,runs.action_id,runs.environment_id,"
-                      "json_extract(outbox.data,'$.revisionId') FROM runs"
+                      "json_extract(outbox.data,'$.revisionId'),json_extract(outbox.data,'$.projectId') FROM runs"
                       " JOIN outbox ON runs.action_id=outbox.id WHERE runs.task_id=? ORDER BY outbox.rowid", {id});
     result["runs"] = Json::array();
     while (runs.next())
         result["runs"].push_back({{"threadId",runs.string(0)},{"runId",runs.string(1)},
                                   {"link",runs.string(2)},{"actionId",runs.string(3)},
                                   {"environmentId",runs.string(4)},{"revisionId",runs.number(5)},
-                                  {"ownerBotId",result.at("botId")}});
+                                  {"projectId",runs.string(6)},{"ownerBotId",result.at("botId")}});
 }
 
 Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {

@@ -110,6 +110,8 @@ struct Observation {
     std::string detail;
     RunEvidence::Availability evidence = RunEvidence::Availability::Available;
     std::string sessionCreatedAt{};
+    std::string checkedCommit{};
+    bool commitEvidenceUnavailable = false;
 };
 inline constexpr std::size_t maxSessionPromptBytes = 120000;
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);

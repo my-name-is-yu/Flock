@@ -69,6 +69,17 @@ Json threadHead(Client& client, const std::string& threadId, int runLimit = 1) {
     return readThread(client,threadId,"messages",1,32,Json::object(),runLimit);
 }
 
+void checkVerificationRoute(Client& client, const Json& config, std::string_view environment,
+                            const std::string& thread = {}) {
+    if (!config.contains("commitVerification")) return;
+    const auto& route = config.at("commitVerification");
+    const auto info = client.call("t3_environment_read",Json::object());
+    if (str(info,"environmentId") != environment)
+        throw Failure(Failure::Kind::Settings,"The OAuth endpoint belongs to a different T3 environment");
+    if (!thread.empty() && str(threadHead(client,thread).at("thread"),"projectId") != str(route,"projectId"))
+        throw Failure(Failure::Kind::Settings,"The Run's Session is outside the saved T3 project");
+}
+
 bool fromRun(const Json& item, const RunRef& run) {
     return localItem(item, run.threadId) && str(item, "runId") == run.runId;
 }
@@ -618,6 +629,46 @@ Report readReport(Client& client, const RunRef& run, std::string_view view, std:
     }
 }
 
+bool commitCheckCommand(std::string_view input) {
+    constexpr std::string_view command = "git rev-parse --verify HEAD";
+    if (input == command) return true;
+    // Providers can record a shell wrapper around the one requested command.
+    for (auto shell : {"/bin/zsh","/bin/bash","/bin/sh"})
+        for (auto flag : {" -lc "," -c "})
+            for (auto quote : {"'","\""})
+                if (input == std::string(shell) + flag + quote + std::string(command) + quote) return true;
+    return false;
+}
+
+std::string checkedCommit(Client& client, const RunRef& assigned, const RunRef& effective,
+                          const RunRef& result, std::string_view expected) {
+    Scan scan;
+    Position before = maxHistoryPosition;
+    std::string actual;
+    for (;;) {
+        scan.step();
+        const auto page = readThread(client,assigned.threadId,"activity",PageSize,512,{{"beforePosition",before}});
+        const auto& items = array(page,"items");
+        for (const auto& item : items) {
+            if ((!fromRun(item,assigned) && !fromRun(item,effective) && !fromRun(item,result)) ||
+                str(item,"type") != "command_execution" ||
+                str(item,"status") != "completed" || boolean(item,"textTruncated")) continue;
+            const auto text = str(item,"text");
+            const auto newline = text.find('\n');
+            if (newline == text.npos || !text.starts_with("$ ") ||
+                !commitCheckCommand(std::string_view(text).substr(2,newline-2))) continue;
+            const auto output = trimSessionQuestionText(std::string_view(text).substr(newline+1));
+            if (!gitCommit(output)) continue;
+            if (output != expected) return std::string(output);
+            actual = output;
+        }
+        const auto next = cursor(page,"earlierPosition");
+        if (!next) return actual;
+        if (*next >= before || items.empty() || *next != position(member(items.front(),"position"))) invalidResponse();
+        before = *next;
+    }
+}
+
 RunEvidence unavailableReport(const Failure& failure) {
     RunEvidence evidence;
     evidence.availability = RunEvidence::Availability::ReportUnavailable;
@@ -791,6 +842,7 @@ public:
                 if (!pin.empty() && !loopbackGitHost(checkedUrl(connection.mcpUrl).origin))
                     return result(Outcome::Settings,"Pinned specialist worktrees require a local T3 environment");
                 Client client(std::move(connection));
+                checkVerificationRoute(client,command.config,command.environmentId);
                 const auto project = client.call("t3_project_read",{{"projectId",command.projectId}});
                 if (str(project,"id") != command.projectId)
                     return result(Outcome::Settings,"The configured ID does not identify the canonical T3 project");
@@ -831,6 +883,7 @@ public:
             }
             Json reply;
             if (launch) {
+                checkVerificationRoute(client,command.config,command.environmentId);
                 if (command.sessionOrigin) {
                     const auto environment = client.call("t3_environment_read",Json::object());
                     if (str(environment,"environmentId") != command.environmentId)
@@ -895,6 +948,7 @@ public:
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
             if (command.tool == "delegate" || command.tool == "follow_up" || command.tool == "start_in_session") {
+                checkVerificationRoute(client,command.config,command.environmentId);
                 auto recovered = reconcileWork(client, command);
                 if (command.tool == "delegate" && recovered.kind == Outcome::Accepted) {
                     const auto pin = launchArgs(command).pin;
@@ -952,8 +1006,12 @@ public:
             auto connection = credential(environmentId,config);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
+            checkVerificationRoute(client,config,environmentId,run.threadId);
             const auto reply = wait(client, run, WaitFor::DelegatedWork);
             const auto effective = str(reply, "runId");
+            const auto verification = config.find("commitVerification");
+            if (verification != config.end() && effective != run.runId && !isRestartContinuation(client,run,effective))
+                return state(Observed::Unavailable,"Could not identify the Run's restart continuation");
             const auto status = str(reply, "status");
             const bool finished = terminal(status);
             if (status == "queued") return state(Observed::Running,status);
@@ -970,6 +1028,14 @@ public:
                 if (!timedOut && ownsResult(client, run, effective, laterId)) {
                     source.runId = laterId;
                     observed.status = str(later, "status");
+                }
+                if (verification != config.end()) {
+                    try {
+                        observed.checkedCommit = checkedCommit(client,run,{run.threadId,effective,run.link},source,
+                                                               str(*verification,"expectedCommit"));
+                    } catch (const Failure&) {
+                        observed.commitEvidenceUnavailable = true;
+                    }
                 }
                 auto problem = pinnedEvidenceProblem(client,config,source,observed.status,origin);
                 if (problem && problem->availability == RunEvidence::Availability::ReportUnavailable)
@@ -1028,9 +1094,12 @@ public:
         auto connection = credential(environmentId, config);
         requireOperate(connection);
         Client client(std::move(connection));
+        checkVerificationRoute(client,config,environmentId,run.threadId);
         // An explicit wait can resolve T3's own restart continuation of the assigned Run.
         const auto current = wait(client, run, WaitFor::Run, 1);
         const auto effective = str(current, "runId");
+        if (config.contains("commitVerification") && effective != run.runId && !isRestartContinuation(client,run,effective))
+            throw Failure(Failure::Kind::Wire,"Could not identify the Run's restart continuation");
         const auto status = str(current,"status");
         if (terminal(status)) return InterruptOutcome::AlreadyTerminal;
         if (status == "queued" && effective == run.runId) {

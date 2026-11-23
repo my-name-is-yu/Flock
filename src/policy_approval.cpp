@@ -88,10 +88,16 @@ PolicyOrigin Store::Impl::taskPolicyOrigin(const Json& task) {
     return origin;
 }
 
-bool Store::Impl::currentPolicyApproval(Id turn, Id task, Id revision, Id generation) const {
+bool Store::Impl::currentPolicyApproval(Id turn, Id task, Id revision, Id generation, std::string_view operation) const {
     if (turn && !query("SELECT 1 FROM conversation_turns WHERE message_id=? AND status IN ('policy_waiting','running')",
                        {turn}).next()) return false;
     if (!task) return true;
+    if (operation.starts_with(runOutboxOperation))
+        return query(R"SQL(
+SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
+WHERE o.id=? AND t.id=? AND o.phase='ready' AND t.state IN ('sending','running')
+  AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
+)SQL",{operation.substr(runOutboxOperation.size()),task,revision}).next();
     return query("SELECT 1 FROM tasks WHERE id=? AND generation=?"
                  " AND coalesce(json_extract(data,'$.currentRevision'),0)=?"
                  " AND state NOT IN ('cancelling','cancelled') AND (? OR state<>'completed')",{task,generation,revision,turn != 0}).next();
@@ -116,7 +122,7 @@ void Store::Impl::releasePolicyTask(Id approval, std::string_view resolution) {
 
 void Store::Impl::settlePolicyApprovals(std::optional<Seconds> now) {
     auto rows = query(R"SQL(
-SELECT a.id,a.turn,a.task,a.revision,a.generation,a.expires_at,a.mode_revision=s.revision,a.status
+SELECT a.id,a.turn,a.task,a.revision,a.generation,a.expires_at,a.mode_revision=s.revision,a.status,a.operation
 FROM policy_approvals a CROSS JOIN policy_settings s
 WHERE a.status IN ('pending','approved')
 )SQL");
@@ -124,7 +130,7 @@ WHERE a.status IN ('pending','approved')
     std::vector<Settlement> settled;
     while (rows.next()) {
         const bool stale = !rows.number(6) ||
-            !currentPolicyApproval(rows.number(1),rows.number(2),rows.number(3),rows.number(4));
+            !currentPolicyApproval(rows.number(1),rows.number(2),rows.number(3),rows.number(4),rows.string(8));
         const bool expired = rows.string(7) == "pending" && now && rows.number(5) && rows.number(5) <= *now;
         if (stale || expired)
             settled.push_back({rows.number(0),rows.number(1),rows.number(2),stale ? "stale" : "expired"});
@@ -164,8 +170,9 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.operation=?
         const auto status = row.string(4);
         if (row.string(1) != action || row.string(2) != resource.target || row.string(3) != fingerprint(payload) ||
             !row.number(5) || row.number(7) != origin.turn || row.number(8) != origin.task ||
-            row.number(9) != origin.revision || row.number(10) != origin.generation ||
-            !currentPolicyApproval(origin.turn,origin.task,origin.revision,origin.generation)) return ApprovalGate::stale;
+            row.number(9) != origin.revision ||
+            (!operation.starts_with(runOutboxOperation) && row.number(10) != origin.generation) ||
+            !currentPolicyApproval(origin.turn,origin.task,origin.revision,origin.generation,operation)) return ApprovalGate::stale;
         if (status == "expired" || status == "rule_saved" ||
             (status == "pending" && row.number(6) && row.number(6) <= now))
             return ApprovalGate::expired;
@@ -185,7 +192,7 @@ AND (anchor>=? OR requester='' OR ?='')
     if (result == PolicyResult::allow) return ApprovalGate::allow;
     if (origin.requester.empty()) return deny("no_person_requester");
     if (sharedRedactor().text(origin.requester) != origin.requester) return deny("protected_requester");
-    if (!currentPolicyApproval(origin.turn,origin.task,origin.revision,origin.generation)) return ApprovalGate::stale;
+    if (!currentPolicyApproval(origin.turn,origin.task,origin.revision,origin.generation,operation)) return ApprovalGate::stale;
     const auto scrub = sharedRedactor();
     if (scrub.text(resource.target) != resource.target) return deny("protected_target");
     auto preview = [&](auto&& self, Json value) -> Json {
@@ -229,7 +236,7 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
 
 void Store::Impl::decidePolicyApproval(const Person& actor, const InboxTarget& item, std::string_view choice) {
     auto row = query(R"SQL(
-SELECT a.requester,a.action,a.target,a.status,a.turn,a.task,a.revision,a.generation,a.mode_revision=s.revision,a.wait_id,a.card_generation
+SELECT a.requester,a.action,a.target,a.status,a.turn,a.task,a.revision,a.generation,a.mode_revision=s.revision,a.wait_id,a.card_generation,a.operation
 FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
 )SQL",{item.itemId,item.botId});
     if (!row.next()) throw DecisionUnavailable{};
@@ -243,7 +250,7 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
     if (item.waitId != row.number(9) || item.taskId != row.number(5) || item.targetRevision != row.number(6) ||
         item.targetGeneration != row.number(10)) throw RequestChanged{};
     if (nextTime ? status != "expired" : status != "pending") throw DecisionUnavailable{};
-    if (!nextTime && (!row.number(8) || !currentPolicyApproval(row.number(4),row.number(5),row.number(6),row.number(7))))
+    if (!nextTime && (!row.number(8) || !currentPolicyApproval(row.number(4),row.number(5),row.number(6),row.number(7),row.string(11))))
         throw RequestChanged{};
     if (saveRule)
         policy.writeRule(currentActor,RuleKind::allow,*parseAction(row.string(1)),row.string(2),true,true);
@@ -261,7 +268,7 @@ AND 'channel-task-update/' || id=(SELECT operation FROM policy_approvals WHERE i
 
 Json Store::Impl::policyApprovalCards(const Person& actor, std::string_view bot) {
     auto rows = query(R"SQL(
-SELECT id,action,target,preview,requester,anchor,task,revision,generation,created_at,expires_at,status,scope,turn,wait_id,card_generation
+SELECT id,action,target,preview,requester,anchor,task,revision,generation,created_at,expires_at,status,scope,turn,wait_id,card_generation,operation
 FROM policy_approvals WHERE bot=? AND status IN ('pending','expired') ORDER BY id DESC
 )SQL",{bot});
     const Policy policy(*this);
@@ -270,7 +277,7 @@ FROM policy_approvals WHERE bot=? AND status IN ('pending','expired') ORDER BY i
     auto cards = Json::array();
     while (rows.next()) {
         const bool expired = rows.string(11) == "expired";
-        if (!expired && !currentPolicyApproval(rows.number(13),rows.number(6),rows.number(7),rows.number(8))) continue;
+        if (!expired && !currentPolicyApproval(rows.number(13),rows.number(6),rows.number(7),rows.number(8),rows.string(16))) continue;
         const bool requester = !currentActor.id.empty() && currentActor.id == rows.string(4);
         const bool canDecide = canSaveRule || (!expired && requester);
         const auto label = rows.string(1) + " · " + rows.string(2);

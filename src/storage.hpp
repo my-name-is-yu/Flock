@@ -41,6 +41,9 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 std::string field(const Json&, std::string_view);
+std::string conversationEnvironmentId(const Json& alias);
+std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name = {});
+inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 bool terminal(const Json&);
 Json questionTarget(const Json&);
 std::string actionId();
@@ -189,7 +192,7 @@ struct Store::Impl {
     ApprovalGate approveAction(const PolicyOrigin&, const Resource&, std::string_view operation,
                                const Json& payload, Seconds now, bool claim = true, ApprovalWait = ApprovalWait::pause);
     void consumePolicyApproval(std::string_view operation);
-    bool currentPolicyApproval(Id turn, Id task, Id revision, Id generation) const;
+    bool currentPolicyApproval(Id turn, Id task, Id revision, Id generation, std::string_view operation) const;
     void settlePolicyApprovals(std::optional<Seconds> now = {});
     void decidePolicyApproval(const Person&, const InboxTarget&, std::string_view);
     Json policyApprovalCards(const Person&, std::string_view bot);
@@ -422,7 +425,7 @@ struct Store::Impl {
     void wait(Json&, std::string_view reason, Json data = Json::object());
     void clearWait(Json&, std::string_view resolution);
     void consumeEvent(const Json&);
-    Json outbox(const Json&) const;
+    Json outbox(const Json&, std::string_view actionId = {}) const;
     void unlockQuestion(Json&, std::string_view reason);
 };
 

@@ -79,6 +79,7 @@ const sessionEndLabels = {
 const stateLabels = {
   ...sessionEndLabels,
   queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for you',
+  confirmation_pending: 'Confirmation pending',
   cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
@@ -976,8 +977,9 @@ function activityRow(tag, className, title, status, statusClass) {
 }
 function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
-  const row = activityRow(link ? 'a' : 'div', 'session-row', request, status, tone);
-  row.title = Number.isFinite(startedAt) ? `${request} · Started ${fullTime.format(startedAt)}` : request;
+  const title = [request, session.name].filter(Boolean).join(' · ');
+  const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
+  row.title = [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · ');
   if (link) {
     row.href = link;
     row.target = '_blank';
@@ -1115,7 +1117,8 @@ function renderActivity() {
       if (activeKeys.has(identity)) continue;
       activeKeys.add(identity);
       live.push(sessionRow(run.request, run, stateLabels[run.state] ?? run.state,
-        run.state === 'waiting' ? 'waiting' : 'live', run.createdAt ? run.createdAt * 1000 : undefined));
+        ['waiting', 'confirmation_pending'].includes(run.state) ? 'waiting' : 'live',
+        run.createdAt ? run.createdAt * 1000 : undefined));
     }
     const ended = [];
     for (const task of groups.sort((a, b) => b.id - a.id)) {
@@ -1501,6 +1504,20 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
+function verificationLine(run, showLink) {
+  const status = Object.hasOwn(stateLabels, run.state) ? stateLabels[run.state] : run.state;
+  const line = node('p', 'event-reason', [run.name, status].filter(Boolean).join(' · '));
+  if (run.commit) line.append(' · ', node('code', null, run.commit));
+  if (showLink) {
+    const link = runIcon(run);
+    if (link) {
+      link.setAttribute('aria-label', `Open ${run.name} in T3`);
+      line.append(link);
+    }
+  }
+  return line;
+}
+
 function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
@@ -1626,18 +1643,20 @@ function eventCard(event, context, place, report) {
     replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
-      : data.report || 'The session submitted a report.';
+      : data.report || (data.destination ? 'No Session report is available.' : 'The session submitted a report.');
     text.textContent = copy;
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
     if (link) text.append(link);
     bubble.append(text);
     if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
-    if (typeof data.status === 'string' && data.status && data.status !== 'completed') {
+    if (data.destination) {
+      bubble.append(verificationLine({name: data.destination, state: data.status, commit: data.commit}, false));
+    } else if (typeof data.status === 'string' && data.status && data.status !== 'completed') {
       const status = Object.hasOwn(stateLabels, data.status) ? stateLabels[data.status] : data.status;
       bubble.append(node('p', 'event-reason', `Work ${status.toLowerCase()}`));
     }
-    if (data.evidenceStatus && data.detail) bubble.append(node('p', 'event-reason', data.detail));
+    if ((data.evidenceStatus || data.destination) && data.detail) bubble.append(node('p', 'event-reason', data.detail));
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
@@ -1685,6 +1704,12 @@ function eventCard(event, context, place, report) {
     else if (event.id === context.latestWebMessageId && data.status === 'received')
       extras.push(node('p', 'msg-note', 'Received'));
     if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
+    if (['request', 'conversation_message'].includes(event.kind)) {
+      for (const run of context.parallelTasks.get(event.taskId) ?? []) {
+        bubble.append(verificationLine(run, true));
+        if (run.detail) bubble.append(node('p', 'event-reason', run.detail));
+      }
+    }
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
       const owner = bots.find((item) => item.id === blocker.botId)?.name ?? blocker.botId;
@@ -1985,7 +2010,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     return;
   }
   if (changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()),
+    data?.presence, data?.activeSessions, data?.parallelTasks, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()),
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
@@ -2080,6 +2105,7 @@ function conversationRows(data, events, keep, source) {
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
+    parallelTasks: new Map((data?.parallelTasks ?? []).map((task) => [task.id, task.runs])),
     closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
   };
   const bot = timeline.bot;
@@ -2136,13 +2162,15 @@ function conversationRows(data, events, keep, source) {
     }
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
     const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
-    const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
+    const request = ['request', 'conversation_message'].includes(event.kind);
+    const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
         place.groupStart, place.taskStart, place.afterQuestion, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
+        request ? timeline.parallelTasks.get(event.taskId) : null,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);

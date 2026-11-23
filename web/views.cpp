@@ -2,6 +2,7 @@
 #include "flock/markdown.hpp"
 #include "flock/policy.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <iterator>
 #include <set>
@@ -158,7 +159,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId","question"});
     else if (kind == "pr_review_requested") copyFields(details,data,{"itemId","title","text","prUrl"});
     else if (kind == "completed") {
-        copyFields(details,data,{"text","reason","doneWhen","revisionId"});
+        copyFields(details,data,{"text","reason","doneWhen","revisionId","runOutcome","requestedCommit"});
         if (data.contains("source")) {
             const auto& source = data.at("source");
             auto run = runView(source,field(source,"environmentId"));
@@ -181,8 +182,10 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
             }
         }
     } else if (kind == "report") {
-        copyFields(details,data,{"report","status","resultRunId","truncated","itemId","revisionId"});
-        if (data.contains("evidenceStatus")) copyFields(details,data,{"evidenceStatus","detail"});
+        copyFields(details,data,{"report","status","resultRunId","truncated","itemId","revisionId",
+                                "destination","commit","requestedCommit"});
+        if (data.contains("evidenceStatus")) copyFields(details,data,{"evidenceStatus"});
+        if (data.contains("evidenceStatus") || data.contains("destination")) copyFields(details,data,{"detail"});
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
@@ -264,6 +267,16 @@ Json taskSummary(const Json& task) {
     return result;
 }
 
+Json verificationRun(const Json& source) {
+    auto run = runView(source,field(source,"environmentId"));
+    if (run.is_null()) run = Json::object();
+    copyFields(run,source,{"name","environmentId","commit"});
+    run["state"] = source.value("status","queued");
+    if (run["state"] == "confirmation_pending" && !field(run,"runId").empty())
+        copyFields(run,source,{"detail"});
+    return run;
+}
+
 Json currentWait(const Json& task) {
     auto result = taskSummary(task);
     const auto& wait = task.at("wait");
@@ -288,6 +301,14 @@ Json sessionGroup(const Json& task) {
         const bool active = field(*run,"runId") == field(activeRun,"runId") && thread == field(activeRun,"threadId") &&
             field(session,"environmentId") == env;
         session["state"] = active ? displayState(task) : run->value("status","ended");
+        if (task.contains("runResults")) {
+            const auto& results = task.at("runResults");
+            const auto result = std::ranges::find_if(results,[&](const Json& check) {
+                return field(check,"environmentId") == field(*run,"environmentId") &&
+                    field(check,"threadId") == thread && field(check,"runId") == field(*run,"runId");
+            });
+            if (result != results.end()) copyFields(session,*result,{"name","commit"});
+        }
         if (const auto createdAt = field(*run,"sessionCreatedAt"); !createdAt.empty()) session["createdAt"] = createdAt;
         sessions.push_back(std::move(session));
     }
@@ -311,7 +332,7 @@ std::string_view botPresence(const Json& activeTasks) {
 
 Json activity(const Json& activeTasks, std::string_view bot) {
     Json result = {{"presence",botPresence(activeTasks)},{"waits",Json::array()},
-                   {"queued",Json::array()},{"activeSessions",Json::array()}};
+                   {"queued",Json::array()},{"activeSessions",Json::array()},{"parallelTasks",Json::array()}};
     for (const auto& task : activeTasks) {
         const auto state = field(task,"state");
         if (state == "waiting") result["waits"].push_back(currentWait(task));
@@ -324,6 +345,24 @@ Json activity(const Json& activeTasks, std::string_view bot) {
                 copyFields(queued["blockedBy"],blocker,{"botId"});
             }
             result["queued"].push_back(std::move(queued));
+        }
+        if (task.contains("runTargets")) {
+            Json checks = Json::array();
+            const auto& routes = task.contains("runResults") ? task.at("runResults") : task.at("runTargets");
+            for (const auto& route : routes) {
+                auto run = verificationRun(route);
+                const bool activeRun = run["state"] == "running" || run["state"] == "confirmation_pending" || run["state"] == "queued";
+                if (activeRun && state == "cancelling" && run["state"] != "confirmation_pending") run["state"] = "stopping";
+                if (activeRun && !field(run,"threadId").empty()) {
+                    auto active = run;
+                    active["taskId"] = task.at("id");
+                    active["request"] = task.at("request");
+                    copyFields(active,task,{"createdAt"});
+                    result["activeSessions"].push_back(std::move(active));
+                }
+                checks.push_back(std::move(run));
+            }
+            result["parallelTasks"].push_back({{"id",task.at("id")},{"runs",std::move(checks)}});
         }
         auto active = runView(task.at("activeRun"),field(task,"environmentId"));
         if (!active.is_null()) {

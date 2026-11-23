@@ -58,6 +58,46 @@ public:
     InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
+void pinnedConversationDestinations() {
+    Sandbox temp;
+    auto config = botConfig();
+    config["conversationEnvironments"] = {
+        {"mini",{{"environmentId","mini-env"},{"projectId","mini-project"}}},
+        {"local","env-canonical"}};
+    const auto folder = temp.path / "bots";
+    createBot(folder / "release",config,"Verify revisions.","");
+    const auto intake = Bots(folder).get("release").intake("");
+    check(intake.config.at("conversationEnvironments") == config.at("conversationEnvironments"),
+          "Bot config must preserve canonical project aliases and legacy environment aliases");
+
+    struct RoutingModel final : Model {
+        Json args;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("turn").empty()) return {{{"start_task",args,"Use the requested destinations."}}};
+            return {{{"reply",{{"text","I recorded the result."}},"Finish the conversation."}}};
+        }
+    } model;
+    NotesT3 t3;
+    Store store(temp.path / "state.db");
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    model.args = {{"request","Verify the release"},{"environments",{"mini","local"}},{"commit",std::string(40,'A')}};
+    store.receive(localOwner,intake,"parallel-verification","Verify the release on both Macs");
+    runtime.runConversations();
+    const auto tasks = store.tasks();
+    check(tasks.size() == 1 && t3.commands.empty(),"one conversation request must save exactly one task before dispatch");
+    const auto task = store.task(tasks.front().at("id"));
+    const Json expected = Json::array({
+        {{"name","mini"},{"environmentId","mini-env"},{"projectId","mini-project"}},
+        {{"name","local"},{"environmentId","env-canonical"},{"projectId","project-canonical"}}});
+    check(task.at("runTargets") == expected && task.at("requestedCommit") == std::string(40,'a'),
+          "the task must pin the selected canonical routes and normalized SHA");
+
+    model.args["environments"] = {"local","env-canonical"};
+    store.receive(localOwner,intake,"duplicate-environment","Verify again on both Macs");
+    runtime.runConversations();
+    check(store.tasks().size() == 1,"two aliases for one environment must not create a parallel task");
+}
+
 void notesAndRoutingOnRestart() {
     Sandbox temp;
     const auto folder = temp.path / "bots";
@@ -389,6 +429,9 @@ void responseContract() {
           turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
           turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
+          turnTool("start_task")["properties"]["environments"]["minItems"] == 2 &&
+          turnTool("start_task")["properties"]["environments"]["maxItems"] == 2 &&
+          turnTool("start_task")["properties"]["commit"]["type"] == "string" &&
           turnTool("change_task")["required"] == Json::array({"reason","taskId","generation","revisionId","instruction"}) &&
           turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&
           turnTool("find_tasks")["required"] == Json::array({"reason"}) &&
@@ -939,6 +982,7 @@ void botProfilesAndAvatars() {
 int main() {
     try {
         configuredSchedules();
+        pinnedConversationDestinations();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();
         directionalPeerConfiguration();

@@ -3,12 +3,45 @@
 #include <algorithm>
 
 namespace flockv0 {
+std::string conversationEnvironmentId(const Json& alias) {
+    return alias.is_string() ? alias.get<std::string>() : field(alias,"environmentId");
+}
+
+std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name) {
+    const auto& config = routing.at("config");
+    const auto aliases = config.find("conversationEnvironments");
+    const bool hasAliases = aliases != config.end() && aliases->is_object();
+    if (hasAliases) {
+        if (const auto alias = aliases->find(name); alias != aliases->end() && conversationEnvironmentId(*alias) == environment)
+            if (auto project = field(*alias,"projectId"); !project.empty()) return project;
+    }
+    if (environment == field(routing,"environmentId"))
+        if (auto project = field(routing,"projectId"); !project.empty()) return project;
+    if (!hasAliases) return {};
+    std::string selected;
+    for (const auto& alias : *aliases) {
+        if (conversationEnvironmentId(alias) != environment) continue;
+        auto project = field(alias,"projectId");
+        if (project.empty()) continue;
+        if (!selected.empty() && selected != project) return {};
+        selected = std::move(project);
+    }
+    return selected;
+}
+
 namespace {
 std::string resolveAlias(const Json& config, std::string_view name) {
     const auto aliases = config.find("conversationEnvironments");
     if (aliases == config.end() || !aliases->is_object()) return {};
-    const auto canonical = std::ranges::any_of(*aliases,[&](const Json& value) { return value == name; });
-    auto id = canonical ? std::string(name) : field(*aliases,name);
+    const auto canonical = std::ranges::any_of(*aliases,[&](const Json& value) {
+        return conversationEnvironmentId(value) == name;
+    });
+    auto id = std::string(name);
+    if (!canonical) {
+        const auto alias = aliases->find(name);
+        if (alias == aliases->end()) return {};
+        id = conversationEnvironmentId(*alias);
+    }
     constexpr auto valid = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:.";
     if (id.size() > 1024 || id.find_first_not_of(valid) != std::string::npos) return {};
     return id;

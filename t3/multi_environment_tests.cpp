@@ -1,0 +1,368 @@
+#include "flock/board_inbox.hpp"
+#include "internal.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <iostream>
+#include <sqlite3.h>
+#include <thread>
+
+using namespace flockv0;
+using flockv0::t3detail::http;
+
+namespace {
+constexpr auto bot = "release";
+constexpr auto request = "Verify the release fixture";
+constexpr auto threadId = "shared-thread";
+constexpr auto runId = "shared-run";
+
+void check(bool pass, std::string_view detail) {
+    if (!pass) throw std::runtime_error(std::string(detail));
+}
+
+struct Endpoint {
+    std::string name, origin;
+
+    std::string id() const { return "env-" + name; }
+    std::string project() const { return "project-" + name; }
+    std::string link() const { return origin + "/" + id() + "/" + threadId; }
+
+    void configure(const Json& settings) const {
+        check(http(origin+"/fixture","POST",{{"Content-Type","application/json"}},settings.dump()).status == 200,
+              "could not configure the " + name + " fixture");
+    }
+
+    Json effects(const char* tool) const {
+        const auto response = http(origin+"/fixture/effects","GET");
+        check(response.status == 200,"could not read the " + name + " effects");
+        return Json::parse(response.body).value(tool,Json::array());
+    }
+
+    void login(const std::filesystem::path& directory) const {
+        const auto signedIn = loginT3(directory,id(),origin+"/mcp",[&](const auto& authorization) {
+            configure({{"authorization",authorization}});
+        });
+        check(signedIn.environmentId == id() && signedIn.operate,"did not connect " + name);
+    }
+};
+
+struct Script final : Model {
+    explicit Script(std::string sha) : commit(std::move(sha)) {}
+
+    std::string commit;
+    Json startResult;
+    bool parallel = true;
+
+    ModelTurn decide(const ModelInput& input) override {
+        const auto& kind = input.event.at("kind");
+        if (kind == "conversation_turn") {
+            const auto& turn = input.event.at("turn");
+            if (turn.empty() && input.event.value("text","") == request) {
+                Json args{{"request",request}};
+                if (parallel) args.update({{"environments",Json::array({"local","mini"})},{"commit",commit}});
+                return {{{"start_task",std::move(args),"Run the release verification"}}};
+            }
+            if (!turn.empty()) startResult = turn.back().at("result");
+            return {{{"reply",{{"text","I have the fixture request."}},"End this turn"}}};
+        }
+        if (kind == "intake")
+            return {{{"delegate",{{"instruction",request},{"doneWhen","The checks have a result"}},"Run the checks"}}};
+        if (kind == "result")
+            return {{{"complete",{{"report",input.event.at("report")}},"Return the checks"}}};
+        throw std::logic_error("unexpected model event: " + input.event.dump());
+    }
+};
+
+struct Scenario {
+    const Endpoint& local;
+    const Endpoint& mini;
+    Script model;
+    Store store;
+    std::unique_ptr<T3> adapter;
+    std::atomic<Seconds> now{unixTime()};
+    Runtime runtime;
+    Id taskId = 0;
+
+    Scenario(const Endpoint& local, const Endpoint& mini, const std::filesystem::path& directory,
+             const std::string& commit, std::string_view name)
+        : local(local), mini(mini), model(commit), store(directory.parent_path()/(std::string(name)+".db")),
+          adapter(makeT3Mcp(directory)), runtime(store,model,*adapter,{},RuntimeOptions{[&] { return now.load(); }}) {}
+
+    void start(bool parallel = true, bool loseMiniReply = false) {
+        model.parallel = parallel;
+        local.configure({{"multiReset",true},{"multiSingle",!parallel}});
+        mini.configure({{"multiReset",true},{"multiHoldLaunchReply",loseMiniReply}});
+        const Intake routing{bot,{},local.id(),local.project(),{{"conversationEnvironments",{
+            {"local",{{"environmentId",local.id()},{"projectId",local.project()}}},
+            {"mini",{{"environmentId",mini.id()},{"projectId",mini.project()}}}
+        }}}};
+        store.receive(localOwner,routing,"start-fixture",request);
+        runtime.runConversations();
+        check(model.startResult.is_object() && model.startResult.value("ok",false),
+              "conversation could not start the verification: " + model.startResult.dump());
+        taskId = model.startResult.at("taskId");
+    }
+
+    Json task() { return store.task(taskId); }
+
+    static Json result(const Json& task, const Endpoint& endpoint) {
+        for (const auto& run : task.value("runResults",Json::array()))
+            if (run.value("environmentId","") == endpoint.id()) return run;
+        return Json::object();
+    }
+
+    template<class Predicate>
+    void advanceUntil(Predicate done, std::string_view detail) {
+        using namespace std::chrono_literals;
+        const auto end = std::chrono::steady_clock::now() + 8s;
+        for (int tick = 0; std::chrono::steady_clock::now() < end; ++tick) {
+            const auto snapshot = task();
+            if (done(snapshot)) return;
+            if (tick % 10 == 0) ++now;
+            runtime.tickConcurrent();
+            std::this_thread::sleep_for(10ms);
+        }
+        throw std::runtime_error(std::string(detail) + ": " + task().dump());
+    }
+
+    void awaitBothRunning() {
+        advanceUntil([&](const Json& snapshot) {
+            return result(snapshot,local).value("status","") == "running" &&
+                   result(snapshot,mini).value("status","") == "running";
+        },"both environments must start before either Run settles");
+        checkLaunches();
+    }
+
+    void checkLaunches() {
+        const auto localLaunches = local.effects("t3_thread_launch");
+        const auto miniLaunches = mini.effects("t3_thread_launch");
+        check(localLaunches.size() == 1 && miniLaunches.size() == 1 &&
+              localLaunches.at(0).at("clientRequestId") != miniLaunches.at(0).at("clientRequestId") &&
+              local.effects("t3_thread_send").empty() && mini.effects("t3_thread_send").empty(),
+              "each environment must accept exactly one distinct action");
+    }
+
+    void checkResult(const Endpoint& endpoint, const Json& outcome, std::string_view status,
+                     std::string_view commit) {
+        check(outcome.at("name") == endpoint.name && outcome.at("projectId") == endpoint.project() &&
+              outcome.at("status") == status && outcome.at("commit") == commit &&
+              outcome.at("threadId") == threadId && outcome.at("runId") == runId && outcome.at("link") == endpoint.link(),
+              "incorrect per-environment Run outcome: " + outcome.dump());
+        if (status == "completed")
+            check(outcome.at("report") == endpoint.id()+" verification completed","a success report was lost");
+    }
+
+    void cancel() { store.operate(localOwner,TaskTarget::from(task(),0),"cancel"); }
+};
+
+void normal(Scenario& fixture) {
+    fixture.start();
+    fixture.awaitBothRunning();
+    fixture.local.configure({{"multiStatus","completed"}});
+    fixture.mini.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },"both Runs should complete");
+    const auto task = fixture.task();
+    check(task.at("runResults").size() == 2 && task.at("runOutcome") == "all_completed" &&
+          fixture.store.tasks(bot).size() == 1,
+          "the original request must contain both outcomes");
+    fixture.checkResult(fixture.local,Scenario::result(task,fixture.local),"completed",fixture.model.commit);
+    fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"completed",fixture.model.commit);
+}
+
+void partial(Scenario& fixture) {
+    fixture.start();
+    fixture.awaitBothRunning();
+    const auto follower = fixture.store.submit({bot,"Queued behind the local verification",fixture.local.id(),fixture.local.project()});
+    check(fixture.store.task(follower).at("blockedBy").at("id") == fixture.taskId,
+          "the active Run should hold its project slot");
+    fixture.mini.configure({{"multiDisconnected",true}});
+    fixture.local.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.local).value("status","") == "completed" &&
+               Scenario::result(task,fixture.mini).value("status","") == "confirmation_pending";
+    },"disconnected Mini must not suppress the local report");
+    auto task = fixture.task();
+    const auto success = Scenario::result(task,fixture.local);
+    check(task.at("state") != "completed","a disconnected Run is not terminal");
+    fixture.checkResult(fixture.local,success,"completed",fixture.model.commit);
+    const auto unblocked = fixture.store.task(follower);
+    check(unblocked.at("blockedBy").is_null(),"an unrelated task should proceed in the settled local project's queue");
+    fixture.store.operate(localOwner,TaskTarget::from(unblocked,0),"cancel");
+    fixture.mini.configure({{"multiDisconnected",false},{"multiStatus","failed"}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },"both outcomes should settle");
+    task = fixture.task();
+    check(task.at("runOutcome") == "partial_failure" && Scenario::result(task,fixture.local) == success,
+          "a later Mini failure changed the local success or the aggregate outcome");
+    fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"failed",fixture.model.commit);
+    fixture.checkLaunches();
+}
+
+void mismatch(Scenario& fixture) {
+    constexpr auto otherCommit = "fedcba9876543210fedcba9876543210fedcba98";
+    fixture.start();
+    fixture.awaitBothRunning();
+    fixture.local.configure({{"multiStatus","completed"}});
+    fixture.mini.configure({{"multiStatus","completed"},{"multiActualCommit",otherCommit}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },"both outcomes should settle");
+    const auto task = fixture.task();
+    check(task.at("runOutcome") == "partial_failure","a different verified commit must fail the Mini check");
+    fixture.checkResult(fixture.local,Scenario::result(task,fixture.local),"completed",fixture.model.commit);
+    fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"failed",otherCommit);
+}
+
+void supervised(Scenario& fixture) {
+    fixture.store.policy().setMode(localOwner,"supervised");
+    fixture.start();
+    auto card = [&](const Endpoint& endpoint) {
+        for (const auto& item : fixture.store.inbox(localOwner,bot))
+            if (item.at("target") == endpoint.id() && item.at("status") == "pending") return item;
+        return Json(nullptr);
+    };
+    auto approve = [&](const Json& item) {
+        fixture.store.decideInbox(localOwner,{item.at("botId"),InboxKind::policy_approval,
+            item.at("itemId"),item.at("waitId"),item.at("taskId"),item.at("targetRevision"),
+            item.at("targetGeneration")},"allow_once");
+    };
+    fixture.advanceUntil([&](const Json&) { return !card(fixture.local).is_null() && !card(fixture.mini).is_null(); },
+                         "both dispatches should request separate approvals");
+    check(fixture.local.effects("t3_thread_launch").empty() && fixture.mini.effects("t3_thread_launch").empty(),
+          "a Run started before its own approval");
+    const auto miniCard = card(fixture.mini);
+    approve(card(fixture.local));
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.local).value("status","") == "running";
+    },"the approved local Run should start while the Mini still awaits approval");
+    check(fixture.mini.effects("t3_thread_launch").empty() &&
+          fixture.task().at("generation") > miniCard.at("targetGeneration"),
+          "one approval launched both Runs or failed to advance the request");
+    approve(miniCard);
+    fixture.awaitBothRunning();
+    fixture.local.configure({{"multiStatus","completed"}});
+    fixture.mini.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },"both approved Runs should settle");
+    check(fixture.task().at("runOutcome") == "all_completed","approving both Runs must preserve the verification results");
+}
+
+void stop(Scenario& fixture) {
+    fixture.start();
+    fixture.awaitBothRunning();
+    fixture.mini.configure({{"multiDisconnected",true},{"multiHoldSettlement",true}});
+    fixture.local.configure({{"multiHoldSettlement",true}});
+    fixture.cancel();
+    fixture.advanceUntil([&](const Json&) {
+        return fixture.local.effects("t3_thread_interrupt").size() == 1;
+    },"the available Run should be interrupted");
+    check(fixture.task().at("state") == "cancelling" && fixture.mini.effects("t3_thread_interrupt").empty(),
+          "stop released a disconnected Run or interrupted the wrong environment");
+    fixture.local.configure({{"multiHoldSettlement",false}});
+    fixture.mini.configure({{"multiDisconnected",false}});
+    fixture.advanceUntil([&](const Json&) {
+        return fixture.mini.effects("t3_thread_interrupt").size() == 1;
+    },"the Mini should be interrupted after reconnecting");
+    check(fixture.task().at("state") == "cancelling","stop released work before the delegated settlement");
+    fixture.mini.configure({{"multiHoldSettlement",false}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "cancelled"; },
+                         "the original request should cancel after both Runs settle");
+    const auto task = fixture.task();
+    check(Scenario::result(task,fixture.local).at("status") == "interrupted" &&
+          Scenario::result(task,fixture.mini).at("status") == "interrupted",
+          "the original request should retain each stop outcome");
+    const auto interrupts = Json::array({{{"threadId",threadId},{"runId",runId}}});
+    check(fixture.local.effects("t3_thread_interrupt") == interrupts &&
+          fixture.mini.effects("t3_thread_interrupt") == interrupts,
+          "stop must target exactly the assigned Run in each saved environment");
+    fixture.checkLaunches();
+}
+
+void single(const Endpoint& local, const Endpoint& mini, const std::filesystem::path& directory,
+            const std::string& commit, bool stopEarly) {
+    const std::string name = stopEarly ? "single-stop" : "single";
+    Id taskId;
+    {
+        Scenario fixture(local,mini,directory,commit,name);
+        fixture.start(false);
+        fixture.advanceUntil([](const Json& task) { return task.at("state") == "running"; },"single Run did not start");
+        taskId = fixture.taskId;
+    }
+    {
+        // Reopen a Run saved before the outbox and active Run stored a project ID.
+        const auto path = directory.parent_path()/(name+".db");
+        sqlite3* connection = nullptr;
+        const auto opened = sqlite3_open_v2(path.c_str(),&connection,SQLITE_OPEN_READWRITE,nullptr);
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> database(connection,sqlite3_close);
+        check(opened == SQLITE_OK,"could not open the fixture database");
+        const auto saved = sqlite3_exec(database.get(),R"SQL(
+UPDATE outbox SET data=json_remove(data,'$.projectId');
+UPDATE tasks SET data=json_remove(data,'$.activeRun.projectId');
+)SQL",nullptr,nullptr,nullptr);
+        check(saved == SQLITE_OK,"could not prepare a legacy single Run");
+    }
+    Scenario fixture(local,mini,directory,commit,name);
+    fixture.taskId = taskId;
+    if (stopEarly) fixture.cancel();
+    else fixture.local.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([&](const Json& task) {
+        return task.at("state") == (stopEarly ? "cancelled" : "completed");
+    },"single Run did not settle");
+    check(fixture.local.effects("t3_thread_launch").size() == 1 &&
+          fixture.mini.effects("t3_thread_launch").empty() &&
+          fixture.local.effects("t3_thread_interrupt").size() == (stopEarly ? 1u : 0u),
+          "existing start_task must use only the default environment");
+}
+
+void recover(Scenario& fixture) {
+    const auto originals = fixture.store.tasks(bot);
+    check(originals.size() == 1,"a restart must keep the original request");
+    fixture.taskId = originals.at(0).at("id");
+    fixture.local.configure({{"multiStatus","completed"}});
+    fixture.mini.configure({{"multiHideLaunch",true}});
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.local).value("status","") == "completed" &&
+               Scenario::result(task,fixture.mini).value("status","") == "confirmation_pending";
+    },"only the Mini should await confirmation after restart");
+    check(Scenario::result(fixture.task(),fixture.mini).value("runId","").empty(),
+          "Flock attributed an unconfirmed launch");
+    fixture.checkLaunches();
+    fixture.mini.configure({{"multiHideLaunch",false},{"multiStatus","completed"}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },
+                         "restart must adopt the saved Mini Run");
+    const auto task = fixture.task();
+    fixture.checkResult(fixture.local,Scenario::result(task,fixture.local),"completed",fixture.model.commit);
+    fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"completed",fixture.model.commit);
+    fixture.checkLaunches();
+}
+}
+
+int main(int argc, char** argv) {
+    try {
+        check(argc == 6,"expected two fixture URLs, credential directory, commit and phase");
+        const Endpoint local{"local",argv[1]}, mini{"mini",argv[2]};
+        const std::filesystem::path directory = argv[3];
+        const std::string commit = argv[4];
+        const std::string_view phase = argv[5];
+        if (phase == "normal") {
+            local.login(directory);
+            mini.login(directory);
+            { Scenario fixture(local,mini,directory,commit,"normal"); normal(fixture); }
+            { Scenario fixture(local,mini,directory,commit,"partial"); partial(fixture); }
+            { Scenario fixture(local,mini,directory,commit,"mismatch"); mismatch(fixture); }
+            { Scenario fixture(local,mini,directory,commit,"supervised"); supervised(fixture); }
+            { Scenario fixture(local,mini,directory,commit,"stop"); stop(fixture); }
+            single(local,mini,directory,commit,false);
+            single(local,mini,directory,commit,true);
+        } else {
+            Scenario fixture(local,mini,directory,commit,"recovery");
+            if (phase == "crash") {
+                fixture.start(true,true);
+                fixture.advanceUntil([](const Json&) { return false; },"expected Flock to be killed before launch reply");
+            } else {
+                check(phase == "recover","unknown fixture phase");
+                recover(fixture);
+            }
+        }
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}

@@ -81,8 +81,8 @@ std::set<std::string> configuredSessionEnvironments(const Json& routing) {
     std::set<std::string> result;
     const auto environment = field(routing,"environmentId");
     if (!environment.empty()) result.insert(environment);
-    for (const auto& id : routing.at("config").value("conversationEnvironments",Json::object()))
-        result.insert(id.get<std::string>());
+    for (const auto& alias : routing.at("config").value("conversationEnvironments",Json::object()))
+        if (auto id = conversationEnvironmentId(alias); !id.empty()) result.insert(std::move(id));
     return result;
 }
 }

@@ -273,13 +273,21 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if (config.contains("conversationEnvironments")) {
         const auto& destinations = config["conversationEnvironments"];
         if (!destinations.is_object() || destinations.size() > 16)
-            throw Conflict("conversationEnvironments must map up to 16 names to T3 environment IDs");
+            throw Conflict("conversationEnvironments must map up to 16 names to T3 destinations");
         auto& saved = bot.settings["conversationEnvironments"] = Json::object();
         for (auto alias = destinations.begin(); alias != destinations.end(); ++alias) {
-            const auto environment = validatedString(destinations,alias.key().c_str());
+            const auto environment = alias->is_object() ? validatedString(*alias,"environmentId")
+                : validatedString(destinations,alias.key().c_str());
             if (alias.key().empty() || alias.key().size() > 80 || !plainId(environment))
                 throw Conflict("Use short conversation environment names and canonical T3 environment IDs");
-            saved[alias.key()] = environment;
+            if (alias->is_object()) {
+                const auto project = validatedString(*alias,"projectId");
+                if (alias->size() != 2 || !plainId(project))
+                    throw Conflict("T3 destination objects require canonical environmentId and projectId");
+                saved[alias.key()] = {{"environmentId",environment},{"projectId",project}};
+            } else {
+                saved[alias.key()] = environment;
+            }
         }
     }
     const auto timeout = config.value("runTimeoutSeconds",Json(1800));
