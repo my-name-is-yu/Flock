@@ -569,7 +569,7 @@ export function mountBoardInbox({
 
   function open(opener, targetItem) {
     const list = scoped();
-    const item = targetItem ? list.find((entry) => itemKey(entry) === itemKey(targetItem)) ?? list[0] : list[0];
+    const item = targetItem ? list.find((entry) => itemKey(entry) === itemKey(targetItem)) : list[0];
     if (!item) return;
     if (mode === 'pending' && itemKey(item) === selected) return;
     selected = itemKey(item);

@@ -1,4 +1,3 @@
-// Plain names for policy actions, shared by Flock settings and approval cards.
 export const actionLabels = {
   'bot.view': 'View Bot conversations',
   'bot.talk': 'Talk to Bots',
@@ -39,17 +38,28 @@ export const actionLabels = {
   'email.send': 'Send email',
   'data.destructive_write': 'Make destructive changes',
 };
-export const actionLabel = (action) => actionLabels[action] ?? action;
+export const actionLabel = (action) => Object.hasOwn(actionLabels, action) ? actionLabels[action] : action;
 
-// Approval previews arrive as the tool's JSON arguments; show the human-readable part.
+const approvalFieldLabels = {
+  prNumber: 'Pull request', issueNumber: 'Issue', repoId: 'Repository',
+  environmentId: 'Environment', projectId: 'Project', url: 'URL',
+};
+
 export function approvalSummary(preview) {
   if (typeof preview !== 'string' || !preview.trim()) return '';
   let value;
   try { value = JSON.parse(preview); } catch { return preview.trim(); }
   if (typeof value === 'string') return value.trim();
-  if (!value || typeof value !== 'object') return preview.trim();
-  const text = ['instruction', 'text', 'body', 'message', 'title', 'request', 'query', 'url']
-    .map((key) => value[key]).find((item) => typeof item === 'string' && item.trim());
-  if (!text) return '';
-  return text.replace(/\n*\[Flock action ID:[^\]]*\]\s*/g, '').trim();
+  const [operation, fields] = Array.isArray(value) && value.length === 2 && typeof value[0] === 'string'
+    ? value : [null, value];
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return preview.trim();
+  const lines = operation ? [operation.replaceAll('_', ' ')] : [];
+  for (const [key, value] of Object.entries(fields)) {
+    const label = Object.hasOwn(approvalFieldLabels, key) ? approvalFieldLabels[key] : key.replace(/([a-z])([A-Z])/g, '$1 $2');
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    const detail = key === 'instruction' ? text.replace(/\n+\[Flock action ID: flock-[^\]\n]+\]\s*$/, '') : text;
+    const heading = label.charAt(0).toUpperCase() + label.slice(1);
+    lines.push(`${heading}: ${detail}`);
+  }
+  return lines.join('\n');
 }
