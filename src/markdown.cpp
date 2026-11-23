@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -52,12 +53,13 @@ bool curlReady() {
 }
 
 std::optional<std::string> percentDecode(std::string_view source) {
-    if (!curlReady()) return std::nullopt;
+    if (source.empty()) return std::string{};
+    if (source.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) || !curlReady())
+        return std::nullopt;
     std::unique_ptr<CURL,decltype(&curl_easy_cleanup)> curl(curl_easy_init(),curl_easy_cleanup);
     if (!curl) return std::nullopt;
-    const std::string input(source);
     int length = 0;
-    auto* decoded = curl_easy_unescape(curl.get(),input.c_str(),0,&length);
+    auto* decoded = curl_easy_unescape(curl.get(),source.data(),static_cast<int>(source.size()),&length);
     if (!decoded) return std::nullopt;
     std::string result(decoded,static_cast<std::size_t>(length));
     curl_free(decoded);
