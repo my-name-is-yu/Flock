@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff">
   <title>Session handoffs</title>
   <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
@@ -13,6 +15,7 @@
 <body><main>
   <a class="settings-back" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>Conversations</a>
   <h1>Session handoffs</h1>
+  <p class="page-lede">T3 Sessions paired with a Bot for a reply or ongoing coordination.</p>
   <p id="status" role="status"></p>
   <section id="recent" aria-labelledby="recent-heading" hidden>
     <h2 id="recent-heading">Recent handoffs</h2>
@@ -22,10 +25,10 @@
     <h2 id="handoff-heading">Handoff</h2>
     <p id="state"></p>
     <div class="handoff-actions">
-      <button id="refresh" type="button">Refresh</button>
-      <button id="pause" type="button" hidden>Pause coordination</button>
-      <button id="resume" type="button" hidden>Resume coordination</button>
-      <button id="stop" type="button" hidden>Stop coordination</button>
+      <button id="refresh" class="button" type="button">Refresh</button>
+      <button id="pause" class="button" type="button" hidden>Pause coordination</button>
+      <button id="resume" class="button" type="button" hidden>Resume coordination</button>
+      <button id="stop" class="button danger" type="button" hidden>Stop coordination</button>
     </div>
     <dl id="origin"></dl>
     <details id="residual" hidden><summary id="residual-count"></summary><ul id="residual-commands"></ul></details>
@@ -36,15 +39,15 @@
       <ul id="deliveries"></ul>
     </section>
     <section id="decision" aria-labelledby="decision-heading" hidden>
-      <h3 id="decision-heading">Latest coordination decision</h3>
+      <h3 id="decision-heading">Latest guidance</h3>
       <p id="decision-text"></p>
     </section>
     <form id="answer" autocomplete="off" hidden>
       <label><span id="question"></span><textarea name="text" rows="3" maxlength="8192" required></textarea></label>
-      <button>Send answer</button>
+      <button class="button primary">Send answer</button>
     </form>
     <section id="delegated" aria-labelledby="work-heading" hidden>
-      <h3 id="work-heading">Delegated checks</h3>
+      <h3 id="work-heading">Specialist checks</h3>
       <ul id="work-list"></ul>
     </section>
   </section>
