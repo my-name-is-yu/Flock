@@ -174,9 +174,13 @@ struct PromptSnapshot {
     std::string request, input, contextText;
     std::vector<PromptPart> parts;
     Json context = Json::object();
+    Json messages;
 
-    explicit PromptSnapshot(const Json& payload) : request(payload.dump()),input(payload.at("input").dump()) {
-        if (payload.contains("instructions"))
+    explicit PromptSnapshot(const Json& payload)
+        : request(payload.dump()),input(payload.at("input").dump()),messages(payload.at("input")) {
+        const auto instructions = field(payload,"instructions");
+        const bool clock = instructions.starts_with("Current event.currentTime");
+        if (!instructions.empty() && !clock)
             parts.push_back({"instructions","instructions",payload.at("instructions").dump()});
         for (const auto& message : payload.at("input")) {
             if (message.at("role") == "developer")
@@ -192,10 +196,21 @@ struct PromptSnapshot {
                     continue;
                 }
                 contextText += text + '\n';
-                context.update(Json::parse(text),true);
-                addContextParts(parts,nlohmann::ordered_json::parse(text));
+                auto fields = nlohmann::ordered_json::parse(text);
+                if (fields.contains("event") && fields.at("event").contains("turn") &&
+                    context.contains("event") && context.at("event").contains("turn")) {
+                    auto& turn = context.at("event").at("turn");
+                    for (auto& result : fields.at("event").at("turn")) {
+                        parts.push_back({"tool_results","event.turn["+std::to_string(turn.size())+"]",result.dump()});
+                        turn.push_back(Json(std::move(result)));
+                    }
+                    fields.at("event").erase("turn");
+                }
+                context.update(Json(fields),true);
+                addContextParts(parts,fields);
             }
         }
+        if (clock) parts.push_back({"current_state","event.currentTime",instructions});
     }
 };
 
@@ -254,6 +269,9 @@ struct FixtureModel : Model {
         record["firstChangedSection"] = nullptr;
         record["firstChangedField"] = nullptr;
         if (previous) {
+            const auto [previousMessage,currentMessage] = std::ranges::mismatch(previous->messages,prompt.messages);
+            record["commonInputMessages"] = previousMessage - previous->messages.begin();
+            record["previousInputMessagesArePrefix"] = previousMessage == previous->messages.end();
             const auto [firstOld,firstNew] = std::ranges::mismatch(previous->parts,prompt.parts);
             if (firstNew != prompt.parts.end() || firstOld != previous->parts.end()) {
                 const auto& changed = firstNew != prompt.parts.end() ? *firstNew : *firstOld;

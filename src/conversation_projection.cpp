@@ -1,12 +1,14 @@
 #include "conversation_storage.hpp"
 
 #include <map>
+#include <vector>
 
 namespace flockv0::conversation_storage {
 namespace {
 // The production bridge embeds the context JSON in an input_text string.
 constexpr std::size_t toolHistoryWireBytes = 768 * 1024;
 constexpr std::size_t olderLargeResultBytes = 16 * 1024;
+constexpr std::size_t webResultWindowBytes = 40 * 1024;
 constexpr std::size_t largeResultBytes = 4 * 1024;
 
 std::size_t wireBytes(const Json& value) {
@@ -62,6 +64,14 @@ Json omitted(const Json& entry) {
     if (!entry.at("args").empty()) compact["argumentsOmitted"] = true;
     return compact;
 }
+
+struct ResultSize {
+    std::size_t full, compact;
+    bool rereadable, windowed;
+
+    std::size_t extra() const { return full - std::min(full,compact); }
+    bool large() const { return rereadable && extra() > largeResultBytes; }
+};
 }
 
 void projectToolHistory(Json& turn, const Json& redactionRevision) {
@@ -94,37 +104,66 @@ void projectToolHistory(Json& turn, const Json& redactionRevision) {
     }
 
     auto projection = Json::array();
+    std::vector<ResultSize> sizes;
+    sizes.reserve(turn.size());
     std::size_t used = 2;
     for (auto& entry : turn) {
         entry["step"] = entry.at("_ref").at("step");
         entry["callIndex"] = entry.at("_ref").at("callIndex");
         auto compact = omitted(entry);
-        used += wireBytes(compact)+1;
+        entry.erase("_ref");
+        ResultSize size{wireBytes(entry),wireBytes(compact),compact.at("result").contains("resultRef"),false};
+        // Preserve the first result separately as the evidence anchor.
+        size.windowed = !sizes.empty() && size.large() && entry.at("tool") == "web_fetch";
+        used += size.compact+1;
+        sizes.push_back(size);
         projection.push_back(std::move(compact));
     }
+
     const auto latestStep = turn.back().at("step").get<Id>();
+    std::size_t windowBegin = 0, windowBytes = 0, latestWebBytes = 0;
+    for (std::size_t begin = 0; begin < turn.size();) {
+        const auto step = turn.at(begin).at("step").get<Id>();
+        auto end = begin;
+        std::size_t batchBytes = 0;
+        while (end < turn.size() && turn.at(end).at("step") == step) {
+            if (sizes[end].windowed) batchBytes += sizes[end].extra();
+            ++end;
+        }
+        // Start a new window at batch boundaries so a new result does not evict one body at a time.
+        if (batchBytes && batchBytes > webResultWindowBytes - std::min(windowBytes,webResultWindowBytes)) {
+            windowBegin = begin;
+            windowBytes = 0;
+        }
+        windowBytes += batchBytes;
+        if (step == latestStep) latestWebBytes = batchBytes;
+        begin = end;
+    }
+
     auto remainingOlderResults = olderLargeResultBytes;
-    const auto keepFull = [&](std::size_t index) {
+    const auto keepFull = [&](std::size_t index, std::size_t& remaining) {
         auto& full = turn.at(index);
         auto& compact = projection.at(index);
-        full.erase("_ref");
-        const auto compactBytes = wireBytes(compact);
-        const auto bytes = wireBytes(full);
-        const auto base = used-compactBytes;
-        if (bytes > toolHistoryWireBytes || base > toolHistoryWireBytes-bytes) return;
-        if (full.at("step") != latestStep && compact.at("result").contains("resultRef") &&
-            bytes > compactBytes + largeResultBytes) {
-            if (bytes-compactBytes > remainingOlderResults) return;
-            remainingOlderResults -= bytes-compactBytes;
+        const auto& size = sizes[index];
+        const auto base = used-size.compact;
+        if (size.full > toolHistoryWireBytes || base > toolHistoryWireBytes-size.full) return;
+        if (full.at("step") != latestStep && size.large()) {
+            if (size.extra() > remaining) return;
+            remaining -= size.extra();
         }
-        used = base+bytes;
+        used = base+size.full;
         compact = std::move(full);
     };
-    // Keep the current batch first, then the initial result that may anchor a chain of reads.
-    auto older = turn.size();
-    while (older && turn.at(older-1).at("step") == latestStep) keepFull(--older);
-    if (older) keepFull(0);
-    while (older > 1) keepFull(--older);
+    auto latest = turn.size();
+    while (latest && turn.at(latest-1).at("step") == latestStep) keepFull(--latest,remainingOlderResults);
+    if (latest) keepFull(0,remainingOlderResults);
+    for (auto older = latest; older > 1;) {
+        --older;
+        if (!sizes[older].windowed) keepFull(older,remainingOlderResults);
+    }
+    auto remainingWebWindow = webResultWindowBytes - std::min(latestWebBytes,webResultWindowBytes);
+    for (auto index = std::max(windowBegin,std::size_t{1}); index < latest; ++index)
+        if (sizes[index].windowed) keepFull(index,remainingWebWindow);
     turn = std::move(projection);
 }
 }

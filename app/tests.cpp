@@ -126,9 +126,17 @@ void notesAndRoutingOnRestart() {
 
 Json requestContext(const Json& request) {
     auto context = Json::object();
-    for (const auto& message : request.at("input"))
-        if (message.at("role") == "user")
-            context.update(Json::parse(message.at("content").at(0).at("text").get_ref<const std::string&>()),true);
+    for (const auto& message : request.at("input")) {
+        if (message.at("role") != "user") continue;
+        auto block = Json::parse(message.at("content").at(0).at("text").get_ref<const std::string&>());
+        if (block.contains("event") && block.at("event").contains("turn") &&
+            context.contains("event") && context.at("event").contains("turn")) {
+            for (auto& entry : block.at("event").at("turn"))
+                context.at("event").at("turn").push_back(std::move(entry));
+            block.at("event").erase("turn");
+        }
+        context.update(block,true);
+    }
     return context;
 }
 
@@ -507,6 +515,20 @@ void responseContract() {
     check(historyText.find("\"history\":") < historyText.find("\"event\":") &&
           currentText.find("\"turn\":") < currentText.find("\"currentTime\":"),
           "Changing invocation data preceded reusable conversation context");
+    auto scopedInput = laterInput;
+    scopedInput.conversationScope = "fixture scope";
+    scopedInput.event.at("turn").at(0)["step"] = 1;
+    const auto scoped = responseRequest(scopedInput);
+    scopedInput.event["currentTime"] = 1001;
+    scopedInput.event.at("turn").push_back({{"tool","find_tasks"},{"step",2},{"result",{{"text","New evidence"}}}});
+    const auto extended = responseRequest(scopedInput);
+    const auto& scopedMessages = scoped.at("input");
+    const auto& extendedMessages = extended.at("input");
+    check(extendedMessages.size() == scopedMessages.size()+1 &&
+          std::equal(scopedMessages.begin(),scopedMessages.end(),extendedMessages.begin()) &&
+          extended.at("instructions") != scoped.at("instructions") &&
+          requestContext(extended).at("event").at("turn") == scopedInput.event.at("turn"),
+          "A changed clock rewrote the retained messages or a tool batch lost evidence");
     const std::map<std::string,Json> requiredChannelArgs{
         {"channel_edit_message",{"reason","externalMessageId","text"}},
         {"channel_react",{"reason","reaction"}},

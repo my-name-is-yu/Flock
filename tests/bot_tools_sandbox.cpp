@@ -70,6 +70,7 @@ struct Provider : Model {
     std::vector<Decision> next;
     Json seen;
     Json content;
+    Json modelMessages;
     std::function<void(const ModelInput&)> beforeTurn;
     std::function<void(const Json&)> inspectRequest;
     std::function<std::vector<Decision>(const Json&)> followStep;
@@ -96,6 +97,7 @@ struct Provider : Model {
             } else {
                 seen = steps;
                 content = request.at("input").back().at("content");
+                modelMessages = request.at("input");
                 auto follow = followStep ? followStep(steps) : std::vector<Decision>{};
                 if (follow.empty()) emit(call("reply",{{"text","Checked."}}));
                 else for (const auto& action : follow) emit(action);
@@ -782,7 +784,7 @@ void protectedArgumentsDoNotChangeToolTargets() {
     const auto persisted = f.sql("SELECT decision || result FROM conversation_steps WHERE step=1 AND message_id=" +
                                  std::to_string(f.lastMessage));
     check(persisted.find(marker) == persisted.npos && steps.dump().find(marker) == std::string::npos &&
-          f.model.content.dump().find(marker) == std::string::npos &&
+          f.model.modelMessages.dump().find(marker) == std::string::npos &&
           f.store->conversation("alpha").dump().find(marker) == std::string::npos,
           "Rejected arguments exposed protected material");
 
