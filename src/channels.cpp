@@ -287,13 +287,14 @@ Json Store::Impl::channelContext(Id id, std::string_view bot, std::vector<ModelI
     if (!permitsChannel(bot,origin,sender,person,"use")) return context;
     const auto& caps = channels.at(origin.kind).capabilities;
     if (permitsChannel(bot,origin,sender,person,"read")) {
+        const bool includeImages = images && Policy(const_cast<Impl&>(*this)).allows(bot,Action::channel_read,channelPolicyTarget(origin));
         const int modelContext = images ? 1 : 0;
         auto files = query(R"SQL(
 SELECT a.id,a.name,a.mime_type,length(a.bytes),a.message_id,CASE WHEN a.message_id=? AND ? THEN a.bytes END
 FROM channel_attachments a JOIN channel_messages c ON c.message_id=a.message_id JOIN messages m ON m.id=c.message_id
 WHERE c.scope_key=? AND m.bot_id=? AND a.message_id<=? AND (? OR a.message_id=?)
 ORDER BY a.message_id DESC,a.position LIMIT 24
-)SQL",{id,modelContext,row.string(3),bot,id,modelContext,id});
+)SQL",{id,static_cast<int>(includeImages),row.string(3),bot,id,modelContext,id});
         while (files.next()) {
             const auto type = files.string(2);
             const auto size = files.number(3);
@@ -302,7 +303,7 @@ ORDER BY a.message_id DESC,a.position LIMIT 24
             context[current ? "attachments" : "earlierAttachments"].push_back(
                 {{"id",files.number(0)},{"name",files.string(1)},{"mimeType",type},{"size",size},
                  {"messageId",files.number(4)}});
-            if (current && images && type.starts_with("image/")) {
+            if (current && includeImages && type.starts_with("image/")) {
                 const auto bytes = files.string(5);
                 if (matchesMime(type,bytes)) images->push_back({id,{},type,encodeAttachment(bytes)});
             }
@@ -589,8 +590,9 @@ void Store::Impl::deliverChannels(std::stop_token shutdown) {
             Transaction tx(db);
             if (shutdown.stop_requested()) return;
             auto row = query(R"SQL(
-SELECT d.id,d.operation,d.payload,d.state,c.origin,c.sender_id,c.person_id,m.bot_id,d.source_id
+SELECT d.id,d.operation,d.payload,d.state,c.origin,c.sender_id,c.person_id,m.bot_id,d.source_id,j.task_id
 FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id JOIN messages m ON m.id=c.message_id
+LEFT JOIN journal j ON j.id=d.reply_id
 WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMIT 1
 )SQL",{unixTime()});
             if (!row.next()) return;
@@ -623,6 +625,26 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
                 if (!reason.empty()) {
                     blocked = "unsupported";
                     if (operation != "reply") channelLimitation(row.number(8),bot,reason,caps.supportsReplies);
+                }
+            }
+            if (blocked.empty() && state == "pending" && row.number(9)) {
+                const auto source = row.number(8);
+                const auto approval = "channel-task-update/" + key;
+                const auto target = channelPolicyTarget(origin);
+                const auto used = query("SELECT 1 FROM policy_approvals WHERE operation=? AND status='used'",{approval}).next();
+                if (!used) {
+                    const auto requester = policyOrigin(loadTurnMessage(source));
+                    const auto gate = approveAction({bot,requester.scope,requester.requester,requester.anchor,0,0,0,0,true},
+                                                     {Action::channel_post,target,true},approval,payload,policyClock());
+                    if (gate == ApprovalGate::waiting) {
+                        exec("UPDATE channel_deliveries SET next_attempt=? WHERE id=?",{unixTime()+5,key});
+                        tx.commit();
+                        continue;
+                    }
+                    if (gate != ApprovalGate::allow) {
+                        blocked = "rejected";
+                        reason = approvalError(gate);
+                    }
                 }
             }
             if (!blocked.empty()) {

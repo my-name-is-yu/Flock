@@ -247,6 +247,10 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
         Policy(*this).writeRule(actor,RuleKind::allow,*parseAction(row.string(1)),row.string(2),true,true);
     exec("UPDATE policy_approvals SET status=? WHERE id=?",
          {nextTime ? "rule_saved" : choice == "deny" ? "denied" : "approved",item.itemId});
+    exec(R"SQL(
+UPDATE channel_deliveries SET next_attempt=0 WHERE state='pending'
+AND 'channel-task-update/' || id=(SELECT operation FROM policy_approvals WHERE id=?)
+)SQL",{item.itemId});
     releasePolicyTurn(row.number(4));
     releasePolicyTask(item.itemId,choice);
     recordInboxDecision(actor,item,choice);

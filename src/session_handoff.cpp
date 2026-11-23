@@ -491,12 +491,14 @@ ORDER BY j.id LIMIT 1
     if (page->authGeneration != auth) return freezeAs(person,channel,"stopped");
     const auto scrub = db.sharedRedactor();
     auto clean = [&](std::string_view text) { return redactT3Tokens(scrub.text(text)); };
+    Id humanInput = 0;
     Json events = Json::array();
     std::string lastEvent;
     for (const auto& event : page->events) {
         if (event.position <= current.eventCursor || event.position > page->cursor || event.id.empty()) continue;
         if (event.kind != "assistant_message" && !(event.kind == "user_message" && event.createdBy == "user")) continue;
         if (event.text.empty() || (event.kind == "assistant_message" && event.status != "completed")) continue;
+        if (event.kind == "user_message") humanInput = std::max(humanInput,event.position);
         events.push_back({{"kind",event.kind},{"summary",bounded(clean(event.text),8192)}});
         lastEvent = event.id;
     }
@@ -629,6 +631,8 @@ specialist,done_when,commit_sha,evidence_sha,journal_id) VALUES(?,?,?,?,?,?,?,?,
         specialist,doneWhen,kind == "delegate_specialist" ? *pin : "",evidenceSha,
         workResult ? Json(workResult->first) : Json(nullptr)});
         if (sqlite3_changes(db.db)) {
+            db.exec("UPDATE session_controls SET human_input_position=max(human_input_position,?) WHERE channel_id=?",
+                    {humanInput,channel});
             if (kind == "root_guidance")
                 delivery.prepare(channel,current.generation,command,bot,invitation.requestId,text,page->cursor);
             if (answer)

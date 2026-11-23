@@ -81,8 +81,11 @@ CREATE TABLE IF NOT EXISTS session_controls(
  permission TEXT NOT NULL,
  consult_command TEXT NOT NULL,
  event_cursor INTEGER NOT NULL,
- initial_pending INTEGER NOT NULL DEFAULT 1)
+ initial_pending INTEGER NOT NULL DEFAULT 1,
+ human_input_position INTEGER NOT NULL DEFAULT 0)
 )SQL");
+    if (!query("SELECT 1 FROM pragma_table_info('session_controls') WHERE name='human_input_position'").next())
+        exec("ALTER TABLE session_controls ADD COLUMN human_input_position INTEGER NOT NULL DEFAULT 0");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS t3_connector(
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
