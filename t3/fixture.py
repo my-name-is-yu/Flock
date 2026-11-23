@@ -236,7 +236,11 @@ class Fixture(BaseHTTPRequestHandler):
                        else [f"candidate-{i}" for i in range(1000, 1130)])
             elif scenario == "session-read":
                 ids = ["deleted", "manual"]
+            elif scenario == "catalog-timeout":
+                ids = [f"catalog-{i}" for i in range(51)]
             start = args.get("cursor", 0)
+            if scenario == "catalog-timeout" and start and state.get("delayCatalog"):
+                time.sleep(2)
             end = min(start + args.get("limit", len(ids)), len(ids))
             return {"projectId": "project", "threads": [self.summary(t) for t in ids[start:end]],
                     "total": len(ids), "nextCursor": end if end < len(ids) else None}
