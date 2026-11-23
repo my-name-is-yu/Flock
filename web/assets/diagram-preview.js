@@ -60,16 +60,7 @@ class DiagramPreview extends HTMLElement {
           this.#fitInline(frame, doc, signal);
           this.#expand.disabled = false;
         } else {
-          const preventNavigation = (event) => {
-            if (event.target.closest?.('a, area')) event.preventDefault();
-          };
-          doc.addEventListener('click', preventNavigation, { capture: true, signal });
-          doc.addEventListener('auxclick', preventNavigation, { capture: true, signal });
-          doc.addEventListener('keydown', (event) => {
-            if (event.key !== 'Escape') return;
-            event.preventDefault();
-            this.#close();
-          }, { signal });
+          this.#bindExpandedNavigation(doc, signal);
         }
       }, { once: true, signal });
       frame.src = this.#path;
@@ -77,6 +68,19 @@ class DiagramPreview extends HTMLElement {
     } catch {
       if (!signal.aborted) unavailable();
     }
+  }
+
+  #bindExpandedNavigation(doc, signal) {
+    const preventLinkNavigation = (event) => {
+      if (event.target.closest?.('a, area')) event.preventDefault();
+    };
+    doc.addEventListener('click', preventLinkNavigation, { capture: true, signal });
+    doc.addEventListener('auxclick', preventLinkNavigation, { capture: true, signal });
+    doc.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      this.#close();
+    }, { signal });
   }
 
   #fitInline(frame, doc, signal) {
