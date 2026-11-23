@@ -101,6 +101,10 @@ const pendingActionLabels = {
 const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
   session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
+  approve: 'Approved', extend: 'Deadline extended', reconcile: 'Check requested', supply: 'Secret saved',
+  allow_once: 'Allowed once', always_allow: 'Always allowed', deny: 'Denied', expired: 'Approval expired',
+  stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
+  superseded: 'Replaced', superseded_instruction: 'Replaced by a newer instruction',
 };
 const errors = {
   invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
@@ -1427,7 +1431,7 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
-function eventCard(event, context, place, report, approval) {
+function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
@@ -1508,17 +1512,12 @@ function eventCard(event, context, place, report, approval) {
     if (!context.canDecide && choices?.length) bubble.append(readOnlyChoices(choices));
     if (context.canDecide && pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
     else if (pendingWait) {
-      const open = node('div', 'event-actions question-actions');
-      if (pendingWait.wait.reason === 'policy_approval') {
-        if (approval) {
-          const control = button('Review approval…', 'button', () => decisions.openItem(approval, control));
-          open.append(control);
-        }
-      } else {
+      if (pendingWait.wait.reason !== 'policy_approval') {
+        const open = node('div', 'event-actions question-actions');
         const label = pendingActionLabels[pendingWait.wait.reason] ?? 'Review…';
         open.append(button(label, 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
+        extras.push(open);
       }
-      if (open.childElementCount) extras.push(open);
     } else if (!context.readOnly || context.closed.has(data.id)) {
       const resolution = node('p', 'msg-resolution');
       resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? 'Request closed'));
@@ -1984,7 +1983,19 @@ function conversationRows(data, events, keep, source) {
   };
   const bot = timeline.bot;
   const botVersion = JSON.stringify([bot?.id, bot?.name, bot?.avatar]);
-  const approvals = source ? [] : decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval');
+  const approvals = source ? [] : decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval' &&
+    (item.status !== 'pending' || !timeline.closed.has(item.waitId)));
+  const pendingByWait = new Map(approvals.filter(item => item.status === 'pending').map(item => [item.waitId, item]));
+  const replacements = new Map();
+  const anchoredToWait = new Set();
+  for (const event of events) {
+    if (event.kind !== 'waiting' || event.data.reason !== 'policy_approval') continue;
+    const item = pendingByWait.get(event.data.id);
+    if (item && item.taskId === event.taskId) {
+      replacements.set(event.id, item);
+      anchoredToWait.add(item.itemId);
+    }
+  }
   const shown = timelineMessages(events, dayLabel);
   const rows = [];
   let peerMessages = [];
@@ -2011,25 +2022,34 @@ function conversationRows(data, events, keep, source) {
     if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
     const place = messagePlacement(previous, event, shown[index + 1]?.event);
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
+    const approval = replacements.get(event.id);
+    if (approval) {
+      rows.push(keep(`event-${event.id}`, ['approval', approval], () => {
+        const card = decisions.inlinePolicyCard(approval);
+        card.id = `event-${event.id}`;
+        card.tabIndex = -1;
+        return card;
+      }));
+      previous = event;
+      return;
+    }
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
-    const approval = wait?.wait.reason === 'policy_approval'
-      ? approvals.find(item => item.taskId === wait.id && item.waitId === wait.wait.id) : null;
     const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
-        place.groupStart, place.taskStart, place.afterQuestion, wait, approval,
+        place.groupStart, place.taskStart, place.afterQuestion, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
-      () => eventCard(event, timeline, place, report, approval));
+      () => eventCard(event, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
     row.classList.toggle('group-continues', !place.groupEnd);
     row.classList.toggle('conversation-source-target', event.id === source?.id);
     rows.push(row);
     for (const item of approvals) {
-      if (item.conversationEventId === event.id)
+      if (!anchoredToWait.has(item.itemId) && item.conversationEventId === event.id)
         rows.push(keep(`policy-${item.itemId}`, item, () => decisions.inlinePolicyCard(item)));
     }
     previous = event;
