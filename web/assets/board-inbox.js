@@ -227,7 +227,8 @@ function decisionCard(item, submit, source, question, saving) {
     : actions[item.itemKind];
   for (const [decision, title] of choices) {
     const style = item.itemKind === 'pr_review' ? (decision === 'approve' ? 'primary' : 'secondary')
-      : (decision === 'deny' || decision === 'reject_pr' ? 'secondary' : 'primary');
+      // One default per card: "Allow once" leads; the lasting "Always allow" stays a deliberate second choice.
+      : (['deny', 'reject_pr', 'always_allow'].includes(decision) ? 'secondary' : 'primary');
     const btn = element('button', title, style);
     btn.value = decision;
     btn.type = 'submit';

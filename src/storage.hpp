@@ -15,7 +15,7 @@
 #include <variant>
 
 namespace flockv0 {
-namespace conversation { struct Message; }
+namespace conversation { struct Message; struct QuestionAnchor; }
 
 struct WorkSession {
     std::string environmentId, threadId, projectId;
@@ -292,7 +292,8 @@ struct Store::Impl {
     bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now,
                        const WorkSession* selectedSession);
-    void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
+    void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route,
+                    const conversation::QuestionAnchor* question = nullptr);
     void pauseTurn(const conversation::Message&);
     Json ownTask(Id taskId, const conversation::Message&) const;
     Json resultReference(Id messageId, const conversation::Message&) const;

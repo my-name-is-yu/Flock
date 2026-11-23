@@ -6,7 +6,6 @@
 #include <condition_variable>
 #include <map>
 #include <mutex>
-#include <set>
 #include <thread>
 #include <variant>
 
@@ -43,14 +42,15 @@ public:
     void stop();
 
 private:
+    enum class Refresh { None, Projection, History };
     struct Watched {
         std::size_t subscribers = 0;
         std::uint64_t revision = 0;
         std::optional<Json> snapshot;
-        bool historyPending = false;
+        Refresh pending = Refresh::None;
     };
     void monitor();
-    std::set<Scope> refresh(const std::vector<Scope>&, const Store::ConversationChanges&);
+    void refresh(const std::vector<Scope>&, const Store::ConversationChanges&);
 
     Store& store_;
     Load load_;

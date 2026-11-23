@@ -117,3 +117,7 @@ form .button { min-height: 2.1rem; }
 .mode-option input:focus-visible { outline: none; box-shadow: none; }
 
 [hidden] { display: none !important; }
+
+#people:has(+ form[hidden]) > p:last-child {
+  border-end-start-radius: var(--radius-lg); border-end-end-radius: var(--radius-lg); border-block-end: 0;
+}

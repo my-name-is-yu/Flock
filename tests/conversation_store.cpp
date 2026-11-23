@@ -150,7 +150,7 @@ struct RuntimeFixture {
         reach(store,id,"running");
         const auto run = store.task(id).at("activeRun").at("runId").get<std::string>();
         t3.observations[run] = {.kind = Observation::Kind::Finished, .status = "completed", .report = std::move(result),
-            .resultRunId = run, .itemId = "report-" + run, .settled = true};
+            .resultRunId = run, .itemId = "report-" + run};
         reach(store,id,"completed");
     }
 };

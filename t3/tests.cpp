@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
               "runtime recognizes observation settings failures");
         fixture({{"scenario", "settling"}});
         observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Finished && !observation.settled, "wait timeout preserves outstanding work");
+        check(observation.kind == Observation::Kind::Settling, "wait timeout preserves outstanding work");
         fixture({{"scenario", "settling-input"}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::ExternalInput &&
@@ -191,7 +191,7 @@ int main(int argc, char** argv) {
         const auto checkResult = [&](const char* scenario, bool ownsLater) {
             fixture({{"scenario", scenario}});
             const auto observed = adapter->observe("env-1", launch.config, run);
-            check(observed.settled && observed.resultRunId == (ownsLater ? "later" : "root") &&
+            check(observed.kind == Observation::Kind::Finished && observed.resultRunId == (ownsLater ? "later" : "root") &&
                   observed.report == (ownsLater ? "later report" : "root report"),
                   std::string("Incorrect result attribution in ") + scenario);
         };
@@ -217,12 +217,12 @@ int main(int argc, char** argv) {
 
         fixture({{"scenario", "paged-report"}});
         observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Finished && observation.settled && !observation.truncated &&
+        check(observation.kind == Observation::Kind::Finished && !observation.truncated &&
               observation.itemId == "item-1" && observation.report == std::string(7000, 'x') + "end of report",
               "Report reads older pages for the assigned Run and joins text continuations");
         fixture({{"changeReportDuringRead", true}});
         observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Finished && observation.settled && observation.report.empty() &&
+        check(observation.kind == Observation::Kind::Finished && observation.report.empty() &&
               observation.evidence == RunEvidence::Availability::ReportUnavailable,
               "Report rejects changes during text continuation without erasing settlement");
         fixture({{"changeReportDuringRead", false}});
@@ -231,7 +231,7 @@ int main(int argc, char** argv) {
             const bool later = std::string_view(scenario) == "notification-result";
             fixture({{"scenario",scenario},{"reportReadFailure","messages"}});
             const auto observed = adapter->observe("env-1",launch.config,run);
-            check(observed.kind == Observation::Kind::Finished && observed.settled && observed.status == "completed" &&
+            check(observed.kind == Observation::Kind::Finished && observed.status == "completed" &&
                   observed.resultRunId == (later ? "later" : "root") && observed.report.empty() &&
                   observed.evidence == Availability::ReportUnavailable && !observed.detail.empty(),
                   "unreadable report erased settlement or its proven source");
@@ -245,14 +245,14 @@ int main(int argc, char** argv) {
         }
         fixture({{"scenario","settled"},{"terminalStatus","failed"},{"reportReadFailure","activity"}});
         observation = adapter->observe("env-1",launch.config,run);
-        check(observation.kind == Observation::Kind::Finished && observation.settled && observation.status == "failed" &&
+        check(observation.kind == Observation::Kind::Finished && observation.status == "failed" &&
               observation.resultRunId == "root" && observation.report == "root report" &&
               observation.evidence == Availability::DiagnosticUnavailable && !observation.detail.empty(),
               "unreadable error history erased a proven failure or its written report");
         fixture({{"scenario","notification-result"},{"terminalStatus","completed"},
                  {"reportReadFailure",nullptr},{"ownershipReadFailure",true}});
         observation = adapter->observe("env-1",launch.config,run);
-        check(observation.kind == Observation::Kind::Unavailable && !observation.settled && observation.resultRunId.empty(),
+        check(observation.kind == Observation::Kind::Unavailable && observation.resultRunId.empty(),
               "unreadable ownership evidence confirmed another Run's result");
         fixture({{"ownershipReadFailure",false}});
 
@@ -291,6 +291,14 @@ int main(int argc, char** argv) {
               delivery.run.runId == "selected-run","a previously unrelated idle Session starts the assigned Run");
         check(restarted->reconcile(selected).run.runId == "selected-run",
               "an existing Session's started Run can be recovered from its request");
+        fixture({{"selectedRunStatus","cancelled"},{"selectedDelegated",true}});
+        const auto draining = adapter->observe("env-1",selected.config,delivery.run);
+        check(draining.kind == Observation::Kind::Settling && draining.resultRunId.empty(),
+              "cancelling a started Run must keep its delegated work outstanding");
+        fixture({{"selectedDelegated",false}});
+        const auto drained = restarted->observe("env-1",selected.config,delivery.run);
+        check(drained.kind == Observation::Kind::Finished && drained.resultRunId == "selected-run",
+              "cancellation settles after the assigned Run's delegated work ends");
 
         selected.actionId = "flock-selected-busy";
         selected.target = {"flock-selected",{},{}};
@@ -310,8 +318,17 @@ int main(int argc, char** argv) {
               effects("t3_queue") == Json::array({{{"action","cancel"},{"threadId","flock-selected"},
                                                    {"queuedRunId","selected-run"}}}) &&
               effects("t3_thread_interrupt").empty(),"stop removes only the assigned queued Run");
-        const auto cancellation = adapter->observe("env-1",selected.config,delivery.run);
-        check(cancellation.kind == Observation::Kind::Finished && cancellation.settled &&
+        for (const auto& [conditions,error] : std::vector<std::pair<Json,std::string>>{
+            {{{"selectedRestartPending",true}}, "a pending restart must retain the assigned Run"},
+            {{{"selectedOmitStart",true}}, "missing start history cannot prove a queue cancellation"},
+            {{{"selectedEffectiveRun","continued"}}, "a different effective Run cannot use the assigned Run's queue history"}
+        }) {
+            fixture(conditions);
+            check(restarted->observe("env-1",selected.config,delivery.run).kind != Observation::Kind::Finished,error);
+            fixture({{"selectedRestartPending",false},{"selectedOmitStart",false},{"selectedEffectiveRun",nullptr}});
+        }
+        const auto cancellation = restarted->observe("env-1",selected.config,delivery.run);
+        check(cancellation.kind == Observation::Kind::Finished &&
               cancellation.status == "cancelled" && cancellation.resultRunId == "selected-run",
               "other active work does not hold cancellation of the assigned Run");
 

@@ -224,6 +224,7 @@ class Fixture(BaseHTTPRequestHandler):
                 assert args["message"].endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
                 state["selectedInput"] = args["message"]
                 state["selectedRunStatus"] = "queued" if state.get("selectedBusy") else "running"
+                state["selectedStartedAt"] = None if state.get("selectedBusy") else "2026-11-21T00:00:00.000Z"
                 run = "manual-run" if state.get("selectedBadReceipt") else "selected-run"
                 return {"threadId": thread, "runId": run, "messageId": "selected-message",
                         "delivery": "queued" if state.get("selectedBusy") else "started", "link": "t3://" + thread}
@@ -275,9 +276,16 @@ class Fixture(BaseHTTPRequestHandler):
             if scenario == "selected-session":
                 assert args["threadId"] in ("human-selected", "flock-selected") and args["runId"] == "selected-run"
                 status = state["selectedRunStatus"]
-                waiting_for_thread = args["untilDelegatedWorkSettled"] and state.get("selectedBusy")
-                return {"threadId": args["threadId"], "runId": args["runId"], "status": status,
-                        "timedOut": status == "queued" or status == "running" or waiting_for_thread}
+                delegated = args["untilDelegatedWorkSettled"]
+                waiting_for_thread = delegated and (state.get("selectedBusy") or state.get("selectedDelegated"))
+                timed_out = (status in ("queued", "running") or bool(waiting_for_thread) or
+                             bool(state.get("selectedRestartPending")))
+                effective = state.get("selectedEffectiveRun") if delegated else None
+                reply = {"threadId": args["threadId"], "runId": effective or args["runId"], "status": status,
+                         "timedOut": timed_out}
+                if delegated and not timed_out:
+                    reply["resultRun"] = {"runId": args["runId"], "status": status}
+                return reply
             assert args["threadId"] == "thread" and args["runId"] == "root" and args["timeoutMs"] <= 400
             if state.get("waitFailure"):
                 return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "Wait is unavailable."}
@@ -336,6 +344,10 @@ class Fixture(BaseHTTPRequestHandler):
                         "projectId": state.get("selectedProject", "project"),
                         "archived": state.get("selectedArchived", False),
                         "creationSource": source, "createdBy": "user" if source == "web" else "agent"}
+            run = {"runId": "selected-run", "ordinal": 2, "status": state.get("selectedRunStatus")}
+            if "selectedStartedAt" in state and not state.get("selectedOmitStart"):
+                run["startedAt"] = state["selectedStartedAt"]
+            recent = [run, {"runId": "manual-run", "ordinal": 1, "status": "running", "startedAt": None}]
             rows = [self.item(thread_id, 0, "manual-run", "user_message", "Earlier work", source=source)]
             if state.get("selectedRunStatus") == "running":
                 rows.append(self.item(thread_id, 1, "selected-run", "user_message", state["selectedInput"], source="mcp"))
