@@ -180,7 +180,7 @@ function decisionCard(item, submit, source, question, saving) {
 
   const bodyLines = [];
   if (item.request && item.request !== item.requestTitle) bodyLines.push(item.request);
-  const prompt = approval ? approvalSummary(item.prompt, item.target) : item.prompt;
+  const prompt = approval ? approvalSummary(item.prompt, item) : item.prompt;
   if (prompt && prompt !== item.requestTitle && prompt !== item.request) bodyLines.push(prompt);
   // A bare pull request URL in the text repeats the card, so drop that line.
   const text = bodyLines.join('\n').split('\n')

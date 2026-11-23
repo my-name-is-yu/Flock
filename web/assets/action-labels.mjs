@@ -43,29 +43,28 @@ const approvalFieldLabels = {
   prNumber: 'Pull request', issueNumber: 'Issue', repoId: 'Repository',
   environmentId: 'Environment', projectId: 'Project', url: 'URL',
 };
-// Bookkeeping that Flock adds to a tool call; it tells the approver nothing about the action itself.
-const internalFields = new Set(['tool', 'run', 'questionId', 'actionId', 'taskId', 'revisionId', 'itemId']);
 const blank = (value) => value == null || value === '' ||
   (typeof value === 'object' && Object.values(value).every(blank));
 
 // Flock writes a delegated instruction as the request, then "Task intent:" and "Completion criteria:"
 // sections for the Session. Show the request once and the criteria as "Done when".
+function instructionBody(text) {
+  return text.replace(/\n+\[Flock action ID: flock-[^\]\n]+\]\s*$/, '');
+}
+
 function instructionLines(text) {
-  const body = text.replace(/\n+\[Flock action ID: flock-[^\]\n]+\]\s*$/, '');
+  const body = instructionBody(text);
   const sections = body.split(/\n\n(Task intent|Completion criteria):\n/);
-  const lines = [sections[0].trim()];
-  for (let index = 1; index < sections.length; index += 2) {
-    const value = sections[index + 1].trim();
-    if (!value) continue;
-    if (sections[index] === 'Completion criteria') lines.push(`Done when: ${value}`);
-    else if (value !== lines[0]) lines.push(`Goal: ${value}`);
-  }
+  if (sections.length !== 5 || sections[1] !== 'Task intent' || sections[3] !== 'Completion criteria')
+    return [body.trim()].filter(Boolean);
+  const [request, , goal, , doneWhen] = sections.map((section) => section.trim());
+  const lines = [request];
+  if (goal && goal !== request) lines.push(`Goal: ${goal}`);
+  if (doneWhen) lines.push(`Done when: ${doneWhen}`);
   return lines.filter(Boolean);
 }
 
-// Turns an approval preview into lines a person can read: what will happen first, then the
-// details that differ from the card's target. Empty and internal fields are left out.
-export function approvalSummary(preview, target = '') {
+export function approvalSummary(preview, { action, target } = {}) {
   if (typeof preview !== 'string' || !preview.trim()) return '';
   let value;
   try { value = JSON.parse(preview); } catch { return preview.trim(); }
@@ -73,14 +72,18 @@ export function approvalSummary(preview, target = '') {
   const [operation, fields] = Array.isArray(value) && value.length === 2 && typeof value[0] === 'string'
     ? value : [null, value];
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return preview.trim();
+  // An environment approval can also gate work in an existing Session. Its target and operation still matter.
+  const startsNewSession = action === 'environment.launch' && operation === null && fields.tool === 'delegate';
   const lines = operation ? [operation.replaceAll('_', ' ')] : [];
-  if (typeof fields.instruction === 'string') lines.push(...instructionLines(fields.instruction));
+  if (startsNewSession && typeof fields.instruction === 'string') lines.push(...instructionLines(fields.instruction));
   for (const [key, value] of Object.entries(fields)) {
-    if (key === 'instruction' || internalFields.has(key) || blank(value) || (target && value === target)) continue;
+    const instruction = key === 'instruction' && typeof value === 'string';
+    if (startsNewSession && (instruction || key === 'tool' ||
+      (key === 'environmentId' && value === target) || (['run', 'questionId'].includes(key) && blank(value)))) continue;
     const label = Object.hasOwn(approvalFieldLabels, key) ? approvalFieldLabels[key] : key.replace(/([a-z])([A-Z])/g, '$1 $2');
     const text = typeof value === 'string' ? value : JSON.stringify(value);
     const heading = label.charAt(0).toUpperCase() + label.slice(1);
-    lines.push(`${heading}: ${text}`);
+    lines.push(`${heading}: ${instruction ? instructionBody(text) : text}`);
   }
   return lines.join('\n');
 }
