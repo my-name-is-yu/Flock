@@ -2151,6 +2151,10 @@ function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
   detailAvatar = null;
 }
+const roleSize = new ResizeObserver(([{ target: soul }]) => {
+  const lineHeight = parseFloat(getComputedStyle(soul).lineHeight);
+  soul.nextElementSibling.hidden = soul.scrollHeight <= Math.ceil(8 * lineHeight);
+});
 let detailSectionTimer = 0;
 function clearDetailSectionTransition() {
   clearTimeout(detailSectionTimer);
@@ -2179,6 +2183,7 @@ elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
   clearDetailSectionTransition();
   releaseDetailAvatar();
+  roleSize.disconnect();
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
@@ -2389,9 +2394,23 @@ function generalContent(bot) {
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
   if (!bot.soul) return [hero, rows];
-  const role = node('section', 'settings-card');
-  role.setAttribute('aria-label', 'Role');
-  role.append(node('p', 'settings-soul', bot.soul));
+  const role = node('section', 'settings-card settings-role');
+  const heading = node('h3', 'settings-card-label', 'Role');
+  heading.id = 'settings-role-label';
+  role.setAttribute('aria-labelledby', heading.id);
+  const soul = node('p', 'settings-soul', bot.soul);
+  soul.id = 'settings-role-text';
+  soul.dataset.folded = 'true';
+  const toggle = button('Show all', 'text-button settings-soul-toggle', () => {
+    const folded = soul.dataset.folded === 'true';
+    soul.dataset.folded = String(!folded);
+    toggle.textContent = folded ? 'Show less' : 'Show all';
+    toggle.setAttribute('aria-expanded', String(folded));
+  });
+  toggle.hidden = true;
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-controls', soul.id);
+  role.append(heading, soul, toggle);
   return [hero, role, rows];
 }
 function cronContent(bot) {
@@ -2510,7 +2529,11 @@ function labelDetail(label) {
 }
 function replaceDetail(render) {
   releaseDetailAvatar();
-  elements['detail-body'].replaceChildren(...render());
+  roleSize.disconnect();
+  const body = elements['detail-body'];
+  body.replaceChildren(...render());
+  const soul = body.querySelector('.settings-soul');
+  if (soul) roleSize.observe(soul);
   if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
 }
 function renderDetail() {
