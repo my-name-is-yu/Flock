@@ -101,12 +101,22 @@ linked Slack or iMessage sender. The approval is answered in Flock. Changing
 modes closes pending approvals for the prior mode.
 
 `GET /api/settings` returns the mode, rules, T3 connection details, and action
-names that apply to people only.
-`POST /api/settings/mode` takes `mode`.
-`POST /api/settings/rule` takes `kind`, `action`, `target`, and the Boolean `add`.
-Set `add` to `true` to create a rule for a Bot action with a nonblank target.
-Set `add` to `false` to remove the matching rule. Both POST endpoints require an
-installation root.
+names that apply to people only. Installation roots can also check the model
+connection (`model`), T3 setup progress (`t3Setup`), and whether a revoked T3
+registration still needs cleanup (`t3CleanupPending`).
+
+These endpoints require an installation root.
+
+- `POST /api/settings/mode` takes `mode`.
+- `POST /api/settings/rule` takes `kind`, `action`, `target`, and the Boolean `add`.
+  Set `add` to `true` to create a rule for a Bot action with a nonblank target.
+  Set `add` to `false` to remove the matching rule.
+- `POST /api/settings/model-login` takes `reconsent` and starts ChatGPT sign-in in
+  the browser on the machine running Flock.
+- `POST /api/settings/t3-connect` takes `environmentId` and `mcpUrl`. The person
+  who starts the connection receives the approval link in `t3Setup.authorizationUrl`.
+- `POST /api/settings/t3-disconnect` takes `environmentId`. Pass `null` to retry
+  removing the provider registration after access has been revoked.
 
 ## Bot settings
 
