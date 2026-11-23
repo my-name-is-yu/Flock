@@ -1423,6 +1423,20 @@ function eventCard(event, context, place, report, approval) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
+  if (data.sessionWake) {
+    const { environmentId, threadId, reason } = data.sessionWake;
+    const explanation = {
+      finished: 'The Bot’s run finished',
+      failed: 'The Bot’s run ended unsuccessfully',
+      waiting_for_person: 'The Bot’s run needs input',
+      unknown: 'The Bot’s run status is unavailable',
+    }[reason];
+    const note = node('article', 'system-note', `${explanation} in T3 Session ${environmentId} / ${threadId} · `);
+    note.id = `event-${event.id}`;
+    note.tabIndex = -1;
+    note.append(eventTime(event));
+    return note;
+  }
   if (side === 'system') {
     const stopped = data.request ? `“${data.request.split('\n')[0]}” was stopped` : 'A request was stopped';
     const note = node('article', 'system-note', `${bot?.name ?? 'Bot'} · ${stopped} · `);

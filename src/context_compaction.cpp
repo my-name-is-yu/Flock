@@ -116,17 +116,19 @@ ORDER BY entry.id DESC LIMIT 24
 )SQL",{message.bot,boundary,message.id,message.channelScope,message.channelScope});
     while (rows.next()) {
         const auto kind = rows.string(2);
-        const bool user = kind=="conversation_message" || kind=="user_answer";
+        const auto data = rows.json(3);
+        const bool wake = kind=="conversation_message" && data.contains("sessionWake");
+        const bool user = !wake && (kind=="conversation_message" || kind=="user_answer");
         const bool reply = kind=="conversation_reply";
-        const char* role = user ? "user" : reply ? "bot" : "task";
+        const char* role = wake ? "system" : user ? "user" : reply ? "bot" : "task";
         Json entry = {{"messageId",rows.number(0)},{"kind",kind},{"role",role},{"text",""}};
+        if (wake) entry["sessionWake"] = scrub.record(data.at("sessionWake"));
         if (rows.number(1)) entry["taskId"] = rows.number(1);
         if (kind=="conversation_message" && message.channelScope.empty()) {
             auto media = attachmentViews(rows.number(0));
             if (!media.empty()) entry["attachments"] = std::move(media);
         }
         if (kind=="conversation_reply") {
-            const auto data = rows.json(3);
             for (const auto* key : {"actions","suggestions"})
                 if (data.contains(key)) entry[key] = scrub.record(data.at(key));
         } else if (kind=="waiting") entry["waitId"] = rows.json(3).at("id");

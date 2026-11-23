@@ -283,6 +283,8 @@ class Fixture(BaseHTTPRequestHandler):
             if state.get("sessionWakeFixture"):
                 assert args["threadId"] == "thread" and args["runId"] == state["botRun"]
                 assert not args["untilDelegatedWorkSettled"]
+                if state.get("transientWakeFailure"):
+                    return {"_tag": "OrchestratorMcpFailure", "code": "temporarily_unavailable"}
                 status = state["botRunStatus"]
                 if state.get("differentWaitRun"):
                     return {"threadId": "thread", "runId": "root", "status": "completed", "timedOut": False}

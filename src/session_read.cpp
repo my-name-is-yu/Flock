@@ -648,8 +648,10 @@ void Store::Impl::authorizeSessionHistory(const conversation::Message& message, 
 }
 
 std::set<std::string> Store::Impl::connectedSearchEnvironments(const conversation::Message& message) {
-    if (!humanSessionRequest(message)) return {};
     std::lock_guard lock(mutex);
+    if (!humanSessionRequest(message) &&
+        (message.principalSource != conversation::PrincipalSource::channel || message.channelScope.empty() ||
+         !channelMessageAuthorized(message.id,message.bot))) return {};
     const auto actor = turnActor(message);
     if (!Policy(*this).allows(actor,Action::bot_settings,message.bot)) return {};
     auto rows = query(R"SQL(

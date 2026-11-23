@@ -272,29 +272,44 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
             return connectedSearchEnvironments(loadTurnMessage(wait.message)).contains(wait.target.environmentId) &&
                 Policy(*this).allows(wait.bot,Action::environment_inspect,wait.target.environmentId);
         };
+        // A revoked connection settles the wait silently, including on restart.
+        const auto settle = [&] {
+            exec("UPDATE session_message_waits SET notified=1 WHERE rowid=? AND notified=0",{wait.key});
+        };
         {
             std::lock_guard lock(mutex);
-            if (!authorized()) continue;
+            if (!authorized()) {
+                settle();
+                continue;
+            }
         }
         const auto reason = t3.sessionMessageWake(wait.target,{wait.target.threadId,wait.run,{}});
         if (reason.empty() || shutdown.stop_requested()) continue;
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (!authorized()) continue;
-        exec("UPDATE session_message_waits SET notified=1 WHERE rowid=? AND notified=0",{wait.key});
+        if (!authorized()) {
+            settle();
+            transaction.commit();
+            continue;
+        }
+        settle();
         if (!sqlite3_changes(db)) continue;
-        exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
-             {unixTime(),wait.bot});
-        const auto id = last();
         const auto source = loadTurnMessage(wait.message);
         auto routing = source.routing;
         routing["sessionWake"] = {{"environmentId",wait.target.environmentId},{"threadId",wait.target.threadId},
                                   {"reason",reason},{"sourceMessageId",wait.message}};
+        exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message',?,?)",
+             {unixTime(),Json{{"sessionWake",routing.at("sessionWake")}},wait.bot});
+        const auto id = last();
         exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,'',?,?,?,? FROM messages WHERE bot_id=?
 )SQL",{id,wait.bot,"session-wake:" + std::to_string(wait.key),wait.message,routing,
        source.admittedActor.id,source.admittedActor.adminRoot ? 1 : 0,static_cast<int>(source.principalSource),wait.bot});
+        exec(R"SQL(
+INSERT INTO channel_messages(message_id,event_key,scope_key,origin,sender_id,person_id)
+SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE message_id=?
+)SQL",{id,"session-wake:" + std::to_string(wait.key),wait.message});
         exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
         transaction.commit();
     }

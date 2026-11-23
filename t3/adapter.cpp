@@ -879,8 +879,8 @@ public:
             const auto head = threadHead(client,run.threadId).at("thread");
             if (str(head,"activeRunId") == run.runId) return "waiting_for_person";
             return {};
-        } catch (const Failure&) {
-            return "unknown";
+        } catch (const Failure& failure) {
+            return failure.reason == Failure::Reason::HistoryNotFound ? "unknown" : "";
         }
     }
 

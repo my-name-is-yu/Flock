@@ -1,4 +1,5 @@
 #include "flock/policy.hpp"
+#include "flock/channels.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
 
@@ -256,11 +257,19 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     fixture({{"differentWaitRun",true}});
     runtime->runConversations();
     check(model.wakes.empty(),"A different Run's wait response woke the Bot");
+    fixture({{"differentWaitRun",false},{"transientWakeFailure",true}});
+    runtime->runConversations();
+    check(model.wakes.empty(),"A transient failure consumed the Run wait");
     restart();
-    fixture({{"differentWaitRun",false},{"botRunStatus","completed"}});
+    fixture({{"transientWakeFailure",false},{"botRunStatus","completed"}});
     runtime->runConversations();
     check(model.wakes.size() == 1 && model.wakes.back().at("reason") == "finished" &&
           model.reads.back().at("ok") == true,"Restart lost the Bot Run wake or its Session history");
+    const auto timeline = store->conversation(intake.botId);
+    check(std::ranges::any_of(timeline,[&](const Json& event) {
+        const auto wake = event.at("data").value("sessionWake",Json::object());
+        return wake.value("reason","") == "finished" && wake.value("threadId","") == thread;
+    }),"The conversation timeline omitted the Session wake event");
     restart();
     runtime->runConversations();
     check(model.wakes.size() == 1,"Restart repeated an already delivered wake");
@@ -276,5 +285,50 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     runtime->runConversations();
     check(model.wakes.size() == 2 && model.wakes.back().at("reason") == "waiting_for_person",
           "A pending user question did not wake exactly once");
+    fixture({{"botRunStatus","queued"}});
+    receive("revoke");
+    runtime->runConversations();
+    check(sends() == before + 3,"The revocation test did not queue a send");
+    T3Connections(*store).disconnect("env-1");
+    runtime->runConversations();
+    restart();
+    T3Connections(*store).connect("env-1",localOwner.id,3210);
+    fixture({{"botRunStatus","completed"}});
+    runtime->runConversations();
+    check(model.wakes.size() == 2,"Reconnecting revived a wait retired after access loss");
+    struct SlackTransport final : ChannelTransport {
+        ChannelDelivery send(std::string_view, const ChannelOrigin&, std::string_view, const Json&) override {
+            return {ChannelDelivery::State::accepted,"fixture-post"};
+        }
+        ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
+    };
+    store->policy().setOwner(localOwner,intake.botId);
+    store->connectChannel({ChannelKind::slack,channelCapabilities(ChannelKind::slack),
+        [](auto token, auto workspace) { return token == "fixture" && workspace == "test"; },
+        [&](auto, auto) -> std::optional<ChannelSender> { return ChannelSender{intake.botId,localOwner.id}; },
+        std::make_shared<SlackTransport>()});
+    store->policy().setMode(localOwner,"supervised");
+    fixture({{"botRunStatus","queued"}});
+    store->receiveChannel(ChannelKind::slack,"fixture",{{"workspaceId","test"},{"threadRef","slack-thread"},
+        {"externalMessageId","slack-ask"},{"senderId","sender"},{"text","Send an update to T3."}},
+        [&](auto,auto) { return intake; });
+    runtime->runConversations();
+    const auto items = store->inbox(localOwner);
+    const auto card = std::ranges::find_if(items,[](const Json& item) {
+        return item.value("itemKind","") == "policy_approval" && item.value("status","") == "pending";
+    });
+    check(sends() == before + 3 && card != items.end(),"The Slack send did not wait for policy approval");
+    store->decideInbox(localOwner,{card->at("botId"),InboxKind::policy_approval,card->at("itemId"),card->at("waitId"),
+        card->at("taskId"),card->at("targetRevision"),card->at("targetGeneration")},"allow_once");
+    runtime->runConversations();
+    check(sends() == before + 4,"The approved Slack send did not queue");
+    fixture({{"botRunStatus","completed"}});
+    runtime->runConversations();
+    check(model.wakes.size() == 3,"The Slack send did not wake the Bot");
+    const auto channelTimeline = store->conversation(intake.botId);
+    check(std::ranges::any_of(channelTimeline,[](const Json& event) {
+        const auto& data = event.at("data");
+        return data.contains("sessionWake") && data.value("channel",Json::object()).value("threadRef","") == "slack-thread";
+    }),"The wake did not preserve its Slack scope");
     fixture({{"sessionWakeFixture",false}});
 }

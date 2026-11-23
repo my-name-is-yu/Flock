@@ -258,7 +258,7 @@ static Failure toolFailure(const Json& payload) {
     if (code == "capability_denied" || code == "thread_credential_required" ||
         code == "runtime_mode_escalation_denied" || code == "interaction_mode_escalation_denied")
         return Failure(Failure::Kind::Auth, "T3 OAuth approval does not allow this operation or mode");
-    if (code == "thread_not_found" || code == "item_not_found" || code == "attachment_not_found" ||
+    if (code == "thread_not_found" || code == "run_not_found" || code == "item_not_found" || code == "attachment_not_found" ||
         (code == "invalid_request" && message == "The thread was not found."))
         return Failure(Failure::Kind::Tool, "T3 history was not found", Failure::Reason::HistoryNotFound);
     if (code == "project_not_found" || (code == "invalid_request" && message == "The project was not found."))
