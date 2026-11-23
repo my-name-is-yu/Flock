@@ -3,7 +3,7 @@
 
 namespace flockv0::web {
 std::string field(const Json&, std::string_view);
-std::string sessionLink(const Json& run);
+std::string externalSessionLink(const Json& run);
 Json botList(Store&, const Json&);
 Json botSettings(const Json&);
 Json botView(Store&, const Json&, const Json* changedSessionTasks = nullptr, std::string_view viewer = {});

@@ -111,9 +111,11 @@ Use `local-owner` with local access, or supply an existing Flock user who can ma
 
 | MCP tool | Arguments and result |
 | --- | --- |
-| `flock_submit_task` | Send `bot`, `text`, and a client-generated `requestId`. Save the returned `taskId`. Retry with the same three values if the response is lost. |
-| `flock_get_task` | Send `taskId` to poll `status`, any pending `question`, the final `result`, and an available T3 `sessionLink`. The link uses T3's own access controls. |
-| `flock_answer_question` | Send `taskId` and `text` with the question's `waitId`, `targetRevision`, and `targetGeneration`. Poll again if the question changed or closed. |
+| `flock_submit_task` | Send `bot`, `text` (up to 8,192 UTF-8 bytes), and a client-generated `requestId`. Save the returned `taskId`. Retry with the same three values if the response is lost. |
+| `flock_get_task` | Send `taskId` to poll `status`, any pending `question`, the final `result`, and `sessionLink`. The link uses T3's own access controls. |
+| `flock_answer_question` | Send `taskId` and `text` (up to 8,000 UTF-8 bytes) with the question's `waitId`, `targetRevision`, and `targetGeneration`. Poll again if the question changed or closed. |
+
+For a completed task, `sessionLink` points to the Session that supplied the result. Flock returns `null` when the source has no hosted T3 link or current permissions prevent sharing it. Local-only Sessions also return `null`.
 
 Flock uses the Bot's configured T3 environment or its sole eligible connected environment. A connection can read and answer only tasks it submitted, including after a Flock restart. Run `flock external-mcp disconnect CONNECTION_ID` to revoke the credential. Existing tasks and receipts stay in Flock.
 

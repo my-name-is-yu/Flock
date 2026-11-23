@@ -32,6 +32,7 @@ private:
         std::string bot;
     };
     OwnedTask authorizeTask(const ExternalMcpConnection&, Id taskId) const;
+    Json completionRun(const OwnedTask&, const Json& completion) const;
     Store& store_;
 };
 

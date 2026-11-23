@@ -16,6 +16,7 @@ std::string field(const Json& object, std::string_view key) {
 namespace {
 constexpr unsigned conversationSize = 36;
 constexpr unsigned sessionsSize = 6;
+constexpr auto hostedSessionBase = "https://app.t3.codes/threads";
 
 void copyFields(Json& output, const Json& source, std::initializer_list<const char*> keys) {
     if (!source.is_object()) return;
@@ -68,16 +69,21 @@ bool localThreadLink(std::string_view url, std::string_view path) {
     return false;
 }
 
+std::string sessionPath(std::string_view environment, std::string_view thread) {
+    if (environment.empty() || thread.empty() || environment == "." || environment == ".." || thread == "." || thread == "..")
+        return {};
+    return "/" + threadSegment(environment) + "/" + threadSegment(thread);
+}
+
 Json runView(const Json& run, std::string_view environment) {
     const auto actualEnvironment = field(run,"environmentId");
     if (!actualEnvironment.empty()) environment = actualEnvironment;
     const auto thread = field(run,"threadId");
-    if (environment.empty() || thread.empty() || environment == "." || environment == ".." || thread == "." || thread == "..")
-        return nullptr;
-    const auto path = "/" + threadSegment(environment) + "/" + threadSegment(thread);
+    const auto path = sessionPath(environment,thread);
+    if (path.empty()) return nullptr;
     const auto saved = field(run,"link");
     return {{"threadId",thread},{"runId",field(run,"runId")},{"environmentId",environment},
-            {"link",localThreadLink(saved,path) ? saved : "https://app.t3.codes/threads" + path}};
+            {"link",localThreadLink(saved,path) ? saved : hostedSessionBase + path}};
 }
 
 Json avatarView(const Json& source, std::string_view botId) {
@@ -338,8 +344,11 @@ Json activity(const Json& activeTasks, std::string_view bot) {
 }
 } // namespace
 
-std::string sessionLink(const Json& run) {
-    return field(runView(run,{}),"link");
+std::string externalSessionLink(const Json& run) {
+    const auto path = sessionPath(field(run,"environmentId"),field(run,"threadId"));
+    if (path.empty()) return {};
+    const auto saved = field(run,"link");
+    return saved == hostedSessionBase + path ? saved : std::string{};
 }
 
 Json botSettings(const Json& bot) {

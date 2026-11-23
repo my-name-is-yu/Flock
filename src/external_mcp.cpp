@@ -2,6 +2,8 @@
 #include "connector_credentials.hpp"
 #include "storage.hpp"
 
+#include <algorithm>
+
 namespace flockv0 {
 namespace {
 constexpr std::string_view tokenPrefix = "flock-mcp-";
@@ -10,6 +12,16 @@ constexpr std::string_view taskUnavailable = "The task is unavailable to this co
 
 std::string redactConnectionTokens(std::string text) {
     return connector_credentials::redact(redactT3Tokens(std::move(text)),tokenPrefix,"[External MCP token]");
+}
+
+Json currentRun(const Json& task) {
+    if (task.at("state") == "cancelled" || task.value("replanning",false) || task.value("newSessionRequired",false))
+        return nullptr;
+    const auto& active = task.at("activeRun");
+    const auto& run = active.is_null() ? task.at("lastRun") : active;
+    if (run.is_null() || run.at("environmentId") != task.at("environmentId") ||
+        run.value("revisionId",Json(nullptr)) != task.value("currentRevision",Json(nullptr))) return nullptr;
+    return run;
 }
 }
 
@@ -130,6 +142,37 @@ WHERE r.connection_id=? AND r.task_id=? AND c.token_digest IS NOT NULL
     return {std::move(actor),std::move(bot)};
 }
 
+Json ExternalMcp::completionRun(const OwnedTask& owner, const Json& completion) const {
+    const auto dependency = completion.find("dependency");
+    if (dependency == completion.end()) return completion.value("source",Json(nullptr));
+
+    const auto peerBot = field(*dependency,"botId");
+    const auto message = field(*dependency,"messageId");
+    const auto policy = store_.policy();
+    if (message.empty() || !policy.allows(owner.actor,Action::bot_view,peerBot)) return nullptr;
+    const auto refs = completion.value("evidenceRefs",Json::array());
+    const auto source = std::ranges::find_if(refs,[&](const Json& ref) {
+        return field(ref,"kind") == "peer_report" && field(ref,"messageId") == message;
+    });
+    if (source == refs.end()) return nullptr;
+
+    const auto environment = field(*source,"environmentId");
+    const auto thread = field(*source,"threadId");
+    const auto run = field(*source,"runId");
+    if (environment.empty() || thread.empty() || run.empty() ||
+        !policy.allows(peerBot,Resource::sessionRead(environment,thread))) return nullptr;
+
+    // A settled report can name a different Run ID from the launch. Match the saved result identity.
+    auto row = store_.p_->query(R"SQL(
+SELECT json_extract(j.data,'$.run.link') FROM journal j JOIN tasks t ON t.id=j.task_id
+WHERE j.task_id=? AND t.bot_id=? AND j.kind='report' AND json_extract(j.data,'$.environmentId')=?
+  AND json_extract(j.data,'$.run.threadId')=? AND json_extract(j.data,'$.resultRunId')=?
+ORDER BY j.id DESC LIMIT 1
+)SQL",{dependency->at("taskId"),peerBot,environment,thread,run});
+    if (!row.next()) return nullptr;
+    return {{"environmentId",environment},{"threadId",thread},{"link",row.string(0)}};
+}
+
 Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) const {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
@@ -154,17 +197,21 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
                                 {"choices",std::move(choices)}};
         }
     }
+    Json run;
     if (task.at("state") == "completed") {
-        auto row = db.query("SELECT json_extract(data,'$.text') FROM journal WHERE task_id=? AND kind='completed'"
+        auto row = db.query("SELECT data FROM journal WHERE task_id=? AND kind='completed'"
                             " ORDER BY id DESC LIMIT 1",{taskId});
-        if (row.next()) data["result"] = {{"text",publicText(row.string(0))}};
-    }
-    auto run = db.query(R"SQL(
-SELECT r.environment_id,r.thread_id,r.link FROM runs r JOIN outbox o ON o.id=r.action_id
-WHERE r.task_id=? ORDER BY o.rowid DESC LIMIT 1
-)SQL",{taskId});
-    if (run.next()) {
-        Json session{{"environmentId",run.string(0)},{"threadId",run.string(1)},{"link",run.string(2)}};
+        if (row.next()) {
+            const auto completion = row.json(0);
+            data["result"] = {{"text",publicText(field(completion,"text"))}};
+            run = completionRun(owner,completion);
+        }
+    } else run = currentRun(task);
+
+    const auto environment = field(run,"environmentId");
+    const auto thread = field(run,"threadId");
+    if (!environment.empty() && !thread.empty() && store_.policy().allows(owner.bot,Resource::sessionRead(environment,thread))) {
+        Json session{{"environmentId",environment},{"threadId",thread},{"link",field(run,"link")}};
         const auto encoded = session.dump();
         if (scrub.record(session,SecretRedactor::Fields::external) == session && redactConnectionTokens(encoded) == encoded)
             data["sessionRun"] = std::move(session);

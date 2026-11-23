@@ -70,9 +70,14 @@ Json structuredResult(const Json& data) {
     return {{"structuredContent",data},{"content",toolContent(data.dump())}};
 }
 
+Json byteLimitedString(std::size_t maxBytes) {
+    return {{"type","string"},{"minLength",1},
+            {"description","Maximum " + std::to_string(maxBytes) + " UTF-8 bytes."}};
+}
+
 Json sessionToolDefinitions() {
-    const Json bot{{"type","string"},{"minLength",1},{"maxLength",128}};
-    const Json thread{{"type","string"},{"minLength",1},{"maxLength",256}};
+    const Json bot{{"type","string"},{"minLength",1},{"maxLength",128},{"pattern","^[A-Za-z0-9][A-Za-z0-9._-]*$"}};
+    const auto thread = byteLimitedString(256);
     return Json::array({
         {{"name",listTool},{"description","List the Flock Bots you can ask. Use a Bot's id as bot in flock_ask or flock_stop."},
          {"annotations",{{"readOnlyHint",true}}},
@@ -87,7 +92,7 @@ Json sessionToolDefinitions() {
          {"inputSchema",{{"type","object"},{"additionalProperties",false},{"required",{"bot","text","threadId","requestId"}},
                          {"properties",{{"bot",bot},{"threadId",thread},
                              {"requestId",{{"type","string"},{"minLength",1},{"maxLength",128},{"pattern","^[A-Za-z0-9._:-]+$"}}},
-                             {"text",{{"type","string"},{"minLength",1},{"maxLength",maxRequestText}}}}}}}},
+                             {"text",byteLimitedString(maxRequestText)}}}}}},
         {{"name",stopTool},{"description","Remove this Bot and its invitees from the T3 Session. Cancel their queued messages "
                                        "and report any that already started. Stop child Sessions they launched from here. The person's work continues. "
                                        "A new flock_ask to a removed Bot brings it back."},
@@ -109,8 +114,9 @@ Json externalToolDefinitions() {
          {"description","Send a task to an authorized Flock Bot using its Bot ID. Save the taskId to check progress. "
                         "On a lost response, retry with the same requestId, bot and text."},
          {"annotations",{{"idempotentHint",true}}},
-         {"inputSchema",schema({{"bot",{{"type","string"},{"minLength",1},{"maxLength",128}}},
-                                {"text",{{"type","string"},{"minLength",1},{"maxLength",maxRequestText}}},
+         {"inputSchema",schema({{"bot",{{"type","string"},{"minLength",1},{"maxLength",128},
+                                        {"pattern","^[A-Za-z0-9][A-Za-z0-9._-]*$"}}},
+                                {"text",byteLimitedString(maxRequestText)},
                                 {"requestId",{{"type","string"},{"minLength",1},{"maxLength",128},{"pattern","^[A-Za-z0-9._:-]+$"}}}},
                                {"bot","text","requestId"})}},
         {{"name",statusTool},
@@ -121,7 +127,7 @@ Json externalToolDefinitions() {
          {"description","Answer the pending question from flock_get_task. Copy its waitId, targetRevision and "
                         "targetGeneration. Refresh the task if the question changed or has already been answered."},
          {"inputSchema",schema({{"taskId",id},{"waitId",id},{"targetRevision",version},{"targetGeneration",version},
-                                {"text",{{"type","string"},{"minLength",1},{"maxLength",maxAnswerText}}}},
+                                {"text",byteLimitedString(maxAnswerText)}},
                                {"taskId","waitId","targetRevision","targetGeneration","text"})}}
     });
 }
@@ -138,7 +144,7 @@ Json callExternalTool(const WebCallbacks& callbacks, ExternalMcp& external, cons
     if (tool == statusTool) {
         if (arguments.size() != 1) throw InvalidToolArguments{};
         auto data = external.status(connection,taskInteger(arguments,"taskId",1));
-        const auto link = sessionLink(data.at("sessionRun"));
+        const auto link = externalSessionLink(data.at("sessionRun"));
         data.erase("sessionRun");
         data["sessionLink"] = link.empty() ? Json(nullptr) : Json(link);
         return structuredResult(data);
@@ -157,41 +163,84 @@ bool containsBot(const Json& bots, std::string_view id) {
     return std::ranges::any_of(bots,[&](const Json& bot) { return bot.value("id",Json(nullptr)) == id; });
 }
 
+Json callSessionTool(Store& store, const WebCallbacks& callbacks, const T3Connection& connection,
+                     const Json& tool, const Json& arguments) {
+    if (tool != listTool && tool != askTool && tool != stopTool) return nullptr;
+    SessionParticipation participation(store,*callbacks.sessionT3);
+    if (tool == listTool) {
+        if (!arguments.empty()) throw InvalidToolArguments{};
+        const auto actor = participation.person(connection);
+        const auto bots = callbacks.bots();
+        const auto names = flockSkillNames(bots);
+        auto rows = Json::array();
+        for (const auto& bot : bots) {
+            const auto botId = bot.value("id",std::string{});
+            if (!names.contains(botId) || !store.policy().allows(actor,Action::bot_decide,botId)) continue;
+            try {
+                if (callbacks.intake(botId,"").botId != botId) continue;
+            } catch (const std::exception&) {
+                continue;
+            }
+            rows.push_back({{"id",botId},{"name",bot.value("name",botId)},
+                            {"role",bot.value("role",std::string("custom"))},{"skill",names.at(botId)}});
+        }
+        return structuredResult({{"bots",std::move(rows)}});
+    }
+    if (arguments.size() != (tool == askTool ? 4u : 2u)) throw InvalidToolArguments{};
+    const auto bot = identifier(arguments,"bot",128);
+    const auto thread = identifier(arguments,"threadId",256);
+    if (tool == stopTool) {
+        const auto stopped = participation.stop(connection,bot,thread);
+        return {{"structuredContent",stopped.data()},{"content",toolContent(stopped.summary())}};
+    }
+    const auto requestId = identifier(arguments,"requestId",128);
+    const SessionAsk request{bot,requestText(arguments,"text"),thread,requestId};
+    const auto messageId = participation.ask(connection,request,[&](std::string_view botId, std::string_view text) {
+        if (!containsBot(callbacks.bots(),botId)) throw Conflict("The Bot is unavailable");
+        try { return callbacks.intake(botId,text); }
+        catch (const std::exception&) { throw Conflict("The Bot is unavailable"); }
+    });
+    return {{"structuredContent",{{"messageId",messageId},{"requestId",requestId},{"status","received"}}},
+            {"content",toolContent("Request accepted. The Bot's messages arrive here with its name. No polling is needed.")}};
+}
+
 bool supportedProtocol(std::string_view value) {
     return value == mcpProtocol || value == "2025-06-18";
 }
 
-void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Request& req, httplib::Response& res) {
-    const bool externalEndpoint = req.path == externalMcpPath;
-    ExternalMcp external(store);
+std::string bearerToken(const httplib::Request& req) {
+    if (req.get_header_value_count("Authorization") != 1) return {};
     const auto authorization = req.get_header_value("Authorization");
-    std::optional<T3Connection> connection;
-    std::optional<ExternalMcpConnection> externalConnection;
-    if (req.get_header_value_count("Authorization") == 1 && authorization.starts_with("Bearer ")) {
-        const auto bearer = std::string_view(authorization).substr(7);
-        if (externalEndpoint) externalConnection = external.authenticate(bearer);
-        else connection = T3Connections(store).authenticate(bearer);
-    }
-    if (!connection && !externalConnection) {
-        res.set_header("WWW-Authenticate","Bearer realm=\"Flock\"");
-        return rpcError(res,401,nullptr,-32001,"A valid Flock connection bearer token is required");
-    }
+    return authorization.starts_with("Bearer ") ? authorization.substr(7) : std::string{};
+}
+
+void requireBearer(httplib::Response& res) {
+    res.set_header("WWW-Authenticate","Bearer realm=\"Flock\"");
+    rpcError(res,401,nullptr,-32001,"A valid Flock connection bearer token is required");
+}
+
+bool acceptMcpPost(const httplib::Request& req, httplib::Response& res) {
     if (req.method != "POST") {
         res.status = 405;
         res.set_header("Allow","POST");
-        return;
+        return false;
     }
-    if (!req.params.empty()) return rpcError(res,400,nullptr,-32600,"Unexpected URL parameters");
-    if (req.body.size() > maxPayload) return rpcError(res,413,nullptr,-32600,"Request too large");
+    const auto reject = [&](int status, std::string_view message) {
+        rpcError(res,status,nullptr,-32600,message);
+        return false;
+    };
+    if (!req.params.empty()) return reject(400,"Unexpected URL parameters");
+    if (req.body.size() > maxPayload) return reject(413,"Request too large");
     const auto mediaType = req.get_header_value("Content-Type");
     if (req.get_header_value_count("Content-Type") != 1 || mediaType.substr(0,mediaType.find(';')) != "application/json")
-        return rpcError(res,415,nullptr,-32600,"Expected application/json");
+        return reject(415,"Expected application/json");
     if (req.get_header_value_count("MCP-Protocol-Version") > 1 ||
         (req.has_header("MCP-Protocol-Version") && !supportedProtocol(req.get_header_value("MCP-Protocol-Version"))))
-        return rpcError(res,400,nullptr,-32600,"Unsupported MCP protocol version");
-    if (!externalEndpoint && !callbacks.sessionT3)
-        return rpcError(res,503,nullptr,-32603,"Flock Session tools are unavailable");
+        return reject(400,"Unsupported MCP protocol version");
+    return true;
+}
 
+void mcpRequest(const httplib::Request& req, httplib::Response& res, Json (*toolDefinitions)(), const auto& callTool) {
     const auto message = Json::parse(req.body,nullptr,false);
     if (message.is_discarded()) return rpcError(res,400,nullptr,-32700,"Invalid JSON");
     if (!message.is_object() || message.value("jsonrpc",Json(nullptr)) != "2.0" ||
@@ -218,57 +267,15 @@ void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Requ
                                  {"capabilities",{{"tools",Json::object()}}}});
     }
     if (method == "ping") return rpcResult(res,*id,Json::object());
-    if (method == "tools/list")
-        return rpcResult(res,*id,{{"tools",externalEndpoint ? externalToolDefinitions() : sessionToolDefinitions()}});
+    if (method == "tools/list") return rpcResult(res,*id,{{"tools",toolDefinitions()}});
     if (method != "tools/call") return rpcError(res,200,*id,-32601,"Method not found");
     const auto tool = params.value("name",Json(nullptr));
     const auto arguments = params.value("arguments",Json::object());
     try {
-        if (externalConnection) {
-            if (!arguments.is_object()) throw InvalidToolArguments{};
-            auto result = callExternalTool(callbacks,external,*externalConnection,tool,arguments);
-            if (result.is_null()) return rpcError(res,200,*id,-32602,"Unknown tool");
-            return rpcResult(res,*id,std::move(result));
-        }
-        if (tool != listTool && tool != askTool && tool != stopTool) return rpcError(res,200,*id,-32602,"Unknown tool");
-        SessionParticipation participation(store,*callbacks.sessionT3);
-        if (tool == listTool) {
-            if (!arguments.is_object() || !arguments.empty()) throw InvalidToolArguments{};
-            const auto actor = participation.person(*connection);
-            const auto bots = callbacks.bots();
-            const auto names = flockSkillNames(bots);
-            auto rows = Json::array();
-            for (const auto& bot : bots) {
-                const auto botId = bot.value("id",std::string{});
-                if (!names.contains(botId) || !store.policy().allows(actor,Action::bot_decide,botId)) continue;
-                try {
-                    if (callbacks.intake(botId,"").botId != botId) continue;
-                } catch (const std::exception&) {
-                    continue;
-                }
-                rows.push_back({{"id",botId},{"name",bot.value("name",botId)},
-                                {"role",bot.value("role",std::string("custom"))},{"skill",names.at(botId)}});
-            }
-            const Json data{{"bots",std::move(rows)}};
-            return rpcResult(res,*id,structuredResult(data));
-        }
-        if (!arguments.is_object() || arguments.size() != (tool == askTool ? 4u : 2u)) throw InvalidToolArguments{};
-        const auto bot = identifier(arguments,"bot",128);
-        const auto thread = identifier(arguments,"threadId",256);
-        if (tool == stopTool) {
-            const auto stopped = participation.stop(*connection,bot,thread);
-            return rpcResult(res,*id,{{"structuredContent",stopped.data()},{"content",toolContent(stopped.summary())}});
-        }
-        const auto requestId = identifier(arguments,"requestId",128);
-        const SessionAsk request{bot,requestText(arguments,"text"),thread,requestId};
-        const auto messageId = participation.ask(*connection,request,[&](std::string_view botId, std::string_view text) {
-            if (!containsBot(callbacks.bots(),botId)) throw Conflict("The Bot is unavailable");
-            try { return callbacks.intake(botId,text); }
-            catch (const std::exception&) { throw Conflict("The Bot is unavailable"); }
-        });
-        const Json data{{"messageId",messageId},{"requestId",requestId},{"status","received"}};
-        return rpcResult(res,*id,{{"structuredContent",data},
-            {"content",toolContent("Request accepted. The Bot's messages arrive here with its name. No polling is needed.")}});
+        if (!arguments.is_object()) throw InvalidToolArguments{};
+        auto result = callTool(tool,arguments);
+        if (result.is_null()) return rpcError(res,200,*id,-32602,"Unknown tool");
+        return rpcResult(res,*id,std::move(result));
     } catch (const InvalidToolArguments&) {
         rpcError(res,200,*id,-32602,"Invalid tool arguments");
     } catch (const Conflict& error) {
@@ -277,17 +284,33 @@ void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Requ
         rpcError(res,200,*id,-32603,"Flock could not process the request");
     }
 }
+
+void registerMcp(httplib::Server& server, const char* path, const httplib::Server::Handler& handler) {
+    server.Post(path,handler);
+    server.Get(path,handler);
+    server.Delete(path,handler);
+}
 }
 
 void mcpRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
-    const auto mcp = [&store,&callbacks](const httplib::Request& req, httplib::Response& res) {
-        mcpRequest(store,callbacks,req,res);
-    };
-    for (const auto* path : {sessionMcpPath,externalMcpPath}) {
-        server.Post(path,mcp);
-        server.Get(path,mcp);
-        server.Delete(path,mcp);
-    }
+    registerMcp(server,sessionMcpPath,[&store,&callbacks](const httplib::Request& req, httplib::Response& res) {
+        const auto connection = T3Connections(store).authenticate(bearerToken(req));
+        if (!connection) return requireBearer(res);
+        if (!acceptMcpPost(req,res)) return;
+        if (!callbacks.sessionT3) return rpcError(res,503,nullptr,-32603,"Flock Session tools are unavailable");
+        mcpRequest(req,res,sessionToolDefinitions,[&](const Json& tool, const Json& args) {
+            return callSessionTool(store,callbacks,*connection,tool,args);
+        });
+    });
+    registerMcp(server,externalMcpPath,[&store,&callbacks](const httplib::Request& req, httplib::Response& res) {
+        ExternalMcp external(store);
+        const auto connection = external.authenticate(bearerToken(req));
+        if (!connection) return requireBearer(res);
+        if (!acceptMcpPost(req,res)) return;
+        mcpRequest(req,res,externalToolDefinitions,[&](const Json& tool, const Json& args) {
+            return callExternalTool(callbacks,external,*connection,tool,args);
+        });
+    });
 }
 
 }
