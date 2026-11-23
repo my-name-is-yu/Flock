@@ -418,6 +418,21 @@ Json Bots::skillCards() const {
     return items;
 }
 
+bool Bots::reconcileCreation(const BotChange& change) {
+    if (!validBotId(change.target) || !validBotId(change.requestKey))
+        throw Conflict("Invalid Bot creation request");
+    std::lock_guard lock(mutex_);
+    if (std::filesystem::exists(directory_ / change.target)) {
+        const auto config = Json::parse(readText(path(change.target) / "config.json",maxConfigBytes),nullptr,false);
+        const auto request = config.find("creationRequest");
+        return request != config.end() && request->is_string() && *request == change.requestKey;
+    }
+    const auto reservation = directory_ / ".flock-issued-ids" / change.target;
+    if (std::filesystem::exists(reservation) && readText(reservation,128) == change.requestKey)
+        std::filesystem::remove(reservation);
+    return false;
+}
+
 void Bots::apply(const BotChange& change) try {
     if (change.operation == "rename_bot") {
         updateProfile(change.target,{{"name",change.name}});
@@ -430,8 +445,13 @@ void Bots::apply(const BotChange& change) try {
     std::filesystem::create_directories(directory_);
     const auto destination = directory_ / change.target;
     if (std::filesystem::exists(destination)) {
-        const auto existing = Json::parse(readText(path(change.target) / "config.json",maxConfigBytes));
-        if (existing.value("creationRequest","") == change.requestKey) return;
+        try {
+            const auto existing = Json::parse(readText(path(change.target) / "config.json",maxConfigBytes),nullptr,false);
+            const auto request = existing.find("creationRequest");
+            if (request != existing.end() && request->is_string() && *request == change.requestKey) return;
+        } catch (const Conflict&) {
+            // An unreadable profile cannot establish a replay.
+        }
         throw Conflict("Target Bot already exists");
     }
     const auto issued = directory_ / ".flock-issued-ids";

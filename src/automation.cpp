@@ -102,7 +102,6 @@ bool matchesEvent(const Json& filter, const Json& event, const SecretRedactor& s
 }
 
 void Store::Impl::initializeAutomationSchema() {
-    Transaction tx(db);
     if (sqlite3_exec(db,R"SQL(
 CREATE TABLE IF NOT EXISTS automations(
   id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('schedule','reminder','trigger')),
@@ -117,7 +116,6 @@ CREATE TABLE IF NOT EXISTS automation_firings(
   dedupe_key TEXT NOT NULL, bot_id TEXT NOT NULL, fired_at INTEGER NOT NULL, receipts TEXT NOT NULL,
   PRIMARY KEY(dedupe_key,bot_id));
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
-    tx.commit();
 }
 
 Json Store::createAutomation(const Person& actor, const Intake& target, const Json& args, Seconds now) {

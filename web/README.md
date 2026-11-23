@@ -4,6 +4,8 @@ The executable serves the embedded UI on its IPv4 loopback listener. The Web UI 
 
 The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. Retrying the same payload returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Select a task question's choice and press **Send answer** to answer directly through `POST /api/operations`. Written replies to questions go through the Bot. The CLI `submit` command and `POST /api/requests` each create an explicit new Task.
 
+`POST /api/requests` requires `botId`, `clientRequestId` and `request`. Provide a nonempty client ID of up to 256 bytes for each new Task. For the same person and Bot, repeating the ID and request text returns the original `taskId`. Reusing the ID with different text returns HTTP 409. The person needs current decision access to create a Task or retrieve its receipt.
+
 The Bot's name and **needs you** count above its chat open its pending decisions. The Bot list also shows a count shortcut. A question card uses the composer to answer its exact target through `POST /api/inbox/decide`. A pull request review card uses the composer to send a message to the Bot through `POST /api/messages`, with the review as the reply target. The review remains pending until a decision is recorded. Recent decisions are available from the conversation controls and the Bot's menu.
 
 The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `sessionCursor` as `sessionsAfter` on the next view request to receive the groups that recorded a new Run. Each returned group includes its full list of Sessions. To continue paging backwards, pass the last page’s `sessionsBefore` to `GET /api/sessions?bot=...&before=...`.
@@ -25,15 +27,13 @@ Browsers can sign in through the Basic challenge.
 Queued and resumed shared Web messages use the sender's current identity and
 Bot access. If a person has multiple credentials, their queued messages have
 root authority only when all of those credentials currently have `adminRoot`.
-Send the message again if it was queued before Flock recorded the source of
-shared Web messages and is rejected after an upgrade.
 
 ## Session handoffs
 
 Run `flock t3 connect ENVIRONMENT MCP_URL` on the machine running Flock.
 Approve T3 OAuth read and operate access for each connected environment.
 Flock registers one loopback MCP server with installed Codex and Claude Code
-2.1.327 or later and exports their Flock skills. If you replace a Bot directory
+and exports their Flock skills. If you replace a Bot directory
 by hand, give the new Bot a new ID so old requests and cached skills keep their
 original identity. For shared Web identities, include the CLI's `local-owner`
 person in the identity file and give it `decide` on the Bots it may invoke.
@@ -54,15 +54,20 @@ immediate requester's peer configuration.
 The first connection saves port 4173 by default. Use `--port PORT` to change
 it and restart any running `flock run`. Keep the Web listener enabled for T3
 skills. A busy saved port prevents startup. Adding an environment at the same
-port keeps the shared provider configuration. Reconnecting an existing
-environment or changing the port rotates the shared bearer. Existing provider
+port keeps a complete provider configuration. Reconnecting an existing
+environment, changing the port, or provisioning a missing registration
+rotates the shared bearer. Existing provider
 sessions may need to reload their configuration. `flock t3 disconnect
 ENVIRONMENT` removes the environment from handoff verification and delivery.
 Disconnecting the final environment revokes the bearer and removes the provider
 registration. T3 OAuth credentials remain available for separately authorized
 ordinary Bot work. For custom provider installations, set `FLOCK_CLAUDE_CLI`,
-`FLOCK_CODEX_CLI`, `FLOCK_CODEX_CONFIG`, `FLOCK_CLAUDE_SKILLS_DIR`, or
+`FLOCK_CODEX_CLI`, `FLOCK_CODEX_CONFIG`, `FLOCK_CLAUDE_CONFIG`, `FLOCK_CLAUDE_SKILLS_DIR`, or
 `FLOCK_CODEX_SKILLS_DIR`.
+
+Already accepted handoffs continue to run with `flock run --no-web` when the
+daemon uses the same Flock home, T3 connection and identity file.
+
 
 Only providers running on the same machine as Flock can call its loopback
 MCP endpoint. Flock can read, verify, and queue replies through a reachable

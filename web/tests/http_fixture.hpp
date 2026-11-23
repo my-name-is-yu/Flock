@@ -99,7 +99,7 @@ public:
         catch (const std::exception& error) { throw std::runtime_error(path + ": " + error.what()); }
     }
     Id request(std::string_view bot, std::string_view text) {
-        return post("/api/requests",{{"botId",bot},{"request",text}},201).at("taskId");
+        return post("/api/requests",{{"botId",bot},{"clientRequestId",actionId()},{"request",text}},201).at("taskId");
     }
     httplib::Headers headers() const { return {{"Origin",origin},{"Sec-Fetch-Site","same-origin"},{"X-Flock-Action","1"}}; }
     static Json checked(const httplib::Result& response, int status) {

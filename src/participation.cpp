@@ -95,13 +95,14 @@ CREATE TABLE IF NOT EXISTS t3_connector(
 }
 
 std::string T3Connections::connect(std::string_view environment, std::string_view person,
-                                  unsigned port) {
+                                  unsigned port,
+                                  const std::function<void(std::string_view)>& install, bool refreshProviders) {
     if (!validId(environment) || !validId(person) || port == 0 || port > 65535)
         throw Conflict("Invalid T3 connection");
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
-    const auto rotate = [&] {
+    const auto rotate = refreshProviders || [&] {
         auto row = db.query("SELECT person_id,port FROM t3_connector");
         return !row.next() || row.string(0) != person || row.number(1) != port ||
             !db.query("SELECT 1 FROM t3_connected_environments LIMIT 1").next() ||
@@ -120,8 +121,15 @@ ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id
 )SQL",{actionId(),person,digest(token),static_cast<Id>(port)});
     }
     db.exec("INSERT OR IGNORE INTO t3_connected_environments VALUES(?)",{environment});
+    if (install) install(token);
     tx.commit();
     return token;
+}
+
+bool T3Connections::ownsBearer(std::string_view token) const {
+    auto& db = *store_.p_;
+    std::lock_guard lock(db.mutex);
+    return db.query("SELECT 1 FROM t3_connector WHERE token_digest=?",{digest(token)}).next();
 }
 
 bool T3Connections::disconnect(std::string_view environment) {

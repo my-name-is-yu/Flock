@@ -2,6 +2,7 @@
 #include "demo.hpp"
 #include "model.hpp"
 #include "tests/fixtures.hpp"
+#include "../tests/task_history.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -12,6 +13,7 @@
 using namespace flockv0;
 using namespace flockv0::app;
 using namespace flockv0::app::test;
+using flockv0::test::lastTaskEvent;
 
 namespace flockv0::app {
 void sessionConversationDispatch(Store&, const Json&);
@@ -214,7 +216,7 @@ void notesAcrossConversationAndWork() {
         check(tasks.size() == 1,"the request should create one Task for this Bot");
         const Id task = tasks.at(0).at("id");
         for (int step = 0; step < 10 && store.task(task).at("state") != "completed"; ++step) runtime.tick();
-        const auto result = store.latestTaskResult(task);
+        const auto result = lastTaskEvent(store,task,"completed");
         check(result.at("kind") == "completed" && result.at("data").at("text") == expectedReport &&
               result.at("data").at("doneWhen") == criterion && store.task(task).at("runs").size() == 1,
             "the Bot's completion report should apply its notes and preserve the saved criterion");
@@ -226,7 +228,7 @@ void notesAcrossConversationAndWork() {
         return task;
     };
     const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {
-        const Id result = store.latestTaskResult(task).at("id");
+        const Id result = lastTaskEvent(store,task,"completed").at("id");
         return store.receive(localOwner,bot,key,"Why does that evidence support the result?",result).at("messageId");
     };
     const auto checkResultAnswer = [&](const Intake& bot, Id task, Id question,
@@ -653,7 +655,7 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
     const Intake intake{"demo","Measure the result","local","project"};
     const auto task = store.submit(intake);
     for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
-    const auto result = store.latestTaskResult(task).at("id").get<Id>();
+    const auto result = lastTaskEvent(store,task,"completed").at("id").get<Id>();
     const auto replyTo = [&](Id message) {
         for (const auto& row : store.conversation("demo"))
             if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == message) return row["data"];
@@ -688,6 +690,47 @@ void fixedDemoAnswersAnAnchoredQuestion() {
           std::ranges::any_of(history,[](const Json& event) {
               return event["kind"] == "user_answer" && event["data"]["text"] == "Use the release dataset";
           }),"the fixed demo did not pass the anchored answer to its task");
+}
+
+void botCreationCollisionIsRecoverable() {
+    struct CreationModel final : Model {
+        Json result;
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& turn = input.event.at("turn");
+            if (!turn.empty()) {
+                result = turn.back().at("result");
+                return {{{"reply",{{"text","Finished"}},{}}}};
+            }
+            return {{{"request_bot_change",{{"operation","create_bot"},{"targetBotId","Target"},
+                                           {"name","Target Bot"}},{}}}};
+        }
+    } model;
+    Sandbox temp;
+    const auto directory = temp.path / "bots";
+    const auto target = directory / "Target";
+    std::filesystem::create_directories(target);
+    Bots bots(directory);
+    Store store(temp.path / "state.db");
+    const Person creator{"creator",false};
+    store.policy().setOwner(creator,"Source");
+    NotesT3 t3;
+    RuntimeOptions options;
+    options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
+    int sequence = 0;
+    const auto create = [&] {
+        store.receive(creator,Intake{"Source","","env","project"},std::to_string(++sequence),"Create a Bot");
+        runtime.runConversations();
+        return model.result;
+    };
+    for (const auto config : {"{",R"({"creationRequest":7})",R"({"creationRequest":"different"})"}) {
+        std::ofstream(target / "config.json") << config;
+        const auto result = create();
+        check(result.at("ok") == false && result.dump().find("Target Bot already exists") != std::string::npos,
+              "Existing Bot did not produce a collision tool error");
+    }
+    std::filesystem::remove_all(target);
+    check(create().at("status") == "applied","Collision left a creation intent blocking the next request");
 }
 
 void botProfilesAndAvatars() {
@@ -872,6 +915,7 @@ int main() {
         fixedDemoWithUserCriteriaAndContinuation();
         fixedDemoAnswersAnAnchoredQuestion();
         fixedDemoFollowUpKeepsTheExplainedResult();
+        botCreationCollisionIsRecoverable();
         botProfilesAndAvatars();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -1,5 +1,6 @@
 #include "flock/board_inbox.hpp"
 #include "http_fixture.hpp"
+#include "../../tests/fake_git.hpp"
 #include "flock/memory_automation.hpp"
 
 #include <sqlite3.h>
@@ -65,7 +66,7 @@ void boundary(Browser& browser) {
           oldApproval->get_header_value("Location") == "/settings/release#local-connections",
           "Previously sent channel approval link did not redirect");
     Browser::checked(browser.client.Get("/settings/release/access/extra",channelNavigation),403);
-    const auto draft = R"({"botId":"release","request":"do not accept this"})";
+    const auto draft = R"({"botId":"release","clientRequestId":"draft","request":"do not accept this"})";
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Origin","https://other.invalid"}}),403);
@@ -85,7 +86,69 @@ void boundary(Browser& browser) {
         check(browser.get(path+"?bot=release").is_array(),"Missing inspector collection");
         Browser::checked(browser.client.Get(path+"?bot=missing"),404);
     }
-    browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
+    browser.post("/api/requests",{{"botId","broken"},{"clientRequestId","broken-request"},{"request","test"}},422);
+}
+
+void explicitRequestReceipts(const std::filesystem::path& path) {
+    const Person owner{"owner",true};
+    auto web = callbacks();
+    web.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer requester") return Person{"requester",false};
+        if (credential == "Bearer other") return Person{"other",false};
+        return Person{};
+    };
+    const Json request{{"botId","release"},{"clientRequestId","draft"},{"request","Draft the release notes"}};
+    Json accepted;
+    {
+        Store store(path);
+        auto access = store.policy();
+        access.setMember(owner,"release","requester",true);
+        access.setMember(owner,"release","other",true);
+        access.setMember(owner,"triage","requester",true);
+        auto configured = web;
+        configured.intake = [route=web.intake,&access,&owner](std::string_view bot, std::string_view text) {
+            if (text == "Revoke while loading settings")
+                access.setMember(owner,"release","requester",false);
+            return route(bot,text);
+        };
+        const auto server = startWeb(store,0,configured);
+        Browser requester(*server), other(*server);
+        requester.client.set_default_headers({{"Authorization","Bearer requester"}});
+        other.client.set_default_headers({{"Authorization","Bearer other"}});
+
+        auto missingId = request;
+        missingId.erase("clientRequestId");
+        requester.post("/api/requests",missingId,400);
+        accepted = requester.post("/api/requests",request,201);
+        check(requester.post("/api/requests",request,201) == accepted,"identical retry created a new Task");
+        check(other.post("/api/requests",request,201) != accepted,"different actors shared a receipt");
+        auto otherBot = request;
+        otherBot["botId"] = "triage";
+        check(requester.post("/api/requests",otherBot,201) != accepted,"different Bots shared a receipt");
+
+        const Json revoked{{"botId","release"},{"clientRequestId","revoked"},{"request","Revoke while loading settings"}};
+        requester.post("/api/requests",revoked,403);
+        requester.post("/api/requests",request,403);
+        check(store.tasks().size() == 3,"denied request or retry inserted another Task");
+        access.setMember(owner,"release","requester",true);
+    }
+    {
+        Store store(path);
+        web.bots = [] { return Json::array(); };
+        web.intake = [](std::string_view, std::string_view) -> Intake {
+            throw std::runtime_error("The Bot settings are temporarily unavailable");
+        };
+        const auto server = startWeb(store,0,web);
+        Browser requester(*server);
+        requester.client.set_default_headers({{"Authorization","Bearer requester"}});
+        check(requester.post("/api/requests",request,201) == accepted,
+              "Task receipt was lost on reopen or needed current Bot settings");
+        auto changed = request;
+        changed["request"] = "Draft something else";
+        check(requester.post("/api/requests",changed,409).at("error") == "request_conflict",
+              "changing the request behind a receipt did not conflict");
+        check(store.tasks().size() == 3,"opening or replaying persisted receipts inserted a Task");
+    }
 }
 
 void checkPresence(Browser& browser, const Json& list, const std::string& bot, std::string_view expected) {
@@ -203,8 +266,8 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     check(settled.at("sessionCursor") > updates.at("sessionCursor") && settledTasks.size() == states.size(),
           "settled Runs did not advance the Session cursor");
     for (const auto& task : settledTasks)
-        check(task.at("runCount") == 1 && task.at("sessions").at(0).at("state") == states.at(task.at("id").get<Id>()),
-              "a settled Run did not refresh its Session status with the same run count");
+        check(task.at("sessions").size() == 1 && task.at("sessions").at(0).at("state") == states.at(task.at("id").get<Id>()),
+              "a settled Run did not refresh its Session status with the same Session count");
 
     auto page = browser.get("/api/view?bot=triage");
     check(page.at("sessionsBefore").get<Id>() > 0,"session list did not offer older history");
@@ -586,7 +649,8 @@ void exercise(const std::filesystem::path& path) {
         return row["kind"] == "waiting" && row["data"]["id"] == waitId;
     }),"question fixture did not cross a history page boundary");
 
-    const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
+    const auto next = browser.post("/api/requests",{{"botId","release"},{"clientRequestId","next-release"},
+        {"request","次の版の変更点を調べる"},
         {"environmentId","ignored"},{"projectId","ignored"},{"trigger",{{"triggerKind","ignored"}}}},201).at("taskId").get<Id>();
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
@@ -817,19 +881,35 @@ void eventStream(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/events?peer=triage"),400);
     Browser::checked(browser.client.Get("/api/events",httplib::Headers{{"Origin","http://example.test"}}),403);
 
-    FixedModel model;
+    struct ReviewModel : FixedModel {
+        Id task = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") != "conversation_turn") return FixedModel::decide(input);
+            const auto& turn = input.event.at("turn");
+            if (turn.empty()) {
+                auto args = git_fixture::openArgs();
+                args.update({{"taskId",task},{"title","Review the draft"}});
+                return {{{"git_open_pr",std::move(args),"Prepare the review fixture"}}};
+            }
+            check(turn.front().at("result").at("status") == "created","could not open the fixture PR");
+            return {{{"reply",{{"text","Ready for review."}},"Report the pull request"}}};
+        }
+    } model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
+                    git_fixture::options(std::make_shared<git_fixture::FakeHost>()));
     unsigned changes = 0;
     Id releaseTask = 0;
     Json botsBeforeApproval;
+    Json approval;
+    bool approved = false;
     readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
         if (changes >= 3) {
             if (changes == 3) {
                 check(change == Json{{"list",true}},"another Bot invalidated the selected view");
-                const auto task = cli.task(releaseTask);
-                cli.requestPrReview(releaseTask,task.value("currentRevision",Id{0}),task.at("generation"),
-                                    "https://example.test/pull/1","Review the draft","Is this ready?");
+                model.task = releaseTask;
+                cli.receive(localOwner,web.intake("release","unused"),"pr-review","Open a pull request for review.");
+                runtime.runConversations();
             } else if (changes == 4) {
                 check(change == Json{{"list",true},{"bot","release"}},"the PR review source did not invalidate its conversation");
                 const auto items = browser.get("/api/inbox?bot=release").at("items");
@@ -839,14 +919,13 @@ void eventStream(const std::filesystem::path& path) {
                 check(std::ranges::any_of(events,[&](const auto& event) {
                     return event.at("id") == items.at(0).at("conversationEventId") &&
                         event.at("kind") == "pr_review_requested" &&
-                        event.at("data") == Json{{"itemId",items.at(0).at("itemId")},{"title","Review the draft"},
-                            {"text","Is this ready?"},{"prUrl","https://example.test/pull/1"}};
+                        event.at("data") == Json{{"itemId",items.at(0).at("itemId")},{"title","Pull request awaiting review"},
+                            {"text","Review the draft"},{"prUrl","https://github.com/org/flock/pull/1"}};
                 }),"the PR review did not have an exact reply source in the Web view");
-                botsBeforeApproval = browser.get("/api/bots");
-                auto approve = items.at(0);
-                approve["decision"] = "approve";
-                browser.post("/api/inbox/decide",approve);
+                approval = items.at(0);
+                approval["decision"] = "approve";
             } else {
+                if (!approved) return true;
                 check(change == Json{{"list",true}},"an inbox-only approval invalidated the selected view");
                 check(browser.get("/api/bots") == botsBeforeApproval &&
                       browser.get("/api/inbox?bot=release").at("items").empty(),
@@ -868,6 +947,13 @@ void eventStream(const std::filesystem::path& path) {
         }
         ++changes;
         return true;
+    },[&] {
+        // Wait until the stream has delivered the Git tool's conversation changes.
+        if (!approval.empty() && !approved) {
+            botsBeforeApproval = browser.get("/api/bots");
+            browser.post("/api/inbox/decide",approval);
+            approved = true;
+        }
     });
 }
 
@@ -1023,7 +1109,7 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
             check(opened == SQLITE_OK,"could not open the fixture writer");
             sqlite3_busy_timeout(db.get(),2000);
             const auto write = "INSERT INTO journal(task_id,time,kind,data) VALUES(" + std::to_string(task) +
-                ",unixepoch(),'instruction_steered',json_object('messageId'," + std::to_string(message) + "))";
+                ",unixepoch(),'instruction_steered',json_object('messageId'," + std::to_string(message) + ",'step',1))";
             check(sqlite3_exec(db.get(),write.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
                   "could not record the historical delivery");
             return true;
@@ -1170,11 +1256,8 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"botId","bot-1"},
         {"name","Scout Photo"},
         {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"},{"imageData",paddedPng}}},
-    },200);
-    const auto imageUrl = padded.at("avatar").at("imageUrl").get<std::string>();
-    const auto paddedImage = browser.client.Get(imageUrl);
-    check(paddedImage && paddedImage->status == 200 && paddedImage->body == fetchedImage->body,
-          "Unused Base64 bits changed the accepted avatar bytes");
+    },400);
+    check(padded.at("error") == "invalid_image","unused Base64 bits were accepted for an avatar upload");
 
     // Rename without re-uploading keeps imageUrl intact.
     const auto renamed = browser.post("/api/bots/profile",{
@@ -1182,11 +1265,11 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"name","Scout Kept"},
         {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"}}},
     },200);
-    check(renamed.at("avatar").at("imageUrl") == imageUrl,"rename did not preserve uploaded avatar URL");
+    check(renamed.at("avatar").at("imageUrl") == originalUrl,"rename did not preserve uploaded avatar URL");
 
     // A name-only update may omit the avatar entirely.
     const auto nameOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Name"}},200);
-    check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == imageUrl,
+    check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == originalUrl,
           "name-only update changed the avatar");
 
     // Replace with GIF updates version and content-type.
@@ -1196,7 +1279,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","badge.gif"},{"imageData",validGifBase64}}},
     },200);
     const auto gifUrl = replaced.at("avatar").at("imageUrl").get<std::string>();
-    check(gifUrl != imageUrl,"replacing uploaded image did not rotate version URL");
+    check(gifUrl != originalUrl,"replacing uploaded image did not rotate version URL");
     const auto fetchedGif = browser.client.Get(gifUrl);
     check(fetchedGif && fetchedGif->status == 200 &&
           fetchedGif->get_header_value("Content-Type") == "image/gif",
@@ -1318,6 +1401,7 @@ int main() {
         TestDirectory directory;
         directRequestApproval(directory.path/"direct-approval.db");
         exercise(directory.path / "state.db");
+        explicitRequestReceipts(directory.path / "request-receipts.db");
         sidebarReplies(directory.path / "sidebar.db");
         failedCompletion(directory.path / "failed-completion.db");
         recurringRequestStatus(directory.path / "recurring-requests.db");

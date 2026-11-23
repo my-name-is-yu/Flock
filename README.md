@@ -2,7 +2,7 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
-Flock reopens databases that use the current SQLite schema. Older development schemas are unsupported. Use a new state directory with `--home` to try the current build alongside an older database.
+Flock reopens databases with the current schema version. Full and Supervised policy use schema version 3. Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
 
 ## Build
 
@@ -72,7 +72,7 @@ The connection supports one-off consultation and ongoing coordination under the 
 Open **Flock settings** to see the connected environments and saved loopback port. Use `--port PORT` to change the port.
 See [Session handoffs](web/README.md#session-handoffs) for connection details.
 
-Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. Additional instructions for an active task are saved for its next safe point, or the Bot can pass a note to the running Session right away. Asking the Bot to implement a completed result starts a new task linked to that result.
+Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.
 
 To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 

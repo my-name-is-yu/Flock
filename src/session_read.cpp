@@ -93,8 +93,8 @@ public:
         if (!configuredProject.empty())
             for (const auto& environment : environments) progress["catalog"][environment] = 0;
         std::vector<SessionTarget> batch;
+        const auto cursor = reference(args,"cursor");
         if (hasCursor(args)) {
-            const auto cursor = reference(args,"cursor");
             anchor = resolve(cursor,RefKind::search);
             const auto position = anchor ? anchor : resolve(cursor,RefKind::searchPosition);
             if (!position || !position->payload.is_object() || position->payload.at("scope") != scopedKey ||
@@ -104,7 +104,10 @@ public:
             for (const auto& target : position->payload.at("remaining"))
                 batch.push_back({target.at(0).get<std::string>(),target.at(1).get<std::string>()});
         }
-        if (batch.empty()) batch = candidates(configuredProject,environments,progress);
+        if (batch.empty()) {
+            batch = candidates(configuredProject,environments,progress);
+            if (!cursor.empty() && !batch.empty()) omitEmitted(batch,cursor);
+        }
         const bool catalogTruncated = !progress.at("catalog").empty();
         const auto scrub = store_.sharedRedactor();
         std::vector<Candidate> matches;
@@ -160,6 +163,7 @@ public:
             bool truncated = catalogTruncated || skippedSlowCandidate || unsearched != incomplete.end();
             if (unsearched != incomplete.end()) scopes.push_back(issue(RefKind::session,*unsearched,nullptr));
             auto nextIndex = scanned;
+            auto emitted = Json::array();
             for (const auto& [target,item,match] : matches) {
                 if (items.size() == limit) {
                     nextIndex = static_cast<std::size_t>(std::ranges::find(batch,target)-batch.begin());
@@ -172,6 +176,7 @@ public:
                 };
                 const auto ref = issue(RefKind::session,target,nullptr);
                 scopes.push_back(ref);
+                emitted.push_back(Json::array({target.environmentId,target.threadId}));
                 items.push_back({{"sessionRef",ref},
                     {"title",display(item.title,240)},{"project",display(item.project,240)},
                     {"status",display(item.status,128)},{"createdAt",display(item.createdAt,30)},
@@ -184,7 +189,8 @@ public:
                 const bool matchAnchor = nextIndex < scanned;
                 const auto target = matchAnchor ? matches[limit-1].target : SessionTarget{};
                 result["nextCursor"] = issue(matchAnchor ? RefKind::search : RefKind::searchPosition,target,
-                    {{"scope",scopedKey},{"progress",progress},{"remaining",std::move(remaining)}});
+                    {{"scope",scopedKey},{"progress",progress},{"remaining",std::move(remaining)},
+                     {"previous",cursor},{"emitted",std::move(emitted)}});
             }
             result["truncated"] = truncated;
             transaction.commit();
@@ -384,6 +390,30 @@ ORDER BY r.environment_id,r.thread_id LIMIT ?4
         });
         result.erase(std::unique(result.begin(),result.end()),result.end());
         return result;
+    }
+
+    void omitEmitted(std::vector<SessionTarget>& batch, std::string_view cursor) const {
+        auto targets = Json::array();
+        for (const auto& target : batch)
+            targets.push_back(Json::array({target.environmentId,target.threadId}));
+        std::set<std::pair<std::string,std::string>> emitted;
+        std::lock_guard lock(store_.mutex);
+        // Each cursor stores only its own page so lineage survives restarts without copying prior pages.
+        auto rows = store_.query(R"SQL(
+WITH RECURSIVE pages(payload) AS (
+    SELECT payload FROM session_read_refs WHERE ref=?1 AND bot=?2
+    UNION ALL
+    SELECT r.payload FROM pages JOIN session_read_refs r
+      ON r.ref=json_extract(pages.payload,'$.previous') AND r.bot=?2
+)
+SELECT DISTINCT json_extract(target.value,'$[0]'),json_extract(target.value,'$[1]')
+FROM pages, json_each(pages.payload,'$.emitted') entry
+JOIN json_each(?3) target ON target.value=entry.value
+)SQL",{cursor,bot_,targets.dump()});
+        while (rows.next()) emitted.emplace(rows.string(0),rows.string(1));
+        std::erase_if(batch,[&](const SessionTarget& target) {
+            return emitted.contains({target.environmentId,target.threadId});
+        });
     }
 
     std::optional<Reference> resolve(std::string_view ref, RefKind kind) const {

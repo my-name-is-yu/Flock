@@ -118,6 +118,8 @@ struct Store::Impl {
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
     std::function<Seconds()> policyClock = unixTime;
+    void openSchema();
+    void initializeSchema();
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
@@ -188,9 +190,9 @@ struct Store::Impl {
     Id gitRedactionEpoch = 0;
     void gitInboxItem(const Json& task, std::string_view key, std::string_view url,
                       std::string_view title, std::string_view prompt);
-    Id insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
-                      std::string_view gitKey = {}, std::string_view operationId = {},
-                      const Json& candidates = Json::array());
+    void insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
+                        std::string_view gitKey, std::string_view operationId = {},
+                        const Json& candidates = Json::array());
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
     void approveMessageModelCall(Id message, Id pause);
@@ -259,13 +261,13 @@ struct Store::Impl {
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                      bool gitNotification) const;
     ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered,
-                             bool gitNotification, bool legacy = false);
+                             bool gitNotification);
     CheckedModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
-                 const BotTools&, GitHost*, const ApplyBotChange&, std::stop_token);
+                 const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, std::stop_token);
     bool runSessionEffect(const conversation::Message&, int step, const Decision&, bool offered, bool hasWebEvidence,
                           T3&, std::stop_token);
     bool isNextTurn(Id messageId) const;
@@ -273,7 +275,6 @@ struct Store::Impl {
     Person turnActor(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
-    void resolveOfferedAnswer(const conversation::Message&);
     Json taskState(const Json& task, const conversation::Message&, bool fullContract = false) const;
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
     Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images);

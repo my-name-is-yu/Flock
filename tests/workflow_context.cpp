@@ -5,7 +5,6 @@
 #include <iostream>
 #include <map>
 #include <set>
-#include <sqlite3.h>
 #include <unistd.h>
 
 using namespace flockv0;
@@ -160,8 +159,7 @@ void expansionRedactsBeforeSearchAndPaging() {
     auto policy = f.store->policy();
     policy.submitSecret({"owner",true},"bot",policy.requestSecret("bot",{"context-credential"}),secret);
     const auto first = f.call("expand_context",{{"compactionId",compaction},{"startMessageId",original}});
-    const auto second = f.call("expand_context",{{"compactionId",compaction},{"startMessageId",first.at("nextMessageId")},
-                                                {"offset",first.at("nextOffset")}});
+    const auto second = f.call("expand_context",{{"cursor",first.at("nextCursor")}});
     require(first.at("messages").at(0).at("text").get<std::string>()+second.at("messages").at(0).at("text").get<std::string>()
             ==prefix+"[redacted] tail","paging split the protected value before redaction");
     require(f.bot.history.front().at("summary")=="Notes: [redacted]","protected value reached the compacted model history");
@@ -173,19 +171,19 @@ void expansionRejectsStaleCursors() {
     Fixture f;
     const std::string secret = "fixture-" + std::string(64,'k');
     const std::string instruction = " DO-NOT-PUBLISH ";
-    const auto original = f.turn(secret + std::string(1928,'x') + "根" + instruction + std::string(2500,'y'));
+    const auto originalText = secret + std::string(1928,'x') + "根" + instruction + std::string(2500,'y');
+    const auto original = f.turn(originalText);
     const auto saved = f.call("compact_conversation",{{"endMessageId",original},{"summary","Keep the instruction"}});
     const auto compaction = saved.at("compaction").at("compactionId");
     const Json range{{"compactionId",compaction},{"startMessageId",original},{"endMessageId",original}};
     const auto first = f.call("expand_context",range);
-    auto legacy = range;
-    legacy["offset"] = first.at("nextOffset");
     auto continuation = range;
     continuation["cursor"] = first.at("nextCursor");
     f.restart();
-    require(f.call("expand_context",continuation).at("messages").at(0).at("text") ==
-            f.call("expand_context",legacy).at("messages").at(0).at("text"),
-            "An unchanged projection did not support both continuation forms after restart");
+    const auto text = [](const Json& page) { return page.at("messages").at(0).at("text").get<std::string>(); };
+    const auto continued = text(f.call("expand_context",continuation));
+    require(!continued.empty() && std::string_view(originalText).substr(text(first).size()).starts_with(continued),
+            "An unchanged projection did not resume after restart");
 
     bool checked = false;
     f.bot.conversation = [&](const ModelInput& input) -> Decision {
@@ -205,20 +203,14 @@ void expansionRejectsStaleCursors() {
     f.turn("Detect redaction changes within the turn");
     f.bot.conversation = {};
     require(checked,"The test did not reach the model with the stale page");
-    for (const auto& cursor : {continuation,legacy}) {
-        f.turn("Continue the saved expansion","expand_context",cursor);
-        require(f.bot.result.at("ok")==false && !f.bot.result.contains("messages"),
-                "A cursor from a different redaction view returned a page");
-    }
+    f.turn("Continue the saved expansion","expand_context",continuation);
+    require(f.bot.result.at("ok")==false && !f.bot.result.contains("messages"),
+            "A cursor from a different redaction view returned a page");
     const auto redacted = f.call("expand_context",range);
-    require(redacted.at("nextOffset")==first.at("nextOffset"),"The test did not reissue the same legacy offset");
-    f.turn("Continue with the ambiguous offset","expand_context",legacy);
-    require(f.bot.result.at("ok")==false,"A reused numeric offset accepted an ambiguous continuation");
     continuation["cursor"] = redacted.at("nextCursor");
     const auto second = f.call("expand_context",continuation);
     const auto third = f.call("expand_context",{{"compactionId",compaction},{"endMessageId",original},
                                                 {"cursor",second.at("nextCursor")}});
-    const auto text = [](const Json& page) { return page.at("messages").at(0).at("text").get<std::string>(); };
     require(text(redacted)+text(second)+text(third) == "[redacted]" + std::string(1928,'x') + "根" +
                 instruction + std::string(2500,'y') && redacted.at("nextCursor").is_number_integer(),
             "A fresh expansion skipped an instruction, included secret text, or embedded text in its reference");
@@ -232,8 +224,6 @@ void expansionCursorKeepsItsSearchRange() {
     f.call("compact_conversation",{{"endMessageId",boundary},{"summary","Collate the evidence"}});
     const auto first = f.call("expand_context",{{"query","ALPHA"},{"limit",1}});
     const auto cursor = first.at("nextCursor");
-    require(first.at("nextMessageId")==lastMatch && !first.contains("nextOffset"),
-            "A page between messages did not return a continuation");
     const auto wider = f.turn("ALPHA evidence added later");
     f.call("compact_conversation",{{"endMessageId",wider},{"summary","Collate the new evidence"}});
     f.turn("Continue with a smaller range","expand_context",{{"cursor",cursor},{"endMessageId",lastMatch}});
@@ -243,20 +233,23 @@ void expansionCursorKeepsItsSearchRange() {
             !continued.contains("nextCursor"),"A cursor resumed a wider range or lost its search filter");
 }
 
-void legacyOffsetsCannotSelectBetweenSearches() {
+void overlapKeepsEachSearchFilter() {
     Fixture f;
     const auto message = f.turn("ALPHA BETA " + std::string(3000,'x'));
     const auto end = f.turn("ALPHA detail");
     f.call("compact_conversation",{{"endMessageId",end},{"summary","Two searches"}});
     const auto alpha = f.call("expand_context",{{"query","ALPHA"}});
     const auto beta = f.call("expand_context",{{"query","BETA"}});
-    require(alpha.at("nextOffset") == beta.at("nextOffset") && alpha.at("nextMessageId") == message,
-            "the fixture did not issue the same byte position for two searches");
+    require(alpha.at("messages") == beta.at("messages") && alpha.at("nextCursor") != beta.at("nextCursor"),
+            "the fixture did not issue independent cursors for the overlapping search result");
     f.turn("Continue overlapping search","expand_context",
-           {{"startMessageId",message},{"offset",alpha.at("nextOffset")}});
-    require(f.bot.result.at("ok") == false,"an ambiguous offset resumed the wrong search");
-    const auto exact = f.call("expand_context",{{"cursor",alpha.at("nextCursor")}});
-    require(exact.at("messages").back().at("messageId") == end,"the exact cursor did not recover its original filter");
+           {{"cursor",alpha.at("nextCursor")},{"query","BETA"}});
+    require(f.bot.result.at("ok") == false,"a cursor accepted a different search filter");
+    const auto alphaPage = f.call("expand_context",{{"cursor",alpha.at("nextCursor")}});
+    const auto betaPage = f.call("expand_context",{{"cursor",beta.at("nextCursor")}});
+    require(alphaPage.at("messages").back().at("messageId") == end &&
+            betaPage.at("messages").size() == 1 && betaPage.at("messages").at(0).at("messageId") == message,
+            "the overlapping searches lost their own filters");
 }
 
 void freshStandaloneSessionIncludesEarlierEvidence() {
@@ -307,27 +300,6 @@ void stageRequestKeepsEmbeddedNul() {
             "stage dispatch lost the request bytes after the marker");
 }
 
-void restoreLegacyWorkflowSchema(Fixture& f) {
-    f.runtime.reset();
-    f.store.reset();
-    sqlite3* connection = nullptr;
-    const auto opened = sqlite3_open((f.dir/"state.db").c_str(),&connection);
-    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(connection,sqlite3_close);
-    require(opened==SQLITE_OK,"cannot open legacy workflow fixture");
-    const auto migrated = sqlite3_exec(db.get(),R"SQL(
-        PRAGMA foreign_keys=OFF;
-        BEGIN IMMEDIATE;
-        CREATE TABLE legacy_workflows(id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,
-            routing TEXT NOT NULL,request TEXT NOT NULL,message_id INTEGER NOT NULL REFERENCES messages,
-            stop_requested INTEGER NOT NULL DEFAULT 0);
-        INSERT INTO legacy_workflows SELECT id,bot_id,routing,request,message_id,stop_requested FROM workflows;
-        DROP TABLE workflows;
-        ALTER TABLE legacy_workflows RENAME TO workflows;
-        COMMIT;
-    )SQL",nullptr,nullptr,nullptr);
-    require(migrated==SQLITE_OK,"could not prepare legacy workflows: "+std::string(sqlite3_errmsg(db.get())));
-}
-
 void verifyAfterRestart(bool advance) {
     Fixture f;
     const Id id = f.call("start_workflow",{{"request","Implement feature"},{"verificationCriteria","Run tests"}}).at("workflowId");
@@ -337,7 +309,6 @@ void verifyAfterRestart(bool advance) {
     f.ticks(1);
     require(f.status().at("stages")[1]["status"]=="pending","verification dispatched prematurely");
     const auto beforeRestart = f.status();
-    if (advance) restoreLegacyWorkflowSchema(f);
     f.restart();
     require(f.status()==beforeRestart,"restart lost workflow IDs, dependencies or artifact evidence");
     f.ticks(3);
@@ -714,19 +685,18 @@ void scopedCompactionPages() {
     f.store->receive({"owner",true},{"other","","env","project",Json::object()},"read","Read first Bot's evidence");
     f.runtime->runConversations();
     require(f.bot.result.at("ok")==false && f.bot.history.empty(),"compaction crossed Bot histories");
-    f.turn("Bad offset","expand_context",{{"startMessageId",first},{"offset",1}});
-    require(f.bot.result.at("ok")==false,"cursor split a UTF-8 character");
     std::string replay;
-    std::size_t offset = 0;
-    do {
-        const auto page = f.call("expand_context",{{"startMessageId",first},{"endMessageId",first},{"offset",offset},{"limit",1}});
+    Json args = {{"startMessageId",first},{"endMessageId",first},{"limit",1}};
+    while (true) {
+        const auto page = f.call("expand_context",args);
         require(page.dump().size()<=8192 && page.at("messages").size()==1 && page["messages"][0]["messageId"]==first,
                 "escaped evidence exceeded its byte or item cap");
-        replay += page["messages"][0]["text"].get<std::string>();
-        if (!page.contains("nextOffset")) break;
-        offset = page.at("nextOffset");
-        require(offset==replay.size() && page.at("nextMessageId")==first,"non-advancing evidence cursor");
-    } while (replay.size()<original.size());
+        const auto chunk = page["messages"][0]["text"].get<std::string>();
+        require(!chunk.empty() && replay.size()+chunk.size()<=original.size(),"non-advancing evidence cursor");
+        replay += chunk;
+        if (!page.contains("nextCursor")) break;
+        args["cursor"] = page.at("nextCursor");
+    }
     require(replay==original,"UTF-8 cursor skipped or duplicated original bytes");
 
     int calls = 0;
@@ -787,7 +757,7 @@ void compactAndContinue() {
     auto expanded = f.call("expand_context",{{"query",shaA},{"limit",100}});
     require(expanded.at("messages").size()==1 && expanded["messages"][0]["text"]==original,"missing original evidence");
     expanded = f.call("expand_context",{{"compactionId",compact["compaction"]["compactionId"]},{"startMessageId",end}});
-    require(expanded.dump().size()<=8192 && expanded.at("nextOffset")>0 && expanded.at("nextMessageId")==end,
+    require(expanded.dump().size()<=8192 && expanded.contains("nextCursor") && expanded.at("messages").at(0).at("messageId")==end,
         "unbounded expansion or missing cursor");
     f.turn("Invalid boundary","compact_conversation",{{"endMessageId",first},{"summary","Discard coverage"}});
     require(f.bot.result.at("ok")==false,"accepted shrinking boundary");
@@ -826,7 +796,7 @@ int main() {
         expansionRedactsBeforeSearchAndPaging();
         expansionRejectsStaleCursors();
         expansionCursorKeepsItsSearchRange();
-        legacyOffsetsCannotSelectBetweenSearches();
+        overlapKeepsEachSearchFilter();
         freshStandaloneSessionIncludesEarlierEvidence();
         verifyAfterRestart(false);
         verifyAfterRestart(true);

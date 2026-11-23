@@ -143,13 +143,6 @@ Resource Resource::sessionRead(std::string_view environment, std::string_view th
 Policy Store::policy() { return Policy(*p_); }
 
 void Store::Impl::initializePolicySchema() {
-    Transaction migration(db);
-    const bool legacy = query("SELECT 1 FROM sqlite_schema WHERE name='policy_settings'"
-                              " AND instr(sql,'revision')=0").next();
-    if (legacy) {
-        exec("ALTER TABLE policy_settings RENAME TO policy_settings_previous");
-        exec("ALTER TABLE policy_rules RENAME TO policy_rules_previous");
-    }
     const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TABLE IF NOT EXISTS policy_settings(id INTEGER PRIMARY KEY CHECK(id=1),mode TEXT NOT NULL CHECK(mode IN ('full','supervised')), revision INTEGER NOT NULL);
@@ -182,15 +175,6 @@ CREATE TABLE IF NOT EXISTS bot_creation_intents(
 CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 )SQL";
     if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw StorageError(db);
-    if (legacy) {
-        exec("UPDATE policy_settings SET mode=(SELECT mode FROM policy_settings_previous WHERE id=1)"
-             " WHERE EXISTS (SELECT 1 FROM policy_settings_previous WHERE id=1)");
-        exec("INSERT INTO policy_rules(kind,action,target,created_at,exact)"
-             " SELECT kind,action,target,created_at,0 FROM policy_rules_previous");
-        exec("DROP TABLE policy_rules_previous");
-        exec("DROP TABLE policy_settings_previous");
-    }
-    migration.commit();
 }
 
 
@@ -360,7 +344,7 @@ void Policy::audit(const Person& actor, std::string_view bot, std::string_view a
 
 Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::string_view operation,
                           std::string_view target, std::string_view name, Id message, int step,
-                          const ApplyBotChange& apply) {
+                          const ApplyBotChange& apply, const ReconcileBotCreation* onExhausted) {
     const bool create = operation == "create_bot";
     const auto requestKey = std::to_string(message) + "-" + std::to_string(step);
     if (!apply) throw Conflict("Bot changes are unavailable");
@@ -403,6 +387,21 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
         if (create) db_.exec("DELETE FROM bot_creation_intents WHERE request_key=?",{requestKey});
         completion.commit();
         throw;
+    } catch (...) {
+        if (!create) throw Conflict("Unable to apply Bot change");
+        if (!onExhausted) throw BotCreationUncertain{};
+        bool published = false;
+        try {
+            published = *onExhausted && (*onExhausted)(change);
+        } catch (...) {
+            // A failed inspection cannot establish that it is safe to release the ID.
+            throw BotCreationUncertain{};
+        }
+        if (!published) {
+            db_.exec("DELETE FROM bot_creation_intents WHERE request_key=?",{requestKey});
+            completion.commit();
+            throw Conflict("Unable to apply Bot change");
+        }
     }
 
     if (create) {

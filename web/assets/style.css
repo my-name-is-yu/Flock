@@ -23,7 +23,6 @@
   --warning: light-dark(#8a531d, #e3ad62);
   --warning-soft: light-dark(#f8eee1, #2b2216);
   --success: light-dark(#2f6b52, #74c79f);
-  --success-soft: light-dark(#e5f1e9, #16271e);
   --danger: light-dark(#a3324a, #f08c9c);
   --danger-soft: light-dark(#fcedf0, #301a1f);
   --danger-soft-hover: light-dark(#f8e0e5, #3b2026);
@@ -55,10 +54,8 @@
 
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --dur-press: 140ms;
   --dur-fast: 160ms;
-  --dur-medium: 240ms;
 
   font-family: var(--font-sans);
   font-size: 16px;
@@ -76,7 +73,6 @@
   transition-duration: 220ms;
   transition-timing-function: cubic-bezier(.2, .8, .2, 1);
 }
-::backdrop { --backdrop: rgb(10 10 14 / .5); }
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }

@@ -135,49 +135,51 @@ Json wait(Client& client, const RunRef& run, bool delegated, int timeout = 400) 
     return response;
 }
 
-bool sameDelegateTitle(std::string_view activity, std::string_view notice) {
-    if (activity == notice) return true;
-    // T3 truncates the activity title and the completion notice independently.
-    const auto stem = [](std::string_view title) {
-        if (title.ends_with("...")) return title.substr(0,title.size()-3);
-        if (title.ends_with("…")) return title.substr(0,title.size()-std::string_view("…").size());
-        return title;
-    };
-    const auto first = stem(activity);
-    const auto second = stem(notice);
-    return (first.size() >= 48 && first.size() != activity.size() && second.starts_with(first)) ||
-           (second.size() >= 48 && second.size() != notice.size() && first.starts_with(second));
-}
-
-struct CompletionNotice { std::string title, updatedAt; };
+struct CompletionNotice { std::size_t count; std::string updatedAt; };
 struct DelegatedChild {
-    std::string parentRun, title, settledAt;
+    std::string parentRun, settledAt;
     bool consumed = false;
 };
 
 std::optional<CompletionNotice> completionNotice(const Json& item) {
-    constexpr std::string_view header = "Delegated task \"";
-    constexpr std::string_view footer = "\" finished";
     const auto text = str(item,"text");
     const auto updatedAt = str(item,"updatedAt");
-    if (str(item,"status") != "completed" || boolean(item,"textTruncated") || updatedAt.empty() ||
-        !text.starts_with(header) || !text.ends_with(footer) || text.size() <= header.size() + footer.size())
+    if (str(item,"status") != "completed" || boolean(item,"textTruncated") || updatedAt.empty())
         return std::nullopt;
-    return CompletionNotice{text.substr(header.size(),text.size() - header.size() - footer.size()),updatedAt};
-}
 
-bool consumeCompletion(const CompletionNotice& notice, std::map<std::string,DelegatedChild>& children,
-                       const std::set<std::string>& ownedRuns) {
-    DelegatedChild* match = nullptr;
-    for (auto& [id,child] : children) {
-        if (!sameDelegateTitle(child.title,notice.title)) continue;
-        if (match) return false;
-        match = &child;
+    constexpr std::string_view single = "Delegated task ";
+    const auto verb = [](std::string_view value) {
+        return value == "finished" || value == "failed" || value == "stopped";
+    };
+    std::string_view frame = text;
+    if (frame.starts_with(single)) {
+        frame.remove_prefix(single.size());
+        if (verb(frame)) return CompletionNotice{1,updatedAt};
+        const auto endQuote = frame.rfind('"');
+        if (frame.starts_with('"') && endQuote > 1 && endQuote != frame.npos &&
+            frame.substr(endQuote + 1).starts_with(' ') && verb(frame.substr(endQuote + 2)))
+            return CompletionNotice{1,updatedAt};
+        return std::nullopt;
     }
-    if (!match || match->consumed || !ownedRuns.contains(match->parentRun) ||
-        match->settledAt.empty() || match->settledAt > notice.updatedAt) return false;
-    match->consumed = true;
-    return true;
+
+    constexpr std::string_view batch = " delegated tasks ";
+    const auto countEnd = frame.find(batch);
+    if (countEnd == frame.npos) return std::nullopt;
+    const auto counts = frame.substr(0,countEnd);
+    const auto outcome = frame.substr(countEnd + batch.size());
+    if (!verb(outcome.substr(0,outcome.find(": ")))) return std::nullopt;
+
+    const auto parseCount = [](std::string_view value, std::size_t& count) {
+        const auto end = value.data() + value.size();
+        const auto result = std::from_chars(value.data(),end,count);
+        return result.ec == std::errc{} && result.ptr == end && count > 0;
+    };
+    const auto of = counts.find(" of ");
+    std::size_t count = 0, total = 0;
+    if (!parseCount(counts.substr(0,of),count) ||
+        (of != counts.npos && (!parseCount(counts.substr(of + 4),total) || count > total)))
+        return std::nullopt;
+    return CompletionNotice{count,updatedAt};
 }
 
 bool ownsResult(Client& client, const RunRef& requested, const std::string& effectiveRunId,
@@ -209,9 +211,10 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
         const auto type = str(item,"type");
         if (type == "subagent") {
             const auto id = str(item,"subagentId");
-            const auto title = str(item,"title");
-            if (!id.empty() && !title.empty())
-                children.emplace(id,DelegatedChild{run,title,terminal(str(item,"status")) ? str(item,"updatedAt") : ""});
+            // Provider-native subagents also appear as subagent items but never produce delegated-task
+            // notices. Count only app-owned delegated tasks, whose node ids T3 derives with this prefix.
+            if (id.starts_with("node:delegated-task:"))
+                children.emplace(id,DelegatedChild{run,terminal(str(item,"status")) ? str(item,"updatedAt") : ""});
         }
         const auto candidate = notices.find(run);
         if (candidate == notices.end()) return true;
@@ -225,13 +228,29 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
     });
     if (!complete) return false;
 
+    std::vector<DelegatedChild*> settled;
+    for (auto& [id,child] : children)
+        if (!child.settledAt.empty()) settled.push_back(&child);
+    // Preserve subagent ID order for children with the same settlement time.
+    std::stable_sort(settled.begin(),settled.end(),[](const auto* a, const auto* b) {
+        return a->settledAt < b->settledAt;
+    });
+
     std::set<std::string> ownedRuns{requested.runId,effectiveRunId};
     for (auto ordinal = base + 1; ordinal <= ending; ++ordinal) {
         const auto& run = ordered.at(ordinal);
         const auto& inputs = notices.at(run);
         if (inputs.empty()) return false;
-        for (const auto& notice : inputs)
-            if (!consumeCompletion(notice,children,ownedRuns)) return false;
+        for (const auto& notice : inputs) {
+            auto remaining = notice.count;
+            for (auto* child : settled) {
+                if (child->settledAt > notice.updatedAt) break;
+                if (child->consumed || !ownedRuns.contains(child->parentRun)) continue;
+                child->consumed = true;
+                if (--remaining == 0) break;
+            }
+            if (remaining != 0) return false;
+        }
         ownedRuns.insert(run);
     }
     return true;
@@ -438,12 +457,14 @@ std::vector<std::string> projectThreads(Client& client, Scan& scan, const std::s
 
 Delivery reconcileWork(Client& client, const Command& command) {
     const bool launch = command.tool == "delegate";
-    if (!launch && !command.candidate.threadId.empty() && command.candidate.threadId != command.target.threadId)
+    const auto& destination = launch ? command.launchReceiptThreadId : command.target.threadId;
+    const auto& hint = command.candidate.threadId;
+    if (!destination.empty() && !hint.empty() && hint != destination)
         return result(Outcome::Unknown, "The supplied Thread is outside the saved action destination");
     Scan scan;
-    auto threads = launch ? projectThreads(client, scan, command.projectId) : std::vector{command.target.threadId};
-    const auto& hint = command.candidate.threadId;
-    if (!hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end()) threads.push_back(hint);
+    auto threads = destination.empty() ? projectThreads(client, scan, command.projectId) : std::vector{destination};
+    if (destination.empty() && !hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end())
+        threads.push_back(hint);
     const auto expected = sessionPrompt(command.actionId,command.instruction);
     std::map<std::pair<std::string, std::string>, RunRef> matches;
     bool incomplete = false;
@@ -591,28 +612,6 @@ bool followUpReady(Client& client, const Command& command) {
         str(current, "latestRunId") == str(info, "latestRunId") && position(member(current, "pendingRequestCount")) == 0;
 }
 
-Delivery steer(Client& client, const Command& command, bool& invoked) {
-    const auto current = wait(client, command.target, false, 1);
-    const auto effective = str(current, "runId");
-    const auto head = threadHead(client, command.target.threadId);
-    const auto& info = head.at("thread");
-    if (!active(str(current, "status")) || str(info, "projectId") != command.projectId || boolean(info, "archived") ||
-        member(info, "activeRunId") != Json(effective))
-        return {Outcome::NotAccepted, {}, "The assigned Run is no longer running", true};
-    invoked = true;
-    const auto reply = client.call("t3_thread_send", {{"threadId", command.target.threadId}, {"mode", "steer"},
-        {"message", command.instruction}, {"clientRequestId", command.actionId}});
-    // T3 v0.1.11 cannot require the expected Run on send. If another Run of the task's Thread took over in
-    // between, surface the mismatch without confirming the assigned Run.
-    if (str(reply, "threadId") != command.target.threadId || str(reply, "delivery") != "steered") invalidResponse();
-    RunRef received = command.target;
-    received.runId = str(reply, "runId");
-    if (received.runId != effective)
-        return result(Outcome::Unknown, "T3 did not confirm steer delivery to " + effective +
-                      (received.runId.empty() ? " (no Run ID returned)" : " (returned " + received.runId + ")"));
-    return result(Outcome::Accepted, {}, std::move(received));
-}
-
 Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
@@ -705,6 +704,9 @@ public:
     }
 
     Delivery send(const Command& command) override {
+        // The MCP send targets the Thread's current Run and has no expected-Run condition.
+        if (command.tool == "steer")
+            return {Outcome::NotAccepted, {}, "T3 cannot target a specific running Run", true};
         bool invoked = false;
         try {
             verifyCommand(command);
@@ -717,7 +719,6 @@ public:
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
             if (command.tool == "answer_session_question") return answer(client, command, invoked);
-            if (command.tool == "steer") return steer(client, command, invoked);
             Json reply;
             if (launch) {
                 if (!launchArguments.pin.empty()) {
@@ -968,15 +969,9 @@ private:
     std::filesystem::path directory_;
 
     Credential credential(const std::string& environment, const Json& config) const {
-        auto connection = loadCredential(directory_, environment);
-        if (!config.is_object() || (config.contains("t3") && !config["t3"].is_object()))
+        if (!config.is_object())
             throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
-        if (config.contains("t3") && config["t3"].contains("mcpUrl")) {
-            const auto hint = str(config["t3"], "mcpUrl");
-            if (checkedUrl(hint).full != connection.mcpUrl)
-                throw Failure(Failure::Kind::Settings, "The Bot's MCP URL differs from the T3 environment's OAuth connection");
-        }
-        return connection;
+        return loadCredential(directory_, environment);
     }
 
     static void requireOperate(const Credential& connection) {
