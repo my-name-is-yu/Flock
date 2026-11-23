@@ -106,6 +106,21 @@ const closedLabels = {
   stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
   superseded: 'Replaced', superseded_instruction: 'Replaced by a newer instruction',
 };
+// Confirms what the response will do, so the person isn't left with a bare "Done".
+const decisionConfirmations = {
+  answer: (name) => `Answer recorded for ${name}.`,
+  allow_once: () => 'Allowed once.',
+  always_allow: () => 'Allowed and saved as a rule.',
+  allow_next_time: () => 'Allow rule saved.',
+  deny: () => 'Denied.',
+  approve: () => 'Approved.',
+  request_changes: (name) => `Change request recorded for ${name}.`,
+  extend: () => 'Deadline extended.',
+  reconcile: () => 'Check requested.',
+  supply: () => 'Secret saved.',
+  link_pr: () => 'Pull request linked.',
+  reject_pr: () => 'Pull request link rejected.',
+};
 const errors = {
   invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
@@ -2999,9 +3014,10 @@ const decisions = mountBoardInbox({
     renderTimeline();
     scheduleReadCheck();
   },
-  onAccepted(item, message) {
-    if (view?.id !== item.botId) return;
-    setNotice(view, message);
+  onAccepted(item, { decision, error }) {
+    if (!view || (view.id !== item.botId && view.id !== item.conversationBotId)) return;
+    const name = bots.find((bot) => bot.id === item.botId)?.name ?? 'The Bot';
+    setNotice(view, error ?? decisionConfirmations[decision]?.(name) ?? 'Response sent.', !!error);
     void view.refresh();
   },
 });

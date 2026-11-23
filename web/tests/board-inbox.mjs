@@ -40,10 +40,14 @@ async function exercise(mountBoardInbox) {
   const nextDocs = { ...docs, itemId: 7, waitId: 7, targetGeneration: 5,
     prompt: 'Which examples, and how many?', choices: ['Quickstart', { options: ['1', '2'] }] };
 
+  const approval = { ...question, itemKind: 'policy_approval', itemId: 10, status: 'pending',
+    action: 'repository.pr', target: 'team/guide' };
   const calls = [];
   const sources = [];
+  const outcomes = [];
   let questions = [question, docs, secret, review];
   let finishDocs;
+  let rejectApproval;
   let readInbox;
   let retries = 0;
   const choices = () => item.querySelector('.question-choice-form');
@@ -54,6 +58,7 @@ async function exercise(mountBoardInbox) {
     async api(path, data) {
       calls.push([path, data]);
       if (path === 'inbox/decide') {
+        if (data.itemId === approval.itemId) await new Promise((_, reject) => { rejectApproval = reject; });
         if (data.waitId === docs.waitId) {
           await new Promise((resolve) => { finishDocs = resolve; });
           questions = questions.filter((entry) => entry !== docs);
@@ -83,7 +88,7 @@ async function exercise(mountBoardInbox) {
       return source;
     },
     onChange() {},
-    onAccepted() {},
+    onAccepted(entry, result) { outcomes.push({ entry, result }); },
     onRefreshError() { retries++; },
     canCompose: () => true,
     focusComposer: () => editor.focus(),
@@ -245,6 +250,25 @@ async function exercise(mountBoardInbox) {
     check(board.count('release') === 0 && layer.hidden && trigger.hidden && retries === 0,
       `HTTP ${status} did not clear the Inbox and close its pending panel`);
   }
+
+  questions = [approval];
+  board.setContext('release', 'approver');
+  await board.refresh();
+  const inline = board.inlinePolicyCard(approval);
+  conversation.append(inline);
+  const allowOnce = inline.querySelector('button[value=allow_once]');
+  const beforeApproval = outcomes.length;
+  allowOnce.click();
+  rejectApproval(new Error('request_changed'));
+  await settled();
+  check(outcomes.length === beforeApproval + 1 && outcomes.at(-1).result.error,
+    'The original viewer did not receive their inline approval error');
+  allowOnce.click();
+  board.setContext('release', 'next-viewer');
+  await board.refresh();
+  rejectApproval(new Error('request_changed'));
+  await settled();
+  check(outcomes.length === beforeApproval + 1, 'A previous viewer’s inline approval error reached the new viewer');
 }
 
 function liveFixture() {
