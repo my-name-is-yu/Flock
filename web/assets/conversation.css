@@ -462,9 +462,18 @@
 .typing span { width: .36rem; height: .36rem; border-radius: var(--radius-full); background: var(--text-3); animation: typing 1.3s ease-in-out infinite; }
 .typing span:nth-child(2) { animation-delay: .16s; }
 .typing span:nth-child(3) { animation-delay: .32s; }
+/* Status lines stack in one grid cell so a new one can slide in while the old one leaves. */
+.working-status { display: grid; min-width: 0; overflow: hidden; }
 .working-label {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-md); color: var(--text-2);
+  grid-area: 1 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-md);
+  color: transparent; background: linear-gradient(90deg, var(--text-3) 0 40%, var(--text) 50%, var(--text-3) 60% 100%) 0 0 / 250% 100%;
+  -webkit-background-clip: text; background-clip: text; animation: working-shimmer 2.4s linear infinite;
 }
+.working-label.entering { animation: working-shimmer 2.4s linear infinite, working-label-in .32s cubic-bezier(0.23, 1, 0.32, 1) both; }
+.working-label.leaving { animation: working-label-out .24s ease-in both; }
+@keyframes working-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@keyframes working-label-in { from { opacity: 0; transform: translateY(.6em); filter: blur(2px); } }
+@keyframes working-label-out { to { opacity: 0; transform: translateY(-.6em); filter: blur(2px); } }
 @keyframes working-enter { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
 @keyframes typing { 0%, 70%, 100% { opacity: .3; transform: scale(.8); } 35% { opacity: 1; transform: none; } }
 
@@ -506,7 +515,7 @@
 
 @container conversation-layout (max-width: 700px) {
   .event-message.bot, .peer-exchange-link { --avatar-col: 0px; }
-  .event-message.bot .msg-line > :is(.msg-avatar, .msg-avatar-space) { display: none; }
+  :is(.event-message.bot, .msg.working) .msg-line > :is(.msg-avatar, .msg-avatar-space) { display: none; }
 }
 @media (max-width: 700px) {
   .conversation-header { --profile-avatar-size: 2.625rem; }
@@ -539,6 +548,7 @@
 @media (prefers-reduced-motion: reduce) {
   .msg.working { animation: none; }
   .typing span { animation: none; opacity: .55; }
+  .working-label { animation: none; background: none; color: var(--text-2); }
   .conversation-actions-list { animation: none; }
   .jump-to-latest, .jump-to-latest svg, .msg-time, .msg-actions { transition: none; transform: none; animation: none; }
   @starting-style { .jump-to-latest { opacity: 1; transform: none; } }
