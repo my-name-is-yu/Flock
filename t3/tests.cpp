@@ -85,9 +85,6 @@ int main(int argc, char** argv) {
         other.environmentId = "env-2";
         checkPreflight(other, Delivery::Kind::Auth, "another environment cannot use credential");
         other = launch;
-        other.config["t3"]["mcpUrl"] = "https://example.test/mcp";
-        checkPreflight(other, Delivery::Kind::Settings, "URL hint cannot redirect credential");
-        other = launch;
         other.config["session"]["model"] = "missing provider";
         checkPreflight(other, Delivery::Kind::Settings, "partial model selection rejected before send");
         fixture({{"delayRunId", true}});
@@ -168,9 +165,7 @@ int main(int argc, char** argv) {
               "a lost response was treated as definitely unsent or retried");
         fixture({{"dropAnswerReply", false}});
 
-        auto badConfig = launch.config;
-        badConfig["t3"]["mcpUrl"] = "https://wrong.test/mcp";
-        observation = adapter->observe("env-1", badConfig, run);
+        observation = adapter->observe("env-1", Json::array(), run);
         check(observation.kind == Observation::Kind::Unavailable && observation.status == "settings",
               "runtime recognizes observation settings failures");
         fixture({{"scenario", "settling"}});

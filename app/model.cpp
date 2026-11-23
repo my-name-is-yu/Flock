@@ -277,11 +277,9 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
     } else if (name == "expand_context") {
         description = "Read bounded original messages from this Bot's compacted history.";
         integer("compactionId","Optional summary identifier.");
-        integer("startMessageId","Inclusive first message or nextMessageId cursor.");
+        integer("startMessageId","Inclusive first message for a new search.");
         integer("endMessageId","Inclusive last message.");
         integer("cursor","Use nextCursor to continue the same search and range.");
-        integer("offset","Legacy byte cursor from nextOffset, paired with startMessageId.");
-        fields["offset"]["minimum"] = 0;
         integer("limit","Maximum messages, capped at eight.");
         text("query","Optional literal search text.",false);
     } else if (name == "continue_fresh_session") {

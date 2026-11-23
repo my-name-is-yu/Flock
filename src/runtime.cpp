@@ -76,7 +76,6 @@ Json pendingBatch(const Json& task, std::size_t maxPromptBytes, SourceQuotes quo
 struct TaskDecision : Decision {
     Json usage = Json::object();
     Id attemptId = 0;
-    bool argumentsChecked = true;
     std::string rejection{};
 };
 
@@ -87,8 +86,8 @@ struct TaskInference {
     std::variant<ModelCall,ModelError> outcome{};
 };
 
-std::string gitInvocation(const TaskDecision& decision, const Json& event) {
-    return decision.attemptId ? "attempt/" + std::to_string(decision.attemptId) : "event/" + event.at("id").dump();
+std::string gitInvocation(const TaskDecision& decision) {
+    return "attempt/" + std::to_string(decision.attemptId);
 }
 
 struct SessionContextLimit : Conflict {
@@ -108,15 +107,11 @@ void includeInstructions(std::string& instruction, const Json& pending) {
 }
 
 void Store::Impl::initializeSpecialistSchema() {
-    const auto createBudgets = [&](std::string name) {
-        exec(("CREATE TABLE IF NOT EXISTS " + name + R"SQL((
+    exec(R"SQL(CREATE TABLE IF NOT EXISTS specialist_budgets(
  channel_id INTEGER PRIMARY KEY REFERENCES return_channels(id),
  allowance INTEGER NOT NULL CHECK(allowance>0),
- used INTEGER NOT NULL DEFAULT 0 CHECK(used>=0 AND used<=allowance))
-)SQL").c_str());
-    };
-    const auto createDelegations = [&](std::string name) {
-        exec(("CREATE TABLE IF NOT EXISTS " + name + R"SQL((
+ used INTEGER NOT NULL DEFAULT 0 CHECK(used>=0 AND used<=allowance)))SQL");
+    exec(R"SQL(CREATE TABLE IF NOT EXISTS specialist_delegations(
  id TEXT PRIMARY KEY REFERENCES peer_exchanges(id),
  channel_id INTEGER NOT NULL REFERENCES specialist_budgets(channel_id),
  generation INTEGER NOT NULL,
@@ -125,47 +120,13 @@ void Store::Impl::initializeSpecialistSchema() {
  commit_sha TEXT NOT NULL,
  parent_id TEXT UNIQUE REFERENCES specialist_delegations(id),
  sender_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
- recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id))
-)SQL").c_str());
-    };
-    const auto needsLocalControls = [&] {
-        return query("SELECT 1 FROM pragma_table_info('specialist_delegations') WHERE name='epoch'").next();
-    };
-    if (needsLocalControls()) {
-        exec("PRAGMA foreign_keys=OFF");
-        {
-            Transaction migration(db);
-            if (needsLocalControls()) {
-                createBudgets("specialist_budgets_local");
-                createDelegations("specialist_delegations_local");
-                exec("INSERT INTO specialist_budgets_local SELECT * FROM specialist_budgets");
-                exec(R"SQL(
-INSERT INTO specialist_delegations_local(id,channel_id,generation,purpose,done_when,commit_sha,parent_id,sender_task,recipient_task)
-SELECT id,channel_id,generation,purpose,done_when,commit_sha,parent_id,sender_task,recipient_task FROM specialist_delegations
-)SQL");
-                exec("DROP TABLE specialist_delegations");
-                exec("DROP TABLE specialist_budgets");
-                exec("ALTER TABLE specialist_budgets_local RENAME TO specialist_budgets");
-                exec("ALTER TABLE specialist_delegations_local RENAME TO specialist_delegations");
-                if (query("SELECT 1 FROM pragma_foreign_key_check('specialist_budgets')"
-                          " UNION ALL SELECT 1 FROM pragma_foreign_key_check('specialist_delegations')"
-                          " UNION ALL SELECT 1 FROM pragma_foreign_key_check('specialist_launches') LIMIT 1").next())
-                    throw Conflict("Could not preserve specialist references during migration");
-            }
-            migration.commit();
-        }
-        exec("PRAGMA foreign_keys=ON");
-    }
-    Transaction transaction(db);
-    createBudgets("specialist_budgets");
-    createDelegations("specialist_delegations");
+ recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id)))SQL");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS specialist_launches(
  action_id TEXT PRIMARY KEY REFERENCES outbox(id),
  delegation_id TEXT NOT NULL REFERENCES specialist_delegations(id),
  task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id))
 )SQL");
-    transaction.commit();
 }
 
 struct Runtime::Impl {
@@ -427,7 +388,7 @@ ORDER BY id)SQL");
         }
     }
 
-    void cancelDone(Json& task, std::string_view detail = {}) {
+    void cancelDone(Json& task) {
         closeQuestion(task,"cancelled");
         if (!field(task,"actionId").empty()) {
             const auto action = db.outbox(task);
@@ -446,7 +407,7 @@ ORDER BY id)SQL");
         task["state"] = "cancelled";
         if (task.contains("workflowParentTaskId"))
             db.exec("UPDATE workflow_stages SET status='stopped' WHERE task_id=?",{task.at("id")});
-        db.journal(task["id"],"cancelled",detail.empty() ? Json::object() : Json{{"detail",detail}});
+        db.journal(task["id"],"cancelled",Json::object());
         if (field(task,"specialistRole")=="requester") {
             auto delegation = db.query("SELECT id,commit_sha FROM specialist_delegations WHERE sender_task=?",{task.at("id")});
             if (delegation.next() && !db.query("SELECT 1 FROM journal WHERE task_id=? AND kind='specialist_result' LIMIT 1",
@@ -458,8 +419,7 @@ ORDER BY id)SQL");
             }
         }
         if (const auto peer = db.peerExchange(task["id"]); peer && peer->recipient == task["id"])
-            finishPeer(*peer,task,db.load(peer->sender),"cancelled",
-                       detail.empty() ? "The receiving Bot's task was cancelled." : detail,actionId());
+            finishPeer(*peer,task,db.load(peer->sender),"cancelled","The receiving Bot's task was cancelled.",actionId());
     }
 
     bool admittedSpecialistRun(const Json& task) const {
@@ -552,7 +512,6 @@ AND s.status NOT IN ('completed','failed','stopped')
     void suspendQuestion(Json& task) {
         auto& question = task["question"];
         if (!question.is_object()) return;
-        if (!question.contains("target")) question["target"] = questionTarget(task);
         const auto reason = field(task["wait"],"reason");
         if (reason == "user_question" || reason == "model_budget" || reason == "model_failure")
             question["suspendedWaitId"] = task["wait"].at("id");
@@ -565,7 +524,7 @@ AND s.status NOT IN ('completed','failed','stopped')
     Json resumeQuestion(Json& task) {
         auto& question = task["question"];
         const auto& target = question.at("target");
-        const auto waitId = question.value("suspendedWaitId",target.value("waitId",Json(nullptr)));
+        const auto waitId = question.value("suspendedWaitId",Json(nullptr));
         db.clearWait(task,"connection_restored");
         task["state"] = "deciding";
         if (!waitId.is_null()) {
@@ -690,15 +649,10 @@ AND s.status NOT IN ('completed','failed','stopped')
                 task["lastRun"] = task["activeRun"];
                 task["activeRun"] = nullptr;
                 consumeEvent(task);
-                auto work = db.query(R"SQL(
-SELECT outbox.data FROM runs JOIN outbox ON runs.action_id=outbox.id
-WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run_id=?
-)SQL", {task["id"],task["environmentId"],run.threadId,run.runId});
-                const auto assignment = work.next() ? work.json(0) : Json::object();
                 Json data = {{"kind","result"},{"run",task["lastRun"]},
                     {"resultRunId",observed.resultRunId.empty() ? run.runId : observed.resultRunId},
                     {"status",observed.status},{"environmentId",task["environmentId"]},
-                    {"revisionId",assignment.value("revisionId",Json(nullptr))}};
+                    {"revisionId",task.at("lastRun").at("revisionId")}};
                 setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,observed.detail,observed.truncated});
                 db.exec("INSERT OR IGNORE INTO t3_events VALUES(?,?,'result',?)",{task["environmentId"],run.threadId,run.runId});
                 if (sqlite3_changes(db.db)) {
@@ -842,14 +796,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             const auto peer = db.peerExchange(id);
             if (peer && !peer->allowsReplan(id)) return false;
             const bool released = current.value("environmentReleased",false);
-            if (peer && (target != old || released) &&
-                db.peerWorkRouteWouldCycle(peer->sender,target,field(current,"projectId"))) {
-                // A legacy move can reach here after releasing its previous slot. Its Run is
-                // settled, and cancellation closes the exchange without sending work to either queue.
-                cancelDone(current,"The receiving Bot's task was cancelled because its saved destination "
-                                   "would make project queues wait for one another.");
-                return true;
-            }
             const auto event = db.currentEvent(current);
             const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
@@ -958,7 +904,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     }
 
     void instructionDelivery(Json& task, const Json& action) {
-        const auto instructions = action.value("instructions",Json::array());
+        const auto& instructions = action.at("instructions");
         if (instructions.empty()) return;
         auto& pending = task["pendingInstructions"];
         for (const auto& item : instructions) {
@@ -967,8 +913,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             });
             if (copy != pending.end()) pending.erase(copy);
             db.journal(task["id"],"instruction_delivered",{{"actionId",action["id"]},{"messageId",item["messageId"]},
-                {"step",item.value("step",0)},
-                {"revisionId",action.value("revisionId",Json(nullptr))},{"run",task["activeRun"]},
+                {"step",item.at("step")},{"revisionId",action.at("revisionId")},{"run",task["activeRun"]},
                 {"source",item.value("source",Json(nullptr))}});
         }
     }
@@ -1052,10 +997,10 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     task["activeRun"] = runJson(outcome.run);
                     task["activeRun"]["ownerBotId"] = task["botId"];
                     task["activeRun"]["environmentId"] = task["environmentId"];
-                    task["activeRun"]["revisionId"] = action.value("revisionId",Json(nullptr));
+                    task["activeRun"]["revisionId"] = action.at("revisionId");
                     db.journal(id,"run_started",{{"run",task["activeRun"]},{"actionId",action["id"]},
                         {"revisionId",task["activeRun"]["revisionId"]},
-                        {"sourceResultRefs",action.value("sourceResultRefs",Json::array())}});
+                        {"sourceResultRefs",action.at("sourceResultRefs")}});
                     instructionDelivery(task,action);
                     if (action["tool"] == "delegate" && !task.value("replanning",false)) {
                         task.erase("newSessionRequired");
@@ -1313,7 +1258,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
                         bool replay = false) {
         change(task,[&](Json& current) {
             const bool unknown = replay && isGitTool(decision.tool) &&
-                db.gitEffectStarted(gitInvocation(decision,event),current.at("id"));
+                db.gitEffectStarted(gitInvocation(decision),current.at("id"));
             const auto why = unknown ? "The host outcome is unknown. Check the target before retrying." : bounded(message,2048);
             Json entry = {{"tool",bounded(decision.tool,128)},{"result",{{"ok",false},{"error",why}}},
                           {"eventId",event.at("id")}};
@@ -1439,34 +1384,11 @@ SELECT r.intent,r.done_when,
        coalesce((SELECT max(j.id) FROM journal j WHERE j.task_id=r.task_id AND
          ((r.number=1 AND j.kind='task_contract_changed') OR
           (r.number>1 AND j.kind='task_revision' AND json_extract(j.data,'$.revisionId')=r.id))),
-         r.source_message_id,0),
-       r.number=1 AND NOT EXISTS (
-         SELECT 1 FROM journal j WHERE j.task_id=r.task_id AND j.kind='task_contract_changed')
+         r.source_message_id,0)
 FROM task_revisions r WHERE r.id=? AND r.task_id=?
 )SQL",{revision(task),task.at("id")});
         if (!row.next()) throw Conflict("The new Session needs an established task revision");
-        SessionContract contract{row.string(0),row.string(1),row.number(2)};
-        if (row.number(3)) {
-            auto original = field(task,"request");
-            if (task.contains("restartContext"))
-                original = taskIntent(db.load(task.at("restartContext").at("taskId")));
-            auto priorChange = db.query(R"SQL(
-WITH intake_intents AS (
-  SELECT j.id,json_extract(s.decision,'$[0].args.intent') AS intent
-  FROM journal j JOIN conversation_steps s ON s.message_id=json_extract(j.data,'$.messageId')
-       AND s.step=json_extract(j.data,'$.step')
-  WHERE j.task_id=?1 AND j.kind='instruction_accepted'
-    AND json_extract(j.data,'$.revisionId')=0 AND json_extract(s.decision,'$[0].tool')='change_task'
-    AND length(json_extract(s.decision,'$[0].args.intent'))>0
-), changes AS (
-  SELECT id,intent,lag(intent,1,?2) OVER (ORDER BY id) AS previous FROM intake_intents
-)
-SELECT coalesce(max(id),0) FROM changes WHERE intent<>previous
-)SQL",{task.at("id"),original});
-            priorChange.next();
-            contract.answersAfter = std::max(contract.answersAfter,priorChange.number(0));
-        }
-        return contract;
+        return {row.string(0),row.string(1),row.number(2)};
     }
 
     Json appendSessionDirections(std::string& instruction, const Json& task, const Json& pending, Id answersAfter) {
@@ -1479,18 +1401,15 @@ SELECT j.id,j.kind,j.data,json_extract(w.data,'$.text'),
        CASE j.kind WHEN 'instruction_accepted' THEN EXISTS (
          SELECT 1 FROM journal d WHERE d.task_id=j.task_id AND d.kind='instruction_delivered'
            AND json_extract(d.data,'$.messageId')=json_extract(j.data,'$.messageId')
-           AND coalesce(json_extract(d.data,'$.step'),0)=json_extract(j.data,'$.step')
+           AND json_extract(d.data,'$.step')=json_extract(j.data,'$.step')
            AND json_extract(d.data,'$.revisionId')=?2)
        ELSE 0 END
 FROM journal j
 LEFT JOIN waits w ON j.kind='user_answer' AND w.id=json_extract(j.data,'$.waitId') AND w.task_id=j.task_id
-LEFT JOIN conversation_steps s ON j.kind='instruction_steered'
-  AND s.message_id=json_extract(j.data,'$.messageId') AND s.step=json_extract(j.data,'$.step')
 WHERE j.task_id=?1 AND
       (j.kind='instruction_accepted' OR
        (j.kind='user_answer' AND j.id>?3 AND w.resolution='answer') OR
-       (j.kind='instruction_steered' AND coalesce(json_extract(j.data,'$.revisionId'),
-          json_extract(s.effect,'$.run.revisionId'))=?2))
+       (j.kind='instruction_steered' AND json_extract(j.data,'$.revisionId')=?2))
 ORDER BY j.id
 )SQL",{task.at("id"),revision(task),answersAfter});
         Json sources = Json::array();
@@ -1614,15 +1533,7 @@ ORDER BY j.id
     }
 
     void prepareDelegation(const Json& task, Json& action) {
-        std::string instruction = field(action,"instructionBase");
-        if (!action.contains("instructionBase")) {
-            auto row = db.query("SELECT data FROM journal WHERE task_id=? AND kind='decision'"
-                                " AND json_extract(data,'$.actionId')=?",{task.at("id"),action.at("id")});
-            if (row.next()) {
-                instruction = field(row.json(0).at("args"),"instruction");
-                if (instruction.empty()) instruction = "Continue this Flock task.";
-            }
-        }
+        auto instruction = action.at("instructionBase").get<std::string>();
         const auto contract = sessionContract(task);
         const auto event = db.currentEvent(task);
         auto prompt = workPrompt(task,event,field(action,"id").size(),&contract);
@@ -2373,7 +2284,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
             Json result;
             try {
                 result = db.gitTool(*options.gitHost,field(snapshot,"botId"),snapshot.at("id"),snapshot,decision,
-                                    gitInvocation(decision,event),snapshot.at("generation").get<Id>());
+                                    gitInvocation(decision),snapshot.at("generation").get<Id>());
             } catch (const StorageError&) { throw; }
             catch (const std::exception& error) { result = {{"ok",false},{"error",db.sharedRedactor().text(error.what())}}; }
             change(snapshot,[&](Json& current) {
@@ -2502,11 +2413,10 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         const auto target = questionTarget(task);
         const auto& question = task["question"];
         if (!question.is_object() || target["requestId"] != observed.question.requestId) return false;
-        const auto savedTarget = question.value("target",target);
+        const auto& savedTarget = question.at("target");
         if (savedTarget == target) return true;
-        if (!savedTarget.is_object()) return false;
         auto forwardedTarget = target;
-        forwardedTarget["eventId"] = savedTarget.value("eventId",Json(nullptr));
+        forwardedTarget["eventId"] = savedTarget.at("eventId");
         return savedTarget == forwardedTarget && forwardedQuestionAnswer(task,savedTarget);
     }
 
@@ -2516,7 +2426,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
             saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
             return std::nullopt;
         return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage"),
-                            saved->value("attemptId",Id{0}),saved->value("argumentsChecked",false),
+                            saved->at("attemptId"),
                             saved->value("rejection",std::string{})};
     }
 
@@ -2535,11 +2445,11 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
                 saveTask(current);
             } else {
                 const auto& call = std::get<ModelCall>(inference.outcome);
-                decision = TaskDecision{call,inference.usage,inference.attemptId,true,call.rejection};
+                decision = TaskDecision{call,inference.usage,inference.attemptId,call.rejection};
                 // Bookkeeping must not advance the generation observed by conversation turns.
                 Json saved{{"generation",inference.generation},{"eventId",inference.eventId},{"revisionId",inference.revisionId},
                     {"tool",call.tool},{"args",call.args},{"reason",call.reason},{"usage",inference.usage},
-                    {"attemptId",inference.attemptId},{"argumentsChecked",true}};
+                    {"attemptId",inference.attemptId}};
                 if (!call.rejection.empty()) saved["rejection"] = call.rejection;
                 db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?)) WHERE id=?",{saved,id});
             }
@@ -2712,7 +2622,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 return;
             }
             if (replay) {
-                auto call = db.checkModelCall(field(task,"botId"),*decision,tools,false,!decision->argumentsChecked);
+                auto call = db.checkModelCall(field(task,"botId"),*decision,tools,false);
                 if (!call.rejection.empty()) {
                     rejectDecision(task,event,TaskDecision{std::move(call),decision->usage,decision->attemptId},call.rejection,true);
                     return;

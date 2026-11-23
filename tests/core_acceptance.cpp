@@ -1,5 +1,6 @@
 #include "flock/board_inbox.hpp"
 #include "flock/session_handoff.hpp"
+#include "task_history.hpp"
 
 #include <algorithm>
 #include <barrier>
@@ -18,6 +19,7 @@
 #include <unistd.h>
 
 using namespace flockv0;
+using flockv0::test::lastTaskEvent;
 
 namespace {
 Decision converse(const ModelInput& input, const std::string& tool, Id taskId, Json args) {
@@ -582,11 +584,10 @@ void connectionRecoveryRestoresSessionQuestion() {
             f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = outage};
             f.runtime->tick();
             const auto connection = f.wait(id,outage);
+            check(f.task(id).at("question").at("suspendedWaitId") == old,"connection wait lost the suspended question");
             check(f.store->inbox(localOwner,"alpha").empty(),"question remained actionable during the outage");
             f.rejects(id,old,"answer",{{"text","dev"}});
             if (manual) f.store->operate(localOwner,TaskTarget::from(f.task(id),connection),"reconcile");
-            if (manual && std::string_view(outage) == "settings")
-                executeSql(f.store->path(),"UPDATE tasks SET data=json_remove(data,'$.question.suspendedWaitId')");
             f.restart();
             f.t3.question("run-1");
             f.runtime->tick();
@@ -1250,7 +1251,7 @@ void peerWorkAndRestart() {
           f.task(root)["additionalUsed"] == 0 && f.logs(root,"user_answer") == 1 && f.logs(root,"completed") == 1,
           "restart duplicated the recipient, Session, evidence read, user answer or completion");
     const auto result = f.botMessages("alpha").back();
-    const auto completion = f.store->latestTaskResult(root).at("data");
+    const auto completion = lastTaskEvent(*f.store,root,"completed").at("data");
     check(!completion.contains("source") && completion.at("dependency") == Json{
               {"exchangeId",result.at("exchangeId")},{"messageId",result.at("messageId")},{"taskId",recipient},
               {"botId","beta"},{"requestKind","work"},{"status","completed"}},
@@ -1352,7 +1353,7 @@ void peerCompletionKeepsEvidenceWithinTheReadGrant() {
     f.reach(recipient,"completed");
     f.restart();
     f.reach(sender,"completed");
-    const auto completion = f.store->latestTaskResult(sender).at("data");
+    const auto completion = lastTaskEvent(*f.store,sender,"completed").at("data");
     check(completion.at("dependency").at("taskId") == recipient &&
           completion.at("evidenceRefs").empty() && !completion.contains("source"),
           "completion exposed peer Run provenance outside its Session read grant");
@@ -1899,7 +1900,7 @@ void peerConsultationAndPermission() {
     check(messages.size() == 2 && messages.front().at("text") == "What is the release policy?" &&
           messages.back().at("fromBotId") == "beta" && messages.back().at("text") == "Require a verified PR",
           "consultation did not record the corresponding request and response");
-    const auto completion = f.store->latestTaskResult(consultation).at("data");
+    const auto completion = lastTaskEvent(*f.store,consultation,"completed").at("data");
     check(completion.at("dependency").at("messageId") == messages.back().at("messageId") &&
           completion.at("dependency").at("requestKind") == "consult" &&
           completion.at("evidenceRefs").empty() && !completion.contains("source"),
@@ -2507,33 +2508,6 @@ void cancelledPeerMoveFreesItsPendingDestination() {
     check(f.task(f.cloudRecipient).at("state") == "cancelling" &&
           f.move(backupRecipient,f.specialist,"desktop").at("effect") == "replanning",
           "a cancelling recipient retained its abandoned destination");
-}
-
-void recoverLegacyPeerMoveCycle() {
-    PeerMoveCycleFixture f;
-    f.startRemoteSender();
-    f.reach(f.remoteSender,"peer_waiting");
-    const auto queued = f.store->tasks("alpha").front().at("id").get<Id>();
-    check(f.move(f.cloudRecipient,f.verifier,"backup").at("ok") == true,"could not prepare the legacy move");
-    f.t3.finish("run-1");
-    f.runtime->tick();
-    f.runtime.reset();
-    // Seed the destination that the old runtime could persist after releasing the original queue.
-    const auto legacyMove = "UPDATE tasks SET data=json_set(data,'$.pendingEnvironmentId','remote',"
-        "'$.environmentReleased',json('true')) WHERE id=" + std::to_string(f.cloudRecipient);
-    executeSql(f.directory/"state.db",legacyMove.c_str());
-    f.restart();
-    f.reach(f.cloudRecipient,"cancelled");
-    f.wait(f.desktopSender,"user_question");
-    const auto messages = f.botMessages("alpha");
-    check(messages.back().at("status") == "cancelled" && f.t3.launches == 1 &&
-          f.task(f.cloudRecipient).at("environmentId") == "cloud",
-          "legacy recovery lost the exchange outcome or sent work to an unsafe destination");
-    f.store->operate(localOwner,TaskTarget::from(f.task(f.desktopSender),0),"cancel");
-    f.reach(queued,"running");
-    f.t3.finish("run-2");
-    f.reach(f.remoteSender,"completed");
-    check(f.logs(f.cloudRecipient,"cancelled") == 1,"the legacy recipient was cancelled more than once");
 }
 
 void peerCancelWhileQueued() {
@@ -3379,7 +3353,6 @@ int main() {
             {"Accepted peer move constrains new exchanges",pendingPeerMovePreventsNewExchange},
             {"Accepted peer move constrains other moves",pendingPeerMovePreventsAnotherMove},
             {"Cancelled peer move frees its pending destination",cancelledPeerMoveFreesItsPendingDestination},
-            {"Legacy cyclic recipient move recovers",recoverLegacyPeerMoveCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
             {"pinned specialist admission, restart and freeze",[] { specialistAdmission(SpecialistMode::Single); }},
