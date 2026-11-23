@@ -444,7 +444,9 @@ try {
   else if (operation === "status") result = status(readProfile());
   else if (operation === "web_status") {
     const profile = readProfile();
-    result = { ...status(profile), needsSignIn: Boolean(profile.subject && !profile.accessToken && !profile.refreshToken) };
+    const needsSignIn = Boolean(profile.subject && (!Array.isArray(profile.granted) ||
+      (profile.granted.includes(directScope) && (!profile.accessToken || !profile.refreshToken))));
+    result = { ...status(profile), needsSignIn };
   } else if (operation === "models") result = await models();
   else if (operation === "infer") result = await infer(input);
   else throw new Failure("Unknown ChatGPT transport operation");
