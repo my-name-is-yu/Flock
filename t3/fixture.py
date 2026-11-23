@@ -573,6 +573,7 @@ def test_headless_handoff(server, flock, temp):
     identities = home / "identities.json"
     identities.write_text(json.dumps([
         {"authorization": "Bearer fixture-identity", "person": "alice", "adminRoot": True},
+        {"authorization": "Bearer fixture-revoked", "person": "bob"},
     ]), encoding="utf-8")
     identities.chmod(0o600)
     env["FLOCK_WEB_IDENTITIES_FILE"] = str(identities)
@@ -599,6 +600,19 @@ def test_headless_handoff(server, flock, temp):
         db.execute("INSERT INTO thread_deliveries(command_id,channel_id,generation,text,state,cursor) "
                    "VALUES('command-1',1,1,?,1,4)", (handoff_text,))
 
+        # Bob remains configured after losing access. His paused handoff still has
+        # a delegation from its previous generation.
+        db.execute("INSERT INTO return_channels VALUES(2,'env-1','project','paused','','request-2','',"
+                   "'release','bob',?)", (json.dumps({"request": "Review the paused release"}),))
+        db.execute("INSERT INTO session_controls(channel_id,state,generation,auth_generation,permission,consult_command,event_cursor) "
+                   "VALUES(2,'paused',2,?,?,'command-2',0)",
+                   (generation, json.dumps({"goal": "Review", "allowDelegation": True})))
+        db.execute("INSERT INTO specialist_budgets(channel_id,allowance) VALUES(2,1)")
+        db.executemany("INSERT INTO tasks VALUES(?,'release','env-1','project','completed',1,?)",
+                       [(1, '{"state":"completed"}'), (2, '{"state":"completed"}')])
+        db.execute("INSERT INTO peer_exchanges VALUES('delegation-2','specialist','closed','',1,2,'env-1',NULL)")
+        db.execute("INSERT INTO specialist_delegations VALUES('delegation-2',2,1,'Review','Done','',NULL,1,2)")
+
     state = None
     with subprocess.Popen(args + ["run", "--no-web"], env=env, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
@@ -621,6 +635,8 @@ def test_headless_handoff(server, flock, temp):
                 raise
     assert daemon.returncode == 0 and "headless mode" in stdout, (stdout, stderr)
     assert state == "completed", f"accepted Session handoff remained {state!r} after restart: {stderr}"
+    with sqlite3.connect(home / "flock.sqlite3") as db:
+        assert db.execute("SELECT state, generation FROM session_controls WHERE channel_id=2").fetchone() == ("paused", 2)
     assert "t3_thread_send" not in server.state.get("effects", {}), "recovery resent an already accepted reply"
 
 

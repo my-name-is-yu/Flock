@@ -16,6 +16,8 @@
 namespace flockv0 {
 namespace conversation { struct Message; }
 
+struct ParticipationAccessDenied : Conflict { using Conflict::Conflict; };
+
 class StorageError : public std::runtime_error {
 public:
     explicit StorageError(sqlite3* db);

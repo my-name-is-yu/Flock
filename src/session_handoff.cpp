@@ -90,9 +90,15 @@ WHERE c.state IN ('paused','stopped','budget_exhausted') AND d.generation<c.gene
             while (rows.next()) sweeps.push_back({rows.string(0),rows.number(1),rows.number(2)});
         }
     }
-    for (const auto& sweep : sweeps)
-        if (const auto person=people_(sweep.person))
+    for (const auto& sweep : sweeps) {
+        const auto person = people_(sweep.person);
+        if (!person) continue;
+        try {
             runtime_->freezeSpecialistWork(*person,sweep.channel,sweep.generation);
+        } catch (const ParticipationAccessDenied&) {
+            continue;
+        }
+    }
 }
 
 SessionHandoffView SessionHandoff::freezeAs(const Person& person, Id channel, std::string_view state) {

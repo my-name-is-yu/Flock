@@ -43,7 +43,7 @@ void authorize(const Access& access, const Person& person, std::string_view bot,
                                         : Scope::consultReply(target.environmentId,target.threadId);
     if (person.id.empty() || !access.permitsPerson(person,bot,Role::decide) ||
         !access.permitsPersonScope(person,Scope::sessionRead(target.environmentId,target.threadId)))
-        throw Conflict("Session participation access denied");
+        throw ParticipationAccessDenied("Session participation access denied");
     if (!requireBot) return;
     if (!access.permits(bot,operation,true) ||
         (coordination && !access.permits(bot,Scope::sessionRead(target.environmentId,target.threadId),true)) ||
