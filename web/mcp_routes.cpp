@@ -1,8 +1,11 @@
-#include "session_mcp_routes.hpp"
+#include "mcp_routes.hpp"
+#include "views.hpp"
+#include "flock/external_mcp.hpp"
 #include "flock/participation.hpp"
 #include "flock/skill_export.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace flockv0::web {
 namespace {
@@ -11,7 +14,11 @@ constexpr std::size_t maxRequestText = 8192;
 constexpr std::string_view askTool = "flock_ask";
 constexpr std::string_view listTool = "flock_bots";
 constexpr std::string_view stopTool = "flock_stop";
+constexpr std::string_view submitTool = "flock_submit_task";
+constexpr std::string_view statusTool = "flock_get_task";
+constexpr std::string_view answerTool = "flock_answer_question";
 constexpr std::string_view mcpProtocol = "2025-11-25";
+constexpr std::size_t maxAnswerText = 8000;
 
 struct InvalidToolArguments {};
 
@@ -39,6 +46,14 @@ std::string requestText(const Json& object, std::string_view field, std::size_t 
     return text;
 }
 
+Id taskInteger(const Json& arguments, std::string_view name, Id minimum) {
+    const auto value = arguments.find(name);
+    if (value == arguments.end() || !value->is_number_integer() ||
+        (value->is_number_unsigned() && value->get<std::uint64_t>() > std::numeric_limits<Id>::max()) ||
+        value->get<Id>() < minimum) throw InvalidToolArguments{};
+    return value->get<Id>();
+}
+
 void rpcError(httplib::Response& res, int status, const Json& id, int code, std::string_view message) {
     reply(res,status,{{"jsonrpc","2.0"},{"id",id},{"error",{{"code",code},{"message",message}}}});
 }
@@ -51,7 +66,11 @@ Json toolContent(std::string_view text) {
     return Json::array({{{"type","text"},{"text",text}}});
 }
 
-Json toolDefinitions() {
+Json structuredResult(const Json& data) {
+    return {{"structuredContent",data},{"content",toolContent(data.dump())}};
+}
+
+Json sessionToolDefinitions() {
     const Json bot{{"type","string"},{"minLength",1},{"maxLength",128}};
     const Json thread{{"type","string"},{"minLength",1},{"maxLength",256}};
     return Json::array({
@@ -78,6 +97,62 @@ Json toolDefinitions() {
     });
 }
 
+Json externalToolDefinitions() {
+    const Json id{{"type","integer"},{"minimum",1}};
+    const Json version{{"type","integer"},{"minimum",0}};
+    const auto schema = [](Json properties, Json required) -> Json {
+        return {{"type","object"},{"additionalProperties",false},{"properties",std::move(properties)},
+                {"required",std::move(required)}};
+    };
+    return Json::array({
+        {{"name",submitTool},
+         {"description","Send a task to an authorized Flock Bot using its Bot ID. Save the taskId to check progress. "
+                        "On a lost response, retry with the same requestId, bot and text."},
+         {"annotations",{{"idempotentHint",true}}},
+         {"inputSchema",schema({{"bot",{{"type","string"},{"minLength",1},{"maxLength",128}}},
+                                {"text",{{"type","string"},{"minLength",1},{"maxLength",maxRequestText}}},
+                                {"requestId",{{"type","string"},{"minLength",1},{"maxLength",128},{"pattern","^[A-Za-z0-9._:-]+$"}}}},
+                               {"bot","text","requestId"})}},
+        {{"name",statusTool},
+         {"description","Check one of your tasks for its current status, pending question, final result and Session link."},
+         {"annotations",{{"readOnlyHint",true}}},
+         {"inputSchema",schema({{"taskId",id}},{"taskId"})}},
+        {{"name",answerTool},
+         {"description","Answer the pending question from flock_get_task. Copy its waitId, targetRevision and "
+                        "targetGeneration. Refresh the task if the question changed or has already been answered."},
+         {"inputSchema",schema({{"taskId",id},{"waitId",id},{"targetRevision",version},{"targetGeneration",version},
+                                {"text",{{"type","string"},{"minLength",1},{"maxLength",maxAnswerText}}}},
+                               {"taskId","waitId","targetRevision","targetGeneration","text"})}}
+    });
+}
+
+Json callExternalTool(const WebCallbacks& callbacks, ExternalMcp& external, const ExternalMcpConnection& connection,
+                      const Json& tool, const Json& arguments) {
+    if (tool == submitTool) {
+        if (arguments.size() != 3) throw InvalidToolArguments{};
+        const auto requestId = identifier(arguments,"requestId",128);
+        const auto task = external.submit(connection,identifier(arguments,"bot",128),requestId,
+                                          requestText(arguments,"text"),callbacks.intake);
+        return structuredResult({{"taskId",task},{"requestId",requestId},{"status","received"}});
+    }
+    if (tool == statusTool) {
+        if (arguments.size() != 1) throw InvalidToolArguments{};
+        auto data = external.status(connection,taskInteger(arguments,"taskId",1));
+        const auto link = sessionLink(data.at("sessionRun"));
+        data.erase("sessionRun");
+        data["sessionLink"] = link.empty() ? Json(nullptr) : Json(link);
+        return structuredResult(data);
+    }
+    if (tool == answerTool) {
+        if (arguments.size() != 5) throw InvalidToolArguments{};
+        external.answer(connection,taskInteger(arguments,"taskId",1),taskInteger(arguments,"waitId",1),
+                        taskInteger(arguments,"targetRevision",0),taskInteger(arguments,"targetGeneration",0),
+                        requestText(arguments,"text",maxAnswerText));
+        return structuredResult({{"accepted",true}});
+    }
+    return nullptr;
+}
+
 bool containsBot(const Json& bots, std::string_view id) {
     return std::ranges::any_of(bots,[&](const Json& bot) { return bot.value("id",Json(nullptr)) == id; });
 }
@@ -87,10 +162,17 @@ bool supportedProtocol(std::string_view value) {
 }
 
 void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Request& req, httplib::Response& res) {
+    const bool externalEndpoint = req.path == externalMcpPath;
+    ExternalMcp external(store);
     const auto authorization = req.get_header_value("Authorization");
-    const auto connection = req.get_header_value_count("Authorization") == 1 && authorization.starts_with("Bearer ")
-        ? T3Connections(store).authenticate(std::string_view(authorization).substr(7)) : std::nullopt;
-    if (!connection) {
+    std::optional<T3Connection> connection;
+    std::optional<ExternalMcpConnection> externalConnection;
+    if (req.get_header_value_count("Authorization") == 1 && authorization.starts_with("Bearer ")) {
+        const auto bearer = std::string_view(authorization).substr(7);
+        if (externalEndpoint) externalConnection = external.authenticate(bearer);
+        else connection = T3Connections(store).authenticate(bearer);
+    }
+    if (!connection && !externalConnection) {
         res.set_header("WWW-Authenticate","Bearer realm=\"Flock\"");
         return rpcError(res,401,nullptr,-32001,"A valid Flock connection bearer token is required");
     }
@@ -107,7 +189,8 @@ void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Requ
     if (req.get_header_value_count("MCP-Protocol-Version") > 1 ||
         (req.has_header("MCP-Protocol-Version") && !supportedProtocol(req.get_header_value("MCP-Protocol-Version"))))
         return rpcError(res,400,nullptr,-32600,"Unsupported MCP protocol version");
-    if (!callbacks.sessionT3) return rpcError(res,503,nullptr,-32603,"Flock Session tools are unavailable");
+    if (!externalEndpoint && !callbacks.sessionT3)
+        return rpcError(res,503,nullptr,-32603,"Flock Session tools are unavailable");
 
     const auto message = Json::parse(req.body,nullptr,false);
     if (message.is_discarded()) return rpcError(res,400,nullptr,-32700,"Invalid JSON");
@@ -135,13 +218,19 @@ void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Requ
                                  {"capabilities",{{"tools",Json::object()}}}});
     }
     if (method == "ping") return rpcResult(res,*id,Json::object());
-    if (method == "tools/list") return rpcResult(res,*id,{{"tools",toolDefinitions()}});
+    if (method == "tools/list")
+        return rpcResult(res,*id,{{"tools",externalEndpoint ? externalToolDefinitions() : sessionToolDefinitions()}});
     if (method != "tools/call") return rpcError(res,200,*id,-32601,"Method not found");
     const auto tool = params.value("name",Json(nullptr));
     const auto arguments = params.value("arguments",Json::object());
-    if (tool != listTool && tool != askTool && tool != stopTool) return rpcError(res,200,*id,-32602,"Unknown tool");
-
     try {
+        if (externalConnection) {
+            if (!arguments.is_object()) throw InvalidToolArguments{};
+            auto result = callExternalTool(callbacks,external,*externalConnection,tool,arguments);
+            if (result.is_null()) return rpcError(res,200,*id,-32602,"Unknown tool");
+            return rpcResult(res,*id,std::move(result));
+        }
+        if (tool != listTool && tool != askTool && tool != stopTool) return rpcError(res,200,*id,-32602,"Unknown tool");
         SessionParticipation participation(store,*callbacks.sessionT3);
         if (tool == listTool) {
             if (!arguments.is_object() || !arguments.empty()) throw InvalidToolArguments{};
@@ -161,7 +250,7 @@ void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Requ
                                 {"role",bot.value("role",std::string("custom"))},{"skill",names.at(botId)}});
             }
             const Json data{{"bots",std::move(rows)}};
-            return rpcResult(res,*id,{{"structuredContent",data},{"content",toolContent(data.dump())}});
+            return rpcResult(res,*id,structuredResult(data));
         }
         if (!arguments.is_object() || arguments.size() != (tool == askTool ? 4u : 2u)) throw InvalidToolArguments{};
         const auto bot = identifier(arguments,"bot",128);
@@ -190,13 +279,15 @@ void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Requ
 }
 }
 
-void sessionMcpRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
+void mcpRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
     const auto mcp = [&store,&callbacks](const httplib::Request& req, httplib::Response& res) {
         mcpRequest(store,callbacks,req,res);
     };
-    server.Post("/mcp/flock",mcp);
-    server.Get("/mcp/flock",mcp);
-    server.Delete("/mcp/flock",mcp);
+    for (const auto* path : {sessionMcpPath,externalMcpPath}) {
+        server.Post(path,mcp);
+        server.Get(path,mcp);
+        server.Delete(path,mcp);
+    }
 }
 
 }

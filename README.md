@@ -99,6 +99,24 @@ To check whether a live model applies different completion criteria, run `build/
 
 The Bot normally evaluates the Session's final report. It can retry an unavailable final report once Flock has verified which Run produced it. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime allows up to three evidence reads per event and saves history excerpts of up to 8 KiB each in SQLite.
 
+### Ask a Bot from an external MCP client
+
+With Flock's Web listener running, provision a connection from the Flock host using the same state directory.
+
+```sh
+build/app/flock external-mcp connect local-owner release
+```
+
+Use `local-owner` with local access, or supply an existing Flock user who can make decisions for each named Bot. Each command creates a separate connection and prints its `connectionId` and `bearerToken` once. Configure the client for Streamable HTTP at `http://127.0.0.1:PORT/mcp/flock/external` with the printed token in its `Authorization: Bearer` header. The listener is loopback-only. For a client on another host, use an HTTPS ingress that forwards only `/mcp/flock/external` with the loopback Host header and the client's Authorization header.
+
+| MCP tool | Arguments and result |
+| --- | --- |
+| `flock_submit_task` | Send `bot`, `text`, and a client-generated `requestId`. Save the returned `taskId`. Retry with the same three values if the response is lost. |
+| `flock_get_task` | Send `taskId` to poll `status`, any pending `question`, the final `result`, and an available T3 `sessionLink`. The link uses T3's own access controls. |
+| `flock_answer_question` | Send `taskId` and `text` with the question's `waitId`, `targetRevision`, and `targetGeneration`. Poll again if the question changed or closed. |
+
+Flock uses the Bot's configured T3 environment or its sole eligible connected environment. A connection can read and answer only tasks it submitted, including after a Flock restart. Run `flock external-mcp disconnect CONNECTION_ID` to revoke the credential. Existing tasks and receipts stay in Flock.
+
 ### Installation policy
 
 The installation starts in **Full**. Bots can use configured resources unless

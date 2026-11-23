@@ -196,6 +196,7 @@ struct Store::Impl {
     void releasePolicyTurn(Id turn);
     void releasePolicyTask(Id approval, std::string_view resolution);
     void initializeParticipationSchema();
+    void initializeExternalMcpSchema();
     Person sessionActor(std::string_view person);
     bool activeSessionOrigin(const conversation::Message&) const;
     bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
@@ -404,6 +405,7 @@ struct Store::Impl {
     std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {},
                                 const Json* movingTask = nullptr);
     std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
+    Id submitRequest(const Intake&, const Person* requester);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
               TaskSource sourceKind = TaskSource::request, const Json& trigger = nullptr);
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&,

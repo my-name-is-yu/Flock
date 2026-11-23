@@ -338,6 +338,10 @@ Json activity(const Json& activeTasks, std::string_view bot) {
 }
 } // namespace
 
+std::string sessionLink(const Json& run) {
+    return field(runView(run,{}),"link");
+}
+
 Json botSettings(const Json& bot) {
     return settingsView(bot);
 }

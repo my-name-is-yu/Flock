@@ -19,7 +19,7 @@ add_custom_command(OUTPUT "${flock_web_asset_header}"
   VERBATIM)
 
 add_library(flock_web server.cpp settings_routes.cpp board_inbox_routes.cpp memory_automation_routes.cpp git_routes.cpp identity.cpp views.cpp change_feed.cpp
-                      channel_routes.cpp channel_bridge.cpp session_mcp_routes.cpp "${flock_web_asset_header}")
+                      channel_routes.cpp channel_bridge.cpp mcp_routes.cpp "${flock_web_asset_header}")
 target_include_directories(flock_web PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(flock_web SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
 target_link_libraries(flock_web PUBLIC flock_core PRIVATE Threads::Threads OpenSSL::Crypto)
@@ -69,6 +69,12 @@ if(BUILD_TESTING)
   target_compile_options(flock_web_session_mcp_tests PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_web_session_mcp COMMAND "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock_web_session_mcp_tests>)
+  add_executable(flock_web_external_mcp_tests tests/external_mcp.cpp)
+  target_include_directories(flock_web_external_mcp_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
+  target_link_libraries(flock_web_external_mcp_tests PRIVATE flock_web Threads::Threads)
+  target_compile_options(flock_web_external_mcp_tests PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_web_external_mcp COMMAND flock_web_external_mcp_tests)
+  set_tests_properties(flock_web_external_mcp PROPERTIES TIMEOUT 30)
   if(FLOCK_NODE_EXECUTABLE)
     add_test(NAME flock_web_chat_grouping
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat-grouping.mjs")
