@@ -283,7 +283,6 @@ export function mountBoardInbox({
   let items = [];
   let epoch = 0;
   let historyRequest;
-  let composerSuppressed = false;
   let morphCleanup = null;
 
   const scoped = (botId = bot) => items.filter((item) => item.botId === botId);
@@ -440,19 +439,6 @@ export function mountBoardInbox({
     moreList.replaceChildren(...actionsList);
   }
 
-  function storedDraft(item, choice) {
-    const key = draftKey(item, choice);
-    if (viewer === 'null' && !drafts.has(key)) {
-      const legacy = JSON.stringify([item.botId, item.taskId, ...(choice ? ['choice'] : [])]);
-      if (drafts.has(legacy)) {
-        const draft = drafts.get(legacy);
-        drafts.delete(legacy);
-        remember(key, draft);
-      }
-    }
-    return drafts.get(key);
-  }
-
   function remember(key, draft) {
     if (draft?.text || draft?.stale) drafts.set(key, draft);
     else drafts.delete(key);
@@ -461,10 +447,10 @@ export function mountBoardInbox({
 
   function composer() {
     const item = current();
-    if (composerSuppressed || item?.itemKind !== 'user_question' || !item.canDecide || !canCompose()) return null;
+    if (item?.itemKind !== 'user_question' || !item.canDecide || !canCompose()) return null;
     const key = draftKey(item, false);
     const target = decisionTarget(item);
-    const saved = storedDraft(item, false);
+    const saved = drafts.get(key);
     return { item, key: target, text: saved?.text ?? '', busy: saving.has(saveKey(item)),
       blocked: !!saved && (saved.target !== target || saved.stale), draftKey: key };
   }
@@ -477,7 +463,7 @@ export function mountBoardInbox({
   }
 
   function reviewDraft(item, targetHost) {
-    const saved = storedDraft(item, false);
+    const saved = drafts.get(draftKey(item, false));
     const target = decisionTarget(item);
     if (!saved || (saved.target === target && !saved.stale)) {
       targetHost.replaceChildren();
@@ -490,7 +476,6 @@ export function mountBoardInbox({
       targetHost.append(button('Use draft for this question', 'text-button', () => {
         if (!canCompose()) return;
         remember(draftKey(item, false), { target, text: saved.text });
-        composerSuppressed = false;
         reviewDraft(item, targetHost);
         onChange();
         focusComposer();
@@ -501,7 +486,7 @@ export function mountBoardInbox({
   function questionControls(item, busy) {
     const group = element('div', '', 'board-inbox-question');
     const target = decisionTarget(item);
-    const saved = storedDraft(item, true);
+    const saved = drafts.get(draftKey(item, true));
     const same = saved?.target === target;
     let selectedAnswer = same && !saved.stale ? saved.text : undefined;
     const stale = same && saved.stale;
@@ -519,8 +504,6 @@ export function mountBoardInbox({
     }
     const write = button('Write an answer', 'text-button question-reply', () => {
       if (!canCompose()) return;
-      composerSuppressed = false;
-      onChange();
       focusComposer();
     });
     write.disabled = busy;
@@ -551,7 +534,7 @@ export function mountBoardInbox({
     if (!item) return;
     const pendingWrite = saving.get(saveKey(item));
     const questionState = item.itemKind === 'user_question' && [!!pendingWrite,
-      storedDraft(item, false)?.stale, storedDraft(item, true)?.stale];
+      drafts.get(draftKey(item, false))?.stale, drafts.get(draftKey(item, true))?.stale];
     const text = JSON.stringify([item, questionState]);
     if (rendered === text) return;
     rendered = text;
@@ -592,7 +575,6 @@ export function mountBoardInbox({
     if (!item) return;
     if (mode === 'pending' && itemKey(item) === selected) return;
     selected = itemKey(item);
-    composerSuppressed = false;
     const pillRect = openLayer('pending', opener);
     renderPending();
     onChange();
@@ -638,7 +620,6 @@ export function mountBoardInbox({
     closeMoreMenu();
     mode = null;
     selected = rendered = null;
-    composerSuppressed = false;
     historyRequest?.abort();
     historyRequest = null;
     host?.getAnimations?.().forEach((anim) => anim.cancel());
@@ -668,7 +649,6 @@ export function mountBoardInbox({
     const focused = document.activeElement;
     closeMoreMenu();
     selected = itemKey(list[index + direction]);
-    composerSuppressed = false;
     message.textContent = '';
     panel.scrollTop = 0;
     renderPending();
@@ -688,7 +668,6 @@ export function mountBoardInbox({
         return;
       }
       selected = itemKey(nextEntry);
-      composerSuppressed = false;
     }
     renderPending();
     onChange();
@@ -839,11 +818,6 @@ export function mountBoardInbox({
       if (draft && !draft.blocked && draft.text.trim()) {
         return submit(draft.item, 'answer', { text: draft.text }, draft.draftKey);
       }
-    },
-    suppressComposer() {
-      composerSuppressed = true;
-      onChange();
-      focusComposer();
     },
   };
 }

@@ -23,9 +23,8 @@ void check(bool passed, const std::string& failure) {
 }
 
 void checkReply(const Json& data) {
-    const bool hasRoute = data.contains("route");
-    const auto outcome = data.value(hasRoute ? "route" : "status", "");
-    if (outcome != (hasRoute ? "reply" : "ok"))
+    const auto outcome = data.at("route").get<std::string>();
+    if (outcome != "reply")
         throw std::runtime_error("Turn ended with " + outcome + ": " + data.value("text", ""));
 }
 
@@ -68,9 +67,13 @@ struct Runs : T3 {
     std::map<std::string,Observation> runs;
     std::vector<Command> notes;
     std::vector<std::string> interrupted;
+    bool supportsRunTargetedSteer() const override { return true; }
     std::string authGeneration(const std::string&, const Json&) override { return "live-eval"; }
     Delivery send(const Command& command) override {
         if (command.tool == "steer") {
+            const auto run = runs.find(command.target.runId);
+            if (run == runs.end() || run->second.kind != Observation::Kind::Running)
+                return {Delivery::Kind::NotAccepted,{},"The assigned Run is no longer running",true};
             notes.push_back(command);
             return {Delivery::Kind::Accepted,command.target,{}};
         }
@@ -610,10 +613,6 @@ struct Script : Model {
 
 void selfTest() {
     int passed = 0;
-    for (const auto& reply : {Json{{"route","reply"}},Json{{"status","ok"}}}) {
-        checkReply(reply);
-        ++passed;
-    }
     const auto run = [&](std::string_view name, const Scenario& scenario, std::vector<Decision> steps,
                          std::string_view expectedFailure = {}) {
         Script script(std::move(steps));

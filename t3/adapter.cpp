@@ -438,12 +438,14 @@ std::vector<std::string> projectThreads(Client& client, Scan& scan, const std::s
 
 Delivery reconcileWork(Client& client, const Command& command) {
     const bool launch = command.tool == "delegate";
-    if (!launch && !command.candidate.threadId.empty() && command.candidate.threadId != command.target.threadId)
+    const auto& destination = launch ? command.launchReceiptThreadId : command.target.threadId;
+    const auto& hint = command.candidate.threadId;
+    if (!destination.empty() && !hint.empty() && hint != destination)
         return result(Outcome::Unknown, "The supplied Thread is outside the saved action destination");
     Scan scan;
-    auto threads = launch ? projectThreads(client, scan, command.projectId) : std::vector{command.target.threadId};
-    const auto& hint = command.candidate.threadId;
-    if (!hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end()) threads.push_back(hint);
+    auto threads = destination.empty() ? projectThreads(client, scan, command.projectId) : std::vector{destination};
+    if (destination.empty() && !hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end())
+        threads.push_back(hint);
     const auto expected = sessionPrompt(command.actionId,command.instruction);
     std::map<std::pair<std::string, std::string>, RunRef> matches;
     bool incomplete = false;
@@ -591,28 +593,6 @@ bool followUpReady(Client& client, const Command& command) {
         str(current, "latestRunId") == str(info, "latestRunId") && position(member(current, "pendingRequestCount")) == 0;
 }
 
-Delivery steer(Client& client, const Command& command, bool& invoked) {
-    const auto current = wait(client, command.target, false, 1);
-    const auto effective = str(current, "runId");
-    const auto head = threadHead(client, command.target.threadId);
-    const auto& info = head.at("thread");
-    if (!active(str(current, "status")) || str(info, "projectId") != command.projectId || boolean(info, "archived") ||
-        member(info, "activeRunId") != Json(effective))
-        return {Outcome::NotAccepted, {}, "The assigned Run is no longer running", true};
-    invoked = true;
-    const auto reply = client.call("t3_thread_send", {{"threadId", command.target.threadId}, {"mode", "steer"},
-        {"message", command.instruction}, {"clientRequestId", command.actionId}});
-    // T3 v0.1.11 cannot require the expected Run on send. If another Run of the task's Thread took over in
-    // between, surface the mismatch without confirming the assigned Run.
-    if (str(reply, "threadId") != command.target.threadId || str(reply, "delivery") != "steered") invalidResponse();
-    RunRef received = command.target;
-    received.runId = str(reply, "runId");
-    if (received.runId != effective)
-        return result(Outcome::Unknown, "T3 did not confirm steer delivery to " + effective +
-                      (received.runId.empty() ? " (no Run ID returned)" : " (returned " + received.runId + ")"));
-    return result(Outcome::Accepted, {}, std::move(received));
-}
-
 Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
@@ -705,6 +685,9 @@ public:
     }
 
     Delivery send(const Command& command) override {
+        // The MCP send targets the Thread's current Run and has no expected-Run condition.
+        if (command.tool == "steer")
+            return {Outcome::NotAccepted, {}, "T3 cannot target a specific running Run", true};
         bool invoked = false;
         try {
             verifyCommand(command);
@@ -717,7 +700,6 @@ public:
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
             if (command.tool == "answer_session_question") return answer(client, command, invoked);
-            if (command.tool == "steer") return steer(client, command, invoked);
             Json reply;
             if (launch) {
                 if (!launchArguments.pin.empty()) {
@@ -968,15 +950,9 @@ private:
     std::filesystem::path directory_;
 
     Credential credential(const std::string& environment, const Json& config) const {
-        auto connection = loadCredential(directory_, environment);
-        if (!config.is_object() || (config.contains("t3") && !config["t3"].is_object()))
+        if (!config.is_object())
             throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
-        if (config.contains("t3") && config["t3"].contains("mcpUrl")) {
-            const auto hint = str(config["t3"], "mcpUrl");
-            if (checkedUrl(hint).full != connection.mcpUrl)
-                throw Failure(Failure::Kind::Settings, "The Bot's MCP URL differs from the T3 environment's OAuth connection");
-        }
-        return connection;
+        return loadCredential(directory_, environment);
     }
 
     static void requireOperate(const Credential& connection) {

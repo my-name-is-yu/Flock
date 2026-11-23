@@ -18,7 +18,7 @@ const elements = Object.fromEntries([
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile-avatar', 'profile-avatar-button',
   'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
-  'decision-reply-context', 'decision-reply-label', 'decision-reply-target', 'decision-cancel-reply',
+  'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
@@ -67,7 +67,6 @@ const narrow = matchMedia('(max-width: 700px)');
 const noHover = matchMedia('(hover: none)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long', day: 'numeric' });
-const preciseClock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
 const sessionEndLabels = {
@@ -97,7 +96,6 @@ const closedLabels = {
 };
 const errors = {
   invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
-  intake_settings: 'Flock could not accept the request. Check the Bot’s execution settings.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
   operation_conflict: 'Flock already processed this action or the pending request changed.',
   request_changed: 'The request changed. Review its current details before acting again.',
@@ -178,14 +176,6 @@ function linkToRun(run, label = 'Open in T3') {
 }
 function waitLabel(reason) { return waitLabels[reason]?.[0] ?? 'Waiting for input'; }
 function waitText(wait) { return wait.text || waitLabels[wait.reason]?.[1] || 'Refresh the pending request.'; }
-function startedText(seconds, precise = false) {
-  return seconds ? `started ${(precise ? preciseClock : clock).format(seconds * 1000)}` : '';
-}
-function repeatedRequests(items) {
-  const counts = new Map();
-  for (const item of items) counts.set(item.request, (counts.get(item.request) ?? 0) + 1);
-  return new Set([...counts].filter(([, count]) => count > 1).map(([request]) => request));
-}
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
   if (signatures.get(key) === signature) return false;
@@ -2080,8 +2070,6 @@ function renderComposer() {
   elements['compose-label'].textContent = decision ? `Replying to ${decision.item.requestTitle}` :
     review ? `Replying to ${review.summary}` : reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
-  elements['decision-cancel-reply'].disabled = busy;
-  elements['decision-cancel-reply'].hidden = true;
   elements.message.placeholder = (decision || review) ? 'Ask a question or give direction' :
     reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
   if (!composition && elements.message.value !== body) {
@@ -2515,15 +2503,6 @@ function renderDetail() {
     }
     return;
   }
-  if (detail.kind === 'paused') {
-    const turn = view.data.pausedConversations.find((item) => item.messageId === detail.messageId);
-    if (changed('detail', detail, turn, view.data.canDecide, [...pendingWaits])) {
-      elements['detail-title'].textContent = waitLabel('model_budget');
-      elements['detail-body'].replaceChildren(node('p', 'prose', turn?.text ?? 'This request has closed.'));
-      if (turn && view.data.canDecide === true) elements['detail-body'].append(pausedActions(turn));
-    }
-    return;
-  }
   const task = view.data.waits.find((item) => item.id === detail.taskId && item.wait.id === detail.waitId);
   if (!task) {
     if (changed('detail', detail, null)) {
@@ -2738,9 +2717,7 @@ async function operate(context, task, operation, fields = {}) {
 }
 async function submitOperation(context, key, payload) {
   if (context?.data?.canDecide !== true || pendingWaits.has(key)) return;
-  const isOpen = () => view === context && (payload.itemKind
-    ? detail?.kind === 'paused' && detail.messageId === payload.waitId
-    : detail?.waitId === payload.waitId);
+  const isOpen = () => !payload.itemKind && view === context && detail?.waitId === payload.waitId;
   pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
@@ -3010,7 +2987,6 @@ elements['cancel-reply'].addEventListener('click', () => {
   renderComposer();
   elements.message.focus();
 });
-elements['decision-cancel-reply'].addEventListener('click', () => decisions.suppressComposer());
 elements['attach-screenshots'].addEventListener('click', () => {
   if (elements['attach-screenshots'].getAttribute('aria-disabled') === 'true') return;
   pickerTarget = { context: view, composer: view.composer, reply: activeReply(view.composer) };

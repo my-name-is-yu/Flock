@@ -6,7 +6,7 @@ namespace flockv0::app {
 
 class T3SetupLock {
 public:
-    explicit T3SetupLock(const std::filesystem::path& state);
+    T3SetupLock();
     ~T3SetupLock();
     T3SetupLock(const T3SetupLock&) = delete;
     T3SetupLock& operator=(const T3SetupLock&) = delete;
@@ -15,8 +15,11 @@ private:
     int fd_;
 };
 
-Json configureT3Providers(std::string_view url, std::string_view token);
-void removeT3Providers();
+using InstallT3Provider = std::function<void(std::string_view)>;
+Json configureT3Providers(std::string_view url,
+    const std::function<void(const InstallT3Provider&)>& connect);
+bool t3ProvidersNeedRefresh(const std::function<bool(std::string_view)>& owns);
+void removeT3Providers(const std::function<bool(std::string_view)>& owns);
 void syncT3Skills(const Json& bots);
 
 }

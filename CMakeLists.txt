@@ -40,7 +40,7 @@ endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
-                       src/runtime.cpp src/policy.cpp src/access_tools.cpp src/secrets.cpp src/participation.cpp src/skill_export.cpp src/root_delivery.cpp
+                       src/runtime.cpp src/policy.cpp src/access_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/skill_export.cpp src/root_delivery.cpp
                        src/session_handoff.cpp src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
                        src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp src/base64.cpp
@@ -101,40 +101,24 @@ if(BUILD_TESTING)
   add_test(NAME flock_conversation_runtime COMMAND flock_conversation_runtime)
 endif()
 
-foreach(component t3 app web)
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${component}/CMakeLists.txt")
-    add_subdirectory(${component})
-  endif()
-endforeach()
-if(TARGET flock AND TARGET flock_web)
-  target_link_libraries(flock PRIVATE flock_web)
-  target_compile_definitions(flock PRIVATE FLOCK_WITH_WEB=1)
-endif()
-if(TARGET flock AND TARGET flock_t3)
-  target_link_libraries(flock PRIVATE flock_t3)
-  target_compile_definitions(flock PRIVATE FLOCK_WITH_T3=1)
-endif()
-if(BUILD_TESTING AND TARGET flock AND TARGET flock_t3 AND TARGET flock_web)
+add_subdirectory(t3)
+add_subdirectory(app)
+add_subdirectory(web)
+target_link_libraries(flock PRIVATE flock_web flock_t3)
+
+if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME flock_t3_connection_setup COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock> connection-setup)
   set_tests_properties(flock_t3_connection_setup PROPERTIES TIMEOUT 45)
-endif()
-if(BUILD_TESTING AND TARGET flock_t3)
   add_executable(flock_live_t3 tests/live_t3.cpp)
   target_link_libraries(flock_live_t3 PRIVATE flock_t3)
-endif()
-if(BUILD_TESTING AND TARGET flock_app_support)
   add_executable(flock_live_conversation tests/live_conversation.cpp)
   target_include_directories(flock_live_conversation PRIVATE app)
   target_link_libraries(flock_live_conversation PRIVATE flock_app_support)
-endif()
-if(BUILD_TESTING AND TARGET flock_t3 AND TARGET flock_app_support)
   add_executable(flock_live_evidence tests/live_evidence.cpp)
   target_include_directories(flock_live_evidence PRIVATE app)
   target_link_libraries(flock_live_evidence PRIVATE flock_t3 flock_app_support)
-endif()
-if(BUILD_TESTING AND TARGET flock_app_support)
   add_executable(flock_git_pr_ci tests/git_pr_ci.cpp)
   target_include_directories(flock_git_pr_ci PRIVATE app)
   target_link_libraries(flock_git_pr_ci PRIVATE flock_app_support)

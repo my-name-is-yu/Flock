@@ -87,6 +87,9 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
             saveTurnResults(id,step,Json::array({Json{{"ok",false},{"taskId",saved.json(0).at("taskId")},
                 {"delivery","unknown"},{"error","Flock restarted while sending this, so T3 may have received it. "
                                                "Check the Session before sending it again"}}}));
+        } else if (control == SessionControl::Steer && !t3.supportsRunTargetedSteer()) {
+            saveTurnResults(id,step,Json::array({toolFailure("This T3 connection cannot target a specific running Run. "
+                "Use send_to_task to save the instruction for the task's next safe point.")}));
         } else if (!offered) {
             saveTurnResults(id,step,Json::array({toolFailure("Session control was not offered for this turn")}));
         } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
@@ -101,8 +104,7 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
                 Command command;
                 command.actionId = "flock-turn-" + std::to_string(id) + "-" + std::to_string(step);
                 command.ownerBotId = message.bot;
-                command.environmentId = field(run,"environmentId");
-                if (command.environmentId.empty()) command.environmentId = field(task,"environmentId");
+                command.environmentId = run.at("environmentId");
                 command.projectId = field(task,"projectId");
                 command.config = task.at("config");
                 command.target = runRef(run);
@@ -162,7 +164,7 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
         Json entry = {{"messageId",id},{"step",step},{"run",outcome.value("run",effect->run)}};
         if (control == SessionControl::Steer) {
             entry["text"] = effect->command.instruction;
-            entry["revisionId"] = effect->run.value("revisionId",Json(nullptr));
+            entry["revisionId"] = effect->run.at("revisionId");
         }
         journal(effect->taskId,control == SessionControl::Steer ? "instruction_steered" : "interrupt_requested",entry);
     }

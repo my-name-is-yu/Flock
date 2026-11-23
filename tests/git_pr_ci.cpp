@@ -121,16 +121,18 @@ void freshPrReviewSchema() {
     check(sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,"could not open fresh database");
     std::unique_ptr<sqlite3,decltype(&sqlite3_close)> connection(raw,sqlite3_close);
     sqlite3_stmt* stmt = nullptr;
-    check(sqlite3_prepare_v2(raw,R"SQL(
+    const auto prepared = sqlite3_prepare_v2(raw,R"SQL(
 SELECT (SELECT count(*) FROM pragma_table_info('pr_review_items')
         WHERE name IN ('operation_id','git_key','candidates'))=3
+   AND NOT EXISTS (SELECT 1 FROM pragma_table_info('pr_review_items') WHERE name='target_generation')
    AND EXISTS (SELECT 1 FROM pragma_index_list('pr_review_items')
                WHERE name='pending_pr_reconciliation' AND "unique"=1 AND partial=1)
    AND (SELECT group_concat(name) FROM pragma_index_info('pending_pr_reconciliation'))='operation_id'
-)SQL",-1,&stmt,nullptr) == SQLITE_OK,"could not query fresh PR review schema");
+)SQL",-1,&stmt,nullptr);
+    check(prepared == SQLITE_OK,"could not query fresh PR review schema: " + std::string(sqlite3_errmsg(raw)));
     std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(stmt,sqlite3_finalize);
     check(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt,0) == 1,
-          "Fresh DB is missing PR review columns or the partial unique reconciliation index");
+          "Fresh DB has incorrect PR review columns or reconciliation index");
 }
 
 void runner() {
@@ -258,26 +260,19 @@ void reviewAfterTaskProgress() {
     check(invoke(store,runtime,script,"open-review-pr","git_open_pr",args).at("status") == "created",
           "fixture did not open a PR awaiting review");
     const auto gitReview = target(store.inbox(localOwner,"owner").at(0));
-    const auto manualReview = store.requestPrReview(task,gitReview.targetRevision,gitReview.targetGeneration,
-                                                  "https://github.com/org/flock/pull/1","Check changes","Verify tests");
-    check(store.inbox(localOwner,"owner").size() == 2,"fixture did not create both reviews");
 
     check(invoke(store,runtime,script,"send-instruction","send_to_task",{{"taskId",task},
                  {"generation",gitReview.targetGeneration},{"instruction","Include the test results"}}).at("ok") == true,
           "fixture did not update the task within its revision");
     const auto inbox = store.inbox(localOwner,"owner");
-    check(inbox.size() == 1,"manual review should expire after a Task generation change");
+    check(inbox.size() == 1,"Git review was lost after a Task generation change");
     const auto latest = target(inbox.at(0));
     check(latest.itemId == gitReview.itemId && latest.targetRevision == gitReview.targetRevision &&
           latest.targetGeneration > gitReview.targetGeneration,"Git review did not follow the Task within its revision");
-    auto invalidManual = latest;
-    invalidManual.itemId = manualReview;
-    for (const auto& stale : {gitReview,invalidManual}) {
-        try {
-            store.decideInbox(localOwner,stale,"approve");
-            throw std::runtime_error("A PR review decision with an invalid generation was accepted");
-        } catch (const RequestChanged&) {}
-    }
+    try {
+        store.decideInbox(localOwner,gitReview,"approve");
+        throw std::runtime_error("A PR review decision with an invalid generation was accepted");
+    } catch (const RequestChanged&) {}
     store.decideInbox(localOwner,latest,"approve");
     check(store.inbox(localOwner,"owner").empty(),"Refreshed Git review decision did not close the item");
 }
