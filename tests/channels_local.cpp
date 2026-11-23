@@ -394,6 +394,9 @@ void taskUpdates(const std::filesystem::path& database) {
     const auto card = std::ranges::find_if(items,[](const auto& item) { return item.at("itemKind")=="policy_approval"; });
     check(card != items.end(),"Task question did not create an approval");
     store.decideInbox(owner,{card->at("botId"),InboxKind::policy_approval,card->at("itemId"),0,0,0,0},"allow_once");
+    const auto allowed = store.decisionHistory(owner).at(0);
+    check(allowed.at("action") == "channel.post" && allowed.at("target") == card->at("target") &&
+          allowed.at("decidedByYou") == true,"History did not say which approval the person allowed");
     store.policy().changeRule(root,RuleKind::ask,Action::channel_post,target,false);
     runtime.tick();
 

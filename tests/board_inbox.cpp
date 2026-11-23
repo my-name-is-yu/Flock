@@ -416,6 +416,7 @@ void chatDecision(const std::filesystem::path& path) {
     runtime.runConversations();
     const auto history = store.decisionHistory(owner);
     check(history.size() == 1 && history.at(0).at("decidedBy") == alice.id && history.at(0).at("decision") == "answer" &&
+          history.at(0).at("decidedByYou") == false && !history.at(0).at("requestTitle").get<std::string>().empty() &&
           history.at(0).at("targetRevision") == item.targetRevision && store.inbox(owner,"report").empty() &&
           !store.task(taskId).contains("blockerReason"),
           "the chat answer did not use the canonical decision audit");
