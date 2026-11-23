@@ -115,6 +115,14 @@
 .bot-text { flex: 1; min-width: 0; display: grid; gap: .1rem; }
 .bot-name { display: flex; align-items: center; gap: .4rem; min-width: 0; font-size: .875rem; font-weight: 600; }
 .bot-name-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.new-bot-mark {
+  display: grid; place-items: center; width: 2.6rem; height: 2.6rem; flex: none;
+  border: 1.5px dashed color-mix(in srgb, var(--text-3) 60%, transparent); border-radius: var(--radius-md);
+  color: var(--text-3); transition: border-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.new-bot-mark svg { width: 1.1rem; height: 1.1rem; }
+.new-bot-row:hover .new-bot-mark, .new-bot-row:focus-within .new-bot-mark { border-color: var(--accent); color: var(--accent); }
+.new-bot-row .bot-name { color: var(--text); }
 .presence-dot { width: .4rem; height: .4rem; border-radius: 50%; flex: none; background: var(--warning); }
 .unread-dot {
   width: .45rem; height: .45rem; border-radius: var(--radius-full); background: var(--accent);

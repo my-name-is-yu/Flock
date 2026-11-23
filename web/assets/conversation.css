@@ -479,6 +479,14 @@
 .empty-state .avatar { width: 4.25rem; height: 4.25rem; border-radius: var(--radius-xl); margin-bottom: .55rem; }
 .empty-state h2 { font-size: var(--text-lg); font-weight: 600; }
 .empty-state p { font-size: var(--text-sm); color: var(--text-2); }
+.empty-state.first-run { gap: 0; }
+.empty-state.first-run p { max-width: 22rem; margin-top: .4rem; line-height: 1.55; text-wrap: balance; }
+.empty-state.first-run .dialog-button { margin-top: var(--space-5); padding-inline: 1.25rem; }
+.first-run-flock { display: flex; align-items: flex-end; margin-bottom: var(--space-4); }
+.first-run-flock .avatar { width: 3.1rem; height: 3.1rem; margin: 0; border-radius: 0; }
+.first-run-flock .avatar:nth-child(1) { rotate: -8deg; translate: .35rem .1rem; }
+.first-run-flock .avatar:nth-child(2) { width: 3.9rem; height: 3.9rem; z-index: 1; }
+.first-run-flock .avatar:nth-child(3) { rotate: 8deg; translate: -.35rem .1rem; }
 
 .bubble[data-fold="folded"] .foldable-text {
   max-height: calc(1lh * 12); overflow: hidden;
