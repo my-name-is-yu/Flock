@@ -463,7 +463,7 @@ void rereadEarlierResult() {
         check(f.results("result",2).back().at("ok") == true && result.at("tool") == "list_connections" &&
               result.at("result") == f.results().at(0) && result.at("resultRef") ==
                   Json{{"messageId",f.message},{"step",1},{"callIndex",1}},"The earlier step's result was not projected");
-        result.erase("resultRef"); // The two turns have different message IDs.
+        result.erase("resultRef");
         return result;
     };
     const auto single = reread(false);

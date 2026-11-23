@@ -195,7 +195,6 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
         if (!row.next()) throw Conflict("Unknown compaction");
         end = std::min(end,row.number(0));
     } else if (start==requestedEnd || args.contains("cursor")) {
-        // Exact reads and saved cursors can recover entries shortened in the recent history.
         end = message.id-1;
     }
     if (requestedEnd) end = std::min(end,requestedEnd);

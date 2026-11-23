@@ -795,7 +795,6 @@ user's language and refer to work by description, never by task, message, revisi
         " Check earlier reads for the same resultRef before reopening. Use read_tool_result only for required evidence"
         " that is still missing. This retrieves saved evidence without repeating the original action.";
 
-    // Serialize stable fields first while keeping a single context document.
     const nlohmann::ordered_json context = {{"history",input.history},{"soul",input.notes.soul},{"memory",input.notes.memory},
         {"event",input.event},{"task",input.task},{"feedback",input.feedback},{"evidence",input.evidence}};
     auto content = Json::array({{{"type","input_text"},

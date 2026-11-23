@@ -7,9 +7,7 @@ namespace flockv0::conversation_storage {
 namespace {
 // The production bridge embeds the context JSON in an input_text string.
 constexpr std::size_t toolHistoryWireBytes = 768 * 1024;
-// Preserve cheap earlier results alongside the newest preceding result.
 constexpr std::size_t earlierEvidenceWireBytes = 8 * 1024;
-// Two explicitly recovered results can be compared after an intervening lookup.
 constexpr std::size_t retainedReopens = 2;
 
 std::size_t wireBytes(const Json& value) {
@@ -126,7 +124,6 @@ void projectToolHistory(Json& turn, const Json& redactionRevision) {
     std::vector<VisibleEntry> visible;
     visible.reserve(entries.size());
     std::size_t remaining = toolHistoryWireBytes - 2;
-    // Admit the newest compact rows first. Keep a contiguous suffix when their summaries fill the budget.
     for (auto entry = entries.rbegin(); entry != entries.rend(); ++entry) {
         auto row = entry->project(false);
         const auto bytes = wireBytes(row) + 1;
