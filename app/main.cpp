@@ -134,10 +134,13 @@ int modelCommand(Arguments& args, const std::filesystem::path& home) {
     return 0;
 }
 
-Json connectT3(Store& store, const std::filesystem::path& home, const std::string& environment,
+Json connectT3(const std::filesystem::path& home, const std::string& environment,
                const std::string& url, unsigned port, const std::function<void(const std::string&)>& authorize,
                std::stop_token stop = {}) {
     const T3SetupLock setup;
+    // Provider registration runs inside the connection transaction. Use its own Store
+    // so the daemon's reads do not wait on the transaction's Store mutex.
+    auto store = openStore(home);
     if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE")) {
         if (!loadIdentities(store,identities).resolvePerson(localOwner.id))
             throw Conflict("Configure a Web identity for local-owner before connecting T3");
@@ -189,8 +192,7 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         if (flag == "--port") port = static_cast<unsigned>(number(args,"port",1,65535));
         else throw Conflict("Unknown T3 connection option: " + flag);
     }
-    auto store = openStore(home);
-    const auto result = connectT3(store,home,environment,url,port,[](const std::string& authorization) {
+    const auto result = connectT3(home,environment,url,port,[](const std::string& authorization) {
         std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
     });
     if (result.at("portChanged").get<bool>())
@@ -305,7 +307,12 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
     });
     Json exportedBots;
-    auto refreshSkills = [&] {
+    // Web callbacks and the filesystem refresh both update the same on-disk skills.
+    std::mutex skillMutex;
+    auto syncSkills = [&](bool providersChanged = false) {
+        if (!T3Connections(store).configured()) return;
+        std::lock_guard lock(skillMutex);
+        if (providersChanged) exportedBots = nullptr;
         try {
             auto descriptions = bots.skillCards();
             if (descriptions != exportedBots) {
@@ -315,13 +322,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         } catch (const std::exception& error) {
             std::cerr << "Could not refresh T3 skills: " << error.what() << '\n';
         }
-    };
-    // Web callbacks and the filesystem refresh both update the same on-disk skills.
-    std::mutex skillMutex;
-    auto syncSkills = [&] {
-        if (!T3Connections(store).configured()) return;
-        std::lock_guard lock(skillMutex);
-        refreshSkills();
     };
     if (web) syncSkills();
     WebCallbacks callbacks{
@@ -358,6 +358,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         std::string requester, authorizationUrl, error;
         std::jthread worker;
     } t3Setup;
+    callbacks.t3Disconnect = [&](const std::optional<std::string>& environment) { disconnectT3(store,environment); };
     if (!fixed) {
         callbacks.t3Setup = [&t3Setup](const Person& actor) {
             std::lock_guard lock(t3Setup.mutex);
@@ -366,7 +367,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                         {"authorizationUrl",ownsAttempt ? t3Setup.authorizationUrl : std::string{}},
                         {"error",ownsAttempt ? t3Setup.error : std::string{}}};
         };
-        callbacks.t3Disconnect = [&](const std::optional<std::string>& environment) { disconnectT3(store,environment); };
         callbacks.t3Connect = [&](const Person& actor, const std::string& environment, const std::string& mcpUrl) {
             validateT3ConnectTarget(environment,mcpUrl);
             const auto port = webPort.load();
@@ -376,11 +376,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             t3Setup.worker = std::jthread([&,port,environment,mcpUrl](std::stop_token stop) {
                 std::string error;
                 try {
-                    connectT3(store,home,environment,mcpUrl,port,[&](const std::string& url) {
+                    connectT3(home,environment,mcpUrl,port,[&](const std::string& url) {
                         std::lock_guard lock(t3Setup.mutex);
                         t3Setup.authorizationUrl = url;
                     },stop);
-                    syncSkills();
+                    syncSkills(true);
                 } catch (const Conflict& failure) { error = failure.what(); }
                 catch (const std::exception&) { error = "Could not complete the T3 connection."; }
                 std::lock_guard lock(t3Setup.mutex);
