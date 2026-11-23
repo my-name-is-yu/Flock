@@ -404,6 +404,12 @@ int main(int argc, char** argv) {
         check(observation.kind == Observation::Kind::Finished && !observation.truncated &&
               observation.itemId == "item-1" && observation.report == std::string(7000, 'x') + "end of report",
               "Report reads older pages for the assigned Run and joins text continuations");
+        check(observation.sessionCreatedAt == "2026-11-21T01:00:00.000Z",
+              "Report observation retains the Session creation time");
+        fixture({{"reportSessionCreatedAt", "2026-02-30T01:00:00Z"}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.kind == Observation::Kind::Finished && !observation.report.empty() &&
+              observation.sessionCreatedAt.empty(), "Invalid Session time does not prevent Run settlement");
         fixture({{"changeReportDuringRead", true}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::Finished && observation.report.empty() &&

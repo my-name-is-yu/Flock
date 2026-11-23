@@ -199,6 +199,15 @@ a.settings-row svg { margin-left: auto; }
 .wait-primary { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
 .wait-cancel { border: 0; border-radius: var(--radius-full); padding: .55rem .75rem; margin-left: -.75rem; background: none; color: var(--danger); font-size: var(--text-sm); }
 .wait-cancel:hover:not(:disabled) { background: var(--danger-soft); }
+.wait-stop-confirm {
+  grid-column: 1 / -1; display: grid; gap: .7rem; padding: .8rem .9rem; border-radius: var(--radius-md);
+  background: var(--danger-soft); animation: stop-confirm-in .16s cubic-bezier(0.23, 1, 0.32, 1);
+}
+@keyframes stop-confirm-in { from { opacity: 0; transform: translateY(3px); } }
+.wait-stop-text { font-size: var(--text-sm); color: var(--text-2); }
+.wait-stop-text strong { color: var(--text); font-weight: 600; }
+.dialog-button.danger { background: var(--danger); color: var(--canvas); }
+.dialog-button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 88%, var(--text)); }
 .dialog-feedback { color: var(--danger); font-size: var(--text-sm); }
 .dialog-feedback:empty { margin-top: calc(-1 * var(--detail-gap)); }
 
@@ -246,6 +255,7 @@ a.settings-row svg { margin-left: auto; }
 @media (prefers-reduced-motion: reduce) {
   .detail, .detail::backdrop { transition: opacity .12s, overlay .12s allow-discrete, display .12s allow-discrete; }
   .detail:not([open]) { transform: none; }
+  .wait-stop-confirm { animation: none; }
   @starting-style { .detail[open] { transform: none; } }
   .detail-tab:active, .settings-avatar-button:hover, .settings-avatar-button:active,
   .settings-name-button:active, .dialog-button:active:not(:disabled), .peer-choice:active { transform: none; }

@@ -1,6 +1,6 @@
 # Flock Web
 
-The executable serves the embedded UI on its IPv4 loopback listener. The Web UI and CLI share the same SQLite Store. The HTTP layer projects explicit display fields from Bot descriptors and Store rows. Local POSTs require the server's exact origin, JSON and the Web UI request header. Browser text is rendered as text, while Session links use T3's environment-scoped hosted route.
+The executable serves the embedded UI on its IPv4 loopback listener. The Web UI and CLI share the same SQLite Store. The HTTP layer projects explicit display fields from Bot descriptors and Store rows. Local POSTs require the server's exact origin, JSON and the Web UI request header. Canonical conversation-message and Bot-reply text remains unchanged; the Web timeline derives safe, server-rendered Markdown HTML for already-sent bubbles. The composer has no live Markdown preview. Session links use T3's environment-scoped hosted route.
 
 The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. For the same person and Bot, retrying the same payload with the same `clientMessageId` returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Select a task question's choice and press **Send answer** to answer directly through `POST /api/operations`. Written replies to questions go through the Bot.
 
@@ -11,6 +11,7 @@ The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `ses
 ## Dependencies
 
 - [cpp-httplib v0.67.0](https://github.com/yhirose/cpp-httplib/tree/v0.67.0) is pinned by release and SHA-256 in CMake.
+- [cmark 0.31.1](https://github.com/commonmark/cmark/tree/0.31.1) is pinned by release and SHA-256 in CMake for shared CommonMark rendering.
 - [Open Bot Avatar 0.3.0](https://www.npmjs.com/package/open-bot-avatar/v/0.3.0) is vendored as the runtime JavaScript files from the npm tarball under `assets/vendor/open-bot-avatar`, with its MIT license. Tarball integrity is `sha512-3P0o8eiClHHiLr7lIFZE/WxUtqHLjVb0xQ0PqYzA48XG/oQlWyeIdcY0egK6H8AgFuoY1aKVhc8QKSaj4z5ZOw==`. The UI uses the public `mountAvatar`, `getExample`, and `validateAvatar` APIs with static list avatars and system reduced-motion support in the conversation header.
 - [T3 Code v0.1.11 thread links](https://github.com/pingdotgg/t3code/blob/v0.1.11/packages/shared/src/threadLinks.ts) define the environment and Thread segments of the browser handoff.
 
@@ -21,6 +22,29 @@ has a unique `authorization` string (the complete Basic or Bearer authorization
 header), a `person` ID, and an optional boolean `adminRoot`. Keep one root
 identity for installation administration. Restart the listener after changing this file.
 Browsers can sign in through the Basic challenge.
+
+## Channel reply formatting
+
+The channel worker keeps reply Markdown unchanged in the conversation journal and
+delivery outbox. Immediately before `reply` delivery it sends a derived payload
+copy: Slack receives mrkdwn and iMessage receives plain text with link
+destinations. Other operations and payload fields, including suggestions,
+attachments, and approval state, are unchanged.
+
+The local bridge receives the derived `payload.text` and `origin` on `/deliver`.
+For Slack replies, `payload.deliveryMetadata.mrkdwn` matches the renderer's
+result. The worker also sets `parse` to `none`, `link_names` to false, and
+`disableAutoMentions` to true.
+The provider sender must honor these settings, must not enable automatic
+mentions or link-name expansion, and must send the supplied text rather than
+reparse canonical Markdown. Text-like Markdown content is escaped before it
+reaches Slack. `mrkdwn` is false when inline code contains a backtick, a code
+block contains triple backticks, or literal text or raw HTML contains `*`, `_`,
+`~`, or a backtick. In that case the entire reply uses escaped plain text with
+links expanded. This removes Markdown formatting throughout the reply to
+preserve literal content without changing code delimiters or inserting characters.
+The provider sender is external to this repository; an adapter that ignores
+this contract can re-enable provider-specific notifications.
 
 Queued and resumed shared Web messages use the sender's current identity and
 Bot access. If a person has multiple credentials, their queued messages have
@@ -62,7 +86,7 @@ environment's OAuth endpoint.
 
 **Flock settings** shows the theme for this browser, the installation mode, rules, and the read-only T3
 connection details for the person who connected T3 and installation roots.
-Installation roots can choose **Full** or **Supervised** and remove rules. **Full** is
+Installation roots can choose **Full** or **Supervised**, add rules, and remove rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
 [category defaults](../README.md#installation-policy).
@@ -76,18 +100,23 @@ Cards prompted by a person's message stay open, including messages from a
 linked Slack or iMessage sender. The approval is answered in Flock. Changing
 modes closes pending approvals for the prior mode.
 
-`GET /api/settings` returns the mode, rules, T3 connection details and, for installation
-roots, the model connection (`model`) and T3 setup progress (`t3Setup`).
-These endpoints require an installation root:
+`GET /api/settings` returns the mode, rules, T3 connection details, and action
+names that apply to people only. Installation roots can also check the model
+connection (`model`), T3 setup progress (`t3Setup`), and whether a revoked T3
+registration still needs cleanup (`t3CleanupPending`).
+
+These endpoints require an installation root.
 
 - `POST /api/settings/mode` takes `mode`.
-- `POST /api/settings/rule` takes `kind`, `action`, `target` and `add`: `true` adds the
-  rule and `false` removes it.
-- `POST /api/settings/model-login` takes `reconsent` and starts ChatGPT sign-in in the
-  browser on the machine running Flock.
-- `POST /api/settings/t3-connect` takes `environmentId` and `mcpUrl`, and starts T3
-  authorization. `t3Setup.authorizationUrl` is the link to approve.
-- `POST /api/settings/t3-disconnect` takes `environmentId`.
+- `POST /api/settings/rule` takes `kind`, `action`, `target`, and the Boolean `add`.
+  Set `add` to `true` to create a rule for a Bot action with a nonblank target.
+  Set `add` to `false` to remove the matching rule.
+- `POST /api/settings/model-login` takes `reconsent` and starts ChatGPT sign-in in
+  the browser on the machine running Flock.
+- `POST /api/settings/t3-connect` takes `environmentId` and `mcpUrl`. The person
+  who starts the connection receives the approval link in `t3Setup.authorizationUrl`.
+- `POST /api/settings/t3-disconnect` takes `environmentId`. Pass `null` to retry
+  removing the provider registration after access has been revoked.
 
 ## Bot settings
 

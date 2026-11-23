@@ -93,6 +93,7 @@ struct RunEvidence {
     Availability availability = Availability::Available;
     std::string report, itemId, detail;
     bool truncated = false;
+    std::string sessionCreatedAt{};
 };
 struct Observation {
     enum class Kind { Running, Question, ExternalInput, Settling, Finished, Unavailable } kind = Kind::Running;
@@ -101,6 +102,7 @@ struct Observation {
     bool truncated = false;
     std::string detail;
     RunEvidence::Availability evidence = RunEvidence::Availability::Available;
+    std::string sessionCreatedAt{};
 };
 inline constexpr std::size_t maxSessionPromptBytes = 120000;
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);

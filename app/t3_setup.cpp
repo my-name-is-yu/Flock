@@ -3,6 +3,8 @@
 #include "flock/skill_export.hpp"
 
 #include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
@@ -11,6 +13,7 @@
 #include <spawn.h>
 #include <sys/file.h>
 #include <sys/wait.h>
+#include <thread>
 #include <tuple>
 #include <unistd.h>
 #include <toml++/toml.hpp>
@@ -78,7 +81,18 @@ bool runProvider(std::vector<std::string> args, std::string_view input = {}, std
     if (!started) return false;
     int status = 0;
     pid_t waited;
-    do { waited = waitpid(pid,&status,0); } while (waited < 0 && errno == EINTR);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    for (;;) {
+        waited = waitpid(pid,&status,WNOHANG);
+        if (waited < 0 && errno == EINTR) continue;
+        if (waited != 0) break;
+        if (std::chrono::steady_clock::now() >= deadline) {
+            kill(pid,SIGKILL);
+            do { waited = waitpid(pid,&status,0); } while (waited < 0 && errno == EINTR);
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
     if (waited != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return false;
     if (capture) {
         char line[128];

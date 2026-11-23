@@ -378,6 +378,7 @@ ORDER BY id)SQL");
         data["truncated"] = !missing && (evidence.truncated || report.size() < evidence.report.size());
         data["detail"] = bounded(evidence.detail,2048);
         data["itemId"] = missing ? std::string{} : evidence.itemId;
+        if (!evidence.sessionCreatedAt.empty()) data["sessionCreatedAt"] = evidence.sessionCreatedAt;
         data.erase("evidenceStatus");
         if (missing) data["evidenceStatus"] = "report_unavailable";
         if (evidence.availability == Availability::DiagnosticUnavailable) data["evidenceStatus"] = "diagnostic_unavailable";
@@ -449,7 +450,8 @@ ORDER BY id)SQL");
                     {"resultRunId",observed.resultRunId.empty() ? run.runId : observed.resultRunId},
                     {"status",observed.status},{"environmentId",task["environmentId"]},
                     {"revisionId",task.at("lastRun").at("revisionId")}};
-                setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,observed.detail,observed.truncated});
+                setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,observed.detail,
+                    observed.truncated,observed.sessionCreatedAt});
                 db.exec("INSERT OR IGNORE INTO t3_events VALUES(?,?,'result',?)",{task["environmentId"],run.threadId,run.runId});
                 if (sqlite3_changes(db.db)) {
                     if (observed.evidence == RunEvidence::Availability::ReportUnavailable && !observed.resultRunId.empty() &&
@@ -538,7 +540,7 @@ ORDER BY id)SQL");
             }
             if (state == "running" && task["deadline"].get<Seconds>() > 0 &&
                 options.clock() >= task["deadline"].get<Seconds>()) {
-                db.wait(task,"deadline",{{"text","The assigned Run reached its deadline"}});
+                db.wait(task,"deadline",{{"text","This request reached its deadline"}});
                 return true;
             }
             return leftQueue;
@@ -576,10 +578,10 @@ ORDER BY id)SQL");
         const auto observed = observe(task);
         if (ingest(task,observed)) return;
         if (observed.kind == Observation::Kind::Settling)
-            return stopNote(task,"Waiting for the assigned Run's delegated work to settle");
+            return stopNote(task,"Waiting for the remaining work on this request to finish");
         if (observed.kind == Observation::Kind::Unavailable &&
             !(task.contains("workflowId") && stop.at("intent") == "cancel"))
-            return stopNote(task,"Cannot locate or observe the assigned Run");
+            return stopNote(task,"Flock couldn't check the status of this work in T3");
         const auto now = options.clock();
         if (now < stop.value("retryAt",Seconds{0})) return;
         Json requested;
@@ -592,7 +594,7 @@ ORDER BY id)SQL");
         try { outcome = t3.interrupt(field(task,"environmentId"),task["config"],runRef(stop.at("run"))); }
         catch (const std::exception&) { return stopNote(requested,"T3 did not confirm the interrupt request"); }
         if (outcome != InterruptOutcome::Requested)
-            return stopNote(requested,"Waiting for T3 to confirm the assigned Run has settled");
+            return stopNote(requested,"Waiting for T3 to confirm this work has stopped");
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         db.journal(task["id"],"interrupt_requested",stop);
