@@ -1,7 +1,9 @@
 #include "flock/board_inbox.hpp"
 #include "flock/session_read.hpp"
+#include "flock/t3_connection.hpp"
 
 #include <iostream>
+#include <sqlite3.h>
 #include <map>
 #include <unistd.h>
 
@@ -12,6 +14,7 @@ constexpr auto staging = "internal-staging-thread";
 constexpr auto second = "internal-second-investigation";
 constexpr auto env = "desktop";
 constexpr auto otherEnv = "remote-desktop";
+constexpr auto nativeSession = "internal-native-session";
 constexpr auto timestamp = "2026-11-21T12:34:56.123Z";
 constexpr auto failureId = "internal-failed-event";
 constexpr auto logId = "internal-test-log";
@@ -27,11 +30,20 @@ struct Backend : T3 {
     std::function<void()> onRead;
     std::string secret;
     bool denyAttachment = false;
+    bool pagedCatalog = false;
+    bool overlappingCatalog = false;
+    bool nativeCatalog = false;
+    std::vector<Id> catalogOffsets;
 
+    bool supportsRunTargetedSteer() const override { return true; }
     std::string authGeneration(const std::string&,const Json&) override { return "connected"; }
     Delivery send(const Command& command) override {
         writes.push_back(command);
-        return {Delivery::Kind::Accepted,{"foreign-thread","foreign-run",{}},{}};
+        const RunRef run{"foreign-thread","foreign-run",{}};
+        if (command.tool == "steer" &&
+            (command.target.threadId != run.threadId || command.target.runId != run.runId))
+            return {Delivery::Kind::NotAccepted,{},"The assigned Run is unavailable",true};
+        return {Delivery::Kind::Accepted,run,{}};
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
@@ -40,13 +52,35 @@ struct Backend : T3 {
     bool allowed(const SessionTarget& target) {
         ++reads;
         if (onRead) onRead();
+        if (target.threadId == nativeSession)
+            return nativeCatalog && target.environmentId == otherEnv && !denied[target.threadId];
         return (target.environmentId == env || target.environmentId == otherEnv) && !denied[target.threadId] &&
             (target.threadId == staging || target.threadId == second || target.threadId == "foreign-thread");
+    }
+    std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
+        std::string_view environment, std::string_view project, Id offset, SessionReadDeadline) override {
+        if (overlappingCatalog)
+            return {environment == env ? std::vector<std::string>{staging} : std::vector<std::string>{},std::nullopt};
+        if (pagedCatalog) {
+            if (environment == otherEnv) return {};
+            catalogOffsets.push_back(offset);
+            if (offset == 0) return {{staging},1000};
+            if (offset == 1000) return {{second},std::nullopt};
+            return {};
+        }
+        if (environment == otherEnv) {
+            if (nativeCatalog && project.empty()) return {{nativeSession,staging},std::nullopt};
+            return {{staging},std::nullopt};
+        }
+        return {{staging,second,"internal-shared-but-denied"},std::nullopt};
     }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target,bool includeMessages,
                                                   SessionReadDeadline) override {
         if (!allowed(target)) return {};
-        std::string title = target.threadId == second ? "Staging investigation 2" : "Staging investigation";
+        if (target.threadId == nativeSession)
+            return SessionMetadata{"Native investigation","Other Project","other-project","completed",timestamp,timestamp,{},false};
+        std::string title = target.threadId == second ? "Staging investigation 2" :
+            target.threadId == "foreign-thread" ? "Foreign investigation" : "Staging investigation";
         if (!secret.empty()) title.append(235-title.size(),'x').append(secret);
         SessionMetadata metadata{title,"Release Pipeline","release","failed",timestamp,timestamp,{},false};
         if (includeMessages) {
@@ -161,7 +195,7 @@ struct Fixture {
         runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return std::string{}; });
     }
     Intake intake(std::string bot) {
-        return {std::move(bot),"Investigate staging",env,"release",Json::object()};
+        return {std::move(bot),"Investigate staging",env,"release",{{"conversationEnvironments",{{"Remote",otherEnv}}}}};
     }
     Json call(std::string tool, Json args, std::string bot = "alpha") {
         model.result = nullptr;
@@ -172,8 +206,8 @@ struct Fixture {
         check(!model.result.is_null(),"conversation did not dispatch tool");
         return model.result;
     }
-    void share(std::string_view thread, GrantChange change = GrantChange::grant) {
-        store->access().resourceGrant({"root",true},"alpha",Scope::sessionRead(env,thread),change);
+    void blockSession(std::string_view thread, bool blocked = false) {
+        store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(env,thread).target,blocked);
     }
 };
 
@@ -184,19 +218,18 @@ void acceptance() {
     const Json filters{{"query","staging"},{"project","Release Pipeline"},{"status","failed"},
                        {"fromTime","2026-11-21T00:00:00Z"},{"toTime","2026-11-22T00:00:00Z"},{"limit",1}};
     const Json empty{{"ok",true},{"sessions",Json::array()},{"nextCursor",nullptr},{"truncated",false}};
-    check(f.call(search,filters) == empty && f.t3.reads == 0,"unshared Session contacted T3 or entered search");
+    f.blockSession(staging,true);
+    f.blockSession(second,true);
+    f.blockSession("internal-shared-but-denied",true);
+    f.store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(otherEnv,staging).target,true);
+    check(f.call(search,filters) == empty && f.t3.reads == 0,"blocked Session contacted T3 or entered search");
     const auto missing = f.call(events,{{"sessionRef","random"},{"operation","counts"}});
     check(missing == f.call(events,{{"sessionRef",staging},{"operation","counts"},{"bot","beta"}}) &&
-          missing.at("ok") == false && f.t3.reads == 0,"manual thread ID exposed the unshared Session");
-
-    f.store->access().personGrant({"root",true},"alpha","alice",Role::admin,GrantChange::grant);
-    try {
-        f.store->access().resourceGrant({"alice"},"alpha",Scope::sessionRead(env,staging),GrantChange::grant);
-        throw std::runtime_error("an administrator shared a scope she does not hold");
-    } catch (const Conflict&) {}
-    f.share(staging);
-    f.share(second);
-    f.share("internal-shared-but-denied");
+          missing.at("ok") == false && f.t3.reads == 0,"manual thread ID exposed the blocked Session");
+    f.blockSession(staging);
+    f.blockSession(second);
+    f.blockSession("internal-shared-but-denied");
+    f.store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(otherEnv,staging).target,true);
     const auto found = f.call(search,filters);
     const auto searchCursor = found.at("nextCursor");
     check(found.at("sessions").size() == 1 && searchCursor.is_string(),"search pagination missing");
@@ -265,7 +298,7 @@ void acceptance() {
     check(log.at("attachment").at("content").get<std::string>().starts_with("fixture failed") &&
           log.at("attachment").at("content").get<std::string>().size() == 8192 && log.at("truncated") == true,
           "attachment content or truncation was lost");
-    f.store->access().resourceGrant({"root",true},"alpha",Scope::sessionRead(otherEnv,staging),GrantChange::grant);
+    f.store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(otherEnv,staging).target,false);
     const auto acrossEnvironments = f.call(search,Json::object()).at("sessions");
     const auto remoteRef = acrossEnvironments.back().at("sessionRef");
     check(acrossEnvironments.size() == 3 && remoteRef != sessionRef &&
@@ -274,7 +307,7 @@ void acceptance() {
           f.call(events,{{"sessionRef",remoteRef},{"operation","get_attachment"},{"attachmentRef",attachmentRef}}).dump() ==
               missingAttachment.dump(),
           "references crossed environments for the same T3 thread identifier");
-    f.store->access().resourceGrant({"root",true},"alpha",Scope::sessionRead(otherEnv,staging),GrantChange::revoke);
+    f.store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(otherEnv,staging).target,true);
     auto tampered = sessionRef.get<std::string>();
     tampered.back() = tampered.back() == 'a' ? 'b' : 'a';
     check(f.call(events,{{"sessionRef",tampered},{"operation","counts"}}).dump() == missing.dump() &&
@@ -284,38 +317,43 @@ void acceptance() {
           "invalid or missing references produced a distinct response");
     f.restart();
     check(fetchLog() == log && request("list",{{"cursor",cursor},{"limit",2}}) == secondPage &&
-          f.call(search,nextSearch) == next,"restart lost scoped references or the read grant");
+          f.call(search,nextSearch) == next,"restart lost scoped references or read access");
 
-    f.store->access().resourceGrant({"root",true},"beta",{"environment",env,"launch"},GrantChange::grant);
     const auto task = f.store->submit(f.intake("beta"));
     for (int i = 0; i < 8 && f.store->task(task).at("state") != "running"; ++i) f.runtime->tick();
     const auto running = f.store->task(task);
     check(running.at("state") == "running" && f.t3.writes.size() == 1,"foreign task did not start");
-    const auto foreign = Scope::sessionRead(env,"foreign-thread");
-    check(f.store->access().permits("beta",foreign,true) && !f.store->access().permits("alpha",foreign,true),
-          "owned Session access is incorrect");
-    check(f.call(search,Json::object(),"beta").at("sessions").size() == 1,"owned Session missing without a grant");
+    const auto foreign = Resource::sessionRead(env,"foreign-thread");
+    check(f.store->policy().allows("beta",foreign) && f.store->policy().allows("alpha",foreign),
+          "Full did not allow Session reads for both Bots");
+    check(f.call(search,{{"query","Foreign"}},"beta").at("sessions").size() == 1,"owned Session missing without a grant");
+    auto outside = f.intake("outside");
+    outside.projectId = "elsewhere";
+    f.model.next = {search,{{"query","Foreign"}},"Check configured project"};
+    f.store->receive(localOwner,outside,"outside-project","Search my project");
+    f.runtime->runConversations();
+    check(f.model.result.at("sessions").empty(),"Search included a recorded run from a different project");
     f.t3.denied["foreign-thread"] = true;
-    check(f.call(search,Json::object(),"beta") == empty,"T3 denial did not override Session ownership");
+    check(f.call(search,{{"query","Foreign"}},"beta") == empty,"T3 denial did not override Session ownership");
     f.t3.denied["foreign-thread"] = false;
-    f.share("foreign-thread");
+    f.blockSession("foreign-thread");
     for (auto tool : {"message_session","interrupt_session","send_to_task","cancel_task"}) {
         const auto outcome = f.call(tool,{{"taskId",task},{"generation",running.at("generation")},
                                          {"text","Deliver this"},{"instruction","Deliver this"}});
-        check(outcome.at("ok") == false,"read grant enabled a write or interruption");
+        check(outcome.at("ok") == false,"Session read enabled a write or interruption");
     }
     check(f.t3.writes.size() == 1 && !f.t3.stops,"write tool bypassed task ownership");
 
     f.t3.denied[staging] = true;
     check(request("list",{{"cursor",cursor},{"limit",2}}) == missing &&
           request("counts") == missing && fetchLog() == missingAttachment &&
-          f.call(search,nextSearch) == empty,"T3 denial did not override the active grant");
+          f.call(search,nextSearch) == empty,"T3 denial did not override the current read policy");
     check(request("list",{{"fromTime","invalid"}}).dump() ==
           f.call(events,{{"operation","list"},{"sessionRef","missing"},{"fromTime","invalid"}}).dump() &&
           request("unknown").dump() == f.call(events,{{"operation","unknown"},{"sessionRef","missing"}}).dump(),
           "request validation depended on whether a Session existed");
     f.t3.denied[staging] = false;
-    f.share(second,GrantChange::revoke);
+    f.blockSession(second,true);
     auto missingSearch = nextSearch;
     missingSearch["cursor"] = "missing";
     check(f.call(search,nextSearch).dump() == f.call(search,missingSearch).dump() &&
@@ -323,24 +361,141 @@ void acceptance() {
 
     f.t3.onRead = [&] {
         Store writer(f.dir/"state.db");
-        writer.access().resourceGrant({"root",true},"alpha",Scope::sessionRead(env,staging),GrantChange::revoke);
+        writer.policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(env,staging).target,true);
     };
     check(request("read_event",{{"eventRef",eventRef}}) == missing,"revocation during an upstream read was ignored");
     f.t3.onRead = {};
     check(request("list",{{"cursor",cursor},{"limit",2}}) == missing &&
           request("read_event",{{"eventRef",eventRef}}) == missing && fetchLog() == missingAttachment &&
           request("counts") == missing,"revoked Session references still exposed evidence");
-    f.share("foreign-thread",GrantChange::revoke);
+    f.blockSession("foreign-thread",true);
     check(f.call(search,filters) == empty,"revoked or unauthorized Sessions returned to search");
+}
+
+void catalogResultsAreDeduplicatedAcrossRecordedBatches() {
+    Fixture f;
+    f.t3.overlappingCatalog = true;
+    f.store->submit(f.intake("alpha"));
+    {
+        sqlite3* raw = nullptr;
+        check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open fixture database");
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(raw,sqlite3_close);
+        check(sqlite3_exec(writer.get(),R"SQL(
+WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<65)
+INSERT INTO outbox(id,task_id,phase,data)
+SELECT printf('fixture-%02d',n),tasks.id,'acked','{}' FROM numbers CROSS JOIN tasks;
+INSERT INTO runs(action_id,task_id,environment_id,thread_id,run_id,link)
+SELECT id,task_id,'desktop',CASE WHEN id='fixture-65' THEN 'internal-staging-thread' ELSE id END,id,''
+FROM outbox;
+)SQL",nullptr,nullptr,nullptr) == SQLITE_OK,"could not seed recorded Sessions");
+    }
+    const auto search = "flock_session_search";
+    const auto first = f.call(search,Json::object());
+    check(first.at("sessions").empty() && first.at("nextCursor").is_string(),"recorded batch did not advance");
+    const auto catalog = f.call(search,{{"cursor",first.at("nextCursor")}});
+    check(catalog.at("sessions").size() == 1 && catalog.at("nextCursor").is_string(),
+          "overlapping Session was not returned by the catalog");
+    f.restart();
+    const auto recorded = f.call(search,{{"cursor",catalog.at("nextCursor")}});
+    check(recorded.at("sessions").empty() && recorded.at("nextCursor").is_null(),
+          "recorded batch returned a Session already emitted by the catalog");
+}
+
+void catalogResumesAfterPartialDiscovery() {
+    Fixture f;
+    f.t3.pagedCatalog = true;
+    const auto first = f.call("flock_session_search",Json::object());
+    check(first.at("sessions").size() == 1 && first.at("truncated") == true &&
+          first.at("nextCursor").is_string(),"Partial catalog lost its results or continuation");
+    f.restart();
+    const auto secondPage = f.call("flock_session_search",{{"cursor",first.at("nextCursor")}});
+    check(secondPage.at("sessions").size() == 1 && secondPage.at("nextCursor").is_null() &&
+          secondPage.at("sessions").front().at("title") == "Staging investigation 2" &&
+          f.t3.catalogOffsets == std::vector<Id>{0,1000},"Catalog restarted at offset zero");
+}
+
+void connectedSearchRespectsCurrentAccess() {
+    Fixture f;
+    f.t3.nativeCatalog = true;
+    T3Connections connections(*f.store);
+    connections.connect(env,localOwner.id,48120);
+    const auto search = "flock_session_search";
+    const auto events = "flock_session_events";
+    const Json filters{{"project","Other Project"}};
+    check(f.call(search,filters).at("sessions").empty(),"an unconnected environment entered the search");
+
+    connections.connect(otherEnv,localOwner.id,48120);
+    const auto found = f.call(search,filters);
+    check(found.at("sessions").size() == 1 && found.at("sessions").front().at("title") == "Native investigation",
+          "connected search remained limited to the Bot routing project");
+    check(found.dump().find(nativeSession) == std::string::npos,"connected search exposed an upstream ID");
+    const auto reference = found.at("sessions").front().at("sessionRef");
+    const Json read{{"sessionRef",reference},{"operation","counts"}};
+    const Json work{{"sessionRef",reference},{"request","Continue the investigation"}};
+    check(f.call(events,read).at("ok") == true,"connected Session reference could not be read");
+
+    auto& denied = f.t3.denied[nativeSession];
+    denied = true;
+    check(f.call(search,filters).at("sessions").empty() && f.call(events,read).at("ok") == false &&
+          f.call("start_task",work).at("ok") == false,"upstream denial did not revoke a discovered Session");
+    denied = false;
+
+    auto policy = f.store->policy();
+    policy.changeNeverRule(localOwner,Action::environment_inspect,otherEnv,true);
+    check(f.call(search,filters).at("sessions").empty() && f.call(events,read).at("ok") == false,
+          "a Never rule did not revoke connected search access");
+    policy.changeNeverRule(localOwner,Action::environment_inspect,otherEnv,false);
+
+    policy.setMember(localOwner,"alpha","guest",true);
+    check(f.call(search,filters).at("sessions").empty() && f.call(events,read).at("ok") == false &&
+          f.call("start_task",work).at("ok") == false,"sharing a Bot retained private connected Session access");
+    policy.setMember(localOwner,"alpha","guest",false);
+    check(f.call(events,read).at("ok") == true,"removing the share did not restore private scope");
+
+    connections.disconnect(otherEnv);
+    const int reads = f.t3.reads;
+    check(f.call(events,read).at("ok") == false && f.call("start_task",work).at("ok") == false &&
+          f.t3.reads == reads,"a disconnected environment remained reachable using a saved reference");
+}
+
+void approvedCallSurvivesReadPreflightContention() {
+    Fixture f;
+    f.model.next = {"flock_session_search",{{"query","regression"}},"Find the report"};
+    auto intake = f.intake("alpha");
+    intake.config["modelCallLimit"] = 1;
+    const auto receipt = f.store->receive(localOwner,intake,"preflight-busy","Look for the failure");
+    f.runtime->runConversations();
+    const auto paused = f.store->pausedConversations("alpha");
+    check(paused.size() == 1 && f.model.result.is_null(),"turn did not pause after reading evidence");
+    const Id pauseId = paused.front().at("messageId");
+    f.store->decideInbox(localOwner,{"alpha",InboxKind::conversation_model_budget,receipt.at("messageId"),pauseId,0,0,pauseId},
+                         "approve");
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the second writer");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(raw,sqlite3_close);
+    bool locked = false;
+    f.t3.onRead = [&] {
+        if (!std::exchange(locked,true))
+            check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,"lock writer");
+    };
+    bool contended = false;
+    try { f.runtime->runConversations(); }
+    catch (const std::runtime_error& error) { contended = std::string_view(error.what()) == "database is locked"; }
+    check(locked && contended && f.model.result.is_null(),"pre-provider write contention was not exercised");
+    check(sqlite3_exec(writer.get(),"ROLLBACK",nullptr,nullptr,nullptr) == SQLITE_OK,"could not release writer");
+    f.t3.onRead = {};
+    f.runtime->runConversations();
+    const auto after = f.store->pausedConversations("alpha");
+    check(!f.model.result.is_null() && after.empty(),"Conversation lost its approved call before model dispatch");
 }
 
 void redactionAndResumedHistory() {
     Fixture f;
-    f.share(staging);
-    auto access = f.store->access();
+    f.blockSession(staging);
+    auto policy = f.store->policy();
     const auto secret = "synthetic-session-credential";
-    const auto key = access.requestSecret("beta",{"beta-fixture"});
-    access.submitSecret({"root",true},"beta",key,secret);
+    const auto key = policy.requestSecret("beta",{"beta-fixture"});
+    policy.submitSecret({"root",true},"beta",key,secret);
     f.t3.secret = secret;
 
     const auto found = f.call("flock_session_search",{{"query","regression"}});
@@ -387,14 +542,18 @@ void redactionAndResumedHistory() {
     pauseThenRevoke({"flock_session_events",attachment,"Read the log"},[&] { f.t3.denyAttachment = true; });
     pauseThenRevoke({"flock_session_search",Json::object(),"Find staging"},[&] { f.t3.denied[staging] = true; });
     f.t3.denied[staging] = false;
-    pauseThenRevoke({"flock_session_search",Json::object(),"Find staging"},[&] { f.share(staging,GrantChange::revoke); });
+    pauseThenRevoke({"flock_session_search",Json::object(),"Find staging"},[&] { f.blockSession(staging,true); });
 }
 }
 
 int main() {
     try {
         acceptance();
+        catalogResumesAfterPartialDiscovery();
+        catalogResultsAreDeduplicatedAcrossRecordedBatches();
+        connectedSearchRespectsCurrentAccess();
         redactionAndResumedHistory();
+        approvedCallSurvivesReadPreflightContention();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
