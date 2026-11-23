@@ -352,6 +352,24 @@
 }
 .msg.user .bubble ::selection { background: rgb(255 255 255 / .3); }
 .event-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
+.event-text.markdown-body { display: block; max-width: 100%; min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body p { margin: .45em 0; }
+.markdown-body ul, .markdown-body ol { margin: .4em 0; padding-inline-start: 1.35em; }
+.markdown-body li + li { margin-top: .2em; }
+.markdown-body blockquote { margin: .4em 0; padding-inline-start: .75em; border-inline-start: 2px solid var(--line); }
+.markdown-body a { overflow-wrap: anywhere; }
+.msg.user .bubble .markdown-body a,
+.msg.user .bubble .markdown-body a:visited,
+.msg.user .bubble .markdown-body a:hover,
+.msg.user .bubble .markdown-body a:active {
+  color: inherit;
+  text-decoration: underline;
+}
+.markdown-body code { font-family: monospace; font-size: .92em; white-space: pre-wrap; }
+.markdown-body pre { max-width: 100%; margin: .5em 0; overflow-x: auto; overscroll-behavior-x: contain; white-space: pre; }
+.markdown-body pre code { font-size: .9em; white-space: pre; }
 .message-attachments { margin-top: .3rem; font-size: var(--text-sm); }
 .channel-image { display: block; max-width: min(100%, 20rem); max-height: 14rem; object-fit: contain; border-radius: var(--radius-md); }
 .read-only-choices { margin-block: .35rem 0; padding-inline-start: 1.2rem; color: var(--text-2); font-size: var(--text-sm); }
@@ -514,7 +532,7 @@
 .msg.bot > .event-actions { margin-top: .15rem; padding-left: var(--avatar-col); }
 
 @container conversation-layout (max-width: 700px) {
-  .event-message.bot, .peer-exchange-link { --avatar-col: 0px; }
+  .event-message.bot, .peer-exchange-link, .policy-inline-card { --avatar-col: 0px; }
   :is(.event-message.bot, .msg.working) .msg-line > :is(.msg-avatar, .msg-avatar-space) { display: none; }
 }
 @media (max-width: 700px) {
@@ -548,7 +566,9 @@
 @media (prefers-reduced-motion: reduce) {
   .msg.working { animation: none; }
   .typing span { animation: none; opacity: .55; }
-  .working-label { animation: none; background: none; color: var(--text-2); }
+  .working-label, .working-label:is(.entering, .leaving) {
+    animation: none; background: none; color: var(--text-2);
+  }
   .conversation-actions-list { animation: none; }
   .jump-to-latest, .jump-to-latest svg, .msg-time, .msg-actions { transition: none; transform: none; animation: none; }
   @starting-style { .jump-to-latest { opacity: 1; transform: none; } }

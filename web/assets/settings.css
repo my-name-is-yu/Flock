@@ -77,6 +77,10 @@ form .button { min-height: 2.1rem; }
 .row-label { display: grid; gap: .1rem; min-width: 0; }
 .row-label strong { color: var(--text); font-size: var(--text-sm); font-weight: 600; }
 .row-label small { color: var(--text-3); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.row-label code {
+  padding: .05rem .3rem; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .95em;
+}
 #machines ul { margin: 0; padding-inline-start: 1.1rem; width: 100%; color: var(--text-2); font-size: var(--text-sm); }
 
 @media (prefers-reduced-motion: reduce) {
