@@ -82,10 +82,14 @@ void parallelDestinations() {
           "a single destination must start in the named pinned project");
 }
 
-void moveWithProject(std::string_view alias, std::string_view project) {
+void moveWithProject(std::string_view alias, std::string_view project, bool sameEnvironment = false) {
     Sandbox temp;
     auto intake = pinnedBot(temp);
     intake.request = "Verify the release";
+    if (sameEnvironment) {
+        intake.environmentId = "mini-env";
+        intake.projectId = "remembered-project";
+    }
     const auto database = temp.path / "state.db";
     Store store(database);
     sqlite3* raw = nullptr;
@@ -117,5 +121,6 @@ void pinnedConversationDestinations() {
     parallelDestinations();
     moveWithProject("mini","mini-project");
     moveWithProject("mini-legacy","remembered-project");
+    moveWithProject("mini","mini-project",true);
 }
 }

@@ -281,13 +281,17 @@ void commitEvidence(Scenario& fixture) {
     const RunRef run{threadId,runId,fixture.local.link()};
     for (const auto* mode : {"missing-post","duplicate-pre","unmarked","reversed","foreign-post",
                              "failed-post","truncated-post","post-then-work","missing-report",
-                             "truncated-report","foreign-report","empty-final-report"}) {
+                             "foreign-report","empty-final-report"}) {
         fixture.local.configure({{"multiStatus","completed"},{"multiEvidence",mode}});
         const auto observation = fixture.adapter->observe(fixture.local.id(),config,run);
         check(observation.kind == Observation::Kind::Finished && observation.status == "completed" &&
               observation.checkedCommit.empty() && observation.commitEvidenceUnavailable,
               std::string("incomplete or unattributed commit evidence was accepted: ") + mode);
     }
+    fixture.local.configure({{"multiEvidence","truncated-report"}});
+    const auto longReport = fixture.adapter->observe(fixture.local.id(),config,run);
+    check(longReport.truncated && longReport.checkedCommit == fixture.model.commit && !longReport.commitEvidenceUnavailable,
+          "truncating the written report must preserve separately verified commit evidence");
     fixture.local.configure({{"multiEvidence","restarted"}});
     const auto observation = fixture.adapter->observe(fixture.local.id(),config,run);
     check(observation.kind == Observation::Kind::Finished && observation.status == "completed" &&

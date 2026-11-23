@@ -657,7 +657,7 @@ std::string commitCheckOutput(const Json& item, std::string_view command) {
 
 std::string checkedCommit(Client& client, const RunRef& assigned, const RunRef& effective,
                           const RunRef& result, const RunEvidence& report, std::string_view expected) {
-    if (!gitCommit(expected) || report.itemId.empty() || report.truncated) return {};
+    if (!gitCommit(expected) || report.itemId.empty()) return {};
     Scan scan;
     std::string before, after;
     bool sawCommand = false, finalReport = false;

@@ -228,7 +228,9 @@ WITH slots AS MATERIALIZED (
   )
   UNION
   SELECT id FROM tasks WHERE state='queued' AND json_extract(data,'$.replanning')=1
-    AND json_extract(data,'$.pendingDestination.environmentId')<>environment_id
+    AND (json_extract(data,'$.pendingDestination.environmentId')<>environment_id OR
+         (json_extract(data,'$.pendingDestination.pinned')=1 AND
+          json_extract(data,'$.pendingDestination.projectId')<>project_id))
   UNION
   SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
   WHERE kind='consult' AND state NOT IN ('completed','cancelled')
@@ -628,8 +630,10 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
             const auto peer = db.peerExchange(id);
             if (peer && !peer->allowsReplan(id)) return false;
             const auto oldEnvironment = field(current,"environmentId");
+            const auto oldProject = field(current,"projectId");
             const auto destination = PendingDestination::read(current);
-            const bool moving = destination && destination->environmentId != oldEnvironment;
+            const bool moving = destination && (destination->environmentId != oldEnvironment ||
+                (destination->pinned && destination->projectId != oldProject));
             const auto event = db.currentEvent(current);
             const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
@@ -639,7 +643,8 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
                 current["newSessionRequired"] = true;
                 current.erase("selectedSession");
                 db.journal(id,"session_destination_changed",
-                    {{"from",oldEnvironment},{"to",destination->environmentId},{"revisionId",revision(current)}});
+                    {{"from",oldEnvironment},{"to",destination->environmentId},{"fromProject",oldProject},
+                     {"toProject",current.at("projectId")},{"revisionId",revision(current)}});
             }
             if (destination && (destination->pinned || destination->projectId.empty()))
                 current.erase("pendingDestination");

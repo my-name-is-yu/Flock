@@ -447,10 +447,11 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
         const auto intent = change->intent.empty() ? oldIntent : change->intent;
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
         const auto& environment = change->route.environmentId;
-        const auto currentEnvironment = field(task,"environmentId");
         const auto pendingRoute = PendingDestination::read(task);
-        const bool destinationChanged = !environment.empty() &&
-            environment != (pendingRoute ? pendingRoute->environmentId : currentEnvironment);
+        const auto currentEnvironment = pendingRoute ? pendingRoute->environmentId : field(task,"environmentId");
+        const auto currentProject = pendingRoute ? pendingRoute->projectId : field(task,"projectId");
+        const bool destinationChanged = !environment.empty() && (environment != currentEnvironment ||
+            (!change->route.projectId.empty() && change->route.projectId != currentProject));
         std::optional<PendingDestination> nextRoute;
         if (destinationChanged) {
             auto project = change->route.projectId;
