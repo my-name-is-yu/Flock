@@ -245,7 +245,6 @@
   .conversation-frame::before, .conversation-frame::after { display: none; }
 }
 .conversation {
-  --bot-accent: var(--accent-fill);
   --user-bubble: #58418a;
   overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0;
   /* Contain absolutely positioned descendants such as .sr-only text; otherwise they extend the page. */
