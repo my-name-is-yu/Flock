@@ -65,7 +65,7 @@ async function load() {
   describeMode(mode);
   $('rules').replaceChildren();
   if (!rules.length) row('rules', canManagePolicy
-    ? emptyLabel('No rules yet', 'Choosing Always allow on a request adds one here. You can also run ', command('flock rules add'), '.')
+    ? emptyLabel('No rules yet', 'Choosing Always allow on a request adds one here, or add one below.')
     : emptyLabel('No rules yet', 'An installation administrator can add rules.'));
   for (const {kind, action, target} of rules) {
     const label = document.createElement('span');
@@ -106,11 +106,8 @@ async function load() {
       item.append(remove);
     }
     row('connections', emptyLabel('Coding agents', 'Codex and Claude Code on this machine reach Flock on port ', command(String(t3.port)), '.'));
-  } else if (canManagePolicy && t3Setup) {
-    row('connections', emptyLabel('Not connected', 'Connect a T3 environment so its Sessions can ask your Bots.'));
   } else if (canManagePolicy) {
-    row('connections', emptyLabel('Not connected',
-      'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on this machine.'));
+    row('connections', emptyLabel('Not connected', 'Connect a T3 environment so its Sessions can ask your Bots.'));
   } else {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
