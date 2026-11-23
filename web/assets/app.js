@@ -1037,7 +1037,7 @@ function renderActivity() {
         ? [actionLabel(item.action), item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
       const row = activityRow('button', 'wait-row', title, status, 'waiting');
       row.type = 'button';
-      row.title = item.itemKind === 'policy_approval' ? approvalSummary(item.prompt) || title : item.prompt || title;
+      row.title = item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item.target) || title : item.prompt || title;
       row.addEventListener('click', () => {
         openNavigation(false);
         decisions.openItem(item, row);
