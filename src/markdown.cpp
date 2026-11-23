@@ -388,7 +388,6 @@ std::string convert(std::string_view source, Target target, const SensitiveText&
     auto* document = cmark_parse_document(bytes,source.size(),CMARK_OPT_DEFAULT);
     if (!document) return escape(source,target);
     std::unique_ptr<cmark_node,decltype(&cmark_node_free)> root(document,cmark_node_free);
-    // A URL that exceeds the decoding limit requires redaction even without protected text.
     if (target == Target::html &&
         ((sensitive && sensitive(render(root.get(),Target::html_text,0))) || hasSensitiveUrl(root.get(),sensitive)))
         return "<p>[redacted]</p>";

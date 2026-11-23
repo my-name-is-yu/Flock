@@ -231,7 +231,6 @@ void dueAutomationWakesAfterIdle(bool externalWrite, bool duringTick) {
     runtime.tickConcurrent();
     check(store.tasks("beta").empty(),"A reminder ran before it was due");
 
-    // Leave the approvals check unchanged and make the reminder due before the automation check.
     if (duringTick) clockReadsUntilDue = 2;
     else makeDue();
     runtime.tickConcurrent();
@@ -256,7 +255,6 @@ void failedAutomationDoesNotInvalidateOtherMaintenance() {
     });
     runtime.tickConcurrent();
 
-    // Read-only probes still work, but repeating either completed write transaction would contend.
     Fixture::sql(locker.get(),"BEGIN IMMEDIATE");
     runtime.tickConcurrent();
     if (!contention) Fixture::sql(locker.get(),"ROLLBACK");

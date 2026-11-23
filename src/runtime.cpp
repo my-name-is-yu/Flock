@@ -157,7 +157,6 @@ struct Runtime::Impl {
         deferContendedWork("database change stamp",[&] { check.emplace(db.changeStamp(),now); });
         if (check && check == completed) return;
         deferContendedWork(operation,[&] {
-            // Pair the pre-scan stamp with the time the phase actually used.
             const std::optional<Seconds> second = work();
             if (check && second) completed.emplace(check->stamp,*second);
         });
