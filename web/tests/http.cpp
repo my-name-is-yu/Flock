@@ -681,7 +681,8 @@ void exercise(const std::filesystem::path& path) {
           "configuration failure was not classified");
     const auto list = browser.get("/api/bots");
     const auto releaseRow = std::find_if(list.begin(),list.end(),[](const Json& bot) { return bot.at("id") == "release"; });
-    check(releaseRow != list.end() && releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
+    check(releaseRow != list.end() && !releaseRow->value("about",std::string{}).empty() &&
+          releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
           "Bot list does not show Release's latest question");
     check(releaseRow->at("latestIncomingEventId") == waits[0]["wait"]["messageId"],
           "a Bot question did not update the incoming event ID");

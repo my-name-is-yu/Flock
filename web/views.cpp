@@ -341,6 +341,10 @@ Json botList(Store& store, const Json& bots) {
         const auto id = field(bot,"id");
         if (id.empty()) continue;
         auto row = botSummary(bot);
+        // The first line of SOUL.md says what the Bot is for; Flock settings lists it under the name.
+        const auto soul = field(bot,"soul");
+        const auto line = soul.substr(0,soul.find_first_of("\r\n"));
+        if (!line.empty()) row["about"] = bounded(line,160);
         conversationSummary(row,store,id);
         row["presence"] = botPresence(statesByBot.value(id,Json::array()));
         result.push_back(std::move(row));
