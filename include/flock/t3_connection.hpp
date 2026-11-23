@@ -22,7 +22,9 @@ class T3Connections {
 public:
     explicit T3Connections(Store& store) : store_(store) {}
     // Returns a new bearer only when provider configuration needs to change.
-    std::string connect(std::string_view environment, std::string_view person, T3ConnectionMode, unsigned port);
+    std::string connect(std::string_view environment, std::string_view person, T3ConnectionMode, unsigned port,
+                        const std::function<void(std::string_view)>& install = {}, bool refreshProviders = false);
+    bool ownsBearer(std::string_view token) const;
     bool disconnect(std::string_view environment);
     void providerRemoved();
     std::optional<T3Connection> authenticate(std::string_view token) const;

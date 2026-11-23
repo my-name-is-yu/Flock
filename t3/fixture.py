@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import sqlite3
 import socket
 import signal
 import subprocess
@@ -593,28 +594,12 @@ def test_connection_setup(server, flock, temp):
     codex_config = directory / "config.toml"
     claude_skills = directory / "claude-skills"
     codex_skills = directory / "codex-skills"
-    claude_state = directory / "claude-state"
-    claude = directory / "claude"
-    claude_argv = directory / "claude-argv"
-    claude.write_text("""#!/bin/sh
-printf '%s\\n' "$@" >> "$FIXTURE_CLAUDE_ARGV"
-case "$2" in
-    add-json)
-        [ "$3" = "--scope" ] && [ "$4" = "user" ] && [ "$5" = "flock" ] && [ "$6" = "-" ] &&
-        [ "$#" = 6 ] || exit 2
-        cat > "$FIXTURE_CLAUDE_STATE" ;;
-    remove)
-        [ "$3" = "--scope" ] && [ "$4" = "user" ] && [ "$5" = "flock" ] || exit 2
-        rm "$FIXTURE_CLAUDE_STATE" ;;
-    get) test -f "$FIXTURE_CLAUDE_STATE" ;;
-    *) exit 2 ;;
-esac
-""")
-    claude.chmod(0o700)
-    env = dict(os.environ, FLOCK_CODEX_CONFIG=str(codex_config), FLOCK_CLAUDE_CLI=str(claude),
+    claude_config = directory / "claude.json"
+    env = dict(os.environ, HOME=str(directory), FLOCK_CODEX_CONFIG=str(codex_config),
+               FLOCK_CLAUDE_CONFIG=str(claude_config), FLOCK_CLAUDE_CLI="/usr/bin/true",
                FLOCK_CODEX_CLI="/usr/bin/true", FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills),
-               FLOCK_CODEX_SKILLS_DIR=str(codex_skills), FIXTURE_CLAUDE_STATE=str(claude_state),
-               FIXTURE_CLAUDE_ARGV=str(claude_argv))
+               FLOCK_CODEX_SKILLS_DIR=str(codex_skills))
+    env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
     original = 'model = "fixture"\n\n[mcp_servers.unrelated]\ncommand = "/usr/bin/true"\n'
     codex_config.write_text(original)
@@ -628,9 +613,8 @@ esac
         port = choose_port.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
 
-    def connect(environment, expected_mode, flags, rewritten, restart=False, expected_error=None):
+    def connect(environment, expected_mode, flags, restart=False, expected_error=None):
         server.state["claimedEnvironment"] = environment
-        argv_before = claude_argv.read_text() if claude_argv.exists() else ""
         with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
                                          *flags], env=env, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
@@ -655,20 +639,20 @@ esac
                     process.kill()
         details = json.loads(output)
         assert details["mode"] == expected_mode and details["port"] == port
-        assert details["configuredProviders"] == (["codex", "claude"] if rewritten else [])
+        has_claude = env["FLOCK_CLAUDE_CLI"] == "/usr/bin/true"
+        assert details["configuredProviders"] == (["codex", "claude"] if has_claude else ["codex"])
         assert ("Restart 'flock run'" in errors) == restart
         codex = codex_config.read_text()
         assert codex.startswith(original) and codex.count("[mcp_servers.flock]") == 1 and endpoint in codex
         assert codex_config.stat().st_mode & 0o777 == 0o600
         token, = re.findall(r'Authorization = "Bearer (flock-t3-[a-f0-9]{64})"', codex)
         assert token not in output and token not in errors
-        assert json.loads(claude_state.read_text()) == {
-            "type": "http", "url": endpoint, "headers": {"Authorization": "Bearer " + token},
-        }
-        argv = claude_argv.read_text()
-        assert "flock-t3-" not in argv and (argv != argv_before) == rewritten
+        if has_claude:
+            assert json.loads(claude_config.read_text())["mcpServers"]["flock"] == {
+                "type": "http", "url": endpoint, "headers": {"Authorization": "Bearer " + token},
+            }
         assert token.encode() not in (state / "flock.sqlite3").read_bytes()
-        for root in [claude_skills, codex_skills]:
+        for root in ([codex_skills, claude_skills] if has_claude else [codex_skills]):
             assert (root / "flock" / "SKILL.md").is_file()
             skill = (root / "flock-reviewer" / "SKILL.md").read_text()
             assert "Reviewer" in skill and "botId `reviewer`" in skill and token not in skill
@@ -682,16 +666,34 @@ esac
         'mcp_servers = { flock = { url = "https://example.com/mcp" } }\n',
     ]:
         codex_config.write_text(reserved)
-        connect("env-1", "full", ["--port", str(port)], rewritten=False,
+        connect("env-1", "full", ["--port", str(port)],
                 expected_error="Remove the existing Codex MCP server named flock")
         assert codex_config.read_text() == reserved
     command = working_command
     codex_config.write_text(original)
 
-    old = connect("env-1", "full", ["--port", str(port)], rewritten=True, restart=True)
-    token = connect("env-1", "consult", ["--mode", "consult"], rewritten=True)
+    env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
+    old = connect("env-1", "full", ["--port", str(port)], restart=True)
+    assert not claude_config.exists()
+    env["FLOCK_CLAUDE_CLI"] = "/usr/bin/true"
+    token = connect("env-2", "consult", ["--mode", "consult"])
     assert token != old
-    assert connect("env-2", "consult", [], rewritten=False) == token
+    credential_dir = state / "credentials" / "t3"
+    credentials = {path.name: path.read_bytes() for path in credential_dir.glob("*.json")}
+    previous_config = codex_config.read_bytes()
+    def connector():
+        with sqlite3.connect(state / "flock.sqlite3") as db:
+            return db.execute("SELECT * FROM t3_connector").fetchone()
+    previous_connector = connector()
+    saved_claude = claude_config.with_suffix(".saved")
+    claude_config.rename(saved_claude)
+    claude_config.symlink_to(saved_claude)
+    connect("env-2", "consult", [],
+            expected_error="Provider configuration cannot be a symlink")
+    assert {path.name: path.read_bytes() for path in credential_dir.glob("*.json")} == credentials
+    assert codex_config.read_bytes() == previous_config and connector() == previous_connector
+    claude_config.unlink()
+    saved_claude.rename(claude_config)
 
     previous_port = port
     with socket.socket() as choose_port:
@@ -701,7 +703,7 @@ esac
             port = replacement.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
     before_port_change = token
-    token = connect("env-2", "full", ["--port", str(port), "--mode", "full"], rewritten=True, restart=True)
+    token = connect("env-2", "full", ["--port", str(port), "--mode", "full"], restart=True)
     assert token != before_port_change
 
     for option in ("--headless", "--no-web"):
@@ -741,11 +743,24 @@ esac
             assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
             subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
-            assert ping(token) == 200 and endpoint in codex_config.read_text() and claude_state.exists()
+            assert ping(token) == 200 and endpoint in codex_config.read_text() and "flock" in json.loads(claude_config.read_text())["mcpServers"]
             subprocess.run(command + ["t3", "disconnect", "env-2"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
             assert ping(token) == 401
-            assert codex_config.read_text() == original and not claude_state.exists()
+            assert codex_config.read_text() == original and "flock" not in json.loads(claude_config.read_text())["mcpServers"]
+
+            connect("env-1", "full", ["--port", str(port)], restart=True)
+            second = [flock, "--home", str(directory / "second-flock")]
+            command = second
+            # Setup only needs OAuth and provider files. The Web port remains with the first home.
+            profile = directory / "second-flock" / "bots" / "reviewer"
+            profile.mkdir(parents=True)
+            (profile / "config.json").write_text('{"name":"Reviewer","role":"reviewer"}')
+            connect("env-1", "full", ["--port", str(port)], restart=True)
+            configs = codex_config.read_bytes(), claude_config.read_bytes()
+            subprocess.run(working_command + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert (codex_config.read_bytes(), claude_config.read_bytes()) == configs
         finally:
             daemon.terminate()
             daemon.wait(timeout=8)

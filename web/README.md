@@ -31,7 +31,7 @@ root authority only when all of those credentials currently have `adminRoot`.
 Run `flock t3 connect ENVIRONMENT MCP_URL` on the machine running Flock.
 Approve T3 OAuth read and operate access for each connected environment.
 Flock registers one loopback MCP server with installed Codex and Claude Code
-2.1.327 or later and exports their Flock skills. If you replace a Bot directory
+and exports their Flock skills. If you replace a Bot directory
 by hand, give the new Bot a new ID so old requests and cached skills keep their
 original identity. For shared Web identities, include the CLI's `local-owner`
 person in the identity file and give it `decide` on the Bots it may invoke.
@@ -55,14 +55,15 @@ configuration. Ordinary Bot launches still require their environment grants.
 The first connection saves port 4173 by default. Use `--port PORT` to change
 it and restart any running `flock run`. Keep the Web listener enabled for T3
 skills. A busy saved port prevents startup. Adding an environment at the same
-port keeps the shared provider configuration. Reconnecting an existing
-environment or changing the port rotates the shared bearer. Existing provider
+port keeps a complete provider configuration. Reconnecting an existing
+environment, changing the port, or provisioning a missing registration
+rotates the shared bearer. Existing provider
 sessions may need to reload their configuration. `flock t3 disconnect
 ENVIRONMENT` removes the environment from handoff verification and delivery.
 Disconnecting the final environment revokes the bearer and removes the provider
 registration. T3 OAuth credentials remain available for separately authorized
 ordinary Bot work. For custom provider installations, set `FLOCK_CLAUDE_CLI`,
-`FLOCK_CODEX_CLI`, `FLOCK_CODEX_CONFIG`, `FLOCK_CLAUDE_SKILLS_DIR`, or
+`FLOCK_CODEX_CLI`, `FLOCK_CODEX_CONFIG`, `FLOCK_CLAUDE_CONFIG`, `FLOCK_CLAUDE_SKILLS_DIR`, or
 `FLOCK_CODEX_SKILLS_DIR`.
 
 Only providers running on the same machine as Flock can call its loopback

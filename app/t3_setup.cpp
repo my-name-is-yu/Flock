@@ -4,16 +4,11 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <memory>
 #include <fcntl.h>
 #include <fstream>
-#include <spawn.h>
 #include <sys/file.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #include <toml++/toml.hpp>
-
-extern char** environ;
 
 namespace flockv0::app {
 namespace {
@@ -46,34 +41,6 @@ bool installed(const std::string& command) {
     return false;
 }
 
-bool runProvider(std::vector<std::string> args, std::string_view input = {}) {
-    // A private, unnamed file lets the child read the configuration without putting it in argv.
-    std::unique_ptr<FILE,decltype(&std::fclose)> data(nullptr,std::fclose);
-    if (!input.empty()) {
-        data.reset(std::tmpfile());
-        if (!data || std::fwrite(input.data(),1,input.size(),data.get()) != input.size() ||
-            std::fflush(data.get()) != 0 || std::fseek(data.get(),0,SEEK_SET) != 0 ||
-            fcntl(fileno(data.get()),F_SETFD,FD_CLOEXEC) < 0) return false;
-    }
-    std::vector<char*> argv;
-    for (auto& arg : args) argv.push_back(arg.data());
-    argv.push_back(nullptr);
-
-    posix_spawn_file_actions_t actions;
-    if (posix_spawn_file_actions_init(&actions) != 0) return false;
-    const auto redirect = posix_spawn_file_actions_addopen(&actions,STDOUT_FILENO,"/dev/null",O_WRONLY,0) ||
-                          posix_spawn_file_actions_addopen(&actions,STDERR_FILENO,"/dev/null",O_WRONLY,0) ||
-                          (data && posix_spawn_file_actions_adddup2(&actions,fileno(data.get()),STDIN_FILENO));
-    pid_t pid = 0;
-    const auto started = redirect == 0 && posix_spawnp(&pid,argv.front(),&actions,nullptr,argv.data(),environ) == 0;
-    posix_spawn_file_actions_destroy(&actions);
-    if (!started) return false;
-    int status = 0;
-    pid_t waited;
-    do { waited = waitpid(pid,&status,0); } while (waited < 0 && errno == EINTR);
-    return waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
-
 void saveConfig(const fs::path& path, std::string_view content) {
     if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
     auto temporary = path.string() + ".flock.XXXXXX";
@@ -95,19 +62,50 @@ void saveConfig(const fs::path& path, std::string_view content) {
     }
 }
 
-void editCodex(std::string_view url, std::string_view token) {
+using OwnsBearer = std::function<bool(std::string_view)>;
+
+bool matchesBearer(std::string_view header, const OwnsBearer& owns) {
+    constexpr std::string_view prefix = "Bearer ";
+    return header.starts_with(prefix) && owns(header.substr(prefix.size()));
+}
+
+struct ConfigEdit {
+    fs::path path;
+    std::optional<std::string> original;
+    std::string content;
+
+    explicit ConfigEdit(fs::path file) : path(std::move(file)) {
+        if (fs::is_symlink(path)) throw Conflict("Provider configuration cannot be a symlink");
+        std::ifstream stream(path,std::ios::binary);
+        if (!stream && fs::exists(path)) throw Conflict("Could not read provider configuration");
+        if (stream) original.emplace(std::istreambuf_iterator<char>(stream),std::istreambuf_iterator<char>());
+        content = original.value_or("");
+    }
+
+    bool changed() const { return content != original.value_or(""); }
+    void apply() const { if (changed()) saveConfig(path,content); }
+    void restore() const {
+        if (!changed()) return;
+        if (original) saveConfig(path,*original);
+        else fs::remove(path);
+    }
+};
+
+ConfigEdit editCodex(std::string_view url, std::string_view token, const OwnsBearer& owns) {
     constexpr std::string_view begin = "# BEGIN Flock T3 connection\n";
     constexpr std::string_view end = "# END Flock T3 connection\n";
-    const auto path = userPath("FLOCK_CODEX_CONFIG",".codex/config.toml");
-    if (fs::is_symlink(path)) throw Conflict("Use FLOCK_CODEX_CONFIG to point to the Codex configuration file");
-    std::ifstream stream(path,std::ios::binary);
-    if (!stream && fs::exists(path)) throw Conflict("Could not read the Codex configuration");
-    std::string config(std::istreambuf_iterator<char>(stream),{});
-    const auto original = config;
+    ConfigEdit edit(userPath("FLOCK_CODEX_CONFIG",".codex/config.toml"));
+    auto& config = edit.content;
     const auto start = config.find(begin);
     if (start != config.npos) {
         const auto finish = config.find(end,start + begin.size());
         if (finish == config.npos) throw Conflict("Incomplete Flock entry in Codex configuration");
+        if (url.empty()) {
+            const auto parsed = toml::parse(config);
+            const auto header = parsed["mcp_servers"]["flock"]["http_headers"]["Authorization"]
+                .value_or(std::string{});
+            if (!matchesBearer(header,owns)) return edit;
+        }
         config.erase(start,finish + end.size() - start);
     }
     if (!url.empty()) {
@@ -129,20 +127,40 @@ void editCodex(std::string_view url, std::string_view token) {
             throw Conflict("The Codex configuration cannot accept the Flock MCP server");
         }
     }
-    if (original != config) saveConfig(path,config);
+    return edit;
 }
 
-void removeClaude(const std::string& command) {
-    if (!runProvider({command,"mcp","remove","--scope","user","flock"}) &&
-        runProvider({command,"mcp","get","flock"}))
-        throw Conflict("Could not remove the Claude Code MCP server");
+ConfigEdit editClaude(std::string_view url, std::string_view token, const OwnsBearer& owns) {
+    const auto directory = setting("CLAUDE_CONFIG_DIR");
+    ConfigEdit edit(directory.empty() ? userPath("FLOCK_CLAUDE_CONFIG",".claude.json")
+                                     : fs::path(directory) / ".claude.json");
+    if (url.empty() && !edit.original) return edit;
+    auto config = edit.original ? Json::parse(*edit.original) : Json::object();
+    if (!config.is_object()) throw Conflict("Invalid Claude Code configuration");
+    if (url.empty() && !config.contains("mcpServers")) return edit;
+    auto& servers = config["mcpServers"];
+    if (servers.is_null()) servers = Json::object();
+    if (!servers.is_object()) throw Conflict("Invalid Claude Code MCP configuration");
+    if (const auto current = servers.find("flock"); current != servers.end()) {
+        const auto headers = current->is_object() ? current->value("headers",Json::object()) : Json::object();
+        const auto header = headers.is_object() ? headers.value("Authorization",std::string{}) : std::string{};
+        if (!matchesBearer(header,owns)) {
+            if (url.empty()) return edit;
+            throw Conflict("Remove the existing Claude Code MCP server named flock before connecting");
+        }
+    } else if (url.empty()) return edit;
+    if (url.empty()) servers.erase("flock");
+    else servers["flock"] = {{"type","http"},{"url",url},{"headers",{{"Authorization","Bearer " + std::string(token)}}}};
+    edit.content = config.dump(2) + '\n';
+    return edit;
 }
 
 }
 
-T3SetupLock::T3SetupLock(const std::filesystem::path& state) {
-    fs::create_directories(state);
-    fd_ = open((state / ".t3-setup.lock").c_str(),O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW,0600);
+T3SetupLock::T3SetupLock() {
+    const auto directory = userPath("HOME","") / ".codex";
+    fs::create_directories(directory);
+    fd_ = open((directory / ".t3-setup.lock").c_str(),O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW,0600);
     if (fd_ < 0) throw Conflict("Could not open the T3 setup lock");
     if (flock(fd_,LOCK_EX | LOCK_NB) != 0) {
         close(fd_);
@@ -152,27 +170,54 @@ T3SetupLock::T3SetupLock(const std::filesystem::path& state) {
 
 T3SetupLock::~T3SetupLock() { close(fd_); }
 
-Json configureT3Providers(std::string_view url, std::string_view token) {
+Json configureT3Providers(std::string_view url,
+    const std::function<void(const InstallT3Provider&)>& connect) {
     auto providers = Json::array();
-    if (installed(setting("FLOCK_CODEX_CLI","codex"))) {
-        editCodex(url,token);
-        providers.push_back("codex");
-    }
-    const auto claude = setting("FLOCK_CLAUDE_CLI","claude");
-    if (installed(claude)) {
-        runProvider({claude,"mcp","remove","--scope","user","flock"});
-        const Json server{{"type","http"},{"url",url},{"headers",{{"Authorization","Bearer " + std::string(token)}}}};
-        if (!runProvider({claude,"mcp","add-json","--scope","user","flock","-"},server.dump()))
-            throw Conflict("Could not configure the Claude Code MCP server. Claude Code 2.1.327 or later is required.");
-        providers.push_back("claude");
+    std::vector<ConfigEdit> edits;
+    std::size_t applied = 0;
+    try {
+        connect([&](std::string_view token) {
+            if (installed(setting("FLOCK_CODEX_CLI","codex"))) {
+                edits.push_back(editCodex(url,token,{}));
+                providers.push_back("codex");
+            }
+            if (installed(setting("FLOCK_CLAUDE_CLI","claude"))) {
+                edits.push_back(editClaude(url,token,[](std::string_view bearer) {
+                    return bearer.starts_with("flock-t3-");
+                }));
+                providers.push_back("claude");
+            }
+            for (const auto& edit : edits) {
+                edit.apply();
+                ++applied;
+            }
+        });
+    } catch (...) {
+        bool rollbackFailed = false;
+        while (applied) {
+            try { edits[--applied].restore(); }
+            catch (...) { rollbackFailed = true; }
+        }
+        if (rollbackFailed) throw Conflict("Could not restore provider configuration after T3 setup failed");
+        throw;
     }
     return providers;
 }
 
-void removeT3Providers() {
-    editCodex({},{});
-    const auto claude = setting("FLOCK_CLAUDE_CLI","claude");
-    if (installed(claude)) removeClaude(claude);
+bool t3ProvidersNeedRefresh(const OwnsBearer& owns) {
+    if (installed(setting("FLOCK_CODEX_CLI","codex")) && !editCodex({},{},owns).changed()) return true;
+    return installed(setting("FLOCK_CLAUDE_CLI","claude")) && !editClaude({},{},owns).changed();
+}
+
+void removeT3Providers(const OwnsBearer& owns) {
+    const auto codex = editCodex({},{},owns);
+    const auto claude = editClaude({},{},owns);
+    codex.apply();
+    try { claude.apply(); }
+    catch (...) {
+        codex.restore();
+        throw;
+    }
 }
 
 void syncT3Skills(const Json& bots) {
