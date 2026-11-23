@@ -377,6 +377,8 @@ public:
     // Let admitted work settle while stopping further dispatch.
     void requestStop();
 private:
+    friend class SessionHandoff;
+    void freezeSpecialistWorkForRecovery(Id channel, Id generation);
     struct Impl;
     std::unique_ptr<Impl> p_;
 };

@@ -462,13 +462,18 @@ JOIN workflow_stages s ON s.workflow_id=w.id WHERE d.recipient_task=? AND s.task
         return row.next() ? row.number(0) : specialistBudgetAllowance;
     }
 
-    void freezeSpecialistWork(const Person& person, Id channel, Id generation) {
+    void freezeSpecialistWork(const Person* person, Id channel, Id generation) {
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
-        const auto participation = db.authorizeParticipation(person,channel,false);
-        if (!std::holds_alternative<CoordinationActivation>(participation)) return;
-        auto control = db.query("SELECT generation,state FROM session_controls WHERE channel_id=?",{channel});
+        if (person && !std::holds_alternative<CoordinationActivation>(
+                db.authorizeParticipation(*person,channel,false))) return;
+        auto control = db.query(R"SQL(
+SELECT s.generation,s.state FROM session_controls s JOIN return_channels r ON r.id=s.channel_id
+WHERE s.channel_id=? AND s.permission<>'null'
+)SQL",{channel});
         if (!control.next() || control.number(0)<=generation || control.string(1)=="active") return;
+        if (!person && control.string(1)!="paused" && control.string(1)!="stopped" &&
+            control.string(1)!="budget_exhausted") return;
         auto rows = db.query(R"SQL(
 SELECT recipient_task FROM specialist_delegations WHERE channel_id=? AND generation<=?
 UNION SELECT s.task_id FROM specialist_delegations d JOIN workflows w ON w.delegation_id=d.id
@@ -2725,7 +2730,11 @@ Id Runtime::specialistBudgetRemaining(Id channel) const {
     return p_->specialistBudgetRemaining(channel);
 }
 void Runtime::freezeSpecialistWork(const Person& person, Id channel, Id generation) {
-    p_->freezeSpecialistWork(person,channel,generation);
+    p_->freezeSpecialistWork(&person,channel,generation);
+}
+
+void Runtime::freezeSpecialistWorkForRecovery(Id channel, Id generation) {
+    p_->freezeSpecialistWork(nullptr,channel,generation);
 }
 void Runtime::requestStop() { p_->shutdown.request_stop(); }
 void Runtime::runConversations() {

@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS session_decisions(
 
 void SessionHandoff::recover() {
     auto& db = *store_.p_;
-    struct Sweep { std::string person; Id channel, generation; };
+    struct Sweep { Id channel, generation; };
     std::vector<Sweep> sweeps;
     {
         std::lock_guard lock(db.mutex);
@@ -82,23 +82,15 @@ void SessionHandoff::recover() {
                 {static_cast<int>(State::Unknown),static_cast<int>(State::Dispatching)});
         if (runtime_) {
             auto rows = db.query(R"SQL(
-SELECT DISTINCT r.person_id,d.channel_id,c.generation-1 FROM session_controls c
-JOIN return_channels r ON r.id=c.channel_id
+SELECT DISTINCT d.channel_id,c.generation-1 FROM session_controls c
 JOIN specialist_delegations d ON d.channel_id=c.channel_id
 WHERE c.state IN ('paused','stopped','budget_exhausted') AND d.generation<c.generation
 )SQL");
-            while (rows.next()) sweeps.push_back({rows.string(0),rows.number(1),rows.number(2)});
+            while (rows.next()) sweeps.push_back({rows.number(0),rows.number(1)});
         }
     }
-    for (const auto& sweep : sweeps) {
-        const auto person = people_(sweep.person);
-        if (!person) continue;
-        try {
-            runtime_->freezeSpecialistWork(*person,sweep.channel,sweep.generation);
-        } catch (const ParticipationAccessDenied&) {
-            continue;
-        }
-    }
+    for (const auto& sweep : sweeps)
+        runtime_->freezeSpecialistWorkForRecovery(sweep.channel,sweep.generation);
 }
 
 SessionHandoffView SessionHandoff::freezeAs(const Person& person, Id channel, std::string_view state) {
