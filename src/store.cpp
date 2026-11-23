@@ -239,6 +239,16 @@ FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
     initializeChannelSchema();
     initializeLocalMachineSchema();
     initializeModelBudgetSchema();
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS conversation_model_failures(
+  attempt_id INTEGER PRIMARY KEY REFERENCES model_attempts(id),
+  message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id),
+  step INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  repair_attempt_id INTEGER UNIQUE REFERENCES model_attempts(id) ON DELETE SET NULL)
+)SQL");
+    exec("CREATE UNIQUE INDEX IF NOT EXISTS conversation_model_repairs"
+         " ON conversation_model_failures(message_id) WHERE repair_attempt_id IS NOT NULL");
     initializeWorkspaceSchema();
     initializeAttachmentsSchema();
     initializeCompactionSchema();

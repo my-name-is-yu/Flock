@@ -38,6 +38,17 @@ const std::vector<std::string> webTools{"start_workflow","workflow_status","inst
     "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
     "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
 
+std::string_view modelFailureReason(ModelErrorCode code) {
+    switch (code) {
+        case ModelErrorCode::invalid_tool_count: return "invalid_tool_count";
+        case ModelErrorCode::invalid_tool_output: return "invalid_tool_output";
+        case ModelErrorCode::unavailable_tool: return "unavailable_tool";
+        case ModelErrorCode::invalid_tool_arguments: return "invalid_tool_arguments";
+        case ModelErrorCode::inference_failed: return "inference_failed";
+    }
+    return "inference_failed";
+}
+
 bool japanese(std::string_view text) {
     return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
         return byte == 0xe3 || (byte >= 0xe4 && byte <= 0xe9);
@@ -795,9 +806,27 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                      {encodeCalls(*completedCalls),id,checkpoint.step});
                 exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
                 hasDecision = true;
-            } else if (const auto retry = std::get<ConversationModelFailure>(checkpoint.outcome).retryFrom) {
-                deferConversation(id,*retry);
-            } else finishTurn(message,failure,nullptr,"error");
+            } else {
+                const auto& error = std::get<ConversationModelFailure>(checkpoint.outcome);
+                const bool isRepair = checkpoint.attempt && query(
+                    "SELECT 1 FROM conversation_model_failures WHERE repair_attempt_id=?",{checkpoint.attempt}).next();
+                Id repair = 0;
+                if (checkpoint.attempt && error.code != ModelErrorCode::inference_failed &&
+                    !query("SELECT 1 FROM conversation_model_failures WHERE message_id=? AND repair_attempt_id IS NOT NULL",
+                           {id}).next()) {
+                    repair = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
+                    if (repair) exec("UPDATE conversation_turns SET reserved_attempt=? WHERE message_id=?",{repair,id});
+                }
+                if (checkpoint.attempt)
+                    exec("INSERT INTO conversation_model_failures(attempt_id,message_id,step,reason,repair_attempt_id)"
+                         " VALUES(?,?,?,?,?)",
+                         {checkpoint.attempt,id,checkpoint.step,modelFailureReason(error.code),
+                          repair ? Json(repair) : Json(nullptr)});
+                if (!repair) {
+                    if (error.retryFrom && !isRepair) deferConversation(id,*error.retryFrom);
+                    else finishTurn(message,failure,nullptr,"error");
+                }
+            }
         }
         transaction.commit();
         conversationCheckpoints.erase(entry);
@@ -867,6 +896,24 @@ LIMIT 1
                 Transaction transaction(db);
                 if (shutdown.stop_requested()) return;
                 if (!authorizeTurn(message)) { transaction.commit(); return; }
+                auto repair = query(R"SQL(
+SELECT f.repair_attempt_id, t.reserved_attempt IS f.repair_attempt_id, f.reason
+FROM conversation_model_failures f JOIN conversation_turns t USING(message_id)
+WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
+)SQL",{id,step});
+                std::string feedback;
+                if (repair.next()) {
+                    if (!repair.number(1)) {
+                        // A previous worker claimed the repair, but no result survived.
+                        exec("INSERT INTO conversation_model_failures(attempt_id,message_id,step,reason) VALUES(?,?,?,?)",
+                             {repair.number(0),id,step,"repair_interrupted"});
+                        finishTurn(message,failure,nullptr,"error");
+                        transaction.commit();
+                        return;
+                    }
+                    feedback = "The previous model response was rejected before executing any of its tools. "
+                               "Reason: " + repair.string(2) + ". Return exactly one offered tool with valid arguments.";
+                }
                 if (!query(R"SQL(
 SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
  SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL))
@@ -879,7 +926,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 auto [offered,machines] = available();
                 const auto context = turnInput(message,step,now,std::move(machines),images);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
-                         .notes = botNotes,.tools = std::move(offered),.feedback = {},.config = message.routing.at("config"),
+                         .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
                          .images = std::move(images)};
                 transaction.commit();
             }
@@ -905,13 +952,14 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 checkpoint.usage = std::move(response.usage);
                 calls = std::move(response.calls);
                 if (calls.empty() || calls.size() > maxToolCalls)
-                    throw ModelError("Invalid Flock call count",false);
+                    throw ModelError("Invalid Flock call count",ModelErrorCode::invalid_tool_count);
                 if (calls.size() > 1 && !std::ranges::all_of(calls,[](const auto& call) { return isBotTool(call.tool); }))
-                    throw ModelError("Parallel calls must be independent Bot tools",false);
+                    throw ModelError("Parallel calls must be independent Bot tools",ModelErrorCode::invalid_tool_count);
                 checkpoint.outcome = calls;
             } catch (const ModelError& error) {
                 if (!error.usage.empty()) checkpoint.usage = error.usage;
-                if (error.transient) checkpoint.outcome = ConversationModelFailure{clock()};
+                checkpoint.outcome = ConversationModelFailure{
+                    error.transient ? std::optional<Seconds>{clock()} : std::nullopt,error.code};
             } catch (const StorageError&) {
                 throw;
             } catch (const std::exception&) {}

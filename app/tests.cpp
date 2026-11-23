@@ -435,6 +435,19 @@ void responseContract() {
     check(responseDecision(modelCall("flock_session_search",searchArgs),turn).calls.at(0).args.at("project") == "Release" &&
           responseDecision(modelCall("flock_session_events",eventArgs),turn).calls.at(0).args.at("attachmentRef") == "opaque-attachment",
           "model Session calls were not decoded using the live schemas");
+    auto mixedInput = input;
+    mixedInput.tools.push_back("workspace_read_file");
+    const auto mixedRequest = responseRequest(mixedInput);
+    check(mixedRequest.at("parallel_tool_calls") == false,"A conversation with Bot tools allowed mixed calls");
+    auto mixedCalls = modelCall("flock_session_search",searchArgs);
+    mixedCalls.push_back(modelCall("check_environment_readiness",{{"reason","Check the connection"}}).front());
+    try {
+        responseDecision(mixedCalls,mixedRequest);
+        check(false,"Mixed Session search and connection check were accepted");
+    } catch (const ModelError& error) {
+        check(error.code == ModelErrorCode::invalid_tool_count && !error.transient,
+              "The mixed response lost its rejection code");
+    }
     auto spoofed = eventArgs;
     spoofed["botId"] = "someone-else";
     rejects<ModelError>([&] { responseDecision(modelCall("flock_session_events",spoofed),turn); },

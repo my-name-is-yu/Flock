@@ -74,6 +74,7 @@ struct TaskChange { std::string intent, doneWhen, environment; };
 
 struct ConversationModelFailure {
     std::optional<Seconds> retryFrom;
+    ModelErrorCode code = ModelErrorCode::inference_failed;
 };
 
 struct ConversationModelCheckpoint {
