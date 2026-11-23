@@ -10,40 +10,27 @@ using conversation_storage::identifier;
 using conversation_storage::ToolError;
 
 namespace {
-enum class SessionControl { Steer, Interrupt };
-
 struct SessionEffect {
-    SessionControl control;
     Id taskId, generation;
     Json run;
     Command command;
 
     Json checkpoint() const {
-        Json effect = {{"kind",control == SessionControl::Steer ? "steer" : "interrupt"},{"taskId",taskId},
+        Json effect = {{"kind","interrupt"},{"taskId",taskId},
                        {"environmentId",command.environmentId},{"ownerBotId",command.ownerBotId},
                        {"projectId",command.projectId},{"config",command.config},{"run",run},{"actionId",command.actionId}};
-        if (control == SessionControl::Steer) effect["text"] = command.instruction;
         return effect;
     }
 
     Json dispatch(T3& t3) const {
-        if (control == SessionControl::Interrupt) {
-            const auto outcome = t3.interrupt(command.environmentId,command.config,command.target);
-            if (outcome == InterruptOutcome::Requested)
-                return {{"ok",true},{"effect","interrupt_requested"},{"taskId",taskId}};
-            if (outcome == InterruptOutcome::AlreadyTerminal)
-                return {{"ok",false},{"taskId",taskId},{"outcome","already_terminal"},
-                        {"error","The assigned Run already ended"}};
-            return {{"ok",false},{"taskId",taskId},{"outcome","no_active_run"},
-                    {"error","T3 has no active Run to interrupt"}};
-        }
-        const auto delivery = t3.send(command);
-        if (delivery.kind == Delivery::Kind::Accepted)
-            return {{"ok",true},{"effect","delivered"},{"taskId",taskId},{"run",runJson(delivery.run)}};
-        Json failed = {{"ok",false},{"taskId",taskId},
-            {"error",delivery.detail.empty() ? "T3 did not accept the note" : delivery.detail}};
-        if (delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent) failed["delivery"] = "unknown";
-        return failed;
+        const auto outcome = t3.interrupt(command.environmentId,command.config,command.target);
+        if (outcome == InterruptOutcome::Requested)
+            return {{"ok",true},{"effect","interrupt_requested"},{"taskId",taskId}};
+        if (outcome == InterruptOutcome::AlreadyTerminal)
+            return {{"ok",false},{"taskId",taskId},{"outcome","already_terminal"},
+                    {"error","The assigned Run already ended"}};
+        return {{"ok",false},{"taskId",taskId},{"outcome","no_active_run"},
+                {"error","T3 has no active Run to interrupt"}};
     }
 };
 }
@@ -58,7 +45,6 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
         saveTurnResults(id,step,Json::array({redactor(message.bot).record(std::move(failure))}));
     };
     const auto& args = decision.args;
-    const auto control = decision.tool == "message_session" ? SessionControl::Steer : SessionControl::Interrupt;
     const auto admit = [&](Id taskId, Id expected, const Json& expectedRun) {
         const auto task = ownTask(taskId,message);
         const auto& run = task.at("activeRun");
@@ -87,9 +73,6 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
             saveTurnResults(id,step,Json::array({Json{{"ok",false},{"taskId",saved.json(0).at("taskId")},
                 {"delivery","unknown"},{"error","Flock restarted while sending this, so T3 may have received it. "
                                                "Check the Session before sending it again"}}}));
-        } else if (control == SessionControl::Steer && !t3.supportsRunTargetedSteer()) {
-            saveTurnResults(id,step,Json::array({toolFailure("This T3 connection cannot target a specific running Run. "
-                "Use send_to_task to save the instruction for the task's next safe point.")}));
         } else if (!offered) {
             saveTurnResults(id,step,Json::array({toolFailure("Session control was not offered for this turn")}));
         } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
@@ -108,29 +91,13 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
                 command.projectId = field(task,"projectId");
                 command.config = task.at("config");
                 command.target = runRef(run);
-                if (control == SessionControl::Steer) {
-                    command.tool = "steer";
-                    command.instruction = conversation_storage::text(args,"text",conversation_storage::messageSize,true);
-                }
-                effect.emplace(SessionEffect{control,taskId,expected,run,std::move(command)});
+                effect.emplace(SessionEffect{taskId,expected,run,std::move(command)});
             } catch (const ToolError& error) { fail(error); }
         }
         transaction.commit();
     }
     if (!effect) return true;
 
-    if (control == SessionControl::Steer) {
-        auto& command = effect->command;
-        try { command.authGeneration = t3.authGeneration(command.environmentId,command.config); }
-        catch (const std::exception& error) {
-            std::lock_guard lock(mutex);
-            Transaction transaction(db);
-            if (!authorizeTurn(message)) { transaction.commit(); return false; }
-            fail(ToolError(error.what(),{{"taskId",effect->taskId}}));
-            transaction.commit();
-            return true;
-        }
-    }
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -169,8 +136,7 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
             ? toolFailure(approvalError(ApprovalGate::denied)) : effect->dispatch(t3);
     }
     catch (const std::exception& error) {
-        const std::string detail = control == SessionControl::Steer ? "T3 may have received the note: "
-                                                                   : "T3 may have received the interrupt: ";
+        const std::string detail = "T3 may have received the interrupt: ";
         outcome = {{"ok",false},{"taskId",effect->taskId},{"delivery","unknown"},{"error",detail + error.what()}};
     }
     outcome = redactor(message.bot).record(std::move(outcome));
@@ -180,15 +146,158 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
         return false;
     if (outcome.value("ok",false)) {
         Json entry = {{"messageId",id},{"step",step},{"run",outcome.value("run",effect->run)}};
-        if (control == SessionControl::Steer) {
-            entry["text"] = effect->command.instruction;
-            entry["revisionId"] = effect->run.at("revisionId");
-        }
-        journal(effect->taskId,control == SessionControl::Steer ? "instruction_steered" : "interrupt_requested",entry);
+        journal(effect->taskId,"interrupt_requested",entry);
     }
     saveTurnResults(id,step,Json::array({outcome}));
     transaction.commit();
     return true;
+}
+
+bool Store::Impl::sendSessionMessage(const conversation::Message& message, int step, const Decision& decision,
+                                     bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
+    const auto id = message.id;
+    const auto save = [&](Json result) {
+        saveTurnResults(id,step,Json::array({redactor(message.bot).record(std::move(result))}));
+    };
+    Command command;
+    command.tool = "message_session";
+    command.actionId = "flock-turn-" + std::to_string(id) + "-" + std::to_string(step);
+    command.ownerBotId = message.bot;
+    std::string error;
+    try {
+        command.environmentId = conversation_storage::text(decision.args,"environmentId",256,true);
+        command.target.threadId = conversation_storage::text(decision.args,"threadId",256,true);
+        const auto name = redactor(message.bot).text(message.routing.at("config").value("botDisplayName",message.bot));
+        command.instruction = name + ": " +
+            conversation_storage::text(decision.args,"text",conversation_storage::messageSize,true);
+        if (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId"))
+            throw ToolError("Use the Session identifiers");
+    } catch (const ToolError& failure) { error = failure.what(); }
+    const SessionTarget target{command.environmentId,command.target.threadId};
+    const Resource resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target};
+    const auto connected = [&] {
+        return connectedSearchEnvironments(message).contains(target.environmentId) &&
+            Policy(*this).allows(message.bot,Action::environment_inspect,target.environmentId);
+    };
+    {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (!authorizeTurn(message)) { transaction.commit(); return false; }
+        auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step});
+        if (!row.next()) return false;
+        if (!row.string(0).empty()) {
+            save({{"ok",false},{"delivery","unknown"},{"error","Flock restarted while sending this. Check the Session before sending again."}});
+        } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
+            save(webEvidenceActionDenied());
+        } else if (!error.empty()) {
+            save(toolFailure(error));
+        } else if (Policy(*this).forbidden(message.bot,resource.action,resource.target)) {
+            save(toolFailure(approvalError(ApprovalGate::denied)));
+        } else if (!connected()) {
+            save(toolFailure("This Session is unavailable through your T3 connection"));
+        }
+        auto result = query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NOT NULL",{id,step});
+        const bool done = result.next();
+        transaction.commit();
+        if (done) return true;
+    }
+    try {
+        command.authGeneration = t3.authGeneration(target.environmentId,command.config);
+        if (!t3.sessionMetadata(target,false))
+            error = "This Session is unavailable through your T3 connection";
+    } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
+    {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (shutdown.stop_requested()) return false;
+        if (!authorizeTurn(message)) { transaction.commit(); return false; }
+        if (!error.empty() || !connected()) {
+            save(toolFailure(error.empty() ? "This Session is unavailable through your T3 connection" : error));
+            transaction.commit();
+            return true;
+        }
+        const auto gate = approveAction(policyOrigin(message),resource,
+            "turn/" + std::to_string(id) + "/" + std::to_string(step),
+            Json::array({decision.tool,decision.args,command.authGeneration}),policyClock());
+        if (gate != ApprovalGate::allow) {
+            if (gate != ApprovalGate::waiting) save(toolFailure(approvalError(gate)));
+            transaction.commit();
+            return gate != ApprovalGate::waiting;
+        }
+        exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
+             "AND result IS NULL AND effect IS NULL",{Json{{"kind","message_session"}},id,step});
+        if (!sqlite3_changes(db)) return false;
+        transaction.commit();
+    }
+
+    Delivery receipt;
+    try {
+        receipt = Policy(*this).forbidden(message.bot,resource.action,resource.target)
+            ? Delivery{Delivery::Kind::NotAccepted,{},std::string(approvalError(ApprovalGate::denied)),true}
+            : t3.send(command);
+    } catch (const std::exception&) {
+        receipt.detail = "Could not confirm delivery to T3";
+    }
+    std::lock_guard lock(mutex);
+    Transaction transaction(db);
+    if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step}).next())
+        return false;
+    if (receipt.kind == Delivery::Kind::Accepted && receipt.run.threadId == target.threadId &&
+        !receipt.run.runId.empty() && (receipt.delivery == "started" || receipt.delivery == "queued")) {
+        exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run) VALUES(?,?,?,?,?)",
+             {id,message.bot,target.environmentId,target.threadId,receipt.run.runId});
+        save({{"ok",true},{"delivery",receipt.delivery},{"environmentId",target.environmentId},{"threadId",target.threadId}});
+    } else {
+        auto result = toolFailure(receipt.detail.empty() ? "Could not confirm delivery to T3" : receipt.detail);
+        if (!receipt.definitelyUnsent && (receipt.kind == Delivery::Kind::Unknown || receipt.kind == Delivery::Kind::Accepted))
+            result["delivery"] = "unknown";
+        save(std::move(result));
+    }
+    transaction.commit();
+    return true;
+}
+
+void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
+    struct Wait { Id key, message; std::string bot; SessionTarget target; std::string run; };
+    std::vector<Wait> waits;
+    {
+        std::lock_guard lock(mutex);
+        auto rows = query("SELECT rowid,message_id,bot,environment,thread,run FROM session_message_waits WHERE notified=0 ORDER BY rowid");
+        while (rows.next())
+            waits.push_back({rows.number(0),rows.number(1),rows.string(2),{rows.string(3),rows.string(4)},rows.string(5)});
+    }
+    for (const auto& wait : waits) {
+        if (shutdown.stop_requested()) return;
+        const auto authorized = [&] {
+            return connectedSearchEnvironments(loadTurnMessage(wait.message)).contains(wait.target.environmentId) &&
+                Policy(*this).allows(wait.bot,Action::environment_inspect,wait.target.environmentId);
+        };
+        {
+            std::lock_guard lock(mutex);
+            if (!authorized()) continue;
+        }
+        const auto reason = t3.sessionMessageWake(wait.target,{wait.target.threadId,wait.run,{}});
+        if (reason.empty() || shutdown.stop_requested()) continue;
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (!authorized()) continue;
+        exec("UPDATE session_message_waits SET notified=1 WHERE rowid=? AND notified=0",{wait.key});
+        if (!sqlite3_changes(db)) continue;
+        exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
+             {unixTime(),wait.bot});
+        const auto id = last();
+        const auto source = loadTurnMessage(wait.message);
+        auto routing = source.routing;
+        routing["sessionWake"] = {{"environmentId",wait.target.environmentId},{"threadId",wait.target.threadId},
+                                  {"reason",reason},{"sourceMessageId",wait.message}};
+        exec(R"SQL(
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,?,'',?,?,?,? FROM messages WHERE bot_id=?
+)SQL",{id,wait.bot,"session-wake:" + std::to_string(wait.key),wait.message,routing,
+       source.admittedActor.id,source.admittedActor.adminRoot ? 1 : 0,static_cast<int>(source.principalSource),wait.bot});
+        exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
+        transaction.commit();
+    }
 }
 
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request,

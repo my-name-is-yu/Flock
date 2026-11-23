@@ -356,6 +356,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
     auto history = conversationHistory(message,summaries,expandedBytes);
     Json event{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
                {"currentTime",now},{"replyTo",std::move(replyTo)},{"turn",std::move(turn)}};
+    if (message.routing.contains("sessionWake")) event["sessionWake"] = message.routing.at("sessionWake");
     event.update(channel);
     if (web) event["attachments"] = attachmentViews(message.id);
     Json task{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)},
@@ -700,7 +701,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     const bool notification = message.principalSource == PrincipalSource::gitWebhook;
     const bool web = message.channelScope.empty() && !notification;
     auto tools = notification ? std::vector<std::string>{"reply","read_tool_result"} : turnTools;
-    if (!t3.supportsRunTargetedSteer()) std::erase(tools,"message_session");
+    if (!web) std::erase(tools,"message_session");
     if (gitHost && notification) {
         appendGitNotificationTools(message.routing.at("gitEvent"),tools);
     } else if (gitHost && web) tools.insert(tools.end(),gitTools().begin(),gitTools().end());
@@ -888,9 +889,11 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
             if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls,shutdown)) return;
             continue;
         }
-        const bool steer = decision.tool == "message_session";
-        const bool sessionControl = steer || decision.tool == "interrupt_session";
-        if (sessionControl && (decision.rejection.empty() || sessionEffect || (steer && !t3.supportsRunTargetedSteer()))) {
+        if (decision.tool == "message_session" && (decision.rejection.empty() || sessionEffect)) {
+            if (!sendSessionMessage(message,step,decision,hasWebEvidence,t3,shutdown)) return;
+            continue;
+        }
+        if (decision.tool == "interrupt_session" && (decision.rejection.empty() || sessionEffect)) {
             if (!runSessionEffect(message,step,decision,decision.rejection.empty(),hasWebEvidence,t3,shutdown)) return;
             continue;
         }

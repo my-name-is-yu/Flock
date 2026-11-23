@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS conversation_steps(
   attempt_id INTEGER, decision TEXT CHECK(json_type(decision)='array'), effect TEXT,
   result TEXT CHECK(json_type(result)='array'),
   PRIMARY KEY(message_id,step));
+CREATE TABLE IF NOT EXISTS session_message_waits(
+  message_id INTEGER NOT NULL REFERENCES messages(id),
+  bot TEXT NOT NULL, environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL,
+  notified INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(message_id,environment,thread,run));
 CREATE TABLE IF NOT EXISTS task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   number INTEGER NOT NULL, intent TEXT NOT NULL, done_when TEXT NOT NULL,
@@ -132,7 +137,7 @@ Json Store::receiveWeb(const Person& actor, const Intake& routing, std::string_v
 Json Store::receive(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                     conversation::PrincipalSource source, const VerifiedChannelMessage* channel,
                     const std::function<Intake()>& route, const Json& attachments) {
-    if (!channel && clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
+    if (!channel && (clientId.starts_with("channel:") || clientId.starts_with("session-wake:"))) throw Conflict("Channel message IDs are reserved");
     if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) ||
         !hasText(text) || text.size() > messageSize || replyTo < 0)
         throw Conflict("Bot, client message ID and nonempty text are required");

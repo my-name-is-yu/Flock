@@ -120,6 +120,7 @@ struct Delivery {
     RunRef run;
     std::string detail;
     bool definitelyUnsent = false;
+    std::string delivery = {};
 };
 enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun };
 struct ReadRequest {
@@ -179,8 +180,7 @@ struct SessionCounts {
 class T3 {
 public:
     virtual ~T3() = default;
-    // A steer must affect only the requested Run, even if another Run takes over.
-    virtual bool supportsRunTargetedSteer() const { return false; }
+    virtual std::string sessionMessageWake(const SessionTarget&, const RunRef&) { return "unknown"; }
     virtual std::string authGeneration(const std::string& environmentId, const Json& config) = 0;
     // Local/preflight checks only. Throw ModelError for a settings failure and report auth separately.
     virtual std::optional<Delivery> preflight(const Command&) { return std::nullopt; }

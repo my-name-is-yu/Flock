@@ -1,4 +1,8 @@
 #include "flock/policy.hpp"
+#include "flock/board_inbox.hpp"
+#include "flock/t3_connection.hpp"
+
+#include <algorithm>
 
 using namespace flockv0;
 
@@ -165,4 +169,112 @@ void sessionSearchDeadline(T3& t3, const std::filesystem::path& database, const 
     fixture({{"searchReadDelays",Json::object()},{"missingSearchThreads",{"deadline-2"}}});
     check(conversation.search(matchedPage).at("ok") == false,"matched-result cursor accepted an unreadable anchor");
     fixture({{"scenario","session-read"},{"missingSearchThreads",Json::array()}});
+}
+
+
+void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std::function<void(Json)>& fixture,
+                        const std::function<Json(std::string_view)>& effects) {
+    struct ModelFixture final : Model {
+        Decision next;
+        Json result;
+        std::vector<Json> wakes, reads;
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& steps = input.event.at("turn");
+            if (const auto wake = input.event.find("sessionWake"); wake != input.event.end()) {
+                if (steps.empty()) {
+                    wakes.push_back(*wake);
+                    return {{{"flock_session_events",{{"operation","counts"},{"environmentId",wake->at("environmentId")},
+                                                      {"threadId",wake->at("threadId")}},"Read the Session after waking"}}};
+                }
+                reads.push_back(steps.back().at("result"));
+            } else if (steps.empty()) {
+                check(std::ranges::find(input.tools,next.tool) != input.tools.end(),"Session messaging was not offered");
+                return {{next}};
+            } else result = steps.back().at("result");
+            return {{{"reply",{{"text","Checked."}},"Respond after checking"}}};
+        }
+    } model;
+    fixture({{"scenario","running"},{"sessionWakeFixture",true},{"botRunStatus","queued"}});
+    auto store = std::make_unique<Store>(database);
+    auto runtime = std::make_unique<Runtime>(*store,model,t3,[](std::string_view) { return std::string{}; });
+    const auto configureIdentity = [&] {
+        store->setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+            if (person == localOwner.id) return true;
+            return {};
+        });
+    };
+    configureIdentity();
+    const auto restart = [&] {
+        runtime.reset();
+        store = std::make_unique<Store>(database);
+        configureIdentity();
+        runtime = std::make_unique<Runtime>(*store,model,t3,[](std::string_view) { return std::string{}; });
+    };
+    T3Connections(*store).connect("env-1",localOwner.id,3210);
+    const Intake intake{"release","Inspect staging","env-1","project",{{"botDisplayName","Ernest"}}};
+    const auto receive = [&](std::string_view id) {
+        return store->receiveWeb(localOwner,intake,id,"Send the follow-up.");
+    };
+    model.next = {"flock_session_search",Json::object(),"Find the Session"};
+    receive("find");
+    runtime->runConversations();
+    check(model.result.is_object(),"Web conversation did not call Session search");
+    const auto session = model.result.at("sessions").at(0);
+    const auto thread = session.at("threadId").get<std::string>();
+    check(thread == "thread" && session.at("environmentId") == "env-1","Search did not return the Session identifiers");
+    model.next = {"message_session",{{"environmentId",session.at("environmentId")},{"threadId",thread},
+                                    {"text","Check the fixture output"}},"Queue the follow-up"};
+    const auto resource = Resource::sessionRead("env-1",thread).target;
+    const auto sends = [&] { return effects("t3_thread_send").size(); };
+    const auto before = sends();
+    store->policy().changeNeverRule(localOwner,Action::t3_send,resource,true);
+    receive("never");
+    runtime->runConversations();
+    check(sends() == before && model.result.at("ok") == false,"Never permitted a Session send");
+    store->policy().changeNeverRule(localOwner,Action::t3_send,resource,false);
+    store->policy().setMode(localOwner,"supervised");
+    const auto origin = receive("supervised");
+    runtime->runConversations();
+    const auto item = store->inbox(localOwner).at(0);
+    check(sends() == before && item.at("status") == "pending","Supervised sent before approval");
+    restart();
+    const InboxTarget approval{item.at("botId"),InboxKind::policy_approval,item.at("itemId"),item.at("waitId"),
+                               item.at("taskId"),item.at("targetRevision"),item.at("targetGeneration")};
+    store->decideInbox(localOwner,approval,"allow_once");
+    runtime->runConversations();
+    if (sends() != before + 1 || model.result.value("delivery","") != "queued")
+        throw std::runtime_error("Approved Session send did not queue: " + model.result.dump());
+    const auto wire = effects("t3_thread_send").back();
+    const auto requestId = "flock-turn-" + std::to_string(origin.at("messageId").get<Id>()) + "-1";
+    check(wire.at("mode") == "queue" && wire.at("threadId") == thread &&
+          wire.at("message") == "Ernest: Check the fixture output" &&
+          wire.at("clientRequestId") == requestId,"Wrong Session send arguments");
+    check(receive("supervised").at("messageId") == origin.at("messageId"),"Duplicate intake created another turn");
+    fixture({{"personFinished",true}});
+    runtime->runConversations();
+    check(model.wakes.empty() && sends() == before + 1,"The person's completion woke the Bot or resent the step");
+    fixture({{"differentWaitRun",true}});
+    runtime->runConversations();
+    check(model.wakes.empty(),"A different Run's wait response woke the Bot");
+    restart();
+    fixture({{"differentWaitRun",false},{"botRunStatus","completed"}});
+    runtime->runConversations();
+    check(model.wakes.size() == 1 && model.wakes.back().at("reason") == "finished" &&
+          model.reads.back().at("ok") == true,"Restart lost the Bot Run wake or its Session history");
+    restart();
+    runtime->runConversations();
+    check(model.wakes.size() == 1,"Restart repeated an already delivered wake");
+
+    store->policy().setMode(localOwner,"full");
+    fixture({{"botRunStatus","queued"}});
+    receive("full");
+    runtime->runConversations();
+    check(sends() == before + 2 && model.result.at("ok") == true,"Full did not send");
+    fixture({{"botRunStatus","running"},{"botQuestion",true}});
+    runtime->runConversations();
+    fixture({{"botRunStatus","completed"},{"botQuestion",false}});
+    runtime->runConversations();
+    check(model.wakes.size() == 2 && model.wakes.back().at("reason") == "waiting_for_person",
+          "A pending user question did not wake exactly once");
+    fixture({{"sessionWakeFixture",false}});
 }

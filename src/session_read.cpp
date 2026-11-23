@@ -200,6 +200,10 @@ public:
                     {"title",display(item.title,240)},{"project",display(item.project,240)},
                     {"status",display(item.status,128)},{"createdAt",display(item.createdAt,30)},
                     {"updatedAt",display(item.updatedAt,30)},{"matchExcerpt",display(match.excerpt,480)}});
+                if (connected) {
+                    items.back()["environmentId"] = display(target.environmentId,256);
+                    items.back()["threadId"] = display(target.threadId,256);
+                }
             }
             if (nextIndex < batch.size() || catalogTruncated || !progress.at("recorded").is_null()) {
                 auto remaining = Json::array();
@@ -220,7 +224,7 @@ public:
     ApprovalGate authorizeEventTool(const conversation::Message& message, int step, const Decision& call) {
         std::lock_guard lock(store_.mutex);
         Transaction tx(store_.db);
-        const auto session = resolve(reference(call.args,"sessionRef"),RefKind::session);
+        const auto session = eventSession(call.args);
         if (!session || !inSessionScope(session->target,session->payload == connectedScope)) return ApprovalGate::allow;
         const auto resource = Resource::sessionRead(session->target.environmentId,session->target.threadId);
         if (policy_.forbidden(bot_,resource.action,resource.target)) return ApprovalGate::allow;
@@ -483,8 +487,16 @@ JOIN json_each(?3) target ON target.value=entry.value
         return std::move(resolved->payload);
     }
 
+    std::optional<Reference> eventSession(const Json& args) const {
+        const auto ref = reference(args,"sessionRef");
+        if (!ref.empty()) return resolve(ref,RefKind::session);
+        SessionTarget target{argument(args,"environmentId",256),argument(args,"threadId",256)};
+        if (target.environmentId.empty() || target.threadId.empty()) return {};
+        return Reference{std::move(target),connectedScope};
+    }
+
     std::optional<Reference> authorizedTarget(const Json& args) const {
-        auto session = resolve(reference(args,"sessionRef"),RefKind::session);
+        auto session = eventSession(args);
         if (!session || !permitted(*session)) return {};
         return session;
     }

@@ -418,9 +418,10 @@ void verifyCommand(const Command& command) {
         return;
     }
     const bool validTarget = command.tool == "delegate" ||
-        (command.tool == "start_in_session" && !command.target.threadId.empty() && command.target.runId.empty()) ||
-        ((command.tool == "follow_up" || command.tool == "steer") && hasRun(command.target));
-    if (!validTarget || command.projectId.empty() ||
+        ((command.tool == "start_in_session" || command.tool == "message_session") &&
+         !command.target.threadId.empty() && command.target.runId.empty()) ||
+        (command.tool == "follow_up" && hasRun(command.target));
+    if (!validTarget || (command.tool != "message_session" && command.projectId.empty()) ||
         command.actionId.empty() || command.actionId.size() > 256 || trim(command.actionId) != command.actionId ||
         command.actionId.find_first_of("\r\n[]") != std::string::npos || trim(command.instruction).empty() ||
         sessionPrompt(command.actionId,command.instruction).size() > maxSessionPromptBytes)
@@ -756,9 +757,6 @@ public:
     }
 
     Delivery send(const Command& command) override {
-        // The MCP send targets the Thread's current Run and has no expected-Run condition.
-        if (command.tool == "steer")
-            return {Outcome::NotAccepted, {}, "T3 cannot target a specific running Run", true};
         bool invoked = false;
         try {
             verifyCommand(command);
@@ -772,6 +770,19 @@ public:
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
             if (command.tool == "answer_session_question") return answer(client, command, invoked);
+            if (command.tool == "message_session") {
+                const auto environment = client.call("t3_environment_read",Json::object());
+                if (str(environment,"environmentId") != command.environmentId)
+                    return {Outcome::Settings,{},"The OAuth endpoint belongs to a different T3 environment",true};
+                invoked = true;
+                const auto reply = client.call("t3_thread_send",{{"threadId",command.target.threadId},
+                    {"mode","queue"},{"message",command.instruction},{"clientRequestId",command.actionId}});
+                const auto run = str(reply,"runId");
+                const auto delivery = str(reply,"delivery");
+                if (str(reply,"threadId") != command.target.threadId || run.empty() ||
+                    (delivery != "started" && delivery != "queued")) invalidResponse();
+                return {Outcome::Accepted,{command.target.threadId,run,str(reply,"link")},{},false,delivery};
+            }
             Json reply;
             if (launch) {
                 if (!launchArguments.pin.empty()) {
@@ -820,7 +831,6 @@ public:
     }
 
     Delivery reconcile(const Command& command) override {
-        if (command.tool == "steer") return result(Outcome::Unknown, "T3 cannot look up a steered note by action ID");
         try {
             verifyCommand(command);
             auto connection = credential(command.environmentId, command.config);
@@ -852,6 +862,25 @@ public:
             return result(Outcome::QuestionGone);
         } catch (const Failure& failure) {
             return failureDelivery(failure);
+        }
+    }
+
+    std::string sessionMessageWake(const SessionTarget& target, const RunRef& run) override {
+        try {
+            Client client(credential(target.environmentId,Json::object()));
+            const auto reply = wait(client,run,WaitFor::Run,1);
+            if (str(reply,"runId") != run.runId) return {};
+            const auto status = str(reply,"status");
+            if (terminal(status)) return status == "completed" ? "finished" : "failed";
+            if (!active(status)) return "unknown";
+            if (status == "queued" || status == "preparing" || status == "starting") return {};
+            if (pending(client,run.threadId).empty()) return {};
+            // The thread-level question list may have changed while the exact Run ended.
+            const auto head = threadHead(client,run.threadId).at("thread");
+            if (str(head,"activeRunId") == run.runId) return "waiting_for_person";
+            return {};
+        } catch (const Failure&) {
+            return "unknown";
         }
     }
 

@@ -35,7 +35,6 @@ struct Backend : T3 {
     bool nativeCatalog = false;
     std::vector<Id> catalogOffsets;
 
-    bool supportsRunTargetedSteer() const override { return true; }
     std::string authGeneration(const std::string&,const Json&) override { return "connected"; }
     Delivery send(const Command& command) override {
         writes.push_back(command);
@@ -428,7 +427,9 @@ void connectedSearchRespectsCurrentAccess() {
     const auto found = f.call(search,filters);
     check(found.at("sessions").size() == 1 && found.at("sessions").front().at("title") == "Native investigation",
           "connected search remained limited to the Bot routing project");
-    check(found.dump().find(nativeSession) == std::string::npos,"connected search exposed an upstream ID");
+    check(found.at("sessions").front().at("threadId") == nativeSession &&
+          found.at("sessions").front().at("environmentId") == otherEnv,
+          "connected search did not return the Session identifiers");
     const auto reference = found.at("sessions").front().at("sessionRef");
     const Json read{{"sessionRef",reference},{"operation","counts"}};
     const Json work{{"sessionRef",reference},{"request","Continue the investigation"}};

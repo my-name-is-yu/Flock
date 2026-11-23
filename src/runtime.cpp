@@ -136,7 +136,7 @@ struct Runtime::Impl {
     T3& t3;
     SoulLoader soul;
     RuntimeOptions options;
-    std::future<void> channelWorker;
+    std::future<void> channelWorker, sessionWakeWorker;
     std::stop_source shutdown;
     int lockFd = -1;
     std::map<Id,std::future<void>> workers;
@@ -196,6 +196,7 @@ struct Runtime::Impl {
         conversationWorkers.clear();
         workers.clear();
         if (channelWorker.valid()) channelWorker.wait();
+        if (sessionWakeWorker.valid()) sessionWakeWorker.wait();
         try { persistTaskInferences(); }
         catch (const std::exception& error) {
             std::fprintf(stderr,"Flock Task inference shutdown: %s\n",error.what());
@@ -2922,6 +2923,7 @@ void Runtime::runConversations() {
     p_->settleApprovals();
     p_->db.persistWorkspaceResults();
     p_->db.deliverGitWebhooks();
+    p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
     p_->db.deliverChannels(p_->shutdown.get_token());
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick && !p_->shutdown.stop_requested(); ++i) {
@@ -2938,6 +2940,7 @@ void Runtime::tick() {
     p_->db.persistWorkspaceResults();
     p_->fireDueAutomations();
     p_->db.deliverGitWebhooks();
+    p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit,p_->options.clock()))
         p_->runTurn(id);
     p_->db.advanceWorkflows(p_->options.clock());
@@ -2967,6 +2970,13 @@ void Runtime::tickConcurrent() {
     if (!p_->channelWorker.valid() && p_->db.channelDeliveryDue())
         p_->channelWorker = std::async(std::launch::async,[db = &p_->db,stop = p_->shutdown.get_token()] {
             db->deliverChannels(stop);
+        });
+    if (p_->sessionWakeWorker.valid() &&
+        p_->sessionWakeWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        p_->deferContendedWork("Session wake worker",[&] { p_->sessionWakeWorker.get(); });
+    if (!p_->sessionWakeWorker.valid())
+        p_->sessionWakeWorker = std::async(std::launch::async,[impl = p_.get()] {
+            impl->db.wakeSessionMessages(impl->t3,impl->shutdown.get_token());
         });
     constexpr auto maxConversationWorkers = Impl::batchLimit;
     if (p_->conversationWorkers.size() < maxConversationWorkers) {

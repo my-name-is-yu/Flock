@@ -8,6 +8,8 @@
 using namespace flockv0;
 using flockv0::t3detail::http;
 
+void sessionMessageWake(T3&, const std::filesystem::path&, const std::function<void(Json)>&,
+                        const std::function<Json(std::string_view)>&);
 void deletedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&);
 void boundedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&,
                           const std::function<Json(std::string_view)>&);
@@ -418,29 +420,6 @@ int main(int argc, char** argv) {
               "a Run ending before the interrupt was reported as acknowledged");
         fixture({{"interruptReply", false}});
 
-        Command note = launch;
-        note.tool = "steer";
-        note.actionId = "flock-turn-7-2";
-        note.target = run;
-        note.instruction = "Also include the CSV table";
-        note.authGeneration = adapter->authGeneration("env-1", launch.config);
-        check(!adapter->supportsRunTargetedSteer(), "the MCP adapter advertised an unsupported Run-targeted send");
-        const auto sends = effects("t3_thread_send").size();
-        const auto reads = effects("t3_thread_read").size();
-        const auto lists = effects("t3_thread_list").size();
-        for (const auto* scenario : {"running","resumed","manual-active","settled"}) {
-            fixture({{"scenario",scenario}});
-            const auto refused = adapter->send(note);
-            check(refused.kind == Delivery::Kind::NotAccepted && refused.definitelyUnsent,
-                  "the MCP adapter did not refuse an unsupported Run-targeted send");
-        }
-        const auto prior = adapter->reconcile(note);
-        check(prior.kind == Delivery::Kind::Unknown && !prior.definitelyUnsent &&
-              effects("t3_thread_send").size() == sends && effects("t3_thread_read").size() == reads &&
-              effects("t3_thread_list").size() == lists,
-              "the MCP adapter touched T3 during a refused send or rewrote the outcome of an older steer");
-        fixture({{"scenario", "running"}});
-
         signIn("env-1");
         const auto reauthorized = adapter->authGeneration("env-1", launch.config);
         check(reauthorized != launch.authGeneration, "reauthorization changes generation");
@@ -452,6 +431,7 @@ int main(int argc, char** argv) {
               "stale generation blocks commands before send");
         check(effects("t3_thread_launch").size() == 1, "stale authorization never launches another T3 thread");
 
+        sessionMessageWake(*restarted,home.parent_path()/"session-wake.db",fixture,effects);
         fixture({{"scope", "orchestration:read"}});
         check(!signIn("env-1"), "login reports read-only approval");
         other.authGeneration = adapter->authGeneration("env-1", launch.config);

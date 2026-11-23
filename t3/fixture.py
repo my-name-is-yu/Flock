@@ -218,6 +218,11 @@ class Fixture(BaseHTTPRequestHandler):
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
         if name == "t3_thread_send":
+            if state.get("sessionWakeFixture"):
+                assert args["threadId"] == "thread" and args["mode"] == "queue"
+                assert args["clientRequestId"].startswith("flock-turn-")
+                state["botRun"] = "bot-run-" + str(len(state["effects"]["t3_thread_send"]))
+                return {"threadId": "thread", "runId": state["botRun"], "delivery": "queued"}
             if scenario == "selected-session":
                 thread = args["threadId"]
                 assert thread in ("human-selected", "flock-selected") and args["mode"] == "queue"
@@ -255,6 +260,8 @@ class Fixture(BaseHTTPRequestHandler):
         if name == "t3_thread_list":
             if args.get("allProjects") is True:
                 assert "projectId" not in args and not args["includeSubagents"]
+                if state.get("sessionWakeFixture"):
+                    return {"projectId": None, "threads": [self.summary("thread")], "total": 1, "nextCursor": None}
                 projects = [self.summary("first"), self.summary("second") | {"projectId": "another-project"}]
                 return {"projectId": None, "threads": projects, "total": len(projects), "nextCursor": None}
             assert args["projectId"] == "project"
@@ -273,6 +280,14 @@ class Fixture(BaseHTTPRequestHandler):
             return {"projectId": "project", "threads": [self.summary(t) for t in ids[start:end]],
                     "total": len(ids), "nextCursor": end if end < len(ids) else None}
         if name == "t3_thread_wait":
+            if state.get("sessionWakeFixture"):
+                assert args["threadId"] == "thread" and args["runId"] == state["botRun"]
+                assert not args["untilDelegatedWorkSettled"]
+                status = state["botRunStatus"]
+                if state.get("differentWaitRun"):
+                    return {"threadId": "thread", "runId": "root", "status": "completed", "timedOut": False}
+                return {"threadId": "thread", "runId": state["botRun"], "status": status,
+                        "timedOut": status != "completed"}
             if scenario == "selected-session":
                 assert args["threadId"] in ("human-selected", "flock-selected") and args["runId"] == "selected-run"
                 status = state["selectedRunStatus"]
@@ -308,6 +323,8 @@ class Fixture(BaseHTTPRequestHandler):
             assert scenario != "settling-input", "terminal Run cannot own a pending question"
             action = args["action"]
             if action == "list":
+                if state.get("sessionWakeFixture"):
+                    return {"requestIds": ["request"] if state.get("botQuestion") else []}
                 return {"requestIds": ["request"] if scenario in ("question", "ambiguous", "race") else []}
             assert args["requestId"] == "request" and scenario in ("question", "ambiguous", "race")
             if action == "read":
@@ -331,8 +348,15 @@ class Fixture(BaseHTTPRequestHandler):
         active = {"manual-active": "unrelated", "running": "root", "resumed": "continued"}.get(scenario)
         latest = "later" if scenario.endswith("-result") else (active or "root")
         count = 1 if scenario in ("question", "ambiguous", "approval", "race", "settling-input") else 0
+        if state.get("sessionWakeFixture"):
+            active = state.get("botRun") if state["botRunStatus"] == "running" else active
+            if state.get("personFinished") and state["botRunStatus"] == "queued":
+                active = None
         summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest, "archived": False,
                                              "pendingRequestCount": count}
+        if state.get("sessionWakeFixture"):
+            summary |= {"title": "Staging follow-up", "status": "running", "runCount": 2,
+                        "createdAt": "2026-11-21T01:00:00.000Z", "updatedAt": "2026-11-21T13:00:00.000Z"}
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]
         rows = [self.item(thread_id, 0, "root", "user_message", state["launched"], source="mcp"),
                 self.item(thread_id, 1, "root", "assistant_message", "root report")]

@@ -344,14 +344,12 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         integer("generation","The task's generation from the latest task list or tool result.",true);
         fields["generation"]["minimum"] = 0;
     } else if (name == "message_session") {
-        description = "Deliver a note to the task's running Session Run right now. It does not start a new Run. "
-                      "Use send_to_task when the instruction can wait for the next safe point.";
-        integer("taskId","The task whose running Session should receive the note.",true);
-        integer("generation","The task's generation from the latest task list or tool result.",true);
-        fields["generation"]["minimum"] = 0;
-        text("text","The note for the running Session.");
+        description = "Queue a message in a T3 Session and wake this Bot once when its work ends or needs a person.";
+        text("environmentId","Environment ID from flock_session_search.");
+        text("threadId","Thread ID from flock_session_search.");
+        text("text","Message to send to the Session.");
     } else if (name == "interrupt_session") {
-        description = "Ask T3 to interrupt the task's running Session Run. The task stays open and its Bot decides what "
+        description = "Interrupt the active Run in the task’s T3 Session. This affects the Session, and the task stays open. The Bot decides what "
                       "to do next. Use cancel_task to stop the whole task.";
         integer("taskId","The task whose running Session should be interrupted.",true);
         integer("generation","The task's generation from the latest task list or tool result.",true);
@@ -380,7 +378,9 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
             text("project","Project title or project identifier.",false);
             text("status","T3 Session status, such as running, completed, or failed.",false);
         } else {
-            text("sessionRef","Opaque Session reference from flock_session_search.");
+            text("sessionRef","Opaque Session reference from flock_session_search.",false);
+            text("environmentId","Environment ID when reading by Session identifiers.",false);
+            text("threadId","Thread ID when reading by Session identifiers.",false);
             text("operation","List or search events, read one event, count all Session messages and Runs, or retrieve an attachment.");
             fields["operation"]["enum"] = {"list","search","read_event","counts","get_attachment"};
             text("kind","Exact event kind, such as command_execution or error.",false);
@@ -651,10 +651,11 @@ Tasks do the work: start_task creates one, send_to_task records an instruction f
 safe point, change_task changes its intent, criteria, or environment, answer_task_question answers a task's
 open user_question, and cancel_task stops the whole task. Use record_task_blocker to record what
 blocks an active task and withdraw_task_question when an open question no longer needs an answer.
-Use message_session, when offered, to deliver a note to a running Session immediately. If it is unavailable,
-use send_to_task to save the instruction for the next safe point. Tell the user when you have saved an
-instruction and, if a Run is active, that it has yet to receive it. Report immediate delivery only when
-message_session confirms it. interrupt_session asks T3 to interrupt a Run while keeping the task open.
+Use message_session to queue a message in an existing Session using its environmentId and threadId.
+The delivery result says whether T3 started or queued it. Reply to finish the current turn.
+Flock starts a separate turn with event.sessionWake when the work finishes or needs an answer.
+In that turn, read the Session history with flock_session_events using those identifiers, then decide what to do.
+interrupt_session asks T3 to interrupt a Run while keeping the task open.
 Use read_result and find_tasks to inspect results and older tasks. The current task's doneWhen takes
 precedence over older criteria in history. If intentTruncated or
 doneWhenTruncated is true, use find_tasks with the taskId to read the full contract before changing it.
