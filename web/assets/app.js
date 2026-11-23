@@ -571,13 +571,13 @@ function createSidebarEntry(botId) {
   const presenceDot = node('span', 'presence-dot');
   const rowUnread = node('span', 'unread-dot row-unread');
   rowUnread.setAttribute('aria-hidden', 'true');
-  name.append(nameText, presenceDot);
+  name.append(nameText);
   const preview = node('span', 'bot-preview');
   const dots = node('span', 'working-dots');
   dots.setAttribute('aria-hidden', 'true');
   dots.append(node('i'), node('i'), node('i'));
   const previewText = document.createTextNode('');
-  preview.append(dots, previewText);
+  preview.append(presenceDot, dots, previewText);
   const text = node('span', 'bot-text');
   text.append(name, preview);
 
@@ -639,13 +639,15 @@ function createSidebarEntry(botId) {
         toggle.setAttribute('aria-label', `${bot.name} menu`);
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
-      if (!previousBot || previousBot.preview !== bot.preview) {
-        previewText.data = bot.preview || '';
-      }
+      // A Bot blocked on the person says so in place of its last message, so the row reads at a glance.
+      const waiting = bot.presence === 'waiting';
+      const previewLabel = waiting ? 'Waiting for you' : bot.preview || '';
+      if (previewText.data !== previewLabel) previewText.data = previewLabel;
+      preview.classList.toggle('waiting', waiting);
       const hasPresence = activePresence.has(bot.presence);
-      presenceDot.hidden = bot.presence !== 'waiting';
+      presenceDot.hidden = !waiting;
       dots.hidden = !busyPresence.has(bot.presence);
-      preview.hidden = !bot.preview && dots.hidden;
+      preview.hidden = !previewLabel && dots.hidden;
       pinPresence.hidden = !pinned || !hasPresence;
       pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
       const unread = hasUnread(bot);
