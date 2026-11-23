@@ -1418,9 +1418,11 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.post("/api/settings/rule",removal,403);
     browser.post("/api/settings/model-login",{{"reconsent",false}},403);
     browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl","https://t3.example/mcp"}},403);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId","env-1"}},403);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     browser.post("/api/settings/model-login",{{"reconsent",false}},409);
     browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl","https://t3.example/mcp"}},409);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId","env-1"}},409);
     browser.post("/api/settings/rule",removal);
     check(browser.get("/api/settings").at("rules").empty(),"Root could not remove the rule");
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target",""},{"add",true}},400);

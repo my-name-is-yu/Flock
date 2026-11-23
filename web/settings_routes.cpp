@@ -75,6 +75,20 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
         catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
     });
+    server.Post("/api/settings/t3-disconnect",[&](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 1024) return reply(res,413,{{"error","payload_too_large"}});
+        try {
+            const auto args = Json::parse(req.body);
+            if (!store.policy().allows(person(callbacks,req),Action::rules_manage,"installation")) throw DecisionDenied{};
+            if (!callbacks.t3Disconnect) return reply(res,409,{{"error","disconnect_unavailable"}});
+            const auto environment = args.at("environmentId").get<std::string>();
+            if (environment.empty() || environment.size() > 200) return reply(res,400,{{"error","invalid_input"}});
+            callbacks.t3Disconnect(environment);
+            reply(res,200,{{"ok",true}});
+        } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
+        catch (const std::exception&) { reply(res,500,{{"error","disconnect_failed"}}); }
+    });
     server.Post(R"(/api/settings/(mode|rule))",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 4096) return reply(res,413,{{"error","payload_too_large"}});
         try {

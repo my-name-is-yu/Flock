@@ -31,6 +31,7 @@ struct WebCallbacks {
     // Optional: connects a T3 environment in the background; t3Setup reports running, authorizationUrl and error.
     std::function<void(const std::string& environment, const std::string& mcpUrl)> t3Connect = {};
     std::function<Json()> t3Setup = {};
+    std::function<void(const std::string& environment)> t3Disconnect = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);

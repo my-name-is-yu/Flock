@@ -85,7 +85,26 @@ async function load() {
   }
   $('connections').replaceChildren();
   if (t3) {
-    for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
+    for (const environment of t3.environments) {
+      const item = row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
+      if (!t3Setup) continue;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'button quiet-danger';
+      remove.textContent = 'Disconnect';
+      remove.onclick = async () => {
+        remove.disabled = true;
+        try {
+          const response = await fetch('/api/settings/t3-disconnect', {
+            method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
+            body: JSON.stringify({ environmentId: environment }),
+          });
+          $('status').textContent = response.ok ? `Disconnected ${environment}.` : 'Could not disconnect this environment.';
+        } catch { $('status').textContent = 'Could not disconnect this environment.'; }
+        await load().catch(() => {});
+      };
+      item.append(remove);
+    }
     row('connections', emptyLabel('Coding agents', 'Codex and Claude Code on this machine reach Flock on port ', command(String(t3.port)), '.'));
   } else if (canManagePolicy && t3Setup) {
     row('connections', emptyLabel('Not connected', 'Connect a T3 environment so its Sessions can ask your Bots.'));

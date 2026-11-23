@@ -194,5 +194,5 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .settings-row .button.primary { background: var(--accent-fill); color: var(--on-accent); }
 .settings-row .button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
 .settings-row a.button.primary { background: var(--accent-fill); color: var(--on-accent); }
-#rule-form, #t3-form { border-radius: 0; }
+.settings-group :is(#rule-form, #t3-form) { border-radius: 0; }
 .settings-row a.button { text-decoration: none; }

@@ -166,19 +166,24 @@ Json connectT3(const std::filesystem::path& home, const std::string& environment
     return {{"port",port},{"portChanged",savedPort != port},{"configuredProviders",providers}};
 }
 
+// Revokes one T3 environment; disconnecting the last one also removes the provider registration.
+void disconnectT3(const std::filesystem::path& home, const std::string& environment) {
+    const T3SetupLock setup;
+    auto store = openStore(home);
+    T3Connections connections(store);
+    if (connections.disconnect(environment)) {
+        removeT3Providers([&](std::string_view token) { return connections.ownsBearer(token); });
+        connections.providerRemoved();
+    }
+}
+
 int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const auto action = args.pop("T3 command");
     if (action != "connect" && action != "disconnect") throw Conflict("Unknown T3 command");
     const auto environment = args.pop("canonical environment ID");
     if (action == "disconnect") {
         args.end();
-        const T3SetupLock setup;
-        auto store = openStore(home);
-        T3Connections connections(store);
-        if (connections.disconnect(environment)) {
-            removeT3Providers([&](std::string_view token) { return connections.ownsBearer(token); });
-            connections.providerRemoved();
-        }
+        disconnectT3(home,environment);
         print({{"environmentId",environment},{"connected",false}});
         return 0;
     }
@@ -342,6 +347,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         std::lock_guard lock(t3Setup->mutex);
         return Json{{"running",t3Setup->running},{"authorizationUrl",t3Setup->authorizationUrl},{"error",t3Setup->error}};
     };
+    callbacks.t3Disconnect = [home](const std::string& environment) { disconnectT3(home,environment); };
     callbacks.t3Connect = [t3Setup,webPort,home,&bots](const std::string& environment, const std::string& mcpUrl) {
         std::lock_guard lock(t3Setup->mutex);
         if (t3Setup->running) return;
