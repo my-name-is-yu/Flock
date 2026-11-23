@@ -242,7 +242,7 @@ void Policy::audit(const Person& actor, std::string_view bot, std::string_view a
 
 Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::string_view operation,
                           std::string_view target, std::string_view name, Id message, int step,
-                          const ApplyBotChange& apply) {
+                          const ApplyBotChange& apply, const ReconcileBotCreation* onExhausted) {
     const bool create = operation == "create_bot";
     const auto requestKey = std::to_string(message) + "-" + std::to_string(step);
     if (!apply) throw Conflict("Bot changes are unavailable");
@@ -286,8 +286,20 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
         completion.commit();
         throw;
     } catch (...) {
-        // Publication may have succeeded. Keep the durable intent for a replay.
-        throw Conflict("Unable to apply Bot change");
+        if (!create) throw Conflict("Unable to apply Bot change");
+        if (!onExhausted) throw BotCreationUncertain{};
+        bool published = false;
+        try {
+            published = *onExhausted && (*onExhausted)(change);
+        } catch (...) {
+            // A failed inspection cannot establish that it is safe to release the ID.
+            throw BotCreationUncertain{};
+        }
+        if (!published) {
+            db_.exec("DELETE FROM bot_creation_intents WHERE request_key=?",{requestKey});
+            completion.commit();
+            throw Conflict("Unable to apply Bot change");
+        }
     }
 
     if (create) {

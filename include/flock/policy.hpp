@@ -91,9 +91,10 @@ public:
     Json redactSecrets(std::string_view bot, const Json& view) const;
     void requireWebIdentity();
     bool requiresIdentity() const;
+    struct BotCreationUncertain : std::exception {};
     Id applyBotChange(std::string_view bot, const Person& creator, std::string_view operation,
                       std::string_view target, std::string_view name, Id message, int step,
-                      const ApplyBotChange&);
+                      const ApplyBotChange&, const ReconcileBotCreation* onExhausted = nullptr);
     Id requestSecret(std::string_view bot, const SecretRef&, Id sourceMessage = 0);
     void submitSecret(const Person&, std::string_view bot, Id request, std::string_view value);
     void useSecret(Id task, const SecretRef&, bool upstreamPermitted,

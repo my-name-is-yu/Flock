@@ -164,14 +164,20 @@ void freshPendingSecretRequests(const std::filesystem::path& path) {
     denied([&]{ access.requestSecret("Reviewer",ref); });
 }
 
-void creationRecoversWithOriginalOwner(const std::filesystem::path& path) {
+void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool publish, bool failReplay = false) {
     const Person creator{"creator",false};
     Store store(path);
     store.policy().setOwner(creator,"Ernest");
     ToolModel model;
     Adapter t3;
     RuntimeOptions options;
+    Seconds now = 100;
+    options.clock = [&] { return now; };
     std::string appliedKey;
+    std::string publishedKey;
+    bool failing = true;
+    int attempts = 0;
+    options.reconcileBotCreation = [&](const BotChange& change) { return publishedKey == change.requestKey; };
     options.applyBotChange = [&](const BotChange& change) {
         sqlite3* connection = nullptr;
         const auto opened = sqlite3_open_v2(path.c_str(),&connection,SQLITE_OPEN_READONLY,nullptr);
@@ -185,11 +191,12 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path) {
               std::string_view(reinterpret_cast<const char*>(sqlite3_column_text(statement,0))) == change.requestKey &&
               std::string_view(reinterpret_cast<const char*>(sqlite3_column_text(statement,1))) == creator.id,
               "Bot creation ran before its original intent was durable");
-        if (appliedKey.empty()) {
-            appliedKey = change.requestKey;
-            throw std::runtime_error("Interrupted after profile publication");
-        }
+        ++attempts;
+        if (appliedKey.empty()) appliedKey = change.requestKey;
         check(appliedKey == change.requestKey,"Recovery used a different publication key");
+        if (publishedKey == change.requestKey && !failReplay) return;
+        if (publish || !failing) publishedKey = change.requestKey;
+        if (failing) throw std::runtime_error("Adapter interrupted");
     };
     const auto run = [&](Store& db) {
         Runtime runtime(db,model,t3,[](std::string_view){return std::string{};},options);
@@ -198,16 +205,39 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path) {
     model.next = {"request_bot_change",{{"operation","create_bot"},{"targetBotId","NewBot"},{"name","New Bot"}},{}};
     store.receive(creator,Intake{"Ernest","","env","project"},"create","Create a Bot");
     run(store);
-    check(model.result.at("turn").back().at("result").at("ok") == false,
-          "Unexpected callback failure did not become a tool error");
-    check(!appliedKey.empty() && !store.policy().allows(creator,Action::bot_settings,"NewBot"),
+    check(model.result.is_null() && attempts == 1,
+          "Uncertain creation saved a terminal tool result");
+    check(!store.policy().allows(creator,Action::bot_settings,"NewBot"),
           "Interrupted creation finalized ownership prematurely");
     Store restarted(path);
-    const auto separator = appliedKey.find('-');
-    restarted.policy().applyBotChange("Ernest",Person{"other",false},"create_bot","NewBot","New Bot",
-        std::stoll(appliedKey.substr(0,separator)),std::stoi(appliedKey.substr(separator+1)),options.applyBotChange);
+    run(restarted);
+    check(attempts == 1,"Retry ran before the scheduled time");
+    ++now;
+    run(restarted);
+    if (!publish || failReplay) {
+        check(model.result.is_null(),"Repeated failure ended the turn too early");
+        now += 2;
+        run(restarted);
+        check(model.result.is_null(),"Repeated failure ended the turn too early");
+        now += 4;
+        run(restarted);
+        check(attempts == 4,"Retry budget did not stop after four attempts");
+    }
+    if (!publish) {
+        check(model.result.at("turn").back().at("result").at("ok") == false,
+              "Retry exhaustion did not produce a tool error");
+        check(!restarted.policy().allows(creator,Action::bot_settings,"NewBot"),
+              "Unpublished creation granted ownership");
+        appliedKey.clear();
+        failing = false;
+        model.next = {"request_bot_change",{{"operation","create_bot"},{"targetBotId","NewBot"},{"name","New Bot"}},{}};
+        restarted.receive(creator,Intake{"Ernest","","env","project"},"recreate","Create a Bot again");
+        run(restarted);
+    }
+    check(!publishedKey.empty() && model.result.at("turn").back().at("result").at("status") == "applied",
+          "Creation did not produce a successful tool result");
     check(restarted.policy().allows(creator,Action::bot_settings,"NewBot"),
-          "Creation did not recover with the original owner");
+          "Creation did not finalize ownership for the original creator");
 }
 
 void exercise(const std::filesystem::path& dir) {
@@ -324,7 +354,9 @@ int main() {
         freshLaunch(directory/"fresh.db");
         runningSessions(directory/"peers.db");
         freshPendingSecretRequests(directory/"secret-requests"/"state.db");
-        creationRecoversWithOriginalOwner(directory/"creation-recovery.db");
+        creationRecoversWithOriginalOwner(directory/"creation-recovery.db",true);
+        creationRecoversWithOriginalOwner(directory/"creation-exhausted.db",false);
+        creationRecoversWithOriginalOwner(directory/"creation-reconciled.db",true,true);
         exercise(directory);
     }
     catch(const std::exception& e){std::cerr<<e.what()<<'\n';std::filesystem::remove_all(tmp);return 1;}

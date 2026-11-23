@@ -721,6 +721,7 @@ void Store::Impl::resolveOfferedAnswer(const Message& message) {
 
 void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
                           const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
+                          const ReconcileBotCreation& reconcileBotCreation,
                           std::stop_token shutdown) {
     Message message;
     bool offeredAnswer = false;
@@ -1001,10 +1002,16 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
             try {
                 if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
                 const auto& args = decision.args;
+                constexpr int maxCreationAttempts = 4;
+                auto retries = query("SELECT failures FROM conversation_retries WHERE message_id=?",{id});
+                const bool exhausted = retries.next() && retries.number(0) >= maxCreationAttempts - 1;
                 const auto changeId = Policy(*this).applyBotChange(message.bot,turnActor(message),
                     toolText(args,"operation",32),toolText(args,"targetBotId",128),toolText(args,"name",128),
-                    id,step,applyBotChange);
+                    id,step,applyBotChange,exhausted ? &reconcileBotCreation : nullptr);
                 result = {{"ok",true},{"changeId",changeId},{"status","applied"}};
+            } catch (const Policy::BotCreationUncertain&) {
+                deferConversation(id,clock());
+                return;
             } catch (const Conflict& error) {
                 result = toolFailure(error.what());
             } catch (const ToolError& error) {
@@ -1056,6 +1063,8 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 result["error"] = error.what();
             }
         }
+        if (decision.tool == "request_bot_change")
+            exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
         saveTurnResults(id,step,Json::array({redactor(message.bot).record(result)}));
         transaction.commit();
     }

@@ -27,6 +27,7 @@ public:
     Json cards() const;
     Json skillCards() const;
     void apply(const BotChange&);
+    bool reconcileCreation(const BotChange&);
     Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt,
                 const Policy::PublishOwnedBot& publishOwned = {});
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);

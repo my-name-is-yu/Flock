@@ -225,6 +225,7 @@ struct TaskTarget {
     static TaskTarget from(const Json& task, Id waitId);
 };
 using ApplyBotChange = std::function<void(const BotChange&)>;
+using ReconcileBotCreation = std::function<bool(const BotChange&)>;
 struct ChannelConnector;
 class LocalMachine;
 enum class ChannelKind;
@@ -361,6 +362,9 @@ struct RuntimeOptions {
     std::function<std::optional<Person>(std::string_view)> resolveSpecialistPerson = {};
     std::function<std::optional<std::string>(const Person&, Id channel)> observeSpecialistInput = {};
     ApplyBotChange applyBotChange = {};
+    // Supply this when applyBotChange can throw after publishing. On exhaustion,
+    // confirm publication by request key or release any unpublished reservation.
+    ReconcileBotCreation reconcileBotCreation = {};
 };
 class Runtime {
 public:

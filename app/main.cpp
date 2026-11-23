@@ -262,6 +262,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         };
     }
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
+    options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store,*model,*t3,soul,options);
     bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
