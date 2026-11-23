@@ -408,6 +408,11 @@ LaunchArguments launchArgs(const Command& command) {
     args["title"] = "Flock task";
     args["message"] = sessionPrompt(command.actionId,command.instruction);
     args["clientRequestId"] = command.actionId;
+    if (command.sessionOrigin) {
+        const auto& origin = *command.sessionOrigin;
+        args["delegatedFrom"] = {{"environmentId",origin.target.environmentId},{"threadId",origin.target.threadId},
+                                 {"title",origin.title}};
+    }
     return {std::move(args),std::move(pin).value_or(std::string{})};
 }
 
@@ -441,23 +446,24 @@ Delivery workReply(const Failure& failure) {
     return reply;
 }
 
-std::vector<std::string> projectThreads(Client& client, Scan& scan, const std::string& projectId) {
+std::vector<std::string> projectThreads(Client& client, Scan& scan, const Command& command) {
     std::vector<std::string> found;
     std::set<std::string> visited;
     std::optional<Position> total;
     Position offset = 0;
     for (;;) {
         scan.step();
-        const auto page = client.call("t3_thread_list", {{"projectId", projectId}, {"includeSubagents", false},
+        const auto page = client.call("t3_thread_list", {{"projectId", command.projectId},
+                                                         {"includeSubagents", command.sessionOrigin.has_value()},
                                                          {"limit", 50}, {"cursor", offset}});
-        if (str(page, "projectId") != projectId) invalidResponse();
+        if (str(page, "projectId") != command.projectId) invalidResponse();
         const auto count = position(member(page, "total"));
         if (total && count != *total) invalidResponse();
         total = count;
         const auto& threads = array(page, "threads");
         for (const auto& thread : threads) {
             const auto id = str(thread, "threadId");
-            if (id.empty() || str(thread, "projectId") != projectId || !visited.insert(id).second) invalidResponse();
+            if (id.empty() || str(thread, "projectId") != command.projectId || !visited.insert(id).second) invalidResponse();
             if (str(thread, "createdBy") == "agent" && str(thread, "creationSource") == "mcp") found.push_back(id);
         }
         const auto next = cursor(page, "nextCursor");
@@ -509,7 +515,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
     if (!destination.empty() && !hint.empty() && hint != destination)
         return result(Outcome::Unknown, "The supplied Thread is outside the saved action destination");
     Scan scan;
-    auto threads = destination.empty() ? projectThreads(client, scan, command.projectId) : std::vector{destination};
+    auto threads = destination.empty() ? projectThreads(client, scan, command) : std::vector{destination};
     if (destination.empty() && !hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end())
         threads.push_back(hint);
     const auto expected = sessionPrompt(command.actionId,command.instruction);
@@ -695,10 +701,21 @@ Delivery answer(Client& client, const Command& command, bool& invoked) {
     }
 }
 
-Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin) {
+Json launchThread(Client& client, Json args, std::string& warning) {
+    try {
+        return client.call("t3_thread_launch",args);
+    } catch (const Failure& failure) {
+        if (failure.reason != Failure::Reason::DelegatedFromRejected || !args.erase("delegatedFrom")) throw;
+        // Validation rejected the first request before dispatch. Keep the same idempotency key.
+        warning = "T3 rejected the delegatedFrom launch field. Retried without linking the origin Session.";
+        return client.call("t3_thread_launch",std::move(args));
+    }
+}
+
+Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin, std::string& warning) {
     auto prompt = str(args,"message");
     args.erase("message");
-    const auto launched = client.call("t3_thread_launch",std::move(args));
+    const auto launched = launchThread(client,std::move(args),warning);
     const auto threadId = str(launched,"threadId");
     if (threadId.empty() || str(launched,"projectId") != command.projectId ||
         !member(launched,"runId").is_null()) invalidResponse();
@@ -758,6 +775,7 @@ public:
 
     Delivery send(const Command& command) override {
         bool invoked = false;
+        std::string launchWarning;
         try {
             verifyCommand(command);
             const bool launch = command.tool == "delegate";
@@ -785,16 +803,22 @@ public:
             }
             Json reply;
             if (launch) {
+                if (command.sessionOrigin) {
+                    const auto environment = client.call("t3_environment_read",Json::object());
+                    if (str(environment,"environmentId") != command.environmentId)
+                        return {Outcome::Settings,{}, "The OAuth endpoint belongs to a different T3 environment",true};
+                }
                 if (!launchArguments.pin.empty()) {
                     if (!loopbackGitHost(origin))
                         return {Outcome::Settings,{},"Pinned specialist worktrees require a local T3 environment",true};
                     invoked = true;
-                    auto delivery = launchPinned(client,command,std::move(launchArguments.parameters),launchArguments.pin);
+                    auto delivery = launchPinned(client,command,std::move(launchArguments.parameters),launchArguments.pin,launchWarning);
+                    delivery.launchWarning = std::move(launchWarning);
                     useLocalThreadLink(delivery.run,command.environmentId,origin);
                     return delivery;
                 }
                 invoked = true;
-                reply = client.call("t3_thread_launch", std::move(launchArguments.parameters));
+                reply = launchThread(client,std::move(launchArguments.parameters),launchWarning);
                 if (str(reply, "projectId") != command.projectId) invalidResponse();
             } else {
                 Json previous;
@@ -820,10 +844,16 @@ public:
             }
             RunRef run{str(reply, "threadId"), str(reply, "runId"), str(reply, "link")};
             useLocalThreadLink(run,command.environmentId,origin);
-            if (!hasRun(run)) return result(Outcome::Unknown, "T3 has not returned the assigned Run ID yet", std::move(run));
-            return result(Outcome::Accepted, {}, std::move(run));
+            auto delivery = hasRun(run) ? result(Outcome::Accepted,{},std::move(run))
+                : result(Outcome::Unknown,"T3 has not returned the assigned Run ID yet",std::move(run));
+            delivery.launchWarning = std::move(launchWarning);
+            return delivery;
         } catch (const Failure& failure) {
-            if (invoked && command.tool != "answer_session_question") return workReply(failure);
+            if (invoked && command.tool != "answer_session_question") {
+                auto delivery = workReply(failure);
+                delivery.launchWarning = std::move(launchWarning);
+                return delivery;
+            }
             auto refused = failureDelivery(failure);
             refused.definitelyUnsent = !invoked;
             return refused;

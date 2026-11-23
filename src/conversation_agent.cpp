@@ -125,6 +125,15 @@ Json Store::Impl::taskState(const Json& task, const Message& message, bool fullC
                  {"state",task.at("state")},
                  {"replanning",task.value("replanning",false)},{"wait",std::move(wait)}};
     if (task.value("queuedInT3",false)) view["queuedInT3"] = true;
+    const auto taskOrigin = task.value("sessionOrigin",Json::object());
+    const auto turnOrigin = message.routing.value("sessionOrigin",Json::object());
+    if (!taskOrigin.empty() && !turnOrigin.empty() && taskOrigin.at("environmentId") == turnOrigin.at("environmentId") &&
+        taskOrigin.at("threadId") == turnOrigin.at("threadId")) {
+        const auto& run = task.at("activeRun").is_object() ? task.at("activeRun") : task.at("lastRun");
+        if (run.is_object() && !task.contains("selectedSession"))
+            view["session"] = {{"environmentId",run.at("environmentId")},{"threadId",run.at("threadId")}};
+        if (task.contains("launchWarning")) view["launchWarning"] = task.at("launchWarning");
+    }
     const auto project = [&](const char* key, const std::string& value, std::size_t limit) {
         view[key] = fullContract ? value : bounded(value,limit);
         if (view[key].get_ref<const std::string&>().size() < value.size())

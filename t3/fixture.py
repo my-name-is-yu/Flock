@@ -45,6 +45,8 @@ class Fixture(BaseHTTPRequestHandler):
         elif self.path == "/fixture/stock":
             self.reply({key: self.server.state[key] for key in ("stockPin", "stockHead")} |
                        {key: self.server.state.get(key, {}) for key in ("stockLaunches", "stockPromptSends")})
+        elif self.path == "/fixture/lineage-sessions":
+            self.reply(self.server.state.get("lineageSessions", {}))
         elif self.path == "/protected,resource":
             if self.server.state.get("oauthFailure") == "discovery":
                 self.reply({"error": "invalid_resource"}, code=400)
@@ -156,7 +158,20 @@ class Fixture(BaseHTTPRequestHandler):
                     envelope["result"] = {"isError": True, "content": [{"type": "text", "text": "Tool failed"}]}
                 self.reply(envelope)
                 return
+            if tool["name"] == "t3_thread_launch" and state.get("lineageFixture"):
+                mode = state.get("lineageLaunchError")
+                if mode in ("invalid-params", "unknown-delegated-from"):
+                    launch = tool["arguments"]
+                    if mode == "invalid-params" or "delegatedFrom" in launch:
+                        state.setdefault("effects", {}).setdefault("t3_thread_launch", []).append(launch)
+                        envelope["error"] = {"code": -32602, "message":
+                            "Unknown field: delegatedFrom" if mode == "unknown-delegated-from" else "Invalid params"}
+                        self.reply(envelope)
+                        return
             content = self.tool(tool["name"], tool["arguments"])
+            if tool["name"] == "t3_thread_launch" and state.get("lineageLaunchError") == "lost-response":
+                self.close_connection = True
+                return
             if (tool["name"] == "t3_pending_request" and tool["arguments"]["action"] == "respond"
                     and state.get("dropAnswerReply")):
                 self.close_connection = True
@@ -210,6 +225,19 @@ class Fixture(BaseHTTPRequestHandler):
         if name == "t3_thread_launch":
             assert args["projectId"] == "project"
             assert args["message"].endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
+            if state.get("lineageFixture"):
+                mode = state.get("lineageLaunchError")
+                if mode == "tool" or (mode == "fallback-fails" and "delegatedFrom" not in args):
+                    return {"_tag": "OrchestratorMcpFailure", "code": "internal_error",
+                            "message": "Unknown field: delegatedFrom"}
+                if mode in ("unsupported", "fallback-fails") and "delegatedFrom" in args:
+                    return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request",
+                            "message": "Unknown field: delegatedFrom"}
+                launches = state.setdefault("lineageSessions", {})
+                launch = launches.setdefault(args["clientRequestId"], {
+                    "threadId": f"lineage-child-{len(launches) + 1}", "arguments": args})
+                assert launch["arguments"] == args, "same-key launch changed its accepted payload"
+                return {"projectId": "project", "threadId": launch["threadId"], "runId": "root"}
             if self.server.peer_recovery:
                 state["launches"].append(args["clientRequestId"])
                 assert len(state["launches"]) == 1, "Runtime sent a second launch"
@@ -218,6 +246,11 @@ class Fixture(BaseHTTPRequestHandler):
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
         if name == "t3_thread_send":
+            if state.get("lineageFixture"):
+                child = next(entry for entry in state["lineageSessions"].values() if entry["threadId"] == args["threadId"])
+                assert args["mode"] == "queue" and args["clientRequestId"].startswith("flock-turn-")
+                child["followupRunId"] = "lineage-follow-up"
+                return {"threadId": child["threadId"], "runId": child["followupRunId"], "delivery": "queued"}
             if state.get("sessionWakeFixture"):
                 assert args["threadId"] == "thread" and args["mode"] == "queue"
                 assert args["clientRequestId"].startswith("flock-turn-")
@@ -265,6 +298,10 @@ class Fixture(BaseHTTPRequestHandler):
                 projects = [self.summary("first"), self.summary("second") | {"projectId": "another-project"}]
                 return {"projectId": None, "threads": projects, "total": len(projects), "nextCursor": None}
             assert args["projectId"] == "project"
+            if state.get("lineageFixture"):
+                children = [self.summary(entry["threadId"]) for entry in state["lineageSessions"].values()
+                            if args["includeSubagents"] or "delegatedFrom" not in entry["arguments"]]
+                return {"projectId": "project", "threads": children, "total": len(children), "nextCursor": None}
             ids = ["thread", "duplicate"] if state.get("duplicate") else ["thread"]
             if scenario == "sparse-session-search":
                 ids = (["deadline-1", "deadline-2", "deadline-3"] if state.get("searchTitles", {}).get("deadline-2")
@@ -280,6 +317,15 @@ class Fixture(BaseHTTPRequestHandler):
             return {"projectId": "project", "threads": [self.summary(t) for t in ids[start:end]],
                     "total": len(ids), "nextCursor": end if end < len(ids) else None}
         if name == "t3_thread_wait":
+            if state.get("lineageFixture"):
+                child = next(entry for entry in state["lineageSessions"].values() if entry["threadId"] == args["threadId"])
+                if args["runId"] == child.get("followupRunId"):
+                    status = state.get("lineageFollowupStatus", "queued")
+                else:
+                    assert args["runId"] == "root", args
+                    status = "running"
+                return {"threadId": child["threadId"], "runId": args["runId"], "status": status,
+                        "timedOut": status != "completed"}
             if state.get("sessionWakeFixture"):
                 assert args["threadId"] == "thread" and args["runId"] == state["botRun"]
                 assert not args["untilDelegatedWorkSettled"]
@@ -347,6 +393,26 @@ class Fixture(BaseHTTPRequestHandler):
                 ("afterPosition" in args and state.get("ownershipReadFailure"))):
             return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "History is unavailable."}
         thread_id = args["threadId"]
+        if state.get("lineageFixture"):
+            child = next((entry for entry in state["lineageSessions"].values() if entry["threadId"] == thread_id), None)
+            if not child and thread_id not in ("lineage-parent", "lineage-unrelated"):
+                return {"_tag": "OrchestratorMcpFailure", "code": "thread_not_found"}
+            title = child["arguments"]["title"] if child else "Deployment planning"
+            actor = {"creationSource": "mcp" if child else "web", "createdBy": "agent" if child else "user"}
+            summary = self.summary(thread_id) | actor | {
+                "activeRunId": "root", "latestRunId": "root", "archived": False, "pendingRequestCount": 0,
+                "title": title, "status": "running", "runCount": 1,
+                "createdAt": "2026-11-21T01:00:00.000Z", "updatedAt": "2026-11-21T13:00:00.000Z"}
+            run = {"runId": "root", "ordinal": 1, "status": "running"}
+            prompt = child["arguments"]["message"] if child else "Parent planning message"
+            # A reconciliation page uses the launch marker to identify the initial Run.
+            items = [] if args["view"] == "activity" else [
+                self.item(thread_id, 1, "root", "user_message", prompt, source=actor["creationSource"]) |
+                {"textTruncated": False, "nextTextOffset": None}]
+            if args.get("afterPosition", -1) >= 1:
+                items = []
+            return {"thread": summary, "recentRuns": [run], "items": items, "hasMore": False,
+                    "nextPosition": items[-1]["position"] if items else None, "earlierPosition": None}
         if state.get("sessionAskFixture") and thread_id not in ("thread", "other-thread"):
             return {"_tag": "OrchestratorMcpFailure", "code": "thread_not_found"}
         active = {"manual-active": "unrelated", "running": "root", "resumed": "continued"}.get(scenario)

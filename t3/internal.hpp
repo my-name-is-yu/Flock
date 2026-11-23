@@ -14,7 +14,8 @@ inline Json initializeParams() {
 
 struct Failure : std::runtime_error {
     enum class Kind { Auth, Settings, Wire, Rpc, Tool };
-    enum class Reason { Other, QuestionGone, WorkSettings, HistoryNotFound, ProjectNotFound, Timeout };
+    enum class Reason { Other, QuestionGone, WorkSettings, HistoryNotFound, ProjectNotFound, Timeout,
+                        DelegatedFromRejected };
     Kind kind;
     Reason reason;
     explicit Failure(Kind category, std::string message, Reason reason = Reason::Other)

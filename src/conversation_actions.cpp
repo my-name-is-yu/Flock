@@ -344,6 +344,19 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
     const auto id = submit({std::string(bot),std::string(request),destination,project,routing.at("config")},
                            messageId,source);
     auto task = load(id);
+    if (routing.contains("sessionOrigin")) task["sessionOrigin"] = routing.at("sessionOrigin");
+    else if (!source.is_null()) {
+        auto parent = query(R"SQL(
+SELECT json_extract(t.data,'$.sessionOrigin') FROM tasks t
+JOIN messages m ON m.id=json_extract(t.data,'$.sourceMessageId')
+JOIN messages request ON request.id=? AND request.person_id=m.person_id
+LEFT JOIN channel_messages channel ON channel.message_id=request.id
+WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND channel.message_id IS NULL
+)SQL",{messageId,source.at("taskId"),bot});
+        if (parent.next()) task["sessionOrigin"] = parent.json(0);
+    }
+    if (task.contains("sessionOrigin"))
+        task["sessionOrigin"]["title"] = redactor(bot).text(field(task.at("sessionOrigin"),"title"));
     if (selectedSession)
         task["selectedSession"] = {{"environmentId",destination},{"projectId",project},
                                    {"threadId",selectedSession->threadId}};

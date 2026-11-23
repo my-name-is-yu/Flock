@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "conversation_storage.hpp"
 #include "flock/bot_profile.hpp"
 
 #include <algorithm>
@@ -710,6 +711,10 @@ ORDER BY id)SQL");
         c.candidate = runRef(action.value("candidate",Json::object()));
         c.candidateQuestionId = field(action,"candidateQuestionId");
         c.launchReceiptThreadId = field(action,"launchReceiptThreadId");
+        if (c.tool == "delegate" && task.contains("sessionOrigin")) {
+            const auto& origin = task.at("sessionOrigin");
+            c.sessionOrigin = SessionOrigin{{field(origin,"environmentId"),field(origin,"threadId")},field(origin,"title")};
+        }
         return c;
     }
 
@@ -752,6 +757,10 @@ ORDER BY id)SQL");
         changeTask(id,[&](Json& task) {
             if (task["actionId"] != action["id"] || terminal(task)) return false;
             const auto scrub = db.redactor(field(task,"botId"));
+            if (!outcome.launchWarning.empty()) {
+                task["launchWarning"] = scrub.text(outcome.launchWarning);
+                db.journal(id,"session_lineage_unavailable",{{"actionId",action["id"]},{"text",task["launchWarning"]}});
+            }
             if (scrub.payload(runJson(outcome.run)) != runJson(outcome.run))
                 outcome = {Delivery::Kind::Unknown,{},"T3 returned a protected Run identifier"};
             outcome.detail = scrub.text(outcome.detail);
@@ -852,9 +861,17 @@ ORDER BY id)SQL");
         const bool usesExistingSession = cmd.tool == "follow_up" || cmd.tool == "start_in_session";
         const bool sendsToSession = usesExistingSession || cmd.tool == "answer_session_question";
         const bool preparesTaskContract = cmd.tool == "delegate" || cmd.tool == "start_in_session";
-        const auto sessionSendAllowed = [&](const Json& current) {
-            if (!sendsToSession) return true;
+        const auto sessionActionAllowed = [&](const Json& current) {
+            if (!cmd.sessionOrigin && !sendsToSession) return true;
             std::lock_guard lock(db.mutex);
+            if (cmd.sessionOrigin) {
+                const auto source = db.loadTurnMessage(current.at("sourceMessageId"));
+                const auto actor = db.turnActor(source);
+                const auto& origin = cmd.sessionOrigin->target;
+                return db.activeSessionOrigin(cmd.ownerBotId,actor.id,origin,cmd.environmentId) &&
+                    policy.allows(actor,Action::bot_decide,cmd.ownerBotId) &&
+                    policy.allows(cmd.ownerBotId,Action::environment_inspect,origin.environmentId);
+            }
             if (db.sessionParticipationStopped(cmd.ownerBotId,{cmd.environmentId,cmd.target.threadId})) return false;
             if (!usesExistingSession || !current.contains("selectedSession")) return cmd.tool != "start_in_session";
             const auto& selected = current.at("selectedSession");
@@ -888,7 +905,7 @@ ORDER BY id)SQL");
         const bool firstSend = action["phase"] == "ready";
         std::shared_lock dispatch(db.sessionDispatchMutex,std::defer_lock);
         if (firstSend) {
-            if (!sessionSendAllowed(task)) return refused(ApprovalGate::denied);
+            if (!sessionActionAllowed(task)) return refused(ApprovalGate::denied);
             if (resource && policy.mode() == "full" && policy.forbidden(cmd.ownerBotId,resource->action,resource->target))
                 return applyDelivery(id,action,{Delivery::Kind::Settings,{},"Session action denied by installation policy.",true});
             if (preparesTaskContract) {
@@ -922,9 +939,10 @@ ORDER BY id)SQL");
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},SessionContextLimit{}.what(),true});
                 action["instruction"] = cmd.instruction;
             }
-            const auto payload = Json{{"tool",cmd.tool},{"instruction",cmd.instruction},{"questionId",cmd.questionId},
+            auto payload = Json{{"tool",cmd.tool},{"instruction",cmd.instruction},{"questionId",cmd.questionId},
                                   {"answers",cmd.answers},{"run",runJson(cmd.target)},{"projectId",cmd.projectId},
                                   {"config",cmd.config},{"environmentId",cmd.environmentId}};
+            if (cmd.sessionOrigin) payload["delegatedFrom"] = task.at("sessionOrigin");
             const auto assess = [&](const Json& current, bool claim) {
                 const auto origin = db.taskPolicyOrigin(current);
                 if (usesExistingSession) {
@@ -960,11 +978,11 @@ ORDER BY id)SQL");
                 stopped->definitelyUnsent = true;
                 return applyDelivery(id,action,*stopped);
             }
-            if (sendsToSession) dispatch.lock();
+            if (sendsToSession || cmd.sessionOrigin) dispatch.lock();
             auto policyGate = ApprovalGate::allow;
             if (!change(task,[&](Json& current) {
                 if (shutdown.stop_requested() || current["actionId"] != action["id"]) return false;
-                if (!sessionSendAllowed(current)) {
+                if (!sessionActionAllowed(current)) {
                     policyGate = ApprovalGate::denied;
                     return false;
                 }
@@ -988,7 +1006,7 @@ ORDER BY id)SQL");
             }
         } else if (action["phase"] != "started") return;
         try {
-            if (firstSend) outcome = !sessionSendAllowed(task) ||
+            if (firstSend) outcome = !sessionActionAllowed(task) ||
                                      (resource && policy.forbidden(cmd.ownerBotId,resource->action,resource->target)) ||
                                      (usesExistingSession && policy.forbidden(cmd.ownerBotId,Action::environment_launch,cmd.environmentId))
                 ? Delivery{Delivery::Kind::NotAccepted,{},"Session action denied by installation policy.",true}

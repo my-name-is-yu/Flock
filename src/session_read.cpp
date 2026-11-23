@@ -667,10 +667,20 @@ bool Store::Impl::connectedSessionAccess(const conversation::Message& message, c
     std::lock_guard lock(mutex);
     Policy policy(*this);
     if (!policy.allows(message.bot,Action::environment_inspect,target.environmentId)) return false;
-    if (message.principalSource == conversation::PrincipalSource::session) {
-        const auto& origin = message.routing.at("sessionOrigin");
-        if (origin.at("environmentId") == target.environmentId && origin.at("threadId") == target.threadId)
-            return activeSessionOrigin(message) && policy.allows(turnActor(message),Action::bot_decide,message.bot);
+    if (const auto origin = message.routing.find("sessionOrigin"); origin != message.routing.end()) {
+        const SessionTarget parent{origin->at("environmentId"),origin->at("threadId")};
+        const auto authorized = [&] {
+            const auto actor = turnActor(message);
+            return activeSessionOrigin(message.bot,actor.id,parent,target.environmentId) &&
+                policy.allows(actor,Action::bot_decide,message.bot);
+        };
+        if (target == parent) return authorized();
+        if (query(R"SQL(
+SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
+WHERE t.bot_id=? AND r.environment_id=? AND r.thread_id=? AND json_extract(o.data,'$.tool')='delegate'
+  AND json_extract(t.data,'$.sessionOrigin.environmentId')=? AND json_extract(t.data,'$.sessionOrigin.threadId')=?
+)SQL",{message.bot,target.environmentId,target.threadId,parent.environmentId,parent.threadId}).next())
+            return authorized();
     }
     return connectedSearchEnvironments(message).contains(target.environmentId);
 }

@@ -14,7 +14,7 @@ namespace {
 constexpr auto endpoint = "/mcp/flock";
 constexpr auto aliceCredential = "Bearer flock-fixture-alice";
 const Person alice{"alice",true}, bob{"bob"};
-const Json sessionOrigin{{"environmentId","env-1"},{"threadId","thread"}};
+const Json sessionOrigin{{"environmentId","env-1"},{"threadId","thread"},{"title","Staging follow-up"}};
 
 class Mcp {
 public:

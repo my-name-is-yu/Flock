@@ -104,6 +104,14 @@ struct Observation {
 inline constexpr std::size_t maxSessionPromptBytes = 120000;
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
 
+struct SessionTarget {
+    std::string environmentId, threadId;
+    bool operator==(const SessionTarget&) const = default;
+};
+struct SessionOrigin {
+    SessionTarget target;
+    std::string title;
+};
 struct Command {
     std::string actionId, tool, environmentId, projectId, instruction, authGeneration;
     Json config = Json::object(), answers = Json::object();
@@ -113,6 +121,7 @@ struct Command {
     std::string candidateQuestionId;
     std::string ownerBotId;
     std::string launchReceiptThreadId; // From the launch response, even if the Run ID was pending.
+    std::optional<SessionOrigin> sessionOrigin;
 };
 struct Delivery {
     enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
@@ -120,6 +129,7 @@ struct Delivery {
     std::string detail;
     bool definitelyUnsent = false;
     std::string delivery = {};
+    std::string launchWarning = {};
 };
 enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun };
 struct ReadRequest {
@@ -134,10 +144,6 @@ struct Excerpt {
 };
 inline constexpr unsigned sessionPageLimit = 20;
 
-struct SessionTarget {
-    std::string environmentId, threadId;
-    bool operator==(const SessionTarget&) const = default;
-};
 struct SessionPreview {
     std::string text;
     bool truncated = false;

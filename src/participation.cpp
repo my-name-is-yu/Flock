@@ -220,7 +220,7 @@ JOIN session_participations p ON p.id=a.participation_id WHERE a.person_id=? AND
             for (const auto& environment : settings->environments)
                 if (connected(environment)) environments.push_back(environment);
     }
-    std::optional<SessionTarget> origin;
+    std::optional<SessionOrigin> origin;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     for (const auto& environment : environments) {
         SessionTarget candidate{environment,thread};
@@ -232,26 +232,27 @@ JOIN session_participations p ON p.id=a.participation_id WHERE a.person_id=? AND
         }
         if (!metadata || metadata->projectId.empty()) continue;
         if (origin) throw Conflict("This threadId matched more than one connected T3 environment");
-        origin = std::move(candidate);
+        origin = SessionOrigin{std::move(candidate),std::move(metadata->title)};
     }
     std::lock_guard lock(db.mutex);
     Transaction transaction(db.db);
     const auto actor = authorizedPerson();
     if (const auto message = replay()) return message;
-    if (!origin || !connected(origin->environmentId))
+    if (!origin || !connected(origin->target.environmentId))
         throw Conflict("This Session is unavailable through your T3 connection");
     const auto scrub = db.sharedRedactor();
-    for (const std::string_view id : {std::string_view(bot),std::string_view(origin->environmentId),
+    for (const std::string_view id : {std::string_view(bot),std::string_view(origin->target.environmentId),
                                      std::string_view(thread),std::string_view(requestId)}) {
         scrub.requirePublic(id);
         if (redactT3Tokens(std::string(id)) != id) throw Conflict("Invalid Session ask identifier");
     }
+    origin->title = redactT3Tokens(scrub.text(origin->title));
     db.exec(R"SQL(
 INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state) VALUES(?,?,?,?,'active')
 ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
-)SQL",{bot,origin->environmentId,thread,actor.id});
+)SQL",{bot,origin->target.environmentId,thread,actor.id});
     auto row = db.query("SELECT id,person_id,state FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=?",
-                        {bot,origin->environmentId,thread});
+                        {bot,origin->target.environmentId,thread});
     if (!row.next() || row.string(1) != actor.id) throw Conflict("This Session participation is unavailable");
     if (row.string(2) == "stopped") throw Conflict("This Bot's participation in the Session has stopped");
     const auto safeText = redactT3Tokens(scrub.text(text));
@@ -293,12 +294,19 @@ WHERE p.bot_id=? AND p.thread_id=? AND p.person_id=?
 
 bool Store::Impl::activeSessionOrigin(const conversation::Message& message) const {
     const auto& origin = message.routing.at("sessionOrigin");
+    const SessionTarget target{origin.at("environmentId"),origin.at("threadId")};
+    return activeSessionOrigin(message.bot,message.admittedActor.id,target,target.environmentId);
+}
+
+bool Store::Impl::activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
+                                      std::string_view destinationEnvironment) const {
     return query(R"SQL(
 SELECT 1 FROM session_participations p
 JOIN t3_connected_environments e ON e.environment_id=p.environment_id
 JOIN t3_connector c ON c.person_id=p.person_id
+JOIN t3_connected_environments destination ON destination.environment_id=?
 WHERE p.bot_id=? AND p.environment_id=? AND p.thread_id=? AND p.person_id=? AND p.state='active'
-)SQL",{message.bot,origin.at("environmentId"),origin.at("threadId"),message.admittedActor.id}).next();
+)SQL",{destinationEnvironment,bot,origin.environmentId,origin.threadId,person}).next();
 }
 
 bool Store::Impl::sessionParticipationStopped(std::string_view bot, const SessionTarget& target) const {

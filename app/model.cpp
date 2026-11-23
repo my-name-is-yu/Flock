@@ -714,10 +714,11 @@ user's language and refer to work by description, never by task, message, revisi
         "A question for the user refers to work by its description and never cites task, run, or revision IDs.";
     if (conversationRequest) instructions = conversationInstructions;
     if (input.event.contains("sessionOrigin")) instructions +=
-        " This request came from the T3 Session in event.sessionOrigin. Use those identifiers with message_session "
+        " The originating T3 Session is in event.sessionOrigin. Use those identifiers with message_session "
         "to send your reply, progress, or questions to that Session. Prefix a question only the person should answer "
         "with \"For the person:\" so the coding agent can show it to them. Use reply to finish the Flock turn after sending. "
-        "On event.sessionWake, read the result. Send another message only if the person's request calls for it.";
+        "The task's session field provides the destination identifiers for reading or messaging its launched work. "
+        "On event.sessionWake, read the indicated Session. Send another message only if the person's request calls for it.";
     auto content = Json::array({{{"type","input_text"},
         {"text",context.dump(-1,' ',false,Json::error_handler_t::replace)}}});
     for (const auto& image : input.images) {

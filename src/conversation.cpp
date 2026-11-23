@@ -167,12 +167,29 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
 
 Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
                                     std::string_view clientId, std::string_view text, Id replyTo,
-                                    const SessionTarget* origin) {
+                                    const SessionOrigin* origin) {
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     modelCallLimit(routing.config);
     Json saved{{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config}};
-    if (origin) saved["sessionOrigin"] = {{"environmentId",origin->environmentId},{"threadId",origin->threadId}};
     const auto scrub = redactor(routing.botId);
+    if (origin) {
+        saved["sessionOrigin"] = {{"environmentId",origin->target.environmentId},{"threadId",origin->target.threadId},
+                                  {"title",scrub.text(origin->title)}};
+    } else if (replyTo && (source == conversation::PrincipalSource::trusted ||
+                           source == conversation::PrincipalSource::web)) {
+        auto previous = query(R"SQL(
+SELECT json_extract(m.routing,'$.sessionOrigin') FROM journal j
+LEFT JOIN conversation_turns turn ON turn.reply_id=j.id
+LEFT JOIN tasks t ON t.id=j.task_id
+JOIN messages m ON m.id=coalesce(turn.message_id,json_extract(t.data,'$.sourceMessageId'),j.id)
+WHERE j.id=? AND m.bot_id=? AND m.person_id=? AND json_type(m.routing,'$.sessionOrigin')='object'
+)SQL",{replyTo,routing.botId,actor.id});
+        if (previous.next()) {
+            auto inherited = previous.json(0);
+            inherited["title"] = scrub.text(field(inherited,"title"));
+            saved["sessionOrigin"] = std::move(inherited);
+        }
+    }
     scrub.requirePublic({routing.botId,actor.id,clientId,saved});
     exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
          {unixTime(),routing.botId});

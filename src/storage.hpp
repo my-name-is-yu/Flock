@@ -127,7 +127,7 @@ struct Store::Impl {
     void initializeLocalMachineSchema();
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource,
                            std::string_view clientId, std::string_view text, Id replyTo = 0,
-                           const SessionTarget* origin = nullptr);
+                           const SessionOrigin* origin = nullptr);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
     void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
@@ -163,6 +163,8 @@ struct Store::Impl {
     void initializeParticipationSchema();
     Person sessionActor(std::string_view person);
     bool activeSessionOrigin(const conversation::Message&) const;
+    bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
+                             std::string_view destinationEnvironment) const;
     bool sessionParticipationStopped(std::string_view bot, const SessionTarget&) const;
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     void initializeMemorySchema();
