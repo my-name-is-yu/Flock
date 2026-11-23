@@ -24,6 +24,7 @@ constexpr int findLimit = 10;
 constexpr int maxSteps = 24;
 constexpr std::size_t resultChunk = 6000;
 constexpr std::size_t sourceSize = 8192;
+constexpr std::size_t artifactSize = 256 * 1024;
 
 const std::vector<std::string> turnTools{"start_task","send_to_task","change_task","answer_task_question",
                                          "record_task_blocker","withdraw_task_question",
@@ -35,6 +36,10 @@ const std::vector<std::string> webTools{"start_workflow","workflow_status","inst
     "list_connections","check_environment_readiness","update_bot_settings","request_bot_change",
     "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
     "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
+
+bool canPublishConversationArtifact(const Message& message) {
+    return message.principalSource == PrincipalSource::web || message.principalSource == PrincipalSource::trusted;
+}
 
 std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
@@ -415,6 +420,16 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             throw ToolError("Unknown tool result in this turn");
         return {{"ok",true}};
     }
+    if (tool == "publish_artifact" && canPublishConversationArtifact(message)) {
+        const auto title = text(args,"title",255,true);
+        const auto html = text(args,"html",artifactSize,true);
+        if (title.find('\0') != title.npos || html.find('\0') != html.npos)
+            throw ToolError("Artifact title and HTML must not contain NUL bytes");
+        redactor(bot).requirePublic({title,html});
+        const auto id = actionId("web-");
+        exec("INSERT INTO conversation_artifacts(id,message_id,html) VALUES(?,?,?)",{id,message.id,html});
+        return {{"ok",true},{"artifact",{{"id",id},{"title",title}}}};
+    }
     if (auto result = channelTool(message.id,bot,decision); !result.is_null()) return result;
     if (auto result = localMachineTool(bot,message.channelScope,decision); !result.is_null()) return result;
     if (std::ranges::find(webTools,tool) != webTools.end()) {
@@ -650,7 +665,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
                  {"status",status},{"actions",actions}};
     if (suggestions.is_array() && !suggestions.empty()) data["suggestions"] = redactor(message.bot).payload(suggestions);
     if (question) data["taskQuestionMessageId"] = question->messageId;
-    if (!artifacts.empty()) data["artifacts"] = std::move(artifacts);
+    if (!artifacts.empty() && route != "access") data["artifacts"] = std::move(artifacts);
     if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot))
         queueChannelReply(message.id,reply,data);
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
@@ -757,6 +772,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         tools.insert(tools.end(),webTools.begin(),webTools.end());
         tools.insert(tools.end(),botToolNames().begin(),botToolNames().end());
     }
+    if (canPublishConversationArtifact(message)) tools.push_back("publish_artifact");
     if (!message.channelScope.empty()) tools.insert(tools.end(),channelTools.begin(),channelTools.end());
     const auto available = [&] {
         auto offered = tools;

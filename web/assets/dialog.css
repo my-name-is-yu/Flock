@@ -21,6 +21,12 @@
   grid-template-areas: "head" "body";
 }
 .detail[open] { display: grid; }
+.detail.diagram-detail {
+  width: min(68rem, calc(100% - 2rem)); height: min(80dvh, 51rem); max-height: none;
+}
+.diagram-detail .diagram-preview { flex: 1; overflow: auto; border-radius: var(--radius-md); }
+.diagram-detail .diagram-preview:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.diagram-detail .diagram-frame { min-width: 44rem; }
 .detail.has-nav {
   width: min(56rem, calc(100% - 3rem));
   height: min(37rem, calc(100dvh - 3rem));
@@ -241,6 +247,7 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
     border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   }
   .detail { max-height: calc(100dvh - .75rem); }
+  .detail.diagram-detail { width: 100%; height: calc(100dvh - .75rem); }
   .detail.has-nav {
     height: calc(100dvh - .75rem);
     grid-template-columns: minmax(0, 1fr);

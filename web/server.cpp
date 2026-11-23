@@ -200,7 +200,7 @@ public:
             .set_default_headers({
                 {"Cache-Control","no-store"},
                 {"Content-Security-Policy","default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-                   "img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"},
+                   "img-src 'self' blob:; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"},
                 {"Cross-Origin-Resource-Policy","same-origin"},
                 {"Referrer-Policy","no-referrer"},
                 {"X-Content-Type-Options","nosniff"},
@@ -290,6 +290,20 @@ public:
                 catch (const Conflict&) { error(res,404,"task_not_found"); }
             });
         }
+        server_.Get(R"(/api/messages/([0-9]+)/artifacts/(web-[0-9a-f]{32}))",[this](const Request& req, Response& res) {
+            const auto value = req.matches[1].str();
+            Id reply = 0;
+            const auto [end,ec] = std::from_chars(value.data(),value.data()+value.size(),reply);
+            if (ec != std::errc{} || end != value.data()+value.size() || reply <= 0)
+                return error(res,404,"artifact_not_found");
+            auto html = store_.conversationArtifact(web::person(callbacks_,req),reply,req.matches[2].str());
+            if (!html) return error(res,404,"artifact_not_found");
+            res.headers.erase("Content-Security-Policy");
+            res.headers.erase("X-Frame-Options");
+            res.set_header("Content-Security-Policy","sandbox; default-src 'none'; style-src 'unsafe-inline'; "
+                           "img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'");
+            res.set_content(std::move(*html),"text/html; charset=utf-8");
+        });
         server_.Post("/api/bots",[this](const Request& req, Response& res) { saveBot(req,res,false); });
         server_.Post("/api/bots/profile",[this](const Request& req, Response& res) { saveBot(req,res,true); });
         server_.Post("/api/bots/delete",[this](const Request& req, Response& res) { deleteBot(req,res); });

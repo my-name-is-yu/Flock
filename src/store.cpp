@@ -76,10 +76,10 @@ Id requiredInteger(const Json& data, std::string_view key, Id minimum) {
     return value->get<Id>();
 }
 bool terminal(const Json& j) { return j["state"] == "completed" || j["state"] == "cancelled"; }
-std::string actionId() {
+std::string actionId(std::string_view prefix) {
     std::random_device random;
     constexpr std::string_view hex = "0123456789abcdef";
-    std::string id = "flock-";
+    std::string id(prefix);
     for (int i = 0; i < 16; ++i) {
         const auto octet = random() & 0xff;
         id += hex[octet >> 4];
@@ -87,6 +87,7 @@ std::string actionId() {
     }
     return id;
 }
+std::string actionId() { return actionId("flock-"); }
 Json runJson(const RunRef& run) {
     return {{"threadId", run.threadId}, {"runId", run.runId}, {"link", run.link}};
 }
@@ -143,6 +144,11 @@ void Store::Impl::openSchema() {
         initialize.commit();
     }
     exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS conversation_artifacts(
+  id TEXT PRIMARY KEY NOT NULL, message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id),
+  html TEXT NOT NULL)
+)SQL");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
   host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,

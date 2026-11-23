@@ -14,15 +14,11 @@ void channelEndpoints(const std::filesystem::path& database) {
         InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
     };
     struct Transport final : ChannelTransport {
-        std::string preview;
-        std::vector<Json> replies;
+        std::vector<Json> publications, replies;
         ChannelDelivery send(std::string_view key, const ChannelOrigin& origin, std::string_view operation,
                              const Json& payload) override {
-            if (operation == "publish_artifact") {
-                const auto url = payload.at("url").get<std::string>();
-                check(url.starts_with("https://previews.example.com/"),"Preview publication is missing its configured origin");
-                preview = url.substr(std::string_view("https://previews.example.com").size());
-            }
+            if (operation == "publish_artifact")
+                publications.push_back({{"id",key},{"origin",origin.json()},{"payload",payload}});
             if (operation == "reply") replies.push_back({{"origin",origin.json()},{"payload",payload}});
             return {ChannelDelivery::State::accepted,std::string(key)};
         }
@@ -42,8 +38,10 @@ void channelEndpoints(const std::filesystem::path& database) {
             }
             if (turn.empty()) {
                 if (input.event.at("text") == "Prepare session") return {"start_task",{{"request","Prepare"}},{}};
-                if (input.event["channel"]["channelKind"] == "slack")
-                    return {"publish_artifact",{{"title","Show preview"},{"html","<p>Preview</p>"}},{}};
+                if (input.event.at("text") == "Preview") {
+                    const auto kind = input.event.at("channel").at("channelKind").get<std::string>();
+                    return {"publish_artifact",{{"title",kind + " preview"},{"html","<p>" + kind + " preview</p>"}},{}};
+                }
             }
             return {"reply",{{"text","Thread reply"},{"suggestions",{"Get started"}}},{}};
         }
@@ -104,18 +102,43 @@ void channelEndpoints(const std::filesystem::path& database) {
     Session t3;
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     runtime.runConversations();
-    check(transport->replies.size() == 2 && transport->replies[0]["payload"]["suggestions"].size() == 1,
-          "Channel replies or getting-started suggestions missing");
-    const auto preview = bridge.Get(transport->preview,httplib::Headers{{"Sec-Fetch-Site","cross-site"}});
-    check(preview && preview->status == 200 && preview->body == "<p>Preview</p>" &&
-          preview->get_header_value("Content-Type").starts_with("text/html") &&
-          preview->get_header_value("Content-Security-Policy").starts_with("sandbox"),"Artifact preview missing sandbox or HTML");
+    check(transport->publications.size() == 2 && transport->replies.size() == 2,
+          "Expected one artifact publication and one explanatory reply in each provider thread");
+    check(transport->publications[0].at("id") != transport->publications[1].at("id"),"Channel preview tokens collided");
+    const auto channelHistory = store.conversation("release");
+    for (std::size_t i = 0; i < transport->publications.size(); ++i) {
+        const std::string kind = i == 0 ? "slack" : "imessage";
+        const auto& publication = transport->publications.at(i);
+        const auto id = publication.at("id").get<std::string>();
+        const auto title = kind + " preview";
+        const auto origin = Json{{"channelKind",kind},{"workspaceId","W"},{"threadRef","thread"},{"externalMessageId","id"}};
+        const auto path = "/api/artifacts/" + id;
+        check(publication.at("origin") == origin && publication.at("payload") == Json{
+              {"title",title},{"url","https://previews.example.com" + path}},"Artifact did not reach its provider thread as a preview link");
+        const auto& reply = transport->replies.at(i);
+        check(reply.at("origin") == origin && reply.at("payload").at("text") == "Thread reply" &&
+              reply.at("payload").at("suggestions") == Json::array({"Get started"}) && !reply.at("payload").contains("artifacts"),
+              "Channel explanation, suggestions or delivery payload changed");
+        const auto preview = bridge.Get(path,httplib::Headers{{"Sec-Fetch-Site","cross-site"}});
+        check(preview && preview->status == 200 && preview->body == "<p>" + title + "</p>" &&
+              preview->get_header_value("Content-Type").starts_with("text/html") &&
+              preview->get_header_value("Content-Security-Policy").starts_with("sandbox;") &&
+              preview->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
+              "External token preview no longer serves its sandboxed, non-embeddable document");
+        check(channelHistory.at(i + 2).at("data").at("artifacts") == Json::array({{{"id",id},{"title",title}}}),
+              "Channel reply lost its journaled external artifact");
+    }
     Browser::checked(bridge.Get("/api/artifacts/flock-00000000000000000000000000000000"),404);
     Browser::checked(bridge.Get("/api/channels/local-connections"),401);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     const auto history = browser.get("/api/conversation?bot=release").at("events");
     check(history.size() == 4 && history.at(0).at("kind") == "conversation_message" &&
           history.at(1).at("kind") == "conversation_message","HTTP conversation does not show channel intake");
+    for (std::size_t i = 2; i < history.size(); ++i) {
+        const auto& data = history.at(i).at("data");
+        check(data.at("text") == "Thread reply" && data.at("artifacts") == channelHistory.at(i).at("data").at("artifacts"),
+              "The Web timeline lost the channel reply or its external preview link");
+    }
     check(history[0]["data"]["channel"] == Json{{"channelKind","slack"},{"fromViewer",false}} &&
           history[1]["data"]["channel"] == Json{{"channelKind","imessage"},{"fromViewer",false}},
           "HTTP channel provenance must include only the kind and whether the viewer sent it");

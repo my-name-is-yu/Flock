@@ -1125,7 +1125,9 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
           "leave_session did not perform and report the same stop as flock_stop");
     db->receive(localOwner,cb.intake("triage",""),"web-after-leave","Send another update");
     runtime->runConversations();
-    check(model.ask.webTools == model.ask.sessionTools,"A Session ask did not receive the Web Bot's tools");
+    auto webTools = model.ask.webTools;
+    check(std::erase(webTools,"publish_artifact") == 1 && webTools == model.ask.sessionTools,
+          "Session asks should share the Web tools except for publishing an inline diagram");
     check(participationState(database,"triage") == "left" && effects().at("t3_thread_send").size() == 4 &&
           model.ask.send.at("error") == "This Bot's participation in the Session has stopped",
           "A send reactivated a Bot that left");

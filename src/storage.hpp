@@ -43,7 +43,7 @@ private:
 std::string field(const Json&, std::string_view);
 bool terminal(const Json&);
 Json questionTarget(const Json&);
-std::string actionId();
+std::string actionId(std::string_view prefix);
 std::string taskIntent(const Json& task);
 std::string effectiveDoneWhen(const Json& task);
 Json runJson(const RunRef&);

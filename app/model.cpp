@@ -518,9 +518,11 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         description = "Read a text file or inspect an image from attachments or earlierAttachments in this channel thread.";
         integer("attachmentId","Attachment ID.",true);
     } else if (name == "publish_artifact") {
-        description = "Publish an HTML preview link in the originating channel.";
+        description = "Publish a diagram or chart beside the Flock Web reply, or an HTML preview link in the originating external channel. "
+            "When asked for a diagram, publish it first, then use reply to give a standalone explanation.";
         text("title","Display title.");
-        text("html","HTML document to preview. Scripts are disabled.");
+        text("html","Self-contained static HTML document with inline CSS or SVG. Fit the width of the conversation on mobile. "
+                    "Scripts and external resources are disabled.");
     } else if (name == "request_local_machine_connection") {
         description = "Request machine-owner approval for exact local operations in an active Session.";
         text("threadId","Active Session thread ID.");

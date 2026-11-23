@@ -1184,6 +1184,8 @@ const icons = {
   resultWarning: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v4.8m0 3.45h.01"/>',
   check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  diagram: '<rect x="9" y="3" width="6" height="5" rx="1"/><rect x="3" y="16" width="6" height="5" rx="1"/><rect x="15" y="16" width="6" height="5" rx="1"/><path d="M12 8v4m-6 4v-4h12v4"/>',
+  expand: '<path d="M9 4.5H4.5V9M15 4.5h4.5V9M19.5 15v4.5H15m-6 0H4.5V15"/>',
   open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
 };
 function icon(name, className = 'glyph') {
@@ -1501,6 +1503,56 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
+function diagramPreview({ replyId, artifactId, title }, expand = null) {
+  const path = `/api/messages/${replyId}/artifacts/${encodeURIComponent(artifactId)}`;
+  const preview = node('div', 'diagram-preview');
+  const status = node('p', 'diagram-status', 'Loading diagram…');
+  status.setAttribute('role', 'status');
+  if (!expand) {
+    preview.tabIndex = 0;
+    preview.setAttribute('role', 'region');
+    preview.setAttribute('aria-label', title);
+  }
+  preview.append(status);
+  void (async () => {
+    try {
+      const response = await fetch(path, { method: 'HEAD', credentials: 'same-origin', redirect: 'error' });
+      if (!response.ok) throw new Error('Diagram unavailable');
+      if (!preview.isConnected) return;
+      const frame = node('iframe', 'diagram-frame');
+      frame.title = title;
+      frame.setAttribute('sandbox', '');
+      frame.referrerPolicy = 'no-referrer';
+      frame.inert = true;
+      if (expand) {
+        frame.loading = 'lazy';
+        expand.disabled = false;
+      }
+      frame.src = path;
+      preview.replaceChildren(frame);
+    } catch {
+      status.textContent = 'Diagram unavailable.';
+      preview.classList.add('diagram-unavailable');
+      if (expand) expand.hidden = true;
+    }
+  })();
+  return preview;
+}
+function diagramCard(replyId, artifact) {
+  const title = artifact.title || 'Diagram';
+  const selection = { kind: 'diagram', replyId, artifactId: artifact.id, title };
+  const card = node('figure', 'conversation-diagram');
+  const caption = node('figcaption', 'diagram-caption');
+  const expand = button(null, 'text-button diagram-expand', () => openDetail(selection));
+  expand.disabled = true;
+  expand.dataset.timelineAction = `expand:${artifact.id}`;
+  expand.setAttribute('aria-label', `Expand ${title}`);
+  expand.setAttribute('aria-haspopup', 'dialog');
+  expand.append(icon('expand'), document.createTextNode('Expand'));
+  caption.append(icon('diagram'), node('span', 'diagram-title', title), expand);
+  card.append(caption, diagramPreview(selection, expand));
+  return card;
+}
 function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
@@ -1710,6 +1762,10 @@ function eventCard(event, context, place, report) {
     extras.push(link);
   }
   for (const artifact of data.artifacts ?? []) {
+    if (event.kind === 'conversation_reply' && /^web-[a-f0-9]{32}$/.test(artifact.id)) {
+      extras.push(diagramCard(event.id, artifact));
+      continue;
+    }
     const link = node('a', 'button', artifact.title);
     link.href = '/api/artifacts/' + encodeURIComponent(artifact.id);
     link.target = '_blank';
@@ -2409,6 +2465,7 @@ elements.detail.addEventListener('close', () => {
   clearDetailSectionTransition();
   releaseDetailAvatar();
   roleSize.disconnect();
+  if (elements.detail.classList.contains('diagram-detail')) elements['detail-body'].replaceChildren();
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
@@ -2819,6 +2876,7 @@ function replaceDetail(render) {
 }
 function renderDetail() {
   if (!detail || !view) return;
+  elements.detail.classList.toggle('diagram-detail', detail.kind === 'diagram');
   if (detail.kind === 'settings') {
     const bot = view.data.bot;
     const sections = sectionsFor(bot);
@@ -2830,6 +2888,13 @@ function renderDetail() {
   }
   labelDetail(null);
   renderDetailNav([], null);
+  if (detail.kind === 'diagram') {
+    if (changed('detail', detail)) {
+      elements['detail-title'].textContent = detail.title;
+      replaceDetail(() => [diagramPreview(detail)]);
+    }
+    return;
+  }
   if (detail.kind === 'peers') {
     const peers = botPeers(view.id).map(({ id }) => participant(id));
     if (changed('detail', detail, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {

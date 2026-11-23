@@ -363,6 +363,105 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
 }
 
+void conversationArtifacts(const std::filesystem::path& path) {
+    static constexpr auto prompt = "依頼がFlockからT3に渡り、結果が戻る流れを図にして";
+    static constexpr auto explanation = "Flock が依頼を T3 に渡し、作業結果をこの会話に返します。";
+    static constexpr auto html = "<!doctype html><style>svg{max-width:100%}</style>"
+        "<svg viewBox='0 0 200 32'><text y='24'>Flock → T3 → Flock</text></svg>";
+    struct DiagramModel : Model {
+        unsigned calls = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            ++calls;
+            check(std::ranges::find(input.tools,"publish_artifact") != input.tools.end(),
+                  "publish_artifact was not offered in a Web conversation");
+            if (input.event.at("text") != prompt)
+                return {{{"reply",{{"text","Plain reply"}},"Reply"}}};
+            const auto& turn = input.event.at("turn");
+            if (turn.empty())
+                return {{{"publish_artifact",{{"title","Flock と T3 の流れ"},{"html",html}},"Draw the diagram"}}};
+            check(!turn.at(0).at("args").contains("html") && turn.at(0).at("result").at("ok") == true,
+                  "the artifact was not saved or its HTML was echoed into tool history");
+            return {{{"reply",{{"text",explanation}},"Explain the diagram"}}};
+        }
+    } model;
+
+    auto config = callbacks();
+    config.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer owner") return Person{"owner",true};
+        if (credential == "Bearer reader") return Person{"reader",false};
+        if (credential == "Bearer other") return Person{"other",false};
+        return Person{};
+    };
+    config.resolveIdentity = [](std::string_view person) -> std::optional<bool> {
+        if (person == "owner") return true;
+        if (person == "reader" || person == "other") return false;
+        return std::nullopt;
+    };
+    constexpr auto feed = "/api/conversation?bot=release";
+    Id source = 0, replyId = 0, otherReplyId = 0;
+    Json refs;
+    std::string artifactId;
+    const auto artifactUrl = [&](Id reply) {
+        return "/api/messages/" + std::to_string(reply) + "/artifacts/" + artifactId;
+    };
+    {
+        Store store(path);
+        store.policy().setMember({"owner",true},"release","reader",true);
+        FixedT3 t3;
+        Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+        const auto server = startWeb(store,0,config);
+        Browser browser(*server);
+        browser.client.set_default_headers({{"Authorization","Bearer owner"}});
+        source = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","diagram"},{"text",prompt}},201)
+            .at("messageId");
+        runtime.runConversations();
+        const auto reply = conversationReply(browser.get("/api/view?bot=release"),source);
+        check(reply.at("text") == explanation && reply.at("artifacts").size() == 1,
+              "the diagram reference did not accompany the Bot explanation");
+        replyId = reply.at("messageId");
+        refs = reply.at("artifacts");
+        const auto& ref = refs.at(0);
+        artifactId = ref.at("id");
+        check(ref.size() == 2 && artifactId.starts_with("web-") && ref.at("title") == "Flock と T3 の流れ",
+              "the reply did not project a private Web artifact reference");
+        const auto plain = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","plain"},{"text","Hello"}},201)
+            .at("messageId").get<Id>();
+        runtime.runConversations();
+        otherReplyId = conversationReply(browser.get(feed),plain).at("messageId");
+        check(model.calls == 3,"the fixture did not publish, reply, and handle the second message");
+    }
+
+    Store reopened(path);
+    const auto server = startWeb(reopened,0,config);
+    Browser reader(*server);
+    reader.client.set_default_headers({{"Authorization","Bearer reader"}});
+    const auto saved = conversationReply(reader.get(feed),source);
+    check(saved.at("artifacts") == refs && saved.at("text") == explanation,
+          "reopening the database did not preserve the artifact reference and text");
+    const auto url = artifactUrl(replyId);
+    const auto document = reader.client.Get(url);
+    check(document && document->status == 200 && document->body == html &&
+          document->get_header_value("Content-Type") == "text/html; charset=utf-8" &&
+          document->get_header_value("Cache-Control") == "no-store" && !document->has_header("X-Frame-Options"),
+          "the authorized viewer could not frame the saved diagram");
+    check(document->get_header_value("Content-Security-Policy") ==
+          "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; "
+          "form-action 'none'; frame-ancestors 'self'", "the diagram lost its isolated document policy");
+    const auto head = reader.client.Head(url);
+    check(head && head->status == 200 && head->body.empty(),"the frame availability request failed");
+    Browser::checked(reader.client.Get(artifactUrl(otherReplyId)),404);
+    Browser::checked(reader.client.Get(artifactUrl(source)),404);
+    Browser::checked(reader.client.Get("/api/artifacts/" + artifactId),404);
+    Browser::checked(reader.client.Get(url,httplib::Headers{{"Sec-Fetch-Site","cross-site"}}),403);
+    Browser outsider(*server);
+    Browser::checked(outsider.client.Get(url),401);
+    outsider.client.set_default_headers({{"Authorization","Bearer other"}});
+    Browser::checked(outsider.client.Get(feed),403);
+    Browser::checked(outsider.client.Get(url),404);
+    reopened.policy().setMember({"owner",true},"release","reader",false);
+    Browser::checked(reader.client.Get(url),404);
+}
+
 void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     Store store(path);
     FixedModel model;
@@ -1356,6 +1455,7 @@ int main(int argc,char** argv) {
 #endif
         inspectors(directory.path / "inspectors.db");
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
+        conversationArtifacts(directory.path / "conversation-artifacts.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite",

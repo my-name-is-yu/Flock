@@ -334,6 +334,7 @@ public:
     void artifactBaseUrl(std::string url);
     Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
     std::optional<ChannelResource> artifact(std::string_view id) const;
+    std::optional<std::string> conversationArtifact(const Person&, Id reply, std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
     void setRootPeople(std::vector<std::string> ids);
     void setWebIdentityResolver(WebIdentityResolver, bool liveInteractiveRoles = false);

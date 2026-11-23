@@ -531,9 +531,29 @@
 .event-actions { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; margin-top: .55rem; }
 .msg.bot > .event-actions { margin-top: .15rem; padding-left: var(--avatar-col); }
 
+.conversation-diagram {
+  inline-size: min(36rem, calc(100% - var(--avatar-col))); min-inline-size: 0;
+  margin: .25rem 0 .2rem var(--avatar-col); overflow: hidden;
+  border: 1px solid var(--hairline); border-radius: var(--radius-lg); background: var(--raised);
+}
+.diagram-caption {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .25rem .45rem .25rem .8rem; border-block-end: 1px solid var(--hairline);
+}
+.diagram-caption > .glyph { flex: none; color: var(--text-3); }
+.diagram-caption .glyph svg { width: 1rem; height: 1rem; }
+.diagram-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: var(--text-sm); font-weight: 600; }
+.diagram-expand { display: inline-flex; align-items: center; gap: .25rem; min-height: 2.25rem; }
+.diagram-expand:hover:not(:disabled) { background: var(--hover); text-decoration: none; }
+.conversation-diagram .diagram-preview:not(.diagram-unavailable) { aspect-ratio: 16 / 9; min-block-size: 11rem; }
+.diagram-preview { display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); min-width: 0; min-height: 0; }
+.diagram-frame { display: block; width: 100%; height: 100%; border: 0; background: #fff; color-scheme: light; pointer-events: none; }
+.diagram-status { place-self: center; margin: .85rem; text-align: center; color: var(--text-2); font-size: var(--text-sm); }
+
 @container conversation-layout (max-width: 700px) {
   .event-message.bot, .peer-exchange-link, .policy-inline-card { --avatar-col: 0px; }
   :is(.event-message.bot, .msg.working) .msg-line > :is(.msg-avatar, .msg-avatar-space) { display: none; }
+  .conversation-diagram .diagram-preview:not(.diagram-unavailable) { aspect-ratio: 4 / 3; min-block-size: 15rem; }
 }
 @media (max-width: 700px) {
   .conversation-header { --profile-avatar-size: 2.625rem; }
