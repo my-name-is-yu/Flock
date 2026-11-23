@@ -9,7 +9,6 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
-#include <exception>
 #include <fcntl.h>
 #include <iostream>
 #include <poll.h>
@@ -831,14 +830,12 @@ Decision decodeResponseCall(const std::string& name, const std::string& argument
 
 ModelTurn responseDecision(const Json& output, const Json& request) {
     if (!output.is_array()) throw ModelError("ChatGPT output is not a list of response items",ModelErrorCode::invalid_tool_output);
-    ModelTurn turn;
-    std::exception_ptr firstRejection;
-    const auto& tools = request.at("tools").at(0).at("tools");
+    std::vector<const Json*> proposed;
     for (const auto& call : output) {
         if (!call.is_object() || !call.contains("type") || !call["type"].is_string())
             throw ModelError("ChatGPT returned a malformed output item",ModelErrorCode::invalid_tool_output);
         if (call["type"] == "reasoning" || call["type"] == "message") continue;
-        if (turn.calls.size() == maxToolCalls)
+        if (proposed.size() == maxToolCalls)
             throw ModelError("Too many tool calls",ModelErrorCode::invalid_tool_count);
         if (call["type"] != "function_call" ||
             !call.contains("name") || !call["name"].is_string() ||
@@ -846,18 +843,23 @@ ModelTurn responseDecision(const Json& output, const Json& request) {
             (!call.contains("namespace") || call["namespace"] != "flock") ||
             (!call.contains("status") || call["status"] != "completed"))
             throw ModelError("Expected completed Flock calls with JSON arguments",ModelErrorCode::invalid_tool_output);
-        auto name = call["name"].get<std::string>();
+        proposed.push_back(&call);
+    }
+    if (proposed.empty() || (proposed.size() > 1 && !request.value("parallel_tool_calls",false)))
+        throw ModelError("Invalid Flock call count for this request",ModelErrorCode::invalid_tool_count);
+
+    ModelTurn turn;
+    const auto& tools = request.at("tools").at(0).at("tools");
+    for (const auto* call : proposed) {
+        auto name = call->at("name").get<std::string>();
         try {
-            turn.calls.push_back(decodeResponseCall(name,call["arguments"].get_ref<const std::string&>(),tools));
+            turn.calls.push_back(decodeResponseCall(name,call->at("arguments").get_ref<const std::string&>(),tools));
         } catch (const ModelError& error) {
-            if (!firstRejection) firstRejection = std::current_exception();
+            if (proposed.size() == 1) throw;
             turn.rejections.emplace(turn.calls.size(),error.what());
             turn.calls.push_back({std::move(name),Json::object(),{}});
         }
     }
-    if (turn.calls.empty() || (turn.calls.size() > 1 && !request.value("parallel_tool_calls",false)))
-        throw ModelError("Invalid Flock call count for this request",ModelErrorCode::invalid_tool_count);
-    if (turn.calls.size() == 1 && firstRejection) std::rethrow_exception(firstRejection);
     return turn;
 }
 

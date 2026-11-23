@@ -265,3 +265,5 @@ Each authorized Bot tool action counts against the request's shared
 response when at least two batchable tools are offered. Flock schedules conflicting
 Bot tools in order and saves results while other calls wait for approval. The Bot
 receives results in provider order, then can reply or propose an action on its own.
+Workspace command launches must be requested on their own. Use the command status
+to check completion before reading files the command produces.

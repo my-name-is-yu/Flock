@@ -292,7 +292,8 @@ struct Store::Impl {
     void saveTurnResults(Id, int step, const Json& results);
     bool runToolBatch(const conversation::Message&, const ToolContext&, int step, const std::vector<ModelCall>&,
                       T3&, std::stop_token);
-    std::map<std::pair<Id,int>,std::map<std::size_t,Json>> toolBatchResults;
+    class ToolBatch;
+    std::map<std::pair<Id,int>,std::map<std::size_t,Json>> unpersistedToolResults;
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
@@ -325,10 +326,10 @@ struct Store::Impl {
         const IntakeResolver& intake;
         const PeerResolver& peers;
         std::stop_token shutdown;
-        bool sessionEffect, hasWebEvidence;
+        bool hasWebEvidence;
     };
-    CallOutcome executeConversationCall(const conversation::Message&, int step, const ModelCall&,
-                                        const ConversationCallContext&);
+    CallOutcome executeConversationStep(const conversation::Message&, int step, const std::vector<ModelCall>&,
+                                        std::string_view effectType, const BotTools&, const ConversationCallContext&);
     Json executeConversationRead(const conversation::Message&, const Decision&, T3&, std::string_view key);
     CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&,
                                              std::string_view key, const ConversationCallContext&);

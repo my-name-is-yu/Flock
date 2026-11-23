@@ -1,6 +1,7 @@
 #include "flock/board_inbox.hpp"
 #include "flock/workspace_tools.hpp"
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -70,7 +71,15 @@ struct FakeT3 : T3 {
 
 struct FakeMcp : McpTools {
     std::atomic_int calls = 0, reads = 0;
-    bool hasServer(std::string_view server) const override { return server == "fixture"; }
+    std::function<void()> onHasServer, onReadOnlyHint;
+    bool hasServer(std::string_view server) const override {
+        if (onHasServer) onHasServer();
+        return server == "fixture";
+    }
+    bool readOnlyHint(std::string_view, std::string_view) override {
+        if (onReadOnlyHint) onReadOnlyHint();
+        return false;
+    }
     Json discover(std::string_view, std::string_view, McpCollection, std::string_view) override { return {}; }
     McpToolResult invoke(std::string_view, std::string_view, const Json&) override {
         ++calls;
@@ -182,26 +191,28 @@ void mixedReads() {
           "Expected two reads and exactly one reply attempt");
     const auto& turn = f.model.turns[1];
     const auto results = f.results();
-    check(turn.size() == 2 && turn[0].at("tool") == search.tool && turn[1].at("tool") == readiness.tool &&
-          turn[0].at("step") == 1 && turn[1].at("step") == 1 &&
-          turn[0].at("callIndex") == 1 && turn[1].at("callIndex") == 2 &&
-          results[0].at("result").at("ok") == true && results[0].at("sessions").size() == 1 &&
-          results[1] == Json({{"ok",true},{"ready",true}}) &&
-          turn[0].at("result").at("sessions").at(0).at("title") == "Fixture Session" &&
-          turn[1].at("result") == results[1],"Ordered and attributed read results did not reach the model");
+    check(turn.size() == 2 && turn[0].at("tool") == search.tool && turn[1].at("tool") == readiness.tool,
+          "The model did not receive results in call order");
+    check(turn[0].at("step") == 1 && turn[1].at("step") == 1 &&
+          turn[0].at("callIndex") == 1 && turn[1].at("callIndex") == 2,"The model lost the original call slots");
+    check(results[0].at("result").at("ok") == true && results[0].at("sessions").size() == 1 &&
+          turn[0].at("result").at("sessions").at(0).at("title") == "Fixture Session",
+          "The Session search result did not reach the model");
+    check(results[1] == Json({{"ok",true},{"ready",true}}) && turn[1].at("result") == results[1],
+          "The readiness result did not reach the model");
 }
 
 void approval(bool allow) {
     Fixture f;
     f.store->policy().setMode(localOwner,"supervised");
-    f.receive({invoke,readResource,search});
+    f.receive({search,invoke,readResource});
     f.runtime->runConversations();
     const auto slots = f.results("effect");
-    check(f.status() == "policy_waiting" && slots[0].is_null() && slots[1].is_null() &&
-          slots[2].at("result").at("ok") == true &&
+    check(f.status() == "policy_waiting" && slots[0].at("result").at("ok") == true &&
+          slots[1].is_null() && slots[2].is_null() &&
           f.t3.searches == 1 && f.mcp->calls == 0 && f.mcp->reads == 0 && f.model.turns.size() == 1,
           "Approval failed to hold a dependent call or preserve an independent result");
-    check(f.query("SELECT operation FROM policy_approvals") == "turn/" + std::to_string(f.message) + "/1/0",
+    check(f.query("SELECT operation FROM policy_approvals") == "turn/" + std::to_string(f.message) + "/1/1",
           "The policy approval lost its call index");
     const auto items = f.store->inbox(localOwner);
     check(items.size() == 1 && items[0].at("itemKind") == "policy_approval","Expected one approval card");
@@ -211,8 +222,40 @@ void approval(bool allow) {
     f.checkFinished(2);
     const auto results = f.results();
     check(f.t3.searches == 1 && f.mcp->calls == (allow ? 1 : 0) && f.mcp->reads == 1 &&
-          results[0].at("ok") == allow && results[1].at("data").at("invocations") == (allow ? 1 : 0) &&
-          results[2] == slots[2],"Approval settlement repeated a sibling or let a dependent call overtake it");
+          results[0] == slots[0] && results[1].at("ok") == allow &&
+          results[2].at("data").at("invocations") == (allow ? 1 : 0),
+          "Approval settlement repeated a sibling or let a dependent call overtake it");
+}
+
+void storeRemainsResponsiveDuringMcpCapabilityChecks() {
+    struct Gate {
+        std::promise<void> entered, release;
+        std::future<void> released = release.get_future();
+
+        void pause() {
+            entered.set_value();
+            released.wait();
+        }
+    };
+    std::array<Gate,2> gates;
+    Fixture f;
+    f.mcp->onHasServer = [&] { gates[0].pause(); };
+    f.mcp->onReadOnlyHint = [&] { gates[1].pause(); };
+    f.receive({invoke,search});
+    auto batch = std::async(std::launch::async,[&] { f.runtime->runConversations(); });
+    bool reachedChecks = true, servedInbox = true;
+    for (auto& gate : gates) {
+        reachedChecks &= gate.entered.get_future().wait_for(3s) == std::future_status::ready;
+        auto inbox = std::async(std::launch::async,[&] { return f.store->inbox(localOwner); });
+        servedInbox &= inbox.wait_for(3s) == std::future_status::ready;
+        gate.release.set_value();
+        inbox.get();
+    }
+    batch.get();
+    check(reachedChecks,"The batch did not reach both MCP capability checks");
+    check(servedInbox,"An MCP capability check held the store mutex");
+    f.checkFinished(2);
+    check(f.mcp->calls == 1,"The MCP call did not complete after checking capabilities");
 }
 
 void followUpNeeded(const Decision& action, std::string_view guidance) {
@@ -225,6 +268,20 @@ void followUpNeeded(const Decision& action, std::string_view guidance) {
           results[0].at("result").at("ok") == true && results[1] == Json({{"ok",false},{"notRun",true},{"error",guidance}}) &&
           f.model.turns.at(1)[1].at("result") == results[1],
           "The standalone action ran in the batch or its result was lost");
+}
+
+void workspaceCommandRunsAlone() {
+    Fixture f;
+    const auto command = call("workspace_run_command",{{"argv",{"pwd"}}});
+    const auto findFiles = call("workspace_search",{{"query","marker"}});
+    f.receive({command,findFiles},4);
+    f.runtime->runConversations();
+    f.checkFinished(2);
+    const auto results = f.results();
+    check(results[0].value("notRun",false) && results[0].at("ok") == false &&
+          f.query("SELECT count(*) FROM workspace_commands") == "0",
+          "A background workspace command started in a batch");
+    check(results[1].at("ok") == true,"A standalone command suppressed a sibling read");
 }
 
 void conflictingWorkspaceCalls() {
@@ -324,8 +381,10 @@ int main() {
         mixedReads();
         approval(true);
         approval(false);
+        storeRemainsResponsiveDuringMcpCapabilityChecks();
         followUpNeeded(call("start_task",{{"request","Start a task"}}),"Run this action on its own after reviewing these results.");
         followUpNeeded(call("reply",{{"text","Premature reply"}}),"Reply after reviewing these results.");
+        workspaceCommandRunsAlone();
         conflictingWorkspaceCalls();
         rejectedCall();
         restartWithPartialResults();

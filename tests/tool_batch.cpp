@@ -47,7 +47,8 @@ void classification() {
 }
 
 void batchAdmission() {
-    for (const auto& tool : botToolNames()) check(batchable(tool), "Bot tool missing from batch admission");
+    for (const auto& tool : botToolNames())
+        check(batchable(tool) == (tool != "workspace_run_command"), "Incorrect Bot batch admission for " + tool);
     check(batchable("flock_session_search"), "Session search missing from batch admission");
     check(batchable("check_environment_readiness"), "Environment readiness missing from batch admission");
     for (const auto& tool : gitTools()) check(!batchable(tool), "Git tool admitted to batching");
@@ -55,12 +56,24 @@ void batchAdmission() {
         check(!batchable(tool), "Unexpected batch admission for " + std::string(tool));
 }
 
+using Waves = std::vector<std::vector<std::size_t>>;
+
+Waves waveSlots(const std::vector<Decision>& calls) {
+    std::vector<Candidate> candidates;
+    for (std::size_t i = 0; i < calls.size(); ++i) candidates.push_back({i,calls[i]});
+    Waves slots;
+    for (const auto& wave : planWaves(candidates)) {
+        auto& indices = slots.emplace_back();
+        for (const auto& call : wave) indices.push_back(call.slot);
+    }
+    return slots;
+}
+
 void waves() {
-    using Waves = std::vector<std::vector<std::size_t>>;
     check(planWaves({}).empty(), "Empty batch produced a wave");
-    check(planWaves({call("flock_session_search"),call("check_environment_readiness")}) == Waves{{0,1}},
+    check(waveSlots({call("flock_session_search"),call("check_environment_readiness")}) == Waves{{0,1}},
           "Independent conversation reads must share one wave");
-    check(planWaves({
+    check(waveSlots({
         call("workspace_write_file",{{"path","src/./Readme"}}),
         call("workspace_read_file",{{"path","src/README"}}),
         call("workspace_read_file",{{"path","src/README"}}),
@@ -72,20 +85,32 @@ void waves() {
         call("workspace_write_file",{{"path","other"}})
     }) == Waves{{0,4,6},{1,2},{3},{5,7},{8}},
           "Each workspace call must follow every earlier conflict and use the earliest eligible wave");
-    check(planWaves({
+    check(waveSlots({
         call("workspace_command_status",{{"commandId",1}}),
         call("workspace_stop_command",{{"commandId",1}}),
         call("workspace_command_status",{{"commandId",2}}),
-        call("workspace_run_command"),
         call("workspace_command_status",{{"commandId",1}})
-    }) == Waves{{0,2},{1},{3},{4}}, "Command control must preserve conflict order");
-    check(planWaves({
+    }) == Waves{{0,2},{1},{3}}, "Command control must preserve conflict order");
+    check(waveSlots({
         call("mcp_discover",{{"server","a"}}),
         call("mcp_call_tool",{{"server","a"}}),
         call("mcp_call_tool",{{"server","b"}}),
         call("mcp_read_resource",{{"server","a"}}),
         call("mcp_discover",{{"server","b"}})
     }) == Waves{{0,2},{1,4},{3}}, "MCP conflicts must order calls on the same server");
+}
+
+void sparseSlots() {
+    const auto write = call("workspace_write_file",{{"path","ordered.txt"}});
+    const auto independent = call("flock_session_search");
+    const auto read = call("workspace_read_file",{{"path","ordered.txt"}});
+    const Candidate calls[]{{1,write},{3,independent},{5,read}};
+    const auto waves = planWaves(calls);
+    check(waves.size() == 2 && waves[0].size() == 2 && waves[1].size() == 1,
+          "Saved or rejected siblings changed wave boundaries");
+    check(waves[0][0].slot == 1 && waves[0][1].slot == 3 && waves[1][0].slot == 5 &&
+          waves[1][0].predecessors == std::vector<std::size_t>{1},
+          "The plan lost original call slots or dependencies");
 }
 
 void approvalKeys() {
@@ -100,6 +125,7 @@ int main() {
         classification();
         batchAdmission();
         waves();
+        sparseSlots();
         approvalKeys();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -22,13 +22,19 @@ void Store::Impl::saveConversationCallResult(const Message& message, int step, J
     saveTurnResults(message.id,step,Json::array({redactor(message.bot).record(std::move(result))}));
 }
 
-Store::Impl::CallOutcome Store::Impl::executeConversationCall(
-    const Message& message, int step, const ModelCall& decision, const ConversationCallContext& ctx) {
+Store::Impl::CallOutcome Store::Impl::executeConversationStep(
+    const Message& message, int step, const std::vector<ModelCall>& calls, std::string_view effectType,
+    const BotTools& settings, const ConversationCallContext& ctx) {
     using enum CallOutcome;
+    const auto& decision = calls.front();
+    if (effectType == "array" || calls.size() > 1 || isBotTool(decision.tool)) {
+        const ToolContext tools{message.bot,message.id,settings,ctx.hasWebEvidence};
+        return runToolBatch(message,tools,step,calls,ctx.t3,ctx.shutdown) ? advance : stop;
+    }
     const auto key = tool_batch::turnCallKey(message.id,step);
     const auto& tool = decision.tool;
     const bool offered = decision.rejection.empty();
-    if (offered || ctx.sessionEffect) {
+    if (offered || effectType == "object") {
         if (tool == "message_session")
             return sendSessionMessage(message,step,decision,key,ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
         if (tool == "interrupt_session")
