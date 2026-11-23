@@ -7,8 +7,6 @@ namespace flockv0::conversation_storage {
 namespace {
 // The production bridge embeds the context JSON in an input_text string.
 constexpr std::size_t toolHistoryWireBytes = 768 * 1024;
-constexpr std::size_t earlierEvidenceWireBytes = 8 * 1024;
-constexpr std::size_t retainedReopens = 2;
 
 std::size_t wireBytes(const Json& value) {
     const auto encoded = value.dump(-1,' ',false,Json::error_handler_t::replace);
@@ -55,6 +53,27 @@ Json resultSummary(const Json& entry) {
     }
     return summary;
 }
+
+struct EarlierEvidenceBudget {
+    bool retain(bool reopened, std::size_t extraBytes) {
+        if (reopened && reopenSlots > 0) {
+            --reopenSlots;
+            return true;
+        }
+        if (!reopened && precedingSlot) {
+            precedingSlot = false;
+            return true;
+        }
+        if (extraBytes > sharedBytes) return false;
+        sharedBytes -= extraBytes;
+        return true;
+    }
+
+private:
+    std::size_t reopenSlots = 2;
+    bool precedingSlot = true;
+    std::size_t sharedBytes = 8 * 1024;
+};
 
 struct ToolHistoryEntry {
     const Json& call;
@@ -133,9 +152,7 @@ void projectToolHistory(Json& turn, const Json& redactionRevision) {
     }
 
     const auto& latestStep = turn.back().at("_ref").at("step");
-    auto remainingEarlier = earlierEvidenceWireBytes;
-    auto remainingReopens = retainedReopens;
-    bool keptPreceding = false;
+    EarlierEvidenceBudget earlierEvidence;
     std::set<CallRef> seen;
     for (auto& selected : visible) {
         const auto& entry = selected.entry;
@@ -144,16 +161,8 @@ void projectToolHistory(Json& turn, const Json& redactionRevision) {
         auto full = entry.project(true);
         const auto bytes = wireBytes(full) + 1;
         if (bytes > remaining + selected.bytes) continue;
-        const bool earlier = ref && full.at("step") != latestStep;
-        const bool reopen = earlier && entry.reopened() && remainingReopens > 0;
-        const bool preceding = earlier && !entry.reopened() && !keptPreceding;
-        if (earlier && !reopen && !preceding && bytes > selected.bytes) {
-            const auto extra = bytes - selected.bytes;
-            if (extra > remainingEarlier) continue;
-            remainingEarlier -= extra;
-        }
-        if (reopen) --remainingReopens;
-        keptPreceding |= preceding;
+        const auto extraBytes = bytes > selected.bytes ? bytes - selected.bytes : 0;
+        if (ref && full.at("step") != latestStep && !earlierEvidence.retain(entry.reopened(),extraBytes)) continue;
         remaining = remaining + selected.bytes - bytes;
         selected.row = std::move(full);
     }
