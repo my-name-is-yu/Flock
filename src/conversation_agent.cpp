@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
+#include "tool_batch.hpp"
 
 #include <algorithm>
 #include <set>
@@ -966,227 +967,232 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
             if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls,shutdown)) return;
             continue;
         }
-        if (decision.tool == "message_session" && (decision.rejection.empty() || sessionEffect)) {
-            if (!sendSessionMessage(message,step,decision,hasWebEvidence,t3,shutdown)) return;
-            continue;
-        }
-        if (decision.tool == "interrupt_session" && (decision.rejection.empty() || sessionEffect)) {
-            if (!runSessionEffect(message,step,decision,decision.rejection.empty(),hasWebEvidence,t3,shutdown)) return;
-            continue;
-        }
-        if (!decision.rejection.empty()) {
-            std::lock_guard lock(mutex);
-            Transaction transaction(db);
-            if (!authorizeTurn(message)) { transaction.commit(); return; }
-            auto result = toolFailure(decision.rejection);
-            if (isGitTool(decision.tool) && gitConversationEffectStarted(id,step)) {
-                result["delivery"] = "unknown";
-                result["error"] = "The host outcome is unknown. Check the target before retrying.";
-            }
-            saveTurnResults(id,step,Json::array({result}));
-            transaction.commit();
-            continue;
-        }
-        if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
-            std::lock_guard lock(mutex);
-            Transaction transaction(db);
-            if (!authorizeTurn(message)) { transaction.commit(); return; }
-            saveTurnResults(id,step,Json::array({webEvidenceActionDenied()}));
-            transaction.commit();
-            continue;
-        }
-        if (decision.tool == "invite_bot") {
-            if (!inviteSessionBot(message,step,decision,t3,intake,peers,shutdown)) return;
-            continue;
-        }
-        if (decision.tool == "leave_session") {
-            if (!leaveSession(message,step,decision,t3,shutdown)) return;
-            continue;
-        }
-
-        Json result;
-        const bool git = isGitTool(decision.tool);
-        const bool readSession = decision.tool == "flock_session_search" || decision.tool == "flock_session_events";
-        const bool checkEnvironment = decision.tool == "check_environment_readiness" && message.channelScope.empty();
-        if (git || readSession || checkEnvironment) {
-            std::lock_guard lock(mutex);
-            Transaction transaction(db);
-            if (shutdown.stop_requested()) return;
-            const bool allowed = authorizeTurn(message);
-            transaction.commit();
-            if (!allowed) return;
-        }
-        if (git) {
-            result = gitConversationTool(gitHost,message,step,decision);
-            if (result.value("policyWaiting",false)) return;
-        } else if (readSession) {
-            result = sessionReadTool(message,step,decision,t3);
-            if (result.value("policyWaiting",false)) return;
-        } else if (checkEnvironment) {
-            try {
-                result = readiness(message.bot,message.routing,decision.args,t3);
-                result["ok"] = true;
-            } catch (const Conflict& error) { result = {{"ok",false},{"error",error.what()}}; }
-        }
-        if (decision.tool == "request_bot_change") {
-            std::lock_guard lock(mutex);
-            try {
-                if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
-                const auto& args = decision.args;
-                const auto operation = toolText(args,"operation",32);
-                const auto target = toolText(args,"targetBotId",128);
-                const auto name = toolText(args,"name",128);
-                const auto actor = turnActor(message);
-                const auto action = operation == "create_bot" ? Action::bot_create : Action::bot_rename;
-                if ((operation != "create_bot" && operation != "rename_bot") || !validBotId(target) ||
-                    !Policy(*this).allows(actor,operation == "create_bot" ? Action::bot_create : Action::bot_settings,target))
-                    throw ToolError("Bot change denied by policy");
-                const auto key = "turn/" + std::to_string(id) + "/" + std::to_string(step);
-                const auto payload = Json::array({decision.tool,args});
-                {
-                    Transaction authorization(db);
-                    if (!authorizeTurn(message) || shutdown.stop_requested()) {
-                        authorization.commit();
-                        return;
-                    }
-                    const auto gate = approveAction(policyOrigin(message),{action,target},key,payload,clock(),false);
-                    authorization.commit();
-                    if (gate == ApprovalGate::waiting) return;
-                    if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
-                }
-                constexpr int maxCreationAttempts = 4;
-                auto retries = query("SELECT failures FROM conversation_retries WHERE message_id=?",{id});
-                const bool exhausted = retries.next() && retries.number(0) >= maxCreationAttempts - 1;
-                const auto changeId = Policy(*this).applyBotChange(message.bot,actor,operation,target,name,
-                    id,step,applyBotChange,exhausted ? &reconcileBotCreation : nullptr);
-                Transaction completed(db);
-                exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'",{key});
-                saveTurnResults(id,step,Json::array({Json{{"ok",true},{"changeId",changeId},{"status","applied"}}}));
-                completed.commit();
-                continue;
-            } catch (const Policy::BotCreationUncertain&) {
-                deferConversation(id,clock());
-                return;
-            } catch (const Conflict& error) {
-                result = toolFailure(error.what());
-            } catch (const ToolError& error) {
-                result = toolFailure(error.what());
-            }
-        }
-        std::optional<WorkSession> selectedSession;
-        if (decision.tool == "start_task" && decision.args.is_object() &&
-            !field(decision.args,"sessionRef").empty()) {
-            try {
-                selectedSession = resolveWorkSession(message,field(decision.args,"sessionRef"),t3);
-            } catch (const StorageError&) {
-                throw;
-            } catch (const std::exception&) {
-                result = toolFailure("The selected T3 Session could not be verified. Search for it again.");
-            }
-        }
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
-        if (!authorizeTurn(message)) { transaction.commit(); return; }
-        if (decision.tool == "reply") {
-            try {
-                const auto& args = decision.args;
-                if (!args.is_object()) throw ToolError("Tool arguments must be an object");
-                auto reply = text(args,"text",8000,true);
-                const auto continuesQuestion = args.find("continuesQuestion");
-                const conversation::QuestionAnchor* question = nullptr;
-                if (continuesQuestion != args.end() && !continuesQuestion->is_null()) {
-                    if (!continuesQuestion->is_boolean()) throw ToolError("continuesQuestion must be a boolean");
-                    if (continuesQuestion->get<bool>()) {
-                        if (!message.question) throw ToolError("Use continuesQuestion only for a reply about the attached task question");
-                        if (const auto error = questionAnswerError(load(message.question->taskId),message)) throw ToolError(error);
-                        question = &*message.question;
-                    }
-                }
-                Json suggestions = Json::array();
-                if (const auto list = args.find("suggestions"); list != args.end() && !list->is_null()) {
-                    if (!list->is_array() || list->size() > 4) throw ToolError("suggestions must be up to 4 strings");
-                    for (const auto& item : *list) {
-                        if (!item.is_string() || !hasText(item.get<std::string>()) || item.get<std::string>().size() > 200)
-                            throw ToolError("Each suggestion must be a nonempty string up to 200 bytes");
-                        if (std::ranges::find(suggestions,item) != suggestions.end())
-                            throw ToolError("Each suggestion must be distinct so the user's choice is unambiguous");
-                        suggestions.push_back(item);
-                    }
-                }
-                if (const auto resource = channelToolPolicy(id,"reply")) {
-                    const auto gate = approveAction(policyOrigin(message),*resource,
-                        "turn/" + std::to_string(id) + "/" + std::to_string(step),
-                        Json{{"text",reply},{"suggestions",suggestions},{"continuesQuestion",question != nullptr}},clock());
-                    if (gate == ApprovalGate::waiting) {
-                        transaction.commit();
-                        return;
-                    }
-                    if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
-                }
-                saveTurnResults(id,step,Json::array({Json{{"ok",true}}}));
-                finishTurn(message,std::move(reply),suggestions,"reply",question);
-                transaction.commit();
-                return;
-            } catch (const ToolError& error) {
-                result = error.details;
-                result["ok"] = false;
-                result["error"] = error.what();
-            }
-        } else if (result.is_null()) {
-            if (shutdown.stop_requested()) return;
-            std::optional<Resource> resource;
-            if (decision.tool == "create_schedule" || decision.tool == "create_reminder" ||
-                       decision.tool == "create_trigger" || decision.tool == "remove_schedule") {
-                resource = Resource{Action::automation_change,message.bot};
-            } else if (decision.tool == "update_bot_settings") {
-                const auto environment = field(decision.args,"environmentId");
-                if (!Policy(*this).forbidden(message.bot,Action::environment_configure,environment))
-                    resource = Resource{Action::environment_configure,environment};
-            } else if (decision.args.contains("docId")) {
-                const auto tool = decision.tool;
-                if (tool == "read_memory" || tool == "memory_history" || tool == "propose_memory_edit" ||
-                    tool == "apply_memory_edit" || tool == "revert_memory_edit")
-                    resource = Resource{tool == "read_memory" || tool == "memory_history" ?
-                                        Action::shared_memory_read : Action::shared_memory_write,field(decision.args,"docId")};
-            } else {
-                resource = channelToolPolicy(message.id,decision.tool);
-            }
-            if (resource) {
-                const auto gate = approveAction(policyOrigin(message),*resource,
-                    "turn/" + std::to_string(id) + "/" + std::to_string(step),
-                    Json::array({decision.tool,decision.args}),clock());
-                if (gate != ApprovalGate::allow) {
-                    if (gate != ApprovalGate::waiting)
-                        saveTurnResults(id,step,Json::array({toolFailure(approvalError(gate))}));
-                    transaction.commit();
-                    if (gate == ApprovalGate::waiting) return;
-                    continue;
-                }
-            }
-            exec("SAVEPOINT turn_tool");
-            try {
-                result = applyTurnTool(message,step,decision,clock(),selectedSession ? &*selectedSession : nullptr);
-                exec("RELEASE turn_tool");
-            } catch (const StorageError&) {
-                throw;
-            } catch (const std::exception& error) {
-                exec("ROLLBACK TO turn_tool");
-                exec("RELEASE turn_tool");
-                if (const auto* failed = dynamic_cast<const ToolError*>(&error)) result = failed->details;
-                else result = Json::object();
-                result["ok"] = false;
-                result["error"] = error.what();
-            }
-        }
-        if (decision.tool == "request_bot_change")
-            exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
-        saveTurnResults(id,step,Json::array({redactor(message.bot).record(result)}));
-        transaction.commit();
+        const auto outcome = executeConversationCall(message,step,std::nullopt,decision,
+            {t3,clock,gitHost,applyBotChange,reconcileBotCreation,intake,peers,shutdown,sessionEffect,hasWebEvidence});
+        if (outcome != CallOutcome::advance) return;
     }
     if (shutdown.stop_requested()) return;
     finish(ja ? "このメッセージの処理が長くなりすぎたため中断しました。必要なら、もう一度送ってください。"
               : "I stopped because handling this message took too many steps. Send it again if needed.",
            "error");
+}
+
+Store::Impl::CallOutcome Store::Impl::executeConversationCall(
+    const Message& message, int step, std::optional<std::size_t> index, const ModelCall& decision,
+    const ConversationCallContext& ctx) {
+    using enum CallOutcome;
+    const auto id = message.id;
+    const auto key = tool_batch::turnCallKey(id,step,index);
+    if (decision.tool == "message_session" && (decision.rejection.empty() || ctx.sessionEffect)) {
+        return sendSessionMessage(message,step,decision,key,ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
+    }
+    if (decision.tool == "interrupt_session" && (decision.rejection.empty() || ctx.sessionEffect)) {
+        return runSessionEffect(message,step,decision,key,decision.rejection.empty(),ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
+    }
+    if (!decision.rejection.empty()) {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (!authorizeTurn(message)) { transaction.commit(); return stop; }
+        auto result = toolFailure(decision.rejection);
+        if (isGitTool(decision.tool) && gitEffectStarted(key)) {
+            result["delivery"] = "unknown";
+            result["error"] = "The host outcome is unknown. Check the target before retrying.";
+        }
+        saveTurnResults(id,step,Json::array({result}));
+        transaction.commit();
+        return advance;
+    }
+    if (ctx.hasWebEvidence && !allowedAfterWebEvidence(decision)) {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (!authorizeTurn(message)) { transaction.commit(); return stop; }
+        saveTurnResults(id,step,Json::array({webEvidenceActionDenied()}));
+        transaction.commit();
+        return advance;
+    }
+    if (decision.tool == "invite_bot") {
+        return inviteSessionBot(message,step,decision,ctx.t3,ctx.intake,ctx.peers,ctx.shutdown) ? advance : stop;
+    }
+    if (decision.tool == "leave_session") {
+        return leaveSession(message,step,decision,ctx.t3,ctx.shutdown) ? advance : stop;
+    }
+
+    Json result;
+    const bool git = isGitTool(decision.tool);
+    const bool readSession = decision.tool == "flock_session_search" || decision.tool == "flock_session_events";
+    const bool checkEnvironment = decision.tool == "check_environment_readiness" && message.channelScope.empty();
+    if (git || readSession || checkEnvironment) {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (ctx.shutdown.stop_requested()) return stop;
+        const bool allowed = authorizeTurn(message);
+        transaction.commit();
+        if (!allowed) return stop;
+    }
+    if (git) {
+        result = gitConversationTool(ctx.gitHost,message,decision,key);
+        if (result.value("policyWaiting",false)) return waiting;
+    } else if (readSession) {
+        result = sessionReadTool(message,decision,ctx.t3,key);
+        if (result.value("policyWaiting",false)) return waiting;
+    } else if (checkEnvironment) {
+        try {
+            result = readiness(message.bot,message.routing,decision.args,ctx.t3);
+            result["ok"] = true;
+        } catch (const Conflict& error) { result = {{"ok",false},{"error",error.what()}}; }
+    }
+    if (decision.tool == "request_bot_change") {
+        std::lock_guard lock(mutex);
+        try {
+            if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
+            const auto& args = decision.args;
+            const auto operation = toolText(args,"operation",32);
+            const auto target = toolText(args,"targetBotId",128);
+            const auto name = toolText(args,"name",128);
+            const auto actor = turnActor(message);
+            const auto action = operation == "create_bot" ? Action::bot_create : Action::bot_rename;
+            if ((operation != "create_bot" && operation != "rename_bot") || !validBotId(target) ||
+                !Policy(*this).allows(actor,operation == "create_bot" ? Action::bot_create : Action::bot_settings,target))
+                throw ToolError("Bot change denied by policy");
+            const auto payload = Json::array({decision.tool,args});
+            {
+                Transaction authorization(db);
+                if (!authorizeTurn(message) || ctx.shutdown.stop_requested()) {
+                    authorization.commit();
+                    return stop;
+                }
+                const auto gate = approveAction(policyOrigin(message),{action,target},key,payload,ctx.clock(),false);
+                authorization.commit();
+                if (gate == ApprovalGate::waiting) return waiting;
+                if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
+            }
+            constexpr int maxCreationAttempts = 4;
+            auto retries = query("SELECT failures FROM conversation_retries WHERE message_id=?",{id});
+            const bool exhausted = retries.next() && retries.number(0) >= maxCreationAttempts - 1;
+            const auto changeId = Policy(*this).applyBotChange(message.bot,actor,operation,target,name,
+                id,step,ctx.applyBotChange,exhausted ? &ctx.reconcileBotCreation : nullptr);
+            Transaction completed(db);
+            exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'",{key});
+            saveTurnResults(id,step,Json::array({Json{{"ok",true},{"changeId",changeId},{"status","applied"}}}));
+            completed.commit();
+            return advance;
+        } catch (const Policy::BotCreationUncertain&) {
+            deferConversation(id,ctx.clock());
+            return stop;
+        } catch (const Conflict& error) {
+            result = toolFailure(error.what());
+        } catch (const ToolError& error) {
+            result = toolFailure(error.what());
+        }
+    }
+    std::optional<WorkSession> selectedSession;
+    if (decision.tool == "start_task" && decision.args.is_object() &&
+        !field(decision.args,"sessionRef").empty()) {
+        try {
+            selectedSession = resolveWorkSession(message,field(decision.args,"sessionRef"),ctx.t3);
+        } catch (const StorageError&) {
+            throw;
+        } catch (const std::exception&) {
+            result = toolFailure("The selected T3 Session could not be verified. Search for it again.");
+        }
+    }
+    std::lock_guard lock(mutex);
+    Transaction transaction(db);
+    if (!authorizeTurn(message)) { transaction.commit(); return stop; }
+    if (decision.tool == "reply") {
+        try {
+            const auto& args = decision.args;
+            if (!args.is_object()) throw ToolError("Tool arguments must be an object");
+            auto reply = text(args,"text",8000,true);
+            const auto continuesQuestion = args.find("continuesQuestion");
+            const conversation::QuestionAnchor* question = nullptr;
+            if (continuesQuestion != args.end() && !continuesQuestion->is_null()) {
+                if (!continuesQuestion->is_boolean()) throw ToolError("continuesQuestion must be a boolean");
+                if (continuesQuestion->get<bool>()) {
+                    if (!message.question) throw ToolError("Use continuesQuestion only for a reply about the attached task question");
+                    if (const auto error = questionAnswerError(load(message.question->taskId),message)) throw ToolError(error);
+                    question = &*message.question;
+                }
+            }
+            Json suggestions = Json::array();
+            if (const auto list = args.find("suggestions"); list != args.end() && !list->is_null()) {
+                if (!list->is_array() || list->size() > 4) throw ToolError("suggestions must be up to 4 strings");
+                for (const auto& item : *list) {
+                    if (!item.is_string() || !hasText(item.get<std::string>()) || item.get<std::string>().size() > 200)
+                        throw ToolError("Each suggestion must be a nonempty string up to 200 bytes");
+                    if (std::ranges::find(suggestions,item) != suggestions.end())
+                        throw ToolError("Each suggestion must be distinct so the user's choice is unambiguous");
+                    suggestions.push_back(item);
+                }
+            }
+            if (const auto resource = channelToolPolicy(id,"reply")) {
+                const auto gate = approveAction(policyOrigin(message),*resource,key,
+                    Json{{"text",reply},{"suggestions",suggestions},{"continuesQuestion",question != nullptr}},ctx.clock());
+                if (gate == ApprovalGate::waiting) {
+                    transaction.commit();
+                    return waiting;
+                }
+                if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
+            }
+            saveTurnResults(id,step,Json::array({Json{{"ok",true}}}));
+            finishTurn(message,std::move(reply),suggestions,"reply",question);
+            transaction.commit();
+            return finished;
+        } catch (const ToolError& error) {
+            result = error.details;
+            result["ok"] = false;
+            result["error"] = error.what();
+        }
+    } else if (result.is_null()) {
+        if (ctx.shutdown.stop_requested()) return stop;
+        std::optional<Resource> resource;
+        if (decision.tool == "create_schedule" || decision.tool == "create_reminder" ||
+                   decision.tool == "create_trigger" || decision.tool == "remove_schedule") {
+            resource = Resource{Action::automation_change,message.bot};
+        } else if (decision.tool == "update_bot_settings") {
+            const auto environment = field(decision.args,"environmentId");
+            if (!Policy(*this).forbidden(message.bot,Action::environment_configure,environment))
+                resource = Resource{Action::environment_configure,environment};
+        } else if (decision.args.contains("docId")) {
+            const auto tool = decision.tool;
+            if (tool == "read_memory" || tool == "memory_history" || tool == "propose_memory_edit" ||
+                tool == "apply_memory_edit" || tool == "revert_memory_edit")
+                resource = Resource{tool == "read_memory" || tool == "memory_history" ?
+                                    Action::shared_memory_read : Action::shared_memory_write,field(decision.args,"docId")};
+        } else {
+            resource = channelToolPolicy(message.id,decision.tool);
+        }
+        if (resource) {
+            const auto gate = approveAction(policyOrigin(message),*resource,key,
+                Json::array({decision.tool,decision.args}),ctx.clock());
+            if (gate != ApprovalGate::allow) {
+                if (gate != ApprovalGate::waiting)
+                    saveTurnResults(id,step,Json::array({toolFailure(approvalError(gate))}));
+                transaction.commit();
+                if (gate == ApprovalGate::waiting) return waiting;
+                return advance;
+            }
+        }
+        exec("SAVEPOINT turn_tool");
+        try {
+            result = applyTurnTool(message,step,decision,ctx.clock(),selectedSession ? &*selectedSession : nullptr);
+            exec("RELEASE turn_tool");
+        } catch (const StorageError&) {
+            throw;
+        } catch (const std::exception& error) {
+            exec("ROLLBACK TO turn_tool");
+            exec("RELEASE turn_tool");
+            if (const auto* failed = dynamic_cast<const ToolError*>(&error)) result = failed->details;
+            else result = Json::object();
+            result["ok"] = false;
+            result["error"] = error.what();
+        }
+    }
+    if (decision.tool == "request_bot_change")
+        exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
+    saveTurnResults(id,step,Json::array({redactor(message.bot).record(result)}));
+    transaction.commit();
+    return advance;
 }
 
 Json Store::pausedConversations(std::string_view bot) const {

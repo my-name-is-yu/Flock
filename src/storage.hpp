@@ -219,7 +219,7 @@ struct Store::Impl {
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
-    Json sessionReadTool(const conversation::Message&, int step, const Decision&, T3&);
+    Json sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key);
     void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
     std::set<std::string> connectedSessionEnvironments(const conversation::Message&);
     std::optional<WorkSession> resolveWorkSession(const conversation::Message&, std::string_view sessionRef, T3&);
@@ -294,13 +294,28 @@ struct Store::Impl {
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,
                  const PeerResolver&, std::stop_token);
-    bool sendSessionMessage(const conversation::Message&, int, const Decision&, bool hasWebEvidence, T3&, std::stop_token);
+    enum class CallOutcome { advance, waiting, stop, finished };
+    struct ConversationCallContext {
+        T3& t3;
+        const std::function<Seconds()>& clock;
+        GitHost* gitHost;
+        const ApplyBotChange& applyBotChange;
+        const ReconcileBotCreation& reconcileBotCreation;
+        const IntakeResolver& intake;
+        const PeerResolver& peers;
+        std::stop_token shutdown;
+        bool sessionEffect, hasWebEvidence;
+    };
+    CallOutcome executeConversationCall(const conversation::Message&, int step, std::optional<std::size_t> index,
+                                        const ModelCall&, const ConversationCallContext&);
+    CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
+                                   bool hasWebEvidence, T3&, std::stop_token);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&,
                           const PeerResolver&, std::stop_token);
     bool leaveSession(const conversation::Message&, int, const Decision&, T3&, std::stop_token);
     void wakeSessionMessages(T3&, std::stop_token);
-    bool runSessionEffect(const conversation::Message&, int step, const Decision&, bool offered, bool hasWebEvidence,
-                          T3&, std::stop_token);
+    CallOutcome runSessionEffect(const conversation::Message&, int step, const Decision&, std::string_view key,
+                                 bool offered, bool hasWebEvidence, T3&, std::stop_token);
     bool isNextTurn(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
     Person turnActor(const conversation::Message&);
@@ -309,8 +324,7 @@ struct Store::Impl {
     Json taskState(const Json& task, const conversation::Message&, bool fullContract = false) const;
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
     Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images);
-    Json gitConversationTool(GitHost*, const conversation::Message&, int step, const Decision&);
-    bool gitConversationEffectStarted(Id message, int step) const;
+    Json gitConversationTool(GitHost*, const conversation::Message&, const Decision&, std::string_view key);
     bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now,
                        const WorkSession* selectedSession);

@@ -222,14 +222,13 @@ public:
         }
     }
 
-    ApprovalGate authorizeEventTool(const conversation::Message& message, int step, const Decision& call) {
+    ApprovalGate authorizeEventTool(const conversation::Message& message, const Decision& call, std::string_view key) {
         std::lock_guard lock(store_.mutex);
         Transaction tx(store_.db);
         const auto session = eventSession(call.args);
         if (!session || !inSessionScope(session->target,session->payload == connectedScope)) return ApprovalGate::allow;
         const auto resource = Resource::sessionRead(session->target.environmentId,session->target.threadId);
         if (policy_.forbidden(bot_,resource.action,resource.target)) return ApprovalGate::allow;
-        const auto key = "turn/" + std::to_string(message.id) + "/" + std::to_string(step);
         const auto gate = store_.approveAction(store_.policyOrigin(message),resource,key,
                                                Json::array({call.tool,call.args}),store_.policyClock());
         if (gate == ApprovalGate::allow) approved_ = session->target;
@@ -620,13 +619,14 @@ JOIN json_each(?3) target ON target.value=entry.value
     }
 };
 
-Json Store::Impl::sessionReadTool(const conversation::Message& message, int step, const Decision& decision, T3& t3) {
+Json Store::Impl::sessionReadTool(const conversation::Message& message, const Decision& decision, T3& t3,
+                                 std::string_view key) {
     Policy policy(*this);
     SessionEvidence evidence(*this,policy,message,t3);
     try {
         if (!decision.args.is_object()) throw Conflict("Tool arguments must be an object");
         if (decision.tool == "flock_session_search") return evidence.search(decision.args);
-        const auto gate = evidence.authorizeEventTool(message,step,decision);
+        const auto gate = evidence.authorizeEventTool(message,decision,key);
         if (gate == ApprovalGate::waiting) return {{"policyWaiting",true}};
         if (gate != ApprovalGate::allow) return scopedResult(failure(std::string(approvalError(gate))));
         return evidence.events(decision.args);
