@@ -185,9 +185,9 @@ function modelAccountActions(item, model) {
   const actions = document.createElement('span');
   actions.className = 'row-actions';
   if (model.canSwitch) actionButton(actions, 'Switch account', (event) => void signIn(false, event.currentTarget, true));
-  if (model.canSignOut) actionButton(actions, 'Sign out', () => confirmSetting('Sign out of ChatGPT?',
+  if (model.connected && model.canSignOut) actionButton(actions, 'Sign out', () => confirmSetting('Sign out of ChatGPT?',
     'Bots on this Flock will need a connected account to use ChatGPT.', 'Sign out', signOut));
-  item.append(actions);
+  if (actions.childElementCount) item.append(actions);
 }
 
 function renderModel(model) {
@@ -219,7 +219,7 @@ function renderModel(model) {
   } else {
     const item = row('model', emptyLabel('ChatGPT sign-in needed', 'Sign in so your Bots can use your ChatGPT plan.'));
     if (model.canSignIn) actionButton(item, 'Sign in with ChatGPT', (event) => void signIn(false, event.currentTarget), true);
-    if (model.connected && (model.canSwitch || model.canSignOut)) modelAccountActions(item, model);
+    if (model.canSwitch || (model.connected && model.canSignOut)) modelAccountActions(item, model);
   }
 }
 

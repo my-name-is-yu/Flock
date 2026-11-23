@@ -27,12 +27,12 @@ struct WebCallbacks {
     // Optional local model status for installation roots.
     std::function<Json()> modelStatus = {};
     // Optional: starts ChatGPT sign-in in the background (opens the browser on this machine).
-    std::function<bool(bool reconsent)> modelLogin = {};
+    std::function<bool(const Person&, bool reconsent)> modelLogin = {};
     std::function<bool(const Person&, const std::string& environmentId, const std::string& mcpUrl)> t3Connect = {};
     std::function<Json(const Person&)> t3Setup = {};
     // A missing environment retries cleanup of a revoked provider registration.
     std::function<void(const std::optional<std::string>& environment)> t3Disconnect = {};
-    std::function<bool()> modelSwitch = {};
+    std::function<bool(const Person&)> modelSwitch = {};
     // nullopt means a sign-in is in progress. The value indicates remote revocation.
     std::function<std::optional<bool>()> modelLogout = {};
     // Managed credentials may be enabled while the listener is running.

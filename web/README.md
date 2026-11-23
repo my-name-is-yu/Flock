@@ -66,9 +66,11 @@ and queues each Bot reply with the Bot's name. If the Bot asks you a question,
 the coding agent shows it to you and forwards your reply. Ask the coding agent
 to stop the Bot when you want it to leave the Session.
 
-The first connection from the Web uses the running Flock port. The CLI
-connection defaults to port 4173 when no connection exists. To change the port,
-save it in **Flock settings → System** and restart Flock. Keep the Web listener enabled to accept
+The first connection from the Web uses the running Flock port. The CLI uses
+the port saved in **Flock settings → System**, or port 4173 if there is no
+saved port or existing connection. An explicit CLI port must match the System
+setting when one is set. To change the System port, save it and restart Flock.
+Keep the Web listener enabled to accept
 MCP calls. An accepted ask can finish when the Runtime restarts with
 `flock run --no-web` and uses the same home, connection, and identity file.
 

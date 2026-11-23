@@ -1410,14 +1410,25 @@ void settingsEndpoints(const std::filesystem::path& path) {
         connections.providerRemoved();
     };
     std::atomic<bool> unavailable = false;
+    std::atomic<bool> signedOut = false;
+    std::atomic<bool> registeredAccount = false;
     std::atomic<unsigned> statusCalls = 0;
     std::atomic<bool> reconsentRequested = false;
-    cb.modelLogin = [&](bool reconsent) { return reconsent && !reconsentRequested.exchange(true); };
+    std::atomic<bool> switchRequested = false;
+    cb.modelLogin = [&](const Person& actor, bool reconsent) {
+        check(actor == Person{"owner",true},"model sign-in lost the initiating administrator");
+        return reconsent && !reconsentRequested.exchange(true);
+    };
     cb.modelStatus = [&] {
         ++statusCalls;
         if (unavailable) throw std::runtime_error("private credential detail");
+        if (signedOut) return Json{{"connected",false},{"registered",registeredAccount.load()}};
         return Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
                     {"needsSignIn",true},{"accessToken","internal fixture token"}};
+    };
+    cb.modelSwitch = [&](const Person& actor) {
+        check(actor == Person{"owner",true},"model switch lost the initiating administrator");
+        return !switchRequested.exchange(true);
     };
     cb.intake = [original = cb.intake](std::string_view bot, std::string_view request) {
         auto intake = original(bot,request);
@@ -1461,12 +1472,23 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Flock settings lost the installation policy");
     check(settings.at("model") == Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
                                       {"demo",false},{"needsSignIn",true},{"unavailable",false},
-                                      {"signingIn",false},{"signInError",""},{"canSignIn",true}},
+                                      {"signingIn",false},{"signInError",""},{"canSignIn",true},{"canSwitch",true}},
           "Flock settings lost model status or exposed credential fields");
     unavailable = true;
     check(browser.get("/api/settings").at("model") == Json{{"unavailable",true}},
           "A failed credential check exposed details or broke the rest of settings");
     unavailable = false;
+    signedOut = true;
+    check(!browser.get("/api/settings").at("model").contains("canSwitch"),
+          "Initial sign-in exposed an account switch without a saved registration");
+    registeredAccount = true;
+    const auto signedOutModel = browser.get("/api/settings").at("model");
+    check(signedOutModel.at("connected") == false && signedOutModel.at("canSignIn") == true &&
+          signedOutModel.at("canSwitch") == true,
+          "The signed-out account lost the normal sign-in or switch action");
+    browser.post("/api/settings/model-login",{{"reconsent",false},{"switchAccount",true}},202);
+    check(switchRequested,"an administrator could not switch the signed-out account");
+    signedOut = false;
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
     check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&

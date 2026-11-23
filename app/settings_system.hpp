@@ -12,6 +12,7 @@ public:
                    std::optional<std::string> cliSessionRead);
 
     unsigned startupPort(unsigned t3Port) const;
+    unsigned t3CliPort(unsigned requestedPort, unsigned t3Port) const;
     std::optional<unsigned> recoveryPort(unsigned t3Port) const;
     const std::string& sessionRead() const { return activeSessionRead_; }
     void listenerStarted(unsigned port);

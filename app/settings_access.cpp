@@ -141,6 +141,22 @@ SettingsAccess::SettingsAccess(Store& store, const std::filesystem::path&, const
     store_.setWebIdentityResolver(identities().resolveRoot,!external_.authenticate);
 }
 
+bool SettingsAccess::canManageInstallation(const Person& actor) const {
+    if (!store_.policy().allows(actor,Action::rules_manage,"installation")) return false;
+    // Host-managed identities authenticate a specific credential. The
+    // conservative per-person resolver applies to queued work.
+    return external_.authenticate || resolve(store_,actor.id).value_or(false);
+}
+
+void SettingsAccess::commitIfAdministrator(const Person& actor, const std::function<void()>& commit) {
+    auto& db = *store_.p_;
+    std::lock_guard lock(db.mutex);
+    Transaction transaction(db.db);
+    if (!canManageInstallation(actor)) throw DecisionDenied{};
+    commit();
+    transaction.commit();
+}
+
 bool SettingsAccess::enabled() const {
     const auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);

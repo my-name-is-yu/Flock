@@ -11,6 +11,8 @@ public:
     SettingsAccess(Store&, const std::filesystem::path& home, const char* externalFile);
     bool enabled() const;
     ConfiguredIdentities identities() const;
+    bool canManageInstallation(const Person&) const;
+    void commitIfAdministrator(const Person&, const std::function<void()>&);
     Json view(const Person&) const;
     Json change(const Person&, const Json&);
 

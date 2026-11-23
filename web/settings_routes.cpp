@@ -41,7 +41,8 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                          {"needsSignIn",status.value("needsSignIn",false)},{"unavailable",status.value("unavailable",false)},
                          {"signingIn",status.value("signingIn",false)},{"signInError",status.value("signInError","")},
                          {"canSignIn",bool(callbacks.modelLogin)}};
-                if (callbacks.modelSwitch) model["canSwitch"] = true;
+                if (callbacks.modelSwitch && (status.value("connected",false) || status.value("registered",false)))
+                    model["canSwitch"] = true;
                 if (callbacks.modelLogout) model["canSignOut"] = true;
             } catch (const std::exception&) { model = {{"unavailable",true}}; }
         }
@@ -130,7 +131,8 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         if (req.body.size() > 1024) return reply(res,413,{{"error","payload_too_large"}});
         try {
             const auto args = Json::parse(req.body);
-            if (!store.policy().allows(person(callbacks,req),Action::rules_manage,"installation")) throw DecisionDenied{};
+            const auto actor = person(callbacks,req);
+            if (!store.policy().allows(actor,Action::rules_manage,"installation")) throw DecisionDenied{};
             if (!args.is_object() || args.size() != (args.contains("switchAccount") ? 2 : 1))
                 return reply(res,400,{{"error","invalid_input"}});
             const auto reconsent = args.at("reconsent").get<bool>();
@@ -138,7 +140,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             if (switchAccount && reconsent) return reply(res,400,{{"error","invalid_input"}});
             if (switchAccount ? !callbacks.modelSwitch : !callbacks.modelLogin)
                 return reply(res,409,{{"error","sign_in_unavailable"}});
-            if (!(switchAccount ? callbacks.modelSwitch() : callbacks.modelLogin(reconsent)))
+            if (!(switchAccount ? callbacks.modelSwitch(actor) : callbacks.modelLogin(actor,reconsent)))
                 return reply(res,409,{{"error","sign_in_pending"}});
             reply(res,202,{{"ok",true}});
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }

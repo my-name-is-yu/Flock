@@ -52,6 +52,10 @@ Json readSettingsFile(const std::filesystem::path& path, Json fallback) {
 void writeSettingsFile(const std::filesystem::path& path, const Json& value) {
     const auto bytes = value.dump(2) + '\n';
     if (bytes.size() > maxSettingsBytes) throw Conflict("The settings are too large to save.");
+    writePrivateFile(path,bytes);
+}
+
+void writePrivateFile(const std::filesystem::path& path, std::string_view bytes) {
     PendingSettings pending(path);
     const File file{::mkstemp(pending.name.data())};
     if (file.fd < 0) {

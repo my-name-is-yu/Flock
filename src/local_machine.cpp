@@ -136,7 +136,7 @@ void Store::setWebOrigin(std::string origin) {
 }
 
 bool Store::Impl::permitsLocalMachineOwner(std::string_view owner, std::string_view bot) const {
-    const auto root = resolveWebIdentity
+    const auto root = liveInteractiveRoles && resolveWebIdentity
         ? resolveWebIdentity(owner)
         : std::optional{std::ranges::find(rootPeople,owner) != rootPeople.end()};
     if (!root) return false;

@@ -8,12 +8,12 @@ if(NOT TARGET tomlplusplus::tomlplusplus)
 endif()
 
 configure_file(chatgpt.mjs chatgpt.mjs COPYONLY)
-add_library(flock_app_support bots.cpp model.cpp bot_tools.cpp git_github.cpp t3_setup.cpp)
+add_library(flock_app_support bots.cpp model.cpp bot_tools.cpp git_github.cpp t3_setup.cpp settings_file.cpp)
 target_link_libraries(flock_app_support PUBLIC flock_core PRIVATE CURL::libcurl tomlplusplus::tomlplusplus)
 target_compile_definitions(flock_app_support PRIVATE FLOCK_CHATGPT_BRIDGE="${CMAKE_CURRENT_BINARY_DIR}/chatgpt.mjs")
 target_compile_options(flock_app_support PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(flock main.cpp demo.cpp settings_file.cpp settings_system.cpp settings_access.cpp settings_connections.cpp)
+add_executable(flock main.cpp demo.cpp settings_system.cpp settings_access.cpp settings_connections.cpp)
 target_link_libraries(flock PRIVATE flock_app_support CURL::libcurl OpenSSL::Crypto)
 target_compile_options(flock PRIVATE -Wall -Wextra -Wpedantic)
 

@@ -139,7 +139,7 @@ int modelCommand(Arguments& args, const std::filesystem::path& home) {
 
 Json connectT3(const std::filesystem::path& home, const std::optional<std::string>& environment,
                const std::string& url, unsigned port, const std::function<void(const std::string&)>& authorize,
-               std::stop_token stop = {}, const std::optional<std::string>& requester = {}) {
+               std::stop_token stop = {}, const std::optional<Person>& requester = {}) {
     const T3SetupLock setup;
     // Provider registration runs inside the connection transaction. Use its own Store
     // so the daemon's reads do not wait on the transaction's Store mutex.
@@ -149,17 +149,18 @@ Json connectT3(const std::filesystem::path& home, const std::optional<std::strin
     const auto verifyAccess = [&] {
         if (access.enabled() && !resolve(localOwner.id))
             throw Conflict("Keep a Web identity for local-owner to connect T3.");
-        if (requester) {
-            const auto actor = resolve(*requester);
-            if (!actor || !store.policy().allows(*actor,Action::rules_manage,"installation"))
-                throw Conflict("The account that started this connection can no longer manage Flock.");
-        }
+        if (requester && !access.canManageInstallation(*requester))
+            throw Conflict("The account that started this connection can no longer manage Flock.");
     };
     verifyAccess();
     T3Connections connections(store);
     const auto previous = connections.settings(localOwner.id);
     const auto savedPort = previous ? previous->port : 0;
-    if (!port) port = savedPort ? savedPort : 4173;
+    const auto requestedPort = port;
+    const auto cliPort = [&] {
+        return SettingsSystem(home,std::nullopt,std::nullopt).t3CliPort(requestedPort,savedPort);
+    };
+    if (!requester) port = cliPort();
     const auto providers = configureT3Providers("http://127.0.0.1:" + std::to_string(port) + "/mcp/flock",
         [&](const InstallT3Provider& install) {
             loginT3Environment(home / "credentials" / "t3",environment,url,authorize,true,[&](
@@ -169,6 +170,8 @@ Json connectT3(const std::filesystem::path& home, const std::optional<std::strin
                 });
                 connections.connect(verifiedEnvironment,localOwner.id,port,[&](std::string_view token) {
                     verifyAccess();
+                    if (!requester && cliPort() != port)
+                        throw Conflict("The Web port changed during T3 setup. Start the connection again.");
                     if (!token.empty()) install(token);
                     saveCredential();
                 },refreshProviders);
@@ -255,8 +258,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
     std::function<Json()> modelStatus;
-    std::function<bool(bool)> modelLogin;
-    std::function<bool()> modelSwitch;
+    std::function<bool(const Person&,bool)> modelLogin;
+    std::function<bool(const Person&)> modelSwitch;
     std::function<std::optional<bool>()> modelLogout;
     struct SignIn {
         std::mutex mutex;
@@ -287,12 +290,17 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             if (!signIn.error.empty()) status["signInError"] = signIn.error;
             return status;
         };
-        const auto startSignIn = [&signIn,directory = home / "credentials" / "chatgpt"](bool reconsent, bool switchAccount) {
+        const auto startSignIn = [&signIn,&access,directory = home / "credentials" / "chatgpt"](
+            const Person& actor, bool reconsent, bool switchAccount) {
             std::lock_guard lock(signIn.mutex);
             if (signIn.running) return false;
-            signIn.worker = std::jthread([&signIn,directory,reconsent,switchAccount](std::stop_token stop) {
+            signIn.worker = std::jthread([&signIn,&access,directory,actor,reconsent,switchAccount](std::stop_token stop) {
                 std::string error;
-                try { ChatGPTModel(directory).loginWeb(reconsent,stop,switchAccount); }
+                try {
+                    ChatGPTModel(directory).loginWeb(reconsent,stop,switchAccount,[&](const auto& commit) {
+                        access.commitIfAdministrator(actor,commit);
+                    });
+                } catch (const DecisionDenied&) { error = "The account that started sign-in can no longer manage Flock."; }
                 catch (const ModelError& failure) { error = failure.what(); }
                 catch (const std::exception&) { error = "Could not sign in to ChatGPT."; }
                 std::lock_guard lock(signIn.mutex);
@@ -304,8 +312,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             signIn.error.clear();
             return true;
         };
-        modelLogin = [startSignIn](bool reconsent) { return startSignIn(reconsent,false); };
-        modelSwitch = [startSignIn] { return startSignIn(false,true); };
+        modelLogin = [startSignIn](const Person& actor, bool reconsent) { return startSignIn(actor,reconsent,false); };
+        modelSwitch = [startSignIn](const Person& actor) { return startSignIn(actor,false,true); };
         modelLogout = [&signIn,account = chatgpt.get()]() -> std::optional<bool> {
             std::lock_guard lock(signIn.mutex);
             if (signIn.running) return std::nullopt;
@@ -423,7 +431,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             if (!port) return false;
             std::lock_guard lock(t3Setup.mutex);
             if (t3Setup.running) return false;
-            t3Setup.worker = std::jthread([&,port,expected,mcpUrl,requester = actor.id](std::stop_token stop) {
+            t3Setup.worker = std::jthread([&,port,expected,mcpUrl,requester = actor](std::stop_token stop) {
                 std::string error;
                 try {
                     connectT3(home,expected,mcpUrl,port,[&](const std::string& url) {

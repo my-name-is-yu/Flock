@@ -51,6 +51,9 @@ void accessLifecycle() {
     const auto administrator = identity.authenticate(memberHeader);
     check(administrator == Person{"member",true},"Promotion is unavailable to other connections");
     check(identity.resolveRoot("member") == true,"Queued work cannot see the new role");
+    int credentialCommits = 0;
+    other.commitIfAdministrator(administrator,[&] { ++credentialCommits; });
+    check(credentialCommits == 1,"An authorized account could not commit a credential change");
     rejects<DecisionDenied>([&] {
         other.change(administrator,{{"operation","rotate"},{"person",localOwner.id}});
     },"A delegated administrator replaced the installation owner's credential");
@@ -66,6 +69,10 @@ void accessLifecycle() {
     access.change(localOwner,{{"operation","remove"},{"person","member"}});
     check(identity.authenticate(newHeader).id.empty() && !identity.resolveRoot("member"),
           "Revoked credentials still grant access");
+    rejects<DecisionDenied>([&] {
+        other.commitIfAdministrator(administrator,[&] { ++credentialCommits; });
+    },"A revoked administrator was able to commit a credential change");
+    check(credentialCommits == 1,"The credential change ran after the administrator was revoked");
     rejects<DecisionDenied>([&] {
         other.change(administrator,{{"operation","invite"},{"person","another"},{"adminRoot",false}});
     },"A revoked administrator changed settings with an earlier authorization");
@@ -83,11 +90,19 @@ void externalAccess() {
     Sandbox home;
     const auto identities = home.path / "identities.json";
     constexpr auto header = "Bearer fixture-read-only";
-    std::ofstream(identities) << Json::array({{{"person","admin"},{"adminRoot",true},{"authorization",header}}}).dump();
+    constexpr auto memberHeader = "Bearer fixture-member-only";
+    std::ofstream(identities) << Json::array({
+        {{"person","admin"},{"adminRoot",true},{"authorization",header}},
+        {{"person","admin"},{"authorization",memberHeader}}
+    }).dump();
     std::filesystem::permissions(identities,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     Store store(home.path / "flock.sqlite3");
     SettingsAccess access(store,home.path,identities.c_str());
     const auto admin = access.identities().authenticate(header);
+    check(access.identities().resolveRoot(admin.id) == false &&
+          access.canManageInstallation(admin) &&
+          !access.canManageInstallation(access.identities().authenticate(memberHeader)),
+          "Installation setup did not use the role of the authenticated credential");
     const auto status = access.view(admin);
     check(admin == Person{"admin",true} && status.at("mode") == "external" &&
           status.at("users").at(0).at("person") == "admin" && status.dump().find(header) == std::string::npos,

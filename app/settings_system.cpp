@@ -54,6 +54,18 @@ unsigned SettingsSystem::startupPort(unsigned t3Port) const {
     return port.is_null() ? t3Port : port.get<unsigned>();
 }
 
+unsigned SettingsSystem::t3CliPort(unsigned requestedPort, unsigned t3Port) const {
+    std::lock_guard lock(mutex_);
+    const auto setting = saved_.value("port",Json(nullptr));
+    const auto preferred = setting.is_null() ? 0u : setting.get<unsigned>();
+    if (preferred && requestedPort && requestedPort != preferred)
+        throw Conflict("Flock System settings select Web port " + std::to_string(preferred) +
+                       ". Change the port in Flock settings before connecting T3.");
+    if (requestedPort) return requestedPort;
+    if (preferred) return preferred;
+    return t3Port ? t3Port : 4173;
+}
+
 std::optional<unsigned> SettingsSystem::recoveryPort(unsigned t3Port) const {
     std::lock_guard lock(mutex_);
     const auto port = saved_.value("port",Json(nullptr));

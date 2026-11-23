@@ -248,11 +248,12 @@ async function showBrowserOrPrintUrl(url, printUrl, callbackSettled, browserRequ
   } else if (printUrl || (!await openBrowser(url) && !callbackSettled())) console.error(url);
 }
 
-async function login({ printUrl = false, reconsent = false, browserRequired = false, switchAccount = false } = {}) {
+async function login({ printUrl = false, reconsent = false, browserRequired = false, switchAccount = false } = {},
+    save = true) {
   const active = readProfile();
   if (!active.hostId) {
     active.hostId = `urn:uuid:${randomUUID()}`;
-    saveProfile(active);
+    if (save) saveProfile(active);
   }
   // A different account has its own client registration, under the same host ID.
   const profile = switchAccount ? { hostId: active.hostId } : active;
@@ -284,7 +285,7 @@ async function login({ printUrl = false, reconsent = false, browserRequired = fa
     const [{ code, clientId }] = await Promise.all([
       callback, showBrowserOrPrintUrl(url.toString(), printUrl, () => callbackSettled, browserRequired),
     ]);
-    if (!profile.clientId && !switchAccount) {
+    if (save && !profile.clientId && !switchAccount) {
       profile.clientId = clientId;
       saveProfile(profile);
     }
@@ -303,8 +304,8 @@ async function login({ printUrl = false, reconsent = false, browserRequired = fa
     if (switchAccount && !status(next).planUsage) {
       throw new Failure("Approve ChatGPT plan usage to switch accounts");
     }
-    saveProfile(next);
-    return status(next);
+    if (save) saveProfile(next);
+    return next;
   } finally {
     listener.close();
   }
@@ -485,19 +486,25 @@ try {
     payload += chunk;
   }
   const input = JSON.parse(payload);
-  let result;
-  if (operation === "login") result = await login(input);
+  let result, candidate;
+  if (operation === "login") result = status(await login(input));
+  else if (operation === "prepare_login") {
+    // Return the verified candidate over the private transport. The daemon
+    // will check the initiating administrator before publishing it.
+    candidate = await login(input, false);
+    result = status(candidate);
+  }
   else if (operation === "sign_out") result = await signOut();
   else if (operation === "status") result = status(readProfile());
   else if (operation === "web_status") {
     const profile = readProfile();
     const needsSignIn = Boolean(profile.subject && !profile.signedOut && (!Array.isArray(profile.granted) ||
       (profile.granted.includes(directScope) && (!profile.accessToken || !profile.refreshToken))));
-    result = { ...status(profile), needsSignIn };
+    result = { ...status(profile), needsSignIn, registered: Boolean(profile.clientId) };
   } else if (operation === "models") result = await models();
   else if (operation === "infer") result = await infer(input);
   else throw new Failure("Unknown ChatGPT transport operation");
-  console.log(JSON.stringify({ result }));
+  console.log(JSON.stringify({ result, candidate }));
 } catch (error) {
   const known = error instanceof Failure;
   // Raw browser, filesystem, fetch and parse errors can contain credentials or prompts.

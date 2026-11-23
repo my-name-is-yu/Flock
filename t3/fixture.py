@@ -882,8 +882,12 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     command = working_command
     codex_config.write_text(original)
 
+    system_settings = state / "system-settings.json"
+    system_settings.write_text(json.dumps({"port": port}))
+    system_settings.chmod(0o600)
     env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
-    old = connect("env-1", ["--port", str(port)], restart=True)
+    old = connect("env-1", [], restart=True)
+    system_settings.unlink()
     assert claude_config.read_bytes() == original_claude
     env["FLOCK_CLAUDE_CLI"] = str(claude)
     token = connect("env-2", [])
@@ -924,6 +928,15 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     token = connect("env-2", ["--port", str(port)], restart=True)
     assert token != before_port_change
 
+    system_settings.write_text(json.dumps({"port": port}))
+    system_settings.chmod(0o600)
+    configured = codex_config.read_bytes(), claude_config.read_bytes(), connector()
+    conflict = subprocess.run(command + ["t3", "connect", "env-2", server.origin + "/mcp",
+                                        "--port", str(previous_port)],
+                              env=env, text=True, capture_output=True, timeout=5)
+    assert conflict.returncode != 0 and "Flock System settings select Web port" in conflict.stderr
+    assert (codex_config.read_bytes(), claude_config.read_bytes(), connector()) == configured
+
     with subprocess.Popen(command + ["run", "--no-web"], env=env, text=True,
                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as headless:
         try:
@@ -950,11 +963,22 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         except urllib.error.HTTPError as error:
             return error.code
 
-    def settings(path="", body=None):
+    admin_credential = "Bearer fixture-local-owner-admin"
+    member_credential = "Bearer fixture-local-owner-member"
+    identities = directory / "web-identities.json"
+    identities.write_text(json.dumps([
+        {"person": "local-owner", "authorization": admin_credential, "adminRoot": True},
+        {"person": "local-owner", "authorization": member_credential},
+    ]))
+    identities.chmod(0o600)
+    env["FLOCK_WEB_IDENTITIES_FILE"] = str(identities)
+
+    def settings(path="", body=None, credential=admin_credential):
         origin = f"http://127.0.0.1:{port}"
         request = urllib.request.Request(origin + "/api/settings" + path,
             data=json.dumps(body).encode() if body is not None else None,
-            headers={"Origin":origin, "Content-Type":"application/json", "X-Flock-Action":"1"})
+            headers={"Origin":origin, "Content-Type":"application/json", "X-Flock-Action":"1",
+                     "Authorization":credential})
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.load(response)
 
@@ -978,6 +1002,12 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
             assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
 
             server.state["claimedEnvironment"] = "env-from-url"
+            try:
+                settings("/t3-connect", {"mcpUrl": server.origin + "/mcp"}, member_credential)
+            except urllib.error.HTTPError as error:
+                assert error.code == 403
+            else:
+                raise AssertionError("non-admin credential started Web T3 setup")
             status, _ = settings("/t3-connect", {"mcpUrl": server.origin + "/mcp"})
             assert status == 202
             pending = await_t3_settings(lambda value: value["t3Setup"]["authorizationUrl"])

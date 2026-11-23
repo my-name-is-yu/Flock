@@ -70,9 +70,11 @@ void channelEndpoints(const std::filesystem::path& database) {
     };
     const auto identities = database.parent_path() / "channel-identities.json";
     std::ofstream(identities) << Json::array({{{"authorization","Bearer fixture-owner"},{"person",owner.id},{"adminRoot",true}},
+                                            {{"authorization","Bearer fixture-owner-member"},{"person",owner.id}},
                                             {{"authorization","Bearer fixture-sender"},{"person",sender.id}}});
     std::filesystem::permissions(identities,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     configureWebIdentities(store,identities,cb);
+    check(cb.resolveIdentity(owner.id) == false,"The fixture owner must have a conservative queued role");
     check(!store.policy().allows(Person{owner.id},Action::bot_decide,"release"),"Machine owner unexpectedly has permission to decide for the Bot");
     const std::string sessionCredential(32,'s');
     const auto config = database.parent_path() / "session-bridge.json";
