@@ -254,9 +254,10 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     Bot bot;
     bot.id = id;
     bot.name = config.contains("name") ? validatedString(config,"name") : bot.id;
-    bot.environmentId = validatedString(config,"environmentId");
-    bot.projectId = validatedString(config,"projectId");
-    if (!plainId(bot.environmentId) || !plainId(bot.projectId))
+    if (config.contains("environmentId")) bot.environmentId = validatedString(config,"environmentId");
+    if (config.contains("projectId")) bot.projectId = validatedString(config,"projectId");
+    if ((!bot.environmentId.empty() && !plainId(bot.environmentId)) ||
+        (!bot.projectId.empty() && !plainId(bot.projectId)))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
     bot.settings = {{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
     for (const auto key : {"services","mcpServers"}) {
@@ -334,7 +335,9 @@ std::vector<PeerBot> Bots::peers(std::string_view id) const {
     if (!sender) return {};
     std::vector<PeerBot> result;
     for (const auto& peerId : sender->allowedBots) {
-        if (const auto peer = tryGetConfiguredBot(peerId)) result.push_back({peer->name,peer->intake(""),peer->role});
+        if (const auto peer = tryGetConfiguredBot(peerId);
+            peer && !peer->environmentId.empty() && !peer->projectId.empty())
+            result.push_back({peer->name,peer->intake(""),peer->role});
     }
     return result;
 }
@@ -580,6 +583,8 @@ void Bots::syncSchedules(Store& store, Seconds now,
             if (!cron.is_array()) throw Conflict("cron must be an array");
             if (!cron.empty()) {
                 const auto bot = configuredBot(id,config,&errors);
+                if (bot.environmentId.empty() || bot.projectId.empty())
+                    throw Conflict("Configured schedules need a T3 environment and project");
                 std::map<std::string_view,std::size_t> counts;
                 for (const auto& entry : cron) {
                     const auto key = entry.find("id");

@@ -9,6 +9,7 @@ namespace flockv0 {
 namespace {
 constexpr auto unavailable = "Session evidence not found";
 constexpr auto searchTimedOut = "Session search timed out. Retry with the same filters and cursor.";
+constexpr auto connectedScope = "connected";
 constexpr std::size_t searchCandidateLimit = 64;
 constexpr auto searchTimeLimit = std::chrono::seconds(2);
 using Clock = std::chrono::steady_clock;
@@ -49,13 +50,15 @@ struct Reference {
     Json payload;
 };
 
-std::string_view reference(const Json& args, const char* key) {
-    const auto value = args.find(key);
-    if (value == args.end() || !value->is_string()) return {};
-    const auto& ref = value->get_ref<const std::string&>();
+std::string_view validReference(std::string_view ref) {
     if (ref.size() != 38 || !ref.starts_with("flock-") ||
         ref.find_first_not_of("0123456789abcdef",6) != ref.npos) return {};
     return ref;
+}
+
+std::string_view reference(const Json& args, const char* key) {
+    const auto value = args.find(key);
+    return value != args.end() && value->is_string() ? validReference(value->get_ref<const std::string&>()) : std::string_view{};
 }
 
 bool hasCursor(const Json& args) {
@@ -66,31 +69,44 @@ bool hasCursor(const Json& args) {
 Json scopedResult(Json result, Json sessions = Json::array()) {
     return {{"result",std::move(result)},{"sessions",std::move(sessions)}};
 }
+
+bool humanSessionRequest(const conversation::Message& message) {
+    return message.channelScope.empty() &&
+        (message.principalSource == conversation::PrincipalSource::trusted ||
+         message.principalSource == conversation::PrincipalSource::web);
+}
+
+std::set<std::string> configuredSessionEnvironments(const Json& routing) {
+    std::set<std::string> result;
+    const auto environment = field(routing,"environmentId");
+    if (!environment.empty()) result.insert(environment);
+    for (const auto& id : routing.at("config").value("conversationEnvironments",Json::object()))
+        result.insert(id.get<std::string>());
+    return result;
+}
 }
 
 class Store::Impl::SessionEvidence {
 public:
-    SessionEvidence(Store::Impl& store, Policy& policy, std::string_view bot, std::string_view channelScope, T3& t3)
-        : store_(store), policy_(policy), bot_(bot), channelScope_(channelScope), t3_(t3) {}
+    SessionEvidence(Store::Impl& store, Policy& policy, const conversation::Message& message, T3& t3)
+        : store_(store), policy_(policy), message_(message), bot_(message.bot), channelScope_(message.channelScope), t3_(t3) {}
 
-    Json search(const Json& args, const Json& routing) {
+    Json search(const Json& args) {
         const Filters filters(args);
         const auto project = argument(args,"project");
         const auto status = argument(args,"status",128);
         const auto limit = pageSize(args);
         const auto key = Json::array({filters.query,project,status,filters.from,filters.to});
-        const auto configuredProject = field(routing,"projectId");
-        std::set<std::string> environments;
-        if (channelScope_.empty()) {
-            const auto environment = field(routing,"environmentId");
-            if (!environment.empty()) environments.insert(environment);
-            for (const auto& id : routing.at("config").value("conversationEnvironments",Json::object()))
-                environments.insert(id.get<std::string>());
-        }
-        const auto scopedKey = Json::array({key,channelScope_,configuredProject,environments});
+        auto environments = store_.connectedSearchEnvironments(message_);
+        const bool connected = !environments.empty();
+        const auto configuredProject = connected ? std::string{} : field(message_.routing,"projectId");
+        if (!connected && channelScope_.empty()) environments = configuredSessionEnvironments(message_.routing);
+        auto scopedKey = Json::array({key,channelScope_,configuredProject,environments});
+        if (connected) scopedKey.push_back(connectedScope);
+        const Json sessionScope = connected ? Json(connectedScope) : Json(nullptr);
         std::optional<Reference> anchor;
         Json progress{{"recorded",Json::array({"",""})},{"catalog",Json::object()}};
-        if (!configuredProject.empty())
+        if (connected || !configuredProject.empty())
             for (const auto& environment : environments) progress["catalog"][environment] = 0;
         std::vector<SessionTarget> batch;
         const auto cursor = reference(args,"cursor");
@@ -98,14 +114,14 @@ public:
             anchor = resolve(cursor,RefKind::search);
             const auto position = anchor ? anchor : resolve(cursor,RefKind::searchPosition);
             if (!position || !position->payload.is_object() || position->payload.at("scope") != scopedKey ||
-                (anchor && (!permitted(anchor->target) || !readable(anchor->target,Clock::now()+searchTimeLimit))))
+                (anchor && (!permitted(anchor->target,false,connected) || !readable(anchor->target,Clock::now()+searchTimeLimit))))
                 return scopedResult(failure(unavailable));
             progress = position->payload.at("progress");
             for (const auto& target : position->payload.at("remaining"))
                 batch.push_back({target.at(0).get<std::string>(),target.at(1).get<std::string>()});
         }
         if (batch.empty()) {
-            batch = candidates(configuredProject,environments,progress);
+            batch = candidates(configuredProject,environments,connected,progress);
             if (!cursor.empty() && !batch.empty()) omitEmitted(batch,cursor);
         }
         const bool catalogTruncated = !progress.at("catalog").empty();
@@ -126,7 +142,7 @@ public:
                 const auto& target = batch[scanned];
                 std::optional<SessionMetadata> item;
                 try {
-                    if (permitted(target)) item = t3_.sessionMetadata(target,!filters.query.empty(),scanDeadline);
+                    if (permitted(target,false,connected)) item = t3_.sessionMetadata(target,!filters.query.empty(),scanDeadline);
                 } catch (const SessionReadTimeout&) {
                     timedOut = true;
                     if (scanned == 0) {
@@ -136,7 +152,7 @@ public:
                     break;
                 }
                 ++scanned;
-                if (!item || (channelScope_.empty() && item->projectId != configuredProject) ||
+                if (!item || (!connected && channelScope_.empty() && item->projectId != configuredProject) ||
                     (!project.empty() && item->projectId != project &&
                      !session_read::contains(scrub.text(item->project),project)) ||
                     (!status.empty() && item->status != status) ||
@@ -150,31 +166,34 @@ public:
             if (timedOut && scanned == 0) return scopedResult(failure(searchTimedOut));
             std::lock_guard lock(store_.mutex);
             Transaction transaction(store_.db);
-            if (anchor && !permitted(anchor->target)) return scopedResult(failure(unavailable));
-            std::erase_if(matches,[&](const Candidate& row) { return !permitted(row.target); });
+            if ((connected && environments != store_.connectedSearchEnvironments(message_)) ||
+                (anchor && !permitted(anchor->target,false,connected))) return scopedResult(failure(unavailable));
+            std::erase_if(matches,[&](const Candidate& row) { return !permitted(row.target,false,connected); });
             if (matches.size() <= limit && !timedOut && scanned < scanLimit) continue;
 
             Json result{{"ok",true},{"sessions",Json::array()},{"nextCursor",nullptr},{"truncated",false}};
             auto& items = result["sessions"];
             auto scopes = Json::array();
-            if (anchor) scopes.push_back(issue(RefKind::session,anchor->target,nullptr));
+            if (anchor) scopes.push_back(issue(RefKind::session,anchor->target,sessionScope));
             const auto latestScrub = store_.sharedRedactor();
-            const auto unsearched = std::ranges::find_if(incomplete,[&](const SessionTarget& target) { return permitted(target); });
+            const auto unsearched = std::ranges::find_if(incomplete,[&](const SessionTarget& target) {
+                return permitted(target,false,connected);
+            });
             bool truncated = catalogTruncated || skippedSlowCandidate || unsearched != incomplete.end();
-            if (unsearched != incomplete.end()) scopes.push_back(issue(RefKind::session,*unsearched,nullptr));
+            if (unsearched != incomplete.end()) scopes.push_back(issue(RefKind::session,*unsearched,sessionScope));
             auto nextIndex = scanned;
             auto emitted = Json::array();
             for (const auto& [target,item,match] : matches) {
                 if (items.size() == limit) {
                     nextIndex = static_cast<std::size_t>(std::ranges::find(batch,target)-batch.begin());
-                    scopes.push_back(issue(RefKind::session,target,nullptr));
+                    scopes.push_back(issue(RefKind::session,target,sessionScope));
                     break;
                 }
                 truncated |= match.incomplete;
                 const auto display = [&](std::string_view text, std::size_t bytes) {
                     return boundedField(latestScrub,text,bytes,truncated);
                 };
-                const auto ref = issue(RefKind::session,target,nullptr);
+                const auto ref = issue(RefKind::session,target,sessionScope);
                 scopes.push_back(ref);
                 emitted.push_back(Json::array({target.environmentId,target.threadId}));
                 items.push_back({{"sessionRef",ref},
@@ -202,7 +221,7 @@ public:
         std::lock_guard lock(store_.mutex);
         Transaction tx(store_.db);
         const auto session = resolve(reference(call.args,"sessionRef"),RefKind::session);
-        if (!session || !inChannelScope(session->target)) return ApprovalGate::allow;
+        if (!session || !inSessionScope(session->target,session->payload == connectedScope)) return ApprovalGate::allow;
         const auto resource = Resource::sessionRead(session->target.environmentId,session->target.threadId);
         if (policy_.forbidden(bot_,resource.action,resource.target)) return ApprovalGate::allow;
         const auto key = "turn/" + std::to_string(message.id) + "/" + std::to_string(step);
@@ -220,9 +239,9 @@ public:
             throw Conflict("Invalid Session event operation");
         const auto session = authorizedTarget(args);
         if (!session) return scopedResult(failure(unavailable));
-        const auto& target = *session;
+        const auto& target = session->target;
         if (operation == "counts") {
-            return finish(target,[&] { return t3_.sessionCounts(target); },
+            return finish(*session,[&] { return t3_.sessionCounts(target); },
                 [](const SessionCounts& counts, const SecretRedactor&, Json& result) {
                     result["counts"] = {{"messages",counts.messages},{"runs",counts.runs}};
                 });
@@ -230,7 +249,7 @@ public:
         if (operation == "read_event") {
             const auto id = scoped(args,"eventRef",RefKind::event,target);
             if (!id) return scopedResult(failure(unavailable));
-            return finish(target,[&] { return t3_.sessionEvent(target,id->get<std::string>()); },
+            return finish(*session,[&] { return t3_.sessionEvent(target,id->get<std::string>()); },
                 [&](const SessionEvent& item, const SecretRedactor& scrub, Json& result) {
                     result["event"] = eventView(item,target,scrub,true);
                     result["truncated"] = result["event"].at("truncated");
@@ -238,7 +257,7 @@ public:
         }
         const auto id = scoped(args,"attachmentRef",RefKind::attachment,target);
         if (!id) return scopedResult(failure(unavailable));
-        return finish(target,[&] {
+        return finish(*session,[&] {
             return t3_.sessionAttachment(target,id->at(0).get<std::string>(),id->at(1).get<std::string>());
         },[&](const SessionAttachment& file, const SecretRedactor& scrub, Json& result) {
             bool truncated = file.truncated;
@@ -249,8 +268,33 @@ public:
         });
     }
 
+    std::optional<WorkSession> work(std::string_view token) {
+        if (!humanSessionRequest(message_)) return {};
+        const auto session = resolve(validReference(token),RefKind::session);
+        if (!session) return {};
+        const auto& target = session->target;
+        {
+            std::lock_guard lock(store_.mutex);
+            if (!permitted(*session) || !policy_.allows(store_.turnActor(message_),Action::bot_decide,bot_) ||
+                !policy_.allows(bot_,Action::environment_inspect,target.environmentId) ||
+                !store_.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?",{target.environmentId}).next())
+                return {};
+        }
+        std::optional<SessionMetadata> metadata;
+        try {
+            metadata = t3_.sessionMetadata(target,false,Clock::now()+searchTimeLimit);
+        } catch (const std::exception&) {
+            return {};
+        }
+        if (!metadata) return {};
+        WorkSession result{target.environmentId,target.threadId,std::move(metadata->projectId)};
+        std::lock_guard lock(store_.mutex);
+        if (!permitted(*session) || !store_.permitsWorkSession(message_,result)) return {};
+        return result;
+    }
+
     void authorizeHistory(Json& steps) const {
-        std::map<std::pair<std::string,bool>,std::optional<SessionTarget>> checked;
+        std::map<std::pair<std::string,bool>,std::optional<Reference>> checked;
         struct SavedEvidence { Json* result; bool accessible, dispatched; };
         std::vector<SavedEvidence> evidence;
         for (auto& step : steps) {
@@ -264,8 +308,8 @@ public:
                 const auto& ref = token.get_ref<const std::string&>();
                 auto [entry, fresh] = checked.try_emplace({ref,dispatched});
                 if (!fresh) continue;
-                const auto bound = resolve(ref,RefKind::session);
-                if (bound && permitted(bound->target,dispatched) && readable(bound->target)) entry->second = bound->target;
+                auto bound = resolve(ref,RefKind::session);
+                if (bound && permitted(*bound,dispatched) && readable(bound->target)) entry->second = std::move(bound);
             }
             const auto& args = step.at("args");
             const bool attachment = !refs.empty() && tool == "flock_session_events" &&
@@ -301,12 +345,16 @@ private:
     };
     Store::Impl& store_;
     Policy& policy_;
+    const conversation::Message& message_;
     std::string_view bot_;
     std::string_view channelScope_;
     T3& t3_;
     std::optional<SessionTarget> approved_;
 
-    bool inChannelScope(const SessionTarget& target) const {
+    bool inSessionScope(const SessionTarget& target, bool connected) const {
+        if (connected)
+            return policy_.allows(bot_,Action::environment_inspect,target.environmentId) &&
+                store_.connectedSearchEnvironments(message_).contains(target.environmentId);
         if (!channelScope_.empty()) {
             std::lock_guard lock(store_.mutex);
             if (!store_.query(R"SQL(
@@ -317,11 +365,15 @@ WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
         return true;
     }
 
-    bool permitted(const SessionTarget& target, bool dispatched = false) const {
-        if (!inChannelScope(target)) return false;
+    bool permitted(const SessionTarget& target, bool dispatched, bool connected) const {
+        if (!inSessionScope(target,connected)) return false;
         const auto resource = Resource::sessionRead(target.environmentId,target.threadId);
         if (dispatched || (approved_ && target == *approved_)) return !policy_.forbidden(bot_,resource.action,resource.target);
         return policy_.allows(bot_,resource);
+    }
+
+    bool permitted(const Reference& ref, bool dispatched = false) const {
+        return permitted(ref.target,dispatched,ref.payload == connectedScope);
     }
 
     bool readable(const SessionTarget& target, SessionReadDeadline deadline = {}) const {
@@ -334,18 +386,18 @@ WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
         }
     }
 
-    bool attachmentReadable(const std::optional<SessionTarget>& target, const Json& args, bool dispatched) const {
-        if (!target || !permitted(*target,dispatched)) return false;
+    bool attachmentReadable(const std::optional<Reference>& session, const Json& args, bool dispatched) const {
+        if (!session || !permitted(*session,dispatched)) return false;
         try {
-            const auto id = scoped(args,"attachmentRef",RefKind::attachment,*target);
-            return id && t3_.sessionAttachment(*target,id->at(0).get<std::string>(),id->at(1).get<std::string>()).has_value();
+            const auto id = scoped(args,"attachmentRef",RefKind::attachment,session->target);
+            return id && t3_.sessionAttachment(session->target,id->at(0).get<std::string>(),id->at(1).get<std::string>()).has_value();
         } catch (const std::exception&) {
             return false;
         }
     }
 
     std::vector<SessionTarget> candidates(const std::string& project, const std::set<std::string>& environments,
-                                          Json& progress) const {
+                                          bool connected, Json& progress) const {
         std::vector<SessionTarget> result;
         auto& recorded = progress.at("recorded");
         if (!recorded.is_null()) {
@@ -353,11 +405,11 @@ WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
             auto rows = store_.query(R"SQL(
 SELECT DISTINCT r.environment_id,r.thread_id FROM runs r JOIN tasks t ON t.id=r.task_id
 LEFT JOIN channel_tasks c ON c.task_id=t.id
-WHERE ((?5='' AND ?6<>'' AND t.project_id=?6 AND r.environment_id IN (SELECT value FROM json_each(?7)))
+WHERE ((?5='' AND (?8 OR (?6<>'' AND t.project_id=?6)) AND r.environment_id IN (SELECT value FROM json_each(?7)))
        OR (?5<>'' AND t.bot_id=?1 AND c.scope_key=?5))
   AND (r.environment_id,r.thread_id) > (?2,?3)
 ORDER BY r.environment_id,r.thread_id LIMIT ?4
-)SQL",{bot_,recorded.at(0),recorded.at(1),searchCandidateLimit+1,channelScope_,project,Json(environments).dump()});
+)SQL",{bot_,recorded.at(0),recorded.at(1),searchCandidateLimit+1,channelScope_,project,Json(environments).dump(),connected});
             while (rows.next()) result.push_back({rows.string(0),rows.string(1)});
             recorded = nullptr;
             if (result.size() > searchCandidateLimit) {
@@ -431,10 +483,10 @@ JOIN json_each(?3) target ON target.value=entry.value
         return std::move(resolved->payload);
     }
 
-    std::optional<SessionTarget> authorizedTarget(const Json& args) const {
+    std::optional<Reference> authorizedTarget(const Json& args) const {
         auto session = resolve(reference(args,"sessionRef"),RefKind::session);
-        if (!session || !permitted(session->target)) return {};
-        return std::move(session->target);
+        if (!session || !permitted(*session)) return {};
+        return session;
     }
 
     std::string issue(RefKind kind, const SessionTarget& target, const Json& payload) const {
@@ -500,7 +552,7 @@ JOIN json_each(?3) target ON target.value=entry.value
     }
 
     template<class Read, class Format>
-    Json finish(const SessionTarget& target, Read read, Format format) {
+    Json finish(const Reference& session, Read read, Format format) {
         decltype(read()) value;
         try {
             value = read();
@@ -510,10 +562,10 @@ JOIN json_each(?3) target ON target.value=entry.value
         if (!value) return scopedResult(failure(unavailable));
         std::lock_guard lock(store_.mutex);
         Transaction transaction(store_.db);
-        if (!permitted(target)) return scopedResult(failure(unavailable));
+        if (!permitted(session)) return scopedResult(failure(unavailable));
         Json result{{"ok",true},{"truncated",false},{"nextCursor",nullptr}};
         format(*value,store_.sharedRedactor(),result);
-        auto scopes = Json::array({issue(RefKind::session,target,nullptr)});
+        auto scopes = Json::array({issue(RefKind::session,session.target,session.payload)});
         transaction.commit();
         return scopedResult(std::move(result),std::move(scopes));
     }
@@ -524,7 +576,7 @@ JOIN json_each(?3) target ON target.value=entry.value
         const auto limit = pageSize(args);
         const auto session = authorizedTarget(args);
         if (!session) return scopedResult(failure(unavailable));
-        const auto& target = *session;
+        const auto& target = session->target;
         const auto key = Json::array({operation,filters.query,kind,filters.from,filters.to});
         std::optional<Id> after;
         if (hasCursor(args)) {
@@ -540,7 +592,7 @@ JOIN json_each(?3) target ON target.value=entry.value
                        session_read::contains(scrub.text(item.title),query);
             };
         }
-        return finish(target,[&] {
+        return finish(*session,[&] {
             return t3_.sessionEvents(target,filter);
         },[&](const SessionEventPage& page, const SecretRedactor& scrub, Json& result) {
             if (page.items.size() > limit) throw std::logic_error("Invalid Session event page");
@@ -559,10 +611,10 @@ JOIN json_each(?3) target ON target.value=entry.value
 
 Json Store::Impl::sessionReadTool(const conversation::Message& message, int step, const Decision& decision, T3& t3) {
     Policy policy(*this);
-    SessionEvidence evidence(*this,policy,message.bot,message.channelScope,t3);
+    SessionEvidence evidence(*this,policy,message,t3);
     try {
         if (!decision.args.is_object()) throw Conflict("Tool arguments must be an object");
-        if (decision.tool == "flock_session_search") return evidence.search(decision.args,message.routing);
+        if (decision.tool == "flock_session_search") return evidence.search(decision.args);
         const auto gate = evidence.authorizeEventTool(message,step,decision);
         if (gate == ApprovalGate::waiting) return {{"policyWaiting",true}};
         if (gate != ApprovalGate::allow) return scopedResult(failure(std::string(approvalError(gate))));
@@ -578,8 +630,51 @@ Json Store::Impl::sessionReadTool(const conversation::Message& message, int step
     }
 }
 
-void Store::Impl::authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3& t3) {
+void Store::Impl::authorizeSessionHistory(const conversation::Message& message, Json& steps, T3& t3) {
     Policy policy(*this);
-    SessionEvidence(*this,policy,bot,channelScope,t3).authorizeHistory(steps);
+    SessionEvidence(*this,policy,message,t3).authorizeHistory(steps);
+}
+
+std::set<std::string> Store::Impl::connectedSearchEnvironments(const conversation::Message& message) {
+    if (!humanSessionRequest(message)) return {};
+    std::lock_guard lock(mutex);
+    const auto actor = turnActor(message);
+    if (!Policy(*this).allows(actor,Action::bot_settings,message.bot)) return {};
+    auto rows = query(R"SQL(
+SELECT environment_id FROM t3_connector CROSS JOIN t3_connected_environments
+WHERE (? OR person_id=?) AND NOT EXISTS (SELECT 1 FROM bot_members WHERE bot=?)
+)SQL",{actor.adminRoot,actor.id,message.bot});
+    std::set<std::string> result;
+    while (rows.next()) result.insert(rows.string(0));
+    return result;
+}
+
+std::optional<WorkSession> Store::Impl::resolveWorkSession(const conversation::Message& message,
+                                                         std::string_view sessionRef, T3& t3) {
+    Policy policy(*this);
+    return SessionEvidence(*this,policy,message,t3).work(sessionRef);
+}
+
+bool Store::Impl::permitsWorkSession(const conversation::Message& message, const WorkSession& session) {
+    if (!humanSessionRequest(message) || session.projectId.empty() || session.threadId.empty()) return false;
+    std::lock_guard lock(mutex);
+    Policy policy(*this);
+    if (!policy.allows(turnActor(message),Action::bot_decide,message.bot) ||
+        !policy.allows(message.bot,Action::environment_inspect,session.environmentId) ||
+        !policy.allows(message.bot,Resource::sessionRead(session.environmentId,session.threadId)) ||
+        !query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?",{session.environmentId}).next())
+        return false;
+    if (connectedSearchEnvironments(message).contains(session.environmentId)) return true;
+    return field(message.routing,"projectId") == session.projectId &&
+        configuredSessionEnvironments(message.routing).contains(session.environmentId);
+}
+
+bool Store::Impl::permitsWorkSession(Id sourceMessageId, const WorkSession& session) {
+    std::lock_guard lock(mutex);
+    try {
+        return permitsWorkSession(loadTurnMessage(sourceMessageId),session);
+    } catch (const Conflict&) {
+        return false;
+    }
 }
 }

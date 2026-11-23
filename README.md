@@ -134,8 +134,18 @@ Session read and T3 send targets use compact JSON
 `["environment-id","thread-id"]`. Secret values stay inside adapters and
 are excluded from card previews.
 
-Session search uses recorded Runs and T3 thread lists for the configured
-project and environments. It scans up to 64 candidates per page with a shared two-second
+In a personal Bot conversation, the connection owner or installation root can
+search readable Sessions across connected T3 projects. Shared Bot conversations
+use their configured project scope. External channels search Sessions recorded
+for the same conversation.
+
+To resume work in a Session, ask your Bot to find it and give it an instruction,
+such as “Find the login investigation and add a test in that Session.” Flock
+sends the instruction to that Session and tracks the new Run, whether the Session
+was started in T3 or by a Bot. If the Session is busy, T3 queues the work.
+The normal T3 send policy and T3's Operate permission apply.
+
+Session search scans up to 64 candidates per page with a shared two-second
 deadline for candidate reads. A cursor after a matched Session first rechecks
 that Session's readability with its own two-second deadline. Follow `nextCursor`
 with the same filters even when the page contains no matches. If a timeout occurs

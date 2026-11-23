@@ -1,5 +1,6 @@
 #include "flock/policy.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/t3_connection.hpp"
 #include "task_history.hpp"
 #include <sqlite3.h>
 #include <algorithm>
@@ -127,6 +128,7 @@ struct SimulatedT3 : T3 {
     std::vector<std::pair<std::string,std::string>> interrupted;
     std::map<std::string,RunRef> deliveries;
     std::map<std::string,Observation> observations;
+    std::map<std::pair<std::string,std::string>,SessionMetadata> sessions;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
     bool runTargetedSteer = true;
     std::string login = "original-login";
@@ -134,6 +136,18 @@ struct SimulatedT3 : T3 {
     std::function<void()> duringAuthLookup;
 
     std::vector<Command> steered;
+    std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
+        std::string_view environment, std::string_view project, Id, SessionReadDeadline) override {
+        std::vector<std::string> threads;
+        for (const auto& [target,metadata] : sessions)
+            if (target.first == environment && (project.empty() || project == metadata.projectId))
+                threads.push_back(target.second);
+        return {std::move(threads),std::nullopt};
+    }
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
+        const auto item = sessions.find({target.environmentId,target.threadId});
+        return item == sessions.end() ? std::nullopt : std::optional(item->second);
+    }
     bool supportsRunTargetedSteer() const override { return runTargetedSteer; }
     std::string authGeneration(const std::string&,const Json&) override {
         if (auto callback = std::exchange(duringAuthLookup,{})) callback();
@@ -2182,11 +2196,75 @@ void environmentsResolveByNameOrId() {
           f.lastTurn()[2]["result"]["ok"] == false && f.response(message)["actions"].size() == 2,
           "a canonical ID was shadowed by an alias, an alias was missed, or an unknown environment was accepted");
 }
+void existingSessionStartsNormalWork() {
+    Fixture f;
+    T3Connections connector(*f.store);
+    connector.connect("desktop",localOwner.id,48123);
+    connector.connect("cloud",localOwner.id,48123);
+
+    f.script("Create the initial Flock task",{start()});
+    f.receive("initial","Create the initial Flock task");
+    const auto initial = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(initial,"running");
+    const auto firstRun = f.task(initial).at("activeRun");
+    const auto firstRunId = firstRun.at("runId").get<std::string>();
+    const auto firstThreadId = firstRun.at("threadId").get<std::string>();
+    f.t3.finish(firstRunId,"Initial report");
+    f.reach(initial,"completed");
+
+    const auto runTitle = "Bot Session";
+    const auto nativeTitle = "Native Session";
+    f.t3.sessions[{"desktop",firstThreadId}] =
+        {runTitle,"Bot Project","project","completed","2026-11-23T00:00:00Z","2026-11-23T00:00:00Z",{},false};
+    f.t3.sessions[{"cloud","native-thread"}] =
+        {nativeTitle,"Other Project","other-project","running","2026-11-23T00:00:00Z","2026-11-23T00:00:00Z",{},false};
+
+    for (const auto title : {nativeTitle,runTitle}) {
+        const auto request = std::string("Add tests in ") + title;
+        f.script(request,{
+            [title](const ModelInput&) {
+                return Decision{"flock_session_search",{{"query",title}},"Find the chosen Session"};
+            },
+            [request](const ModelInput& input) {
+                const auto& sessions = input.event.at("turn").back().at("result").at("sessions");
+                check(sessions.size() == 1,"the chosen Session was not discoverable");
+                return Decision{"start_task",{{"request",request},{"sessionRef",sessions.front().at("sessionRef")}},
+                                "Start work in the chosen Session"};
+            }
+        });
+        f.store->receive(localOwner,f.routing(request,"alpha","",""),request,request);
+        f.runtime->runConversations();
+        const auto taskId = f.store->tasks("alpha").front().at("id").get<Id>();
+        f.reach(taskId,"running");
+        const auto& sent = f.t3.sent.back();
+        const bool native = title == nativeTitle;
+        check(sent.tool == "start_in_session" && sent.target.runId.empty() &&
+              sent.target.threadId == (native ? "native-thread" : firstThreadId) &&
+              sent.environmentId == (native ? "cloud" : "desktop") &&
+              sent.projectId == (native ? "other-project" : "project"),
+              "work lost the selected Thread or used the Bot's launch route");
+        const auto assigned = f.task(taskId).at("activeRun");
+        check(assigned.at("runId") != firstRunId && assigned.at("threadId") == sent.target.threadId,
+              "Flock tracked earlier work instead of the assigned Run");
+        f.t3.finish(assigned.at("runId").get<std::string>(),request);
+        f.reach(taskId,"completed");
+        const auto result = f.event(taskId,"completed");
+        check(!result.is_null() && f.task(initial).at("state") == "completed",
+              "the new Run did not complete as a normal task");
+    }
+    const auto sentBefore = f.t3.sent.size();
+    f.script("Try a raw Thread ID",{start({{"sessionRef","native-thread"}})});
+    f.receive("raw-thread","Try a raw Thread ID");
+    f.tick();
+    check(f.lastTurn().front().at("result").at("ok") == false && f.t3.sent.size() == sentBefore,
+          "a raw Thread ID bypassed Session selection");
+}
 }
 
 int main() {
     try {
         durableInboxAndTargetedRevision();
+        existingSessionStartsNormalWork();
         linkedResultStartsANewSession();
         independentRequestQueuesSeparately();
         followUpCarriesTheReferencedReport();

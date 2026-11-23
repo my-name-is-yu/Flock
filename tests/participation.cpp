@@ -43,6 +43,7 @@ public:
     std::vector<Sent> sent;
     std::function<void()> beforeSend;
     std::string auth = "auth";
+    std::string activeRun = "run";
     bool uncertain = false, dispatchUnavailable = false;
     std::function<void()> beforeProof;
     std::mutex proofMutex;
@@ -56,7 +57,7 @@ public:
         probed.emplace_back(environment);
         for (auto* target : {&first,&second,&remote})
             if (target->environmentId == environment && target->threadId == thread)
-                return ThreadProof{*target,static_cast<Id>(history.at(target->threadId).size()),auth,"run","tool"};
+                return ThreadProof{*target,static_cast<Id>(history.at(target->threadId).size()),auth,activeRun,"tool"};
         return {};
     }
     std::optional<ThreadPage> read(const ThreadTarget& target, std::optional<Id> after) override {
@@ -175,6 +176,34 @@ void multiEnvironment(const std::filesystem::path& path) {
           "disconnecting one environment changed delivery to the remaining Thread");
     check(connections.disconnect(remote.environmentId) && !connections.authenticate(token),
           "disconnecting the final environment did not revoke the bearer");
+}
+
+void handoffChecksTheInvokingRun(const std::filesystem::path& path) {
+    Store store(path);
+    store.submit({"planner","Previous work",first.environmentId,first.projectId});
+    sqlite3* handle = nullptr;
+    const auto opened = sqlite3_open(path.c_str(),&handle);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(handle,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not open the fixture writer");
+    const auto seed = sqlite3_exec(writer.get(),R"SQL(
+INSERT INTO outbox(id,task_id,phase,data) SELECT 'previous-action',id,'accepted','{}' FROM tasks;
+INSERT INTO runs(action_id,task_id,environment_id,thread_id,run_id,link)
+SELECT 'previous-action',id,environment_id,'first','recorded-run','' FROM tasks;
+UPDATE tasks SET state='running',data=json_set(data,'$.activeRun',json_object('threadId','first','runId','current-run'));
+)SQL",nullptr,nullptr,nullptr);
+    check(seed == SQLITE_OK,"Could not record the Flock Runs");
+
+    Sessions sessions;
+    SessionHandoff handoff(store,sessions,resolve,intake);
+    const auto connection = connect(store);
+    for (const auto* run : {"recorded-run","current-run"}) {
+        sessions.activeRun = run;
+        denied([&] { invoke(handoff,connection,first,run,"Start a recursive handoff."); });
+    }
+    sessions.activeRun = "new-native-run";
+    const auto result = invoke(handoff,connection,first,"native-request","Start a handoff from a new Run.");
+    check(handoff.view(owner,result.channel).origin.invitation.target == first,
+          "An earlier Flock Run blocked the new native Run's handoff");
 }
 
 void invocationAndRecovery(const std::filesystem::path& path) {
@@ -551,6 +580,7 @@ int main() {
         originMatching();
         skillExport(path / "skills");
         multiEnvironment(path / "environments.sqlite3");
+        handoffChecksTheInvokingRun(path / "handoff-run.sqlite3");
         invocationAndRecovery(path / "invocation.sqlite3");
         reconcileAfterReceiptWriteContention(path / "receipt-contention.sqlite3");
         coordinate(path / "coordination.sqlite3");

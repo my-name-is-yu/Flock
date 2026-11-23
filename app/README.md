@@ -42,7 +42,10 @@ Example `bots/release/config.json`
 }
 ```
 
-Use the exact environment and project IDs from T3. The optional `session`
+Use the exact environment and project IDs from T3 for the Bot's default destination for
+new Sessions and for configured schedules. A personal Bot with a model configured
+can search connected T3 and start work in an existing Session with those IDs omitted.
+The optional `session`
 object accepts `model`, `providerInstanceId`, `runtimeMode`, and
 `workspaceStrategy`. Omitted Session settings use T3's defaults. If T3 cannot
 select a model for the project, set `model` and `providerInstanceId` together

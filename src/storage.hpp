@@ -9,12 +9,17 @@
 #include "flock/memory_automation.hpp"
 #include <map>
 #include <mutex>
+#include <set>
 #include <sqlite3.h>
 #include <utility>
 #include <variant>
 
 namespace flockv0 {
 namespace conversation { struct Message; }
+
+struct WorkSession {
+    std::string environmentId, threadId, projectId;
+};
 
 class StorageError : public std::runtime_error {
 public:
@@ -201,7 +206,11 @@ struct Store::Impl {
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
     Json sessionReadTool(const conversation::Message&, int step, const Decision&, T3&);
-    void authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3&);
+    void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
+    std::set<std::string> connectedSearchEnvironments(const conversation::Message&);
+    std::optional<WorkSession> resolveWorkSession(const conversation::Message&, std::string_view sessionRef, T3&);
+    bool permitsWorkSession(const conversation::Message&, const WorkSession&);
+    bool permitsWorkSession(Id sourceMessageId, const WorkSession&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
     explicit Impl(std::filesystem::path path, MemorySeed);
@@ -281,13 +290,15 @@ struct Store::Impl {
     Json gitConversationTool(GitHost*, const conversation::Message&, int step, const Decision&);
     bool gitConversationEffectStarted(Id message, int step) const;
     bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
-    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now);
+    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now,
+                       const WorkSession* selectedSession);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);
     Json ownTask(Id taskId, const conversation::Message&) const;
     Json resultReference(Id messageId, const conversation::Message&) const;
     Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
-                             std::string_view environment, Id messageId, const Json& source, bool resume);
+                             std::string_view environment, Id messageId, const Json& source, bool resume,
+                             const WorkSession* selectedSession = nullptr);
     bool acceptInstruction(Json& task, Id messageId, int step, std::string_view instruction,
                            const Json& source, const Json& routing, const TaskChange* change);
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
