@@ -112,8 +112,7 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
         if (source.contains("imageData") && !source["imageData"].is_null()) {
             if (!source["imageData"].is_string()) throw InputError("invalid_image");
             try {
-                image.emplace(decodeBase64(source["imageData"].get_ref<const std::string&>(),
-                                           AvatarImage::maxBytes,Base64Padding::AllowUnusedBits));
+                image.emplace(decodeBase64(source["imageData"].get_ref<const std::string&>(),AvatarImage::maxBytes));
             } catch (const std::invalid_argument&) {
                 throw InputError("invalid_image");
             } catch (const std::length_error&) {
@@ -233,7 +232,7 @@ public:
             if (!image) return error(res,404,"avatar_not_found");
             res.set_content(image->bytes().data(),image->bytes().size(),std::string(image->format().contentType));
         });
-        for (const auto path : {"/api/view","/api/workflows","/api/compactions","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
+        for (const auto path : {"/api/view","/api/workflows","/api/compactions","/api/conversation","/api/peer-conversation","/api/sessions"}) {
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
@@ -243,12 +242,6 @@ public:
                 const auto* bot = botById(known,id);
                 if (!bot) return error(res,404,"bot_not_found");
                 try {
-                    if (req.path == "/api/task") {
-                        const auto taskId = queryId(req,"taskId",false);
-                        const auto task = store_.task(taskId);
-                        if (web::field(task,"botId") != id) return error(res,404,"task_not_found");
-                        return json(res,200,store_.access().redactSecrets(id,web::taskDetail(task,store_.latestTaskResult(taskId))));
-                    }
                     const auto before = queryId(req,"before",true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,actor,id,before);
                     if (req.path == "/api/compactions" || req.path == "/api/workflows") {

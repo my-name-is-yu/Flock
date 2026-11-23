@@ -2,6 +2,7 @@
 #include "demo.hpp"
 #include "model.hpp"
 #include "tests/fixtures.hpp"
+#include "../tests/task_history.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -12,6 +13,7 @@
 using namespace flockv0;
 using namespace flockv0::app;
 using namespace flockv0::app::test;
+using flockv0::test::lastTaskEvent;
 
 namespace flockv0::app {
 void sessionConversationDispatch(Store&, const Json&);
@@ -218,7 +220,7 @@ void notesAcrossConversationAndWork() {
         check(tasks.size() == 1,"the request should create one Task for this Bot");
         const Id task = tasks.at(0).at("id");
         for (int step = 0; step < 10 && store.task(task).at("state") != "completed"; ++step) runtime.tick();
-        const auto result = store.latestTaskResult(task);
+        const auto result = lastTaskEvent(store,task,"completed");
         check(result.at("kind") == "completed" && result.at("data").at("text") == expectedReport &&
               result.at("data").at("doneWhen") == criterion && store.task(task).at("runs").size() == 1,
             "the Bot's completion report should apply its notes and preserve the saved criterion");
@@ -230,7 +232,7 @@ void notesAcrossConversationAndWork() {
         return task;
     };
     const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {
-        const Id result = store.latestTaskResult(task).at("id");
+        const Id result = lastTaskEvent(store,task,"completed").at("id");
         return store.receive(localOwner,bot,key,"Why does that evidence support the result?",result).at("messageId");
     };
     const auto checkResultAnswer = [&](const Intake& bot, Id task, Id question,
@@ -661,7 +663,7 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
     const Intake intake{"demo","Measure the result","local","project"};
     const auto task = store.submit(intake);
     for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
-    const auto result = store.latestTaskResult(task).at("id").get<Id>();
+    const auto result = lastTaskEvent(store,task,"completed").at("id").get<Id>();
     const auto replyTo = [&](Id message) {
         for (const auto& row : store.conversation("demo"))
             if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == message) return row["data"];
