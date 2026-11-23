@@ -68,6 +68,7 @@ function workAnswer(view, work, stage, prompt) {
   input.addEventListener('input', () => workAnswerDrafts.set(key, input.value));
   label.append(input);
   const button = document.createElement('button');
+  button.className = 'button primary';
   button.textContent = 'Send answer';
   form.append(label, button);
   form.onsubmit = (event) => {
@@ -105,6 +106,7 @@ function render(view) {
   $('handoff').hidden = false;
   $('handoff-heading').textContent = `${coordination ? 'Coordination' : 'Consultation'} with ${view.botId}`;
   $('state').textContent = handoffLabels[view.state] ?? workState(view.state);
+  $('state').dataset.state = view.state;
   fields('origin', [
     ['Paired by', view.person], ['Environment', view.target.environmentId], ['Project', view.target.projectId],
     ['Thread', view.target.threadId], ['Request', view.requestId],
