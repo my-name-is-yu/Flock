@@ -953,18 +953,19 @@ function workflowInspectors(data, open) {
   }
   return sections;
 }
+// Sidebar status lines say what the person needs to do, not which internal item kind is pending.
 const decisionKindLabels = {
-  user_question: 'Question from the Bot',
-  pr_review: 'Pull request review',
-  pr_reconciliation: 'Unconfirmed pull request',
-  extra_run: 'Extra run',
-  deadline: 'Deadline extension',
-  model_budget: 'Extra model call',
-  conversation_model_budget: 'Extra model call',
-  unknown_delivery: 'Delivery confirmation',
-  grant_request: 'Access request',
-  protected_input: 'Protected input',
-  bot_change: 'Bot change',
+  user_question: 'Question for you',
+  pr_review: 'Review requested',
+  pr_reconciliation: 'Confirm the pull request',
+  extra_run: 'Approve one more run',
+  deadline: 'Deadline reached',
+  model_budget: 'Approve another model call',
+  conversation_model_budget: 'Approve another model call',
+  unknown_delivery: 'Message to T3 unconfirmed',
+  grant_request: 'Access requested',
+  protected_input: 'Secret needed',
+  bot_change: 'Bot change to approve',
 };
 let activityBotId = null;
 let activitySeen = false;

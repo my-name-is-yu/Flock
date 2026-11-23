@@ -1,10 +1,10 @@
 import { hasQuestionChoices, questionChoiceForm, updateQuestionChoiceForm } from './question-choices.js';
 
 const labels = {
-  user_question: 'Question', extra_run: 'Extra run', deadline: 'Deadline extension',
-  model_budget: 'Extra model call', conversation_model_budget: 'Extra conversation model call',
+  user_question: 'Question', extra_run: 'One more run', deadline: 'Deadline extension',
+  model_budget: 'Another model call', conversation_model_budget: 'Another model call',
   unknown_delivery: 'Unconfirmed message to T3', grant_request: 'Access request',
-  protected_input: 'Protected input', bot_change: 'Bot change', pr_review: 'Pull request review',
+  protected_input: 'Secret value', bot_change: 'Bot change', pr_review: 'Pull request review',
   pr_reconciliation: 'Unconfirmed pull request',
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
   extend: 'Extended', reconcile: 'Checked again', request_changes: 'Changes requested',
@@ -17,7 +17,7 @@ const actions = {
   conversation_model_budget: [['approve', 'Approve one call']],
   unknown_delivery: [['reconcile', 'Check T3 again']],
   grant_request: [['approve', 'Approve access'], ['deny', 'Deny']],
-  protected_input: [['supply', 'Save protected value']],
+  protected_input: [['supply', 'Save secret']],
   bot_change: [['approve', 'Approve change'], ['deny', 'Deny']],
   pr_reconciliation: [['reject_pr', 'Reject']],
   pr_review: [['request_changes', 'Request changes'], ['approve', 'Approve review']],
