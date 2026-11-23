@@ -5,7 +5,30 @@
 
 namespace flockv0::tool_batch {
 namespace {
-constexpr std::string_view conversationBatchReads[]{"flock_session_search","check_environment_readiness"};
+struct ReadSpec {
+    std::string_view tool;
+    ConversationRead path;
+    CallClass classification = CallClass::parallel_read;
+};
+constexpr ReadSpec conversationBatchReads[]{
+    {"flock_session_search",ConversationRead::network},
+    {"check_environment_readiness",ConversationRead::network},
+    {"flock_session_events",ConversationRead::network,CallClass::gated_read},
+    {"find_tasks",ConversationRead::store},
+    {"read_result",ConversationRead::store},
+    {"workflow_status",ConversationRead::store},
+    {"list_schedules",ConversationRead::store},
+    {"list_secrets",ConversationRead::store},
+    {"list_connections",ConversationRead::store},
+    {"read_tool_result",ConversationRead::store},
+    {"read_memory",ConversationRead::store,CallClass::gated_read},
+    {"memory_history",ConversationRead::store,CallClass::gated_read}
+};
+
+const ReadSpec* conversationReadSpec(std::string_view tool) {
+    const auto* read = std::ranges::find(conversationBatchReads,tool,&ReadSpec::tool);
+    return read == std::end(conversationBatchReads) ? nullptr : read;
+}
 
 bool filenamesMayMatch(const Decision& a, const Decision& b) {
     const auto left = relativeToolPath(field(a.args,"path")).generic_string();
@@ -35,28 +58,28 @@ CallClass classify(const Decision& call) {
     if (tool == "reply") return CallClass::terminal;
     if (gitOperation(call) == "read")
         return tool == "git_find_repos" || tool == "git_read_result" ? CallClass::parallel_read : CallClass::gated_read;
+    if (const auto* read = conversationReadSpec(tool)) return read->classification;
 
-    constexpr std::string_view gated[]{
-        "flock_session_events","read_channel_attachment","read_memory","memory_history","mcp_call_tool"
-    };
+    constexpr std::string_view gated[]{"read_channel_attachment","mcp_call_tool"};
     if (std::ranges::find(gated,tool) != std::end(gated)) return CallClass::gated_read;
 
     constexpr std::string_view reads[]{
-        "read_result","find_tasks","read_tool_result","workflow_status","expand_context",
-        "list_secrets","list_connections","list_schedules","workspace_read_file",
+        "expand_context","workspace_read_file",
         "workspace_search","workspace_command_status","web_search","web_fetch","mcp_discover","mcp_read_resource",
         "skill_list","skill_read","inspect_attachment"
     };
-    if (std::ranges::find(reads,tool) != std::end(reads) ||
-        std::ranges::find(conversationBatchReads,tool) != std::end(conversationBatchReads))
-        return CallClass::parallel_read;
+    if (std::ranges::find(reads,tool) != std::end(reads)) return CallClass::parallel_read;
 
     return CallClass::exclusive;
 }
 
+ConversationRead conversationRead(std::string_view tool) {
+    const auto* read = conversationReadSpec(tool);
+    return read ? read->path : ConversationRead::none;
+}
+
 bool batchable(std::string_view tool) {
-    return (isBotTool(tool) && tool != "workspace_run_command") ||
-           std::ranges::find(conversationBatchReads,tool) != std::end(conversationBatchReads);
+    return (isBotTool(tool) && tool != "workspace_run_command") || conversationReadSpec(tool);
 }
 
 std::vector<std::vector<PlannedCall>> planWaves(std::span<const Candidate> validatedCalls) {

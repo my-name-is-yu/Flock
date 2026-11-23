@@ -222,7 +222,8 @@ public:
         }
     }
 
-    ApprovalGate authorizeEventTool(const conversation::Message& message, const Decision& call, std::string_view key) {
+    ApprovalGate authorizeEventTool(const conversation::Message& message, const Decision& call, std::string_view key,
+                                    ApprovalWait waitMode, bool& claimApproval) {
         std::lock_guard lock(store_.mutex);
         Transaction tx(store_.db);
         const auto session = eventSession(call.args);
@@ -230,8 +231,12 @@ public:
         const auto resource = Resource::sessionRead(session->target.environmentId,session->target.threadId);
         if (policy_.forbidden(bot_,resource.action,resource.target)) return ApprovalGate::allow;
         const auto gate = store_.approveAction(store_.policyOrigin(message),resource,key,
-                                               Json::array({call.tool,call.args}),store_.policyClock());
-        if (gate == ApprovalGate::allow) approved_ = session->target;
+                                               Json::array({call.tool,call.args}),store_.policyClock(),
+                                               waitMode == ApprovalWait::pause,waitMode);
+        if (gate == ApprovalGate::allow) {
+            approved_ = session->target;
+            claimApproval = waitMode == ApprovalWait::defer;
+        }
         tx.commit();
         return gate;
     }
@@ -619,25 +624,27 @@ JOIN json_each(?3) target ON target.value=entry.value
     }
 };
 
-Json Store::Impl::sessionReadTool(const conversation::Message& message, const Decision& decision, T3& t3,
-                                 std::string_view key) {
+Store::Impl::ToolCallResult Store::Impl::sessionReadTool(
+    const conversation::Message& message, const Decision& decision, T3& t3, std::string_view key,
+    ApprovalWait waitMode) {
     Policy policy(*this);
     SessionEvidence evidence(*this,policy,message,t3);
+    bool claimApproval = false;
     try {
         if (!decision.args.is_object()) throw Conflict("Tool arguments must be an object");
-        if (decision.tool == "flock_session_search") return evidence.search(decision.args);
-        const auto gate = evidence.authorizeEventTool(message,decision,key);
-        if (gate == ApprovalGate::waiting) return {{"policyWaiting",true}};
-        if (gate != ApprovalGate::allow) return scopedResult(failure(std::string(approvalError(gate))));
-        return evidence.events(decision.args);
+        if (decision.tool == "flock_session_search") return {evidence.search(decision.args)};
+        const auto gate = evidence.authorizeEventTool(message,decision,key,waitMode,claimApproval);
+        if (gate == ApprovalGate::waiting) return {Json{{"policyWaiting",true}}};
+        if (gate != ApprovalGate::allow) return {scopedResult(failure(std::string(approvalError(gate))))};
+        return {evidence.events(decision.args),claimApproval};
     } catch (const Conflict& error) {
-        return scopedResult(failure(error.what()));
+        return {scopedResult(failure(error.what())),claimApproval};
     } catch (const SessionReadTimeout&) {
-        return scopedResult(failure(searchTimedOut));
+        return {scopedResult(failure(searchTimedOut)),claimApproval};
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception&) {
-        return scopedResult(failure("Session evidence could not be read"));
+        return {scopedResult(failure("Session evidence could not be read")),claimApproval};
     }
 }
 

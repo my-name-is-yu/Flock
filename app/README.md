@@ -262,8 +262,16 @@ host-managed bearer token. Discovery lists one collection per call and returns
 
 Each authorized Bot tool action counts against the request's shared
 `modelCallLimit`. ChatGPT can propose several independent reads in one conversation
-response when at least two batchable tools are offered. Flock schedules conflicting
-Bot tools in order and saves results while other calls wait for approval. The Bot
-receives results in provider order, then can reply or propose an action on its own.
-Workspace command launches must be requested on their own. Use the command status
-to check completion before reading files the command produces.
+response when at least two batchable tools are offered. Conversation batches can
+read Session search and events, environment readiness, tasks and task results,
+workflow status, schedules, secret names, connections, saved tool results, and
+memory and revision history. Store reads run under the Store mutex, and T3 reads
+can overlap. Flock schedules conflicting Bot tools in order and saves results
+while individual calls wait for approval. The Bot receives results in provider
+order, then can reply or propose an action on its own. Git reads and workspace
+command launches must be requested on their own. Use the command status to check
+completion before reading files the command produces.
+
+Run `ctest --test-dir build -R '^flock_tool_batch_measure$' -V` to compare
+single-call and batch timings, model attempts, budget units, and budget pauses
+using deterministic fake providers.

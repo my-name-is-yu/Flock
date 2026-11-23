@@ -6,8 +6,10 @@
 
 namespace flockv0::tool_batch {
 enum class CallClass { parallel_read, gated_read, exclusive, terminal };
+enum class ConversationRead { none, store, network };
 
 CallClass classify(const Decision&);
+ConversationRead conversationRead(std::string_view tool);
 bool batchable(std::string_view tool);
 
 struct Candidate {

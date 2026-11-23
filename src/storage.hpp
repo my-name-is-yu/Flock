@@ -254,7 +254,8 @@ struct Store::Impl {
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
-    Json sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key);
+    struct ToolCallResult { Json value; bool claimApproval = false; };
+    ToolCallResult sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key, ApprovalWait);
     void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
     std::set<std::string> connectedSessionEnvironments(const conversation::Message&);
     std::optional<WorkSession> resolveWorkSession(const conversation::Message&, std::string_view sessionRef, T3&);
@@ -306,10 +307,8 @@ struct Store::Impl {
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
     void saveTurnResults(Id, int step, const Json& results);
-    bool runToolBatch(const conversation::Message&, const ToolContext&, int step, const std::vector<ModelCall>&,
-                      T3&, std::stop_token);
     class ToolBatch;
-    std::map<std::pair<Id,int>,std::map<std::size_t,Json>> unpersistedToolResults;
+    std::map<std::pair<Id,int>,std::map<std::size_t,ToolCallResult>> unpersistedToolResults;
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
@@ -344,15 +343,20 @@ struct Store::Impl {
         std::stop_token shutdown;
         bool hasWebEvidence;
     };
+    bool runToolBatch(const conversation::Message&, const ToolContext&, int step, const std::vector<ModelCall>&,
+                      const ConversationCallContext&);
     CallOutcome executeConversationStep(const conversation::Message&, int step, const std::vector<ModelCall>&,
                                         std::string_view effectType, const BotTools&, const ConversationCallContext&);
-    Json executeConversationRead(const conversation::Message&, const Decision&, T3&, std::string_view key);
+    ToolCallResult executeConversationRead(const conversation::Message&, const Decision&, T3&,
+                                           std::string_view key, ApprovalWait);
     CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&,
                                              std::string_view key, const ConversationCallContext&);
     CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&,
                                           std::string_view key, const std::function<Seconds()>&);
     CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&,
                                              std::string_view key, const ConversationCallContext&);
+    Json applyLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
+                                    Seconds now, ApprovalWait, const WorkSession* selectedSession = nullptr);
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,

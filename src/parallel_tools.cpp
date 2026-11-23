@@ -31,7 +31,11 @@ void Store::Impl::saveTurnResults(Id message, int step, const Json& results) {
 namespace {
 void recoverSlot(Json& result, const Decision& call) {
     if (!result.contains("inFlight")) return;
-    if (tool_batch::classify(call) == tool_batch::CallClass::parallel_read) result = nullptr;
+    using enum tool_batch::CallClass;
+    const auto classification = tool_batch::classify(call);
+    if (classification == parallel_read ||
+        (classification == gated_read && tool_batch::conversationRead(call.tool) != tool_batch::ConversationRead::none))
+        result = nullptr;
     else result = {{"ok",false},{"delivery","unknown"},
                    {"error","Flock restarted during this tool call. Its outcome is unknown."}};
 }
@@ -56,8 +60,8 @@ ProviderState providerState(const BotTools& settings, const Decision& call) {
 class Store::Impl::ToolBatch {
 public:
     ToolBatch(Impl& store, const conversation::Message& message, const ToolContext& tools, int step,
-              const std::vector<ModelCall>& calls, T3& t3, std::stop_token shutdown)
-        : store_(store), message_(message), tools_(tools), step_(step), calls_(calls), t3_(t3), shutdown_(shutdown),
+              const std::vector<ModelCall>& calls, const ConversationCallContext& ctx)
+        : store_(store), message_(message), tools_(tools), step_(step), calls_(calls), ctx_(ctx),
           blocked_(calls.size()) {}
 
     bool run() {
@@ -98,13 +102,16 @@ private:
     const ToolContext& tools_;
     int step_;
     const std::vector<ModelCall>& calls_;
-    T3& t3_;
-    std::stop_token shutdown_;
+    const ConversationCallContext& ctx_;
     std::vector<bool> blocked_;
     bool approvalWaiting_ = false;
 
     bool authorize() {
-        return !shutdown_.stop_requested() && store_.authorizeTurn(message_);
+        return !ctx_.shutdown.stop_requested() && store_.authorizeTurn(message_);
+    }
+
+    bool storeRead(std::size_t slot) const {
+        return tool_batch::conversationRead(calls_[slot].tool) == tool_batch::ConversationRead::store;
     }
 
     Json admissionFailure(const ModelCall& call) {
@@ -136,7 +143,7 @@ private:
                 blocked_[slot] = true;
                 continue;
             }
-            if (shutdown_.stop_requested()) return std::nullopt;
+            if (ctx_.shutdown.stop_requested()) return std::nullopt;
             eligible.emplace_back(slot,providerState(tools_.settings,calls_[slot]));
         }
 
@@ -148,7 +155,7 @@ private:
         std::vector<std::size_t> reserved;
         for (const auto& [slot,provider] : eligible) {
             if (isBotTool(calls_[slot].tool) && !reserveBotCall(slot,provider,origin,budget)) continue;
-            saveSlot(slot,{{"inFlight",true}});
+            if (!storeRead(slot)) saveSlot(slot,{{"inFlight",true}});
             reserved.push_back(slot);
         }
         transaction.commit();
@@ -198,33 +205,48 @@ private:
         std::vector<std::future<void>> workers;
         workers.reserve(reserved.size());
         for (const auto slot : reserved) {
+            if (storeRead(slot)) continue;
             try {
                 workers.push_back(std::async(std::launch::async,[this,slot] {
                     recordResult(slot,executeCall(slot));
                 }));
             } catch (const std::system_error&) {
-                recordResult(slot,toolFailure("Could not start the tool call"));
+                recordResult(slot,{toolFailure("Could not start the tool call")});
             }
         }
+        for (const auto slot : reserved)
+            if (storeRead(slot)) executeStoreRead(slot);
         for (auto& worker : workers) worker.get();
     }
 
-    Json executeCall(std::size_t slot) {
+    void executeStoreRead(std::size_t slot) {
+        std::lock_guard lock(store_.mutex);
+        Transaction transaction(store_.db);
+        if (authorize()) {
+            auto result = store_.applyLocalConversationCall(message_,step_,calls_[slot],callKey(slot),
+                                                            ctx_.clock(),ApprovalWait::defer);
+            if (result.value("policyWaiting",false)) approvalWaiting_ = true;
+            else saveSlot(slot,store_.redactor(message_.bot).record(std::move(result)));
+        }
+        transaction.commit();
+    }
+
+    ToolCallResult executeCall(std::size_t slot) {
         const auto& call = calls_[slot];
         const bool bot = isBotTool(call.tool);
         try {
-            if (!bot) return store_.executeConversationRead(message_,call,t3_,callKey(slot));
+            if (!bot) return store_.executeConversationRead(message_,call,ctx_.t3,callKey(slot),ApprovalWait::defer);
             auto result = store_.executeBotTool(tools_,call);
             if (!result.contains("ok")) result["ok"] = true;
-            return result;
+            return {std::move(result)};
         } catch (const ToolOutcomeUnknown& error) {
-            return {{"ok",false},{"error",error.what()},{"delivery","unknown"}};
+            return {Json{{"ok",false},{"error",error.what()},{"delivery","unknown"}}};
         } catch (const Conflict& error) {
-            return toolFailure(error.what());
+            return {toolFailure(error.what())};
         } catch (const StorageError&) {
             throw;
         } catch (const std::exception&) {
-            return toolFailure(bot ? "Bot tool execution failed" : "Conversation read failed");
+            return {toolFailure(bot ? "Bot tool execution failed" : "Conversation read failed")};
         }
     }
 
@@ -235,9 +257,13 @@ private:
                     {"$[" + std::to_string(slot) + "]",encoded,message_.id,step_});
     }
 
-    void recordResult(std::size_t slot, Json result) {
+    void recordResult(std::size_t slot, ToolCallResult execution) {
         std::lock_guard lock(store_.mutex);
-        store_.unpersistedToolResults[{message_.id,step_}].insert_or_assign(slot,std::move(result));
+        if (!isBotTool(calls_[slot].tool) && execution.value.value("policyWaiting",false)) {
+            approvalWaiting_ = true;
+            execution.value = nullptr;
+        }
+        store_.unpersistedToolResults[{message_.id,step_}].insert_or_assign(slot,std::move(execution));
         flushResults();
     }
 
@@ -250,7 +276,13 @@ private:
             const auto& tool = calls_.at(it->first).tool;
             const auto scrub = !isBotTool(tool) || tool == "inspect_attachment" ?
                 store_.redactor(message_.bot) : store_.sharedRedactor();
-            saveSlot(it->first,scrub.record(it->second));
+            Transaction transaction(store_.db);
+            saveSlot(it->first,scrub.record(it->second.value));
+            // Keep a one-time approval available until the event result can survive a restart.
+            if (it->second.claimApproval)
+                store_.exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'",
+                            {callKey(it->first)});
+            transaction.commit();
             it = slots.erase(it);
         }
         unpersisted.erase(batch);
@@ -259,7 +291,7 @@ private:
     bool finish() {
         std::lock_guard lock(store_.mutex);
         Transaction transaction(store_.db);
-        if (!store_.authorizeTurn(message_)) { transaction.commit(); return false; }
+        if (!authorize()) { transaction.commit(); return false; }
         auto row = store_.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=?",{message_.id,step_});
         if (!row.next()) throw Conflict("Tool batch step is missing");
         const auto results = row.json(0);
@@ -280,7 +312,7 @@ private:
 };
 
 bool Store::Impl::runToolBatch(const conversation::Message& message, const ToolContext& tools, int step,
-                               const std::vector<ModelCall>& calls, T3& t3, std::stop_token shutdown) {
-    return ToolBatch(*this,message,tools,step,calls,t3,shutdown).run();
+                               const std::vector<ModelCall>& calls, const ConversationCallContext& ctx) {
+    return ToolBatch(*this,message,tools,step,calls,ctx).run();
 }
 }
