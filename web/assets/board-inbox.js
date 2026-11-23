@@ -746,7 +746,7 @@ export function mountBoardInbox({
       if (answer && error.message === 'request_changed' && drafts.get(answer) === saved) {
         remember(answer, { target: fingerprint, text: data.text, stale: true });
       }
-      if (inline) onAccepted(item, { error: errors[error.message] ?? 'Could not confirm your response.' });
+      if (inline && owner === viewer) onAccepted(item, { error: errors[error.message] ?? 'Could not confirm your response.' });
       if (isCurrent()) message.textContent = errors[error.message] ?? 'Could not confirm your response. Check the request before trying again.';
       if (owner === viewer) await refresh();
     } finally {
