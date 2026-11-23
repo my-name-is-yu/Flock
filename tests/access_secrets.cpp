@@ -197,16 +197,17 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path) {
     };
     model.next = {"request_bot_change",{{"operation","create_bot"},{"targetBotId","NewBot"},{"name","New Bot"}},{}};
     store.receive(creator,Intake{"Ernest","","env","project"},"create","Create a Bot");
-    try { run(store); }
-    catch (const std::runtime_error& error) {
-        check(std::string_view(error.what()) == "Interrupted after profile publication","Unexpected creation failure");
-    }
+    run(store);
+    check(model.result.at("turn").back().at("result").at("ok") == false,
+          "Unexpected callback failure did not become a tool error");
     check(!appliedKey.empty() && !store.policy().allows(creator,Action::bot_settings,"NewBot"),
           "Interrupted creation finalized ownership prematurely");
     Store restarted(path);
-    run(restarted);
-    check(restarted.policy().allows(creator,Action::bot_settings,"NewBot") &&
-          model.result.at("turn").back().at("result").at("status") == "applied","Creation did not recover with the original owner");
+    const auto separator = appliedKey.find('-');
+    restarted.policy().applyBotChange("Ernest",Person{"other",false},"create_bot","NewBot","New Bot",
+        std::stoll(appliedKey.substr(0,separator)),std::stoi(appliedKey.substr(separator+1)),options.applyBotChange);
+    check(restarted.policy().allows(creator,Action::bot_settings,"NewBot"),
+          "Creation did not recover with the original owner");
 }
 
 void exercise(const std::filesystem::path& dir) {

@@ -285,6 +285,9 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
         if (create) db_.exec("DELETE FROM bot_creation_intents WHERE request_key=?",{requestKey});
         completion.commit();
         throw;
+    } catch (...) {
+        // Publication may have succeeded. Keep the durable intent for a replay.
+        throw Conflict("Unable to apply Bot change");
     }
 
     if (create) {

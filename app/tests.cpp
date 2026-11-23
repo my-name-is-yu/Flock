@@ -692,6 +692,47 @@ void fixedDemoAnswersAnAnchoredQuestion() {
           }),"the fixed demo did not pass the anchored answer to its task");
 }
 
+void botCreationCollisionIsRecoverable() {
+    struct CreationModel final : Model {
+        Json result;
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& turn = input.event.at("turn");
+            if (!turn.empty()) {
+                result = turn.back().at("result");
+                return {{{"reply",{{"text","Finished"}},{}}}};
+            }
+            return {{{"request_bot_change",{{"operation","create_bot"},{"targetBotId","Target"},
+                                           {"name","Target Bot"}},{}}}};
+        }
+    } model;
+    Sandbox temp;
+    const auto directory = temp.path / "bots";
+    const auto target = directory / "Target";
+    std::filesystem::create_directories(target);
+    Bots bots(directory);
+    Store store(temp.path / "state.db");
+    const Person creator{"creator",false};
+    store.policy().setOwner(creator,"Source");
+    NotesT3 t3;
+    RuntimeOptions options;
+    options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
+    int sequence = 0;
+    const auto create = [&] {
+        store.receive(creator,Intake{"Source","","env","project"},std::to_string(++sequence),"Create a Bot");
+        runtime.runConversations();
+        return model.result;
+    };
+    for (const auto config : {"{",R"({"creationRequest":7})",R"({"creationRequest":"different"})"}) {
+        std::ofstream(target / "config.json") << config;
+        const auto result = create();
+        check(result.at("ok") == false && result.dump().find("Target Bot already exists") != std::string::npos,
+              "Existing Bot did not produce a collision tool error");
+    }
+    std::filesystem::remove_all(target);
+    check(create().at("status") == "applied","Collision left a creation intent blocking the next request");
+}
+
 void botProfilesAndAvatars() {
     Sandbox temp;
     Bots bots(temp.path / "bots");
@@ -874,6 +915,7 @@ int main() {
         fixedDemoWithUserCriteriaAndContinuation();
         fixedDemoAnswersAnAnchoredQuestion();
         fixedDemoFollowUpKeepsTheExplainedResult();
+        botCreationCollisionIsRecoverable();
         botProfilesAndAvatars();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
