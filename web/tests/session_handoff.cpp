@@ -110,9 +110,14 @@ void sessionHandoffs(const std::filesystem::path& directory) {
         return cards;
     };
     installIdentities(directory/"identities.json",db,cb);
-    cb.sessionHandoffs = std::make_shared<SessionHandoff>(db,session,cb.configuredPerson);
-    const auto handoffs = cb.sessionHandoffs;
     const auto intake = cb.intake;
+    std::atomic_bool configured{true};
+    cb.intake = [intake,&configured](std::string_view bot, std::string_view request) {
+        if (bot == "broken" || !configured) throw Conflict(privateValue);
+        return intake(bot,request);
+    };
+    cb.sessionHandoffs = std::make_shared<SessionHandoff>(db,session,cb.configuredPerson,cb.intake);
+    const auto handoffs = cb.sessionHandoffs;
 
     const Person alice{"alice",true};
     db.access().personGrant(alice,"release","bob",Role::decide,GrantChange::grant);
@@ -175,6 +180,14 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     check(mcp.call(args).at("result").at("isError") == true,"removed Bot accepted");
     removed = false;
 
+    configured = false;
+    check(mcp.request("tools/call",{{"name","list_flock_bots"}}).at("result").at("structuredContent").at("bots").empty(),
+          "catalog advertised a Bot with invalid configuration");
+    const auto invalidBot = mcp.call(args).at("result");
+    check(invalidBot.value("isError",false) && invalidBot.dump().find(privateValue) == std::string::npos,
+          "MCP created a channel with an invalid Bot configuration");
+    check(handoffs->recent(alice).empty(),"Rejected intake left an active channel");
+    configured = true;
     const auto ack = mcp.call(args).at("result");
     const auto accepted = ack.at("structuredContent");
     check(!accepted.at("requestId").get<std::string>().empty() && ack.dump().find(token) == std::string::npos &&
@@ -200,8 +213,8 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     browser.client.set_default_headers({{"Authorization",aliceCredential}});
 
     const Runtime::SoulLoader soul = [](std::string_view) { return "Check releases carefully"; };
-    handoffs->consult(alice,channel,model,intake,soul);
-    handoffs->consult(alice,otherChannel,model,intake,soul);
+    handoffs->consult(alice,channel,model,soul);
+    handoffs->consult(alice,otherChannel,model,soul);
     view = browser.get(path);
     const auto& delivery = view.at("deliveries").at(0);
     check(session.sends.size() == 2 && session.sends[0].first == target && session.sends[1].first == otherTarget &&

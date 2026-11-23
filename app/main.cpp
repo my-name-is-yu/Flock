@@ -318,10 +318,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             -> std::optional<Person> {
             return id == localOwner.id && !store.access().requiresIdentity() ? std::optional(localOwner) : std::nullopt;
         };
-        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,&runtime,options.peers);
+        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,callbacks.intake,&runtime,options.peers);
         handoffs->recover();
         callbacks.sessionHandoffs = handoffs;
-        handoffWorker = std::jthread([handoffs, person=handoffPeople, intake=callbacks.intake,
+        handoffWorker = std::jthread([handoffs, person=handoffPeople,
                                      soul=[&](std::string_view botId) { return bots.soul(botId); },
                                      &model](std::stop_token stop) {
             Id after = 0;
@@ -336,8 +336,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                         if (!actor) continue;
                         try {
                             const auto view = handoffs->view(*actor,channel);
-                            if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
-                            else handoffs->consult(*actor,channel,*model,intake,soul);
+                            if (view.coordination) handoffs->step(*actor,channel,*model,soul);
+                            else handoffs->consult(*actor,channel,*model,soul);
                         } catch (const std::exception&) {
                         }
                     }

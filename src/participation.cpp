@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <future>
 #include <thread>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -220,6 +221,12 @@ LEFT JOIN t3_connector t ON t.person_id=c.person_id AND e.environment_id IS NOT 
     return CoordinationActivation{std::move(result),{std::move(*scope)}};
 }
 
+Intake SessionHandoff::resolveBot(std::string_view bot) const {
+    auto routing = intake_(bot,"");
+    if (routing.botId != bot) throw Conflict("Session Bot is unavailable");
+    return routing;
+}
+
 std::optional<Person> SessionHandoff::person(const T3Connection& connection) const {
     return people_ ? people_(connection.personId) : std::nullopt;
 }
@@ -255,19 +262,30 @@ HandoffAck SessionHandoff::invoke(const T3Connection& connection, const Json& ar
     const auto& environments = settings->environments;
     const auto deadline = std::chrono::steady_clock::now() + proofTimeout;
     do {
-        for (std::size_t i = 0; i < environments.size(); ++i) {
-            const auto now = std::chrono::steady_clock::now();
-            // Give each environment a share of the remaining time, including when an endpoint stalls.
-            const auto probeDeadline = now + std::max(deadline-now,std::chrono::steady_clock::duration::zero()) /
-                static_cast<std::chrono::steady_clock::duration::rep>(environments.size()-i);
-            const auto& environment = environments[i];
-            const auto proof = session_.proveInvocation(environment,thread,arguments,probeDeadline);
+        const auto probe = [&](std::string_view environment) -> std::optional<ThreadProof> {
+            auto proof = session_.proveInvocation(environment,thread,arguments,deadline);
             if (proof && proof->target.environmentId == environment && proof->target.threadId == thread &&
                 validId(proof->target.projectId) && !proof->activeRunId.empty() && !proof->authGeneration.empty() &&
-                !proof->itemId.empty()) {
-                if (!botExists(bot)) throw Conflict("Unknown Bot");
-                return openChannel(connection,*proof,bot,request,text,digest(arguments.dump()),coordination);
+                !proof->itemId.empty()) return proof;
+            return {};
+        };
+        std::optional<ThreadProof> proof;
+        if (environments.size() == 1) {
+            proof = probe(environments.front());
+        } else {
+            std::vector<std::future<std::optional<ThreadProof>>> probes;
+            for (const auto& environment : environments)
+                probes.push_back(std::async(std::launch::async,probe,std::string_view(environment)));
+            for (auto& candidate : probes) {
+                if (auto match = candidate.get()) {
+                    if (proof) throw Conflict("This invocation matched more than one T3 environment");
+                    proof = std::move(match);
+                }
             }
+        }
+        if (proof) {
+            if (!botExists(bot)) throw Conflict("Unknown Bot");
+            return openChannel(connection,*proof,bot,request,text,digest(arguments.dump()),coordination);
         }
         std::this_thread::sleep_until(std::min(deadline,std::chrono::steady_clock::now()+std::chrono::milliseconds(150)));
     } while (std::chrono::steady_clock::now() < deadline);
@@ -304,6 +322,8 @@ WHERE environment_id=? AND client_request_id=?
         tx.commit();
         return ack;
     }
+    try { resolveBot(bot); }
+    catch (const Conflict&) { throw Conflict("Session Bot is unavailable"); }
     if (scope && db.query(R"SQL(
 SELECT 1 FROM return_channels c JOIN session_controls s ON s.channel_id=c.id
 WHERE c.environment_id=? AND c.thread_id=? AND s.permission<>'null' AND s.state IN ('active','paused')

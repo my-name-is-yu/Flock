@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
             return Json::parse(response.body).value(std::string(tool), Json::array());
         };
         auto signIn = [&](const std::string& environment) {
-            loginT3(home, environment, endpoint, [&](const std::string& authorization) {
+            return loginT3(home, environment, endpoint, [&](const std::string& authorization) {
                 fixture({{"authorization", authorization}});
             });
         };
@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
             check(diagnosed, "OAuth failure identifies stage, HTTP status and error");
         }
         fixture({{"oauthFailure", false}});
-        signIn("env-1");
+        check(signIn("env-1"), "login reports Operate approval");
         auto ownerOnly = [](const std::filesystem::path& path) {
             struct stat st{};
             return stat(path.c_str(), &st) == 0 && st.st_uid == geteuid() && (st.st_mode & 0077) == 0;
@@ -380,7 +380,7 @@ int main(int argc, char** argv) {
         check(effects("t3_thread_launch").size() == 1, "stale authorization never launches another T3 thread");
 
         fixture({{"scope", "orchestration:read"}});
-        signIn("env-1");
+        check(!signIn("env-1"), "login reports read-only approval");
         other.authGeneration = adapter->authGeneration("env-1", launch.config);
         checkPreflight(other, Delivery::Kind::Auth, "read-only OAuth cannot operate");
         check(adapter->send(other).kind == Delivery::Kind::Auth &&

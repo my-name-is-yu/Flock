@@ -11,6 +11,7 @@
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <toml++/toml.hpp>
 
 extern char** environ;
 
@@ -110,15 +111,23 @@ void editCodex(std::string_view url, std::string_view token) {
         config.erase(start,finish + end.size() - start);
     }
     if (!url.empty()) {
-        // The server name is reserved for this connector.
-        if (config.find("[mcp_servers.flock]") != config.npos || config.find("[mcp_servers.\"flock\"]") != config.npos ||
-            config.find("[mcp_servers.'flock']") != config.npos)
-            throw Conflict("Remove the existing Codex MCP server named flock before connecting");
+        try {
+            const auto parsed = toml::parse(config);
+            if (parsed["mcp_servers"]["flock"])
+                throw Conflict("Remove the existing Codex MCP server named flock before connecting");
+        } catch (const toml::parse_error&) {
+            throw Conflict("Fix the invalid Codex configuration before connecting");
+        }
         if (!config.empty() && config.back() != '\n') config += '\n';
         config += begin;
         config += "[mcp_servers.flock]\nurl = " + Json(url).dump() +
                   "\nhttp_headers = { Authorization = " + Json("Bearer " + std::string(token)).dump() + " }\n";
         config += end;
+        try {
+            (void)toml::parse(config);
+        } catch (const toml::parse_error&) {
+            throw Conflict("The Codex configuration cannot accept the Flock MCP server");
+        }
     }
     if (original != config) saveConfig(path,config);
 }

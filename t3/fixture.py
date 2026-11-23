@@ -160,6 +160,9 @@ class Fixture(BaseHTTPRequestHandler):
                     and state.get("dropAnswerReply")):
                 self.close_connection = True
                 return
+            if tool["name"] == "t3_thread_send" and state.get("stockDropSendReply"):
+                self.close_connection = True
+                return
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": content.get("_tag") == "OrchestratorMcpFailure"}
             if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
@@ -407,7 +410,11 @@ class Fixture(BaseHTTPRequestHandler):
             assert set(args) == {"threadId", "message", "mode", "clientRequestId"}
             thread = args["threadId"]
             if thread == "human":
-                assert args["clientRequestId"] == "command-1" and args["message"] == "[Flock result] Complete."
+                if state.get("stockRootRecovery"):
+                    assert args["message"].startswith("[Flock Bot planner | ")
+                    state["stockRootInput"] = args["message"]
+                else:
+                    assert args["clientRequestId"] == "command-1" and args["message"] == "[Flock result] Complete."
             else:
                 assert thread == "pinned-worker" and args["clientRequestId"] == "pinned-worker:start"
                 assert "Check fixture" in args["message"]
@@ -423,6 +430,14 @@ class Fixture(BaseHTTPRequestHandler):
             return {"threadId": "wrong" if state.get("badReceipt") else thread,
                     "messageId": "sent-id", "runId": "next-run", "delivery": "queued" if thread == "human" else "started"}
         if name == "t3_thread_wait":
+            if args["threadId"] == "human":
+                assert args["runId"] == "next-run" and args["timeoutMs"] == 1
+                assert not args["untilDelegatedWorkSettled"]
+                wait = state["stockRootWait"]
+                return {"threadId": "other" if wait == "wrong-thread" else "human",
+                        "runId": "other-run" if wait == "wrong-run" else "next-run",
+                        "status": "cancelled" if wait == "cancelled" else "failed",
+                        "timedOut": wait == "timed-out"}
             assert args["threadId"] == "pinned-worker" and args["runId"] == "next-run"
             return {"threadId": "pinned-worker", "runId": "next-run", "status": "completed", "timedOut": False,
                     "resultRun": {"runId": "next-run", "status": "completed"}}
@@ -451,6 +466,16 @@ class Fixture(BaseHTTPRequestHandler):
         elif is_root and state.get("stockHistory") == "streaming-late-human":
             rows = [self.item("human", 1, "root-run", "assistant_message", "Unfinished response", status="running"),
                     self.item("human", 2, "root-run", "user_message", "Human after unfinished response", "web")]
+        if is_root and state.get("stockRootRecovery"):
+            rows = rows[:1]
+            if "stockRootInput" in state:
+                rows.append(self.item(thread, 4, "next-run", "user_message", state["stockRootInput"], "mcp") |
+                            {"messageId": "sent-id"})
+                summary["activeRunId"] = None
+                summary["latestRunId"] = "next-run"
+                if state.get("stockRootExtraHistory"):
+                    rows.extend(self.item(thread, position, "later-run", "assistant_message", "Later progress")
+                                for position in range(5, 26))
         if thread == "pinned-worker":
             rows = [self.item(thread, 1, "next-run", "assistant_message", "Pinned report") |
                     {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}]
@@ -461,7 +486,7 @@ class Fixture(BaseHTTPRequestHandler):
             tool_name = "mcp__flock__invoke_flock_bot" if mode == "claude" else "flock.invoke_flock_bot"
             body = json.dumps({"toolName": tool_name, "input": arguments}, ensure_ascii=False)
             source = "other" if mode == "wrong-thread" else "human"
-            item = self.item(source, 7, "old-run" if mode == "old-run" else "root-run",
+            item = self.item(source, 2 if state.get("stockRootRecovery") else 7, "old-run" if mode == "old-run" else "root-run",
                              "dynamic_tool", body, status="running") | {"itemId": "invocation"}
             if mode == "inherited":
                 item["visibility"] = "inherited"
@@ -603,7 +628,7 @@ esac
         port = choose_port.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
 
-    def connect(environment, expected_mode, flags, rewritten, restart=False):
+    def connect(environment, expected_mode, flags, rewritten, restart=False, expected_error=None):
         server.state["claimedEnvironment"] = environment
         argv_before = claude_argv.read_text() if claude_argv.exists() else ""
         with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
@@ -621,6 +646,9 @@ esac
                 with urllib.request.urlopen(request, timeout=5):
                     pass
                 output, errors = process.communicate(timeout=8)
+                if expected_error:
+                    assert process.returncode != 0 and expected_error in errors, errors
+                    return
                 assert process.returncode == 0, errors
             finally:
                 if process.poll() is None:
@@ -645,6 +673,20 @@ esac
             skill = (root / "flock-reviewer" / "SKILL.md").read_text()
             assert "Reviewer" in skill and "botId `reviewer`" in skill and token not in skill
         return token
+
+    working_command = command
+    command = [flock, "--home", str(directory / "rejected-flock")]
+    for reserved in [
+        '[mcp_servers . flock]\nurl = "https://example.com/mcp"\n',
+        'mcp_servers.flock.url = "https://example.com/mcp"\n',
+        'mcp_servers = { flock = { url = "https://example.com/mcp" } }\n',
+    ]:
+        codex_config.write_text(reserved)
+        connect("env-1", "full", ["--port", str(port)], rewritten=False,
+                expected_error="Remove the existing Codex MCP server named flock")
+        assert codex_config.read_text() == reserved
+    command = working_command
+    codex_config.write_text(original)
 
     old = connect("env-1", "full", ["--port", str(port)], rewritten=True, restart=True)
     token = connect("env-1", "consult", ["--mode", "consult"], rewritten=True)

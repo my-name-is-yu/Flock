@@ -2,6 +2,7 @@
 #include "flock/session_read.hpp"
 
 #include <iostream>
+#include <sqlite3.h>
 #include <map>
 #include <unistd.h>
 
@@ -334,6 +335,38 @@ void acceptance() {
     check(f.call(search,filters) == empty,"revoked or unauthorized Sessions returned to search");
 }
 
+void approvedCallSurvivesReadPreflightContention() {
+    Fixture f;
+    f.share(staging);
+    f.model.next = {"flock_session_search",{{"query","regression"}},"Find the report"};
+    auto intake = f.intake("alpha");
+    intake.config["modelCallLimit"] = 1;
+    const auto receipt = f.store->receive(localOwner,intake,"preflight-busy","Look for the failure");
+    f.runtime->runConversations();
+    const auto paused = f.store->pausedConversations("alpha");
+    check(paused.size() == 1 && f.model.result.is_null(),"turn did not pause after reading evidence");
+    const Id pauseId = paused.front().at("messageId");
+    f.store->decideInbox(localOwner,{"alpha",InboxKind::conversation_model_budget,receipt.at("messageId"),pauseId,0,0,pauseId},
+                         "approve");
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the second writer");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(raw,sqlite3_close);
+    bool locked = false;
+    f.t3.onRead = [&] {
+        if (!std::exchange(locked,true))
+            check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,"lock writer");
+    };
+    bool contended = false;
+    try { f.runtime->runConversations(); }
+    catch (const std::runtime_error& error) { contended = std::string_view(error.what()) == "database is locked"; }
+    check(locked && contended && f.model.result.is_null(),"pre-provider write contention was not exercised");
+    check(sqlite3_exec(writer.get(),"ROLLBACK",nullptr,nullptr,nullptr) == SQLITE_OK,"could not release writer");
+    f.t3.onRead = {};
+    f.runtime->runConversations();
+    const auto after = f.store->pausedConversations("alpha");
+    check(!f.model.result.is_null() && after.empty(),"Conversation lost its approved call before model dispatch");
+}
+
 void redactionAndResumedHistory() {
     Fixture f;
     f.share(staging);
@@ -395,6 +428,7 @@ int main() {
     try {
         acceptance();
         redactionAndResumedHistory();
+        approvedCallSurvivesReadPreflightContention();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
