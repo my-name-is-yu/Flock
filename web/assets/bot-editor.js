@@ -105,7 +105,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   dialog.innerHTML = `
     <section class="studio-start" id="studio-start" hidden>
       <header class="studio-head">
-        <h2 id="studio-start-title">New bot</h2>
+        <h2 id="studio-start-title">New Bot</h2>
         <button type="button" class="icon-button studio-close" data-close aria-label="Close">${uiIcon('close')}</button>
       </header>
       <div class="studio-start-list">
@@ -130,7 +130,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
       <div class="studio-panel">
         <header class="studio-head">
-          <h2 id="studio-title">New bot</h2>
+          <h2 id="studio-title">New Bot</h2>
           <button type="button" class="icon-button studio-close" data-close aria-label="Close">${uiIcon('close')}</button>
         </header>
 
@@ -561,7 +561,9 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       chosen.focus({ preventScroll: true });
       return;
     }
-    els.title.textContent = mode === 'edit' ? 'Edit appearance' : 'New bot';
+    // Keep the chosen preset in view on the appearance step, so it's clear what is being created.
+    const preset = PRESETS.find((entry) => entry.id === state.role);
+    els.title.textContent = mode === 'edit' ? 'Edit appearance' : preset ? `New ${preset.title} Bot` : 'New Bot';
     els.cancel.textContent = mode === 'edit' ? 'Cancel' : 'Back';
     els.nameInput.value = state.name;
     const enteringFromStart = animate && prevStep === 'start';

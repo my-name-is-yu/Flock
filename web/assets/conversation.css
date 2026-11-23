@@ -352,6 +352,24 @@
 }
 .msg.user .bubble ::selection { background: rgb(255 255 255 / .3); }
 .event-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
+.event-text.markdown-body { display: block; max-width: 100%; min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body p { margin: .45em 0; }
+.markdown-body ul, .markdown-body ol { margin: .4em 0; padding-inline-start: 1.35em; }
+.markdown-body li + li { margin-top: .2em; }
+.markdown-body blockquote { margin: .4em 0; padding-inline-start: .75em; border-inline-start: 2px solid var(--line); }
+.markdown-body a { overflow-wrap: anywhere; }
+.msg.user .bubble .markdown-body a,
+.msg.user .bubble .markdown-body a:visited,
+.msg.user .bubble .markdown-body a:hover,
+.msg.user .bubble .markdown-body a:active {
+  color: inherit;
+  text-decoration: underline;
+}
+.markdown-body code { font-family: monospace; font-size: .92em; white-space: pre-wrap; }
+.markdown-body pre { max-width: 100%; margin: .5em 0; overflow-x: auto; overscroll-behavior-x: contain; white-space: pre; }
+.markdown-body pre code { font-size: .9em; white-space: pre; }
 .message-attachments { margin-top: .3rem; font-size: var(--text-sm); }
 .channel-image { display: block; max-width: min(100%, 20rem); max-height: 14rem; object-fit: contain; border-radius: var(--radius-md); }
 .read-only-choices { margin-block: .35rem 0; padding-inline-start: 1.2rem; color: var(--text-2); font-size: var(--text-sm); }
@@ -462,9 +480,18 @@
 .typing span { width: .36rem; height: .36rem; border-radius: var(--radius-full); background: var(--text-3); animation: typing 1.3s ease-in-out infinite; }
 .typing span:nth-child(2) { animation-delay: .16s; }
 .typing span:nth-child(3) { animation-delay: .32s; }
+/* Status lines stack in one grid cell so a new one can slide in while the old one leaves. */
+.working-status { display: grid; min-width: 0; overflow: hidden; }
 .working-label {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-md); color: var(--text-2);
+  grid-area: 1 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-md);
+  color: transparent; background: linear-gradient(90deg, var(--text-3) 0 40%, var(--text) 50%, var(--text-3) 60% 100%) 0 0 / 250% 100%;
+  -webkit-background-clip: text; background-clip: text; animation: working-shimmer 2.4s linear infinite;
 }
+.working-label.entering { animation: working-shimmer 2.4s linear infinite, working-label-in .32s cubic-bezier(0.23, 1, 0.32, 1) both; }
+.working-label.leaving { animation: working-label-out .24s ease-in both; }
+@keyframes working-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@keyframes working-label-in { from { opacity: 0; transform: translateY(.6em); filter: blur(2px); } }
+@keyframes working-label-out { to { opacity: 0; transform: translateY(-.6em); filter: blur(2px); } }
 @keyframes working-enter { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
 @keyframes typing { 0%, 70%, 100% { opacity: .3; transform: scale(.8); } 35% { opacity: 1; transform: none; } }
 
@@ -505,8 +532,8 @@
 .msg.bot > .event-actions { margin-top: .15rem; padding-left: var(--avatar-col); }
 
 @container conversation-layout (max-width: 700px) {
-  .event-message.bot, .peer-exchange-link { --avatar-col: 0px; }
-  .event-message.bot .msg-line > :is(.msg-avatar, .msg-avatar-space) { display: none; }
+  .event-message.bot, .peer-exchange-link, .policy-inline-card { --avatar-col: 0px; }
+  :is(.event-message.bot, .msg.working) .msg-line > :is(.msg-avatar, .msg-avatar-space) { display: none; }
 }
 @media (max-width: 700px) {
   .conversation-header { --profile-avatar-size: 2.625rem; }
@@ -539,6 +566,9 @@
 @media (prefers-reduced-motion: reduce) {
   .msg.working { animation: none; }
   .typing span { animation: none; opacity: .55; }
+  .working-label, .working-label:is(.entering, .leaving) {
+    animation: none; background: none; color: var(--text-2);
+  }
   .conversation-actions-list { animation: none; }
   .jump-to-latest, .jump-to-latest svg, .msg-time, .msg-actions { transition: none; transform: none; animation: none; }
   @starting-style { .jump-to-latest { opacity: 1; transform: none; } }

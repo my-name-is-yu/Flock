@@ -273,8 +273,9 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     check(browser.get(viewPath(updates)).at("sessionTasks").empty(),
           "refresh returned unchanged Session history");
 
+    constexpr auto creation = "2026-11-21T00:15:00.000Z";
     t3.observations["thread-separate-0"] = {.kind=Observation::Kind::Finished,.status="failed",
-        .report="The health check failed",.resultRunId="distinct-result-run"};
+        .report="The health check failed",.resultRunId="distinct-result-run",.sessionCreatedAt=creation};
     t3.observations["thread-separate-1"] = {.kind=Observation::Kind::Finished,
         .report="Historical report without a status"};
     tick(runtime,3);
@@ -283,9 +284,14 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     const std::map<Id,std::string_view> states = {{failed,"failed"},{historical,"ended"}};
     check(settled.at("sessionCursor") > updates.at("sessionCursor") && settledTasks.size() == states.size(),
           "settled Runs did not advance the Session cursor");
-    for (const auto& task : settledTasks)
-        check(task.at("sessions").size() == 1 && task.at("sessions").at(0).at("state") == states.at(task.at("id").get<Id>()),
+    for (const auto& task : settledTasks) {
+        const auto id = task.at("id").get<Id>();
+        const auto& session = task.at("sessions").at(0);
+        check(task.at("sessions").size() == 1 && session.at("state") == states.at(id),
               "a settled Run did not refresh its Session status with the same Session count");
+        check(id == failed ? session.at("createdAt") == creation : !session.contains("createdAt"),
+              "the Session timestamp must come from T3 and stay absent when unavailable");
+    }
 
     auto page = browser.get("/api/view?bot=triage");
     check(page.at("sessionsBefore").get<Id>() > 0,"session list did not offer older history");
@@ -1415,11 +1421,16 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Shared member did not get the read-only installation mode");
     browser.post("/api/settings/mode",{{"mode","full"}},403);
     browser.post("/api/settings/rule",removal,403);
+    const Json addition{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",true}};
+    browser.post("/api/settings/rule",addition,403);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     browser.post("/api/settings/rule",removal);
     check(browser.get("/api/settings").at("rules").empty(),"Root could not remove the rule");
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target",""},{"add",true}},400);
-    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",true}});
+    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","  "},{"add",true}},400);
+    browser.post("/api/settings/rule",{{"kind","never"},{"action","bot.talk"},{"target","release"},{"add",true}},400);
+    check(browser.get("/api/settings").at("rules").empty(),"an invalid addition changed installation rules");
+    browser.post("/api/settings/rule",addition);
     const auto added = browser.get("/api/settings").at("rules");
     check(added.size() == 1 && added.at(0).at("kind") == "allow" && added.at(0).at("action") == "repository.pr" &&
           added.at(0).at("target") == "github.com/acme/app","Root could not add a rule from Flock settings");
