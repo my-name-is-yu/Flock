@@ -49,10 +49,15 @@ void classification() {
 void batchAdmission() {
     for (const auto& tool : botToolNames())
         check(batchable(tool) == (tool != "workspace_run_command"), "Incorrect Bot batch admission for " + tool);
-    check(batchable("flock_session_search"), "Session search missing from batch admission");
-    check(batchable("check_environment_readiness"), "Environment readiness missing from batch admission");
+    for (const auto tool : {"flock_session_search","check_environment_readiness","flock_session_events","find_tasks",
+                            "read_result","workflow_status","list_schedules","list_secrets","list_connections",
+                            "read_tool_result","read_memory","memory_history"}) {
+        const auto classification = classify(call(tool));
+        check(batchable(tool) && (classification == CallClass::parallel_read || classification == CallClass::gated_read),
+              "Incorrect conversation read batch admission for " + std::string(tool));
+    }
     for (const auto& tool : gitTools()) check(!batchable(tool), "Git tool admitted to batching");
-    for (const auto tool : {"read_tool_result","flock_session_events","message_session","reply","unknown_tool"})
+    for (const auto tool : {"expand_context","message_session","reply","unknown_tool"})
         check(!batchable(tool), "Unexpected batch admission for " + std::string(tool));
 }
 

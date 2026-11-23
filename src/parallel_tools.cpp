@@ -7,13 +7,12 @@
 
 namespace flockv0 {
 bool allowedAfterWebEvidence(const Decision& call) {
-    if (gitOperation(call) == "read") return true;
+    if (tool_batch::conversationRead(call.tool) != tool_batch::ConversationRead::none || gitOperation(call) == "read")
+        return true;
     constexpr std::string_view readOnly[]{
-        "reply","web_search","web_fetch","read_result","find_tasks","flock_session_search","flock_session_events",
-        "list_secrets","list_connections","check_environment_readiness","workspace_read_file",
+        "reply","web_search","web_fetch","workspace_read_file",
         "workspace_search","workspace_command_status","mcp_discover","mcp_read_resource",
-        "skill_list","skill_read","inspect_attachment","workflow_status","expand_context","read_tool_result",
-        "read_memory","memory_history","list_schedules"
+        "skill_list","skill_read","inspect_attachment","expand_context"
     };
     return std::ranges::find(readOnly,call.tool) != std::end(readOnly);
 }
@@ -31,7 +30,10 @@ void Store::Impl::saveTurnResults(Id message, int step, const Json& results) {
 namespace {
 void recoverSlot(Json& result, const Decision& call) {
     if (!result.contains("inFlight")) return;
-    if (tool_batch::classify(call) == tool_batch::CallClass::parallel_read) result = nullptr;
+    using enum tool_batch::CallClass;
+    if (tool_batch::conversationRead(call.tool) != tool_batch::ConversationRead::none ||
+        tool_batch::classify(call) == parallel_read)
+        result = nullptr;
     else result = {{"ok",false},{"delivery","unknown"},
                    {"error","Flock restarted during this tool call. Its outcome is unknown."}};
 }
@@ -56,8 +58,8 @@ ProviderState providerState(const BotTools& settings, const Decision& call) {
 class Store::Impl::ToolBatch {
 public:
     ToolBatch(Impl& store, const conversation::Message& message, const ToolContext& tools, int step,
-              const std::vector<ModelCall>& calls, T3& t3, std::stop_token shutdown)
-        : store_(store), message_(message), tools_(tools), step_(step), calls_(calls), t3_(t3), shutdown_(shutdown),
+              const std::vector<ModelCall>& calls, const ConversationCallContext& ctx)
+        : store_(store), message_(message), tools_(tools), step_(step), calls_(calls), ctx_(ctx),
           blocked_(calls.size()) {}
 
     bool run() {
@@ -98,13 +100,16 @@ private:
     const ToolContext& tools_;
     int step_;
     const std::vector<ModelCall>& calls_;
-    T3& t3_;
-    std::stop_token shutdown_;
+    const ConversationCallContext& ctx_;
     std::vector<bool> blocked_;
     bool approvalWaiting_ = false;
 
     bool authorize() {
-        return !shutdown_.stop_requested() && store_.authorizeTurn(message_);
+        return !ctx_.shutdown.stop_requested() && store_.authorizeTurn(message_);
+    }
+
+    bool storeRead(std::size_t slot) const {
+        return tool_batch::conversationRead(calls_[slot].tool) == tool_batch::ConversationRead::store;
     }
 
     Json admissionFailure(const ModelCall& call) {
@@ -136,7 +141,7 @@ private:
                 blocked_[slot] = true;
                 continue;
             }
-            if (shutdown_.stop_requested()) return std::nullopt;
+            if (ctx_.shutdown.stop_requested()) return std::nullopt;
             eligible.emplace_back(slot,providerState(tools_.settings,calls_[slot]));
         }
 
@@ -148,7 +153,7 @@ private:
         std::vector<std::size_t> reserved;
         for (const auto& [slot,provider] : eligible) {
             if (isBotTool(calls_[slot].tool) && !reserveBotCall(slot,provider,origin,budget)) continue;
-            saveSlot(slot,{{"inFlight",true}});
+            if (!storeRead(slot)) saveSlot(slot,{{"inFlight",true}});
             reserved.push_back(slot);
         }
         transaction.commit();
@@ -198,33 +203,48 @@ private:
         std::vector<std::future<void>> workers;
         workers.reserve(reserved.size());
         for (const auto slot : reserved) {
+            if (storeRead(slot)) continue;
             try {
                 workers.push_back(std::async(std::launch::async,[this,slot] {
                     recordResult(slot,executeCall(slot));
                 }));
             } catch (const std::system_error&) {
-                recordResult(slot,toolFailure("Could not start the tool call"));
+                recordResult(slot,CompletedToolCall{toolFailure("Could not start the tool call")});
             }
         }
+        for (const auto slot : reserved)
+            if (storeRead(slot)) executeStoreRead(slot);
         for (auto& worker : workers) worker.get();
     }
 
-    Json executeCall(std::size_t slot) {
+    void executeStoreRead(std::size_t slot) {
+        std::lock_guard lock(store_.mutex);
+        Transaction transaction(store_.db);
+        if (authorize()) {
+            auto result = store_.applyLocalConversationCall(message_,step_,calls_[slot],callKey(slot),
+                                                            ctx_.clock(),ApprovalWait::defer);
+            if (result) saveSlot(slot,store_.redactor(message_.bot).record(std::move(*result)));
+            else approvalWaiting_ = true;
+        }
+        transaction.commit();
+    }
+
+    ToolCallResult executeCall(std::size_t slot) {
         const auto& call = calls_[slot];
         const bool bot = isBotTool(call.tool);
         try {
-            if (!bot) return store_.executeConversationRead(message_,call,t3_,callKey(slot));
+            if (!bot) return store_.executeConversationRead(message_,call,ctx_.t3,callKey(slot),ApprovalWait::defer);
             auto result = store_.executeBotTool(tools_,call);
             if (!result.contains("ok")) result["ok"] = true;
-            return result;
+            return CompletedToolCall{std::move(result)};
         } catch (const ToolOutcomeUnknown& error) {
-            return {{"ok",false},{"error",error.what()},{"delivery","unknown"}};
+            return CompletedToolCall{{{"ok",false},{"error",error.what()},{"delivery","unknown"}}};
         } catch (const Conflict& error) {
-            return toolFailure(error.what());
+            return CompletedToolCall{toolFailure(error.what())};
         } catch (const StorageError&) {
             throw;
         } catch (const std::exception&) {
-            return toolFailure(bot ? "Bot tool execution failed" : "Conversation read failed");
+            return CompletedToolCall{toolFailure(bot ? "Bot tool execution failed" : "Conversation read failed")};
         }
     }
 
@@ -235,9 +255,10 @@ private:
                     {"$[" + std::to_string(slot) + "]",encoded,message_.id,step_});
     }
 
-    void recordResult(std::size_t slot, Json result) {
+    void recordResult(std::size_t slot, ToolCallResult execution) {
         std::lock_guard lock(store_.mutex);
-        store_.unpersistedToolResults[{message_.id,step_}].insert_or_assign(slot,std::move(result));
+        if (!execution) approvalWaiting_ = true;
+        store_.unpersistedToolResults[{message_.id,step_}].insert_or_assign(slot,std::move(execution));
         flushResults();
     }
 
@@ -250,7 +271,11 @@ private:
             const auto& tool = calls_.at(it->first).tool;
             const auto scrub = !isBotTool(tool) || tool == "inspect_attachment" ?
                 store_.redactor(message_.bot) : store_.sharedRedactor();
-            saveSlot(it->first,scrub.record(it->second));
+            const auto& result = it->second;
+            Transaction transaction(store_.db);
+            saveSlot(it->first,result ? scrub.record(result->value) : Json(nullptr));
+            if (result && result->consumeApproval) store_.consumePolicyApproval(callKey(it->first));
+            transaction.commit();
             it = slots.erase(it);
         }
         unpersisted.erase(batch);
@@ -259,7 +284,7 @@ private:
     bool finish() {
         std::lock_guard lock(store_.mutex);
         Transaction transaction(store_.db);
-        if (!store_.authorizeTurn(message_)) { transaction.commit(); return false; }
+        if (!authorize()) { transaction.commit(); return false; }
         auto row = store_.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=?",{message_.id,step_});
         if (!row.next()) throw Conflict("Tool batch step is missing");
         const auto results = row.json(0);
@@ -280,7 +305,7 @@ private:
 };
 
 bool Store::Impl::runToolBatch(const conversation::Message& message, const ToolContext& tools, int step,
-                               const std::vector<ModelCall>& calls, T3& t3, std::stop_token shutdown) {
-    return ToolBatch(*this,message,tools,step,calls,t3,shutdown).run();
+                               const std::vector<ModelCall>& calls, const ConversationCallContext& ctx) {
+    return ToolBatch(*this,message,tools,step,calls,ctx).run();
 }
 }

@@ -29,7 +29,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     const auto& decision = calls.front();
     if (effectType == "array" || calls.size() > 1 || isBotTool(decision.tool)) {
         const ToolContext tools{message.bot,message.id,settings,ctx.hasWebEvidence};
-        return runToolBatch(message,tools,step,calls,ctx.t3,ctx.shutdown) ? advance : stop;
+        return runToolBatch(message,tools,step,calls,ctx) ? advance : stop;
     }
     const auto key = tool_batch::turnCallKey(message.id,step);
     const auto& tool = decision.tool;
@@ -66,9 +66,9 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     if (tool == "request_bot_change") return executeConversationBotChange(message,step,decision,key,ctx);
 
     const bool git = isGitTool(tool);
-    const bool sessionRead = tool == "flock_session_search" || tool == "flock_session_events";
-    const bool checkEnvironment = tool == "check_environment_readiness" && message.channelScope.empty();
-    if (!git && !sessionRead && !checkEnvironment)
+    using enum tool_batch::ConversationRead;
+    const auto read = tool_batch::conversationRead(tool);
+    if (!git && (read == none || read == store))
         return executeLocalConversationCall(message,step,decision,key,ctx);
 
     {
@@ -80,28 +80,38 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
         if (!allowed) return stop;
     }
 
-    auto result = git ? gitConversationTool(ctx.gitHost,message,decision,key) :
-                        executeConversationRead(message,decision,ctx.t3,key);
-    if (result.value("policyWaiting",false)) return waiting;
+    ToolCallResult result;
+    if (git) {
+        auto value = gitConversationTool(ctx.gitHost,message,decision,key);
+        if (value.value("policyWaiting",false)) return waiting;
+        result = CompletedToolCall{std::move(value)};
+    } else {
+        result = executeConversationRead(message,decision,ctx.t3,key,ApprovalWait::pause);
+        if (!result) return waiting;
+    }
 
     std::lock_guard lock(mutex);
     Transaction transaction(db);
     if (!authorizeTurn(message)) { transaction.commit(); return stop; }
-    saveConversationCallResult(message,step,std::move(result));
+    saveConversationCallResult(message,step,std::move(result->value));
+    if (result->consumeApproval) consumePolicyApproval(key);
     transaction.commit();
     return advance;
 }
 
-Json Store::Impl::executeConversationRead(const Message& message, const Decision& decision, T3& t3,
-                                          std::string_view key) {
-    if (decision.tool == "flock_session_search" || decision.tool == "flock_session_events")
-        return sessionReadTool(message,decision,t3,key);
-    if (decision.tool != "check_environment_readiness") throw Conflict("Unsupported conversation read");
+Store::Impl::ToolCallResult Store::Impl::executeConversationRead(
+    const Message& message, const Decision& decision, T3& t3, std::string_view key, ApprovalWait waitMode) {
+    using enum tool_batch::ConversationRead;
+    const auto read = tool_batch::conversationRead(decision.tool);
+    if (read == session)
+        return sessionReadTool(message,decision,t3,key,waitMode);
+    if (read != environment_readiness) throw std::logic_error("Unsupported network conversation read");
+    if (!message.channelScope.empty()) return CompletedToolCall{toolFailure("Use Flock Web for this action")};
     try {
         auto result = readiness(message.bot,message.routing,decision.args,t3);
         result["ok"] = true;
-        return result;
-    } catch (const Conflict& error) { return toolFailure(error.what()); }
+        return CompletedToolCall{std::move(result)};
+    } catch (const Conflict& error) { return CompletedToolCall{toolFailure(error.what())}; }
 }
 
 Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(
@@ -141,7 +151,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(
             const auto changeId = Policy(*this).applyBotChange(message.bot,actor,operation,target,name,
                 id,step,ctx.applyBotChange,exhausted ? &ctx.reconcileBotCreation : nullptr);
             Transaction completed(db);
-            exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'",{key});
+            consumePolicyApproval(key);
             saveTurnResults(id,step,Json::array({Json{{"ok",true},{"changeId",changeId},{"status","applied"}}}));
             completed.commit();
             return advance;
@@ -238,7 +248,6 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
     const Message& message, int step, const Decision& decision, std::string_view key,
     const ConversationCallContext& ctx) {
     using enum CallOutcome;
-    const auto id = message.id;
     Json result;
     std::optional<WorkSession> selectedSession;
     if (decision.tool == "start_task" && decision.args.is_object() &&
@@ -260,32 +269,34 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
         return advance;
     }
     if (ctx.shutdown.stop_requested()) return stop;
-    const auto resource = conversationCallResource(message,decision);
-    if (resource) {
+    auto completed = applyLocalConversationCall(message,step,decision,key,ctx.clock(),ApprovalWait::pause,
+                                                selectedSession ? &*selectedSession : nullptr);
+    if (completed) saveConversationCallResult(message,step,std::move(*completed));
+    transaction.commit();
+    return completed ? advance : waiting;
+}
+
+std::optional<Json> Store::Impl::applyLocalConversationCall(
+    const Message& message, int step, const Decision& decision, std::string_view key, Seconds now,
+    ApprovalWait waitMode, const WorkSession* selectedSession) {
+    if (const auto resource = conversationCallResource(message,decision)) {
         const auto gate = approveAction(policyOrigin(message),*resource,key,
-            Json::array({decision.tool,decision.args}),ctx.clock());
-        if (gate != ApprovalGate::allow) {
-            if (gate != ApprovalGate::waiting)
-                saveTurnResults(id,step,Json::array({toolFailure(approvalError(gate))}));
-            transaction.commit();
-            if (gate == ApprovalGate::waiting) return waiting;
-            return advance;
-        }
+            Json::array({decision.tool,decision.args}),now,true,waitMode);
+        if (gate == ApprovalGate::waiting) return std::nullopt;
+        if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
     }
     exec("SAVEPOINT turn_tool");
     try {
-        result = applyTurnTool(message,step,decision,ctx.clock(),selectedSession ? &*selectedSession : nullptr);
+        auto result = applyTurnTool(message,step,decision,now,selectedSession);
         exec("RELEASE turn_tool");
+        return result;
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {
         exec("ROLLBACK TO turn_tool");
         exec("RELEASE turn_tool");
         const auto* failed = dynamic_cast<const ToolError*>(&error);
-        result = failed ? toolErrorResult(*failed) : toolFailure(error.what());
+        return failed ? toolErrorResult(*failed) : toolFailure(error.what());
     }
-    saveConversationCallResult(message,step,std::move(result));
-    transaction.commit();
-    return advance;
 }
 }

@@ -447,6 +447,9 @@ void responseContract() {
     auto batchInput = input;
     batchInput.tools = {"flock_session_search","reply"};
     check(responseRequest(batchInput).at("parallel_tool_calls") == false,"One batchable tool enabled parallel calls");
+    batchInput.tools.push_back("read_memory");
+    check(responseRequest(batchInput).at("parallel_tool_calls") == true,"A batchable Store read was missed");
+    batchInput.tools.pop_back();
     batchInput.tools.push_back("check_environment_readiness");
     const auto batchRequest = responseRequest(batchInput);
     check(batchRequest.at("parallel_tool_calls") == true,"Two batchable reads did not enable parallel calls");

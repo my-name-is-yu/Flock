@@ -139,6 +139,10 @@ WHERE a.status IN ('pending','approved')
     }
 }
 
+void Store::Impl::consumePolicyApproval(std::string_view operation) {
+    exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'",{operation});
+}
+
 ApprovalGate Store::Impl::approveAction(const PolicyOrigin& origin, const Resource& resource,
                                        std::string_view operation, const Json& payload, Seconds now, bool claim,
                                        ApprovalWait waitMode) {
