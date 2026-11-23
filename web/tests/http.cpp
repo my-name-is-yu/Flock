@@ -690,6 +690,8 @@ void exercise(const std::filesystem::path& path) {
     const auto releaseRow = std::find_if(list.begin(),list.end(),[](const Json& bot) { return bot.at("id") == "release"; });
     check(releaseRow != list.end() && releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
           "Bot list does not show Release's latest question");
+    check(releaseRow->at("about") == "利用者向けのリリースノートをまとめる。",
+          "Bot list does not show Release's role");
     check(releaseRow->at("latestIncomingEventId") == waits[0]["wait"]["messageId"],
           "a Bot question did not update the incoming event ID");
     const Id waitId = waits[0]["wait"]["id"];

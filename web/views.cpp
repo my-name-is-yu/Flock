@@ -350,6 +350,8 @@ Json botList(Store& store, const Json& bots) {
         const auto id = field(bot,"id");
         if (id.empty()) continue;
         auto row = botSummary(bot);
+        // Keep the full text until the response redacts protected values.
+        if (const auto soul = field(bot,"soul"); !soul.empty()) row["about"] = soul;
         conversationSummary(row,store,id);
         row["presence"] = botPresence(statesByBot.value(id,Json::array()));
         result.push_back(std::move(row));

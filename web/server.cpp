@@ -540,6 +540,12 @@ private:
         for (auto& bot : list) {
             const auto id = web::field(bot,"id");
             bot = redactBot(id,bot);
+            if (auto about = bot.find("about"); about != bot.end()) {
+                const auto& soul = about->get_ref<const std::string&>();
+                const auto firstLine = std::string_view(soul).substr(0,soul.find_first_of("\r\n"));
+                if (firstLine.empty()) bot.erase(about);
+                else *about = bounded(firstLine,160);
+            }
             auto& entries = bot["peers"] = Json::array();
             for (const auto& peer : connections[id]) entries.push_back({{"id",peer}});
         }

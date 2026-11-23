@@ -150,7 +150,7 @@ async function loadBots() {
   $('bots').replaceChildren();
   if (!bots.length) row('bots', emptyLabel('No Bots yet', 'Create one from the + button in the conversation list.'));
   for (const bot of bots) {
-    const item = row('bots', emptyLabel(bot.name, 'Name, look, role and recurring requests'));
+    const item = row('bots', emptyLabel(bot.name, bot.about || 'No role written yet. Choose Settings to describe what it does.'));
     const actions = document.createElement('span');
     actions.className = 'row-actions';
     actions.append(link('Settings', `/?${new URLSearchParams({ bot: bot.id, settings: '1' })}`, `Settings for ${bot.name}`),

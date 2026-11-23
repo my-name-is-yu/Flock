@@ -864,6 +864,24 @@ void chatGPTConversation(const std::filesystem::path& home) {
 }
 #endif
 
+void botRolePreviewRedactsBeforeBounding(const std::filesystem::path& path) {
+    Store store(path);
+    const auto visible = "Role: " + std::string(134,'a');
+    const auto protectedValue = "RolePreviewFixture-" + std::string(40,'z') + "\ncredential suffix";
+    auto cb = callbacks();
+    cb.bots = [&] {
+        return Json::array({{{"id","release"},{"name","Release"},
+                            {"soul",visible + protectedValue + "\nRole details"}}});
+    };
+    auto policy = store.policy();
+    const auto request = policy.requestSecret("release",{"fixture-role-token"});
+    policy.submitSecret(localOwner,"release",request,protectedValue);
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    check(browser.get("/api/bots").at(0).at("about") == visible + "[redacted]",
+          "Bot role preview must redact a multiline secret before splitting or truncating");
+}
+
 void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     Store store(path);
     auto cb = callbacks();
@@ -1336,6 +1354,7 @@ int main(int argc,char** argv) {
             "確認手順の妥当性を確認してください。 Synthetic&ErnestCredential-221",true);
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
+        botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         queuedWebAuthority(directory.path / "queued-web-authority.sqlite");
         memoryAutomationEndpoints(directory.path / "automation.sqlite");
