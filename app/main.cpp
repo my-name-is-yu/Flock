@@ -137,10 +137,12 @@ int t3Command(Arguments& args, const std::filesystem::path& home) {
     const auto url = args.pop("T3 MCP URL");
     args.end();
 #ifdef FLOCK_WITH_T3
-    loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
+    const auto canOperate = loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
         std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
     });
-    print({{"environmentId",environment},{"connected",true}});
+    print({{"environmentId",environment},{"connected",true},{"canOperate",canOperate}});
+    if (!canOperate)
+        std::cerr << "This T3 connection is read-only. Sign in again with T3 Operate access to launch Sessions.\n";
     return 0;
 #else
     (void)home;
@@ -235,10 +237,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::jthread handoffWorker;
     if (handoffSession && callbacks.configuredPerson) {
         handoffPeople = callbacks.configuredPerson;
-        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,&runtime,options.peers);
+        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,callbacks.intake,&runtime,options.peers);
         handoffs->recover();
         callbacks.sessionHandoffs = handoffs;
-        handoffWorker = std::jthread([handoffs, person=handoffPeople, intake=callbacks.intake,
+        handoffWorker = std::jthread([handoffs, person=handoffPeople,
                                      soul=[&](std::string_view botId) { return bots.soul(botId); },
                                      &model](std::stop_token stop) {
             Id after = 0;
@@ -253,8 +255,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                         if (!actor) continue;
                         try {
                             const auto view = handoffs->view(*actor,channel);
-                            if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
-                            else handoffs->consult(*actor,channel,*model,intake,soul);
+                            if (view.coordination) handoffs->step(*actor,channel,*model,soul);
+                            else handoffs->consult(*actor,channel,*model,soul);
                         } catch (const std::exception&) {
                         }
                     }
