@@ -502,6 +502,11 @@ void responseContract() {
     const auto laterContext = requestContext(later);
     check(laterContext.at("event") == laterInput.event && laterContext.at("task") == laterInput.task &&
           laterContext.at("feedback") == laterInput.feedback,"Prompt partition lost current context");
+    const auto& historyText = laterMessages.at(1).at("content").at(0).at("text").get_ref<const std::string&>();
+    const auto& currentText = laterMessages.at(2).at("content").at(0).at("text").get_ref<const std::string&>();
+    check(historyText.find("\"history\":") < historyText.find("\"event\":") &&
+          currentText.find("\"turn\":") < currentText.find("\"currentTime\":"),
+          "Changing invocation data preceded reusable conversation context");
     const std::map<std::string,Json> requiredChannelArgs{
         {"channel_edit_message",{"reason","externalMessageId","text"}},
         {"channel_react",{"reason","reaction"}},

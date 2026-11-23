@@ -926,6 +926,10 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
                          .images = std::move(images)};
+                if (message.principalSource != PrincipalSource::gitWebhook && input.images.empty())
+                    input.conversationScope = Json::array({path.string(),message.bot,message.channelScope,
+                        message.admittedActor.id,static_cast<int>(message.principalSource)}).dump(
+                            -1,' ',false,Json::error_handler_t::replace);
                 transaction.commit();
             }
             ConversationModelCheckpoint checkpoint{0,step,Json::object(),ConversationModelFailure{}};

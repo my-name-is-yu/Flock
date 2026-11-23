@@ -103,7 +103,7 @@ function checkTransport(executable) {
   const lock = openSync(join(root, "lock"), "wx", 0o600);
   try {
     writeFileSync(join(root, "profile.json"), JSON.stringify({
-      accessToken: "fixture", refreshToken: "fixture", granted: ["chatgpt.tokens.use.direct"],
+      hostId: "fixture-installation", accessToken: "fixture", refreshToken: "fixture", granted: ["chatgpt.tokens.use.direct"],
       expiresAt: Date.now() + 3600_000,
     }), { mode: 0o600 });
     for (const [mode, transient, message] of [
@@ -121,6 +121,24 @@ function checkTransport(executable) {
       assert.match(error.error, message);
       assert.equal(error.transient, transient, mode);
     }
+    const invoke = (scope, input) => {
+      const response = childProcess.spawnSync(process.execPath, ["--import", scriptPath,
+        join(dirname(executable), "chatgpt.mjs"), "infer_conversation", root, "3"], {
+        input: JSON.stringify({ request: { input }, scope }), encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe", lock],
+        env: { ...process.env, FLOCK_TEST_TRANSPORT_MODE: "scope" },
+      });
+      assert.equal(response.status, 0, response.stderr);
+      const { result } = JSON.parse(response.stdout);
+      assert.equal(result.transportRequestBytes, Buffer.byteLength(JSON.stringify({ input })));
+      const { session, body } = result.output[0];
+      assert.deepEqual(body, { input });
+      assert.match(session, /^[a-f0-9]{64}$/);
+      return session;
+    };
+    const first = invoke("private scope A", "first prompt");
+    assert.equal(invoke("private scope A", "updated prompt"), first);
+    assert.notEqual(invoke("private scope B", "first prompt"), first);
   } finally {
     closeSync(lock);
     rmSync(root, { recursive: true, force: true });
@@ -332,7 +350,16 @@ if (realpathSync(process.argv[1]) === scriptPath) {
 } else if (process.env.FLOCK_TEST_ACCOUNT_LIFECYCLE) {
   simulateAccountLifecycle(process.env.FLOCK_TEST_ACCOUNT_LIFECYCLE);
 } else if (process.env.FLOCK_TEST_TRANSPORT_MODE) {
-  globalThis.fetch = async () => transportResponse(process.env.FLOCK_TEST_TRANSPORT_MODE);
+  globalThis.fetch = async (url, options) => {
+    const mode = process.env.FLOCK_TEST_TRANSPORT_MODE;
+    if (mode !== "scope") return transportResponse(mode);
+    assert.equal(url, "https://api.openai.com/v1/responses");
+    assert.equal(options.headers.authorization, "Bearer fixture");
+    const event = { type: "response.completed", response: {
+      output: [{ session: options.headers["session-id"], body: JSON.parse(options.body) }],
+    } };
+    return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } });
+  };
 } else {
   simulateAuthorization(process.env.FLOCK_TEST_LOGIN_MODE);
 }

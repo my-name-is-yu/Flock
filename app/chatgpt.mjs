@@ -462,18 +462,24 @@ async function parseStream(body, requestId) {
   throw new Failure("ChatGPT stream ended before a completed response", true);
 }
 
-async function infer(payload) {
+async function infer(payload, scope = "") {
+  const body = JSON.stringify(payload);
+  const headers = { "content-type": "application/json", accept: "text/event-stream" };
+  if (scope) {
+    const { hostId } = readProfile();
+    if (hostId) headers["session-id"] = createHash("sha256").update(JSON.stringify([hostId, scope])).digest("hex");
+  }
   const response = await api("/responses", await accessToken(), {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "text/event-stream" },
-    body: JSON.stringify(payload),
+    headers,
+    body,
   }, 90_000);
   const mediaType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
   if (!response.body || (mediaType && mediaType !== "text/event-stream")) {
     throw new Failure("ChatGPT did not return the expected response stream");
   }
   const completed = await parseStream(response.body, response.headers.get("x-request-id"));
-  return { output: completed.output, usage: completed.usage };
+  return { output: completed.output, usage: completed.usage, transportRequestBytes: Buffer.byteLength(body) };
 }
 
 try {
@@ -503,6 +509,7 @@ try {
     result = { ...status(profile), needsSignIn, registered: Boolean(profile.clientId) };
   } else if (operation === "models") result = await models();
   else if (operation === "infer") result = await infer(input);
+  else if (operation === "infer_conversation") result = await infer(input.request, input.scope);
   else throw new Failure("Unknown ChatGPT transport operation");
   console.log(JSON.stringify({ result, candidate }));
 } catch (error) {
