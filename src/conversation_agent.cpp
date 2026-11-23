@@ -385,7 +385,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
-                                Seconds now, const ApplyBotChange& applyBotChange) {
+                                Seconds now) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -413,12 +413,6 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" ||
             tool == "stop_workflow_stage" || tool == "stop_workflow")
             return workflowTool(tool,args,bot,message.id,step,routing);
-        if (tool == "request_bot_change") {
-            const auto id = Policy(*this).applyBotChange(bot,turnActor(message),
-                toolText(args,"operation",32),toolText(args,"targetBotId",128),toolText(args,"name",128),
-                message.id,step,applyBotChange);
-            return {{"ok",true},{"changeId",id},{"status","applied"}};
-        }
         auto result = accessTool(bot,message.id,routing,decision);
         const auto actor = turnActor(message);
         if (result.is_null()) result = memory(bot,actor,tool,args,now,true);
@@ -999,6 +993,27 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 result["ok"] = true;
             } catch (const Conflict& error) { result = {{"ok",false},{"error",error.what()}}; }
         }
+        if (decision.tool == "request_bot_change") {
+            std::lock_guard lock(mutex);
+            {
+                Transaction authorization(db);
+                const bool allowed = authorizeTurn(message);
+                authorization.commit();
+                if (!allowed || shutdown.stop_requested()) return;
+            }
+            try {
+                if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
+                const auto& args = decision.args;
+                const auto changeId = Policy(*this).applyBotChange(message.bot,turnActor(message),
+                    toolText(args,"operation",32),toolText(args,"targetBotId",128),toolText(args,"name",128),
+                    id,step,applyBotChange);
+                result = {{"ok",true},{"changeId",changeId},{"status","applied"}};
+            } catch (const Conflict& error) {
+                result = toolFailure(error.what());
+            } catch (const ToolError& error) {
+                result = toolFailure(error.what());
+            }
+        }
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (!authorizeTurn(message)) { transaction.commit(); return; }
@@ -1031,7 +1046,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
             if (shutdown.stop_requested()) return;
             exec("SAVEPOINT turn_tool");
             try {
-                result = applyTurnTool(message,step,decision,clock(),applyBotChange);
+                result = applyTurnTool(message,step,decision,clock());
                 exec("RELEASE turn_tool");
             } catch (const StorageError&) {
                 throw;

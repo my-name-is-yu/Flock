@@ -285,8 +285,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     WebCallbacks callbacks{
         [&] { return bots.cards(); },
         [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
-        [&](const Json& profile,const std::optional<AvatarImage>& image) {
-            auto created = bots.create(profile,image);
+        [&](const Person& creator,const Json& profile,const std::optional<AvatarImage>& image) {
+            auto created = store.policy().createOwnedBot(creator,[&](const auto& publishOwned) {
+                return bots.create(profile,image,publishOwned);
+            });
             syncSkills();
             return created;
         },

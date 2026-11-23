@@ -257,7 +257,7 @@ struct Store::Impl {
     Json gitConversationTool(GitHost*, const conversation::Message&, int step, const Decision&);
     bool gitConversationEffectStarted(Id message, int step) const;
     bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
-    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now, const ApplyBotChange&);
+    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);
     Json ownTask(Id taskId, const conversation::Message&) const;

@@ -27,7 +27,8 @@ public:
     Json cards() const;
     Json skillCards() const;
     void apply(const BotChange&);
-    Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
+    Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt,
+                const Policy::PublishOwnedBot& publishOwned = {});
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     std::optional<AvatarImage> avatarImage(std::string_view id) const;
     void syncSchedules(Store&, Seconds now, const std::function<void(std::string_view,std::string_view)>& report) const;
@@ -36,6 +37,7 @@ private:
     mutable std::mutex mutex_;
     std::filesystem::path path(std::string_view id) const;
     Json cardLocked(std::string_view id) const;
+    Json cardFromDirectory(std::string_view id, const std::filesystem::path&) const;
 };
 
 }

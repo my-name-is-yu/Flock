@@ -119,6 +119,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS pending_secret ON protected_inputs(bot,name) W
 CREATE UNIQUE INDEX IF NOT EXISTS fulfilled_secret ON protected_inputs(name) WHERE status='fulfilled';
 CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target TEXT,name TEXT,
  request_key TEXT UNIQUE NOT NULL,source_message_id INTEGER REFERENCES messages(id));
+CREATE TABLE IF NOT EXISTS bot_creation_intents(
+ request_key TEXT PRIMARY KEY,target TEXT UNIQUE NOT NULL,person TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 )SQL";
     if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Cannot initialize access schema");
@@ -182,10 +184,25 @@ void Policy::changeNeverRule(const Person& actor, Action action, std::string_vie
     tx.commit();
 }
 
+Json Policy::createOwnedBot(const Person& creator,
+                            const std::function<Json(const PublishOwnedBot&)>& create) {
+    std::lock_guard lock(db_.mutex);
+    if (!allows(creator,Action::bot_create,"")) throw DecisionDenied{};
+    db_.sharedRedactor().requirePublic({creator.id});
+    return create([&](std::string_view bot, const std::function<void()>& publish) {
+        Transaction ownership(db_.db);
+        setOwner(creator,bot);
+        publish();
+        ownership.commit();
+    });
+}
+
 void Policy::setOwner(const Person& creator, std::string_view bot) {
     std::lock_guard lock(db_.mutex);
     if (!validBotId(bot) || !allows(creator,Action::bot_create,bot)) throw DecisionDenied{};
     db_.sharedRedactor().requirePublic({creator.id,bot});
+    if (db_.query("SELECT 1 FROM bot_creation_intents WHERE target=?",{bot}).next())
+        throw Conflict("Bot creation is already in progress");
     db_.exec("INSERT INTO bot_owners VALUES(?,?)",{bot,creator.id});
 }
 
@@ -227,23 +244,58 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
                           std::string_view target, std::string_view name, Id message, int step,
                           const ApplyBotChange& apply) {
     const bool create = operation == "create_bot";
-    if ((!create && operation != "rename_bot") || !validBotId(target) ||
-        !allows(bot,create ? Action::bot_create : Action::bot_rename,target))
-        throw Conflict("Bot change denied by policy");
-    if (!apply) throw Conflict("Bot changes are unavailable");
-    // A Bot acts for the person it is talking to, so renaming needs that person's authority over the target.
-    if (!identifier(creator.id) || (!create && !allows(creator,Action::bot_settings,target))) throw DecisionDenied{};
-    std::lock_guard lock(db_.mutex);
-    db_.redactor(bot).requirePublic({name,target});
     const auto requestKey = std::to_string(message) + "-" + std::to_string(step);
+    if (!apply) throw Conflict("Bot changes are unavailable");
     const BotChange change{std::string(operation),std::string(target),botName(name),requestKey};
-    if (create && db_.query("SELECT 1 FROM bot_owners WHERE bot=?",{target}).next())
-        throw Conflict("Target Bot already exists");
-    apply(change);
-    if (create) setOwner(creator,target);
+    std::lock_guard lock(db_.mutex);
+    if (auto completed = db_.query("SELECT id FROM bot_changes WHERE request_key=?",{requestKey}); completed.next())
+        return completed.number(0);
+
+    std::string owner;
+    if (create) {
+        auto pending = db_.query("SELECT person FROM bot_creation_intents WHERE request_key=? AND target=?",
+                                 {requestKey,target});
+        if (pending.next()) owner = pending.string(0);
+    }
+    if (owner.empty()) {
+        if ((!create && operation != "rename_bot") || !validBotId(target) ||
+            !allows(bot,create ? Action::bot_create : Action::bot_rename,target))
+            throw Conflict("Bot change denied by policy");
+        if (!identifier(creator.id) || (!create && !allows(creator,Action::bot_settings,target)))
+            throw DecisionDenied{};
+        db_.redactor(bot).requirePublic({name,target});
+        if (create) {
+            Transaction intent(db_.db);
+            db_.sharedRedactor().requirePublic({creator.id,target});
+            if (db_.query("SELECT 1 FROM bot_owners WHERE bot=? UNION ALL SELECT 1 FROM bot_creation_intents WHERE target=?",
+                          {target,target}).next())
+                throw Conflict("Target Bot already exists");
+            owner = creator.id;
+            db_.exec("INSERT INTO bot_creation_intents VALUES(?,?,?)",{requestKey,target,owner});
+            intent.commit();
+        }
+    }
+    Transaction completion(db_.db);
+    if (auto completed = db_.query("SELECT id FROM bot_changes WHERE request_key=?",{requestKey}); completed.next())
+        return completed.number(0);
+    try {
+        apply(change);
+    } catch (const Conflict&) {
+        // A rejected application leaves no published profile.
+        if (create) db_.exec("DELETE FROM bot_creation_intents WHERE request_key=?",{requestKey});
+        completion.commit();
+        throw;
+    }
+
+    if (create) {
+        db_.exec("INSERT INTO bot_owners VALUES(?,?)",{target,owner});
+        db_.exec("DELETE FROM bot_creation_intents WHERE request_key=?",{requestKey});
+    }
     db_.exec("INSERT INTO bot_changes(bot,operation,target,name,request_key,source_message_id) VALUES(?,?,?,?,?,?)",
              {bot,operation,target,change.name,requestKey,message});
-    return db_.last();
+    const auto id = db_.last();
+    completion.commit();
+    return id;
 }
 
 void Policy::executeSessionResource(std::string_view environment, const RunRef& run, const Resource& resource,

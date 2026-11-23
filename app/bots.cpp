@@ -340,7 +340,10 @@ std::vector<PeerBot> Bots::peers(std::string_view id) const {
 }
 
 Json Bots::cardLocked(std::string_view id) const {
-    const auto botDir = path(id);
+    return cardFromDirectory(id,path(id));
+}
+
+Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& botDir) const {
     const auto config = Json::parse(readText(botDir / "config.json",maxConfigBytes),nullptr,false);
     if (!config.is_object())
         return {{"id",id},{"name",id},{"soul","Check this Bot’s configuration."},{"cron",Json::array()}};
@@ -415,7 +418,7 @@ Json Bots::skillCards() const {
     return items;
 }
 
-void Bots::apply(const BotChange& change) {
+void Bots::apply(const BotChange& change) try {
     if (change.operation == "rename_bot") {
         updateProfile(change.target,{{"name",change.name}});
         return;
@@ -433,7 +436,9 @@ void Bots::apply(const BotChange& change) {
     }
     const auto issued = directory_ / ".flock-issued-ids";
     std::filesystem::create_directories(issued);
-    if (std::filesystem::exists(issued / change.target)) throw Conflict("This Bot ID has already been used");
+    const auto reservation = issued / change.target;
+    if (std::filesystem::exists(reservation) && readText(reservation,128) != change.requestKey)
+        throw Conflict("This Bot ID has already been used");
     const auto staging = directory_ / (".create-" + change.requestKey);
     if (!std::filesystem::create_directory(staging) &&
         (std::filesystem::is_symlink(staging) || !std::filesystem::is_directory(staging)))
@@ -441,11 +446,21 @@ void Bots::apply(const BotChange& change) {
     const Json config{{"name",name},{"role","custom"},{"creationRequest",change.requestKey},
                       {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}};
     writeAtomic(staging / "config.json",config.dump(2) + "\n");
-    std::filesystem::rename(staging,destination);
-    writeNewFile(issued / change.target,"");
+    if (!writeNewFile(reservation,change.requestKey) && readText(reservation,128) != change.requestKey)
+        throw Conflict("This Bot ID has already been used");
+    std::error_code failure;
+    std::filesystem::rename(staging,destination,failure);
+    if (failure) {
+        std::error_code ignore;
+        std::filesystem::remove(reservation,ignore);
+        throw Conflict("Unable to publish Bot profile");
+    }
+} catch (const std::filesystem::filesystem_error&) {
+    throw Conflict("Unable to save Bot profile");
 }
 
-Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) {
+Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image,
+                  const Policy::PublishOwnedBot& publishOwned) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
     const auto name = validatedBotName(profile);
     std::string role = "custom";
@@ -461,24 +476,33 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) 
     const auto issued = directory_ / ".flock-issued-ids";
     std::filesystem::create_directories(issued);
     const auto base = slugForName(name);
+    const auto staging = directory_ / (".create-web-" + actionId());
     std::string id = base;
-    for (unsigned suffix = 2; ; ++suffix) {
-        std::error_code error;
-        if (writeNewFile(issued / id,"") && std::filesystem::create_directory(directory_ / id,error)) break;
-        if (error && error != std::errc::file_exists)
-            throw std::filesystem::filesystem_error("Unable to create Bot directory",directory_ / id,error);
-        id = base + "-" + std::to_string(suffix);
-    }
-    const auto botDir = directory_ / id;
+    bool reserved = false;
+    bool published = false;
     try {
+        for (unsigned suffix = 2; ; ++suffix) {
+            if (!std::filesystem::exists(directory_ / id) && writeNewFile(issued / id,"")) break;
+            id = base + "-" + std::to_string(suffix);
+        }
+        reserved = true;
+        if (!std::filesystem::create_directory(staging)) throw Conflict("Unable to stage Bot profile");
         Json config = {{"name",name},{"role",role},{"avatar",avatar}};
-        saveProfile(botDir,config,image ? &*image : nullptr);
+        saveProfile(staging,config,image ? &*image : nullptr);
         const auto starter = roleStarterSoul(role);
-        if (!starter.empty()) writeAtomic(botDir / "SOUL.md",starter);
-        return cardLocked(id);
+        if (!starter.empty()) writeAtomic(staging / "SOUL.md",starter);
+        auto card = cardFromDirectory(id,staging);
+        const auto publish = [&] {
+            std::filesystem::rename(staging,directory_ / id);
+            published = true;
+        };
+        if (publishOwned) publishOwned(id,publish);
+        else publish();
+        return card;
     } catch (...) {
         std::error_code ignore;
-        std::filesystem::remove_all(botDir,ignore);
+        std::filesystem::remove_all(published ? directory_ / id : staging,ignore);
+        if (reserved && !ignore) std::filesystem::remove(issued / id,ignore);
         throw;
     }
 }

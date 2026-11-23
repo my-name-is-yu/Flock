@@ -694,6 +694,27 @@ void botProfilesAndAvatars() {
     Sandbox temp;
     Bots bots(temp.path / "bots");
 
+    {
+        Store store(temp.path / "creation.db");
+        auto policy = store.policy();
+        const Person creator{"bot-creator",false};
+        const Json profile{{"name","Blue Lake"},
+                           {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}};
+        policy.submitSecret(localOwner,"secrets",policy.requestSecret("secrets",{"creation-fixture"}),"blue-lake");
+        bool rejected = false;
+        try {
+            policy.createOwnedBot(creator,[&](const auto& publish) {
+                return bots.create(profile,std::nullopt,publish);
+            });
+        } catch (const Conflict&) {
+            rejected = true;
+        }
+        check(rejected && bots.cards().empty() &&
+              !std::filesystem::exists(temp.path/"bots"/".flock-issued-ids"/"blue-lake") &&
+              !policy.allows(creator,Action::bot_settings,"blue-lake"),
+              "Rejected owner registration left a profile, issued ID, or owner");
+    }
+
     // Create a Bot with role template and shape avatar without execution settings.
     const auto created = bots.create({
         {"name","Scout"},
