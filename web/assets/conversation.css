@@ -195,12 +195,6 @@
   to { opacity: 1; transform: none; }
 }
 .profile-name, .profile-status, .peer-names bdi { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.header-name {
-  max-width: 100%;
-  padding: .1875rem .7rem; border-radius: var(--radius-full);
-  background: var(--accent-soft); color: var(--accent);
-  font-size: var(--text-sm); font-weight: 600; line-height: 1.25;
-}
 .profile-name { max-width: 100%; font-size: var(--text-sm); font-weight: 650; line-height: 1.25; }
 .peer-names { display: inline-flex; align-items: center; gap: .38rem; max-width: 100%; min-width: 0; }
 .profile-status {
@@ -245,7 +239,6 @@
   .conversation-frame::before, .conversation-frame::after { display: none; }
 }
 .conversation {
-  --bot-accent: var(--accent-fill);
   --user-bubble: #58418a;
   overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0;
   /* Contain absolutely positioned descendants such as .sr-only text; otherwise they extend the page. */
@@ -453,6 +446,10 @@
 .msg-quote { display: flex; align-items: center; gap: .3rem; }
 .msg-quote span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .msg-quote .glyph svg { width: .8rem; height: .8rem; }
+.msg-queued { display: flex; align-items: center; gap: .3rem; }
+.msg-queued > * { flex: none; }
+.msg-queued .glyph svg { width: .8rem; height: .8rem; }
+.msg-queued .msg-queued-request { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
 
 .msg.working {
   animation: working-enter .24s cubic-bezier(.22, 1.2, .36, 1) both;
@@ -479,6 +476,14 @@
 .empty-state .avatar { width: 4.25rem; height: 4.25rem; border-radius: var(--radius-xl); margin-bottom: .55rem; }
 .empty-state h2 { font-size: var(--text-lg); font-weight: 600; }
 .empty-state p { font-size: var(--text-sm); color: var(--text-2); }
+.empty-state.first-run { gap: 0; }
+.empty-state.first-run p { max-width: 22rem; margin-top: .4rem; line-height: 1.55; text-wrap: balance; }
+.empty-state.first-run .dialog-button { margin-top: var(--space-5); padding-inline: 1.25rem; }
+.first-run-flock { display: flex; align-items: flex-end; margin-bottom: var(--space-4); }
+.first-run-flock .avatar { width: 3.1rem; height: 3.1rem; margin: 0; border-radius: 0; }
+.first-run-flock .avatar:nth-child(1) { rotate: -8deg; translate: .35rem .1rem; }
+.first-run-flock .avatar:nth-child(2) { width: 3.9rem; height: 3.9rem; z-index: 1; }
+.first-run-flock .avatar:nth-child(3) { rotate: 8deg; translate: -.35rem .1rem; }
 
 .bubble[data-fold="folded"] .foldable-text {
   max-height: calc(1lh * 12); overflow: hidden;
@@ -538,7 +543,7 @@
   .profile-caption:has(.needs-you:not([hidden])):active, .jump-to-latest:active, .question-option:active,
   .peer-exchange-link:active, .fold-toggle:active { transform: none; }
   .msg-action[data-copied="true"] svg, .question-option:has(:checked), .msg-resolution, .empty-state > * { animation: none; }
-  .profile-identity[data-state="offline"] .status-indicator, .peer-exchange[open] .peer-message-list { animation: none; }
+  .profile-identity[data-state="offline"] .status-indicator { animation: none; }
   .conversation-source-target .bubble { animation: source-highlight-reduced 2s ease-out; }
   .profile-status, .older { transition: none; }
   @starting-style { .profile-status, .older { opacity: 1; transform: none; } }
@@ -556,7 +561,10 @@
 /* Touch screens have no hover, so every row used to show its copy and reply icons at once.
    Tapping a bubble already reveals its time; it now reveals that row's actions too. */
 @media (hover: none) {
-  .event-message:not(:has(> .msg-time), :focus-visible, :has(:focus-visible)) .msg-actions { display: none; }
+  /* Keep actions in the keyboard tab order while they are hidden. */
+  .event-message:not(:has(> .msg-time), :focus-visible, :has(:focus-visible)) .msg-actions {
+    position: absolute; opacity: 0; pointer-events: none; transition: none;
+  }
   /* Without the actions beside it, a shrink-wrapped line would size the bubble's percentage width against itself. */
   .event-message .msg-line { justify-self: stretch; }
   .event-message:has(> .msg-time) .msg-actions { animation: msg-actions-in .18s var(--ease-out); }
@@ -607,15 +615,3 @@
 }
 .peer-forwarded-message + .event-text { margin-block-start: .45rem; }
 .peer-status { margin-bottom: var(--space-4); text-align: center; color: var(--danger); font-size: var(--text-sm); }
-.peer-exchange { min-width: 0; max-width: 42rem; margin-top: .8rem; }
-.peer-exchange > summary { width: fit-content; max-width: 100%; border-radius: 7px; padding: .35rem .45rem; color: var(--text-2); cursor: pointer; font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
-.peer-exchange > summary:hover { color: var(--text); }
-.peer-message-list { list-style: none; display: grid; gap: .8rem; margin: .35rem 0 0 .55rem; border-inline-start: 1px solid var(--hairline); padding: .1rem 0 .1rem .8rem; }
-.peer-exchange[open] .peer-message-list { animation: exchange-reveal .2s cubic-bezier(0.23, 1, 0.32, 1); }
-@keyframes exchange-reveal {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: none; }
-}
-.peer-message { display: grid; gap: .22rem; min-width: 0; }
-.peer-message > .link { justify-self: start; }
-.event-meta { display: flex; flex-wrap: wrap; gap: .4rem; color: var(--text-2); font-size: var(--text-xs); }

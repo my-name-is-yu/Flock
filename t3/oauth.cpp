@@ -392,8 +392,9 @@ Credential loadCredential(const std::filesystem::path& path, const std::string& 
 
 }
 
-void loginT3(const std::filesystem::path& credentialDirectory, const std::string& environmentId,
-             const std::string& mcpUrl, const std::function<void(const std::string&)>& showAuthorizationUrl) {
+bool loginT3(const std::filesystem::path& credentialDirectory, const std::string& environmentId,
+             const std::string& mcpUrl, const std::function<void(const std::string&)>& showAuthorizationUrl, bool requireOperate,
+             const std::function<void(const std::function<void()>&)>& install) {
     using namespace t3detail;
     const auto name = credentialName(environmentId);
     const auto resource = checkedUrl(mcpUrl);
@@ -433,11 +434,16 @@ void loginT3(const std::filesystem::path& credentialDirectory, const std::string
         operateScope |= item == OperateScope;
     }
     if (!readScope) noCredential();
+    if (requireOperate && !operateScope)
+        throw Failure(Failure::Kind::Auth,"Authorize T3 read and operate access for the Flock connection");
     Credential credential{resource.full, token, randomValue(), unixTime() + expires, operateScope};
     Client client(credential);
     const auto identity = client.call("t3_environment_read", Json::object());
     if (str(identity, "environmentId") != environmentId)
         throw Failure(Failure::Kind::Settings, "The OAuth endpoint belongs to a different T3 environment");
-    saveCredential(directory.get(), name, environmentId, credential);
+    const auto save = [&] { saveCredential(directory.get(), name, environmentId, credential); };
+    if (install) install(save);
+    else save();
+    return operateScope;
 }
 }

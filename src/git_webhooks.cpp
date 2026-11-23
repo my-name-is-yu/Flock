@@ -1,4 +1,4 @@
-#include "storage.hpp"
+#include "conversation_storage.hpp"
 
 #include <algorithm>
 
@@ -61,7 +61,7 @@ SELECT 1 FROM git_pr_watches w JOIN tasks t ON t.id=w.task_id AND t.bot_id=w.bot
 WHERE w.host=? AND w.repo=? AND w.pr_number=? AND w.task_id=? AND w.bot_id=?
 AND t.state NOT IN ('cancelled','cancelling')
 )SQL",{repo.host,repo.repo,event.at("prNumber"),event.at("taskId"),bot}).next() &&
-        Access(*this).permits(bot,{"repository",repo.resource(),"read"},true);
+        Policy(*this).allows(bot,Action::repository_read,repo.resource());
 }
 
 void Store::Impl::deliverGitWebhooks() {
@@ -131,9 +131,9 @@ ORDER BY id,pr_number LIMIT ?
              {taskId,unixTime(),scrub.record(event),bot});
         const auto message = last();
         exec(R"SQL(
-INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root)
-SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0 FROM messages WHERE bot_id=?
-)SQL",{message,bot,key,routing,bot});
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0,? FROM messages WHERE bot_id=?
+)SQL",{message,bot,key,routing,static_cast<int>(conversation::PrincipalSource::gitWebhook),bot});
         exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')",{message});
     }
     transaction.commit();
