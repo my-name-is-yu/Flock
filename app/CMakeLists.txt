@@ -34,6 +34,10 @@ if(BUILD_TESTING)
     COMMAND "${CMAKE_COMMAND}" "-DFLOCK=$<TARGET_FILE:flock>" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_port.cmake")
   find_program(FLOCK_NODE_EXECUTABLE node)
   if(FLOCK_NODE_EXECUTABLE)
+    add_test(NAME flock_app_bot_deletion
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-deletion.mjs"
+              "$<TARGET_FILE:flock>" "${Python3_EXECUTABLE}")
+    set_tests_properties(flock_app_bot_deletion PROPERTIES TIMEOUT 25)
     add_test(NAME flock_app_headless_settings
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/headless-settings.mjs" "$<TARGET_FILE:flock>")
     set_tests_properties(flock_app_headless_settings PROPERTIES TIMEOUT 20)

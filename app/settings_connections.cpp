@@ -414,7 +414,7 @@ Json SettingsConnections::botChannels(std::string_view botId) const {
     return botChannelsLocked(botId);
 }
 
-Json SettingsConnections::changeBotChannel(std::string_view botId, const Json& input) {
+Json SettingsConnections::changeBotChannel(std::string_view botId, const Json& input, const Store& store) {
     if (!validBotId(botId) || !input.is_object()) throw Conflict("Invalid Bot channel settings");
     if (hostChannels_) throw Conflict("These channel settings are managed on the Flock host");
     try {
@@ -428,8 +428,11 @@ Json SettingsConnections::changeBotChannel(std::string_view botId, const Json& i
         auto channels = desired_.at("channels");
         if (!objectField(channels,type).contains(id)) throw Conflict("This bridge is no longer registered");
         auto& senders = channels.at(type).at(id).at("senders");
-        if (senders.contains(senderId) && senders.at(senderId).at("botId") != botId)
-            throw Conflict("This sender is linked to another Bot");
+        if (const auto existing = senders.find(senderId); existing != senders.end()) {
+            const auto& assigned = existing->at("botId").get_ref<const std::string&>();
+            if (assigned != botId && (action != "setSender" || !store.botDeleted(assigned)))
+                throw Conflict("This sender is linked to another Bot");
+        }
         if (action == "removeSender") senders.erase(senderId);
         else senders[senderId] = {{"personId",settingText(sender,"personId",200)},{"botId",botId}};
         validateChannelBridgeSettings(channels);

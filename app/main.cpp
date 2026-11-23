@@ -103,6 +103,13 @@ Store openStore(const std::filesystem::path& home) {
     return Store(home / "flock.sqlite3");
 }
 
+Json activeBotCards(const Store& store, Json cards) {
+    cards.erase(std::remove_if(cards.begin(),cards.end(),[&](const Json& card) {
+        return store.botDeleted(card.at("id").get_ref<const std::string&>());
+    }),cards.end());
+    return cards;
+}
+
 void print(const Json& value) {
     std::cout << value.dump(2,' ',false,Json::error_handler_t::replace) << '\n';
 }
@@ -168,7 +175,7 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (result.portChanged)
         std::cerr << "T3 skills use Flock Web port " << result.port
                   << ". Restart 'flock run' if it is already running.\n";
-    try { syncT3Skills(bots.skillCards()); }
+    try { syncT3Skills(activeBotCards(openStore(home),bots.skillCards())); }
     catch (const std::exception& error) {
         std::cerr << "Could not export T3 skills: " << error.what() << '\n';
     }
@@ -281,7 +288,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     }
     options.requireT3Connection = !fixed;
     options.botTools = connections.loadTools();
-    options.peers = [&](std::string_view botId) { return bots.peers(botId); };
+    options.peers = [&](std::string_view botId) {
+        auto peers = bots.peers(botId);
+        std::erase_if(peers,[&](const PeerBot& peer) { return store.botDeleted(peer.intake.botId); });
+        return peers;
+    };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
     const IntakeResolver intake = [&](std::string_view botId, std::string_view request) {
@@ -303,7 +314,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         std::lock_guard lock(skillMutex);
         if (providersChanged) exportedBots = nullptr;
         try {
-            auto descriptions = bots.skillCards();
+            auto descriptions = activeBotCards(store,bots.skillCards());
             if (descriptions != exportedBots) {
                 syncT3Skills(descriptions);
                 exportedBots = std::move(descriptions);
@@ -314,7 +325,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     };
     if (web) syncSkills();
     WebCallbacks callbacks{
-        [&] { return bots.cards(); },
+        [&] { return activeBotCards(store,bots.cards()); },
         intake,
         [&](const Person& creator,const Json& profile,const std::optional<AvatarImage>& image) {
             auto created = store.policy().createOwnedBot(creator,[&](const auto& publishOwned) {
@@ -360,7 +371,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     };
     callbacks.botChannels = [&](std::string_view bot) { return connections.botChannels(bot); };
     callbacks.changeBotChannel = [&](std::string_view bot, const Json& args) {
-        return connections.changeBotChannel(bot,args);
+        return connections.changeBotChannel(bot,args,store);
     };
     T3WebSetup t3Setup(home,[&] { syncSkills(true); });
     t3Setup.configure(callbacks,store,!fixed);
@@ -487,7 +498,9 @@ int runCli(Arguments& args) {
     if (command == "t3") return t3Command(args,home,bots);
     if (command == "bots") {
         args.end();
-        print(bots.cards());
+        auto cards = bots.cards();
+        if (std::filesystem::exists(home / "flock.sqlite3")) cards = activeBotCards(openStore(home),std::move(cards));
+        print(cards);
     } else if (command == "run") daemon(args,home,bots);
     else if (command == "rules") rulesCommand(home,args);
     else if (command == "mode") {

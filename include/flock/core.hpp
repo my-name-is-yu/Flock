@@ -25,6 +25,7 @@ std::string bounded(std::string_view text, std::size_t bytes);
 std::string actionId();
 
 struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
+struct BotBusy : Conflict { BotBusy() : Conflict("Bot has unfinished work") {} };
 
 // Initial allowance from an intake's saved config. Each approval adds one attempt.
 Id modelCallLimit(const Json& config);
@@ -263,6 +264,8 @@ public:
     Store& operator=(const Store&) = delete;
 
     Policy policy();
+    bool botDeleted(std::string_view bot) const;
+    void deleteBot(const Person&, std::string_view bot);
     Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
     Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
     Json automations(const Person&, std::string_view bot, Id before = 0) const;

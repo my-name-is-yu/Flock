@@ -66,6 +66,7 @@ public:
     std::map<Id,GitLog> jobLogs;
     std::vector<std::string> prStateUpdates;
     std::function<void(std::string_view)> onPrStateUpdate;
+    std::function<void(const GitContext&)> beforeCall;
     std::function<void(const GitContext&, const GitOpenPr&)> inspect;
     std::string_view name() const override { return hostName; }
     std::pair<std::vector<GitRepository>,bool> repositories(const GitContext&, std::string_view query, Id page) override {
@@ -107,7 +108,8 @@ public:
         check(job == 81,"wrong CI job");
         return log;
     }
-    Json call(const GitContext&, const GitRepository&, const Decision& decision) override {
+    Json call(const GitContext& context, const GitRepository&, const Decision& decision) override {
+        if (beforeCall) beforeCall(context);
         ++hostCalls;
         const auto& args = decision.args;
         if (decision.tool == "git_update_pr" && args.contains("state")) {

@@ -142,6 +142,13 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
+    exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
+  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,
+  PRIMARY KEY(host,repo,pr_number),
+  FOREIGN KEY(host,repo,pr_number) REFERENCES git_pr_watches(host,repo,pr_number) ON DELETE CASCADE)
+)SQL");
     exec("PRAGMA journal_mode=WAL");
     // Open the WAL now so a read-only peer can use a freshly initialized database.
     exec("PRAGMA user_version");
@@ -575,6 +582,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         item.request.size() > 16000 || (!consultation && item.environmentId.empty()) ||
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), and environment are required");
+    if (botDeleted(item.botId)) throw Conflict("Bot has been deleted");
     const auto scrub = redactor(item.botId);
     scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.config});
     modelCallLimit(item.config);

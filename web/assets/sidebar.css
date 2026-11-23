@@ -165,6 +165,7 @@
   transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .menu-popover button svg { width: 1rem; height: 1rem; flex: none; color: var(--text-2); }
+.menu-popover button.danger, .menu-popover button.danger svg { color: var(--danger); }
 .menu-popover button:hover, .menu-popover button:focus-visible { background: var(--press); outline: none; }
 .menu-popover button:active { transform: scale(.98); }
 

@@ -211,6 +211,7 @@ std::vector<ScheduleImportError> Store::syncSchedules(
     if (now < 0 || now > lastAutomationTime) throw Conflict("Clock is outside the supported range");
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
+    if (p_->botDeleted(bot)) return {};
     const auto scrub = p_->redactor(bot);
     std::map<std::string_view,std::size_t> counts;
     for (const auto& schedule : schedules) ++counts[schedule.id];
@@ -273,11 +274,22 @@ VALUES(?,'schedule',?,?,'active',?,'config',?,?)
 
 void Store::pruneAutomations(const std::vector<std::string>& configuredBots) {
     std::lock_guard lock(p_->mutex);
-    p_->exec(R"SQL(
-UPDATE automations SET status=CASE WHEN config_id IS NULL THEN 'canceled' ELSE 'inactive' END,
-  next_run_at=NULL,error=NULL
+    Transaction tx(p_->db);
+    auto absent = p_->query(R"SQL(
+SELECT json_group_array(DISTINCT bot_id) FROM automations
 WHERE status IN ('active','failed') AND bot_id NOT IN (SELECT value FROM json_each(?))
 )SQL",{Json(configuredBots).dump()});
+    absent.next();
+    p_->retireAutomations(absent.json(0));
+    tx.commit();
+}
+
+void Store::Impl::retireAutomations(const Json& botIds) {
+    exec(R"SQL(
+UPDATE automations SET status=CASE WHEN config_id IS NULL THEN 'canceled' ELSE 'inactive' END,
+  next_run_at=NULL,error=NULL
+WHERE status IN ('active','failed') AND bot_id IN (SELECT value FROM json_each(?))
+)SQL",Json::array({botIds}));
 }
 
 Json Store::Impl::automationTool(std::string_view bot, const Person& actor, const Json& routing, const Decision& decision, Seconds now) {

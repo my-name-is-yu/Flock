@@ -114,6 +114,18 @@ UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION S
     return result;
 }
 
+Statement Store::Impl::actionablePrReviews(std::string_view bot) const {
+    return query(R"SQL(
+SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
+FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
+LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
+AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
+WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
+    p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
+    AND NOT coalesce(json_extract(t.data,'$.replanning'),0))) ORDER BY p.id DESC
+)SQL",{bot});
+}
+
 Json Store::inbox(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     p_->settlePolicyApprovals(p_->policyClock());
@@ -187,15 +199,7 @@ ORDER BY p.id DESC
 )SQL",{id});
         while (inputs.next())
             addProtectedInput(protected_input,inputs.number(0),"Protected input",inputs.string(2),"Supply a value for "+inputs.string(1),inputs.number(3));
-        auto reviews = p_->query(R"SQL(
-SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
-FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
-LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
-AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
-WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
-    p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
-    AND NOT coalesce(json_extract(t.data,'$.replanning'),0))) ORDER BY p.id DESC
-)SQL",{id});
+        auto reviews = p_->actionablePrReviews(id);
         while (reviews.next()) {
             const auto task = reviews.json(3);
             const auto kind = reviews.number(7) ? pr_reconciliation : pr_review;
