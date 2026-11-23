@@ -2,13 +2,20 @@
 
 #include "flock/skill_export.hpp"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <fstream>
+#include <memory>
+#include <spawn.h>
 #include <sys/file.h>
+#include <sys/wait.h>
+#include <tuple>
 #include <unistd.h>
 #include <toml++/toml.hpp>
+
+extern char** environ;
 
 namespace flockv0::app {
 namespace {
@@ -39,6 +46,46 @@ bool installed(const std::string& command) {
         start = end+1;
     }
     return false;
+}
+
+bool runProvider(std::vector<std::string> args, std::string_view input = {}, std::string* output = nullptr) {
+    // A private, unnamed file lets the child read the configuration without putting it in argv.
+    std::unique_ptr<FILE,decltype(&std::fclose)> data(nullptr,std::fclose);
+    if (!input.empty()) {
+        data.reset(std::tmpfile());
+        if (!data || std::fwrite(input.data(),1,input.size(),data.get()) != input.size() ||
+            std::fflush(data.get()) != 0 || std::fseek(data.get(),0,SEEK_SET) != 0 ||
+            fcntl(fileno(data.get()),F_SETFD,FD_CLOEXEC) < 0) return false;
+    }
+    std::unique_ptr<FILE,decltype(&std::fclose)> capture(nullptr,std::fclose);
+    if (output) {
+        capture.reset(std::tmpfile());
+        if (!capture || fcntl(fileno(capture.get()),F_SETFD,FD_CLOEXEC) < 0) return false;
+    }
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    argv.push_back(nullptr);
+
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    const auto redirect = (capture ? posix_spawn_file_actions_adddup2(&actions,fileno(capture.get()),STDOUT_FILENO)
+                                   : posix_spawn_file_actions_addopen(&actions,STDOUT_FILENO,"/dev/null",O_WRONLY,0)) ||
+                          posix_spawn_file_actions_addopen(&actions,STDERR_FILENO,"/dev/null",O_WRONLY,0) ||
+                          (data && posix_spawn_file_actions_adddup2(&actions,fileno(data.get()),STDIN_FILENO));
+    pid_t pid = 0;
+    const auto started = redirect == 0 && posix_spawnp(&pid,argv.front(),&actions,nullptr,argv.data(),environ) == 0;
+    posix_spawn_file_actions_destroy(&actions);
+    if (!started) return false;
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(pid,&status,0); } while (waited < 0 && errno == EINTR);
+    if (waited != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return false;
+    if (capture) {
+        char line[128];
+        if (std::fseek(capture.get(),0,SEEK_SET) != 0 || !std::fgets(line,sizeof line,capture.get())) return false;
+        *output = line;
+    }
+    return true;
 }
 
 void saveConfig(const fs::path& path, std::string_view content) {
@@ -130,29 +177,64 @@ ConfigEdit editCodex(std::string_view url, std::string_view token, const OwnsBea
     return edit;
 }
 
-ConfigEdit editClaude(std::string_view url, std::string_view token, const OwnsBearer& owns) {
+std::optional<Json> readClaudeServer() {
     const auto directory = setting("CLAUDE_CONFIG_DIR");
-    ConfigEdit edit(directory.empty() ? userPath("FLOCK_CLAUDE_CONFIG",".claude.json")
-                                     : fs::path(directory) / ".claude.json");
-    if (url.empty() && !edit.original) return edit;
-    auto config = edit.original ? Json::parse(*edit.original) : Json::object();
+    const auto path = directory.empty() ? userPath("FLOCK_CLAUDE_CONFIG",".claude.json")
+                                        : fs::path(directory) / ".claude.json";
+    std::ifstream stream(path,std::ios::binary);
+    if (!stream) {
+        if (fs::exists(path)) throw Conflict("Could not read Claude Code configuration");
+        return {};
+    }
+    const auto config = Json::parse(stream);
     if (!config.is_object()) throw Conflict("Invalid Claude Code configuration");
-    if (url.empty() && !config.contains("mcpServers")) return edit;
-    auto& servers = config["mcpServers"];
-    if (servers.is_null()) servers = Json::object();
-    if (!servers.is_object()) throw Conflict("Invalid Claude Code MCP configuration");
-    if (const auto current = servers.find("flock"); current != servers.end()) {
-        const auto headers = current->is_object() ? current->value("headers",Json::object()) : Json::object();
-        const auto header = headers.is_object() ? headers.value("Authorization",std::string{}) : std::string{};
-        if (!matchesBearer(header,owns)) {
-            if (url.empty()) return edit;
-            throw Conflict("Remove the existing Claude Code MCP server named flock before connecting");
-        }
-    } else if (url.empty()) return edit;
-    if (url.empty()) servers.erase("flock");
-    else servers["flock"] = {{"type","http"},{"url",url},{"headers",{{"Authorization","Bearer " + std::string(token)}}}};
-    edit.content = config.dump(2) + '\n';
-    return edit;
+    const auto servers = config.find("mcpServers");
+    if (servers == config.end() || servers->is_null()) return {};
+    if (!servers->is_object()) throw Conflict("Invalid Claude Code MCP configuration");
+    const auto server = servers->find("flock");
+    if (server == servers->end()) return {};
+    return *server;
+}
+
+bool ownsClaudeServer(const std::optional<Json>& server, const OwnsBearer& owns) {
+    if (!server || !server->is_object()) return false;
+    const auto headers = server->find("headers");
+    if (headers == server->end() || !headers->is_object()) return false;
+    const auto header = headers->find("Authorization");
+    return header != headers->end() && header->is_string() &&
+           matchesBearer(header->get_ref<const std::string&>(),owns);
+}
+
+constexpr auto claudeSetupError =
+    "Could not configure the Claude Code MCP server. Claude Code 2.1.327 or later is required.";
+
+void requireClaudeStdin(const std::string& cli) {
+    std::string version;
+    int major, minor, patch;
+    if (!runProvider({cli,"--version"},{},&version) ||
+        std::sscanf(version.c_str(),"%d.%d.%d",&major,&minor,&patch) != 3 ||
+        std::tuple(major,minor,patch) < std::tuple(2,1,327))
+        throw Conflict(claudeSetupError);
+}
+
+void addClaude(const std::string& cli, const Json& server) {
+    if (!runProvider({cli,"mcp","add-json","--scope","user","flock","-"},server.dump()))
+        throw Conflict(claudeSetupError);
+}
+
+void removeClaude(const std::string& cli) {
+    if (!runProvider({cli,"mcp","remove","--scope","user","flock"}))
+        throw Conflict("Could not remove the Claude Code MCP server");
+}
+
+void restoreClaude(const std::string& cli, const std::optional<Json>& previous, const Json& replacement) {
+    const auto current = readClaudeServer();
+    if (current == previous) return;
+    if (current) {
+        if (*current != replacement) throw Conflict("Claude Code MCP registration changed during T3 setup");
+        removeClaude(cli);
+    }
+    if (previous) addClaude(cli,*previous);
 }
 
 }
@@ -173,29 +255,45 @@ T3SetupLock::~T3SetupLock() { close(fd_); }
 Json configureT3Providers(std::string_view url,
     const std::function<void(const InstallT3Provider&)>& connect) {
     auto providers = Json::array();
-    std::vector<ConfigEdit> edits;
-    std::size_t applied = 0;
+    std::optional<ConfigEdit> codex;
+    const auto claude = setting("FLOCK_CLAUDE_CLI","claude");
+    std::optional<Json> previousClaude;
+    bool codexApplied = false;
+    std::optional<Json> replacementClaude;
     try {
         connect([&](std::string_view token) {
             if (installed(setting("FLOCK_CODEX_CLI","codex"))) {
-                edits.push_back(editCodex(url,token,{}));
+                codex = editCodex(url,token,{});
                 providers.push_back("codex");
             }
-            if (installed(setting("FLOCK_CLAUDE_CLI","claude"))) {
-                edits.push_back(editClaude(url,token,[](std::string_view bearer) {
+            const bool hasClaude = installed(claude);
+            if (hasClaude) {
+                previousClaude = readClaudeServer();
+                if (previousClaude && !ownsClaudeServer(previousClaude,[](std::string_view bearer) {
                     return bearer.starts_with("flock-t3-");
-                }));
+                })) throw Conflict("Remove the existing Claude Code MCP server named flock before connecting");
+                if (previousClaude) requireClaudeStdin(claude);
                 providers.push_back("claude");
             }
-            for (const auto& edit : edits) {
-                edit.apply();
-                ++applied;
+            if (codex) {
+                codex->apply();
+                codexApplied = true;
+            }
+            if (hasClaude) {
+                replacementClaude = Json{{"type","http"},{"url",url},
+                                         {"headers",{{"Authorization","Bearer " + std::string(token)}}}};
+                if (previousClaude) removeClaude(claude);
+                addClaude(claude,*replacementClaude);
             }
         });
     } catch (...) {
         bool rollbackFailed = false;
-        while (applied) {
-            try { edits[--applied].restore(); }
+        if (replacementClaude) {
+            try { restoreClaude(claude,previousClaude,*replacementClaude); }
+            catch (...) { rollbackFailed = true; }
+        }
+        if (codexApplied) {
+            try { codex->restore(); }
             catch (...) { rollbackFailed = true; }
         }
         if (rollbackFailed) throw Conflict("Could not restore provider configuration after T3 setup failed");
@@ -206,14 +304,15 @@ Json configureT3Providers(std::string_view url,
 
 bool t3ProvidersNeedRefresh(const OwnsBearer& owns) {
     if (installed(setting("FLOCK_CODEX_CLI","codex")) && !editCodex({},{},owns).changed()) return true;
-    return installed(setting("FLOCK_CLAUDE_CLI","claude")) && !editClaude({},{},owns).changed();
+    return installed(setting("FLOCK_CLAUDE_CLI","claude")) && !ownsClaudeServer(readClaudeServer(),owns);
 }
 
 void removeT3Providers(const OwnsBearer& owns) {
     const auto codex = editCodex({},{},owns);
-    const auto claude = editClaude({},{},owns);
+    const auto claude = setting("FLOCK_CLAUDE_CLI","claude");
+    const bool removeRegistration = ownsClaudeServer(readClaudeServer(),owns);
     codex.apply();
-    try { claude.apply(); }
+    try { if (removeRegistration) removeClaude(claude); }
     catch (...) {
         codex.restore();
         throw;

@@ -594,11 +594,49 @@ def test_connection_setup(server, flock, temp):
     codex_config = directory / "config.toml"
     claude_skills = directory / "claude-skills"
     codex_skills = directory / "codex-skills"
-    claude_config = directory / "claude.json"
+    claude_config = directory / ".claude.json"
+    original_claude = b'{ "z-last" : [1,  2], "mcpServers":{}, "a-first" : true }\n'
+    claude_config.write_bytes(original_claude)
+    claude = directory / "claude"
+    claude.write_text(
+        f"#!{sys.executable}\n"
+        + """import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print(os.environ.get("FIXTURE_CLAUDE_VERSION", "2.1.327") + " (Claude Code)")
+    sys.exit(0)
+
+directory = Path(os.environ.get("CLAUDE_CONFIG_DIR", os.environ["HOME"]))
+path = directory / ".claude.json"
+config = path.read_bytes()
+servers = json.loads(config)["mcpServers"]
+before = json.dumps(servers).encode()
+if args == ["mcp", "add-json", "--scope", "user", "flock", "-"]:
+    assert "flock" not in servers
+    server = json.load(sys.stdin)
+    if server["headers"]["Authorization"] != os.environ.get(
+        "FIXTURE_CLAUDE_ALLOW_BEARER", server["headers"]["Authorization"]
+    ):
+        sys.exit(1)
+    servers["flock"] = server
+else:
+    assert args == ["mcp", "remove", "--scope", "user", "flock"]
+    del servers["flock"]
+marker = b'"mcpServers":'
+old = marker + before
+assert old in config
+path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
+"""
+    )
+    claude.chmod(0o700)
     env = dict(os.environ, HOME=str(directory), FLOCK_CODEX_CONFIG=str(codex_config),
-               FLOCK_CLAUDE_CONFIG=str(claude_config), FLOCK_CLAUDE_CLI="/usr/bin/true",
-               FLOCK_CODEX_CLI="/usr/bin/true", FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills),
-               FLOCK_CODEX_SKILLS_DIR=str(codex_skills))
+               FLOCK_CLAUDE_CONFIG=str(claude_config),
+               FLOCK_CLAUDE_CLI=str(claude), FLOCK_CODEX_CLI="/usr/bin/true",
+               FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills), FLOCK_CODEX_SKILLS_DIR=str(codex_skills))
     env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
     original = 'model = "fixture"\n\n[mcp_servers.unrelated]\ncommand = "/usr/bin/true"\n'
@@ -631,7 +669,7 @@ def test_connection_setup(server, flock, temp):
                     pass
                 output, errors = process.communicate(timeout=8)
                 if expected_error:
-                    assert process.returncode != 0 and expected_error in errors, errors
+                    assert process.returncode != 0 and expected_error in errors, (output, errors)
                     return
                 assert process.returncode == 0, errors
             finally:
@@ -639,7 +677,7 @@ def test_connection_setup(server, flock, temp):
                     process.kill()
         details = json.loads(output)
         assert details["mode"] == expected_mode and details["port"] == port
-        has_claude = env["FLOCK_CLAUDE_CLI"] == "/usr/bin/true"
+        has_claude = env["FLOCK_CLAUDE_CLI"] == str(claude)
         assert details["configuredProviders"] == (["codex", "claude"] if has_claude else ["codex"])
         assert ("Restart 'flock run'" in errors) == restart
         codex = codex_config.read_text()
@@ -674,8 +712,8 @@ def test_connection_setup(server, flock, temp):
 
     env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
     old = connect("env-1", "full", ["--port", str(port)], restart=True)
-    assert not claude_config.exists()
-    env["FLOCK_CLAUDE_CLI"] = "/usr/bin/true"
+    assert claude_config.read_bytes() == original_claude
+    env["FLOCK_CLAUDE_CLI"] = str(claude)
     token = connect("env-2", "consult", ["--mode", "consult"])
     assert token != old
     credential_dir = state / "credentials" / "t3"
@@ -685,15 +723,17 @@ def test_connection_setup(server, flock, temp):
         with sqlite3.connect(state / "flock.sqlite3") as db:
             return db.execute("SELECT * FROM t3_connector").fetchone()
     previous_connector = connector()
-    saved_claude = claude_config.with_suffix(".saved")
-    claude_config.rename(saved_claude)
-    claude_config.symlink_to(saved_claude)
-    connect("env-2", "consult", [],
-            expected_error="Provider configuration cannot be a symlink")
-    assert {path.name: path.read_bytes() for path in credential_dir.glob("*.json")} == credentials
-    assert codex_config.read_bytes() == previous_config and connector() == previous_connector
-    claude_config.unlink()
-    saved_claude.rename(claude_config)
+    previous_claude = claude_config.read_bytes()
+    for setting, value in [
+        ("FIXTURE_CLAUDE_VERSION", "2.1.326"),
+        ("FIXTURE_CLAUDE_ALLOW_BEARER", "Bearer " + token),
+    ]:
+        env[setting] = value
+        connect("env-2", "consult", [], expected_error="Claude Code 2.1.327 or later is required")
+        del env[setting]
+        assert {path.name: path.read_bytes() for path in credential_dir.glob("*.json")} == credentials
+        assert codex_config.read_bytes() == previous_config and connector() == previous_connector
+        assert claude_config.read_bytes() == previous_claude
 
     previous_port = port
     with socket.socket() as choose_port:
@@ -746,7 +786,7 @@ def test_connection_setup(server, flock, temp):
             subprocess.run(command + ["t3", "disconnect", "env-2"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
             assert ping(token) == 401
-            assert codex_config.read_text() == original and "flock" not in json.loads(claude_config.read_text())["mcpServers"]
+            assert codex_config.read_text() == original and claude_config.read_bytes() == original_claude
 
             connect("env-1", "full", ["--port", str(port)], restart=True)
             second = [flock, "--home", str(directory / "second-flock")]
