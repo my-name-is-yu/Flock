@@ -79,6 +79,13 @@ function fixtures() {
     activeSessions = request ? [{ taskId: 18, threadId: 'working', environmentId: 'local', state: 'running', request }] : [];
     document.dispatchEvent(new Event('visibilitychange'));
   };
+  window.showSuggestion = () => {
+    activeSessions = [];
+    events.push({ id: 5, kind: 'conversation_reply', time: time + 1002, data: {
+      text: 'I can check the logs.', suggestions: ['Check the logs.'],
+    } });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   window.fetch = async (path) => {
     if (path === '/api/bots') return Response.json([bot, peer]);
     if (path.startsWith('/api/peer-conversation?')) return Response.json(path.includes('before=')
@@ -209,6 +216,27 @@ async function exercise() {
   await showWorking('Finish the check');
   check(!leavingLabels().length && !workingLabel().classList.contains('entering'),
     'Reduced-motion working statuses still entered or exited with animation');
+
+  const ghost = document.getElementById('composer-ghost');
+  const input = document.getElementById('message');
+  const key = (name, options = {}) => input.dispatchEvent(new KeyboardEvent('keydown', {
+    key: name, code: name, bubbles: true, cancelable: true, ...options,
+  }));
+  window.showSuggestion();
+  for (let attempt = 0; attempt < 20 && ghost.hidden; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(!ghost.hidden && !input.value, 'A suggested reply did not appear in the empty composer');
+  check(key('Enter', { altKey: true }) && key('Tab', { ctrlKey: true }) && !input.value,
+    'A modified keyboard shortcut accepted the suggested reply');
+  input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+  check(ghost.hidden && key('Enter') && !input.value, 'A suggestion remained active during input composition');
+  input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+  check(!ghost.hidden && !key('Tab') && input.value === 'Check the logs.' && ghost.hidden,
+    'Tab did not accept the exact displayed suggestion');
+  input.value = 'Check tomorrow’s logs.';
+  input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  document.getElementById('cancel-reply').click();
+  check(ghost.hidden && !input.value, 'The suggestion covered a differently worded saved reply draft');
 
   window.noHoverFixture.matches = true;
   window.noHoverFixture.dispatchEvent(new Event('change'));
