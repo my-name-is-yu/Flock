@@ -563,7 +563,7 @@ function menuPopover(bot) {
     }],
     ['Open settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
-  if (bot.canDelete) actions.push(['Delete Bot…', sidebarIcons.trash, () => {
+  if (bot.canDelete) actions.push(['Delete', sidebarIcons.trash, () => {
     const current = bots.find(({ id }) => id === bot.id);
     closeMenu();
     openDeleteBot(current, document.activeElement);
@@ -2696,7 +2696,7 @@ function generalContent(bot) {
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
   if (bot.canDelete) {
-    const remove = button('Delete Bot…', 'settings-row danger', (event) => openDeleteBot(bot, event.currentTarget));
+    const remove = button('Delete', 'settings-row danger', (event) => openDeleteBot(bot, event.currentTarget));
     remove.setAttribute('aria-haspopup', 'dialog');
     rows.append(remove);
   }
