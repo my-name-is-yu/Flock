@@ -92,6 +92,8 @@ int main() {
             "CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES (1);");
         unsupportedSchemaLeavesDatabaseIntact(path / "unrelated-state.db",
             "PRAGMA application_id=123; PRAGMA user_version=1; CREATE TABLE items(id INTEGER PRIMARY KEY);");
+        unsupportedSchemaLeavesDatabaseIntact(path / "pre-policy-state.db",
+            "PRAGMA application_id=0x464c4f43; PRAGMA user_version=1; CREATE TABLE tasks(id INTEGER PRIMARY KEY);");
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;
