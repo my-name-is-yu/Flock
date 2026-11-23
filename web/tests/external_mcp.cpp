@@ -67,7 +67,6 @@ public:
             status = response.status;
             return false;
         };
-        // Drop the connection after Flock sends the headers, before the client reads the receipt body.
         const auto response = client_.send(request);
         check(status == 200 && !response && response.error() == httplib::Error::Canceled,
               "The first submission did not lose its MCP response body");
@@ -379,16 +378,32 @@ void replannedTaskDropsPriorRun() {
     check(!current.value("replanning",false) && current.at("lastRun").at("revisionId") != current.at("currentRevision") &&
           mcp.success(statusTool,task).at("sessionLink").is_null(),"A settled Run for the old revision was linked");
 }
+
+void hostedSessionLinks() {
+    constexpr auto hostedUrl = "https://app.t3.codes/threads/build%2Eprod/thread%7Enightly";
+    constexpr auto loopbackUrl = "http://localhost:3773/build.prod/loopback~nightly";
+    Json hostedSession{{"environmentId","build.prod"},{"threadId","thread~nightly"},{"link",hostedUrl}};
+    check(web::externalSessionLink(hostedSession) == hostedUrl,
+          "An encoded hosted link did not match its Session IDs");
+    hostedSession["link"] = "https://app.t3.codes/threads/build.prod/thread~nightly";
+    check(web::externalSessionLink(hostedSession).empty(),"A noncanonical hosted link was accepted");
+
+    const Json loopbackSession{{"environmentId","build.prod"},{"threadId","loopback~nightly"},{"link",loopbackUrl}};
+    const auto tasks = Json::array({{{"activeRun",nullptr},{"runs",Json::array({loopbackSession,hostedSession})}}});
+    TestDirectory dir;
+    Store store(dir.path/"flock.sqlite3");
+    const auto view = web::botView(store,{{"id","release"}},&tasks);
+    const auto& links = view.at("sessionTasks").at(0).at("sessions");
+    check(links.at(0).at("link") == hostedUrl && links.at(1).at("link") == loopbackUrl,
+          "Web Session links did not use the hosted and loopback encodings");
+}
 }
 
 int main() {
     try {
         credentialScopes();
         roundTrip();
-        const Json encodedSession{{"environmentId","build.prod"},{"threadId","thread~nightly"},
-            {"link","https://app.t3.codes/threads/build%2Eprod/thread%7Enightly"}};
-        check(web::externalSessionLink(encodedSession) == encodedSession.at("link").get<std::string>(),
-              "An encoded hosted link did not match its Session IDs");
+        hostedSessionLinks();
         peerCompletion(peerLink,peerLink);
         peerCompletion("http://localhost:3773/linked%20env/thread-triage",nullptr);
         peerCompletion("https://app.t3.codes/threads/linked%20env/other-thread",nullptr);

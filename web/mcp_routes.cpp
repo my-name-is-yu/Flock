@@ -256,7 +256,7 @@ void mcpRequest(const httplib::Request& req, httplib::Response& res, Json (*tool
     const auto& method = message.at("method").get_ref<const std::string&>();
     const auto id = message.find("id");
     if (id == message.end()) {
-        // Notifications carry no response and never call a tool.
+        // Notifications carry no response.
         res.status = 202;
         return;
     }

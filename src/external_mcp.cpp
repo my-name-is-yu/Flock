@@ -158,17 +158,16 @@ Json ExternalMcp::completionRun(const OwnedTask& owner, const Json& completion) 
 
     const auto environment = field(*source,"environmentId");
     const auto thread = field(*source,"threadId");
-    const auto run = field(*source,"runId");
-    if (environment.empty() || thread.empty() || run.empty() ||
+    const auto resultRunId = field(*source,"runId");
+    if (environment.empty() || thread.empty() || resultRunId.empty() ||
         !policy.allows(peerBot,Resource::sessionRead(environment,thread))) return nullptr;
 
-    // A settled report can name a different Run ID from the launch. Match the saved result identity.
     auto row = store_.p_->query(R"SQL(
 SELECT json_extract(j.data,'$.run.link') FROM journal j JOIN tasks t ON t.id=j.task_id
 WHERE j.task_id=? AND t.bot_id=? AND j.kind='report' AND json_extract(j.data,'$.environmentId')=?
   AND json_extract(j.data,'$.run.threadId')=? AND json_extract(j.data,'$.resultRunId')=?
 ORDER BY j.id DESC LIMIT 1
-)SQL",{dependency->at("taskId"),peerBot,environment,thread,run});
+)SQL",{dependency->at("taskId"),peerBot,environment,thread,resultRunId});
     if (!row.next()) return nullptr;
     return {{"environmentId",environment},{"threadId",thread},{"link",row.string(0)}};
 }

@@ -75,15 +75,20 @@ std::string sessionPath(std::string_view environment, std::string_view thread,
     return "/" + threadSegment(environment,punctuation) + "/" + threadSegment(thread,punctuation);
 }
 
+std::string hostedSessionPath(std::string_view environment, std::string_view thread) {
+    // T3 Code's hosted links also escape dots and tildes.
+    return sessionPath(environment,thread,"-_");
+}
+
 Json runView(const Json& run, std::string_view environment) {
     const auto actualEnvironment = field(run,"environmentId");
     if (!actualEnvironment.empty()) environment = actualEnvironment;
     const auto thread = field(run,"threadId");
-    const auto path = sessionPath(environment,thread);
-    if (path.empty()) return nullptr;
+    const auto loopbackPath = sessionPath(environment,thread);
+    if (loopbackPath.empty()) return nullptr;
     const auto saved = field(run,"link");
     return {{"threadId",thread},{"runId",field(run,"runId")},{"environmentId",environment},
-            {"link",localThreadLink(saved,path) ? saved : hostedSessionBase + path}};
+            {"link",localThreadLink(saved,loopbackPath) ? saved : hostedSessionBase + hostedSessionPath(environment,thread)}};
 }
 
 Json avatarView(const Json& source, std::string_view botId) {
@@ -347,13 +352,10 @@ Json activity(const Json& activeTasks, std::string_view bot) {
 std::string externalSessionLink(const Json& run) {
     const auto environment = field(run,"environmentId");
     const auto thread = field(run,"threadId");
-    // T3 Code's hosted links also escape dots and tildes. Older records may use the URI form.
-    const auto hosted = sessionPath(environment,thread,"-_");
+    const auto hosted = hostedSessionPath(environment,thread);
     if (hosted.empty()) return {};
     const auto saved = field(run,"link");
-    if (saved == hostedSessionBase + hosted || saved == hostedSessionBase + sessionPath(environment,thread))
-        return saved;
-    return {};
+    return saved == hostedSessionBase + hosted ? saved : std::string{};
 }
 
 Json botSettings(const Json& bot) {
