@@ -306,13 +306,16 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
     const Json image = {{"name","private-screenshot.png"},{"mimeType","image/png"},
         {"dataBase64","iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}};
     const Json audio = {{"name","private-audio.mp3"},{"mimeType","audio/mpeg"},{"dataBase64","SUQzAA=="}};
-    const auto submit = [&](std::string_view key, const Json& attachments) {
+    const auto submit = [&](std::string_view key, const Json& attachments, std::string_view text) {
         return browser.post("/api/messages",{{"botId","release"},{"clientMessageId",key},
-            {"text","Look at this"},{"attachments",attachments}},201).at("messageId").get<Id>();
+            {"text",std::string(text)},{"attachments",attachments}},201).at("messageId").get<Id>();
     };
-    const auto single = submit("a",Json::array({image,audio}));
-    const auto multiple = submit("b",Json::array({image,image}));
-    const auto textOnly = submit("c",Json::array());
+    const auto single = submit("a",Json::array({image,audio}),"Look at this");
+    const auto multiple = submit("b",Json::array({image,image}),"Look at this");
+    const auto textOnly = submit("c",Json::array(),"Look at this");
+    const std::string markdownText =
+        "**From user**\n\n- [safe link](https://example.com/user)\n- [unsafe link](javascript:alert(1))\n\n<script>alert(1)</script>";
+    const auto markdownMessage = submit("markdown-user",Json::array(),markdownText);
     auto noncanonicalAudio = audio;
     noncanonicalAudio["dataBase64"] = "SUQzAB==";
     browser.post("/api/messages",{{"botId","release"},{"clientMessageId","invalid-padding"},
@@ -324,6 +327,7 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
             if (match == remaining.end()) continue;
             const auto& data = event.at("data");
             check(data.at("imageAttachmentCount") == match->second,"wrong saved image count in the conversation");
+            check(data.at("textHtml").is_string(),"user message was not projected as safe Markdown HTML");
             check(!data.contains("attachments") && !data.contains("dataBase64") &&
                   data.dump().find("private-screenshot") == std::string::npos,
                   "Web conversation exposed private attachment details");
@@ -335,7 +339,22 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
     browser.client.set_default_headers({});
     Browser::checked(browser.client.Get(conversation),401);
     browser.client.set_default_headers({{"Authorization","Bearer reader"}});
-    assertCounts(browser.get("/api/view?bot=release").at("events"),{{single,1},{multiple,2},{textOnly,0}});
+    const auto view = browser.get("/api/view?bot=release");
+    assertCounts(view.at("events"),{{single,1},{multiple,2},{textOnly,0},{markdownMessage,0}});
+    bool renderedUserMarkdown = false;
+    for (const auto& event : view.at("events")) {
+        if (event["kind"] != "conversation_message" || event["id"] != markdownMessage) continue;
+        const auto& data = event.at("data");
+        const auto html = data.at("textHtml").get<std::string>();
+        renderedUserMarkdown = data.at("text") == markdownText &&
+            html.find("<strong>From user</strong>") != std::string::npos &&
+            html.find("<a href=\"https://example.com/user\">safe link</a>") != std::string::npos &&
+            html.find("unsafe link (javascript:alert(1))") != std::string::npos &&
+            html.find("href=\"javascript:") == std::string::npos &&
+            html.find("&lt;script&gt;alert(1)&lt;/script&gt;") != std::string::npos &&
+            html.find("<script>") == std::string::npos;
+    }
+    check(renderedUserMarkdown,"Web user-message projection changed canonical text or rendered unsafe Markdown");
     assertCounts(browser.get(std::string(conversation) + "&before=" + std::to_string(multiple)).at("events"),{{single,1}});
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
 }
@@ -454,11 +473,12 @@ void conversationEntry(const std::filesystem::path& path) {
     check(markdownReply.at("text") == "**完了**：[結果を見る](https://example.com/result)" &&
           markdownReply.at("textHtml") == "<p><strong>完了</strong>：<a href=\"https://example.com/result\">結果を見る</a></p>",
           "Web projection changed canonical reply text or omitted safe rendered HTML");
-    bool rawMessageUntouched = false;
+    bool userMessageProjectionPreservedSource = false;
     for (const auto& event : markdownPage.at("events"))
         if (event["kind"] == "conversation_message" && event["data"]["messageId"] == markdownReceipt.at("messageId"))
-            rawMessageUntouched = event["data"]["text"] == "markdown fixture" && !event["data"].contains("textHtml");
-    check(rawMessageUntouched,"Web projection changed a user message or exposed rendered HTML for it");
+            userMessageProjectionPreservedSource = event["data"]["text"] == "markdown fixture" &&
+                event["data"]["textHtml"] == "<p>markdown fixture</p>";
+    check(userMessageProjectionPreservedSource,"Web user-message projection changed canonical text or omitted rendered HTML");
 
     const auto summary = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","options-summary"},
         {"text","2案目を要約して"}},201);
