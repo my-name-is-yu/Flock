@@ -86,40 +86,14 @@ bool closed(std::string_view status) {
 }
 
 void Store::Impl::initializeWorkflowSchema() {
-    const auto createWorkflows = [&](const char* createTable) {
-        const auto sql = std::string(createTable) + R"SQL((
-            id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,routing TEXT NOT NULL,request TEXT NOT NULL,
-            message_id INTEGER REFERENCES messages,stop_requested INTEGER NOT NULL DEFAULT 0,
-            delegation_id TEXT UNIQUE,peer_request_id TEXT,start_key TEXT,input_artifact_version TEXT,
-            CHECK ((message_id IS NOT NULL AND delegation_id IS NULL AND peer_request_id IS NULL
-                    AND start_key IS NULL AND input_artifact_version IS NULL)
-                OR (message_id IS NULL AND delegation_id IS NOT NULL AND peer_request_id IS NOT NULL
-                    AND start_key IS NOT NULL AND input_artifact_version IS NOT NULL))))SQL";
-        exec(sql.c_str());
-    };
-    const auto needsOriginMigration = [&] {
-        return query("SELECT 1 FROM pragma_table_info('workflows') WHERE name='message_id' AND \"notnull\"=1").next();
-    };
-    if (needsOriginMigration()) {
-        exec("PRAGMA foreign_keys=OFF");
-        {
-            Transaction migration(db);
-            if (needsOriginMigration()) {
-                createWorkflows("CREATE TABLE workflows_with_origin");
-                exec("INSERT INTO workflows_with_origin(id,bot_id,routing,request,message_id,stop_requested)"
-                     " SELECT id,bot_id,routing,request,message_id,stop_requested FROM workflows");
-                exec("DROP TABLE workflows");
-                exec("ALTER TABLE workflows_with_origin RENAME TO workflows");
-                if (query("SELECT 1 FROM pragma_foreign_key_check('workflows')"
-                          " UNION ALL SELECT 1 FROM pragma_foreign_key_check('workflow_stages') LIMIT 1").next())
-                    throw Conflict("Could not preserve workflow references during migration");
-            }
-            migration.commit();
-        }
-        exec("PRAGMA foreign_keys=ON");
-    }
-    Transaction tx(db);
-    createWorkflows("CREATE TABLE IF NOT EXISTS workflows");
+    exec(R"SQL(CREATE TABLE IF NOT EXISTS workflows(
+        id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,routing TEXT NOT NULL,request TEXT NOT NULL,
+        message_id INTEGER REFERENCES messages,stop_requested INTEGER NOT NULL DEFAULT 0,
+        delegation_id TEXT UNIQUE,peer_request_id TEXT,start_key TEXT,input_artifact_version TEXT,
+        CHECK ((message_id IS NOT NULL AND delegation_id IS NULL AND peer_request_id IS NULL
+                AND start_key IS NULL AND input_artifact_version IS NULL)
+            OR (message_id IS NULL AND delegation_id IS NOT NULL AND peer_request_id IS NOT NULL
+                AND start_key IS NOT NULL AND input_artifact_version IS NOT NULL))))SQL");
     exec(R"SQL(CREATE TABLE IF NOT EXISTS workflow_stages(workflow_id INTEGER NOT NULL REFERENCES workflows,
         stage_id TEXT NOT NULL,spec TEXT NOT NULL,task_id INTEGER UNIQUE REFERENCES tasks,result_id INTEGER REFERENCES journal,instruction TEXT,status TEXT NOT NULL DEFAULT 'pending',
         input TEXT NOT NULL DEFAULT '',output TEXT NOT NULL DEFAULT '',deadline INTEGER NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0,
@@ -149,7 +123,6 @@ void Store::Impl::initializeWorkflowSchema() {
         report_id INTEGER PRIMARY KEY REFERENCES journal,workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,
         version TEXT NOT NULL,verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail')),
         FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages))SQL");
-    tx.commit();
 }
 
 Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const {

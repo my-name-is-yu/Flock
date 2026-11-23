@@ -141,6 +141,8 @@
 .settings-soul { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.7; }
 .settings-soul[data-folded="true"] {
   max-height: calc(1lh * 8); overflow: hidden;
+}
+.settings-soul[data-folded="true"]:has(+ .settings-soul-toggle:not([hidden])) {
   mask-image: linear-gradient(#000 calc(100% - 2lh), transparent);
 }
 .settings-soul-toggle { justify-self: start; margin-inline-start: -.55rem; }

@@ -32,7 +32,6 @@
         </button>
       </div>
       <div class="sidebar-scroll">
-        <a class="sidebar-handoffs" href="/session-handoff.html">Session handoffs</a>
         <section class="nav-section bots" aria-labelledby="bots-heading">
           <div id="pinned" class="pins" role="group" aria-label="Pin" hidden></div>
           <div id="bot-list" class="bot-list"></div>
@@ -52,6 +51,15 @@
       </div>
       <div class="sidebar-foot">
         <div id="connection" class="connection" data-state="loading" role="status"><span class="status-dot" aria-hidden="true"></span><span id="connection-text">Connecting…</span></div>
+        <nav class="sidebar-foot-links" aria-label="Flock">
+        <a class="sidebar-handoffs sidebar-settings" href="/settings" aria-label="Flock settings" title="Flock settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </a>
+        <a class="sidebar-handoffs" href="/session-handoff.html" title="T3 Sessions paired with a Bot">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 7h11l-3.5-3.5M16 17H5l3.5 3.5"/></svg>
+          <span>Session handoffs</span>
+        </a>
+        </nav>
         <div id="theme-switch" class="theme-switch" role="group" aria-label="Theme">
           <button type="button" data-theme-mode="system" aria-pressed="true" aria-label="Use system theme" title="Use system theme">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16v4"/></svg>
@@ -81,7 +89,7 @@
             <h1 id="profile-heading" class="profile-heading profile-caption" aria-labelledby="profile-name">
               <span id="profile-name" class="profile-name" dir="auto"></span>
               <button id="needs-you" type="button" class="needs-you" aria-labelledby="profile-name needs-you-text" aria-controls="decision-panel" aria-expanded="false" aria-keyshortcuts="Alt+Alt" hidden>
-                <span id="needs-you-text"><span id="needs-you-count"></span> needs you</span>
+                <span id="needs-you-text">Needs you · <span id="needs-you-count"></span></span>
               </button>
               <span id="profile-status" class="profile-status" hidden></span>
             </h1>
@@ -115,7 +123,7 @@
                 </button>
                 <button id="conversation-recent-decisions" class="conversation-action" type="button" aria-controls="decision-panel">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Zm0 0h4.5l1 2h5l1-2H20"/></svg>
-                  <span>Recent decisions</span>
+                  <span>History</span>
                 </button>
                 <button id="peer-picker" class="conversation-action" type="button" aria-haspopup="dialog" hidden>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 3V6a2 2 0 0 1 1-2Zm14 4a2 2 0 0 1 2 2v10l-5-3h-4"/></svg>
@@ -171,7 +179,7 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
                 </button>
                 <details id="decision-more" class="decision-more">
-                  <summary class="icon-button" aria-label="More decision actions" title="More actions">
+                  <summary class="icon-button" aria-label="More actions" title="More actions">
                     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/></svg>
                   </summary>
                   <div id="decision-more-list" class="decision-more-list"></div>
@@ -196,9 +204,6 @@
           <div id="decision-reply-context" class="decision-reply-context" hidden>
             <svg class="decision-reply-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>
             <p class="reply-target"><span id="decision-reply-label"></span> <span id="decision-reply-target" dir="auto"></span></p>
-            <button id="decision-cancel-reply" type="button" class="reply-cancel" aria-label="Cancel decision reply" title="Cancel decision reply" hidden>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
-            </button>
           </div>
           <div class="composer-box">
             <div id="reply-context" class="reply-context" hidden>

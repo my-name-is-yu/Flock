@@ -651,7 +651,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
     auto working = directoryAt(root,relative);
     verifyTree(root);
     const auto cwd = relative.empty() ? workspace.path : workspace.path / relative;
-    const bool writable = Access(*this).permits(ctx.bot,{"workspace",ctx.bot,"write"},true);
+    const bool writable = Policy(*this).allows(ctx.bot,Action::workspace_write,ctx.bot);
     const bool pipeline = args.contains("pipeline");
 #if defined(__APPLE__) || defined(__linux__)
     auto command = pipeline ? pipelineSupervisorCommand(workspace.path,cwd,args.at("pipeline"),writable,path)
