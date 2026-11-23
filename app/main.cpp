@@ -221,11 +221,15 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     }
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
+    std::function<Json()> modelStatus;
     if (fixed) {
         model = makeDemoModel();
         t3 = makeDemoT3();
+        modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
     } else {
-        model = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
+        auto chatgpt = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
+        modelStatus = [model = chatgpt.get()] { return model->status(); };
+        model = std::move(chatgpt);
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
     options.botTools = loadBotTools(home);
@@ -290,6 +294,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
     if (bridges) configureChannelBridges(store,bridges,callbacks);
     callbacks.sessionT3 = t3.get();
+    callbacks.modelStatus = modelStatus;
     std::unique_ptr<WebServer> server;
     if (web) {
         if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;

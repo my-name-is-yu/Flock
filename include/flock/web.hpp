@@ -24,6 +24,8 @@ struct WebCallbacks {
     WebIdentityResolver resolveIdentity = {};
     T3* sessionT3 = nullptr;
     std::function<std::optional<Person>(std::string_view)> configuredPerson = {};
+    // Optional model connection status for Flock settings: connected, account, planUsage, demo.
+    std::function<Json()> modelStatus = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);

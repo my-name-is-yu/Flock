@@ -52,7 +52,16 @@ for (const input of themeInputs) {
 async function load() {
   const response = await fetch('/api/settings');
   if (!response.ok) throw new Error();
-  const {mode, rules, canManagePolicy, t3} = await response.json();
+  const {mode, rules, canManagePolicy, t3, model} = await response.json();
+  $('model-section').hidden = !model;
+  $('model').replaceChildren();
+  if (model?.demo) row('model', emptyLabel('Demo model', 'This Flock runs with ', command('--fixed'), ', so Bots use a local demo instead of ChatGPT.'));
+  else if (model?.unavailable) row('model', emptyLabel('ChatGPT', 'Flock couldn’t check the connection right now. Reload to try again.'));
+  else if (model?.connected) {
+    row('model', emptyLabel('ChatGPT', model.account ? `Connected as ${model.account}` : 'Connected'));
+    if (!model.planUsage) row('model', emptyLabel('Plan usage not granted',
+      'Bots can’t use your ChatGPT plan yet. Run ', command('flock model login --reconsent'), ' to grant it.'));
+  } else if (model) row('model', emptyLabel('ChatGPT not connected', 'Run ', command('flock model login'), ' on the machine running Flock to sign in.'));
   currentMode = mode;
   for (const input of modeInputs) {
     input.checked = input.value === mode;

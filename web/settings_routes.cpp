@@ -21,8 +21,18 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         const auto actor = person(callbacks,req);
         auto policy = store.policy();
         const auto connection = T3Connections(store).settings(actor.id,actor.adminRoot);
+        const bool canManage = policy.allows(actor,Action::rules_manage,"installation");
+        // Only installation roots see which model account Flock uses.
+        Json model = nullptr;
+        if (canManage && callbacks.modelStatus) {
+            try {
+                const auto status = callbacks.modelStatus();
+                model = {{"connected",status.value("connected",false)},{"account",status.value("account","")},
+                         {"planUsage",status.value("planUsage",false)},{"demo",status.value("demo",false)}};
+            } catch (const std::exception&) { model = {{"unavailable",true}}; }
+        }
         reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
-                       {"canManagePolicy",policy.allows(actor,Action::rules_manage,"installation")},
+                       {"canManagePolicy",canManage},{"model",model},
                        {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
                                         : Json(nullptr)}});
     });

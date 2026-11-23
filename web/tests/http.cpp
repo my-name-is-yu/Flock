@@ -1400,7 +1400,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Bot settings exposed installation settings or lost membership");
     const auto settings = browser.get("/api/settings");
     check(settings.at("mode") == "full" && settings.at("canManagePolicy") == true &&
-          settings.at("rules").size() == 1 && !settings.contains("members"),"Flock settings lost the installation policy");
+          settings.at("rules").size() == 1 && !settings.contains("members") && settings.at("model").is_null(),
+          "Flock settings lost the installation policy or invented a model status");
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
     check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&
