@@ -5,15 +5,21 @@ const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
 let currentMode;
 const ruleLabels = {never: 'Never', ask: 'Ask first', allow: 'Allow'};
 
-function emptyLabel(title, detail) {
+function emptyLabel(title, ...detail) {
   const label = document.createElement('span');
   label.className = 'row-label';
   const heading = document.createElement('strong');
   heading.textContent = title;
   const sub = document.createElement('small');
-  sub.textContent = detail;
+  sub.append(...detail);
   label.append(heading, sub);
   return label;
+}
+
+function command(text) {
+  const code = document.createElement('code');
+  code.textContent = text;
+  return code;
 }
 
 function row(list, content) {
@@ -34,9 +40,9 @@ async function load() {
   }
   $('mode-options').classList.toggle('read-only', !canManagePolicy);
   $('rules').replaceChildren();
-  if (!rules.length) row('rules', emptyLabel('No rules yet', canManagePolicy
-    ? 'Choose Always allow on a request or run flock rules add.'
-    : 'An installation administrator can add rules.'));
+  if (!rules.length) row('rules', canManagePolicy
+    ? emptyLabel('No rules yet', 'Choosing Always allow on a request adds one here. You can also run ', command('flock rules add'), '.')
+    : emptyLabel('No rules yet', 'An installation administrator can add rules.'));
   for (const {kind, action, target} of rules) {
     const label = document.createElement('span');
     label.className = 'row-label';
@@ -55,10 +61,12 @@ async function load() {
   }
   $('connections').replaceChildren();
   if (t3) {
-    row('connections', emptyLabel('Flock MCP endpoint', `Port ${t3.port}`));
-    for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Connected environment'));
+    for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
+    row('connections', emptyLabel('Coding agents', 'Flock is configured to use port ', command(String(t3.port)),
+      ' for local Codex and Claude Code connections.'));
   } else if (canManagePolicy) {
-    row('connections', emptyLabel('Not connected', 'Run flock t3 connect ENVIRONMENT MCP_URL on the machine running Flock.'));
+    row('connections', emptyLabel('Not connected',
+      'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on the machine running Flock.'));
   } else {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
