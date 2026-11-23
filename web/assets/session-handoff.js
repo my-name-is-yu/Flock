@@ -12,13 +12,14 @@ let recentRendered = '';
 let pairingTimer;
 const workAnswerDrafts = new Map();
 const handoffLabels = {
-  active: 'Active', paused: 'Paused in Flock',
-  stopped: 'Stopped in Flock', completed: 'Completed', budget_exhausted: 'Budget exhausted',
+  active: 'Active', paused: 'Paused', stopped: 'Stopped', completed: 'Completed', budget_exhausted: 'Out of budget',
 };
 const deliveryLabels = {
-  prepared: 'Ready to send', dispatching: 'Sending', accepted: 'Accepted by T3', queued: 'Queued by T3',
-  observed: 'Response observed', failed: 'Failed', rejected: 'Rejected', unknown: 'Delivery unknown',
+  prepared: 'Ready to send', dispatching: 'Sending', accepted: 'Delivered', queued: 'Waiting in T3',
+  observed: 'Answered', failed: 'Failed', rejected: 'Rejected by T3', unknown: 'Not confirmed',
 };
+const botNames = new Map();
+const botName = (id) => botNames.get(id) ?? id;
 
 async function request(path, data) {
   const options = data === undefined ? {} : {
@@ -104,23 +105,23 @@ function render(view) {
   const coordination = view.mode === 'coordinate';
   const stopped = view.frozen || ['completed', 'budget_exhausted'].includes(view.state);
   $('handoff').hidden = false;
-  $('handoff-heading').textContent = `${coordination ? 'Coordination' : 'Consultation'} with ${view.botId}`;
+  $('handoff-heading').textContent = `${coordination ? 'Coordination' : 'Consultation'} with ${botName(view.botId)}`;
   $('state').textContent = handoffLabels[view.state] ?? workState(view.state);
   $('state').dataset.state = view.state;
   fields('origin', [
-    ['Paired by', view.person], ['Environment', view.target.environmentId], ['Project', view.target.projectId],
-    ['Thread', view.target.threadId], ['Request', view.requestId],
-    ...(coordination ? [['Goal', view.goal], ['Scope', view.allowDelegation ? 'Guide and delegate' : 'Guide'],
-      ['Local generation', view.generation], ['Progress cursor', view.eventCursor]] : []),
+    ...(coordination ? [['Goal', view.goal],
+      ['Bot may', view.allowDelegation ? 'Guide the Session and run specialist checks' : 'Guide the Session']] : []),
+    ['Paired by', view.person], ['Thread', view.target.threadId],
+    ['Project', view.target.projectId], ['Environment', view.target.environmentId],
   ]);
   const commandCount = view.residualCommandIds.length;
   const residualCommands = new Set(view.residualCommandIds);
   $('residual').hidden = commandCount === 0;
-  $('residual-count').textContent = `${commandCount} in-flight or unresolved T3 ${commandCount === 1 ? 'message' : 'messages'}`;
+  $('residual-count').textContent = `${commandCount} ${commandCount === 1 ? 'message' : 'messages'} to T3 may still arrive`;
   $('residual-commands').replaceChildren(...view.residualCommandIds.map(listItem));
   const childCount = view.admittedChildIds.length;
   $('residual-work').hidden = !view.frozen || childCount === 0;
-  $('residual-work-count').textContent = `${childCount} child ${childCount === 1 ? 'launch' : 'launches'} admitted before pause or stop`;
+  $('residual-work-count').textContent = `${childCount} specialist ${childCount === 1 ? 'check' : 'checks'} started before the pause may still finish`;
   $('residual-children').replaceChildren(...view.admittedChildIds.map(listItem));
 
   $('no-deliveries').hidden = view.deliveries.length !== 0;
@@ -129,12 +130,12 @@ function render(view) {
     const summary = document.createElement('summary');
     summary.textContent = [
       deliveryLabels[delivery.state] ?? workState(delivery.state),
-      delivery.receipt?.mode,
-      residualCommands.has(delivery.commandId) ? 'Outstanding after pause or stop' : '',
+      residualCommands.has(delivery.commandId) ? 'May still arrive' : '',
     ].filter(Boolean).join(' · ');
-    const entries = [`Command ${delivery.commandId}`];
-    if (delivery.receipt) entries.push(`Accepted Run ${delivery.receipt.runId}`, `Message ${delivery.receipt.messageId}`);
-    if (delivery.observedRunId) entries.push(`Response observed in Run ${delivery.observedRunId}`);
+    // Identifiers stay available for troubleshooting, but only inside the expanded row.
+    const entries = [`Flock message ${delivery.commandId}`];
+    if (delivery.receipt) entries.push(`T3 Run ${delivery.receipt.runId} · message ${delivery.receipt.messageId}`);
+    if (delivery.observedRunId) entries.push(`Answered in Run ${delivery.observedRunId}`);
     const list = document.createElement('ul');
     list.replaceChildren(...entries.map(listItem));
     detail.append(summary, list);
@@ -152,7 +153,7 @@ function render(view) {
     summary.dataset.delegation = work.delegationId;
     summary.open = expanded.has(work.delegationId) || !!work.question || work.stages.some((stage) => stage.question);
     const title = document.createElement('summary');
-    title.textContent = `${work.executor} · ${workState(work.result?.status ?? work.state)}`;
+    title.textContent = `${botName(work.executor)} · ${workState(work.result?.status ?? work.state)}`;
     const content = document.createElement('ul');
     const showQuestion = (parent, stage, question, canAnswer) => {
       if (!question) return;
@@ -163,8 +164,8 @@ function render(view) {
         parent.append(text);
       }
     };
-    const notes = [work.purpose, `Requested by: ${workers.get(work.parentDelegationId) ?? view.botId}`,
-      `Required evidence: ${work.doneWhen}`, `Input commit: ${work.commit}`,
+    const notes = [work.purpose, `Requested by ${botName(workers.get(work.parentDelegationId) ?? view.botId)}`,
+      `Done when: ${work.doneWhen}`, `Commit ${work.commit}`,
       ...(work.result ? [work.result.report, ...work.result.evidence.map((source) =>
         [source.stageId, source.verdict, source.findings, source.threadId, source.runId, source.itemId]
           .filter(Boolean).join(' · '))] : []),
@@ -216,7 +217,7 @@ function renderRecent(recent) {
     const row = document.createElement('li');
     const link = document.createElement('a');
     link.href = '/session-handoff.html?channel=' + item.channelId;
-    link.textContent = `${item.mode === 'coordinate' ? 'Coordination' : 'Consultation'} with ${item.botId} · ${handoffLabels[item.state] ?? workState(item.state)}`;
+    link.textContent = `${item.mode === 'coordinate' ? 'Coordination' : 'Consultation'} with ${botName(item.botId)} · ${handoffLabels[item.state] ?? workState(item.state)}`;
     link.title = item.threadId;
     if (String(item.channelId) === channel) link.setAttribute('aria-current', 'page');
     row.append(link);
@@ -319,7 +320,10 @@ void (async () => {
   if (!response.ok) throw new Error('Could not load Bots');
   const bots = await response.json();
   if (!Array.isArray(bots)) throw new Error('Could not load Bots');
-  for (const bot of bots) pairingForm.elements.botId.add(new Option(bot.name || bot.id, bot.id));
+  for (const bot of bots) {
+    botNames.set(bot.id, bot.name || bot.id);
+    pairingForm.elements.botId.add(new Option(bot.name || bot.id, bot.id));
+  }
   await loadRecent();
   if (channel) render(await request(`/${channel}`));
 })().catch(() => { status.textContent = 'Session handoffs are unavailable. Check your Flock sign-in.'; });
