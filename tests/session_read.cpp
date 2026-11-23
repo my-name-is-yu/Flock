@@ -300,6 +300,12 @@ void acceptance() {
     check(f.store->policy().allows("beta",foreign) && f.store->policy().allows("alpha",foreign),
           "Full did not allow Session reads for both Bots");
     check(f.call(search,{{"query","Foreign"}},"beta").at("sessions").size() == 1,"owned Session missing without a grant");
+    auto outside = f.intake("outside");
+    outside.projectId = "elsewhere";
+    f.model.next = {search,{{"query","Foreign"}},"Check configured project"};
+    f.store->receive(localOwner,outside,"outside-project","Search my project");
+    f.runtime->runConversations();
+    check(f.model.result.at("sessions").empty(),"Search included a recorded run from a different project");
     f.t3.denied["foreign-thread"] = true;
     check(f.call(search,{{"query","Foreign"}},"beta") == empty,"T3 denial did not override Session ownership");
     f.t3.denied["foreign-thread"] = false;

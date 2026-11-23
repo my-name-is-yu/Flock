@@ -78,14 +78,22 @@ public:
         const auto status = argument(args,"status",128);
         const auto limit = pageSize(args);
         const auto key = Json::array({filters.query,project,status,filters.from,filters.to});
-        const auto scopedKey = Json::array({key,channelScope_});
+        const auto configuredProject = field(routing,"projectId");
+        std::set<std::string> environments;
+        if (channelScope_.empty()) {
+            const auto environment = field(routing,"environmentId");
+            if (!environment.empty()) environments.insert(environment);
+            for (const auto& id : routing.at("config").value("conversationEnvironments",Json::object()))
+                environments.insert(id.get<std::string>());
+        }
+        const auto scopedKey = Json::array({key,channelScope_,configuredProject,environments});
         std::optional<Reference> anchor;
         SessionTarget after;
         if (hasCursor(args)) {
             const auto cursor = reference(args,"cursor");
             anchor = resolve(cursor,RefKind::search);
             if (anchor) {
-                if ((anchor->payload != scopedKey && anchor->payload != key) ||
+                if (anchor->payload != scopedKey ||
                     !permitted(anchor->target) || !readable(anchor->target,Clock::now()+searchTimeLimit))
                     return scopedResult(failure(unavailable));
                 after = anchor->target;
@@ -99,7 +107,7 @@ public:
         const auto scrub = store_.sharedRedactor();
         std::vector<Candidate> matches;
         std::vector<SessionTarget> incomplete;
-        const auto [batch,catalogTruncated] = candidates(after,routing);
+        const auto [batch,catalogTruncated] = candidates(after,configuredProject,environments);
         const auto scanLimit = std::min(searchCandidateLimit,batch.size());
         const auto scanDeadline = Clock::now()+searchTimeLimit;
         std::size_t scanned = 0;
@@ -124,7 +132,7 @@ public:
                     break;
                 }
                 ++scanned;
-                if (!item ||
+                if (!item || (channelScope_.empty() && item->projectId != configuredProject) ||
                     (!project.empty() && item->projectId != project &&
                      !session_read::contains(scrub.text(item->project),project)) ||
                     (!status.empty() && item->status != status) ||
@@ -296,26 +304,23 @@ WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
         }
     }
 
-    std::pair<std::vector<SessionTarget>,bool> candidates(const SessionTarget& after, const Json& routing) const {
+    std::pair<std::vector<SessionTarget>,bool> candidates(const SessionTarget& after,
+            const std::string& project, const std::set<std::string>& environments) const {
         std::vector<SessionTarget> result;
         {
             std::lock_guard lock(store_.mutex);
             auto rows = store_.query(R"SQL(
 SELECT DISTINCT r.environment_id,r.thread_id FROM runs r JOIN tasks t ON t.id=r.task_id
 LEFT JOIN channel_tasks c ON c.task_id=t.id
-WHERE (?5='' OR (t.bot_id=?1 AND c.scope_key=?5)) AND (r.environment_id,r.thread_id) > (?2,?3)
+WHERE ((?5='' AND ?6<>'' AND t.project_id=?6 AND r.environment_id IN (SELECT value FROM json_each(?7)))
+       OR (?5<>'' AND t.bot_id=?1 AND c.scope_key=?5))
+  AND (r.environment_id,r.thread_id) > (?2,?3)
 ORDER BY r.environment_id,r.thread_id LIMIT ?4
-)SQL",{bot_,after.environmentId,after.threadId,searchCandidateLimit+1,channelScope_});
+)SQL",{bot_,after.environmentId,after.threadId,searchCandidateLimit+1,channelScope_,project,Json(environments).dump()});
             while (rows.next()) result.push_back({rows.string(0),rows.string(1)});
         }
         bool truncated = false;
-        const auto project = field(routing,"projectId");
         if (channelScope_.empty() && !project.empty()) {
-            std::set<std::string> environments;
-            const auto environment = field(routing,"environmentId");
-            if (!environment.empty()) environments.insert(environment);
-            for (const auto& id : routing.at("config").value("conversationEnvironments",Json::object()))
-                environments.insert(id.get<std::string>());
             const auto deadline = Clock::now()+searchTimeLimit;
             for (const auto& id : environments) {
                 if (id < after.environmentId || !access_.allows(bot_,Action::environment_inspect,id)) continue;
