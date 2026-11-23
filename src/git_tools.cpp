@@ -27,8 +27,9 @@ struct Tool {
 
 const std::vector<std::pair<std::string_view,Tool>>& specs() {
     static const std::vector<std::pair<std::string_view,Tool>> tools{
-        {"git_find_repos",{"Find repositories with a repository:read grant on the connected host.",
-            "read",{{"query","string","Optional case-insensitive substring of owner/repo.",false}}}},
+        {"git_find_repos",{"Find accessible repositories on the connected host.",
+            "read",{{"query","string","Optional case-insensitive substring of owner/repo.",false},
+                     {"page","integer","Next repository page from the previous response.",false}}}},
         {"git_read_result",{"Recover a saved Git read for this task. Read IDs are listed in event.gitReadRefs.",
             "read",{{"readId","integer","Exact saved Git read ID."}},nullptr,nullptr,true}},
         {"git_repo_info",{"Read repository details using repository:read.","read",{}}},
@@ -133,7 +134,7 @@ Json gitToolSchema(std::string_view name, bool conversation) {
                     {"reason",{{"type","string"},{"description","Evidence and reason for the action."}}}};
     Json required = {"host","reason"};
     if (name != "git_find_repos" && name != "git_read_result") {
-        properties["repo"] = {{"type","string"},{"description","Exact owner/repo from the repository grant."}};
+        properties["repo"] = {{"type","string"},{"description","Exact owner/repo from repository discovery."}};
         required.push_back("repo");
         if (conversation)
             properties["taskId"] = {{"type","integer"},{"minimum",1},{"description","Task owned by this Bot. Required for mutations."}};

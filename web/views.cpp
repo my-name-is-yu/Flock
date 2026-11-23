@@ -1,8 +1,7 @@
 #include "views.hpp"
 
-#include <array>
 #include <charconv>
-#include <map>
+#include <iterator>
 #include <set>
 
 namespace flockv0::web {
@@ -82,21 +81,17 @@ Json runView(const Json& run, std::string_view environment) {
 Json avatarView(const Json& source, std::string_view botId) {
     Json view = Json::object();
     copyFields(view,source,{"kind","example","icon","color","eyeColor","filename","version"});
-    if (field(source,"kind") == "upload") {
-        const auto version = field(source,"version");
-        const bool hasImage = !version.empty() || !field(source,"file").empty() || !field(source,"imageUrl").empty();
-        if (hasImage && !botId.empty()) {
-            auto url = "/api/bot-avatar?bot=" + threadSegment(botId);
-            if (!version.empty()) url += "&v=" + threadSegment(version);
-            view["imageUrl"] = std::move(url);
-        }
+    const auto version = field(source,"version");
+    if (field(source,"kind") == "upload" && !version.empty() && !botId.empty()) {
+        view["imageUrl"] = "/api/bot-avatar?bot=" + threadSegment(botId) + "&v=" + threadSegment(version);
     }
-    const auto definition = source.value("definition",source);
-    Json shape = Json::object();
-    copyFields(shape,definition,{"version","id","name"});
-    if (definition.contains("body")) copyFields(shape["body"] = Json::object(),definition["body"],{"path"});
-    if (definition.contains("eyes")) copyFields(shape["eyes"] = Json::object(),definition["eyes"],{"x","y","spacing","scale"});
-    if (shape.contains("body") && shape.contains("eyes")) view["definition"] = shape;
+    if (const auto definition = source.find("definition"); definition != source.end() && definition->is_object()) {
+        Json shape = Json::object();
+        copyFields(shape,*definition,{"version","id","name"});
+        if (definition->contains("body")) copyFields(shape["body"] = Json::object(),definition->at("body"),{"path"});
+        if (definition->contains("eyes")) copyFields(shape["eyes"] = Json::object(),definition->at("eyes"),{"x","y","spacing","scale"});
+        if (shape.contains("body") && shape.contains("eyes")) view["definition"] = std::move(shape);
+    }
     return view;
 }
 
@@ -137,15 +132,6 @@ Json waitView(const Json& wait) {
         for (const auto& choice : wait["choices"])
             if (choice.is_string()) choices.push_back(choice);
     }
-    return view;
-}
-
-std::string displayState(const Json& task);
-
-Json sourceView(const Json& source, bool includeText = false) {
-    Json view = Json::object();
-    copyFields(view,source,{"taskId","messageId","revisionId","option"});
-    if (includeText) copyFields(view,source,{"text"});
     return view;
 }
 
@@ -254,12 +240,13 @@ std::string displayState(const Json& task) {
     const auto state = field(task,"state");
     if (state == "cancelling" || ((state != "cancelled" && state != "completed") && task.value("replanning",false)))
         return "stopping";
+    if (state == "running" && task.value("queuedInT3",false)) return "queued";
     return state;
 }
 
 Json taskSummary(const Json& task) {
     Json result = {{"state",displayState(task)}};
-    copyFields(result,task,{"id","request","deadline","currentRevision","generation","sourceTaskId","createdAt","workflowId","stageId","inputArtifactVersion"});
+    copyFields(result,task,{"id","request","deadline","currentRevision","generation","createdAt","workflowId","stageId","inputArtifactVersion"});
     return result;
 }
 
@@ -291,7 +278,6 @@ Json sessionGroup(const Json& task) {
     }
     auto group = taskSummary(task);
     group["sessions"] = std::move(sessions);
-    group["runCount"] = runs.size();
     return group;
 }
 
@@ -394,41 +380,6 @@ Json sessions(Store& store, std::string_view bot, Id before) {
             break;
         }
         page.push_back(sessionGroup(task));
-    }
-    return result;
-}
-
-Json taskDetail(const Json& task, const Json& latestResult) {
-    auto result = taskSummary(task);
-    copyFields(result,task,{"doneWhen","intent","blockerReason"});
-    copyTrigger(result,task);
-    result["result"] = latestResult.is_null() ? Json(nullptr) : eventView(latestResult);
-    auto& revisions = result["revisions"] = Json::array();
-    if (task.contains("revisions") && task["revisions"].is_array()) {
-        for (const auto& revision : task["revisions"]) {
-            Json view = Json::object();
-            copyFields(view,revision,{"id","number","intent","doneWhen","sourceMessageId"});
-            revisions.push_back(std::move(view));
-        }
-    }
-    auto& instructions = result["pendingInstructions"] = Json::array();
-    if (task.contains("pendingInstructions") && task["pendingInstructions"].is_array()) {
-        for (const auto& instruction : task["pendingInstructions"]) {
-            Json view = Json::object();
-            copyFields(view,instruction,{"messageId","text","revisionId","conflicting"});
-            instructions.push_back(std::move(view));
-        }
-    }
-    auto& sources = result["sourceResultRefs"] = Json::array();
-    if (task.contains("sourceResultRefs") && task["sourceResultRefs"].is_array()) {
-        for (const auto& source : task["sourceResultRefs"]) sources.push_back(sourceView(source,true));
-    }
-    auto& runs = result["runs"] = Json::array();
-    for (const auto& run : task.at("runs")) {
-        auto view = runView(run,field(task,"environmentId"));
-        if (view.is_null()) continue;
-        copyFields(view,run,{"revisionId"});
-        runs.push_back(std::move(view));
     }
     return result;
 }

@@ -293,3 +293,13 @@
   .decision-shade { background: Canvas; opacity: .75; }
   .decision-panel { border-color: CanvasText; }
 }
+
+
+.board-inbox-card.policy-inline-card {
+  width: min(100%, 33rem);
+  margin-block: .6rem;
+  padding: .9rem 1rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+}

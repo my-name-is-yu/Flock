@@ -1,5 +1,7 @@
 #include "http_fixture.hpp"
+#include "../../tests/fake_git.hpp"
 #include "flock/memory_automation.hpp"
+#include "flock/policy.hpp"
 
 #include <sqlite3.h>
 
@@ -57,18 +59,22 @@ void boundary(Browser& browser) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
     }
-    const auto draft = R"({"botId":"release","request":"do not accept this"})";
+    const httplib::Headers channelNavigation{{"Sec-Fetch-Site","cross-site"},
+        {"Sec-Fetch-Mode","navigate"},{"Sec-Fetch-Dest","document"}};
+    Browser::checked(browser.client.Get("/settings/release/access",channelNavigation),403);
+    Browser::checked(browser.client.Get("/settings/release/access"),404);
+    const auto draft = R"({"botId":"release","clientMessageId":"draft","text":"do not accept this"})";
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Origin","https://other.invalid"}}),403);
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Sec-Fetch-Site","same-site"}}),403);
-    Browser::checked(browser.client.Post("/api/requests",draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/requests",{{"Origin",browser.origin}},draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/requests",{{"Origin","null"},{"X-Flock-Action","1"}},draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/requests",browser.headers(),draft,"text/plain"),415);
-    Browser::checked(browser.client.Post("/api/requests",browser.headers(),"{","application/json"),400);
-    Browser::checked(browser.client.Post("/api/requests",browser.headers(),std::string(140000,'x'),"application/json"),413);
-    const auto preflight = browser.client.Options("/api/requests",{{"Origin","https://other.invalid"}});
+    Browser::checked(browser.client.Post("/api/messages",draft,"application/json"),403);
+    Browser::checked(browser.client.Post("/api/messages",{{"Origin",browser.origin}},draft,"application/json"),403);
+    Browser::checked(browser.client.Post("/api/messages",{{"Origin","null"},{"X-Flock-Action","1"}},draft,"application/json"),403);
+    Browser::checked(browser.client.Post("/api/messages",browser.headers(),draft,"text/plain"),415);
+    Browser::checked(browser.client.Post("/api/messages",browser.headers(),"{","application/json"),400);
+    Browser::checked(browser.client.Post("/api/messages",browser.headers(),std::string(140000,'x'),"application/json"),413);
+    const auto preflight = browser.client.Options("/api/messages",{{"Origin","https://other.invalid"}});
     check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
     Browser::checked(browser.client.Get("/api/view?bot=missing"),404);
@@ -77,7 +83,78 @@ void boundary(Browser& browser) {
         check(browser.get(path+"?bot=release").is_array(),"Missing inspector collection");
         Browser::checked(browser.client.Get(path+"?bot=missing"),404);
     }
-    browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
+    browser.post("/api/requests",{{"botId","release"},{"clientRequestId","draft"},{"request","test"}},404);
+}
+
+void messageReceipts(const std::filesystem::path& path) {
+    const Person owner{"owner",true};
+    auto web = callbacks();
+    web.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer requester") return Person{"requester",false};
+        if (credential == "Bearer other") return Person{"other",false};
+        return Person{};
+    };
+    web.resolveIdentity = [](std::string_view person) -> std::optional<bool> {
+        if (person == "requester" || person == "other") return false;
+        return std::nullopt;
+    };
+    const Json message{{"botId","release"},{"clientMessageId","draft"},{"text","Draft the release notes"}};
+    Json accepted;
+    {
+        Store store(path);
+        auto access = store.policy();
+        access.setMember(owner,"release","requester",true);
+        access.setMember(owner,"release","other",true);
+        access.setMember(owner,"triage","requester",true);
+        auto configured = web;
+        configured.intake = [route=web.intake,&access,&owner](std::string_view bot, std::string_view text) {
+            if (text == "Revoke while loading settings")
+                access.setMember(owner,"release","requester",false);
+            return route(bot,text);
+        };
+        const auto server = startWeb(store,0,configured);
+        Browser requester(*server), other(*server);
+        requester.client.set_default_headers({{"Authorization","Bearer requester"}});
+        other.client.set_default_headers({{"Authorization","Bearer other"}});
+
+        auto missingId = message;
+        missingId.erase("clientMessageId");
+        requester.post("/api/messages",missingId,400);
+        accepted = requester.post("/api/messages",message,201);
+        check(accepted.at("status") == "received" && accepted.at("messageId").get<Id>() > 0,
+              "HTTP intake did not return a message receipt");
+        check(requester.post("/api/messages",message,201) == accepted,"identical retry created a new message");
+        check(other.post("/api/messages",message,201) != accepted,"different actors shared a receipt");
+        auto otherBot = message;
+        otherBot["botId"] = "triage";
+        check(requester.post("/api/messages",otherBot,201) != accepted,"different Bots shared a receipt");
+
+        const Json revoked{{"botId","release"},{"clientMessageId","revoked"},{"text","Revoke while loading settings"}};
+        requester.post("/api/messages",revoked,403);
+        requester.post("/api/messages",message,403);
+        check(store.conversation("release").size() == 2 && store.conversation("triage").size() == 1 && store.tasks().empty(),
+              "denied or replayed messages duplicated conversation entries or started work");
+        access.setMember(owner,"release","requester",true);
+    }
+    {
+        Store store(path);
+        std::atomic_uint intakeCalls = 0;
+        web.intake = [&](std::string_view, std::string_view) -> Intake {
+            ++intakeCalls;
+            throw std::runtime_error("The Bot settings are temporarily unavailable");
+        };
+        const auto server = startWeb(store,0,web);
+        Browser requester(*server);
+        requester.client.set_default_headers({{"Authorization","Bearer requester"}});
+        check(requester.post("/api/messages",message,201) == accepted && intakeCalls == 0,
+              "message receipt was lost on reopen or needed current Bot settings");
+        auto changed = message;
+        changed["text"] = "Draft something else";
+        check(requester.post("/api/messages",changed,409).at("error") == "message_conflict",
+              "changing the text behind a receipt did not conflict");
+        check(store.conversation("release").size() == 2 && store.conversation("triage").size() == 1 && store.tasks().empty(),
+              "replaying persisted receipts duplicated conversation entries or started work");
+    }
 }
 
 void checkPresence(Browser& browser, const Json& list, const std::string& bot, std::string_view expected) {
@@ -195,8 +272,8 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     check(settled.at("sessionCursor") > updates.at("sessionCursor") && settledTasks.size() == states.size(),
           "settled Runs did not advance the Session cursor");
     for (const auto& task : settledTasks)
-        check(task.at("runCount") == 1 && task.at("sessions").at(0).at("state") == states.at(task.at("id").get<Id>()),
-              "a settled Run did not refresh its Session status with the same run count");
+        check(task.at("sessions").size() == 1 && task.at("sessions").at(0).at("state") == states.at(task.at("id").get<Id>()),
+              "a settled Run did not refresh its Session status with the same Session count");
 
     auto page = browser.get("/api/view?bot=triage");
     check(page.at("sessionsBefore").get<Id>() > 0,"session list did not offer older history");
@@ -223,7 +300,6 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
 
 void failedCompletion(const std::filesystem::path& path) {
     Store store(path);
-    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
@@ -257,8 +333,8 @@ std::vector<PeerBot> fixturePeers(std::string_view sender) {
     return {{"Triage",{"triage","","local-env","release"}}};
 }
 
-Id seedPeerHistory(Browser& browser, Runtime& runtime, const FixedT3& t3) {
-    const auto task = browser.request("release","判定基準の確認");
+void seedPeerHistory(Store& store, Browser& browser, Runtime& runtime, const FixedT3& t3) {
+    store.submit({"release","判定基準の確認","local-env","release"});
     Json waiting;
     for (unsigned attempt = 0; attempt < 8; ++attempt) {
         runtime.tick();
@@ -271,7 +347,6 @@ Id seedPeerHistory(Browser& browser, Runtime& runtime, const FixedT3& t3) {
     const auto finished = browser.get("/api/view?bot=release");
     check(hasEvent(finished.at("events"),"completed","text","判定基準を確認しました") && t3.launches.empty(),
           "consultation did not show the result without starting a T3 Session");
-    return task;
 }
 
 void peerHistory(const std::filesystem::path& path) {
@@ -283,7 +358,7 @@ void peerHistory(const std::filesystem::path& path) {
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
     const auto server = startWeb(store,0,callbacks());
     Browser browser(*server);
-    seedPeerHistory(browser,runtime,t3);
+    seedPeerHistory(store,browser,runtime,t3);
 
     for (int i = 0; i < 2001; ++i) store.submit({"release","Newer request " + std::to_string(i),"local-env","release"});
     const auto newest = browser.get("/api/view?bot=release");
@@ -377,7 +452,7 @@ void peerConversation(const std::filesystem::path& path) {
         check(store.tasks().empty() && t3.launches.empty(),"opening a DM or posting to the old route started work");
         Browser::checked(browser.client.Get("/api/peer-conversation?bot=triage&peer=settings"),403);
 
-        seedPeerHistory(browser,runtime,t3);
+        seedPeerHistory(store,browser,runtime,t3);
         history = browser.get(primary).at("messages");
         check(history.size() == 2 && history == browser.get(reverse).at("messages"),
               "an exchange was missing, duplicated, or different from the opposite Bot page");
@@ -407,13 +482,13 @@ void peerConversation(const std::filesystem::path& path) {
         Browser browser(*server);
         check(browser.get(primary).at("messages") == history,"restarting lost the conversation");
         allowed = false;
-        check(browser.get(reverse).at("messages") == history,"removing a grant lost existing history");
+        check(browser.get(reverse).at("messages") == history,"removing a peer permission lost existing history");
         Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=broken"),403);
         Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=unknown"),404);
         const auto bots = browser.get("/api/bots");
         const auto triage = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "triage"; });
         check(triage != bots.end() && triage->at("peers") == Json::array({Json{{"id","release"}}}),
-              "the recipient lost its historical partner after the grant was removed");
+              "the recipient lost its historical partner after peer permission was removed");
         configured = false;
         check(browser.get(primary).at("messages") == history,"removing a peer's configuration lost history");
         const auto beforeFirst = std::to_string(history.front().at("id").get<Id>());
@@ -449,9 +524,9 @@ void peerConversationAnchor(const std::filesystem::path& path) {
         return credential == "Bearer reader" ? Person{"reader"} : Person{};
     };
     const Person owner{"fixture",true};
-    auto access = store.access();
-    access.personGrant(owner,"release","reader",Role::view,GrantChange::grant);
-    access.personGrant(owner,"settings","reader",Role::view,GrantChange::grant);
+    auto policy = store.policy();
+    policy.setMember(owner,"release","reader",true);
+    policy.setMember(owner,"settings","reader",true);
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer reader"}});
@@ -471,7 +546,7 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     const std::string reverse = "/api/peer-conversation?bot=triage&peer=release";
     const auto anchor = "&anchor=" + std::to_string(targetId);
     Browser::checked(browser.client.Get(primary + anchor),403);
-    access.personGrant(owner,"triage","reader",Role::view,GrantChange::grant);
+    policy.setMember(owner,"triage","reader",true);
 
     const auto latest = browser.get(primary);
     check(latest.at("messages").front().at("id").get<Id>() > targetId,"fixture anchor appeared in the latest page");
@@ -495,24 +570,74 @@ void peerConversationAnchor(const std::filesystem::path& path) {
         == Json{{"error","peer_message_not_found"}},"a different readable pair resolved the anchor");
 }
 
+void conversationRequestApproval(const std::filesystem::path& path) {
+    Store store(path);
+    struct ConversationModel : FixedModel {
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") != "conversation_turn") return FixedModel::decide(input);
+            if (input.event.at("turn").empty())
+                return {{{"start_task",{{"request",input.event.at("text")}},"Start the requested work"}}};
+            return {{{"reply",{{"text","I queued your request."}},"Report the queued Task"}}};
+        }
+    } model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    const Person requester{"requester",false};
+    auto web = callbacks();
+    web.authenticate = [&](std::string_view credential) {
+        return credential == "Bearer requester" ? requester : Person{};
+    };
+    web.resolveIdentity = [&](std::string_view person) -> std::optional<bool> {
+        if (person == requester.id) return requester.adminRoot;
+        return std::nullopt;
+    };
+    auto policy = store.policy();
+    policy.setMember(localOwner,"release",requester.id,true);
+    policy.setMode(localOwner,"supervised");
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization","Bearer requester"}});
+    const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","supervised-release"},
+        {"text","Build a supervised release"},{"environmentId","ignored"},{"projectId","ignored"},
+        {"trigger",{{"triggerKind","ignored"}}}},201);
+    check(receipt.at("status") == "received" && store.tasks().empty(),"HTTP intake did not wait for the conversation turn");
+    tick(runtime,4);
+    const auto tasks = store.tasks("release");
+    check(tasks.size() == 1 && tasks.at(0).at("sourceMessageId") == receipt.at("messageId"),
+          "the Task did not retain its conversation message");
+    const auto& task = tasks.at(0);
+    check(task.at("environmentId") == "local-env" && task.at("projectId") == "release" && !task.contains("trigger"),
+          "the HTTP client changed routing or schedule");
+    const auto approvals = store.inbox(requester);
+    check(approvals.size() == 1 && approvals.at(0).at("taskId") == task.at("id") &&
+          approvals.at(0).at("itemKind") == "policy_approval" && approvals.at(0).at("canDecide") == true,
+          "the message sender could not approve the Task they requested");
+    check(t3.launches.empty(),"the Task launched before approval");
+    const auto& item = approvals.at(0);
+    browser.post("/api/inbox/decide",{{"botId",item.at("botId")},{"itemKind",item.at("itemKind")},
+        {"itemId",item.at("itemId")},{"waitId",item.at("waitId")},{"taskId",item.at("taskId")},
+        {"targetRevision",item.at("targetRevision")},{"targetGeneration",item.at("targetGeneration")},
+        {"decision","allow_once"}});
+    tick(runtime,4);
+    check(t3.launches["release"] == 1,"the Task could not launch with approval");
+}
+
 void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
-    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
-    store.access().resourceGrant({"fixture",true},"settings",{"environment","local-env","launch"},GrantChange::grant);
-    store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
     const auto notes = [](std::string_view) { return std::string{}; };
     auto runtime = std::make_unique<Runtime>(store,model,t3,notes);
-    auto server = startWeb(store,0,callbacks());
+    const auto web = callbacks();
+    auto server = startWeb(store,0,web);
     const auto port = server->port();
     Browser browser(*server);
     boundary(browser);
-    check(cli.tasks().empty(),"rejected HTTP requests still submitted work");
-    const auto release = browser.request("release","下書きの掲載範囲を確認する");
-    const auto triage = browser.request("triage","昨日届いた不具合を確認する");
-    const auto settings = browser.request("settings","接続設定を確認する");
+    check(cli.tasks().empty() && cli.conversation("release").empty(),"rejected HTTP requests still submitted messages or work");
+    const auto release = cli.submit(web.intake("release","下書きの掲載範囲を確認する"));
+    const auto triage = cli.submit(web.intake("triage","昨日届いた不具合を確認する"));
+    const auto settings = cli.submit(web.intake("settings","接続設定を確認する"));
     tick(*runtime,3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
     t3.observations["thread-release"].question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
@@ -559,13 +684,11 @@ void exercise(const std::filesystem::path& path) {
         return row["kind"] == "waiting" && row["data"]["id"] == waitId;
     }),"question fixture did not cross a history page boundary");
 
-    const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
-        {"environmentId","ignored"},{"projectId","ignored"},{"trigger",{{"triggerKind","ignored"}}}},201).at("taskId").get<Id>();
+    const auto next = cli.submit(web.intake("release","次の版の変更点を調べる"));
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
     checkPresence(browser,browser.get("/api/bots"),"release","waiting");
-    check(cli.task(next)["environmentId"] == "local-env" && !cli.task(next).contains("trigger"),"client changed routing or schedule");
     const auto& visibleWait = afterSubmit.at("waits").at(0);
     Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"},
                   {"targetRevision",visibleWait.at("currentRevision")},{"targetGeneration",visibleWait.at("generation")}};
@@ -782,7 +905,6 @@ void recurringRequestStatus(const std::filesystem::path& path) {
 void eventStream(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
-    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
     auto web = callbacks();
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
@@ -791,19 +913,35 @@ void eventStream(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/events?peer=triage"),400);
     Browser::checked(browser.client.Get("/api/events",httplib::Headers{{"Origin","http://example.test"}}),403);
 
-    FixedModel model;
+    struct ReviewModel : FixedModel {
+        Id task = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") != "conversation_turn") return FixedModel::decide(input);
+            const auto& turn = input.event.at("turn");
+            if (turn.empty()) {
+                auto args = git_fixture::openArgs();
+                args.update({{"taskId",task},{"title","Review the draft"}});
+                return {{{"git_open_pr",std::move(args),"Prepare the review fixture"}}};
+            }
+            check(turn.front().at("result").at("status") == "created","could not open the fixture PR");
+            return {{{"reply",{{"text","Ready for review."}},"Report the pull request"}}};
+        }
+    } model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
+                    git_fixture::options(std::make_shared<git_fixture::FakeHost>()));
     unsigned changes = 0;
     Id releaseTask = 0;
     Json botsBeforeApproval;
+    Json approval;
+    bool approved = false;
     readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
         if (changes >= 3) {
             if (changes == 3) {
                 check(change == Json{{"list",true}},"another Bot invalidated the selected view");
-                const auto task = cli.task(releaseTask);
-                cli.requestPrReview(releaseTask,task.value("currentRevision",Id{0}),task.at("generation"),
-                                    "https://example.test/pull/1","Review the draft","Is this ready?");
+                model.task = releaseTask;
+                cli.receive(localOwner,web.intake("release","unused"),"pr-review","Open a pull request for review.");
+                runtime.runConversations();
             } else if (changes == 4) {
                 check(change == Json{{"list",true},{"bot","release"}},"the PR review source did not invalidate its conversation");
                 const auto items = browser.get("/api/inbox?bot=release").at("items");
@@ -813,14 +951,13 @@ void eventStream(const std::filesystem::path& path) {
                 check(std::ranges::any_of(events,[&](const auto& event) {
                     return event.at("id") == items.at(0).at("conversationEventId") &&
                         event.at("kind") == "pr_review_requested" &&
-                        event.at("data") == Json{{"itemId",items.at(0).at("itemId")},{"title","Review the draft"},
-                            {"text","Is this ready?"},{"prUrl","https://example.test/pull/1"}};
+                        event.at("data") == Json{{"itemId",items.at(0).at("itemId")},{"title","Pull request awaiting review"},
+                            {"text","Review the draft"},{"prUrl","https://github.com/org/flock/pull/1"}};
                 }),"the PR review did not have an exact reply source in the Web view");
-                botsBeforeApproval = browser.get("/api/bots");
-                auto approve = items.at(0);
-                approve["decision"] = "approve";
-                browser.post("/api/inbox/decide",approve);
+                approval = items.at(0);
+                approval["decision"] = "approve";
             } else {
+                if (!approved) return true;
                 check(change == Json{{"list",true}},"an inbox-only approval invalidated the selected view");
                 check(browser.get("/api/bots") == botsBeforeApproval &&
                       browser.get("/api/inbox?bot=release").at("items").empty(),
@@ -842,16 +979,22 @@ void eventStream(const std::filesystem::path& path) {
         }
         ++changes;
         return true;
+    },[&] {
+        // Wait until the stream has delivered the Git tool's conversation changes.
+        if (!approval.empty() && !approved) {
+            botsBeforeApproval = browser.get("/api/bots");
+            browser.post("/api/inbox/decide",approval);
+            approved = true;
+        }
     });
 }
 
 void conversationPermissions(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"fixture",true};
-    auto access = store.access();
-    access.personGrant(owner,"release","reader",Role::view,GrantChange::grant);
-    access.personGrant(owner,"release","decider",Role::decide,GrantChange::grant);
-    access.resourceGrant(owner,"release",{"environment","local-env","launch"},GrantChange::grant);
+    auto policy = store.policy();
+    policy.setMember(owner,"release","reader",true);
+    policy.setMember(owner,"release","decider",true);
     auto web = callbacks();
     web.authenticate = [](std::string_view credential) {
         if (credential == "Bearer reader") return Person{"reader"};
@@ -898,7 +1041,7 @@ void conversationPermissions(const std::filesystem::path& path) {
     const auto viewPath = "/api/view?bot=release";
     const auto readable = reader.get(viewPath);
     const auto writable = decider.get(viewPath);
-    check(readable.at("canDecide") == false && writable.at("canDecide") == true,"conversation permission did not follow the caller");
+    check(readable.at("canDecide") == true && writable.at("canDecide") == true,"conversation permission did not follow the caller");
     check(!readable.at("events").empty() && readable.at("events") == writable.at("events") &&
           readable.at("waits") == writable.at("waits"),"reader lost conversation or wait history");
 
@@ -906,16 +1049,15 @@ void conversationPermissions(const std::filesystem::path& path) {
     const Json answer = {{"botId","release"},{"taskId",taskId},{"waitId",wait.at("wait").at("id")},
         {"operation","answer"},{"text","すべて"},{"targetRevision",wait.at("currentRevision")},
         {"targetGeneration",wait.at("generation")}};
-    reader.post("/api/messages",message,403);
+    auto memberMessage = message;
+    memberMessage["clientMessageId"] = "shared-member-message";
+    reader.post("/api/messages",memberMessage,201);
+    runtime.runConversations();
+    policy.setMember(owner,"release","reader",false);
+    Browser::checked(reader.client.Get(viewPath),403);
     reader.post("/api/operations",answer,403);
-    unsigned updates = 0;
-    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
-        check(change.at("bot") == "release","permission change did not invalidate the open conversation");
-        check(reader.get(viewPath).at("canDecide") == (updates == 1),"refreshed conversation has stale permission");
-        if (++updates == 3) return false;
-        access.personGrant(owner,"release","reader",updates == 1 ? Role::decide : Role::view,GrantChange::grant);
-        return true;
-    });
+    policy.setMember(owner,"release","reader",true);
+
     decider.post("/api/operations",answer);
     const auto authorized = decider.post("/api/messages",message,201).at("messageId");
     runtime.runConversations();
@@ -999,7 +1141,7 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
             check(opened == SQLITE_OK,"could not open the fixture writer");
             sqlite3_busy_timeout(db.get(),2000);
             const auto write = "INSERT INTO journal(task_id,time,kind,data) VALUES(" + std::to_string(task) +
-                ",unixepoch(),'instruction_steered',json_object('messageId'," + std::to_string(message) + "))";
+                ",unixepoch(),'instruction_steered',json_object('messageId'," + std::to_string(message) + ",'step',1))";
             check(sqlite3_exec(db.get(),write.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
                   "could not record the historical delivery");
             return true;
@@ -1036,7 +1178,7 @@ void peerEventStream(const std::filesystem::path& path) {
         if (change.contains("dm")) check(change.at("dm") == pair,"the DM stream sent the wrong scope");
         if (std::exchange(initial,false)) {
             check(change == Json{{"list",true},{"bot","release"},{"dm",pair}},"missing initial DM scope");
-            seedPeerHistory(browser,runtime,t3);
+            seedPeerHistory(store,browser,runtime,t3);
             return true;
         }
         return !change.contains("dm");
@@ -1057,8 +1199,9 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
         return {std::string(bot),std::string(request),"local-env","proj",Json::object()};
     };
-    cb.createBot = [&](const Json& profile, const std::optional<AvatarImage>& image) {
+    cb.createBot = [&](const Person& creator, const Json& profile, const std::optional<AvatarImage>& image) {
         const auto id = "bot-" + std::to_string(++counter);
+        store.policy().setOwner(creator,id);
         Json avatar = profile.at("avatar");
         if (image) {
             images.insert_or_assign(id,*image);
@@ -1145,11 +1288,8 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"botId","bot-1"},
         {"name","Scout Photo"},
         {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"},{"imageData",paddedPng}}},
-    },200);
-    const auto imageUrl = padded.at("avatar").at("imageUrl").get<std::string>();
-    const auto paddedImage = browser.client.Get(imageUrl);
-    check(paddedImage && paddedImage->status == 200 && paddedImage->body == fetchedImage->body,
-          "Unused Base64 bits changed the accepted avatar bytes");
+    },400);
+    check(padded.at("error") == "invalid_image","unused Base64 bits were accepted for an avatar upload");
 
     // Rename without re-uploading keeps imageUrl intact.
     const auto renamed = browser.post("/api/bots/profile",{
@@ -1157,11 +1297,11 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"name","Scout Kept"},
         {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"}}},
     },200);
-    check(renamed.at("avatar").at("imageUrl") == imageUrl,"rename did not preserve uploaded avatar URL");
+    check(renamed.at("avatar").at("imageUrl") == originalUrl,"rename did not preserve uploaded avatar URL");
 
     // A name-only update may omit the avatar entirely.
     const auto nameOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Name"}},200);
-    check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == imageUrl,
+    check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == originalUrl,
           "name-only update changed the avatar");
 
     // Replace with GIF updates version and content-type.
@@ -1171,7 +1311,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","badge.gif"},{"imageData",validGifBase64}}},
     },200);
     const auto gifUrl = replaced.at("avatar").at("imageUrl").get<std::string>();
-    check(gifUrl != imageUrl,"replacing uploaded image did not rotate version URL");
+    check(gifUrl != originalUrl,"replacing uploaded image did not rotate version URL");
     const auto fetchedGif = browser.client.Get(gifUrl);
     check(fetchedGif && fetchedGif->status == 200 &&
           fetchedGif->get_header_value("Content-Type") == "image/gif",
@@ -1208,10 +1348,15 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
     },404);
 }
-void accessEndpoints(const std::filesystem::path& path) {
+void settingsEndpoints(const std::filesystem::path& path) {
     Store store(path);
-    const auto id = store.access().request("release",{"repository","github.com/org/private","read"});
+    store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/org/private",true);
     auto cb = callbacks();
+    cb.intake = [original = cb.intake](std::string_view bot, std::string_view request) {
+        auto intake = original(bot,request);
+        intake.config.erase("token");
+        return intake;
+    };
     const auto file = path.parent_path()/"identities.json";
     const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
                                        {{"authorization","Bearer fixture-alice"},{"person","alice"}}});
@@ -1225,25 +1370,43 @@ void accessEndpoints(const std::filesystem::path& path) {
     check(rejected,"symlink identity file accepted");
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
-    Browser::checked(browser.client.Get("/api/access?bot=release"),401);
+    Browser::checked(browser.client.Get("/api/bot-settings?bot=release"),401);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     check(browser.get("/api/view?bot=release").at("composerPerson")=="owner","composer identity did not match owner");
-    Browser::checked(browser.client.Get("/api/access?bot=release&bot=triage"),400);
+    Browser::checked(browser.client.Get("/api/bot-settings?bot=release&bot=triage"),400);
     auto crossOrigin = browser.headers();
     crossOrigin.erase("Origin");
     crossOrigin.emplace("Origin","https://example.invalid");
-    Browser::checked(browser.client.Post("/api/access/decision",crossOrigin,
-        Json{{"botId","release"},{"requestId",id},{"approve",true}}.dump(),"application/json"),403);
-    browser.post("/api/access/decision",{{"botId","release"},{"requestId",id},{"approve",true},{"resourceId","wrong"}},400);
-    const auto secretRequest = store.access().requestSecret("release",{"fixture-token"});
-    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}});
-    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}},403);
-    browser.post("/api/access/person",{{"botId","release"},{"action","grant"},{"person","alice"},{"role","view"}});
-    browser.post("/api/access/decision",{{"botId","release"},{"requestId",id},{"approve",true}});
-    auto state = browser.get("/api/access?bot=release");
-    check(state.at("requests").at(0).at("status")=="approved" && state.at("grants").size()==1,"approval not effective");
-    browser.post("/api/access/resource",{{"botId","release"},{"action","revoke"},{"resourceKind","repository"},
-                                          {"resourceId","github.com/org/private"},{"operation","read"}});
+    const Json share{{"botId","release"},{"person","alice"},{"add",true}};
+    Browser::checked(browser.client.Post("/api/bot-settings/members",crossOrigin,share.dump(),"application/json"),403);
+    const auto secretRequest = store.policy().requestSecret("release",{"fixture-token"});
+    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}});
+    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}},403);
+    browser.post("/api/bot-settings/members",share);
+    const auto state = browser.get("/api/bot-settings?bot=release");
+    check(state.at("members") == Json::array({"alice"}) &&
+          !state.contains("mode") && !state.contains("rules") && !state.contains("t3"),
+          "Bot settings exposed installation settings or lost membership");
+    const auto settings = browser.get("/api/settings");
+    check(settings.at("mode") == "full" && settings.at("canManagePolicy") == true &&
+          settings.at("rules").size() == 1 && !settings.contains("members"),"Flock settings lost the installation policy");
+    const auto settingsPage = browser.client.Get("/settings");
+    const auto botPage = browser.client.Get("/settings/release");
+    check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&
+          botPage && botPage->status == 200 && botPage->body.find("Sharing and connections") != std::string::npos,
+          "Settings pages did not serve their own content");
+    browser.post("/api/settings/mode",{{"mode","supervised"}});
+    const auto rule = settings.at("rules").at(0);
+    const Json removal{{"kind",rule.at("kind")},{"action",rule.at("action")},{"target",rule.at("target")}};
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    const auto sharedSettings = browser.get("/api/settings");
+    check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false,
+          "Shared member did not get the read-only installation mode");
+    browser.post("/api/settings/mode",{{"mode","full"}},403);
+    browser.post("/api/settings/rule",removal,403);
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    browser.post("/api/settings/rule",removal);
+    check(browser.get("/api/settings").at("rules").empty(),"Root could not remove the rule");
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
     check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
@@ -1258,9 +1421,9 @@ void accessEndpoints(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/compactions?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/events?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"),403);
-    browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},403);
-    browser.post("/api/access/resource",{{"botId","release"},{"adminRoot",true}},403);
-    browser.post("/api/access/secret",{{"botId","release"},{"requestId",1},{"value",privateValue}},403);
+    browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},201);
+    browser.post("/api/bot-settings/members",{{"botId","release"},{"person","owner"},{"add",false}},403);
+    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",1},{"value",privateValue}},403);
 }
 
 } // namespace
@@ -1268,7 +1431,9 @@ void accessEndpoints(const std::filesystem::path& path) {
 int main() {
     try {
         TestDirectory directory;
+        conversationRequestApproval(directory.path / "conversation-approval.db");
         exercise(directory.path / "state.db");
+        messageReceipts(directory.path / "message-receipts.db");
         sidebarReplies(directory.path / "sidebar.db");
         failedCompletion(directory.path / "failed-completion.db");
         recurringRequestStatus(directory.path / "recurring-requests.db");
@@ -1280,7 +1445,7 @@ int main() {
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
         peerConversationAnchor(directory.path / "peer-conversation-anchor.db");
-        accessEndpoints(directory.path / "access.db");
+        settingsEndpoints(directory.path / "settings.db");
         boardInboxEndpoints(directory.path / "board-inbox.db");
         channelEndpoints(directory.path / "channels.db");
         botProfileEndpoints(directory.path / "profiles.db");
