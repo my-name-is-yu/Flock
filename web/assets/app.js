@@ -2307,6 +2307,12 @@ function openDetail(selection) {
   elements.detail.showModal();
   if (!detailNav.hidden) detailNav.querySelector('[aria-selected="true"]')?.focus();
 }
+elements.detail.addEventListener('cancel', (event) => {
+  const keep = elements.detail.querySelector('.wait-stop-keep');
+  if (!keep || keep.disabled) return;
+  event.preventDefault();
+  keep.click();
+});
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
   clearDetailSectionTransition();
@@ -2632,11 +2638,28 @@ function waitContent(context, task) {
   } else if (['unknown_delivery', 'auth', 'settings'].includes(wait.reason)) {
     primary.append(action('Check again', 'reconcile'));
   }
-  actions.append(button('Stop this request', 'wait-cancel', () => {
-    const name = task.request.split('\n')[0];
-    if (window.confirm(`Stop “${name}”?\n\nThe Bot will stop working on this request and interrupt its T3 session if one is running.`))
-      perform('cancel');
-  }), primary);
+  // Stopping can't be undone, so it asks in place, with the safe choice focused, instead of a browser dialog.
+  const stop = button('Stop this request', 'wait-cancel', () => {
+    const botName = context.data.bot?.name ?? 'The Bot';
+    const confirm = node('div', 'wait-stop-confirm');
+    confirm.setAttribute('role', 'group');
+    const prompt = node('p', 'wait-stop-text');
+    prompt.id = 'wait-stop-text';
+    prompt.append(node('strong', null, 'Stop this request?'),
+      ` This requests a stop for ${botName}’s work on this request, including any T3 work assigned to it.`);
+    confirm.setAttribute('aria-labelledby', prompt.id);
+    const keep = button('Keep working', 'dialog-button quiet wait-stop-keep', () => {
+      actions.replaceChildren(stop, primary);
+      stop.focus();
+    });
+    const confirmStop = button('Stop request', 'dialog-button danger', () => perform('cancel'));
+    const choices = node('div', 'wait-primary');
+    choices.append(keep, confirmStop);
+    confirm.append(prompt, choices);
+    actions.replaceChildren(confirm);
+    keep.focus();
+  });
+  actions.append(stop, primary);
   const feedback = node('p', 'dialog-feedback');
   feedback.id = 'detail-feedback';
   feedback.setAttribute('role', 'status');
