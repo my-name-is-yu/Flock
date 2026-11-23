@@ -64,37 +64,36 @@ std::optional<std::string> percentDecode(std::string_view source) {
     return result;
 }
 
-std::optional<std::string> queryFormVariant(std::string_view source) {
-    const auto fragment = source.find('#');
-    const auto query = source.find('?');
-    if (query == source.npos || (fragment != source.npos && fragment < query)) return std::nullopt;
-    const auto end = fragment == source.npos ? source.size() : fragment;
+std::optional<std::string> formPercentDecode(std::string_view source) {
     std::string form(source);
-    bool changed = false;
-    for (auto index = query + 1; index < end; ++index) {
-        if (form[index] == '+') {
-            form[index] = ' ';
-            changed = true;
-        }
-    }
-    if (!changed) return std::nullopt;
-    return form;
+    for (char& character : form)
+        if (character == '+') character = ' ';
+    return percentDecode(form);
 }
 
-bool sensitiveUrl(std::string_view source, const SensitiveText& sensitive) {
-    if (source.empty()) return false;
+template <typename Decode>
+bool sensitiveAfterDecoding(std::string_view source, const SensitiveText& sensitive, Decode decode) {
     constexpr unsigned maxPercentDecodeLayers = 4;
     std::string current(source);
     for (unsigned layer = 0; layer <= maxPercentDecodeLayers; ++layer) {
         if (sensitive(current)) return true;
-        if (const auto form = queryFormVariant(current); form && sensitive(*form)) return true;
-        const auto decoded = percentDecode(current);
+        const auto decoded = decode(current);
         if (!decoded) return true;
         if (*decoded == current) return false;
         if (layer == maxPercentDecodeLayers) return true;
         current = *decoded;
     }
     return true;
+}
+
+bool sensitiveUrl(std::string_view source, const SensitiveText& sensitive) {
+    if (source.empty()) return false;
+    if (sensitiveAfterDecoding(source,sensitive,percentDecode)) return true;
+    const auto query = source.find('?');
+    const auto fragment = source.find('#');
+    if (query == source.npos || (fragment != source.npos && fragment < query)) return false;
+    const auto end = fragment == source.npos ? source.size() : fragment;
+    return sensitiveAfterDecoding(source.substr(query + 1,end - query - 1),sensitive,formPercentDecode);
 }
 
 bool safeUrl(std::string_view source) {

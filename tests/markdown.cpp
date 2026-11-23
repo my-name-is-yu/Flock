@@ -188,6 +188,13 @@ void protectedHtml() {
           markdown::toHtml("[credential](https://example.com/?q=A&amp;B)",ampersand) == redacted &&
           markdown::toHtml("[credential](https://example.com/?q=A+B)",space) == redacted,
           "encoded link credentials bypassed URL-sensitive detection");
+    const auto hashAndSpace = [](std::string_view text) { return text.find("A B#C D") != text.npos; };
+    check(markdown::toHtml("[credential](https://example.com/?q=%23A+B)",space) == redacted &&
+          markdown::toHtml("[credential](https://example.com/?q=%23A+B%23C+D)",hashAndSpace) == redacted,
+          "encoded query hashes changed original query boundaries before form decoding");
+    check(markdown::toHtml("[docs](https://example.com/?q=ok#A+B)",space) ==
+              "<p><a href=\"https://example.com/?q=ok#A+B\">docs</a></p>",
+          "a fragment plus was incorrectly interpreted as a query-form space");
     const auto nestedUrl = [](std::string credential, unsigned layers) {
         for (unsigned layer = 0; layer < layers; ++layer) {
             std::string encoded;

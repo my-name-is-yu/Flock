@@ -909,6 +909,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const std::string doubleEncodedUrlText = "[credential](https://example.com/?token=A%2526B)";
     const std::string decodedUrlText = "[credential](https://example.com/?q=A&amp;B)";
     const std::string formUrlText = "[credential](https://example.com/?q=A+B)";
+    const std::string hashFormUrlText = "[credential](https://example.com/?q=%23A+B)";
     const std::string safeRichText = "**safe** [docs](https://example.com/path%252Fpart)";
     const auto rawSemanticMessage = send("staging-triage","semantic-raw",rawSemanticText);
     const auto formattedSemanticMessage = send("staging-triage","semantic-formatted",formattedSemanticText);
@@ -917,6 +918,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const auto doubleEncodedUrlMessage = send("staging-triage","semantic-double-encoded-url",doubleEncodedUrlText);
     const auto decodedUrlMessage = send("staging-triage","semantic-decoded-url",decodedUrlText);
     const auto formUrlMessage = send("staging-triage","semantic-form-url",formUrlText);
+    const auto hashFormUrlMessage = send("staging-triage","semantic-hash-form-url",hashFormUrlText);
     for (int i = 0; i < 40; ++i) send("staging-triage","filler-" + std::to_string(i),"Later update");
     const auto viewAmpMessage = send("staging-triage","view-amp",ampText);
     const auto viewMarkdownMessage = send("staging-triage","view-markdown",markdownText);
@@ -989,6 +991,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
         verifyProtectedHtml(events,doubleEncodedUrlMessage,doubleEncodedUrlText);
         verifyProtectedHtml(events,decodedUrlMessage,decodedUrlText);
         verifyProtectedHtml(events,formUrlMessage,formUrlText);
+        verifyProtectedHtml(events,hashFormUrlMessage,hashFormUrlText);
     };
     verifyRecentSemanticMessages(viewResponse.at("events"));
     const auto storedAmp = store.conversation("staging-triage",viewAmpMessage + 1,1);
@@ -1022,6 +1025,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     requireStored(doubleEncodedUrlMessage,doubleEncodedUrlText);
     requireStored(decodedUrlMessage,decodedUrlText);
     requireStored(formUrlMessage,formUrlText);
+    requireStored(hashFormUrlMessage,hashFormUrlText);
     const auto foreign = browser.get(history + "&before=" + std::to_string(otherBotMessage + 1));
     check(foreign.at("events").back().at("id") != otherBotMessage,
           "An exact source lookup must stay in the selected Bot");
