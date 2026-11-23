@@ -142,7 +142,6 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
-    // Additive tables are created when opening existing version 6 databases.
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS conversation_model_failures(
   attempt_id INTEGER PRIMARY KEY REFERENCES model_attempts(id),
@@ -579,7 +578,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
-    if (Policy(*this).botDeleted(item.botId)) throw Conflict("Bot has been deleted");
+    if (botDeleted(item.botId)) throw Conflict("Bot has been deleted");
     const auto scrub = redactor(item.botId);
     scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.config});
     modelCallLimit(item.config);

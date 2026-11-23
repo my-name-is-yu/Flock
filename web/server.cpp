@@ -487,12 +487,13 @@ private:
         const auto bot = web::field(body,"botId");
         if (!validBotId(bot)) return error(res,400,"invalid_bot");
         const auto actor = web::person(callbacks_,req);
-        auto policy = store_.policy();
-        if (!policy.allows(actor,Action::bot_settings,bot)) return error(res,403,"access_denied");
-        if (findBot(bot).is_null()) return error(res,404,"bot_not_found");
-        try { policy.deleteBot(actor,bot); }
+        if (findBot(bot).is_null()) {
+            if (!store_.policy().allows(actor,Action::bot_settings,bot)) return error(res,403,"access_denied");
+            return error(res,404,"bot_not_found");
+        }
+        try { store_.deleteBot(actor,bot); }
         catch (const DecisionDenied&) { return error(res,403,"access_denied"); }
-        catch (const Policy::BotBusy&) { return error(res,409,"bot_busy"); }
+        catch (const BotBusy&) { return error(res,409,"bot_busy"); }
         changes_.rescan();
         json(res,200,{{"ok",true}});
     }

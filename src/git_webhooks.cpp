@@ -64,19 +64,25 @@ AND t.state NOT IN ('cancelled','cancelling')
         Policy(*this).allows(bot,Action::repository_read,repo.resource());
 }
 
+Id Store::Impl::latestGitWebhookId() const {
+    auto row = query("SELECT coalesce(max(id),0) FROM git_webhook_events");
+    row.next();
+    return row.number(0);
+}
+
 void Store::Impl::deliverGitWebhooks() {
     std::lock_guard lock(mutex);
     const auto version = dataVersion();
     if (gitWebhooksDrainedAt == version) return;
     constexpr unsigned batchSize = 100;
     Transaction transaction(db);
-    // The original cursor governs attribution. The current watch's cursor governs delivery.
     auto rows = query(R"SQL(
 WITH watches AS (
- SELECT w.*,coalesce(o.event_cursor,w.event_cursor) AS attribution_cursor
+ SELECT w.host,w.repo,w.pr_number,w.task_id,w.bot_id,w.run,w.url,
+        w.event_cursor AS delivery_cursor,coalesce(o.event_cursor,w.event_cursor) AS attribution_cursor
  FROM git_pr_watches w LEFT JOIN git_pr_watch_origins o USING(host,repo,pr_number)
 ), matches AS (
- SELECT e.id,e.host,e.event_id,e.repo,e.data,w.pr_number,w.task_id,w.bot_id,w.run,w.url,w.event_cursor,
+ SELECT e.id,e.host,e.event_id,e.repo,e.data,w.pr_number,w.task_id,w.bot_id,w.run,w.url,w.delivery_cursor,
         json_array_length(e.data,'$.prNumbers')>0 AS explicit_pr,
         count(*) OVER (PARTITION BY e.id) AS watch_count
  FROM git_webhook_events e JOIN watches w ON w.host=e.host AND w.repo=e.repo AND e.id>w.attribution_cursor
@@ -91,7 +97,8 @@ WITH watches AS (
          ORDER BY h.event_cursor LIMIT 1)))
 )
 SELECT id,host,event_id,repo,data,pr_number,task_id,bot_id,run,url FROM matches m
-WHERE id>event_cursor AND (explicit_pr OR watch_count=1)
+WHERE id>delivery_cursor AND (explicit_pr OR watch_count=1)
+ AND NOT EXISTS (SELECT 1 FROM deleted_bots retired WHERE retired.bot=m.bot_id)
  AND NOT EXISTS (SELECT 1 FROM git_webhook_deliveries d
                  WHERE d.event=m.id AND (NOT m.explicit_pr OR d.pr_number=m.pr_number))
 ORDER BY id,pr_number LIMIT ?

@@ -280,6 +280,30 @@ WHERE r.task_id=? AND r.id=? AND a.task=r.task_id AND a.bot=?
     projection.commit();
 }
 
+class Store::Impl::GitPrMutationClaim {
+public:
+    explicit GitPrMutationClaim(Impl& store) : store_(store) {}
+    GitPrMutationClaim(const GitPrMutationClaim&) = delete;
+    GitPrMutationClaim& operator=(const GitPrMutationClaim&) = delete;
+    ~GitPrMutationClaim() { release(); }
+
+    void acquire(const GitRepository& repo, Id pr, Id task) {
+        if (store_.gitPrWatchUnavailable(repo,pr,task)) throw Conflict("This pull request belongs to another task");
+        claim_ = store_.gitPrMutationsInFlight.emplace(repo.host,repo.repo,pr).first;
+    }
+
+    void release() {
+        if (!claim_) return;
+        std::lock_guard lock(store_.mutex);
+        store_.gitPrMutationsInFlight.erase(*claim_);
+        claim_.reset();
+    }
+
+private:
+    Impl& store_;
+    std::optional<std::set<GitPrKey>::iterator> claim_;
+};
+
 Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const Json& routing,
                           const Decision& decision, std::string_view invocation, std::optional<Id> generation, Id turn) {
     if (decision.tool == "git_read_result" && !generation) throw Conflict("Saved Git reads are available within their task");
@@ -409,6 +433,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     const auto key = Json::array({invocation,decision.tool,target}).dump();
     const Json dedupe = createComment ? Json(target.dump()) : Json(nullptr);
     Id eventCursor = 0;
+    GitPrMutationClaim watchMutation(*this);
     {
         std::lock_guard lock(mutex);
         Transaction tx(db);
@@ -419,11 +444,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             return {{"ok",false},{"status","unknown"},{"error","The host outcome is unknown. Check the target before retrying."}};
         }
         if (watchPr) {
-            if (gitPrOwnedByAnotherTask(repo,args.at("prNumber"),taskId))
-                throw Conflict("This pull request belongs to another task");
-            auto events = query("SELECT coalesce(max(id),0) FROM git_webhook_events");
-            events.next();
-            eventCursor = events.number(0);
+            watchMutation.acquire(repo,args.at("prNumber"),taskId);
+            eventCursor = latestGitWebhookId();
         }
         if (policy.forbidden(bot,*parseAction("repository." + std::string(op)),repo.resource()))
             throw Conflict("Repository access denied");
@@ -441,6 +463,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     }
     std::lock_guard lock(mutex);
     Transaction tx(db);
+    watchMutation.release();
     const auto scrub = sharedRedactor();
     if (result.value("ok",false)) result["data"] = scrub.payload(result.at("data"),false,gitResultTextLimit);
     else result["error"] = scrub.text(field(result,"error"));
@@ -450,7 +473,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
         const bool requested = decision.tool == "git_request_review";
         if (watchPr) {
             const auto sha = field(result.at("data"),"headSha");
-            result["watchAttached"] = watchGitPr(taskId,bot,runJson(context.run),eventCursor,{{repo,repo,{},{}},pr,url,{},sha,false});
+            result["watchAttached"] = watchGitPr(taskId,bot,runJson(context.run),eventCursor,
+                                                 {{repo,repo,{},{}},pr,url,{},sha,false},GitWatchStart::mutationAdmission);
         }
         if ((requested && result.at("watchAttached") == true) || decision.tool == "git_submit_review")
             gitInboxItem(load(taskId),"review/" + actionId(),url,

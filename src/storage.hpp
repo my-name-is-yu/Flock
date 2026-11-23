@@ -111,6 +111,12 @@ struct SessionStop {
 };
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
 std::string_view approvalError(ApprovalGate);
+enum class GitWatchStart { operationIntent, mutationAdmission };
+struct GitPrKey {
+    std::string host, repo;
+    Id number;
+    auto operator<=>(const GitPrKey&) const = default;
+};
 
 struct Store::Impl {
     sqlite3* db = nullptr;
@@ -131,6 +137,7 @@ struct Store::Impl {
     std::function<Seconds()> policyClock = unixTime;
     void openSchema();
     void initializeSchema();
+    bool botDeleted(std::string_view bot) const;
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource,
@@ -179,6 +186,7 @@ struct Store::Impl {
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     void initializeMemorySchema();
     void initializeAutomationSchema();
+    void retireAutomations(const Json& botIds);
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
     void createMemory(std::string_view key, std::string_view bot, std::string_view id,
                       std::string_view content, Seconds now);
@@ -194,6 +202,7 @@ struct Store::Impl {
     void fireAutomation(Id, const Statement&, Seconds now);
     SecretRedactor sharedRedactor() const;
     void initializeBoardInboxSchema();
+    Statement actionablePrReviews(std::string_view bot) const;
     void initializeGitSchema();
     Json gitTool(GitHost&, std::string_view bot, Id task, const Json& routing, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
@@ -202,9 +211,13 @@ struct Store::Impl {
     Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
+    Id latestGitWebhookId() const;
+    std::set<GitPrKey> gitPrMutationsInFlight;
+    class GitPrMutationClaim;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
-    bool gitPrOwnedByAnotherTask(const GitRepository&, Id pr, Id task) const;
-    bool watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest&);
+    bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
+    bool watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest&,
+                    GitWatchStart = GitWatchStart::operationIntent);
     void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const Json& task);
     std::vector<std::string> gitCredentials;
     Id gitRedactionEpoch = 0;

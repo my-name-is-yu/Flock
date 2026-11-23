@@ -414,7 +414,7 @@ Json SettingsConnections::botChannels(std::string_view botId) const {
     return botChannelsLocked(botId);
 }
 
-Json SettingsConnections::changeBotChannel(std::string_view botId, const Json& input, const Policy& policy) {
+Json SettingsConnections::changeBotChannel(std::string_view botId, const Json& input, const Store& store) {
     if (!validBotId(botId) || !input.is_object()) throw Conflict("Invalid Bot channel settings");
     if (hostChannels_) throw Conflict("These channel settings are managed on the Flock host");
     try {
@@ -430,7 +430,7 @@ Json SettingsConnections::changeBotChannel(std::string_view botId, const Json& i
         auto& senders = channels.at(type).at(id).at("senders");
         if (const auto existing = senders.find(senderId); existing != senders.end()) {
             const auto& assigned = existing->at("botId").get_ref<const std::string&>();
-            if (assigned != botId && (action != "setSender" || !policy.botDeleted(assigned)))
+            if (assigned != botId && (action != "setSender" || !store.botDeleted(assigned)))
                 throw Conflict("This sender is linked to another Bot");
         }
         if (action == "removeSender") senders.erase(senderId);

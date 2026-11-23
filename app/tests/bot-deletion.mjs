@@ -88,6 +88,15 @@ print(json.dumps(result))
 `));
 }
 
+function prepareStoreWithoutDeletedBots() {
+  cli('rules', 'list');
+  sqlite(`
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('DROP TABLE deleted_bots')
+`);
+}
+
 const deleteBot = (botId, options) => api('bots/delete', { body: { botId }, ...options });
 const botIds = (bots) => bots.map((bot) => bot.id).sort();
 
@@ -100,20 +109,13 @@ try {
   const botDirectory = join(home, 'bots', 'release');
   const configPath = join(botDirectory, 'config.json');
   mkdirSync(botDirectory, { recursive: true });
-  // Keep the next occurrence well outside the test regardless of startup time.
-  const scheduledMonth = (new Date().getUTCMonth() + 6) % 12 + 1;
+  const futureScheduleMonth = (new Date().getUTCMonth() + 6) % 12 + 1;
   const releaseConfig = JSON.stringify({
     name: 'Release', modelProvider: 'chatgpt', model: 'demo', environmentId: 'demo-env', projectId: 'demo-project',
-    cron: [{ id: 'yearly', schedule: `0 0 1 ${scheduledMonth} *`, timezone: 'Etc/UTC', request: 'Check the next release' }],
+    cron: [{ id: 'yearly', schedule: `0 0 1 ${futureScheduleMonth} *`, timezone: 'Etc/UTC', request: 'Check the next release' }],
   });
   writeFileSync(configPath, releaseConfig);
-  cli('rules', 'list');
-  // Simulate a version 6 Store created before Bot deletion was supported.
-  sqlite(`
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as db:
-    db.execute('DROP TABLE deleted_bots')
-`);
+  prepareStoreWithoutDeletedBots();
   await start();
   const [scheduleStatus, nextRun] = configuredSchedule();
   assert.equal(scheduleStatus, 'active');
@@ -158,15 +160,14 @@ with sqlite3.connect(sys.argv[1]) as db:
   const history = cli('history', String(waiting.id));
   assert.ok(history.some(({ kind }) => kind === 'cancelled'));
 
-  // Detached workspace commands have their own lifecycle after a conversation ends.
-  for (const state of ['running', 'stop_requested', 'exited']) {
+  for (const workspaceCommandState of ['running', 'stop_requested', 'exited']) {
     sqlite(`
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as db:
     db.execute("INSERT INTO workspace_commands(id,bot,started_at,state) VALUES(1,'release',0,?) "
                "ON CONFLICT(id) DO UPDATE SET state=excluded.state", (sys.argv[2],))
-`, state);
-    if (state !== 'exited') assert.deepEqual(await deleteBot(botId, { status: 409 }), { error: 'bot_busy' });
+`, workspaceCommandState);
+    if (workspaceCommandState !== 'exited') assert.deepEqual(await deleteBot(botId, { status: 409 }), { error: 'bot_busy' });
   }
 
   assert.deepEqual(await deleteBot(botId), { ok: true });
