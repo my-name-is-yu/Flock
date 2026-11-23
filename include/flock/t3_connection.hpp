@@ -21,6 +21,7 @@ public:
                         const std::function<void(std::string_view)>& install = {}, bool refreshProviders = false);
     bool ownsBearer(std::string_view token) const;
     bool disconnect(std::string_view environment);
+    bool providerCleanupPending() const;
     void providerRemoved();
     std::optional<T3Connection> authenticate(std::string_view token) const;
     std::optional<T3ConnectionSettings> settings(std::string_view person, bool installationRoot = false) const;

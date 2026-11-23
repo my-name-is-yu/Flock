@@ -161,19 +161,24 @@ Json connectT3(Store& store, const std::filesystem::path& home, const std::strin
     return {{"port",port},{"portChanged",savedPort != port},{"configuredProviders",providers}};
 }
 
+void disconnectT3(Store& store, const std::optional<std::string>& environment) {
+    const T3SetupLock setup;
+    T3Connections connections(store);
+    const bool cleanup = environment ? connections.disconnect(*environment) : connections.providerCleanupPending();
+    if (cleanup) {
+        removeT3Providers([&](std::string_view token) { return connections.ownsBearer(token); });
+        connections.providerRemoved();
+    }
+}
+
 int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const auto action = args.pop("T3 command");
     if (action != "connect" && action != "disconnect") throw Conflict("Unknown T3 command");
     const auto environment = args.pop("canonical environment ID");
     if (action == "disconnect") {
         args.end();
-        const T3SetupLock setup;
         auto store = openStore(home);
-        T3Connections connections(store);
-        if (connections.disconnect(environment)) {
-            removeT3Providers([&](std::string_view token) { return connections.ownsBearer(token); });
-            connections.providerRemoved();
-        }
+        disconnectT3(store,environment);
         print({{"environmentId",environment},{"connected",false}});
         return 0;
     }
@@ -361,6 +366,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                         {"authorizationUrl",ownsAttempt ? t3Setup.authorizationUrl : std::string{}},
                         {"error",ownsAttempt ? t3Setup.error : std::string{}}};
         };
+        callbacks.t3Disconnect = [&](const std::optional<std::string>& environment) { disconnectT3(store,environment); };
         callbacks.t3Connect = [&](const Person& actor, const std::string& environment, const std::string& mcpUrl) {
             validateT3ConnectTarget(environment,mcpUrl);
             const auto port = webPort.load();

@@ -1,3 +1,4 @@
+#include "flock/t3_connection.hpp"
 #include "http_fixture.hpp"
 #include "../../tests/fake_git.hpp"
 #include "flock/memory_automation.hpp"
@@ -1380,6 +1381,18 @@ void settingsEndpoints(const std::filesystem::path& path) {
         return Json{{"running",t3Started.load()},
                     {"authorizationUrl",actor.id == "owner" && t3Started ? "https://t3.example/authorize" : ""}};
     };
+    const std::string legacyEnvironment(513,'e');
+    auto connections = T3Connections(store);
+    const auto legacyBearer = connections.connect(legacyEnvironment,localOwner.id,4173);
+    cb.t3Disconnect = [&](const std::optional<std::string>& environment) {
+        if (environment) {
+            check(*environment == legacyEnvironment,"T3 disconnect callback received the wrong environment");
+            check(connections.disconnect(*environment),"last T3 environment did not leave cleanup pending");
+            throw std::runtime_error("fixture provider failure");
+        }
+        check(connections.providerCleanupPending(),"missing T3 provider registration to clean up");
+        connections.providerRemoved();
+    };
     std::atomic<bool> unavailable = false;
     std::atomic<unsigned> statusCalls = 0;
     std::atomic<bool> reconsentRequested = false;
@@ -1460,6 +1473,13 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.post("/api/settings/rule",addition,403);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     browser.post("/api/settings/model-login",{{"reconsent","true"}},400);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",false}},400);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",legacyEnvironment}},500);
+    const auto cleanup = browser.get("/api/settings");
+    check(cleanup.at("t3").is_null() && cleanup.at("t3CleanupPending") == true &&
+          !connections.authenticate(legacyBearer),"failed T3 cleanup retained access or could not be retried");
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",nullptr}});
+    check(browser.get("/api/settings").at("t3CleanupPending") == false,"retry did not clear T3 cleanup status");
     browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl",false}},400);
     browser.post("/api/settings/t3-connect",t3Target,202);
     browser.post("/api/settings/t3-connect",t3Target,409);
@@ -1486,6 +1506,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
     check(browser.get("/api/settings").at("t3Setup").is_null(),"member could see administrator T3 setup status");
     browser.post("/api/settings/t3-connect",t3Target,403);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",legacyEnvironment}},403);
+    browser.post("/api/settings/t3-disconnect",{{"environmentId",nullptr}},403);
     check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
     check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");

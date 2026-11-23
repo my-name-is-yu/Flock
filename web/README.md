@@ -72,8 +72,8 @@ MCP calls. An accepted ask can finish when the Runtime restarts with
 Adding an environment at the same port keeps a complete provider configuration.
 Reconnecting an existing environment, changing the port, or provisioning a
 missing registration rotates the shared bearer. Existing provider sessions may
-need to reload their configuration. Run `flock t3 disconnect ENVIRONMENT` to
-revoke the connection to that environment. Disconnecting the final environment
+need to reload their configuration. Choose **Disconnect** on an environment in Flock settings, or run
+`flock t3 disconnect ENVIRONMENT`, to revoke the connection to that environment. Disconnecting the final environment
 revokes the bearer and removes the provider registration. For custom provider
 installations, set `FLOCK_CLAUDE_CLI`, `FLOCK_CODEX_CLI`, `FLOCK_CODEX_CONFIG`,
 `FLOCK_CLAUDE_CONFIG`, `FLOCK_CLAUDE_SKILLS_DIR`, or `FLOCK_CODEX_SKILLS_DIR`.

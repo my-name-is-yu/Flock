@@ -175,6 +175,12 @@ UPDATE session_message_waits SET notified=1 WHERE notified=0 AND (environment=?1
     return removeProvider;
 }
 
+bool T3Connections::providerCleanupPending() const {
+    auto& db = *store_.p_;
+    std::lock_guard lock(db.mutex);
+    return db.query("SELECT 1 FROM t3_connector WHERE NOT EXISTS(SELECT 1 FROM t3_connected_environments)").next();
+}
+
 void T3Connections::providerRemoved() {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);

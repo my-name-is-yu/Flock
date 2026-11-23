@@ -249,6 +249,7 @@ let connectionsRequest = 0;
 let t3Poll = 0;
 let watchingT3 = false;
 let startingT3 = false;
+let disconnectingT3 = false;
 
 function pollConnections() {
   clearTimeout(t3Poll);
@@ -263,19 +264,24 @@ async function refreshConnections() {
     if (response.status === 401 || response.status === 403) return renderConnections({});
     if (!response.ok) throw new Error();
     const data = await response.json();
-    if (request === connectionsRequest) renderConnections(data);
+    if (request !== connectionsRequest) return false;
+    renderConnections(data);
+    return true;
   } catch {
     if (request === connectionsRequest && watchingT3) pollConnections();
   }
 }
 
-function renderConnections({t3, t3Setup, canManagePolicy: editable}) {
+function renderConnections({t3, t3Setup, canManagePolicy: editable, canDisconnectT3, t3CleanupPending}) {
   clearTimeout(t3Poll);
   $('t3-form').hidden = !t3Setup || t3Setup.running;
   watchingT3 = t3Setup?.running === true;
   $('connections').replaceChildren();
   if (t3) {
-    for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
+    for (const environment of t3.environments) {
+      const item = row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
+      if (canDisconnectT3) disconnectButton(item, 'Disconnect', environment);
+    }
     row('connections', emptyLabel('Coding agents', 'Flock is configured to use port ', command(String(t3.port)),
       ' for local Codex and Claude Code connections.'));
   } else if (editable && t3Setup) {
@@ -285,6 +291,10 @@ function renderConnections({t3, t3Setup, canManagePolicy: editable}) {
       'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on the machine running Flock.'));
   } else {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
+  }
+  if (t3CleanupPending) {
+    const item = row('connections', emptyLabel('Provider registration remains', 'T3 access is revoked. Retry removing the Flock registration from local coding agents.'));
+    disconnectButton(item, 'Retry cleanup', null);
   }
   if (watchingT3) {
     const authorization = t3Setup.authorizationUrl;
@@ -303,14 +313,50 @@ function renderConnections({t3, t3Setup, canManagePolicy: editable}) {
   }
 }
 
+function updateConnectionButtons() {
+  for (const button of $('connections').querySelectorAll('button[data-t3-disconnect]')) {
+    button.disabled = startingT3 || watchingT3 || disconnectingT3;
+  }
+  for (const control of $('t3-form').elements) control.disabled = disconnectingT3 || startingT3;
+}
+
+function disconnectButton(item, label, environment) {
+  const control = actionButton(item, label, () => void disconnectT3(environment));
+  control.classList.add('quiet-danger');
+  control.dataset.t3Disconnect = '';
+  control.disabled = startingT3 || watchingT3 || disconnectingT3;
+}
+
+async function disconnectT3(environment) {
+  if (startingT3 || watchingT3 || disconnectingT3) return;
+  disconnectingT3 = true;
+  ++connectionsRequest;
+  updateConnectionButtons();
+  let saved = false;
+  try {
+    const response = await fetch('/api/settings/t3-disconnect', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
+      body: JSON.stringify({environmentId: environment}),
+    });
+    saved = response.ok;
+  } catch {}
+  const refreshed = await refreshConnections();
+  $('status').textContent = saved
+    ? (refreshed ? (environment ? `Disconnected ${environment}.` : 'Provider registration removed.')
+                  : 'Saved. Reload to see the current connections.')
+    : 'Could not finish disconnecting. Check the current connection status.';
+  disconnectingT3 = false;
+  updateConnectionButtons();
+}
+
 $('t3-form').onsubmit = async (event) => {
   event.preventDefault();
-  if (!canManagePolicy || startingT3 || watchingT3) return;
+  if (!canManagePolicy || startingT3 || watchingT3 || disconnectingT3) return;
   const form = event.currentTarget;
   const {environmentId, mcpUrl} = Object.fromEntries(new FormData(form));
   startingT3 = true;
   ++connectionsRequest;
-  for (const control of form.elements) control.disabled = true;
+  updateConnectionButtons();
   try {
     const response = await fetch('/api/settings/t3-connect', {
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
@@ -325,7 +371,7 @@ $('t3-form').onsubmit = async (event) => {
     $('status').textContent = 'Could not start the T3 connection. Check the environment ID and MCP URL.';
   } finally {
     startingT3 = false;
-    for (const control of form.elements) control.disabled = false;
+    updateConnectionButtons();
   }
 };
 

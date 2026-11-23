@@ -38,12 +38,16 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             } catch (const std::exception&) { model = {{"unavailable",true}}; }
         }
         const auto t3Setup = canManage && callbacks.t3Setup ? callbacks.t3Setup(actor) : Json(nullptr);
-        const auto connection = T3Connections(store).settings(actor.id,actor.adminRoot);
+        const T3Connections connections(store);
+        const auto connection = connections.settings(actor.id,actor.adminRoot);
+        const bool canDisconnectT3 = canManage && bool(callbacks.t3Disconnect);
+        const bool t3CleanupPending = canDisconnectT3 && connections.providerCleanupPending();
         auto personActionNames = Json::array();
         for (const auto action : personOnlyActions) personActionNames.push_back(actionName(action));
         reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
                        {"canManagePolicy",canManage},{"model",std::move(model)},{"t3Setup",t3Setup},
                        {"personOnlyActions",std::move(personActionNames)},
+                       {"canDisconnectT3",canDisconnectT3},{"t3CleanupPending",t3CleanupPending},
                        {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
                                         : Json(nullptr)}});
     });
@@ -87,6 +91,25 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
         catch (const Conflict&) { reply(res,400,{{"error","invalid_input"}}); }
         catch (const std::exception&) { reply(res,503,{{"error","connect_unavailable"}}); }
+    });
+    server.Post("/api/settings/t3-disconnect",[&](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 8192) return reply(res,413,{{"error","payload_too_large"}});
+        try {
+            if (!store.policy().allows(person(callbacks,req),Action::rules_manage,"installation")) throw DecisionDenied{};
+            const auto args = Json::parse(req.body);
+            if (!args.is_object() || args.size() != 1) return reply(res,400,{{"error","invalid_input"}});
+            const auto& value = args.at("environmentId");
+            std::optional<std::string> environment;
+            if (!value.is_null()) {
+                environment = value.get<std::string>();
+                if (environment->empty() || environment->size() > 1024) return reply(res,400,{{"error","invalid_input"}});
+            }
+            if (!callbacks.t3Disconnect) return reply(res,409,{{"error","disconnect_unavailable"}});
+            callbacks.t3Disconnect(environment);
+            reply(res,200,{{"ok",true}});
+        } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
+        catch (const std::exception&) { reply(res,500,{{"error","disconnect_failed"}}); }
     });
     server.Post(R"(/api/settings/(mode|rule))",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 4096) return reply(res,413,{{"error","payload_too_large"}});
