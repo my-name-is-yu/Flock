@@ -23,7 +23,6 @@
   --warning: light-dark(#8a531d, #e3ad62);
   --warning-soft: light-dark(#f8eee1, #2b2216);
   --success: light-dark(#2f6b52, #74c79f);
-  --success-soft: light-dark(#e5f1e9, #16271e);
   --danger: light-dark(#a3324a, #f08c9c);
   --danger-soft: light-dark(#fcedf0, #301a1f);
   --danger-soft-hover: light-dark(#f8e0e5, #3b2026);
@@ -55,16 +54,32 @@
 
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --dur-press: 140ms;
   --dur-fast: 160ms;
-  --dur-medium: 240ms;
 
   font-family: var(--font-sans);
   font-size: 16px;
   color: var(--text);
   background: var(--canvas);
   -webkit-font-smoothing: antialiased;
+}
+/* The open Bot's avatar color drives every accent token, so controls, focus rings and the user's
+   bubbles share one hue per conversation. app.js sets --bot-accent; the default keeps Flock purple.
+   An .accent-scope element re-derives the tokens from its own --bot-accent, e.g. the Bot editor's live color. */
+@property --bot-accent { syntax: '<color>'; inherits: true; initial-value: #5a45a3; }
+@supports (color: light-dark(red, blue)) and (color: oklch(from red .5 min(c, .15) h)) {
+  :root, .accent-scope {
+    --accent: light-dark(oklch(from var(--bot-accent) .47 min(c, .15) h), oklch(from var(--bot-accent) .8 min(c, .11) h));
+    --accent-fill: light-dark(oklch(from var(--bot-accent) .5 min(c, .15) h), oklch(from var(--bot-accent) .56 min(c, .13) h));
+    --accent-fill-hover: light-dark(oklch(from var(--bot-accent) .42 min(c, .14) h), oklch(from var(--bot-accent) .62 min(c, .13) h));
+    --accent-soft: light-dark(oklch(from var(--bot-accent) .96 min(c, .025) h), oklch(from var(--bot-accent) .26 min(c, .035) h));
+    --accent-soft-hover: light-dark(oklch(from var(--bot-accent) .93 min(c, .04) h), oklch(from var(--bot-accent) .3 min(c, .045) h));
+    --focus: light-dark(oklch(from var(--bot-accent) .55 min(c, .16) h), oklch(from var(--bot-accent) .74 min(c, .13) h));
+  }
+  :root { transition: --bot-accent var(--dur-medium) var(--ease-out); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { transition: none; }
 }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }
@@ -76,7 +91,6 @@
   transition-duration: 220ms;
   transition-timing-function: cubic-bezier(.2, .8, .2, 1);
 }
-::backdrop { --backdrop: rgb(10 10 14 / .5); }
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }

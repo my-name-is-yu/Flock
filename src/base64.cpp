@@ -37,7 +37,7 @@ std::string encodeBase64(std::string_view bytes) {
     return result;
 }
 
-std::string decodeBase64(std::string_view input, std::size_t maxBytes, Base64Padding paddingPolicy) {
+std::string decodeBase64(std::string_view input, std::size_t maxBytes) {
     const auto size = base64DecodedSize(input);
     if (!size) throw std::invalid_argument("Invalid Base64 length");
     if (*size > maxBytes) throw std::length_error("Decoded Base64 exceeds the byte limit");
@@ -52,8 +52,7 @@ std::string decodeBase64(std::string_view input, std::size_t maxBytes, Base64Pad
         const int c = blockPadding == 2 ? 0 : digit(input[i + 2]);
         const int d = blockPadding ? 0 : digit(input[i + 3]);
         if (a < 0 || b < 0 || c < 0 || d < 0) throw std::invalid_argument("Invalid Base64 character or padding");
-        if (paddingPolicy == Base64Padding::Canonical &&
-            ((blockPadding == 2 && (b & 15)) || (blockPadding == 1 && (c & 3))))
+        if ((blockPadding == 2 && (b & 15)) || (blockPadding == 1 && (c & 3)))
             throw std::invalid_argument("Nonzero unused Base64 padding bits");
 
         result += static_cast<char>((a << 2) | (b >> 4));

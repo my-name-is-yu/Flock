@@ -101,6 +101,7 @@ function runAnimation(element, keyframes, options) {
 }
 
 export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
+  dialog.classList.add('accent-scope');
   dialog.innerHTML = `
     <section class="studio-start" id="studio-start" hidden>
       <header class="studio-head">
@@ -501,6 +502,8 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
   function renderAppearance({ animateTabSwitch = false, prevKind = state.kind, animateChoices = false } = {}) {
     els.studio.style.setProperty('--avatar-color', state.color);
+    // Preview the accent the Bot will get: Create, focus rings and selections follow the chosen color.
+    dialog.style.setProperty('--bot-accent', state.color);
     for (const tab of els.tabs.querySelectorAll('button[data-kind]')) {
       tab.setAttribute('aria-pressed', String(tab.dataset.kind === state.kind));
     }
@@ -540,6 +543,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     dialog.setAttribute('aria-labelledby', step === 'start' ? 'studio-start-title' : 'studio-title');
     setSubmitError('');
     if (step === 'start') {
+      dialog.style.removeProperty('--bot-accent');
       els.tabs.classList.remove('seg-animated');
       destroyHero();
       onDraft?.(null);
