@@ -312,9 +312,10 @@ void stop(Scenario& fixture) {
     fixture.mini.configure({{"multiDisconnected",true},{"multiHoldSettlement",true}});
     fixture.local.configure({{"multiHoldSettlement",true}});
     fixture.cancel();
-    fixture.advanceUntil([&](const Json&) {
-        return fixture.local.effects("t3_thread_interrupt").size() == 1;
-    },"the available Run should be interrupted");
+    fixture.advanceUntil([&](const Json& task) {
+        return fixture.local.effects("t3_thread_interrupt").size() == 1 &&
+               Scenario::result(task,fixture.mini).value("status","") == "confirmation_pending";
+    },"the connected Run should be interrupted while the disconnected Run awaits confirmation");
     check(fixture.task().at("state") == "cancelling" && fixture.mini.effects("t3_thread_interrupt").empty(),
           "stop released a disconnected Run or interrupted the wrong environment");
     fixture.local.configure({{"multiHoldSettlement",false}});

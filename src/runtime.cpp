@@ -899,16 +899,17 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
         using Kind = Observation::Kind;
         changeTask(id,[&](Json& current) {
             auto& saved = verificationRun(current,key);
-            if (!verificationRunOutstanding(saved) || current.at("state") == "cancelling") return false;
+            if (!verificationRunOutstanding(saved)) return false;
+            const bool stopping = current.at("state") == "cancelling";
             bool changed = false;
             if (observed.kind == Kind::Unavailable)
                 changed = setCheckStatus(saved,"confirmation_pending","Flock could not confirm the Run's status in T3.");
             else if (observed.kind == Kind::Question || observed.kind == Kind::ExternalInput)
                 changed = setCheckStatus(saved,"confirmation_pending","Review the pending input or approval in this T3 Session.");
-            else
+            else if (!stopping)
                 changed = setCheckStatus(saved,observed.status == "queued" ? "queued" : "running",{});
             const auto deadline = saved.value("deadline",Seconds{});
-            if (current.at("wait").is_null() && deadline > 0 && now >= deadline) {
+            if (!stopping && current.at("wait").is_null() && deadline > 0 && now >= deadline) {
                 db.wait(current,"deadline",{{"text",field(saved,"name") + " reached its deadline"},
                     {"runActionId",key},{"run",{{"threadId",ref.threadId},{"runId",ref.runId},
                                                {"link",ref.link},{"environmentId",cmd.environmentId}}}});
