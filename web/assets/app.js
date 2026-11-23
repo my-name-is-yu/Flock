@@ -1419,7 +1419,7 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
-function eventCard(event, context, place, report) {
+function eventCard(event, context, place, report, approval) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
@@ -1476,8 +1476,6 @@ function eventCard(event, context, place, report) {
     else if (pendingWait) {
       const open = node('div', 'event-actions question-actions');
       if (pendingWait.wait.reason === 'policy_approval') {
-        const approval = decisions.itemsFor(view.id).find(item =>
-          item.itemKind === 'policy_approval' && item.taskId === pendingWait.id && item.waitId === data.id);
         if (approval) {
           const control = button('Review approval…', 'button', () => decisions.openItem(approval, control));
           open.append(control);
@@ -1974,16 +1972,18 @@ function conversationRows(data, events, keep, source) {
     const place = messagePlacement(previous, event, shown[index + 1]?.event);
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
+    const approval = wait?.wait.reason === 'policy_approval'
+      ? approvals.find(item => item.taskId === wait.id && item.waitId === wait.wait.id) : null;
     const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
-        place.groupStart, place.taskStart, place.afterQuestion, wait,
+        place.groupStart, place.taskStart, place.afterQuestion, wait, approval,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
-      () => eventCard(event, timeline, place, report));
+      () => eventCard(event, timeline, place, report, approval));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
     row.classList.toggle('group-continues', !place.groupEnd);
     row.classList.toggle('conversation-source-target', event.id === source?.id);

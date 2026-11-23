@@ -1,9 +1,9 @@
 import { actionLabel } from '/action-labels.mjs';
+
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
 let currentMode;
 const ruleLabels = {never: 'Never', ask: 'Ask first', allow: 'Allow'};
-
 
 function emptyLabel(title, detail) {
   const label = document.createElement('span');

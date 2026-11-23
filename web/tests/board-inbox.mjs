@@ -251,7 +251,11 @@ function liveFixture() {
   const bot = { id: 'release', name: 'Release', latestIncomingEventId: 0 };
   const decision = { botId: bot.id, botName: bot.name, itemKind: 'user_question', itemId: 1, waitId: 1,
     taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'Draft notes', prompt: 'Which branch?' };
-  const fixture = window.inboxFixture = { reads: 0, updated: false, failed: false };
+  const approval = { ...decision, itemKind: 'policy_approval', itemId: 2, taskId: 2, waitId: 2,
+    action: 'repository.pr', target: 'team/guide', requestTitle: 'repository.pr · team/guide',
+    prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true };
+  const wait = {id: 2, reason: 'policy_approval', text: approval.requestTitle};
+  const fixture = window.inboxFixture = { reads: 0, approvalReady: false, updated: false, failed: false };
   window.EventSource = class extends EventTarget {
     constructor(path) {
       super();
@@ -264,7 +268,8 @@ function liveFixture() {
     const headers = { 'X-Flock-Viewer': '"viewer"' };
     if (path === '/api/bots') return Response.json([bot], { headers });
     if (path.startsWith('/api/view?')) return Response.json({
-      bot, events: [], olderBefore: 0, presence: 'idle', sessionTasks: [], waits: [], historyCursor: 0,
+      bot, events: [{id: 4, taskId: 2, time: 1, kind: 'waiting', data: wait}],
+      olderBefore: 0, presence: 'idle', sessionTasks: [], waits: [{id: 2, wait}], historyCursor: 0,
       sessionCursor: 0, canDecide: true, composerPerson: 'viewer',
     }, { headers });
     if (path === '/api/inbox') {
@@ -273,7 +278,7 @@ function liveFixture() {
         fixture.failed = true;
         return Response.json({ error: 'server_error' }, { status: 503 });
       }
-      return Response.json({ items: fixture.updated ? [] : [decision] });
+      return Response.json({ items: fixture.updated ? [] : fixture.approvalReady ? [decision, approval] : [decision] });
     }
     throw new Error('Unexpected route ' + path);
   };
@@ -293,11 +298,18 @@ async function exerciseLiveRetry() {
   await waitFor(() => !trigger.hidden && fixture.stream?.path === '/api/events?bot=release',
     'The Inbox did not load on the Bot stream');
   const stream = fixture.stream;
+  await waitFor(() => document.getElementById('event-4'), 'The pending wait did not appear');
   const reads = fixture.reads;
+  fixture.approvalReady = true;
   stream.dispatchEvent(new Event('ready'));
   await waitFor(() => fixture.reads > reads, 'The ready stream did not catch up');
-  trigger.click();
-  if (panel.hidden) throw new Error('The Inbox pending panel did not open before the invalidation');
+  const review = () => [...document.querySelectorAll('#event-4 button')]
+    .find(button => button.textContent === 'Review approval…');
+  await waitFor(review, 'A late Inbox response did not attach the approval to its wait');
+  review().click();
+  if (panel.hidden || !panel.textContent.includes('Pull request: 42') || !panel.textContent.includes('State: closed') ||
+      ![...panel.querySelectorAll('button')].some(button => button.textContent === 'Allow once'))
+    throw new Error('The wait did not open the exact approval with its requested change');
   fixture.updated = true;
   stream.dispatchEvent(new MessageEvent('change', { data: '{"list":true}' }));
   await waitFor(() => fixture.failed, 'The live invalidation did not fetch the Inbox');
