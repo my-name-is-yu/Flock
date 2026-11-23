@@ -1,8 +1,13 @@
+import { accentColor } from '/avatars.js';
+
 const [, , botId] = location.pathname.split('/').map(decodeURIComponent);
 const $ = (id) => document.getElementById(id);
 $('back').href = '/?' + new URLSearchParams({bot: botId});
 fetch('/api/bots').then(r => r.ok ? r.json() : []).then(bots => {
-  $('back-label').textContent = bots.find(bot => bot.id === botId)?.name || botId;
+  const bot = bots.find(item => item.id === botId);
+  $('back-label').textContent = bot?.name || botId;
+  // This page belongs to one Bot, so it wears that Bot's accent like its conversation does.
+  if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
 }).catch(() => { $('back-label').textContent = botId; });
 function post(url, data) {
   return fetch(url, {
@@ -59,10 +64,33 @@ async function load() {
     });
   }
   $('secrets').hidden = !$('inputs').childElementCount;
-  $('sharing').hidden = !data.canManageMembers;
+  // Always say who can use this Bot; an empty page reads as broken.
+  $('sharing').hidden = false;
+  $('members').hidden = !data.canManageMembers;
   for (const person of data.members) {
-    button(row('people',person),'Remove',() => submit('members',{person,add:false}));
+    const item = row('people',person);
+    if (data.canManageMembers) button(item,'Remove',() => submit('members',{person,add:false}));
   }
+  if (!data.members.length) {
+    const [title, detail] = !data.canManage
+      ? ['Only you', 'The Bot’s owner decides who else can use it.']
+      : data.canManageMembers
+        ? ['Only you', 'Add a person ID below to let someone else talk to this Bot.']
+        : ['Only you', 'To share this Bot, set FLOCK_WEB_IDENTITIES_FILE and restart Flock so people can sign in.'];
+    note('people', title, detail);
+  }
+}
+function note(id, title, detail) {
+  const item = document.createElement('p');
+  const label = document.createElement('span');
+  label.className = 'row-label';
+  const heading = document.createElement('strong');
+  heading.textContent = title;
+  const sub = document.createElement('small');
+  sub.textContent = detail;
+  label.append(heading, sub);
+  item.append(label);
+  $(id).append(item);
 }
 async function loadMachines() {
   const response = await fetch('/api/channels/local-connections');
