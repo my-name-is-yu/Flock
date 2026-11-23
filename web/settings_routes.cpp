@@ -2,6 +2,8 @@
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
 
+#include <algorithm>
+
 namespace flockv0::web {
 Person person(const WebCallbacks& callbacks, const httplib::Request& request) {
     if (!callbacks.authenticate) return request.has_header("Authorization") ? Person{} : localOwner;
@@ -10,6 +12,9 @@ Person person(const WebCallbacks& callbacks, const httplib::Request& request) {
 }
 
 namespace {
+constexpr Action personOnlyActions[] = {Action::bot_view,Action::bot_talk,Action::bot_decide,
+    Action::bot_settings,Action::rules_manage};
+
 void reply(httplib::Response& res, int status, const Json& value) {
     res.status = status;
     res.set_content(value.dump(),"application/json");
@@ -22,17 +27,20 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         auto policy = store.policy();
         const auto connection = T3Connections(store).settings(actor.id,actor.adminRoot);
         const bool canManage = policy.allows(actor,Action::rules_manage,"installation");
-        // Only installation roots see which model account Flock uses.
         Json model = nullptr;
         if (canManage && callbacks.modelStatus) {
             try {
                 const auto status = callbacks.modelStatus();
                 model = {{"connected",status.value("connected",false)},{"account",status.value("account","")},
-                         {"planUsage",status.value("planUsage",false)},{"demo",status.value("demo",false)}};
+                         {"planUsage",status.value("planUsage",false)},{"demo",status.value("demo",false)},
+                         {"needsSignIn",status.value("needsSignIn",false)}};
             } catch (const std::exception&) { model = {{"unavailable",true}}; }
         }
+        auto personActionNames = Json::array();
+        for (const auto action : personOnlyActions) personActionNames.push_back(actionName(action));
         reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
-                       {"canManagePolicy",canManage},{"model",model},
+                       {"canManagePolicy",canManage},{"model",std::move(model)},
+                       {"personOnlyActions",std::move(personActionNames)},
                        {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
                                         : Json(nullptr)}});
     });
@@ -59,7 +67,9 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                 if (!action || !kind) return reply(res,400,{{"error","invalid_input"}});
                 const auto target = args.at("target").get<std::string>();
                 const auto add = args.at("add").get<bool>();
-                if (add && target.empty()) return reply(res,400,{{"error","invalid_input"}});
+                if (add && (trimSessionQuestionText(target).empty() ||
+                    std::ranges::find(personOnlyActions,*action) != std::end(personOnlyActions)))
+                    return reply(res,400,{{"error","invalid_input"}});
                 policy.changeRule(actor,*kind,*action,target,add);
             }
             reply(res,200,{{"ok",true}});

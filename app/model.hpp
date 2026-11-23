@@ -11,6 +11,7 @@ public:
     ModelTurn decide(const ModelInput&) override;
     Json login(bool printUrl, bool reconsent);
     Json status();
+    Json webStatus();
     Json models();
 private:
     std::filesystem::path directory_;

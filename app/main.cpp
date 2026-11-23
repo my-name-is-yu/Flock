@@ -228,7 +228,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
     } else {
         auto chatgpt = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
-        modelStatus = [model = chatgpt.get()] { return model->status(); };
+        modelStatus = [model = chatgpt.get()] { return model->webStatus(); };
         model = std::move(chatgpt);
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
