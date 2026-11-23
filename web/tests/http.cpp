@@ -63,6 +63,13 @@ void boundary(Browser& browser) {
         {"Sec-Fetch-Mode","navigate"},{"Sec-Fetch-Dest","document"}};
     Browser::checked(browser.client.Get("/settings/release/access",channelNavigation),403);
     Browser::checked(browser.client.Get("/settings/release/access"),404);
+    const auto missingPage = browser.client.Get("/settings/release/access",httplib::Headers{{"Accept","text/html,*/*"}});
+    check(missingPage && missingPage->status == 404 &&
+          missingPage->get_header_value("Content-Type").starts_with("text/html") &&
+          missingPage->body.find("Page not found") != std::string::npos,"browser navigation to a missing page did not get the HTML page");
+    const auto missingApi = browser.client.Get("/api/missing",httplib::Headers{{"Accept","text/html,*/*"}});
+    check(missingApi && missingApi->status == 404 && missingApi->body.find("http_error") != std::string::npos,
+          "a missing API route returned HTML instead of a JSON error");
     const auto draft = R"({"botId":"release","clientMessageId":"draft","text":"do not accept this"})";
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/",httplib::Headers{{"Host","rebound.invalid"}}),403);

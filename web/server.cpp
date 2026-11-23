@@ -193,8 +193,19 @@ public:
         server_.set_exception_handler([](const Request&, Response& res, std::exception_ptr) {
             error(res,500,"server_error");
         });
-        server_.set_error_handler([](const Request&, Response& res) {
-            if (res.body.empty()) error(res,res.status,"http_error");
+        server_.set_error_handler([](const Request& req, Response& res) {
+            if (!res.body.empty()) return;
+            // A browser following a stale or mistyped link gets a page, not a JSON error.
+            const bool page = res.status == 404 && req.method == "GET" && !req.path.starts_with("/api/") &&
+                !req.path.starts_with("/mcp") && req.get_header_value("Accept").find("text/html") != std::string::npos;
+            if (page) {
+                for (const auto& asset : web::assets) {
+                    if (asset.path != "/not-found.html") continue;
+                    res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
+                    return;
+                }
+            }
+            error(res,res.status,"http_error");
         });
         for (const auto& asset : web::assets) {
             const auto path = asset.path == "/index.html" ? "/" :

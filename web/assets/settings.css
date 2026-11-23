@@ -126,3 +126,5 @@ form .button { min-height: 2.1rem; }
 #supervised:checked::before { justify-self: end; background: var(--raised); }
 
 [hidden] { display: none !important; }
+
+.not-found-home { display: inline-flex; text-decoration: none; }
