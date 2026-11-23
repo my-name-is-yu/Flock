@@ -94,8 +94,7 @@ Json readThread(Client&, std::string_view threadId, std::string_view view, unsig
 void advancePosition(const Json&, Id&);
 bool gitCommit(std::string_view sha);
 bool loopbackGitHost(std::string_view origin);
-std::optional<WorkspaceHead> workspaceHead(Client&, std::string_view projectId, const Json& thread,
-                                            bool requireSeparateWorktree);
+std::optional<WorkspaceHead> workspaceHead(Client&, std::string_view projectId, const Json& thread);
 bool moreHistory(const Json&, Id after, Id start);
 std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path&, const SessionTarget&, bool includeMessages,
                                                SessionReadDeadline);

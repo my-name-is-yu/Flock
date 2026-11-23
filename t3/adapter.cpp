@@ -605,7 +605,7 @@ std::optional<RunEvidence> pinnedEvidenceProblem(Client& client, const Json& con
     if (!gitCommit(pin) || !loopbackGitHost(origin)) return problem;
     const auto head = threadHead(client,source.threadId);
     const auto& thread = head.at("thread");
-    const auto actual = workspaceHead(client,str(thread,"projectId"),thread,true);
+    const auto actual = workspaceHead(client,str(thread,"projectId"),thread);
     if (!actual) return problem;
     if (actual->clean && actual->commit == pin) return {};
     problem.availability = RunEvidence::Availability::Available;
@@ -715,7 +715,7 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
-        const auto workspace = workspaceHead(client,command.projectId,thread,true);
+        const auto workspace = workspaceHead(client,command.projectId,thread);
         if (!workspace || !workspace->clean || workspace->commit != pin)
             return {Outcome::NotAccepted,{},"The provisioned specialist worktree does not match the saved commit",true};
         const auto sent = client.call("t3_thread_send",{{"threadId",threadId},{"mode","queue"},
@@ -844,8 +844,7 @@ public:
                         if (!loopbackGitHost(origin))
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                         const auto head = threadHead(client,recovered.run.threadId);
-                        const auto workspace = workspaceHead(client,command.projectId,
-                                                             head.at("thread"),true);
+                        const auto workspace = workspaceHead(client,command.projectId,head.at("thread"));
                         if (!workspace || !workspace->clean || workspace->commit != pin)
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                     }
@@ -871,7 +870,10 @@ public:
             const auto reply = wait(client,run,WaitFor::Run,1);
             if (str(reply,"runId") != run.runId) return {};
             const auto status = str(reply,"status");
-            if (terminal(status)) return status == "completed" ? "finished" : "failed";
+            if (terminal(status)) {
+                if (boolean(reply,"timedOut")) return {};
+                return status == "completed" ? "finished" : "failed";
+            }
             if (!active(status)) return "unknown";
             if (status == "queued" || status == "preparing" || status == "starting") return {};
             if (pending(client,run.threadId).empty()) return {};

@@ -175,10 +175,21 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
     } catch (const ToolError& failure) { error = failure.what(); }
     const SessionTarget target{command.environmentId,command.target.threadId};
     const Resource resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target};
-    const auto connected = [&] {
-        return connectedSearchEnvironments(message).contains(target.environmentId) &&
-            Policy(*this).allows(message.bot,Action::environment_inspect,target.environmentId);
+    const auto saveReceipt = [&](const Delivery& receipt) {
+        if (receipt.kind == Delivery::Kind::Accepted && receipt.run.threadId == target.threadId &&
+            !receipt.run.runId.empty() && (receipt.delivery == "started" || receipt.delivery == "queued")) {
+            if (!sessionParticipationStopped(message.bot,target))
+                exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run) VALUES(?,?,?,?,?)",
+                     {id,message.bot,target.environmentId,target.threadId,receipt.run.runId});
+            save({{"ok",true},{"delivery",receipt.delivery},{"environmentId",target.environmentId},{"threadId",target.threadId}});
+        } else {
+            auto result = toolFailure(receipt.detail.empty() ? "Could not confirm delivery to T3" : receipt.detail);
+            if (!receipt.definitelyUnsent && (receipt.kind == Delivery::Kind::Unknown || receipt.kind == Delivery::Kind::Accepted))
+                result["delivery"] = "unknown";
+            save(std::move(result));
+        }
     };
+    constexpr auto stopped = "This Bot's participation in the Session has stopped";
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -186,32 +197,47 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step});
         if (!row.next()) return false;
         if (!row.string(0).empty()) {
-            save({{"ok",false},{"delivery","unknown"},{"error","Flock restarted while sending this. Check the Session before sending again."}});
+            if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end())
+                saveReceipt(receipt->second);
+            else save({{"ok",false},{"delivery","unknown"},{"error","Flock restarted while sending this. Check the Session before sending again."}});
+        } else if (sessionParticipationStopped(message.bot,target)) {
+            save(toolFailure(stopped));
         } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
             save(webEvidenceActionDenied());
         } else if (!error.empty()) {
             save(toolFailure(error));
         } else if (Policy(*this).forbidden(message.bot,resource.action,resource.target)) {
             save(toolFailure(approvalError(ApprovalGate::denied)));
-        } else if (!connected()) {
+        } else if (!connectedSessionAccess(message,target)) {
             save(toolFailure("This Session is unavailable through your T3 connection"));
         }
         auto result = query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NOT NULL",{id,step});
         const bool done = result.next();
         transaction.commit();
-        if (done) return true;
+        if (done) {
+            sessionSendReceipts.erase(id);
+            return true;
+        }
     }
     try {
         command.authGeneration = t3.authGeneration(target.environmentId,command.config);
         if (!t3.sessionMetadata(target,false))
             error = "This Session is unavailable through your T3 connection";
     } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
+    // A stop takes the exclusive lock. Hold this through the wire call so a stop cannot
+    // commit between recording a dispatch and starting it.
+    std::shared_lock dispatch(sessionDispatchMutex);
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (shutdown.stop_requested()) return false;
         if (!authorizeTurn(message)) { transaction.commit(); return false; }
-        if (!error.empty() || !connected()) {
+        if (sessionParticipationStopped(message.bot,target)) {
+            save(toolFailure(stopped));
+            transaction.commit();
+            return true;
+        }
+        if (!error.empty() || !connectedSessionAccess(message,target)) {
             save(toolFailure(error.empty() ? "This Session is unavailable through your T3 connection" : error));
             transaction.commit();
             return true;
@@ -239,21 +265,12 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         receipt.detail = "Could not confirm delivery to T3";
     }
     std::lock_guard lock(mutex);
+    // If SQLite is busy, retry the receipt write without repeating the T3 send.
+    const auto checkpoint = sessionSendReceipts.insert_or_assign(id,std::move(receipt)).first;
     Transaction transaction(db);
-    if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step}).next())
-        return false;
-    if (receipt.kind == Delivery::Kind::Accepted && receipt.run.threadId == target.threadId &&
-        !receipt.run.runId.empty() && (receipt.delivery == "started" || receipt.delivery == "queued")) {
-        exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run) VALUES(?,?,?,?,?)",
-             {id,message.bot,target.environmentId,target.threadId,receipt.run.runId});
-        save({{"ok",true},{"delivery",receipt.delivery},{"environmentId",target.environmentId},{"threadId",target.threadId}});
-    } else {
-        auto result = toolFailure(receipt.detail.empty() ? "Could not confirm delivery to T3" : receipt.detail);
-        if (!receipt.definitelyUnsent && (receipt.kind == Delivery::Kind::Unknown || receipt.kind == Delivery::Kind::Accepted))
-            result["delivery"] = "unknown";
-        save(std::move(result));
-    }
+    saveReceipt(checkpoint->second);
     transaction.commit();
+    sessionSendReceipts.erase(checkpoint);
     return true;
 }
 
@@ -269,8 +286,10 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
     for (const auto& wait : waits) {
         if (shutdown.stop_requested()) return;
         const auto authorized = [&] {
-            return connectedSearchEnvironments(loadTurnMessage(wait.message)).contains(wait.target.environmentId) &&
-                Policy(*this).allows(wait.bot,Action::environment_inspect,wait.target.environmentId);
+            const auto message = loadTurnMessage(wait.message);
+            return !sessionParticipationStopped(wait.bot,wait.target) &&
+                (message.principalSource != conversation::PrincipalSource::session || activeSessionOrigin(message)) &&
+                connectedSessionAccess(message,wait.target);
         };
         // A revoked connection settles the wait silently, including on restart.
         const auto settle = [&] {

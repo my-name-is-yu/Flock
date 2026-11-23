@@ -32,7 +32,6 @@ export const actionLabels = {
   'channel.use': 'Use channels',
   'channel.read': 'Read channel messages',
   'channel.post': 'Post channel messages',
-  't3.coordinate': 'Coordinate T3 work',
   't3.send': 'Send messages to T3',
   'automation.change': 'Change automations',
   'email.send': 'Send email',

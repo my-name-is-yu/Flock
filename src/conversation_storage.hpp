@@ -6,7 +6,7 @@
 #include <limits>
 
 namespace flockv0::conversation {
-enum class PrincipalSource { gitWebhook = 0, trusted = 1, web = 2, channel = 3 };
+enum class PrincipalSource { gitWebhook = 0, trusted = 1, web = 2, channel = 3, session = 4 };
 
 struct QuestionAnchor {
     Id messageId, taskId;

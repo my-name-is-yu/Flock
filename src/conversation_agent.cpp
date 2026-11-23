@@ -356,6 +356,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
     auto history = conversationHistory(message,summaries,expandedBytes);
     Json event{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
                {"currentTime",now},{"replyTo",std::move(replyTo)},{"turn",std::move(turn)}};
+    if (message.routing.contains("sessionOrigin")) event["sessionOrigin"] = message.routing.at("sessionOrigin");
     if (message.routing.contains("sessionWake")) event["sessionWake"] = message.routing.at("sessionWake");
     event.update(channel);
     if (web) event["attachments"] = attachmentViews(message.id);
@@ -629,6 +630,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     releaseModelCall(takeReservedConversationCall(message.id));
     exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
+    sessionSendReceipts.erase(message.id);
 }
 
 void Store::Impl::pauseTurn(const Message& message) {
@@ -652,6 +654,10 @@ Person Store::Impl::turnActor(const Message& message) {
         case PrincipalSource::trusted: return admitted;
         case PrincipalSource::channel: return {admitted.id,false};
         case PrincipalSource::gitWebhook: return {};
+        case PrincipalSource::session: {
+            try { return sessionActor(admitted.id); }
+            catch (const std::exception&) { return {}; }
+        }
         case PrincipalSource::web: {
             if (!resolveWebIdentity) return {};
             try {
@@ -672,6 +678,10 @@ bool Store::Impl::authorizeTurn(const Message& message) {
         releaseModelCall(takeReservedConversationCall(message.id));
         exec("UPDATE conversation_turns SET status='done' WHERE message_id=?",{message.id});
         exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
+        return false;
+    }
+    if (message.principalSource == PrincipalSource::session && !activeSessionOrigin(message)) {
+        finishTurn(message,"The T3 Session participation has ended.",nullptr,"session_access");
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {

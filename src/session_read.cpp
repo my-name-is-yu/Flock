@@ -73,7 +73,8 @@ Json scopedResult(Json result, Json sessions = Json::array()) {
 bool humanSessionRequest(const conversation::Message& message) {
     return message.channelScope.empty() &&
         (message.principalSource == conversation::PrincipalSource::trusted ||
-         message.principalSource == conversation::PrincipalSource::web);
+         message.principalSource == conversation::PrincipalSource::web ||
+         message.principalSource == conversation::PrincipalSource::session);
 }
 
 std::set<std::string> configuredSessionEnvironments(const Json& routing) {
@@ -357,8 +358,7 @@ private:
 
     bool inSessionScope(const SessionTarget& target, bool connected) const {
         if (connected)
-            return policy_.allows(bot_,Action::environment_inspect,target.environmentId) &&
-                store_.connectedSearchEnvironments(message_).contains(target.environmentId);
+            return store_.connectedSessionAccess(message_,target);
         if (!channelScope_.empty()) {
             std::lock_guard lock(store_.mutex);
             if (!store_.query(R"SQL(
@@ -663,6 +663,18 @@ WHERE (? OR person_id=?) AND NOT EXISTS (SELECT 1 FROM bot_members WHERE bot=?)
     return result;
 }
 
+bool Store::Impl::connectedSessionAccess(const conversation::Message& message, const SessionTarget& target) {
+    std::lock_guard lock(mutex);
+    Policy policy(*this);
+    if (!policy.allows(message.bot,Action::environment_inspect,target.environmentId)) return false;
+    if (message.principalSource == conversation::PrincipalSource::session) {
+        const auto& origin = message.routing.at("sessionOrigin");
+        if (origin.at("environmentId") == target.environmentId && origin.at("threadId") == target.threadId)
+            return activeSessionOrigin(message) && policy.allows(turnActor(message),Action::bot_decide,message.bot);
+    }
+    return connectedSearchEnvironments(message).contains(target.environmentId);
+}
+
 std::optional<WorkSession> Store::Impl::resolveWorkSession(const conversation::Message& message,
                                                          std::string_view sessionRef, T3& t3) {
     Policy policy(*this);
@@ -678,7 +690,7 @@ bool Store::Impl::permitsWorkSession(const conversation::Message& message, const
         !policy.allows(message.bot,Resource::sessionRead(session.environmentId,session.threadId)) ||
         !query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?",{session.environmentId}).next())
         return false;
-    if (connectedSearchEnvironments(message).contains(session.environmentId)) return true;
+    if (connectedSessionAccess(message,{session.environmentId,session.threadId})) return true;
     return field(message.routing,"projectId") == session.projectId &&
         configuredSessionEnvironments(message.routing).contains(session.environmentId);
 }

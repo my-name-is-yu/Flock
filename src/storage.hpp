@@ -1,6 +1,5 @@
 #pragma once
 #include "flock/policy.hpp"
-#include "flock/participation.hpp"
 #include "flock/secrets.hpp"
 #include "workspace_internal.hpp"
 #include "flock/board_inbox.hpp"
@@ -10,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <shared_mutex>
 #include <sqlite3.h>
 #include <utility>
 #include <variant>
@@ -64,9 +64,6 @@ struct CheckedModelTurn {
     Json usage;
 };
 
-struct ConversationWorkflowOrigin { Id messageId; };
-struct ReceivedPeerWork { std::string delegationId, requestId, startKey; };
-using WorkflowOrigin = std::variant<ConversationWorkflowOrigin, ReceivedPeerWork>;
 
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
@@ -122,11 +119,15 @@ struct Store::Impl {
     WebIdentityResolver resolveWebIdentity;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
+    std::shared_mutex sessionDispatchMutex;
     std::function<Seconds()> policyClock = unixTime;
     void openSchema();
     void initializeSchema();
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
+    Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource,
+                           std::string_view clientId, std::string_view text, Id replyTo = 0,
+                           const SessionTarget* origin = nullptr);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
     void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
@@ -160,9 +161,10 @@ struct Store::Impl {
     void releasePolicyTurn(Id turn);
     void releasePolicyTask(Id approval, std::string_view resolution);
     void initializeParticipationSchema();
-    void initializeRootDeliverySchema();
-    void initializeSessionHandoffSchema();
-    Participation authorizeParticipation(const Person&, Id channel, bool requireConnection = true);
+    Person sessionActor(std::string_view person);
+    bool activeSessionOrigin(const conversation::Message&) const;
+    bool sessionParticipationStopped(std::string_view bot, const SessionTarget&) const;
+    bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     void initializeMemorySchema();
     void initializeAutomationSchema();
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
@@ -229,12 +231,11 @@ struct Store::Impl {
     Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;
     Json conversationHistory(const conversation::Message&, const Json& summaries, std::size_t expandedBytes) const;
     Json contextTool(std::string_view tool, const Json&, const conversation::Message&, int step);
-    Id startWorkflow(const WorkflowOrigin&, const Json& args, std::string_view bot, const Json& routing,
-                     std::string_view inputArtifactVersion = {});
+    Id startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing);
     Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);
     Json workflowStatus(Id id, std::string_view bot, Seconds now) const;
     void advanceWorkflows(Seconds now);
-    void materializeWorkflowStages(Id scopedWorkflow = 0);
+    void materializeWorkflowStages();
     void appendStageRequirements(std::string& instruction, const Json& task) const;
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
@@ -275,6 +276,7 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
+    std::map<Id,Delivery> sessionSendReceipts;
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, std::stop_token);
     bool sendSessionMessage(const conversation::Message&, int, const Decision&, bool hasWebEvidence, T3&, std::stop_token);
@@ -314,7 +316,6 @@ struct Store::Impl {
     bool waitIsActionable(const Json& task) const;
     Id waitAnchor(Id task, Id wait) const;
     std::optional<PeerExchange> peerExchange(Id) const;
-    void initializeSpecialistSchema();
     bool peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const;
     bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);

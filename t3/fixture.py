@@ -161,7 +161,7 @@ class Fixture(BaseHTTPRequestHandler):
                     and state.get("dropAnswerReply")):
                 self.close_connection = True
                 return
-            if tool["name"] == "t3_thread_send" and (state.get("stockDropSendReply") or state.get("selectedDropSendReply")):
+            if tool["name"] == "t3_thread_send" and state.get("selectedDropSendReply"):
                 self.close_connection = True
                 return
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
@@ -347,6 +347,8 @@ class Fixture(BaseHTTPRequestHandler):
                 ("afterPosition" in args and state.get("ownershipReadFailure"))):
             return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "History is unavailable."}
         thread_id = args["threadId"]
+        if state.get("sessionAskFixture") and thread_id not in ("thread", "other-thread"):
+            return {"_tag": "OrchestratorMcpFailure", "code": "thread_not_found"}
         active = {"manual-active": "unrelated", "running": "root", "resumed": "continued"}.get(scenario)
         latest = "later" if scenario.endswith("-result") else (active or "root")
         count = 1 if scenario in ("question", "ambiguous", "approval", "race", "settling-input") else 0
@@ -500,113 +502,35 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["mode"] == "queue"
             assert set(args) == {"threadId", "message", "mode", "clientRequestId"}
             thread = args["threadId"]
-            if thread == "human":
-                if state.get("stockRootRecovery"):
-                    assert args["message"].startswith("[Flock Bot planner | ")
-                    state["stockRootInput"] = args["message"]
-                else:
-                    assert args["clientRequestId"] == "command-1" and args["message"] == "[Flock result] Complete."
+            assert thread == "pinned-worker" and args["clientRequestId"] == "pinned-worker:start"
+            assert "Check fixture" in args["message"]
+            prompts = state.setdefault("stockPromptSends", {})
+            key = thread + ":" + args["clientRequestId"]
+            payload = {name: args[name] for name in sorted(args)}
+            if key in prompts:
+                assert prompts[key]["payload"] == payload, "same-key first-prompt retry changed its payload"
+                prompts[key]["replays"] += 1
             else:
-                assert thread == "pinned-worker" and args["clientRequestId"] == "pinned-worker:start"
-                assert "Check fixture" in args["message"]
-            if thread != "human":
-                prompts = state.setdefault("stockPromptSends", {})
-                key = thread + ":" + args["clientRequestId"]
-                payload = {name: args[name] for name in sorted(args)}
-                if key in prompts:
-                    assert prompts[key]["payload"] == payload, "same-key first-prompt retry changed its payload"
-                    prompts[key]["replays"] += 1
-                else:
-                    prompts[key] = {"payload": payload, "replays": 0}
-            return {"threadId": "wrong" if state.get("badReceipt") else thread,
-                    "messageId": "sent-id", "runId": "next-run", "delivery": "queued" if thread == "human" else "started"}
+                prompts[key] = {"payload": payload, "replays": 0}
+            return {"threadId": thread, "messageId": "sent-id", "runId": "next-run", "delivery": "started"}
         if name == "t3_thread_wait":
-            if args["threadId"] == "human":
-                assert args["runId"] == "next-run" and args["timeoutMs"] == 1
-                assert not args["untilDelegatedWorkSettled"]
-                wait = state["stockRootWait"]
-                return {"threadId": "other" if wait == "wrong-thread" else "human",
-                        "runId": "other-run" if wait == "wrong-run" else "next-run",
-                        "status": "cancelled" if wait == "cancelled" else "failed",
-                        "timedOut": wait == "timed-out"}
             assert args["threadId"] == "pinned-worker" and args["runId"] == "next-run"
             return {"threadId": "pinned-worker", "runId": "next-run", "status": "completed", "timedOut": False,
                     "resultRun": {"runId": "next-run", "status": "completed"}}
         assert name == "t3_thread_read"
         thread = args["threadId"]
-        is_root = thread == "human"
         summary = self.summary(thread) | {
-            "activeRunId": "root-run" if is_root else None,
-            "latestRunId": "root-run" if is_root else None,
-            "archived": False,
-            "projectId": state.get("claimedProject", "project"),
-            "worktreePath": None if is_root else state["stockWrongTree" if thread == "wrong-worker" else "stockTree"],
+            "activeRunId": None, "latestRunId": None, "archived": False, "projectId": "project",
+            "worktreePath": state["stockWrongTree" if thread == "wrong-worker" else "stockTree"],
         }
-        rows = [] if not is_root else [
-            self.item("human", 3, "root-run", "user_message", "Human progress", "web") | {"messageId": "human-id"},
-            self.item("other", 4, "other-run", "assistant_message", "Inherited secret") | {"visibility": "inherited"},
-            self.item("human", 5, "root-run", "assistant_message", "Streaming content",
-                      status="completed" if state.get("finalized") else "running") | {"messageId": "reply-id"},
-            self.item("human", 6, "root-run", "user_message", "[Flock result] Complete.", "mcp") |
-                {"messageId": "sent-id"},
-        ]
-        if is_root and state.get("handoffText"):
-            rows[-1] = self.item("human", 6, "next-run", "user_message", state["handoffText"], "mcp") | {
-                "messageId": "sent-id"}
-            rows.append(self.item("human", 7, "next-run", "assistant_message", "Received consultation reply."))
-        if is_root and state.get("stockHistory") == "late-human":
-            rows = [self.item("human", position, "root-run", "assistant_message", f"Progress {position}")
-                    for position in range(1, 26)]
-            rows.append(self.item("human", 26, "root-run", "user_message", "Later human input", "web"))
-        elif is_root and state.get("stockHistory") == "streaming-late-human":
-            rows = [self.item("human", 1, "root-run", "assistant_message", "Unfinished response", status="running"),
-                    self.item("human", 2, "root-run", "user_message", "Human after unfinished response", "web")]
-        if is_root and state.get("stockRootRecovery"):
-            rows = rows[:1]
-            if "stockRootInput" in state:
-                rows.append(self.item(thread, 4, "next-run", "user_message", state["stockRootInput"], "mcp") |
-                            {"messageId": "sent-id"})
-                summary["activeRunId"] = None
-                summary["latestRunId"] = "next-run"
-                if state.get("stockRootExtraHistory"):
-                    rows.extend(self.item(thread, position, "later-run", "assistant_message", "Later progress")
-                                for position in range(5, 26))
+        rows = []
         if thread == "pinned-worker":
-            rows = [self.item(thread, 1, "next-run", "assistant_message", "Pinned report") |
-                    {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}]
-        if is_root and args["view"] == "activity" and state.get("stockInvocation"):
-            mode = state["stockInvocation"]
-            summary["activeRunId"] = None if mode == "finished" else "root-run"
-            arguments = state["stockArguments"]
-            tool_name = "mcp__flock__invoke_flock_bot" if mode == "claude" else "flock.invoke_flock_bot"
-            body = json.dumps({"toolName": tool_name, "input": arguments}, ensure_ascii=False)
-            source = "other" if mode == "wrong-thread" else "human"
-            item = self.item(source, 2 if state.get("stockRootRecovery") else 7, "old-run" if mode == "old-run" else "root-run",
-                             "dynamic_tool", body, status="running") | {"itemId": "invocation"}
-            if mode == "inherited":
-                item["visibility"] = "inherited"
-            if args.get("itemId") is None or args["itemId"] == item["itemId"]:
-                offset = args.get("textOffset", 0)
-                bounded = body[offset:offset + args["maxCharsPerItem"]]
-                item["text"] = bounded
-                item["textTruncated"] = offset + len(bounded) < len(body)
-                item["nextTextOffset"] = offset + len(bounded) if item["textTruncated"] else None
-                rows = [item]
-            else:
-                rows = []
-        if args.get("beforePosition") is not None:
-            rows = [row for row in rows if row["position"] < args["beforePosition"]]
-        else:
-            rows = [row for row in rows if row["position"] > args.get("afterPosition", -1)]
-        page = rows[-args["limit"]:] if args.get("beforePosition") is not None else rows[:args["limit"]]
-        has_more = len(rows) > len(page)
-        if state.get("stockIncomplete") and args.get("afterPosition") is not None:
-            has_more = True
-        rows = page
-        return {"thread": summary, "items": rows, "recentRuns": [], "hasMore": has_more,
-                "nextPosition": rows[-1]["position"] + 1 if state.get("stockIncomplete") and rows else
-                    rows[-1]["position"] if rows else None,
-                "earlierPosition": None}
+            row = self.item(thread, 1, "next-run", "assistant_message", "Pinned report") | {
+                "textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}
+            if args.get("afterPosition", -1) < row["position"] < args.get("beforePosition", float("inf")):
+                rows.append(row)
+        return {"thread": summary, "items": rows, "recentRuns": [], "hasMore": False,
+                "nextPosition": rows[-1]["position"] if rows else None, "earlierPosition": None}
 
     def result_history(self, thread_id, scenario, recent, rows):
         def add(run, kind, text, source="provider", **fields):
@@ -820,7 +744,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         for root in ([codex_skills, claude_skills] if has_claude else [codex_skills]):
             assert (root / "flock" / "SKILL.md").is_file()
             skill = (root / "flock-reviewer" / "SKILL.md").read_text()
-            assert "Reviewer" in skill and "botId `reviewer`" in skill and token not in skill
+            assert "Reviewer" in skill and "Pass `reviewer` as bot" in skill and token not in skill
         return token
 
     working_command = command
@@ -946,110 +870,12 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
             daemon.wait(timeout=8)
 
 
-def test_headless_handoff(server, flock, temp):
-    home = Path(temp)
-    args = [flock, "--home", str(home)]
-    env = {key: value for key, value in os.environ.items() if not key.startswith("FLOCK_")}
-    subprocess.run(args + ["rules", "list"],
-                   env=env, check=True, capture_output=True, timeout=5)
-    identities = home / "identities.json"
-    identities.write_text(json.dumps([
-        {"authorization": "Bearer fixture-identity", "person": "alice", "adminRoot": True},
-        {"authorization": "Bearer fixture-revoked", "person": "bob"},
-    ]), encoding="utf-8")
-    identities.chmod(0o600)
-    env["FLOCK_WEB_IDENTITIES_FILE"] = str(identities)
-
-    credential_dir = home / "credentials" / "t3"
-    credential_dir.mkdir(mode=0o700, parents=True)
-    digest = base64.urlsafe_b64encode(hashlib.sha256(b"env-1").digest()).decode().rstrip("=")
-    generation = "a" * 43
-    credential = credential_dir / f"t3-{digest}.json"
-    credential.write_text(json.dumps({
-        "environmentId": "env-1", "mcpUrl": server.origin + "/mcp", "token": "fixture.signed-token",
-        "generation": generation, "expiresAt": int(time.time()) + 60, "operate": True,
-    }), encoding="utf-8")
-    credential.chmod(0o600)
-    handoff_text = "[Flock Bot release | request request-1 | action command-1]\nConsultation reply"
-    server.state.update(handoffText=handoff_text, finalized=True)
-
-    with sqlite3.connect(home / "flock.sqlite3") as db:
-        db.execute("INSERT INTO t3_connector VALUES(1,'fixture','alice','fixture-digest',4173)")
-        db.execute("INSERT INTO t3_connected_environments VALUES('env-1')")
-        # Simulate a daemon exit after T3 accepted the reply and before Flock saved the receipt.
-        db.execute("INSERT INTO return_channels VALUES(1,'env-1','project','human','','request-1','',"
-                   "'release','alice','{\"request\":\"Review the release\"}','client-1','digest')")
-        db.execute("INSERT INTO session_controls(channel_id,state,auth_generation,permission,consult_command,event_cursor) "
-                   "VALUES(1,'active',?,'null','command-1',4)", (generation,))
-        db.execute("INSERT INTO thread_deliveries(command_id,channel_id,generation,text,state,cursor) "
-                   "VALUES('command-1',1,1,?,1,4)", (handoff_text,))
-
-        # Bob has lost access and Carol is absent from the identity directory.
-        for channel, owner in [(2, "bob"), (3, "carol")]:
-            delegation = f"delegation-{channel}"
-            sender, recipient = channel * 2 - 1, channel * 2
-            db.execute("INSERT INTO return_channels VALUES(?,'env-1','project',?,'',?,'',"
-                       "'release',?,?,?,'digest')",
-                       (channel, f"paused-{channel}", f"request-{channel}", owner,
-                        json.dumps({"request": "Review the paused release"}), f"client-{channel}"))
-            db.execute("INSERT INTO session_controls(channel_id,state,generation,auth_generation,permission,consult_command,event_cursor) "
-                       "VALUES(?,'paused',2,?,?,'',0)",
-                       (channel, generation, json.dumps({"goal": "Review", "allowDelegation": True})))
-            db.execute("INSERT INTO specialist_budgets(channel_id,allowance) VALUES(?,1)", (channel,))
-            db.executemany("INSERT INTO tasks VALUES(?,'release','env-1','project',?,1,?)",
-                           [(sender, "completed", "{}"),
-                            (recipient, "queued", json.dumps({
-                                "activeRun": None, "environmentId": "env-1", "eventId": 0,
-                                "specialistRole": "executor", "specialistDelegationId": delegation,
-                            }))])
-            db.execute("INSERT INTO peer_exchanges VALUES(?,'specialist','closed','',?,?,'env-1',NULL)",
-                       (delegation, sender, recipient))
-            db.execute("INSERT INTO specialist_delegations VALUES(?,?,1,'Review','Done','',NULL,?,?)",
-                       (delegation, channel, sender, recipient))
-
-    state = None
-    with subprocess.Popen(args + ["run", "--no-web"], env=env, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
-        try:
-            deadline = time.monotonic() + 8
-            with sqlite3.connect(home / "flock.sqlite3") as db:
-                while daemon.poll() is None and time.monotonic() < deadline:
-                    state, = db.execute("SELECT state FROM session_controls WHERE channel_id=1").fetchone()
-                    if state == "completed":
-                        break
-                    time.sleep(0.05)
-        finally:
-            if daemon.poll() is None:
-                daemon.terminate()
-            try:
-                stdout, stderr = daemon.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                daemon.kill()
-                daemon.communicate()
-                raise
-    assert daemon.returncode == 0 and "headless mode" in stdout, (stdout, stderr)
-    assert state == "completed", f"accepted Session handoff remained {state!r} after restart: {stderr}"
-    with sqlite3.connect(home / "flock.sqlite3") as db:
-        recovered = db.execute("""
-            SELECT r.person_id, c.state, c.generation, t.state,
-                   EXISTS(SELECT 1 FROM journal WHERE task_id=t.id AND kind='cancel_requested')
-            FROM specialist_delegations d JOIN return_channels r ON r.id=d.channel_id
-            JOIN session_controls c ON c.channel_id=r.id JOIN tasks t ON t.id=d.recipient_task
-        """).fetchall()
-        assert {row[0] for row in recovered} == {"bob", "carol"}, recovered
-        for owner, state, generation, task, cancelled in recovered:
-            assert (state, generation) == ("paused", 2), owner
-            assert task in ("cancelling", "cancelled") and cancelled, (owner, task)
-    assert "t3_thread_send" not in server.state.get("effects", {}), "recovery resent an already accepted reply"
-
-
 with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.state = {}
     server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
-    headless_handoff = sys.argv[2:] == ["headless-handoff"]
-    server.stock_thread = headless_handoff or sys.argv[2:] == ["stock-thread"]
-    if server.stock_thread and not headless_handoff:
+    server.stock_thread = sys.argv[2:] == ["pinned-workspace"]
+    if server.stock_thread:
         root = temp + "/project"
         good = temp + "/worker"
         wrong = temp + "/wrong-worker"
@@ -1076,9 +902,6 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
             code = 0
         elif sys.argv[2:] == ["connection-setup"]:
             test_connection_setup(server, sys.argv[1], temp)
-            code = 0
-        elif headless_handoff:
-            test_headless_handoff(server, sys.argv[1], temp)
             code = 0
         else:
             code = subprocess.run([sys.argv[1], server.origin, temp + "/creds"], timeout=30, check=False).returncode

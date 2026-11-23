@@ -11,11 +11,11 @@ namespace flockv0 {
 namespace {
 
 constexpr std::string_view marker = ".flock-skill";
-constexpr std::string_view generic = R"(Use list_flock_bots to find the intended Bot by name or role. Use its exact stable id.
-Get threadId from currentThreadId in t3_thread_list. If it is missing, ask the person to run this skill in a T3 Thread.
-Call invoke_flock_bot with threadId, botId, a fresh random requestId, and the request text.
-Use consult for a single reply. Use coordinate with a goal when the person asks for ongoing coordination.
-Retry the same logical request with identical arguments. The reply arrives in the same Thread. No polling is needed.
+constexpr std::string_view askInstructions = R"(Get threadId from currentThreadId in t3_thread_list. If it is missing, ask the person to run this skill in a T3 Session.
+Call flock_ask with bot, threadId, the request text, and a fresh requestId. Retry the same request with identical arguments.
+Bot messages arrive in this Session prefixed with the Bot's name. No polling is needed.
+Show messages addressed to the person and let them answer. Forward their reply with flock_ask using the same bot and threadId and a new requestId.
+Use flock_stop with bot and threadId when the person asks the Bot to leave the Session.
 )";
 
 std::string slug(std::string_view id) {
@@ -99,7 +99,9 @@ std::map<std::string,std::string> flockSkillNames(const Json& bots) {
 void exportFlockSkills(const std::filesystem::path& root, const Json& bots) {
     const auto names = flockSkillNames(bots);
     std::map<std::string,std::string> files{
-        {"flock",skill("flock","Discover and invoke a Flock Bot in the current T3 Thread.",generic)}};
+        {"flock",skill("flock","Ask a Flock Bot in the current T3 Session.",
+                      "Use flock_bots to find the intended Bot by name or role. Pass its exact id as bot.\n" +
+                      std::string(askInstructions))}};
     for (const auto& bot : bots) {
         const auto id = bot.value("id",std::string{});
         const auto found = names.find(id);
@@ -107,9 +109,7 @@ void exportFlockSkills(const std::filesystem::path& root, const Json& bots) {
         const auto name = bot.value("name",id);
         const auto role = bot.value("role",std::string("custom"));
         files.emplace(found->second,skill(found->second,"Ask " + name + " (" + role + ") in Flock.",
-            "Get threadId from currentThreadId in t3_thread_list.\n"
-            "Call invoke_flock_bot with botId `" + id + "`, that threadId, a fresh random requestId and the request text. "
-            "For ongoing coordination pass mode coordinate and a goal. Retry with identical arguments.\n"));
+            "Pass `" + id + "` as bot.\n" + std::string(askInstructions)));
     }
     std::filesystem::create_directories(root);
     std::vector<std::string> blocked;
