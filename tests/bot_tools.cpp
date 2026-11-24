@@ -253,6 +253,9 @@ void workspaceFiles(Fixture& f) {
           "Workspace read missed its content");
     fs::create_directory(root/"notes");
     write(root/"notes"/"empty.txt","");
+    const auto writeOnly = root/"notes"/"write-only.txt";
+    write(writeOnly,"not readable");
+    check(chmod(writeOnly.c_str(),0200) == 0,"Could not make fixture note write-only");
     const std::string largeNote(9000,'n');
     write(root/"notes"/"large.txt",largeNote);
     const auto list = call("workspace_search",{{"path","notes"}});
@@ -263,8 +266,8 @@ void workspaceFiles(Fixture& f) {
     f.block(Action::workspace_read,"alpha",false);
     const auto listing = f.run(list);
     const auto preview = f.run(readLarge);
-    check(listing.at("files") == Json::array({"notes/empty.txt","notes/large.txt"}) &&
-          listing.at("truncated") == false,"Workspace listing missed empty files or applied the text limit");
+    check(listing.at("files") == Json::array({"notes/empty.txt","notes/large.txt","notes/write-only.txt"}) &&
+          listing.at("truncated") == false,"Workspace listing attempted to read file contents");
     check(preview.at("bytes") == largeNote.size() && preview.at("truncated") == true &&
           preview.at("text") == largeNote.substr(0,8192),"Workspace read lost the full byte count or exceeded its preview limit");
     f.model.inspectRequest = {};

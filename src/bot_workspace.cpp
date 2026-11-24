@@ -151,8 +151,8 @@ Json searchWorkspace(int root, const fs::path& relative, std::string_view query)
         if (++visited > maxEntries || bytes >= maxSearchBytes || files.size() >= 40 ||
             file.native().size() > 1024) return false;
         if (!S_ISREG(info.st_mode) || info.st_nlink != 1) return true;
-        const auto input = regularFile(parent,file.filename());
         if (!query.empty()) {
+            const auto input = regularFile(parent,file.filename());
             const auto cap = std::min(maxFileBytes,maxSearchBytes-bytes);
             const auto data = readFile(input.fd.get(),cap+1);
             const auto size = std::min(data.size(),cap);
