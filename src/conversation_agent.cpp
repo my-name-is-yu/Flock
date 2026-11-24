@@ -505,8 +505,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
         active(task);
-        if (task.contains("runTargets") || task.contains("runResults"))
-            throw ToolError("Destination-specific follow-up and task-wide changes are not available for this task yet");
+        if (tool == "change_task" && (task.contains("runTargets") || task.contains("runResults")))
+            throw ToolError("Task-wide changes are not available for tasks with destination Runs yet");
+        if (tool == "send_to_task" && task.contains("runTargets"))
+            throw ToolError("A destination Session is unavailable until its T3 Thread is saved");
+        if (tool == "send_to_task" && task.contains("runResults"))
+            throw ToolError("Send this destination instruction on its own to use the saved T3 Thread");
         const auto instruction = text(args,"instruction",messageSize,true);
         const auto result = source(&task);
         std::optional<TaskChange> change;

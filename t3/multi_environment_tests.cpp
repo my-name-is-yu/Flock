@@ -53,6 +53,7 @@ struct Script final : Model {
     std::string commit;
     Json startResult;
     Json sendResult;
+    Json ambiguousResult;
     Id followUpTask = 0;
     Id followUpGeneration = 0;
     bool parallel = true;
@@ -60,9 +61,12 @@ struct Script final : Model {
     ModelTurn decide(const ModelInput& input) override {
         const auto& kind = input.event.at("kind");
         if (kind == "conversation_turn") {
-            if (input.event.value("text","") == "Send instruction to Mini" && input.event.at("turn").empty())
-                return {{{"send_to_task",{{"taskId",followUpTask},{"generation",followUpGeneration},
-                    {"destination","mini"},{"instruction","Check the Mini result"}},"Send only to Mini"}}};
+            const auto& text = input.event.value("text","");
+            if (input.event.at("turn").empty() && (text == "Send instruction to Mini" || text == "Send instruction without destination")) {
+                Json args{{"taskId",followUpTask},{"generation",followUpGeneration},{"instruction","Check the Mini result"}};
+                if (text == "Send instruction to Mini") args["destination"] = "mini";
+                return {{{"send_to_task",std::move(args),"Send to the selected destination"}}};
+            }
             const auto& turn = input.event.at("turn");
             if (turn.empty() && input.event.value("text","") == request) {
                 Json args{{"request",request}};
@@ -73,7 +77,8 @@ struct Script final : Model {
                 return {{{"start_task",std::move(args),"Run the release verification"}}};
             }
             if (!turn.empty()) {
-                if (input.event.value("text","") == "Send instruction to Mini") sendResult = turn.back().at("result");
+                if (text == "Send instruction to Mini") sendResult = turn.back().at("result");
+                else if (text == "Send instruction without destination") ambiguousResult = turn.back().at("result");
                 else startResult = turn.back().at("result");
             }
             return {{{"reply",{{"text","I have the fixture request."}},"End this turn"}}};
@@ -214,6 +219,12 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
         {"local",{{"environmentId",local.id()},{"projectId",local.project()}}},
         {"mini",{{"environmentId",mini.id()},{"projectId",mini.project()}}}
     }}}};
+    fixture.store.receive(localOwner,routing,"ambiguous-follow-up-fixture","Send instruction without destination");
+    fixture.runtime.runConversations();
+    check(!fixture.model.ambiguousResult.value("ok",true) &&
+          fixture.model.ambiguousResult.value("error","").find("Choose a destination") != std::string::npos &&
+          local.effects("t3_thread_send").empty() && mini.effects("t3_thread_send").empty(),
+          "an omitted selector must be rejected as ambiguous without contacting either destination");
     fixture.store.receive(localOwner,routing,"follow-up-fixture","Send instruction to Mini");
     fixture.runtime.runConversations();
     check(fixture.model.sendResult.value("ok",false),"send_to_task did not deliver the selected destination message: " + fixture.model.sendResult.dump());
