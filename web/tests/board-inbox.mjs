@@ -401,7 +401,7 @@ async function exerciseLiveRetry() {
     'The Inbox did not load on the Bot stream');
   const badge = document.querySelector('#bot-list .decision-count');
   const preview = document.querySelector('#bot-list .bot-preview');
-  if (badge.hidden || badge.textContent !== '1' || preview.textContent !== fixture.bot.preview ||
+  if (badge.hidden || badge.textContent !== '2' || preview.textContent !== fixture.bot.preview ||
       !preview.querySelector('.presence-dot').hidden)
     throw new Error('The Bot row did not show the last message and a single waiting indicator');
   const { width, height } = badge.getBoundingClientRect();
