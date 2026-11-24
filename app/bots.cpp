@@ -662,6 +662,8 @@ Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& sett
                 if (key == "model") config["modelProvider"] = "chatgpt";
             }
         }
+        if (config.contains("projectId") && !config.contains("environmentId"))
+            throw BotProfileError("invalid_workspace","A pinned T3 project needs its environmentId");
         const auto updated = profileText(config);
         const auto schedules = configuredSchedules(id,config,configErrors);
         bool published = false;
