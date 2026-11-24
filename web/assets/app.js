@@ -2808,7 +2808,7 @@ function renderDetail() {
     renderDetailNav(sections, detail.section);
     const { soul, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
-    detailRole?.update(soul);
+    detailRole?.update(soul, bot.canDelete === true);
     return;
   }
   labelDetail(null);
