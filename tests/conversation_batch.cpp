@@ -289,18 +289,91 @@ void followUpNeeded(const Decision& action, std::string_view guidance) {
           "The standalone action ran in the batch or its result was lost");
 }
 
-void workspaceCommandRunsAlone() {
+void retiredWorkspaceCallsSettleOnUpgrade() {
     Fixture f;
-    const auto command = call("workspace_run_command",{{"argv",{"pwd"}}});
-    const auto findFiles = call("workspace_search",{{"query","marker"}});
-    f.receive({command,findFiles},4);
+    check(f.query("SELECT count(*) FROM sqlite_schema WHERE name='workspace_commands'") == "0",
+          "A fresh installation still creates command storage");
+    const auto checkpoint = [&](const Json& slots) {
+        const auto id = std::to_string(f.message);
+        const auto budget = "'message/" + id + "'";
+        auto decisions = Json::array();
+        for (const auto& action : f.model.first.calls)
+            decisions.push_back({{"tool",action.tool},{"args",action.args},{"reason",action.reason}});
+        Fixture::write(f.connect().get(),
+            "INSERT OR IGNORE INTO model_budgets(id,call_limit) VALUES(" + budget + ",20);"
+            "UPDATE model_budgets SET attempts=1 WHERE id=" + budget + ";"
+            "INSERT INTO model_attempts(budget_id,purpose,time,message_id) VALUES("
+            + budget + ",'conversation_turn',1," + id + ");"
+            "INSERT INTO conversation_steps(message_id,step,attempt_id,decision,effect) VALUES(" + id +
+            ",1,(SELECT id FROM model_attempts WHERE purpose='conversation_turn' AND message_id=" + id +
+            "),'" + decisions.dump() + "','" + slots.dump() + "');");
+    };
+    f.receive({call("workspace_run_command",{{"argv",{"touch","replayed.txt"}}})});
+    checkpoint(Json::array({nullptr}));
+    const auto id = std::to_string(f.message);
+    Fixture::write(f.connect().get(),R"SQL(
+CREATE TABLE workspace_commands(
+ id INTEGER PRIMARY KEY, bot TEXT NOT NULL, started_at INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('running','stop_requested','exited','unknown_after_restart')),
+ stdout TEXT NOT NULL DEFAULT '', stderr TEXT NOT NULL DEFAULT '', truncated INTEGER NOT NULL DEFAULT 0,
+ exit_code INTEGER);
+INSERT INTO workspace_commands(id,bot,started_at,state,stdout) VALUES(1,'alpha',0,'running','legacy command output');
+INSERT INTO policy_rules(kind,action,target,created_at,exact) VALUES('ask','workspace.exec','alpha',0,1);
+)SQL"
+        "INSERT INTO policy_approvals(operation,bot,action,target,fingerprint,preview,scope,requester,anchor,"
+        "turn,task,revision,generation,created_at,mode_revision,card_generation) VALUES("
+        "'turn/" + id + "/1/0','alpha','workspace.exec','alpha','legacy','[]','alpha','local-owner'," +
+        id + "," + id + ",0,0,0,0,0,0);"
+        "UPDATE conversation_turns SET status='policy_waiting' WHERE message_id=" + id + ";");
+
+    f.restart();
+    f.runtime->runConversations();
+    f.checkFinished(2);
+    const Json unavailable{{"ok",false},{"error","Tool unavailable for this turn"}};
+    check(f.results().at(0) == unavailable && f.query("SELECT status FROM policy_approvals") == "stale",
+          "A retired command or its pending approval blocked the turn");
+
+    f.receive({
+        call("workspace_command_status",{{"commandId",1}}),
+        call("workspace_stop_command",{{"commandId",1}}),
+        call("workspace_command_status",{{"commandId",1}}),
+        call("workspace_search")
+    });
+    const Json historical{{"ok",true},{"untrustedData",true},{"stdout","legacy command output"}};
+    checkpoint(Json::array({nullptr,Json{{"inFlight",true}},historical,nullptr}));
+    f.restart();
     f.runtime->runConversations();
     f.checkFinished(2);
     const auto results = f.results();
-    check(results[0].value("notRun",false) && results[0].at("ok") == false &&
-          f.query("SELECT count(*) FROM workspace_commands") == "0",
-          "A background workspace command started in a batch");
-    check(results[1].at("ok") == true,"A standalone command suppressed a sibling read");
+    check(results.at(0) == unavailable &&
+          results.at(1) == Json({{"ok",false},{"error","Tool unavailable for this turn"},{"delivery","unknown"}}),
+          "Queued status and in-flight stop did not settle as unavailable");
+    check(results.at(2) == historical && results.at(3).at("ok") == true,
+          "Upgrade lost in-flight uncertainty, completed history, or the pending file read");
+    check(f.model.turns.size() == 1 &&
+          !f.model.turns.front().at(2).at("result").value("ok",true) &&
+          f.model.turns.front().dump().find("legacy command output") == std::string::npos &&
+          !fs::exists(f.home/"workspaces"/"alpha"/"replayed.txt"),
+          "Upgrade replayed a retired command or offered its completed output to the model");
+
+    f.receive({call("workspace_command_status",{{"commandId",1}})});
+    checkpoint(Json::array({historical}));
+    Fixture::write(f.connect().get(),"UPDATE conversation_steps SET result=effect,effect=NULL" + f.whereStep());
+    f.restart();
+    f.runtime->runConversations();
+    f.checkFinished(2);
+    check(f.results().at(0) == historical &&
+          f.model.turns.size() == 1 &&
+          f.model.turns.front().at(0).at("result").value("accessRevoked",false) &&
+          f.model.turns.front().dump().find("legacy command output") == std::string::npos,
+          "A pre-upgrade result bypassed current tool history authorization");
+    check(f.query("PRAGMA user_version") == "7" &&
+          f.query("SELECT state || ':' || stdout FROM workspace_commands") == "running:legacy command output" &&
+          f.query("SELECT count(*) FROM policy_rules WHERE action='workspace.exec'") == "1" &&
+          f.store->policy().rules().empty() && f.store->inbox(localOwner).empty(),
+          "Upgrade removed historical data or kept a retired approval available");
+    f.store->deleteBot(localOwner,"alpha");
+    check(f.store->botDeleted("alpha"),"A retired command continued to block Bot deletion");
 }
 
 void conflictingWorkspaceCalls() {
@@ -624,7 +697,7 @@ int main(int argc, char** argv) {
         storeRemainsResponsiveDuringMcpCapabilityChecks();
         followUpNeeded(call("start_task",{{"request","Start a task"}}),"Run this action on its own after reviewing these results.");
         followUpNeeded(call("reply",{{"text","Premature reply"}}),"Reply after reviewing these results.");
-        workspaceCommandRunsAlone();
+        retiredWorkspaceCallsSettleOnUpgrade();
         conflictingWorkspaceCalls();
         rejectedCall();
         restartWithPartialResults();

@@ -40,9 +40,6 @@ bool filenamesMayMatch(const Decision& a, const Decision& b) {
 }
 bool validatedCallsConflict(const Decision& a, const Decision& b) {
     if (a.tool.starts_with("workspace_") && b.tool.starts_with("workspace_")) {
-        if (a.args.contains("commandId") && b.args.contains("commandId"))
-            return a.args["commandId"] == b.args["commandId"] &&
-                (a.tool == "workspace_stop_command" || b.tool == "workspace_stop_command");
         if (a.tool == "workspace_write_file" || b.tool == "workspace_write_file")
             return a.tool == "workspace_search" || b.tool == "workspace_search" ||
                 (a.args.contains("path") && b.args.contains("path") &&
@@ -65,7 +62,7 @@ CallClass classify(const Decision& call) {
 
     constexpr std::string_view reads[]{
         "expand_context","workspace_read_file",
-        "workspace_search","workspace_command_status","web_search","web_fetch","mcp_discover","mcp_read_resource",
+        "workspace_search","web_search","web_fetch","mcp_discover","mcp_read_resource",
         "skill_list","skill_read","inspect_attachment"
     };
     if (std::ranges::find(reads,tool) != std::end(reads)) return CallClass::parallel_read;
@@ -79,7 +76,7 @@ ConversationRead conversationRead(std::string_view tool) {
 }
 
 bool batchable(std::string_view tool) {
-    return (isBotTool(tool) && tool != "workspace_run_command") || conversationReadSpec(tool);
+    return isBotTool(tool) || conversationReadSpec(tool);
 }
 
 std::vector<std::vector<PlannedCall>> planWaves(std::span<const Candidate> validatedCalls) {

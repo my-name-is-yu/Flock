@@ -20,7 +20,6 @@ SELECT 1 WHERE
   EXISTS (SELECT 1 FROM tasks WHERE bot_id=?1 AND state NOT IN ('completed','cancelled'))
   OR EXISTS (SELECT 1 FROM messages m JOIN conversation_turns t ON t.message_id=m.id
              WHERE m.bot_id=?1 AND t.status<>'done')
-  OR EXISTS (SELECT 1 FROM workspace_commands WHERE bot=?1 AND state IN ('running','stop_requested'))
   OR EXISTS (SELECT 1 FROM session_message_waits WHERE bot=?1 AND notified=0)
   OR EXISTS (SELECT 1 FROM messages m JOIN channel_deliveries d ON d.source_id=m.id
              WHERE m.bot_id=?1 AND d.state IN ('pending','unknown'))

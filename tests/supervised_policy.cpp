@@ -71,7 +71,7 @@ void rules(const std::filesystem::path& path) {
         for (const auto action : asks)
             check(policy.check("release",action,"target") == (policy.mode()=="full" ? PolicyResult::allow : PolicyResult::ask),
                   actionName(action));
-        for (const auto action : {Action::repository_read,Action::workspace_read,Action::workspace_write,Action::workspace_exec,
+        for (const auto action : {Action::repository_read,Action::workspace_read,Action::workspace_write,
             Action::web_search,Action::web_fetch,Action::skill_list,Action::skill_read,Action::mcp_discover,
             Action::mcp_read_resource,Action::session_read,Action::attachment_inspect,Action::shared_memory_read})
             check(policy.allows("release",action,"target"),actionName(action));

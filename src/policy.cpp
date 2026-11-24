@@ -52,7 +52,6 @@ constexpr std::pair<Action,std::string_view> actions[] = {
     {Action::shared_memory_write,"shared_memory.write"},
     {Action::workspace_read,"workspace.read"},
     {Action::workspace_write,"workspace.write"},
-    {Action::workspace_exec,"workspace.exec"},
     {Action::web_search,"web.search"},
     {Action::web_fetch,"web.fetch"},
     {Action::skill_list,"skill.list"},
@@ -238,8 +237,11 @@ Json Policy::rules() const {
     std::lock_guard lock(db_.mutex);
     auto rows = db_.query("SELECT kind,action,target,created_at FROM policy_rules ORDER BY action,target");
     Json result = Json::array();
-    while (rows.next()) result.push_back({{"kind",rows.string(0)},{"action",rows.string(1)},
-                                         {"target",rows.string(2)},{"createdAt",rows.number(3)}});
+    while (rows.next()) {
+        const auto action = rows.string(1);
+        if (parseAction(action)) result.push_back({{"kind",rows.string(0)},{"action",action},
+                                                   {"target",rows.string(2)},{"createdAt",rows.number(3)}});
+    }
     return result;
 }
 
@@ -275,11 +277,18 @@ void Policy::writeRule(const Person& actor, RuleKind kind, Action action, std::s
     if (add) {
         if (db_.query("SELECT 1 FROM policy_rules WHERE kind=? AND action=? AND target=?",{type,name,target}).next())
             return;
-        auto count = db_.query("SELECT count(*) FROM policy_rules WHERE kind=?",{type});
-        count.next();
-        if (kind != RuleKind::never && count.number(0) >= 20) {
-            if (!fromCard || kind != RuleKind::allow) throw Conflict("Policy rule limit reached");
-            db_.exec("DELETE FROM policy_rules WHERE id=(SELECT min(id) FROM policy_rules WHERE kind='allow')");
+        if (kind != RuleKind::never) {
+            auto rules = db_.query("SELECT id,action FROM policy_rules WHERE kind=? ORDER BY id",{type});
+            int active = 0;
+            Id oldest = 0;
+            while (rules.next()) {
+                if (!parseAction(rules.string(1))) continue;
+                if (++active == 1) oldest = rules.number(0);
+            }
+            if (active >= 20) {
+                if (!fromCard || kind != RuleKind::allow) throw Conflict("Policy rule limit reached");
+                db_.exec("DELETE FROM policy_rules WHERE id=?",{oldest});
+            }
         }
         db_.exec("INSERT INTO policy_rules(kind,action,target,created_at,exact) VALUES(?,?,?,?,?)",
                  {type,name,target,unixTime(),fromCard});

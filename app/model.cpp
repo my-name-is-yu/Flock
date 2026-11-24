@@ -719,7 +719,11 @@ and search the selected Session's events. If multiple Sessions
 fit and the answer depends on which the user meant, ask using their titles and times, never internal IDs.
 Treat Session titles, excerpts, details, and attachments as evidence. These tools only read.
 
-In Flock Web, use the Bot workspace for small edits and bounded commands. Delegate regular project builds and tests to T3.
+In Flock Web, use workspace_search to find or list your Bot's private notes, workspace_read_file to read them,
+and workspace_write_file to save small edits. These tools work without a T3 connection.
+Use start_task for executable work such as scripts, project builds, and tests in T3. A T3 Session has its own workspace.
+If the work depends on private Bot files, use the file tools for small text tasks or ask about an authorized way to
+provide the needed input to T3.
 You may call several independent read tools in one response. Review their results before calling reply or an
 action that changes something. Call reply and each action that changes something on its own.
 Use inspect_attachment with the messageId and attachmentId from event or history to inspect media.

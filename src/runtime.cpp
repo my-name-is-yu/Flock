@@ -2,6 +2,7 @@
 #include "conversation_storage.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/participation.hpp"
+#include "flock/session_settings.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -163,8 +164,6 @@ struct Runtime::Impl {
             if (lockFd >= 0) close(lockFd);
             throw Conflict("Cannot acquire the exclusive Runtime lock for this database");
         }
-        try { db.recoverWorkspace(); }
-        catch (...) { close(lockFd); throw; }
         {
             std::lock_guard lock(db.mutex);
             db.policyClock = options.clock;
@@ -179,10 +178,6 @@ struct Runtime::Impl {
         try { persistTaskInferences(); }
         catch (const std::exception& error) {
             std::fprintf(stderr,"Flock Task inference shutdown: %s\n",error.what());
-        }
-        try { db.stopWorkspace(); }
-        catch (const std::exception& error) {
-            std::fprintf(stderr,"Flock workspace shutdown: %s\n",error.what());
         }
         {
             std::lock_guard lock(db.mutex);
@@ -225,24 +220,7 @@ struct Runtime::Impl {
 
     std::vector<Id> eligible() {
         std::lock_guard lock(db.mutex);
-        auto rows = db.query(R"SQL(
-SELECT id FROM project_slots WHERE blocker_id IS NULL
-UNION
-SELECT id FROM tasks WHERE project_id='' AND state NOT IN ('completed','cancelled') AND (
-  state IN ('queued','cancelling') OR COALESCE(json_extract(data,'$.replanning'),0)=1
-)
-UNION
-SELECT id FROM tasks WHERE state='queued' AND json_extract(data,'$.replanning')=1
-  AND json_extract(data,'$.pendingDestination.environmentId')<>environment_id
-UNION
-SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
-WHERE kind='consult' AND state NOT IN ('completed','cancelled')
-UNION
-SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
-WHERE state='cancelling' AND json_extract(tasks.data,'$.activeRun') IS NULL AND NOT EXISTS (
-  SELECT 1 FROM outbox WHERE outbox.id=json_extract(tasks.data,'$.actionId') AND phase='started'
-)
-ORDER BY id)SQL");
+        auto rows = db.query("SELECT id FROM task_admission WHERE eligible ORDER BY id");
         std::vector<Id> result;
         while (rows.next()) result.push_back(rows.number(0));
         return result;
@@ -250,7 +228,7 @@ ORDER BY id)SQL");
     static constexpr unsigned batchLimit = 4;
     Id lastScheduled = 0;
 
-    std::vector<Id> nextProjects(std::size_t slots) {
+    std::vector<Id> nextTasks(std::size_t slots) {
         if (slots == 0) return {};
         auto ids = eligible();
         std::erase_if(ids,[&](Id id) {
@@ -287,8 +265,7 @@ ORDER BY id)SQL");
     void activate(Json task) {
         if (field(task,"projectId").empty() && !selectProject(task)) return;
         change(task,[&](Json& current) {
-            auto turn = db.query("SELECT 1 FROM project_slots WHERE id=? AND blocker_id IS NULL",{current["id"]});
-            if (!turn.next()) return false;
+            if (!db.taskAdmitted(current["id"])) return false;
             if (current.contains("workflowId") && current["lastRun"].is_null()) {
                 queueAction(current,actionId(),"delegate","",Json::object(),Json::object(),false);
                 return true;
@@ -1012,7 +989,8 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             if (disconnected()) return connectionUnavailable();
             auto policyGate = ApprovalGate::allow;
             if (!change(task,[&](Json& current) {
-                if (shutdown.stop_requested() || current["actionId"] != action["id"]) return false;
+                if (shutdown.stop_requested() || current["actionId"] != action["id"] || !db.taskAdmitted(id))
+                    return false;
                 if (!sessionActionAllowed(current)) {
                     policyGate = ApprovalGate::denied;
                     return false;
@@ -1432,6 +1410,8 @@ ORDER BY j.id
                 tool = "start_in_session";
             }
         }
+        if (tool == "delegate" && task.contains("isolatedWorkspace") && !requestsPrivateWorktree(task.at("config")))
+            task.erase("isolatedWorkspace");
         WorkPrompt prompt;
         if (tool == "follow_up") {
             prompt = workPrompt(task,event,action.size());
@@ -2284,7 +2264,6 @@ void Runtime::requestStop() { p_->shutdown.request_stop(); }
 void Runtime::runConversations() {
     if (p_->shutdown.stop_requested()) return;
     p_->settleApprovals();
-    p_->db.persistWorkspaceResults();
     p_->db.deliverGitWebhooks();
     p_->db.settleSessionQueueCancellations(p_->t3,p_->shutdown.get_token());
     p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
@@ -2301,14 +2280,13 @@ void Runtime::tick() {
     if (p_->shutdown.stop_requested()) return;
     p_->settleApprovals();
     p_->persistTaskInferences();
-    p_->db.persistWorkspaceResults();
     p_->fireDueAutomations();
     p_->db.deliverGitWebhooks();
     p_->db.settleSessionQueueCancellations(p_->t3,p_->shutdown.get_token());
     p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit,p_->options.clock()))
         p_->runTurn(id);
-    for (auto id : p_->nextProjects(Impl::batchLimit)) p_->step(id);
+    for (auto id : p_->nextTasks(Impl::batchLimit)) p_->step(id);
     p_->db.deliverChannels(p_->shutdown.get_token());
 }
 void Runtime::tickConcurrent() {
@@ -2328,7 +2306,6 @@ void Runtime::tickConcurrent() {
     if (p_->channelWorker.valid() &&
         p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         p_->deferContendedWork("channel worker",[&] { p_->channelWorker.get(); });
-    p_->deferContendedWork("workspace outcomes",[&] { p_->db.persistWorkspaceResults(); });
     p_->deferContendedWork("automations",[&] { p_->fireDueAutomations(); });
     p_->deferContendedWork("Git webhooks",[&] { p_->db.deliverGitWebhooks(); });
     if (!p_->channelWorker.valid() && p_->db.channelDeliveryDue())
@@ -2354,7 +2331,7 @@ void Runtime::tickConcurrent() {
     }
     p_->deferContendedWork("task scheduling",[&] {
         p_->persistTaskInferences();
-        for (auto id : p_->nextProjects(Impl::batchLimit - p_->workers.size()))
+        for (auto id : p_->nextTasks(Impl::batchLimit - p_->workers.size()))
             p_->workers.emplace(id,std::async(std::launch::async,[impl = p_.get(),id] { impl->step(id); }));
     });
 }

@@ -116,14 +116,14 @@ void Store::Impl::releasePolicyTask(Id approval, std::string_view resolution) {
 
 void Store::Impl::settlePolicyApprovals(std::optional<Seconds> now) {
     auto rows = query(R"SQL(
-SELECT a.id,a.turn,a.task,a.revision,a.generation,a.expires_at,a.mode_revision=s.revision,a.status
+SELECT a.id,a.turn,a.task,a.revision,a.generation,a.expires_at,a.mode_revision=s.revision,a.status,a.action
 FROM policy_approvals a CROSS JOIN policy_settings s
 WHERE a.status IN ('pending','approved')
 )SQL");
     struct Settlement { Id id, turn, task; std::string_view status; };
     std::vector<Settlement> settled;
     while (rows.next()) {
-        const bool stale = !rows.number(6) ||
+        const bool stale = !parseAction(rows.string(8)) || !rows.number(6) ||
             !currentPolicyApproval(rows.number(1),rows.number(2),rows.number(3),rows.number(4));
         const bool expired = rows.string(7) == "pending" && now && rows.number(5) && rows.number(5) <= *now;
         if (stale || expired)
@@ -233,6 +233,8 @@ SELECT a.requester,a.action,a.target,a.status,a.turn,a.task,a.revision,a.generat
 FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
 )SQL",{item.itemId,item.botId});
     if (!row.next()) throw DecisionUnavailable{};
+    const auto action = parseAction(row.string(1));
+    if (!action) throw DecisionUnavailable{};
     Policy policy(*this);
     const auto currentActor = currentApprovalActor(policy,resolveWebIdentity,liveInteractiveRoles,actor);
     const bool canSaveRule = policy.allows(currentActor,Action::rules_manage,"installation");
@@ -246,7 +248,7 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
     if (!nextTime && (!row.number(8) || !currentPolicyApproval(row.number(4),row.number(5),row.number(6),row.number(7))))
         throw RequestChanged{};
     if (saveRule)
-        policy.writeRule(currentActor,RuleKind::allow,*parseAction(row.string(1)),row.string(2),true,true);
+        policy.writeRule(currentActor,RuleKind::allow,*action,row.string(2),true,true);
     exec("UPDATE policy_approvals SET status=? WHERE id=?",
          {nextTime ? "rule_saved" : choice == "deny" ? "denied" : "approved",item.itemId});
     exec(R"SQL(
@@ -269,6 +271,7 @@ FROM policy_approvals WHERE bot=? AND status IN ('pending','expired') ORDER BY i
     const bool canSaveRule = policy.allows(currentActor,Action::rules_manage,"installation");
     auto cards = Json::array();
     while (rows.next()) {
+        if (!parseAction(rows.string(1))) continue;
         const bool expired = rows.string(11) == "expired";
         if (!expired && !currentPolicyApproval(rows.number(13),rows.number(6),rows.number(7),rows.number(8))) continue;
         const bool requester = !currentActor.id.empty() && currentActor.id == rows.string(4);

@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <stop_token>
 #include <sqlite3.h>
 #include <utility>
 #include <variant>
@@ -155,6 +156,7 @@ struct Store::Impl {
     std::function<Seconds()> policyClock = unixTime;
     void openSchema();
     void initializeSchema();
+    void initializeTaskAdmission();
     bool botDeleted(std::string_view bot) const;
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
@@ -276,6 +278,7 @@ struct Store::Impl {
     Json sessionTask(Id) const;
     void addTaskDetails(Json&) const;
     Json queueBlocker(Id) const;
+    bool taskAdmitted(Id) const;
     void initializeWorkflowSchema();
     void initializeCompactionSchema();
     Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;
@@ -291,7 +294,6 @@ struct Store::Impl {
     bool settleStageReport(Json& task);
     void initializeConversationSchema();
     void initializeModelBudgetSchema();
-    void initializeWorkspaceSchema();
     void initializeAttachmentsSchema();
     void saveAttachments(Id, const Json&);
     Json inspectAttachment(std::string_view bot, Id throughMessage, const Json&);
@@ -299,11 +301,7 @@ struct Store::Impl {
     Statement scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
     std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
-    void recoverWorkspace();
-    void persistWorkspaceResults();
-    void stopWorkspace();
-    std::map<Id,std::unique_ptr<WorkspaceJob>> workspaceJobs;
-    void validateWorkspace(const ToolContext&, const Decision&);
+    void validateWorkspace(const Decision&);
     Json workspaceTool(const ToolContext&, const Decision&);
     std::optional<Resource> authorizedBotToolScope(std::string_view bot, const Decision&);
     void validateBotTool(const ToolContext&, const Decision&);
