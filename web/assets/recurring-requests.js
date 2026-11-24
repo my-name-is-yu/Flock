@@ -2,6 +2,7 @@ const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Frida
 const dateOptions = { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' };
 const localTime = new Intl.DateTimeFormat('en', dateOptions);
 const browserZone = localTime.resolvedOptions().timeZone;
+const maxRequestBytes = 16000;
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -50,7 +51,20 @@ function scheduleRow(item, canManage, removeSchedule) {
   when.append(node('span', null, timing.text));
   if (timing.zone && timing.zone !== browserZone) when.append(node('span', 'cron-zone', timing.zone));
   const text = node('div', 'cron-text');
-  text.append(when, node('p', 'cron-request', item.request));
+  text.append(when);
+  const filter = item.kind === 'trigger' && Object.entries(item.eventFilter ?? {})
+    .map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join(', ');
+  let conditions;
+  if (filter) {
+    conditions = node('p', 'cron-filter', `Matches ${filter}`);
+    conditions.id = `cron-conditions-${item.id}`;
+    if (filter.length > 160) {
+      const details = node('details', 'cron-filter');
+      details.append(node('summary', null, 'Event conditions'), conditions);
+      text.append(details);
+    } else text.append(conditions);
+  }
+  text.append(node('p', 'cron-request', item.request));
   row.append(text);
 
   if (item.configId) {
@@ -63,7 +77,10 @@ function scheduleRow(item, canManage, removeSchedule) {
     text.append(error);
     remove.type = 'button';
     remove.dataset.scheduleId = item.id;
-    remove.setAttribute('aria-label', `Remove “${item.request}”`);
+    remove.setAttribute('aria-label', item.kind === 'trigger'
+      ? `Remove “${item.request}” triggered by ${item.source}`
+      : `Remove “${item.request}”`);
+    if (conditions) remove.setAttribute('aria-describedby', conditions.id);
     remove.addEventListener('click', async () => {
       remove.disabled = true;
       error.hidden = true;
@@ -87,7 +104,7 @@ function scheduleForm(addSchedule) {
   form.append(node('h3', 'settings-card-label', 'Add a recurring request'));
 
   const request = node('textarea', 'cron-request-input');
-  Object.assign(request, { required: true, rows: 2, maxLength: 8000, placeholder: 'Summarize what changed since yesterday.' });
+  Object.assign(request, { required: true, rows: 2, placeholder: 'Summarize what changed since yesterday.' });
   request.setAttribute('aria-label', 'Request');
   const repeat = node('select');
   repeat.setAttribute('aria-label', 'Repeat');
@@ -117,8 +134,12 @@ function scheduleForm(addSchedule) {
     event.preventDefault();
     if (add.disabled) return;
     const message = request.value.trim();
-    if (!message) {
-      error.textContent = 'Enter a request.';
+    let validation;
+    if (!message) validation = 'Enter a request.';
+    else if (new TextEncoder().encode(message).length > maxRequestBytes)
+      validation = 'Keep the request to 16,000 bytes or fewer.';
+    if (validation) {
+      error.textContent = validation;
       error.hidden = false;
       request.focus();
       return;

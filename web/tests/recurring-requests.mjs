@@ -64,6 +64,30 @@ async function exercise(createRecurringRequests) {
   check(list.textContent.includes('Unavailable') && list.querySelectorAll('button').length === 2,
     'configuration warning or read-only configured row was lost');
 
+  const trigger = { kind: 'trigger', source: 'deploy', request: 'Check the deployment' };
+  const longCondition = 'release-'.repeat(25) + '<img>';
+  recent.push({ ...trigger, id: 6, eventFilter: { branch: 'main' } },
+    { ...trigger, id: 7, eventFilter: { branch: 'staging' } },
+    { ...trigger, id: 8, eventFilter: { branch: longCondition } });
+  poll();
+  await nextTask();
+  const mainTrigger = list.querySelector('[data-schedule-id="6"]');
+  const stagingTrigger = list.querySelector('[data-schedule-id="7"]');
+  const removeDescription = (button) => document.getElementById(button.getAttribute('aria-describedby'));
+  check(mainTrigger.getAttribute('aria-label').includes('deploy') &&
+    removeDescription(mainTrigger)?.textContent === 'Matches branch = "main"' &&
+    removeDescription(stagingTrigger)?.textContent === 'Matches branch = "staging"',
+    'same-source triggers did not identify their distinct conditions');
+  const details = removeDescription(list.querySelector('[data-schedule-id="8"]'))?.closest('details');
+  check(details && !details.open, 'a long condition did not start collapsed');
+  details.open = true;
+  check(details.textContent.includes(longCondition) && !details.querySelector('img'),
+    'a long condition was incomplete or interpreted as markup');
+  stagingTrigger.click();
+  await nextTask();
+  check(removed === '7' && !list.querySelector('[data-schedule-id="7"]') &&
+    list.querySelector('[data-schedule-id="6"]'), 'removing the staging trigger removed the wrong trigger');
+
   const draft = form.querySelector('textarea');
   const [repeat] = form.querySelectorAll('select');
   draft.value = 'Draft to keep';
@@ -74,11 +98,21 @@ async function exercise(createRecurringRequests) {
   check(count.data === '2' && !list.textContent.includes('Reminder'), 'an external change stayed stale');
   check(draft.value === 'Draft to keep' && document.activeElement === draft, 'a refresh discarded the draft or focus');
 
+  const oversizedRequest = 'あ'.repeat(5334);
+  draft.value = oversizedRequest;
+  form.requestSubmit();
+  await nextTask();
+  check(!added && draft.value === oversizedRequest && !form.querySelector('.cron-error').hidden &&
+    form.querySelector('.cron-error').textContent.includes('16,000 bytes'),
+    'oversized UTF-8 text was submitted or its draft was lost');
+  const validRequest = 'a'.repeat(16000);
+  draft.select();
+  document.execCommand('insertText', false, validRequest);
   repeat.value = '1-5';
   form.requestSubmit();
   await nextTask();
-  check(added?.botId === 'release' && added?.cron === '0 9 * * 1-5' && count.data === '3' && !draft.value,
-    'adding a request did not refresh the list or clear the submitted draft');
+  check(added?.botId === 'release' && added?.cron === '0 9 * * 1-5' && added.request === validRequest &&
+    count.data === '3' && !draft.value, 'adding a request truncated text, left a stale list, or kept the submitted draft');
 
   let resolveRead;
   holdRead = new Promise((resolve) => { resolveRead = resolve; });

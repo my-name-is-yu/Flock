@@ -614,7 +614,7 @@ export function mountBoardInbox({
     const request = historyRequest = new AbortController();
     const sameView = () => request === historyRequest && mode === 'history';
     try {
-      const { decisions } = await api(`inbox/history?${new URLSearchParams({ bot })}`, undefined, request.signal);
+      const { decisions } = await api(`inbox/history?${new URLSearchParams({ bot })}`, undefined, { signal: request.signal });
       if (!sameView()) return;
       const cards = decisions.map(historyCard);
       host.replaceChildren(...cards);
