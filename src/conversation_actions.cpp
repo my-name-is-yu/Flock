@@ -185,13 +185,45 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     command.actionId = "flock-turn-" + std::to_string(id) + "-" + std::to_string(step);
     command.ownerBotId = message.bot;
     std::string error;
+    bool savedTaskTarget = false;
     try {
-        command.environmentId = conversation_storage::text(decision.args,"environmentId",256,true);
-        command.target.threadId = conversation_storage::text(decision.args,"threadId",256,true);
+        if (decision.tool == "send_to_task") {
+            std::lock_guard lock(mutex);
+            Transaction transaction(db);
+            const auto task = ownTask(conversation_storage::identifier(decision.args,"taskId",true),message);
+            if (conversation_storage::identifier(decision.args,"generation",true,0) != task.at("generation"))
+                throw ToolError("stale",{{"taskId",task.at("id")},{"current",taskState(task,message)}});
+            if (!task.contains("runResults")) throw ToolError("The destination is unavailable");
+            const auto name = conversation_storage::text(decision.args,"destination",256,false);
+            const auto environment = conversation_storage::text(decision.args,"environmentId",256,false);
+            const auto project = conversation_storage::text(decision.args,"projectId",256,false);
+            if (environment.empty() != project.empty()) throw ToolError("Select a destination by both environmentId and projectId");
+            std::vector<Json> matches;
+            for (const auto& run : task.at("runResults")) {
+                if ((!name.empty() && run.value("name","") == name) ||
+                    (!environment.empty() && run.value("environmentId","") == environment && run.value("projectId","") == project))
+                    matches.push_back(run);
+            }
+            if (name.empty() && environment.empty()) {
+                if (task.at("runResults").size() == 1) matches.push_back(task.at("runResults").front());
+                else throw ToolError("Choose a destination by friendly name, or by environmentId and projectId");
+            }
+            if (matches.size() != 1) throw ToolError(matches.empty() ? "The destination is unavailable" : "The destination selector is ambiguous");
+            command.environmentId = matches.front().value("environmentId","");
+            command.target.threadId = matches.front().value("threadId","");
+            if (command.environmentId.empty() || command.target.threadId.empty()) throw ToolError("The destination Session is unavailable");
+            savedTaskTarget = true;
+            command.instruction = conversation_storage::text(decision.args,"instruction",conversation_storage::messageSize,true);
+            transaction.commit();
+        } else {
+            command.environmentId = conversation_storage::text(decision.args,"environmentId",256,true);
+            command.target.threadId = conversation_storage::text(decision.args,"threadId",256,true);
+            command.instruction = conversation_storage::text(decision.args,"text",conversation_storage::messageSize,true);
+        }
         const auto name = redactor(message.bot).text(message.routing.at("config").value("botDisplayName",message.bot));
-        command.instruction = name + ": " +
-            conversation_storage::text(decision.args,"text",conversation_storage::messageSize,true);
-        if (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId"))
+        command.instruction = name + ": " + command.instruction;
+        if (decision.tool == "message_session" &&
+            (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
             throw ToolError("Use the Session identifiers");
     } catch (const ToolError& failure) { error = failure.what(); }
     const SessionTarget target{command.environmentId,command.target.threadId};
@@ -226,7 +258,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             save(toolFailure(error));
         } else if (Policy(*this).forbidden(message.bot,resource.action,resource.target)) {
             save(toolFailure(approvalError(ApprovalGate::denied)));
-        } else if (!connectedSessionAccess(message,target)) {
+        } else if (!savedTaskTarget && !connectedSessionAccess(message,target)) {
             save(toolFailure("This Session is unavailable through your T3 connection"));
         }
         auto result = query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NOT NULL",{id,step});
@@ -240,8 +272,10 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     std::string title;
     try {
         command.authGeneration = t3.authGeneration(target.environmentId,command.config);
-        if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
-        else error = "This Session is unavailable through your T3 connection";
+        if (!savedTaskTarget) {
+            if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
+            else error = "This Session is unavailable through your T3 connection";
+        }
     } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
     const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::shared);
     {
@@ -254,7 +288,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             transaction.commit();
             return advance;
         }
-        if (!error.empty() || !connectedSessionAccess(message,target)) {
+        if (!error.empty() || (!savedTaskTarget && !connectedSessionAccess(message,target))) {
             save(toolFailure(error.empty() ? "This Session is unavailable through your T3 connection" : error));
             transaction.commit();
             return advance;

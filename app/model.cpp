@@ -329,11 +329,14 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         fields["resume"] = {{"type","boolean"},{"description",
             "True only to resume the cancelled task that produced sourceResultMessageId, inheriting its criteria and instructions."}};
     } else if (name == "send_to_task") {
-        description = "Save an additional instruction for an active task's next safe point, without changing its intent or criteria.";
+        description = "Send an additional instruction to a task. For a multi-destination task, select one saved destination by friendly name, or by environmentId and projectId together. Omit the selector only when exactly one destination is available.";
         integer("taskId","The task to instruct.",true);
         integer("generation","The task's generation from the latest task list or tool result.",true);
         fields["generation"]["minimum"] = 0;
         text("instruction","The instruction for the task.");
+        text("destination","Saved friendly name of the destination to message.",false);
+        text("environmentId","Saved destination environment ID; provide with projectId.",false);
+        text("projectId","Saved destination project ID; provide with environmentId.",false);
         integer("sourceResultMessageId","A result of this task's current revision that the instruction refers to.");
     } else if (name == "change_task") {
         description = "Change an active task's intent, acceptance criteria, or environment. The current run stops and the task replans.";

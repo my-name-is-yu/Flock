@@ -27,6 +27,20 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     const BotTools& settings, const ConversationCallContext& ctx) {
     using enum CallOutcome;
     const auto& decision = calls.front();
+    if (calls.size() == 1 && decision.tool == "send_to_task" && decision.args.is_object() &&
+        decision.args.contains("taskId")) {
+        bool destinationTask = false;
+        try {
+            std::lock_guard lock(mutex);
+            Transaction transaction(db);
+            destinationTask = ownTask(conversation_storage::identifier(decision.args,"taskId",true),message)
+                                 .contains("runResults");
+            transaction.commit();
+        } catch (const ToolError&) {}
+        if (destinationTask)
+            return sendSessionMessage(message,step,decision,tool_batch::turnCallKey(message.id,step),
+                                      ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
+    }
     if (effectType == "array" || calls.size() > 1 || isBotTool(decision.tool)) {
         const ToolContext tools{message.bot,message.id,settings,ctx.hasWebEvidence};
         return runToolBatch(message,tools,step,calls,ctx) ? advance : stop;

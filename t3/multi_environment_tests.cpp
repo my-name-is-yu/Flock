@@ -52,11 +52,17 @@ struct Script final : Model {
 
     std::string commit;
     Json startResult;
+    Json sendResult;
+    Id followUpTask = 0;
+    Id followUpGeneration = 0;
     bool parallel = true;
 
     ModelTurn decide(const ModelInput& input) override {
         const auto& kind = input.event.at("kind");
         if (kind == "conversation_turn") {
+            if (input.event.value("text","") == "Send instruction to Mini" && input.event.at("turn").empty())
+                return {{{"send_to_task",{{"taskId",followUpTask},{"generation",followUpGeneration},
+                    {"destination","mini"},{"instruction","Check the Mini result"}},"Send only to Mini"}}};
             const auto& turn = input.event.at("turn");
             if (turn.empty() && input.event.value("text","") == request) {
                 Json args{{"request",request}};
@@ -66,7 +72,10 @@ struct Script final : Model {
                 }
                 return {{{"start_task",std::move(args),"Run the release verification"}}};
             }
-            if (!turn.empty()) startResult = turn.back().at("result");
+            if (!turn.empty()) {
+                if (input.event.value("text","") == "Send instruction to Mini") sendResult = turn.back().at("result");
+                else startResult = turn.back().at("result");
+            }
             return {{{"reply",{{"text","I have the fixture request."}},"End this turn"}}};
         }
         if (kind == "intake" && input.task.at("request") == holdLocal)
@@ -188,6 +197,34 @@ void ordinaryMulti(const Endpoint& local, const Endpoint& mini, const std::files
           task.at("runResults").size() == 2,"ordinary work must aggregate both destinations without SHA policy");
     fixture.checkResult(fixture.local,Scenario::result(task,fixture.local),"completed","");
     fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"completed","");
+}
+
+void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std::filesystem::path& directory) {
+    Scenario fixture(local,mini,directory,{},"send-one-destination");
+    fixture.start();
+    fixture.awaitBothRunning();
+    fixture.local.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.local).value("status","") == "completed";
+    },"the local destination must complete before messaging Mini");
+    const auto original = Scenario::result(fixture.task(),fixture.local);
+    fixture.model.followUpTask = fixture.taskId;
+    fixture.model.followUpGeneration = fixture.task().at("generation");
+    const Intake routing{bot,{},local.id(),local.project(),{{"conversationEnvironments",{
+        {"local",{{"environmentId",local.id()},{"projectId",local.project()}}},
+        {"mini",{{"environmentId",mini.id()},{"projectId",mini.project()}}}
+    }}}};
+    fixture.store.receive(localOwner,routing,"follow-up-fixture","Send instruction to Mini");
+    fixture.runtime.runConversations();
+    check(fixture.model.sendResult.value("ok",false),"send_to_task did not deliver the selected destination message: " + fixture.model.sendResult.dump());
+    const auto task = fixture.task();
+    const auto miniMessages = mini.effects("t3_thread_send");
+    check(local.effects("t3_thread_send").empty() && miniMessages.size() == 1 &&
+          miniMessages.front().at("message").get<std::string>().find("Check the Mini result") != std::string::npos &&
+          local.effects("t3_thread_launch").size() == 1 && mini.effects("t3_thread_launch").size() == 1 &&
+          fixture.store.tasks(bot).size() == 1 && task.at("id") == fixture.taskId &&
+          Scenario::result(task,fixture.local) == original,
+          "the instruction must go only to Mini without relaunching or changing Local's successful result");
 }
 
 void independentSlots(Scenario& fixture) {
@@ -484,6 +521,7 @@ int main(int argc, char** argv) {
             { Scenario fixture(local,mini,directory,commit,"supervised"); supervised(fixture); }
             { Scenario fixture(local,mini,directory,commit,"stop"); stop(fixture); }
             ordinaryMulti(local,mini,directory);
+            sendToOneDestination(local,mini,directory);
             single(local,mini,directory,commit,false);
             single(local,mini,directory,commit,true);
         } else {

@@ -663,6 +663,11 @@ class Fixture(BaseHTTPRequestHandler):
                     assert "workspaceStrategy" not in args and pre_check not in prompt and post_check not in prompt
             state["multiPrompt"] = prompt
             return {"threadId": thread, "runId": run, "projectId": project, "link": summary["link"]}
+        if name == "t3_thread_send":
+            assert "multiPrompt" in state and args["threadId"] == thread and args["mode"] == "queue"
+            assert args["clientRequestId"].startswith("flock-turn-")
+            state["multiFollowup"] = args["message"]
+            return {"threadId": thread, "runId": "follow-up-run", "delivery": "queued"}
         if name == "t3_thread_list":
             assert args["projectId"] == project and args["cursor"] == 0
             threads = [summary] if "multiPrompt" in state and not state.get("multiHideLaunch") else []

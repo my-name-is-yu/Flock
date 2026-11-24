@@ -125,7 +125,7 @@ void genericDestinationCounts() {
           "ordinary multi-destination work must persist all routes without a SHA policy");
 }
 
-void destinationInstructionsAreExplicitlyUnavailable() {
+void destinationWithoutSessionIsUnavailable() {
     Sandbox temp;
     auto intake = pinnedBot(temp);
     intake.request = "Verify the release";
@@ -157,8 +157,8 @@ void destinationInstructionsAreExplicitlyUnavailable() {
     store.receive(localOwner,intake,"destination-follow-up","Continue the Mini work");
     runtime.runConversations();
     check(!model.receipt.value("ok",true) &&
-          model.receipt.dump().find("Destination-specific follow-up") != std::string::npos,
-          "a destination follow-up must not be accepted while its dispatch path is unavailable");
+          model.receipt.dump().find("destination Session is unavailable") != std::string::npos,
+          "a destination without a saved T3 Thread must be rejected as unavailable");
 }
 
 void moveWithProject(std::string_view alias, std::string_view project, bool sameEnvironment = false) {
@@ -199,7 +199,7 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
 void pinnedConversationDestinations() {
     parallelDestinations();
     genericDestinationCounts();
-    destinationInstructionsAreExplicitlyUnavailable();
+    destinationWithoutSessionIsUnavailable();
     moveWithProject("mini","mini-project");
     moveWithProject("mini-legacy","remembered-project");
     moveWithProject("mini","mini-project",true);
