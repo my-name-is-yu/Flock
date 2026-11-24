@@ -2131,6 +2131,50 @@ std::string latestApprovalStatus(Fixture& f) {
         ? reinterpret_cast<const char*>(sqlite3_column_text(statement.get(),0)) : "";
 }
 
+std::string latestApprovalOperation(Fixture& f) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the task database");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_stmt* rawStatement = nullptr;
+    check(sqlite3_prepare_v2(db.get(),"SELECT operation FROM policy_approvals ORDER BY id DESC LIMIT 1",-1,
+                             &rawStatement,nullptr) == SQLITE_OK,"could not read policy approval operation");
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(rawStatement,sqlite3_finalize);
+    return sqlite3_step(statement.get()) == SQLITE_ROW
+        ? reinterpret_cast<const char*>(sqlite3_column_text(statement.get(),0)) : "";
+}
+
+void setOutboxPhase(Fixture& f, std::string_view actionId, std::string_view phase) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the task database");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_stmt* rawStatement = nullptr;
+    check(sqlite3_prepare_v2(db.get(),"UPDATE outbox SET phase=? WHERE id=?",-1,&rawStatement,nullptr) == SQLITE_OK,
+          "could not prepare the outbox phase update");
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(rawStatement,sqlite3_finalize);
+    sqlite3_bind_text(statement.get(),1,phase.data(),static_cast<int>(phase.size()),SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(),2,actionId.data(),static_cast<int>(actionId.size()),SQLITE_TRANSIENT);
+    check(sqlite3_step(statement.get()) == SQLITE_DONE && sqlite3_changes(db.get()) == 1,
+          "could not advance the approved launch outbox phase");
+}
+
+void startedRunOutboxApprovalIsStale() {
+    Fixture f;
+    f.store->policy().setMode(localOwner,"supervised");
+    oneLinkedDestinationTask(f,"stale-outbox-approval","Wait for linked launch approval");
+    f.advanceUntil([&] { return !f.store->inbox(localOwner).empty(); },
+                   "the linked launch did not request approval");
+    const auto cards = f.store->inbox(localOwner);
+    check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" && f.t3.sent.empty(),
+          "the linked launch did not remain gated on its approval");
+    const auto operation = latestApprovalOperation(f);
+    constexpr std::string_view outboxPrefix = "run-outbox/";
+    check(operation.starts_with(outboxPrefix),"the pending launch did not use an outbox approval");
+    setOutboxPhase(f,operation.substr(outboxPrefix.size()),"started");
+    const auto remaining = f.store->inbox(localOwner);
+    check(latestApprovalStatus(f) == "stale" && remaining.empty() && f.t3.sent.empty(),
+          "a launch approval remained live after its outbox had started");
+}
+
 void queuedDestinationStopsReleaseSlots() {
     {
         Fixture f;
@@ -2824,6 +2868,11 @@ int main(int argc, char** argv) {
             std::cout << "Recovered destination stop policy acceptance passed with simulated T3\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "stale-outbox-approval") {
+            startedRunOutboxApprovalIsStale();
+            std::cout << "Started outbox approval stale-state acceptance passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "queued-destination-stop") {
             queuedDestinationStopsReleaseSlots();
             std::cout << "Queued destination stop acceptance passed with simulated T3\n";
@@ -2880,6 +2929,7 @@ int main(int argc, char** argv) {
         discoveredLinkedNameMoveKeepsRoute();
         destinationFollowupValidatesAndRedactsSourceReport();
         recoveredDestinationStopHonorsPolicy();
+        startedRunOutboxApprovalIsStale();
         queuedDestinationStopsReleaseSlots();
         moveAsksForTheDestinationProjectAfterSettlement();
         queuedMoveWaitsForTheNewerDestinationOwner();

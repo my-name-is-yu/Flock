@@ -93,12 +93,15 @@ bool Store::Impl::currentPolicyApproval(Id turn, Id task, Id revision, Id genera
                        {turn}).next()) return false;
     if (!task) return true;
     if (operation.starts_with(runOutboxOperation) || operation.starts_with(runStopOperation)) {
-        const auto prefix = operation.starts_with(runOutboxOperation) ? runOutboxOperation : runStopOperation;
+        const bool stopOperation = operation.starts_with(runStopOperation);
+        const auto prefix = stopOperation ? runStopOperation : runOutboxOperation;
         return query(R"SQL(
 SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
-WHERE o.id=? AND t.id=? AND o.phase IN ('ready','started','accepted') AND t.state IN ('running','waiting')
+WHERE o.id=? AND t.id=? AND ((? AND o.phase='ready') OR (? AND o.phase IN ('started','accepted')))
+  AND t.state IN ('running','waiting')
   AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
-)SQL",{operation.substr(prefix.size()),task,revision}).next();
+)SQL",{operation.substr(prefix.size()),task,static_cast<int>(!stopOperation),
+         static_cast<int>(stopOperation),revision}).next();
     }
     return query("SELECT 1 FROM tasks WHERE id=? AND generation=?"
                  " AND coalesce(json_extract(data,'$.currentRevision'),0)=?"
