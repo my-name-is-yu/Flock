@@ -272,7 +272,8 @@ async function exercise(mountBoardInbox) {
 }
 
 function liveFixture() {
-  const bot = { id: 'release', name: 'Release', latestIncomingEventId: 0 };
+  const bot = { id: 'release', name: 'Release', latestIncomingEventId: 0,
+    presence: 'waiting', preview: 'Which branch?' };
   const decision = { botId: bot.id, botName: bot.name, itemKind: 'user_question', itemId: 1, waitId: 1,
     taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'Draft notes', prompt: 'Which branch?' };
   const approval = { ...decision, itemKind: 'policy_approval', itemId: 2, taskId: 2, waitId: 2,
@@ -335,6 +336,13 @@ async function exerciseLiveRetry() {
   }
   await waitFor(() => !trigger.hidden && fixture.stream?.path === '/api/events?bot=release',
     'The Inbox did not load on the Bot stream');
+  const badge = document.querySelector('#bot-list .decision-count');
+  const preview = document.querySelector('#bot-list .bot-preview');
+  if (badge.hidden || badge.textContent !== '1' || preview.textContent !== fixture.bot.preview ||
+      !preview.querySelector('.presence-dot').hidden)
+    throw new Error('The Bot row did not show the last message and a single waiting indicator');
+  const { width, height } = badge.getBoundingClientRect();
+  if (width < 24 || height < 24) throw new Error('The count button is smaller than 24 × 24 pixels');
   const stream = fixture.stream;
   await waitFor(() => document.getElementById('event-4'), 'The pending wait did not appear');
   const reads = fixture.reads;
@@ -357,6 +365,8 @@ async function exerciseLiveRetry() {
   await waitFor(() => fixture.failed, 'The live invalidation did not fetch the Inbox');
   if (trigger.hidden || panel.hidden) throw new Error('A transient Inbox failure cleared the pending decision');
   await waitFor(() => trigger.hidden && panel.hidden, 'The Inbox stayed stale with a healthy stream after HTTP 503');
+  if (!badge.hidden || preview.textContent !== 'Waiting for you' || preview.querySelector('.presence-dot').hidden)
+    throw new Error('The waiting Bot did not restore its status after losing its count');
   const resolution = document.querySelector('#event-4 .msg-resolution');
   if (approvalCard() || !resolution?.textContent.includes('Allowed once'))
     throw new Error('Resolving the approval did not restore its waiting event and decision');
