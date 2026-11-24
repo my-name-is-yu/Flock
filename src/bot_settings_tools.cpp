@@ -13,8 +13,8 @@ std::string argument(const Json& args, const char* key) {
 std::set<std::string> environments(const Json& routing) {
     std::set<std::string> ids;
     if (auto primary = field(routing,"environmentId"); !primary.empty()) ids.insert(std::move(primary));
-    for (const auto& id : routing.at("config").value("conversationEnvironments",Json::object()))
-        ids.insert(id.get<std::string>());
+    for (const auto& alias : routing.at("config").value("conversationEnvironments",Json::object()))
+        if (auto id = conversationEnvironmentId(alias); !id.empty()) ids.insert(std::move(id));
     return ids;
 }
 }
@@ -27,7 +27,6 @@ Seconds Store::Impl::environmentTimeout(std::string_view bot, std::string_view e
 Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Json& args, T3& t3) {
     Policy policy(*this);
     const auto& config = routing.at("config");
-    const auto environment = field(routing,"environmentId");
     const auto name = args.contains("environmentId") ? argument(args,"environmentId") : std::string{};
     std::string id;
     {
@@ -40,7 +39,7 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     Command command;
     command.ownerBotId = bot;
     command.environmentId = id;
-    if (id == environment) command.projectId = field(routing,"projectId");
+    command.projectId = configuredT3Project(routing,id,name);
     command.config = config;
     command.actionId = actionId();
     command.tool = "delegate";

@@ -51,7 +51,7 @@ endif()
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
-                       src/runtime.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
+                       src/runtime.cpp src/run_reports.cpp src/project_slots.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
                        src/bot_settings_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/external_mcp.cpp src/skill_export.cpp
                        src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp

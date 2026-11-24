@@ -49,13 +49,14 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   let workspace;
   let draft;
   let catalog = [];
+  let editable = false;
 
   function showView() {
     const configured = !!(workspace.model && workspace.environmentId && workspace.projectId);
     element.classList.toggle('needs-setup', !configured);
     edit.textContent = configured ? 'Edit' : 'Set up';
     edit.setAttribute('aria-label', `${edit.textContent} how this Bot runs`);
-    edit.hidden = !!draft;
+    edit.hidden = !editable || !!draft;
     form.hidden = !draft;
     facts.hidden = !!draft || !configured;
     missing.hidden = !!draft || configured;
@@ -63,9 +64,12 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     environmentText.textContent = workspace.environmentId;
     projectText.textContent = workspace.projectId;
   }
-  function update({ model = '', environmentId = '', projectId = '' }) {
-    if (workspace?.model === model && workspace.environmentId === environmentId && workspace.projectId === projectId) return;
+  function update({ model = '', environmentId = '', projectId = '' }, canEdit = editable) {
+    if (editable === canEdit && workspace?.model === model && workspace.environmentId === environmentId &&
+        workspace.projectId === projectId) return;
+    editable = canEdit;
     workspace = { model, environmentId, projectId };
+    if (!editable) draft = null;
     showView();
   }
   function showFeedback(message, error = false) {
@@ -111,6 +115,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     }
   }
   edit.addEventListener('click', () => {
+    if (!editable) return;
     draft = { initial: workspace, environmentEdited: false };
     showModelOptions([], workspace.model, 'Loading models…');
     modelFeedback.hidden = true;

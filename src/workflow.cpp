@@ -268,7 +268,7 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
             task["state"] = "queued";
             exec("UPDATE workflow_stages SET status='pending',deadline=0,alerted=0 WHERE workflow_id=? AND stage_id=?", {id,target});
         }
-        acceptInstruction(task,message,step,instruction,nullptr,routing,nullptr);
+        acceptInstruction(task,message,step,instruction,nullptr,nullptr);
     }
     auto status = workflowStatus(id,bot,unixTime());
     status["effect"] = "accepted";
@@ -333,7 +333,8 @@ void Store::Impl::materializeWorkflowStages() {
         exec(R"SQL(UPDATE workflow_dependencies AS d SET report_id=p.result_id,artifact_version=p.output
             FROM workflow_stages p WHERE p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
             AND d.workflow_id=? AND d.stage_id=?)SQL",{id,stage});
-        const auto taskId = startConversationTask(routing,bot,request,field(routing,"environmentId"),ready.number(4),nullptr,false);
+        const TaskRoute route{field(routing,"environmentId"),field(routing,"projectId")};
+        const auto taskId = startConversationTask(routing,bot,request,route,ready.number(4),nullptr,false);
         auto task = load(taskId);
         task["workflowId"] = id;
         task["stageId"] = spec.at("stageId");
@@ -346,7 +347,7 @@ void Store::Impl::materializeWorkflowStages() {
         if (!ready.string(5).empty()) {
             const auto next = ready.json(5);
             acceptInstruction(task,next.at("messageId"),next.at("step"),
-                              scrub.text(field(next,"text")),nullptr,routing,nullptr);
+                              scrub.text(field(next,"text")),nullptr,nullptr);
         } else save(task);
         exec("UPDATE workflow_stages SET task_id=?,input=?,instruction=NULL WHERE workflow_id=? AND stage_id=?",
              {taskId,input,id,spec.at("stageId")});
