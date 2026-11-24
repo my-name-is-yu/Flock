@@ -110,7 +110,7 @@ Json botSummary(const Json& bot) {
 Json settingsView(const Json& bot) {
     auto view = botSummary(bot);
     view["soul"] = field(bot,"soul");
-    copyFields(view,bot,{"environmentId","projectId"});
+    copyFields(view,bot,{"environmentId","projectId","model"});
     auto& cron = view["cron"] = Json::array();
     if (bot.contains("cron") && bot["cron"].is_array()) {
         for (const auto& schedule : bot["cron"]) {

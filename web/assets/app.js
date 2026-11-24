@@ -2602,6 +2602,16 @@ function generalContent(bot) {
   rows.append(settings);
   return [hero, workspace, roleCard(bot, statusNote), rows];
 }
+let modelCatalog = null;
+async function loadModelCatalog() {
+  if (modelCatalog) return modelCatalog;
+  try {
+    modelCatalog = (await api('settings/models')).models;
+  } catch {
+    modelCatalog = [];
+  }
+  return modelCatalog;
+}
 let t3Environments = null;
 async function loadT3Environments() {
   if (t3Environments) return t3Environments;
@@ -2613,16 +2623,19 @@ async function loadT3Environments() {
   }
   return t3Environments;
 }
+function modelName(slug) {
+  return modelCatalog?.find((item) => item.slug === slug)?.displayName ?? slug;
+}
 function workspaceCard(bot, statusNote) {
   const card = node('section', 'settings-card settings-workspace');
   const header = node('div', 'settings-role-header');
-  const heading = node('h3', 'settings-card-label', 'Where it works');
+  const heading = node('h3', 'settings-card-label', 'How it runs');
   heading.id = 'settings-workspace-label';
   card.setAttribute('aria-labelledby', heading.id);
   const edit = button('Edit', 'text-button settings-role-edit', beginEdit);
-  edit.setAttribute('aria-label', 'Edit where this Bot works');
+  edit.setAttribute('aria-label', 'Edit how this Bot runs');
   header.append(heading, edit);
-  const configured = !!(bot.environmentId && bot.projectId);
+  const configured = !!(bot.model && bot.environmentId && bot.projectId);
   card.classList.toggle('needs-setup', !configured);
 
   function renderView() {
@@ -2630,11 +2643,12 @@ function workspaceCard(bot, statusNote) {
     edit.textContent = configured ? 'Edit' : 'Set up';
     if (!configured) {
       card.replaceChildren(header, node('p', 'settings-workspace-missing',
-        `Choose a T3 project for ${bot.name} before it can start work.`));
+        `Choose a model and a T3 project for ${bot.name} before it can start work.`));
       return;
     }
     const facts = node('dl', 'settings-workspace-facts');
-    facts.append(node('dt', null, 'Project'), node('dd', null, bot.projectId),
+    facts.append(node('dt', null, 'Model'), node('dd', null, modelName(bot.model)),
+      node('dt', null, 'Project'), node('dd', null, bot.projectId),
       node('dt', null, 'T3 environment'), node('dd', null, bot.environmentId));
     card.replaceChildren(header, facts);
   }
@@ -2652,6 +2666,20 @@ function workspaceCard(bot, statusNote) {
     const listId = 'settings-t3-environments';
     const [environmentField, environment] = field('T3 environment ID', 'environmentId', bot.environmentId, listId);
     const [projectField, project] = field('Project ID', 'projectId', bot.projectId);
+    const modelField = node('label', 'settings-workspace-field');
+    const model = node('select');
+    model.name = 'model';
+    model.required = true;
+    const placeholder = Object.assign(node('option', null, 'Loading models…'), { value: '' });
+    model.append(placeholder);
+    modelField.append(node('span', null, 'Model'), model);
+    void loadModelCatalog().then((models) => {
+      const choices = models.some(({ slug }) => slug === bot.model) || !bot.model
+        ? models : [...models, { slug: bot.model, displayName: bot.model }];
+      placeholder.textContent = choices.length ? 'Choose a model' : 'Sign in to ChatGPT in Flock settings first';
+      model.append(...choices.map(({ slug, displayName }) => Object.assign(node('option', null, displayName), { value: slug })));
+      model.value = bot.model ?? (choices.length === 1 ? choices[0].slug : '');
+    });
     const suggestions = node('datalist');
     suggestions.id = listId;
     void loadT3Environments().then((environments) => {
@@ -2667,24 +2695,25 @@ function workspaceCard(bot, statusNote) {
     const save = button('Save', 'dialog-button primary');
     save.type = 'submit';
     actions.append(cancel, save);
-    form.append(environmentField, projectField, suggestions, hint, actions);
+    form.append(modelField, environmentField, projectField, suggestions, hint, actions);
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
-      for (const control of [environment, project, save, cancel]) control.disabled = true;
+      for (const control of [model, environment, project, save, cancel]) control.disabled = true;
       statusNote.classList.remove('error');
       statusNote.hidden = true;
       try {
-        await api('bots/profile', { botId: bot.id, name: bot.name, environmentId: environment.value, projectId: project.value });
+        await api('bots/profile', { botId: bot.id, name: bot.name, model: model.value,
+          environmentId: environment.value, projectId: project.value });
         await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
         if (detail?.kind === 'settings') {
-          detail = { ...detail, status: 'Saved where it works' };
+          detail = { ...detail, status: 'Saved' };
           signatures.delete('detail');
           renderDetail();
         }
       } catch {
-        for (const control of [environment, project, save, cancel]) control.disabled = false;
+        for (const control of [model, environment, project, save, cancel]) control.disabled = false;
         statusNote.classList.add('error');
-        statusNote.textContent = 'Couldn’t save. Check both IDs and try again.';
+        statusNote.textContent = 'Couldn’t save. Check the model and both IDs, then try again.';
         statusNote.hidden = false;
       }
     });

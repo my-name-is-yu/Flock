@@ -371,7 +371,7 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     }
 
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
-    for (const auto* key : {"environmentId","projectId"})
+    for (const auto* key : {"environmentId","projectId","model"})
         if (const auto value = config.find(key); value != config.end() && value->is_string()) item[key] = *value;
     if (config.contains("role") && config["role"].is_string() && validBotRole(config["role"].get_ref<const std::string&>()))
         item["role"] = config["role"];
@@ -551,6 +551,17 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
         if (id.empty()) config.erase(key);
         else if (!plainId(id)) throw Conflict("Use canonical environmentId and projectId identifiers from T3");
         else config[key] = id;
+    }
+    if (const auto model = profile.find("model"); model != profile.end()) {
+        const auto& slug = model->get_ref<const std::string&>();
+        if (slug.empty()) {
+            config.erase("modelProvider");
+            config.erase("model");
+        } else if (!plainId(slug)) throw Conflict("Choose a model from the list");
+        else {
+            config["modelProvider"] = "chatgpt";
+            config["model"] = slug;
+        }
     }
     if (changeAvatar)
         config["avatar"] = prepareAvatar(profile,botDir,existingAvatar,image);

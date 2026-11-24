@@ -51,6 +51,12 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                        {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
                                         : Json(nullptr)}});
     });
+    server.Get("/api/settings/models",[&](const httplib::Request& req, httplib::Response& res) {
+        person(callbacks,req);
+        if (!callbacks.modelCatalog) return reply(res,503,{{"error","models_unavailable"}});
+        try { reply(res,200,{{"models",callbacks.modelCatalog()}}); }
+        catch (const std::exception&) { reply(res,503,{{"error","models_unavailable"}}); }
+    });
     server.Get("/api/bot-settings",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.get_param_value_count("bot") != 1 || req.get_param_value("bot").empty())
             return reply(res,400,{{"error","invalid_bot"}});

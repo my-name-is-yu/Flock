@@ -113,7 +113,7 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
             throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
-    for (const auto* key : {"environmentId","projectId"}) {
+    for (const auto* key : {"environmentId","projectId","model"}) {
         if (creating || !body.contains(key)) continue;
         const auto& value = body[key];
         if (!value.is_string() || value.get_ref<const std::string&>().size() > 256) throw InputError("invalid_workspace");

@@ -240,6 +240,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::unique_ptr<T3> t3;
     std::function<Json()> modelStatus;
     std::function<bool(bool)> modelLogin;
+    std::function<Json()> modelCatalog;
     struct SignIn {
         std::mutex mutex;
         bool running = false;
@@ -251,6 +252,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         model = makeDemoModel();
         t3 = makeDemoT3();
         modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
+        modelCatalog = [] { return Json::array({{{"slug","demo"},{"displayName","Demo"}}}); };
     } else {
         auto chatgpt = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
         modelStatus = [model = chatgpt.get(),&signIn] {
@@ -286,6 +288,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             signIn.error.clear();
             return true;
         };
+        modelCatalog = [directory = home / "credentials" / "chatgpt"] { return ChatGPTModel(directory).models(); };
         model = std::move(chatgpt);
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
@@ -351,6 +354,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     callbacks.sessionT3 = t3.get();
     callbacks.modelStatus = modelStatus;
     callbacks.modelLogin = modelLogin;
+    callbacks.modelCatalog = modelCatalog;
     std::atomic<unsigned> webPort = 0;
     struct T3Setup {
         std::mutex mutex;

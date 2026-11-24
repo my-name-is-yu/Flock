@@ -831,13 +831,16 @@ void botProfilesAndAvatars() {
     check(cleared.at("soul") == "" && !std::filesystem::exists(temp.path / "bots" / "scout" / "SOUL.md"),
           "clearing a Bot role left SOUL.md behind");
 
-    const auto placed = bots.updateProfile("scout",{{"name","Scout Renamed"},{"environmentId","env-1"},{"projectId","project-1"}},std::nullopt);
+    const auto placed = bots.updateProfile("scout",{{"name","Scout Renamed"},{"model","gpt-test"},
+        {"environmentId","env-1"},{"projectId","project-1"}},std::nullopt);
     const auto scoutConfig = [&] {
         std::ifstream input(temp.path / "bots" / "scout" / "config.json");
         return Json::parse(input);
     };
     check(placed.at("environmentId") == "env-1" && placed.at("projectId") == "project-1" &&
-          scoutConfig().at("environmentId") == "env-1" && scoutConfig().at("projectId") == "project-1",
+          scoutConfig().at("environmentId") == "env-1" && scoutConfig().at("projectId") == "project-1" &&
+          placed.at("model") == "gpt-test" && scoutConfig().at("modelProvider") == "chatgpt" &&
+          bots.get("scout").intake("Check").projectId == "project-1",
           "saving where a Bot works did not write its config");
     bool rejectedProject = false;
     try { bots.updateProfile("scout",{{"name","Scout Renamed"},{"projectId","has space"}},std::nullopt); }

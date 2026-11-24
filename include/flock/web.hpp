@@ -28,6 +28,8 @@ struct WebCallbacks {
     std::function<Json()> modelStatus = {};
     // Optional: starts ChatGPT sign-in in the background (opens the browser on this machine).
     std::function<bool(bool reconsent)> modelLogin = {};
+    // Optional: the models Bots can use, as [{slug, displayName}].
+    std::function<Json()> modelCatalog = {};
     std::function<bool(const Person&, const std::string& environmentId, const std::string& mcpUrl)> t3Connect = {};
     std::function<Json(const Person&)> t3Setup = {};
     // A missing environment retries cleanup of a revoked provider registration.
