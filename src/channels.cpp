@@ -159,7 +159,7 @@ void Store::connectChannel(ChannelConnector connector) {
     p_->channels.insert_or_assign(connector.kind,std::move(connector));
 }
 
-void Store::artifactBaseUrl(std::string url) {
+std::string normalizeArtifactBaseUrl(std::string url) {
     if (!url.empty()) {
         if (!url.starts_with("https://") || url.size() <= 8) throw Conflict("Artifact base URL must be an HTTPS origin");
         if (url.ends_with('/')) url.pop_back();
@@ -177,8 +177,13 @@ void Store::artifactBaseUrl(std::string url) {
                 throw Conflict("Invalid artifact origin port");
         }
     }
+    return url;
+}
+
+void Store::artifactBaseUrl(std::string url) {
+    auto origin = normalizeArtifactBaseUrl(std::move(url));
     std::lock_guard lock(p_->mutex);
-    p_->artifactOrigin = std::move(url);
+    p_->artifactOrigin = std::move(origin);
 }
 
 bool Store::Impl::permitsChannel(std::string_view bot, const ChannelOrigin& origin,
@@ -188,6 +193,7 @@ bool Store::Impl::permitsChannel(std::string_view bot, const ChannelOrigin& orig
     const auto linked = connector->second.resolveSender(origin.workspaceId,sender);
     if (!linked || linked->botId != bot || linked->personId != person) return false;
     auto policy = Policy(const_cast<Impl&>(*this));
+    if (resolveWebIdentity && policy.requiresIdentity() && !resolveWebIdentity(person)) return false;
     return policy.allows(Person{std::string(person),false},Action::bot_talk,bot) &&
            policy.allows(bot,Action::channel_use,channelPolicyTarget(origin)) &&
            (operation == "use" || !policy.forbidden(bot,operation == "read" ? Action::channel_read : Action::channel_post,

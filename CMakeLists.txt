@@ -49,12 +49,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
-                       src/markdown.cpp
+                       src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
-                       src/runtime.cpp src/policy.cpp src/policy_approval.cpp src/bot_settings_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/skill_export.cpp
+                       src/runtime.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
+                       src/bot_settings_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/external_mcp.cpp src/skill_export.cpp
                        src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
-                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp src/base64.cpp
+                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/base64.cpp
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
@@ -106,6 +107,15 @@ if(BUILD_TESTING)
   add_executable(flock_conversation_store tests/conversation_store.cpp)
   target_link_libraries(flock_conversation_store PRIVATE flock_core)
   add_test(NAME flock_conversation_store COMMAND flock_conversation_store)
+  add_executable(flock_tool_batch tests/tool_batch.cpp)
+  target_link_libraries(flock_tool_batch PRIVATE flock_core)
+  target_compile_options(flock_tool_batch PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_tool_batch COMMAND flock_tool_batch)
+  add_executable(flock_conversation_batch tests/conversation_batch.cpp)
+  target_link_libraries(flock_conversation_batch PRIVATE flock_core)
+  target_compile_options(flock_conversation_batch PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_conversation_batch COMMAND flock_conversation_batch)
+  add_test(NAME flock_tool_batch_measure COMMAND flock_conversation_batch --measure)
   add_executable(flock_markdown_tests tests/markdown.cpp)
   target_link_libraries(flock_markdown_tests PRIVATE flock_core)
   add_test(NAME flock_markdown COMMAND flock_markdown_tests)
@@ -137,6 +147,10 @@ if(BUILD_TESTING)
   target_link_libraries(flock_git_pr_ci PRIVATE flock_app_support)
   target_compile_options(flock_git_pr_ci PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_git_pr_ci COMMAND flock_git_pr_ci)
+  add_executable(flock_git_bot_deletion tests/git_bot_deletion.cpp)
+  target_link_libraries(flock_git_bot_deletion PRIVATE flock_core)
+  target_compile_options(flock_git_bot_deletion PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_git_bot_deletion COMMAND flock_git_bot_deletion)
   add_executable(flock_bot_tools_sandbox tests/bot_tools_sandbox.cpp)
   target_include_directories(flock_bot_tools_sandbox PRIVATE app)
   target_link_libraries(flock_bot_tools_sandbox PRIVATE flock_app_support)

@@ -242,6 +242,14 @@ a.settings-row svg { margin-left: auto; }
 .dialog-button.quiet { background: none; color: var(--text-2); }
 .dialog-button.quiet:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 
+.settings-row.danger { color: var(--danger); }
+button.settings-row.danger:hover { background: var(--danger-soft); }
+.bot-delete-dialog { width: min(26rem, calc(100% - 2rem)); }
+.bot-delete-dialog p { color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; }
+.bot-delete-feedback:empty { position: absolute; }
+.bot-delete-dialog .bot-delete-feedback.error { color: var(--danger); }
+.bot-delete-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); }
+
 @media (max-width: 700px) {
   .detail, .detail.has-nav {
     --detail-pad: 1.1rem;

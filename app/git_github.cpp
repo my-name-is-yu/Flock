@@ -156,6 +156,7 @@ public:
         if (initialized != CURLE_OK) throw Conflict("GitHub HTTP initialization failed");
     }
     std::string_view name() const override { return "github.com"; }
+    void verifyToken() const { (void)json("GET","/rate_limit"); }
     bool permits(const GitContext&, const GitRepository& repository, std::string_view) const override {
         return repository.host == name();
     }
@@ -380,5 +381,9 @@ private:
 
 std::shared_ptr<GitHost> makeGitHubHost(std::string token) {
     return std::make_shared<GitHub>(std::move(token));
+}
+
+void verifyGitHubToken(std::string token) {
+    GitHub(std::move(token)).verifyToken();
 }
 }

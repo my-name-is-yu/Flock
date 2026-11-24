@@ -62,6 +62,7 @@ struct GitWebhook {
     std::string headSha, summary;
     Id jobId = 0;
     std::string payloadDigest = {};
+    std::string requestedReviewer = {};
 };
 
 const std::vector<std::string>& gitTools(bool conversation = true);

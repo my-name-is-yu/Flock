@@ -64,6 +64,16 @@ std::optional<Json> ChangeFeed::next(Cursor& cursor) {
     return update;
 }
 
+std::shared_ptr<const ChangeFeed::Projection> ChangeFeed::cachedBotView(const Person& person, const std::string& bot,
+                                                                      const Json& descriptor) {
+    std::lock_guard lock(mutex_);
+    const auto item = watched_.find({person,BotView{bot}});
+    if (item == watched_.end()) return {};
+    const auto& snapshot = item->second.snapshot;
+    if (!snapshot || !snapshot->botVersion || snapshot->botVersion->descriptor != descriptor) return {};
+    return snapshot;
+}
+
 void ChangeFeed::rescan() {
     std::lock_guard lock(mutex_);
     scanRequested_ = true;
@@ -80,10 +90,10 @@ void ChangeFeed::stop() {
 }
 
 void ChangeFeed::refresh(const std::vector<Scope>& scopes, const Store::ConversationChanges& changes) {
-    std::map<Scope,std::optional<Json>> snapshots;
+    std::map<Scope,std::shared_ptr<const Projection>> snapshots;
     for (const auto& scope : scopes) {
         auto& snapshot = snapshots[scope];
-        try { snapshot = load_(scope); }
+        try { snapshot = std::make_shared<const Projection>(load_(scope)); }
         catch (const std::exception&) {}
     }
     std::lock_guard lock(mutex_);
@@ -98,10 +108,10 @@ void ChangeFeed::refresh(const std::vector<Scope>& scopes, const Store::Conversa
             if (watched.pending == Refresh::None) watched.pending = Refresh::Projection;
             continue;
         }
-        const bool historyChanged = std::exchange(watched.pending,Refresh::None) == Refresh::History && !snapshot->is_null();
-        if (watched.snapshot == snapshot && !historyChanged) continue;
+        const bool historyChanged = std::exchange(watched.pending,Refresh::None) == Refresh::History && !snapshot->data.is_null();
+        const bool projectionChanged = !watched.snapshot || watched.snapshot->data != snapshot->data;
         watched.snapshot = std::move(snapshot);
-        watched.revision = ++revision_;
+        if (projectionChanged || historyChanged) watched.revision = ++revision_;
     }
     if (revision_ != previousRevision) changed_.notify_all();
 }
