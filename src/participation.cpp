@@ -1,13 +1,11 @@
 #include "flock/participation.hpp"
+#include "connector_credentials.hpp"
 #include "conversation_storage.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <fcntl.h>
 #include <future>
-#include <openssl/evp.h>
-#include <openssl/rand.h>
 #include <sys/file.h>
 #include <unistd.h>
 
@@ -16,6 +14,7 @@ namespace {
 
 constexpr std::string_view tokenPrefix = "flock-t3-";
 constexpr std::size_t maxRequestBytes = 8192;
+using connector_credentials::digest;
 
 // An invitation gives the inviter's stop authority over the invitee in this Session.
 // Follow outgoing edges only. UNION also makes repeated invitations and cycles harmless.
@@ -28,33 +27,6 @@ WITH RECURSIVE stopping(id) AS (
  WHERE i.message_id<?2
 )
 )SQL";
-
-template<class Bytes>
-std::string hex(const Bytes& bytes) {
-    constexpr std::string_view digits = "0123456789abcdef";
-    std::string result;
-    result.reserve(bytes.size() * 2);
-    for (const auto byte : bytes) {
-        result += digits[byte >> 4];
-        result += digits[byte & 15];
-    }
-    return result;
-}
-
-std::string digest(std::string_view value) {
-    std::array<unsigned char,32> bytes{};
-    unsigned int size = 0;
-    if (EVP_Digest(value.data(),value.size(),bytes.data(),&size,EVP_sha256(),nullptr) != 1 || size != bytes.size())
-        throw std::runtime_error("Could not hash T3 connection data");
-    return hex(bytes);
-}
-
-std::string connectorBearer() {
-    std::array<unsigned char,32> bytes{};
-    if (RAND_bytes(bytes.data(),static_cast<int>(bytes.size())) != 1)
-        throw std::runtime_error("Could not generate T3 connection token");
-    return std::string(tokenPrefix) + hex(bytes);
-}
 
 bool validId(std::string_view value, std::size_t max = 1024) {
     return !value.empty() && value.size() <= max &&
@@ -81,14 +53,7 @@ SessionDispatchFileLock::SessionDispatchFileLock(const std::filesystem::path& da
 SessionDispatchFileLock::~SessionDispatchFileLock() { close(fd_); }
 
 std::string redactT3Tokens(std::string value) {
-    std::size_t at = 0;
-    while ((at = value.find(tokenPrefix,at)) != value.npos) {
-        const auto suffix = std::string_view(value).substr(at + tokenPrefix.size(),64);
-        if (suffix.size() == 64 && suffix.find_first_not_of("0123456789abcdef") == suffix.npos)
-            value.replace(at,tokenPrefix.size()+64,"[T3 connection token]");
-        at += tokenPrefix.size();
-    }
-    return value;
+    return connector_credentials::redact(std::move(value),tokenPrefix,"[T3 connection token]");
 }
 
 void Store::Impl::initializeParticipationSchema() {
@@ -152,7 +117,7 @@ std::string T3Connections::connect(std::string_view environment, std::string_vie
     }();
     std::string token;
     if (rotate) {
-        token = connectorBearer();
+        token = connector_credentials::bearer(tokenPrefix);
         db.exec(R"SQL(
 INSERT INTO t3_connector VALUES(1,?,?,?,?)
 ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id,
@@ -172,7 +137,7 @@ void T3Connections::rebindPort(unsigned port, const std::function<void(std::stri
     Transaction tx(db.db);
     const auto currentPort = this->port();
     if (currentPort && currentPort != port) {
-        const auto token = connectorBearer();
+        const auto token = connector_credentials::bearer(tokenPrefix);
         // The provider can verify its existing registration against the old token until its update succeeds.
         install(token);
         db.exec("UPDATE t3_connector SET id=?,token_digest=?,port=?",{actionId(),digest(token),static_cast<Id>(port)});
@@ -227,8 +192,7 @@ void T3Connections::providerRemoved() {
 }
 
 std::optional<T3Connection> T3Connections::authenticate(std::string_view token) const {
-    if (!token.starts_with(tokenPrefix) || token.size() != tokenPrefix.size()+64 ||
-        token.substr(tokenPrefix.size()).find_first_not_of("0123456789abcdef") != token.npos) return {};
+    if (!connector_credentials::validBearer(token,tokenPrefix)) return {};
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     auto row = db.query("SELECT id,person_id FROM t3_connector WHERE token_digest=?"

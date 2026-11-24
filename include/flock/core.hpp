@@ -363,6 +363,7 @@ private:
     friend class Runtime;
     friend class Policy;
     friend class T3Connections;
+    friend class ExternalMcp;
     friend class SessionParticipation;
     friend class SettingsAccess;
 };

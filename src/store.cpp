@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS git_review_receipts(
     exec("CREATE INDEX IF NOT EXISTS git_review_receipts_target"
          " ON git_review_receipts(task_id,host,repo,pr_number,reviewer,after_event)");
     exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
+    initializeExternalMcpSchema();
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
   host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,
@@ -583,13 +584,18 @@ std::optional<Store::BotViewStamp> Store::botViewStamp() const {
 Id Store::submit(const Intake& item, const Person* requester) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    if (requester && !policy().allows(*requester,Action::bot_talk,item.botId)) throw DecisionDenied{};
-    const auto id = p_->submit(item);
-    if (requester) {
-        p_->sharedRedactor().requirePublic(requester->id);
-        p_->exec("UPDATE tasks SET data=json_set(data,'$.requester',?) WHERE id=?",{requester->id,id});
-    }
+    const auto id = p_->submitRequest(item,requester);
     transaction.commit();
+    return id;
+}
+
+Id Store::Impl::submitRequest(const Intake& item, const Person* requester) {
+    if (requester && !Policy(*this).allows(*requester,Action::bot_talk,item.botId)) throw DecisionDenied{};
+    const auto id = submit(item);
+    if (requester) {
+        sharedRedactor().requirePublic(requester->id);
+        exec("UPDATE tasks SET data=json_set(data,'$.requester',?) WHERE id=?",{requester->id,id});
+    }
     return id;
 }
 

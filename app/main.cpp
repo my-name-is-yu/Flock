@@ -9,6 +9,7 @@
 #include "t3_connection_setup.hpp"
 #include "t3_setup.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/external_mcp.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/identity.hpp"
 
@@ -46,6 +47,8 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   t3 connect [MCP_URL] [--port PORT]
   t3 reconnect ENVIRONMENT [--port PORT]
   t3 disconnect ENVIRONMENT
+  external-mcp connect PERSON BOT [BOT ...]
+  external-mcp disconnect CONNECTION_ID
   model login [--print-url] [--reconsent]
   model status
   model models
@@ -181,6 +184,30 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     }
     print({{"environmentId",result.environmentId},{"connected",true},
            {"port",result.port},{"configuredProviders",result.configuredProviders}});
+    return 0;
+}
+
+int externalMcpCommand(Arguments& args, const std::filesystem::path& home, const Bots& bots) {
+    const auto action = args.pop("external MCP command");
+    if (action == "connect") {
+        const auto person = args.pop("Flock person");
+        std::vector<std::string> allowedBots;
+        do {
+            const auto bot = args.pop("Bot ID");
+            bots.get(bot);
+            allowedBots.emplace_back(bot);
+        } while (!args.empty());
+        auto store = openStore(home);
+        const SettingsAccess access(store,home,std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
+        const auto credential = ExternalMcp(store).connect(person,allowedBots);
+        print({{"connectionId",credential.connectionId},{"bearerToken",credential.bearerToken}});
+    } else if (action == "disconnect") {
+        const auto id = args.pop("external MCP connection ID");
+        args.end();
+        auto store = openStore(home);
+        ExternalMcp(store).disconnect(id);
+        print({{"connectionId",id},{"connected",false}});
+    } else throw Conflict("Unknown external MCP command");
     return 0;
 }
 
@@ -436,6 +463,7 @@ int runCli(Arguments& args) {
     if (command == "model") return modelCommand(args,home);
     Bots bots(home / "bots");
     if (command == "t3") return t3Command(args,home,bots);
+    if (command == "external-mcp") return externalMcpCommand(args,home,bots);
     if (command == "bots") {
         args.end();
         auto cards = bots.cards();
