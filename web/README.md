@@ -145,8 +145,8 @@ These endpoints require an installation root.
 
 ## Bot settings
 
-**Sharing and connections** contains shared members, pending protected inputs,
-and local machine connections for the Bot.
+Each Bot's **Access** page (Flock settings → Bots → Access) lists who can use
+the Bot, secrets it is waiting for, and connected computers.
 
 The creator owns the Bot. A root identity can manage all Bots. Shared members
 can view and talk to their Bot and answer its Decision Inbox items. With Web

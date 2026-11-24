@@ -1,26 +1,52 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff">
-<title>Sharing and connections</title><script src="/theme.js"></script><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/settings.css"><script type="module" src="/bot-settings.js"></script></head>
-<body><main>
-<a id="back" class="settings-back" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span id="back-label">Back</span></a><h1>Sharing and connections</h1>
-<p id="status" role="status"></p>
-<section id="local-connections" hidden><h2>Local machine connections</h2><div id="machines"></div></section>
-<div id="administration" hidden>
-<section id="secrets" hidden><h2>Secrets</h2><div id="inputs"></div></section>
-<section id="sharing" hidden><h2>Who can use this Bot</h2><div id="people"></div>
-<form id="members"><label>Person ID <input required name="person"></label><button class="button">Add member</button></form></section>
-</div>
-<section id="channel-senders" aria-labelledby="channel-heading" hidden>
-  <h2 id="channel-heading">Channel senders</h2>
-  <div class="settings-group">
-    <div id="channel-links"></div>
-    <form id="channel-sender-form" class="rule-form" hidden>
-      <label>Channel <select id="channel-bridge" name="bridge" required></select></label>
-      <label>Sender ID <input name="sender" required autocomplete="off" spellcheck="false"></label>
-      <label>Flock person ID <input name="person" required autocomplete="off" spellcheck="false"></label>
-      <button class="button">Link sender</button>
-    </form>
-  </div>
-</section>
-</main></body></html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff">
+  <title>Access · Flock settings</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/settings.css">
+  <script type="module" src="/bot-settings.js"></script>
+</head>
+<body><div class="settings-shell">
+  <nav class="settings-nav" aria-label="Settings sections"></nav>
+  <main class="settings-page">
+    <header class="settings-header">
+      <h1 class="settings-crumb"><a href="/settings#bots">Bots</a><span class="settings-crumb-sep" aria-hidden="true">/</span><span id="crumb-bot"></span><span class="settings-crumb-sep" aria-hidden="true">/</span><span>Access</span></h1>
+    </header>
+    <p id="status" role="status"></p>
+    <section id="local-connections" aria-labelledby="machines-heading" hidden>
+      <h2 id="machines-heading">Connected computers</h2>
+      <div id="machines" class="settings-group"></div>
+    </section>
+    <section id="secrets" aria-labelledby="secrets-heading" hidden>
+      <h2 id="secrets-heading">Secrets to provide</h2>
+      <div id="inputs" class="settings-group"></div>
+    </section>
+    <section id="sharing" aria-labelledby="sharing-heading" hidden>
+      <h2 id="sharing-heading">Who can use this Bot</h2>
+      <div class="settings-group"><div id="people" class="settings-rows"></div>
+        <form id="members" class="settings-row rule-form" hidden>
+          <label class="rule-target">Person ID <input required name="person" autocomplete="off" spellcheck="false"></label>
+          <button class="button">Add person</button>
+        </form>
+      </div>
+    </section>
+    <section id="channel-senders" aria-labelledby="channel-heading" hidden>
+      <h2 id="channel-heading">Channel senders</h2>
+      <div class="settings-group">
+        <div id="channel-links" class="settings-rows"></div>
+        <form id="channel-sender-form" class="settings-row rule-form" hidden>
+          <label>Channel <select id="channel-bridge" name="bridge" required></select></label>
+          <label>Sender ID <input name="sender" required autocomplete="off" spellcheck="false"></label>
+          <label>Person ID <input name="person" required autocomplete="off" spellcheck="false"></label>
+          <button class="button">Link sender</button>
+        </form>
+      </div>
+    </section>
+  </main>
+</div></body>
+</html>

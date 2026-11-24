@@ -12,14 +12,7 @@
   <script type="module" src="/settings.js"></script>
 </head>
 <body><div class="settings-shell">
-  <nav class="settings-nav" aria-label="Settings sections">
-    <a class="settings-back" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>Conversations</a>
-    <a href="#appearance" data-section="appearance"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4m11.2-11.2L19 5"/></svg>Appearance</a>
-    <a href="#permissions" data-section="permissions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 5 6.5v5c0 4.2 2.9 7.6 7 9 4.1-1.4 7-4.8 7-9v-5z"/><path d="m9 12 2 2 4-4"/></svg>Permissions</a>
-    <a href="#connections" data-section="connections"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 15 15 9"/><path d="M10.5 6.5 12 5a4.2 4.2 0 0 1 6 6l-1.5 1.5M13.5 17.5 12 19a4.2 4.2 0 0 1-6-6l1.5-1.5"/></svg>Connections</a>
-    <a href="#access" data-section="access"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="7.5" r="3"/><path d="M4.5 19v-2a5.5 5.5 0 0 1 11 0v2M17 5a3 3 0 0 1 0 5.7M18 13a4.2 4.2 0 0 1 2.5 4v2"/></svg>Access</a>
-    <a href="#system" data-section="system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M8.5 20h7M12 16.5V20M7.5 10.5h2.5"/></svg>System</a>
-  </nav>
+  <nav class="settings-nav" aria-label="Settings sections"></nav>
   <main class="settings-page">
     <header class="settings-header">
       <h1 class="settings-crumb"><span>Settings</span><span class="settings-crumb-sep" aria-hidden="true">/</span><span id="crumb">Appearance</span></h1>
@@ -55,7 +48,7 @@
       </section>
       <section aria-labelledby="rules-heading">
         <h2 id="rules-heading">Rules</h2>
-        <div class="settings-group"><div id="rules"></div>
+        <div class="settings-group"><div id="rules" class="settings-rows"></div>
           <form id="rule-form" class="settings-row rule-form" hidden>
             <label>Choice <select name="kind" required>
               <option value="allow">Allow</option><option value="ask">Ask first</option><option value="never">Never</option>
@@ -67,6 +60,12 @@
         </div>
       </section>
     </div>
+    <div class="settings-panel" data-panel="bots" hidden>
+      <section aria-labelledby="bots-heading">
+        <h2 id="bots-heading">Bots</h2>
+        <div id="bots" class="settings-group" aria-live="polite"></div>
+      </section>
+    </div>
     <div class="settings-panel" data-panel="connections" hidden>
       <section aria-labelledby="execution-heading">
         <h2 id="execution-heading">Models and execution</h2>
@@ -76,13 +75,13 @@
         </div>
         <div class="connection-provider">
           <h3>T3 Code</h3>
-          <div class="settings-group"><div id="connections"></div>
+          <div class="settings-group"><div id="connections" class="settings-rows"></div>
             <div id="t3-connect-options" class="settings-row t3-connect-options" hidden>
               <button id="t3-connect-local" type="button" class="button primary">Connect local T3</button>
               <details id="t3-connect-by-url">
                 <summary>Use a connection URL</summary>
                 <form id="t3-form" class="rule-form">
-                  <label class="rule-target">T3 connection URL <input name="mcpUrl" type="url" required autocomplete="off" spellcheck="false" placeholder="Paste Copy MCP URL from T3 Code"></label>
+                  <label class="rule-target">T3 connection URL <input name="mcpUrl" type="url" required autocomplete="off" spellcheck="false" placeholder="Paste the URL copied from T3 Code"></label>
                   <button class="button">Connect</button>
                 </form>
               </details>
@@ -103,7 +102,7 @@
       <section aria-labelledby="access-heading">
         <h2 id="access-heading">Flock sign-in</h2>
         <div id="access" class="settings-group" aria-live="polite"></div>
-        <p class="settings-help">To share a specific Bot, open Sharing and connections in that Bot’s conversation.</p>
+        <p class="settings-help">To share a Bot, open <a href="#bots">Bots</a> and choose Access for that Bot.</p>
       </section>
     </div>
     <div class="settings-panel" data-panel="system" hidden>

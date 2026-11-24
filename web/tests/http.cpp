@@ -1703,9 +1703,13 @@ void settingsEndpoints(const std::filesystem::path& path) {
     signedOut = false;
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
-    check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&
-          botPage && botPage->status == 200 && botPage->body.find("Sharing and connections") != std::string::npos,
-          "Settings pages did not serve their own content");
+    check(settingsPage && settingsPage->status == 200 &&
+          settingsPage->body.find("data-panel=\"bots\"") != std::string::npos,
+          "Flock settings did not include the Bots section");
+    check(botPage && botPage->status == 200 && botPage->body.find("Access · Flock settings") != std::string::npos &&
+          botPage->body.find("id=\"local-connections\"") != std::string::npos &&
+          botPage->body.find("id=\"channel-senders\"") != std::string::npos,
+          "Bot Access did not include the computer approval and channel sender sections");
     browser.post("/api/settings/mode",{{"mode","supervised"}});
     const auto rule = settings.at("rules").at(0);
     const Json removal{{"kind",rule.at("kind")},{"action",rule.at("action")},{"target",rule.at("target")},{"add",false}};
