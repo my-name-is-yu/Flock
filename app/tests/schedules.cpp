@@ -238,6 +238,64 @@ void runSettingsChangesResyncConfiguredSchedules() {
     check(store.tasks("release").size() == 1,"a configured schedule fired after its destination was cleared");
 }
 
+void automationFiringsUseCurrentPlannerModel() {
+    Sandbox temp;
+    const auto home = temp.path / "bots";
+    const auto folder = home / "release";
+    createBot(folder,botConfig("previous-model"),"","");
+    Bots bots(home);
+    Store store(temp.path / "tasks.db",{},[&](std::string_view id,std::string_view request) {
+        return bots.get(id).intake(request);
+    });
+    const Person owner{"fixture",true};
+    const auto firstDue = utc(2026,1,2,0,0);
+    const auto nextDue = utc(2026,1,3,0,0);
+    auto saved = bots.get("release").intake("");
+    saved.environmentId = "saved-environment";
+    saved.projectId = "saved-project";
+    saved.config["modelProvider"] = "saved-provider";
+    saved.config["runTimeoutSeconds"] = 135;
+    const auto schedule = store.createAutomation(owner,saved,{{"kind","schedule"},{"cron","0 0 * * *"},
+        {"timezone","Etc/UTC"},{"request","Daily check"}},firstDue - 60);
+    const auto trigger = store.createAutomation(owner,saved,{{"kind","trigger"},{"source","deploy"},
+        {"eventFilter",{{"branch","main"}}},{"request","Deploy check"}},firstDue - 60);
+
+    store.fireDueAutomations(firstDue);
+    const auto previousTask = store.tasks("release").at(0).at("id").get<Id>();
+    const auto report = [](std::string_view,std::string_view error) { throw std::runtime_error(std::string(error)); };
+    bots.updateRunSettings(store,"release",{{"model","current-model"},{"environmentId","current-environment"},
+        {"projectId","current-project"}},firstDue,report);
+
+    store.fireDueAutomations(nextDue);
+    const auto recurring = store.tasks("release").at(0);
+    check(recurring.at("trigger").at("triggerId") == schedule.at("id") &&
+          recurring.at("trigger").at("targetTime") == nextDue,"model change lost the next scheduled occurrence");
+    const auto webhook = store.receiveWebhook(owner,"deploy","event-1",{{"branch","main"}},nextDue);
+    check(webhook.at("tasks").size() == 1 && webhook.at("tasks").at(0).at("triggerId") == trigger.at("id"),
+          "model change lost the matched webhook firing");
+
+    auto currentConfig = saved.config;
+    currentConfig["model"] = "current-model";
+    currentConfig["modelProvider"] = "chatgpt";
+    const auto checkTask = [&](Id id,const Json& expected) {
+        const auto task = store.task(id);
+        check(task.at("config") == expected && task.at("environmentId") == saved.environmentId &&
+              task.at("projectId") == saved.projectId,"automation task used the wrong planner model or lost its saved route");
+    };
+    checkTask(recurring.at("id").get<Id>(),currentConfig);
+    checkTask(webhook.at("tasks").at(0).at("taskId").get<Id>(),currentConfig);
+    auto previousConfig = currentConfig;
+    previousConfig["model"] = "previous-model";
+    checkTask(previousTask,previousConfig);
+
+    write(folder / "config.json","invalid");
+    store.fireDueAutomations(utc(2026,1,4,0,0));
+    const auto fallback = store.tasks("release").at(0);
+    check(fallback.at("trigger").at("targetTime") == utc(2026,1,4,0,0),
+          "unreadable Bot settings prevented the saved automation from firing");
+    checkTask(fallback.at("id").get<Id>(),saved.config);
+}
+
 void failedScheduleSyncLeavesWorkspaceUnchanged() {
     Sandbox temp;
     const auto home = temp.path / "bots";
@@ -360,6 +418,7 @@ void configuredSchedules() {
     cronIntakeAndRestart();
     configuredScheduleLifecycle();
     runSettingsChangesResyncConfiguredSchedules();
+    automationFiringsUseCurrentPlannerModel();
     failedScheduleSyncLeavesWorkspaceUnchanged();
     invalidSessionSettingsPreserveDueTimes();
     invalidEntriesPreserveDueSchedule();

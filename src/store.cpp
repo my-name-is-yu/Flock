@@ -102,8 +102,8 @@ Json questionTarget(const Json& task) {
         {"eventId",task.at("eventId")},{"run",task.at("activeRun")},{"requestId",field(task.at("question"),"requestId")}};
 }
 
-Store::Impl::Impl(std::filesystem::path file, MemorySeed seed)
-    : path(std::move(file)), memorySeed(std::move(seed)) {
+Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, IntakeResolver intake)
+    : path(std::move(file)), memorySeed(std::move(seed)), automationIntake(std::move(intake)) {
     if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
     const int rc = sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
     try {
@@ -539,8 +539,8 @@ std::string effectiveDoneWhen(const Json& task) {
     return task.value("requestedDoneWhen",field(task,"doneWhen"));
 }
 
-Store::Store(std::filesystem::path db, MemorySeed seed)
-    : p_(std::make_unique<Impl>(std::move(db),std::move(seed))) {}
+Store::Store(std::filesystem::path db, MemorySeed seed, IntakeResolver automationIntake)
+    : p_(std::make_unique<Impl>(std::move(db),std::move(seed),std::move(automationIntake))) {}
 Store::~Store() = default;
 const std::filesystem::path& Store::path() const { return p_->path; }
 
