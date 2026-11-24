@@ -268,6 +268,7 @@ struct Store::Impl {
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
     Id dataVersion() const;
+    std::pair<Id,Id> changeStamp() const;
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;

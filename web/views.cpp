@@ -1,6 +1,7 @@
 #include "views.hpp"
 #include "flock/markdown.hpp"
 #include "flock/policy.hpp"
+#include "flock/secrets.hpp"
 
 #include <charconv>
 #include <iterator>
@@ -360,12 +361,12 @@ Json botList(Store& store, const Json& bots) {
 }
 
 Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
-    const auto policy = store.policy();
-    const auto events = policy.redactSecrets(bot,
-        store.conversation(bot,before,conversationSize + 1,Store::ConversationEvents::all,viewer));
-    const markdown::SensitiveText sensitive = [&](std::string_view text) {
-        return containsProtectedText(policy,bot,text);
-    };
+    auto events = store.conversation(bot,before,conversationSize + 1,Store::ConversationEvents::all,viewer);
+    const auto redactor = store.policy().secretRedactor(bot);
+    events = redactor.record(std::move(events),SecretRedactor::Fields::external);
+    markdown::SensitiveText sensitive;
+    if (!redactor.empty())
+        sensitive = [&](std::string_view text) { return redactor.containsProtectedText(text); };
     const bool more = events.size() > conversationSize;
     Json result = {{"events",Json::array()},{"olderBefore",0}};
     auto& page = result["events"];

@@ -214,8 +214,9 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
 Json Store::pausedConversations(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
-SELECT j.data FROM conversation_turns t JOIN journal j ON j.id=t.pause_id
-WHERE j.conversation_bot_id=? AND t.status='paused' ORDER BY j.id DESC
+-- Seek the populated pause IDs instead of visiting all journal entries for the Bot.
+SELECT j.data FROM conversation_turns t CROSS JOIN journal j ON j.id=t.pause_id
+WHERE t.pause_id IS NOT NULL AND t.status='paused' AND j.conversation_bot_id=? ORDER BY t.pause_id DESC
 )SQL",{bot});
     auto result = Json::array();
     while (rows.next()) result.push_back(rows.json(0));

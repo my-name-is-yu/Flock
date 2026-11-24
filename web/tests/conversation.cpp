@@ -105,6 +105,7 @@ struct FixedModel : Model {
         }
         if (text == missingBudgetQuestion) return reply("見積もりに必要な明細の件数を教えてください。");
         if (text == "markdown fixture") return reply("**完了**：[結果を見る](https://example.com/result)");
+        if (text == "nested URL fixture") return reply("[Result](https://example.test/?q=%252525252541)");
         if (text == budgetDetail) {
             check(input.history.dump().find("見積もりに必要な明細の件数") != std::string::npos,
                   "The follow-up did not see the Bot's earlier question");
@@ -486,6 +487,14 @@ void conversationEntry(const std::filesystem::path& path) {
             userMessageProjectionPreservedSource = event["data"]["text"] == "markdown fixture" &&
                 event["data"]["textHtml"] == "<p>markdown fixture</p>";
     check(userMessageProjectionPreservedSource,"Web user-message projection changed canonical text or omitted rendered HTML");
+
+    const auto nestedUrlReceipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","nested-url-reply"},
+        {"text","nested URL fixture"}},201);
+    tick(runtime,3);
+    const auto nestedUrlReply = conversationReply(browser.get("/api/view?bot=release"),nestedUrlReceipt.at("messageId"));
+    check(nestedUrlReply.at("text") == "[Result](https://example.test/?q=%252525252541)" &&
+          nestedUrlReply.at("textHtml") == "<p>[redacted]</p>",
+          "Web rendered a URL that exceeded the decoding limit in a reply without protected values");
 
     const auto summary = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","options-summary"},
         {"text","2案目を要約して"}},201);

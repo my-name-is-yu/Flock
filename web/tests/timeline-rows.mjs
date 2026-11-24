@@ -23,18 +23,24 @@ function exercise(createTimelineRows) {
       row.append(body, copy);
       return row;
     })));
-  draw('bot', [['first', 'First message']]);
+  const initial = draw('bot', [['first', 'First message']]);
   const first = timeline.firstElementChild;
+  check(initial.length === 1 && initial[0] === first, 'The first row was not reported as added');
   const text = first.querySelector('p').firstChild;
   const copy = first.querySelector('button');
   copy.focus();
   window.getSelection().setBaseAndExtent(text, 0, text, 5);
-  draw('bot', [['earlier', 'Earlier message'], ['first', 'First message'], ['newer', 'Newer message']]);
+  const entries = [['earlier', 'Earlier message'], ['first', 'First message'], ['newer', 'Newer message']];
+  const added = draw('bot', entries);
   check(timeline.children[1] === first && document.activeElement === copy && window.getSelection().toString() === 'First',
     'A live append or history prepend replaced a focused message or cleared selection');
+  check(added.length === 2 && added[0] === timeline.firstElementChild && added[1] === timeline.lastElementChild,
+    'The prepend or append did not report exactly the newly mounted rows');
+  check(draw('bot', entries).length === 0, 'Unchanged rows were reported as added');
 
-  draw('bot', [['first', 'Revised message']]);
+  const replaced = draw('bot', [['first', 'Revised message']]);
   const revised = timeline.firstElementChild;
+  check(replaced.length === 1 && replaced[0] === revised, 'A replacement row was not reported as added');
   check(revised !== first && document.activeElement === revised.querySelector('button'),
     'A changed row did not restore the same available action');
   draw('bot', [['first', 'Revised message', true]]);

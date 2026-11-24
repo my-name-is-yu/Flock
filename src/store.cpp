@@ -544,10 +544,12 @@ Id Store::Impl::dataVersion() const {
     return version.next() ? version.number(0) : 0;
 }
 
-std::pair<std::int64_t,std::int64_t> Store::changeStamp() const {
-    std::lock_guard lock(p_->mutex);
-    return {sqlite3_total_changes64(p_->db),p_->dataVersion()};
+std::pair<Id,Id> Store::Impl::changeStamp() const {
+    std::lock_guard lock(mutex);
+    return {sqlite3_total_changes64(db),dataVersion()};
 }
+
+std::pair<Id,Id> Store::changeStamp() const { return p_->changeStamp(); }
 
 Store::ConversationChanges Store::conversationChangesSince(std::optional<Id> after, std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
@@ -982,17 +984,19 @@ SELECT page.id,page.task_id,page.time,page.kind,
                 SELECT 1 FROM instructions d WHERE d.kind='instruction_delivered'
                 AND d.task_id=i.task_id AND d.step=i.step
               )) FROM instructions i WHERE i.kind!='instruction_delivered'
-            ) THEN 'true' ELSE 'false' END))) END
+            ) THEN 'true' ELSE 'false' END))) END,
+  channel.message_id IS NOT NULL
 FROM page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN conversation_input_status input ON input.message_id=m.id
 LEFT JOIN waits w ON page.kind='user_answer'
   AND w.id=json_extract(page.data,'$.waitId') AND w.task_id=page.task_id
+LEFT JOIN channel_messages channel ON page.kind='conversation_message' AND channel.message_id=m.id
 ORDER BY page.id DESC)SQL",
         {bot,through,events == ConversationEvents::incoming ? 1 : 0,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
-        if (event["kind"] == "conversation_message")
+        if (rows.number(5))
             event["data"].update(p_->channelContext(rows.number(0),bot,nullptr,viewer));
         result.push_back(std::move(event));
     }

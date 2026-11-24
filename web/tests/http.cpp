@@ -1,5 +1,6 @@
 #include "flock/t3_connection.hpp"
 #include "http_fixture.hpp"
+#include "../change_feed.hpp"
 #include "../../tests/fake_git.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/policy.hpp"
@@ -1257,6 +1258,60 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
     });
 }
 
+void retryOneBotProjection(const std::filesystem::path& path) {
+    using web::ChangeFeed;
+    Store store(path), writer(path);
+    const auto web = callbacks();
+    const auto intake = web.intake("release","Follow up");
+    const auto message = writer.receive(localOwner,intake,"old","Follow up").at("messageId").get<Id>();
+    const auto task = writer.submit(web.intake("release","Latest release request"));
+    const auto latest = store.conversation("release",0,1);
+    std::atomic<bool> releaseAvailable = true;
+    std::atomic<bool> releaseFailed = false;
+    ChangeFeed feed(store,[&](const ChangeFeed::Scope& scope) {
+        const auto* view = std::get_if<ChangeFeed::BotView>(&scope.target);
+        if (!view) return Json::object();
+        if (view->bot == "release" && !releaseAvailable.load()) {
+            releaseFailed = true;
+            throw std::runtime_error("release projection unavailable");
+        }
+        return store.conversation(view->bot,0,1);
+    });
+    auto release = feed.subscribe({localOwner,ChangeFeed::BotView{"release"}}).value();
+    auto triage = feed.subscribe({localOwner,ChangeFeed::BotView{"triage"}}).value();
+    const auto expectBot = [&](ChangeFeed::Cursor& cursor, std::string_view bot) {
+        for (int attempt = 0; attempt < 5; ++attempt)
+            if (feed.next(cursor).value().value("bot","") == bot) return;
+        throw std::runtime_error("missing change for " + std::string(bot));
+    };
+    expectBot(release,"release");
+    expectBot(triage,"triage");
+
+    releaseAvailable = false;
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    check(opened == SQLITE_OK,"could not open the fixture writer");
+    sqlite3_busy_timeout(db.get(),2000);
+    const auto event = [&](std::string_view kind) {
+        return "(" + std::to_string(task) + ",unixepoch(),'" + std::string(kind) + "',json_object('messageId'," +
+            std::to_string(message) + ",'step',1))";
+    };
+    const auto write = "INSERT INTO journal(task_id,time,kind,data) VALUES" + event("instruction_accepted") +
+        "," + event("instruction_delivered");
+    check(sqlite3_exec(db.get(),write.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,"could not update historical message");
+    writer.submit(web.intake("triage","Healthy Bot request"));
+    expectBot(triage,"triage");
+    check(feed.next(release).value().empty() && releaseFailed.load(),"release did not remain pending during the failed projection");
+    releaseAvailable = true;
+    expectBot(release,"release");
+    check(store.conversation("release",0,1) == latest,"history invalidation unexpectedly changed the latest page");
+    check(store.conversation("release",message+1,1).back().at("data").at("deliveredToT3") == true,
+          "the recovered Bot skipped the historical change");
+    feed.release(release);
+    feed.release(triage);
+}
+
 void peerEventStream(const std::filesystem::path& path) {
     Store store(path);
     auto web = callbacks();
@@ -1647,6 +1702,7 @@ int main() {
         conversationPermissions(directory.path / "conversation-permissions.db");
         retryEventProjection(directory.path / "retry-events.db");
         retryHistoryInvalidation(directory.path / "retry-history.db");
+        retryOneBotProjection(directory.path / "retry-one-bot.db");
         peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
