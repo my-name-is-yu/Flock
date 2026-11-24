@@ -275,7 +275,9 @@ WHERE json_type(task.data,'$.runResults') IS NULL AND NOT EXISTS (
 )
 UNION ALL
 SELECT slot.id,slot.action_id FROM slots slot JOIN tasks task ON task.id=slot.id
-WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR (
+WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR EXISTS (
+  SELECT 1 FROM outbox stop WHERE stop.id=slot.action_id AND json_extract(stop.data,'$.stopRequested')=1
+) OR (
   slot.blocker_id IS NULL AND NOT EXISTS (
     SELECT 1 FROM policy_approvals WHERE operation=?1 || slot.action_id AND status='pending'
   )
@@ -1200,7 +1202,9 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         };
         const bool firstSend = action["phase"] == "ready";
         const auto disconnected = [&] {
-            return options.requireT3Connection && !db.t3EnvironmentConnected(cmd.environmentId);
+            const auto& connectionEnvironment = cmd.gatewayEnvironmentId.empty()
+                ? cmd.environmentId : cmd.gatewayEnvironmentId;
+            return options.requireT3Connection && !db.t3EnvironmentConnected(connectionEnvironment);
         };
         const auto connectionUnavailable = [&] {
             applyDelivery(id,action,{Delivery::Kind::Auth,{},

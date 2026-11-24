@@ -44,7 +44,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     }
     if (calls.size() == 1 && tool == "cancel_task" && decision.args.is_object() &&
         (decision.args.contains("destination") || decision.args.contains("environmentId") ||
-         decision.args.contains("projectId")))
+         decision.args.contains("projectId") || decision.args.contains("gatewayEnvironmentId")))
         return cancelDestinationRun(message,step,decision,tool_batch::turnCallKey(message.id,step),
                                     decision.rejection.empty(),ctx.hasWebEvidence,ctx.shutdown);
     if (effectType == "array" || calls.size() > 1 || isBotTool(tool) ||
@@ -255,7 +255,7 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
             result = toolFailure("The selected T3 Session could not be verified. Search for it again.");
         }
     }
-    if (decision.tool == "start_task" && !selectedSession && result.is_null())
+    if ((decision.tool == "start_task" || decision.tool == "change_task") && !selectedSession && result.is_null())
         linked = discoverLinkedTaskDestinations(ctx.t3,message.bot);
     std::lock_guard lock(mutex);
     Transaction transaction(db);

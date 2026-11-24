@@ -1808,6 +1808,35 @@ void nonDefaultProjectMoveKeepsCanonicalGateway() {
           "the next T3 instruction silently fell back to the target ID as gateway");
 }
 
+void sameEnvironmentMoveKeepsGateway() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    const Json aliases = {{"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},
+                                              {"gatewayEnvironmentId","desktop"}}}};
+    auto initial = f.routing("Start this work");
+    initial.config["conversationEnvironments"] = aliases;
+    const auto request = "Start linked cloud work";
+    f.script(request,{start({{"request",request},{"environment","cloud-target"}})});
+    f.store->receive(localOwner,initial,"same-environment-start",request);
+    f.runtime->runConversations();
+    const auto moving = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(moving,"running");
+    check(f.task(moving).at("environmentId") == "cloud" && f.task(moving).at("gatewayEnvironmentId") == "desktop",
+          "the linked task did not retain its gateway before the same-environment edit");
+
+    const auto text = "Edit the linked cloud work";
+    f.script(text,{change(moving,{{"environment","cloud"}})});
+    auto intake = f.routing(text,"alpha","desktop","project");
+    intake.config["conversationEnvironments"] = aliases;
+    f.store->receive(localOwner,intake,"same-environment-change",text);
+    f.runtime->runConversations();
+    f.t3.finish("run-1","Old linked destination settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the same-environment edit was not relaunched");
+    check(f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().gatewayEnvironmentId == "desktop",
+          "the same-environment edit silently changed its registered gateway");
+}
+
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
     rememberCloudProject(f);
@@ -2462,6 +2491,7 @@ int main(int argc, char** argv) {
         cloudDestinationWaitsForItsProject();
         canonicalMoveKeepsProjectAndGateway();
         nonDefaultProjectMoveKeepsCanonicalGateway();
+        sameEnvironmentMoveKeepsGateway();
         moveAsksForTheDestinationProjectAfterSettlement();
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();

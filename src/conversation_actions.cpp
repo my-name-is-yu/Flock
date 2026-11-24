@@ -243,6 +243,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     bool savedTaskTarget = false;
     Id savedTaskId = 0, savedGeneration = 0;
     std::string savedActionId;
+    Json source = nullptr;
     try {
         if (decision.tool == "send_to_task") {
             std::lock_guard lock(mutex);
@@ -253,6 +254,12 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             if (terminal(task) || task.at("state") == "cancelling")
                 throw ToolError("The task is " + field(task,"state"),{{"taskId",task.at("id")}});
             const auto selected = selectSavedDestination(task,decision.args,true);
+            if (const auto sourceId = conversation_storage::identifier(decision.args,"sourceResultMessageId",false); sourceId) {
+                source = resultReference(sourceId,message);
+                if (source.at("taskId") != task.at("id") ||
+                    source.at("revisionId") != task.value("currentRevision",Id{0}))
+                    throw ToolError("sourceResultMessageId must be a result of this task's current revision");
+            }
             command.environmentId = selected.environmentId;
             command.gatewayEnvironmentId = selected.gatewayEnvironmentId;
             command.target.threadId = selected.threadId;
@@ -271,6 +278,8 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         }
         const auto name = redactor(message.bot).text(message.routing.at("config").value("botDisplayName",message.bot));
         command.instruction = name + ": " + command.instruction;
+        if (!source.is_null())
+            command.instruction += "\n\n(reference only):\n" + bounded(field(source,"text"),8192);
         if (decision.tool == "message_session" &&
             (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
             throw ToolError("Use the Session identifiers");
@@ -482,7 +491,8 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(
                 query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
                       {selected.actionId,taskId,selected.environmentId,selected.threadId,selected.runId}).next();
             if (phase == "accepted" && !exactRun) throw ToolError("The destination Session is unavailable");
-            if (exactRun) {
+            const bool recoveredRun = phase == "started" && !selected.threadId.empty() && !selected.runId.empty();
+            if (exactRun || recoveredRun) {
                 const Resource resource{Action::t3_send,
                     Resource::sessionRead(selected.environmentId,selected.threadId).target};
                 auto origin = policyOrigin(message);

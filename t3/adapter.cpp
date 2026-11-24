@@ -930,7 +930,7 @@ public:
                     invoked = true;
                     auto delivery = launchPinned(client,command,std::move(launchArguments.parameters),launchArguments.pin,launchWarning);
                     delivery.launchWarning = std::move(launchWarning);
-                    useLocalThreadLink(delivery.run,gateway,origin);
+                    useLocalThreadLink(delivery.run,command.environmentId,origin);
                     return delivery;
                 }
                 invoked = true;
@@ -962,7 +962,7 @@ public:
             }
             RunRef run{str(reply, "threadId"), str(reply, "runId"), str(reply, "link"),
                        command.target.gatewayEnvironmentId};
-            useLocalThreadLink(run,gateway,origin);
+            useLocalThreadLink(run,command.environmentId,origin);
             auto delivery = hasRun(run) ? result(Outcome::Accepted,{},std::move(run))
                 : result(Outcome::Unknown,"T3 has not returned the assigned Run ID yet",std::move(run));
             delivery.launchWarning = std::move(launchWarning);
@@ -1000,7 +1000,7 @@ public:
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                     }
                 }
-                useLocalThreadLink(recovered.run,gateway,origin);
+                useLocalThreadLink(recovered.run,command.environmentId,origin);
                 return recovered;
             }
             if ((!command.candidate.threadId.empty() && command.candidate.threadId != command.target.threadId) ||

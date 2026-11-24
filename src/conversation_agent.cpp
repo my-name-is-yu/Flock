@@ -535,7 +535,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             if (revision != task.value("currentRevision",Id{0}))
                 throw ToolError("stale",{{"applied",0},{"taskId",task.at("id")},
                     {"expected",{{"revisionId",revision}}},{"current",taskState(task,message)}});
-            change = taskChange(message,args,task);
+            change = taskChange(message,args,task,linked);
         }
         const bool conflicting = acceptInstruction(task,message.id,step,
             instruction,result.is_null() ? Json(nullptr) : sourceRef(result),change ? &*change : nullptr);

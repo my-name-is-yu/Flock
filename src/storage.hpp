@@ -422,11 +422,12 @@ struct Store::Impl {
     std::set<std::string> registeredT3Environments(std::string_view bot);
     std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {});
     TaskRoute taskRoute(std::string_view bot, const Json& routing, std::string_view name,
-                        const Json* movingTask = nullptr);
+                        const Json* movingTask = nullptr, const LinkedTaskDestinations* linked = nullptr);
     StartDestinations startDestinations(const conversation::Message&, const Json& args, bool resume,
                                        const WorkSession* selectedSession, const LinkedTaskDestinations& linked);
     LinkedTaskDestinations discoverLinkedTaskDestinations(T3&, std::string_view bot);
-    TaskChange taskChange(const conversation::Message&, const Json& args, const Json& task);
+    TaskChange taskChange(const conversation::Message&, const Json& args, const Json& task,
+                          const LinkedTaskDestinations& linked);
     std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
     Id submitRequest(const Intake&, const Person* requester);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
