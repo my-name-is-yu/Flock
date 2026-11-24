@@ -198,7 +198,6 @@ void projectToolHistory(Json& turn, const Json& redactionRevision) {
         }
         webBytes += batchBytes;
     }
-    // The ordinary evidence budget has first claim on space for recent and reopened results.
     const auto promoteWeb = [&](VisibleEntry& selected) {
         if (!selected.canPromoteWeb || selected.webExtraBytes > remaining) return;
         remaining -= selected.webExtraBytes;

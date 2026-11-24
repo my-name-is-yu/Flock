@@ -664,7 +664,6 @@ std::string chainRequest(int series) {
 }
 
 Case nearLimit(Fixture& f) {
-    // Each web_fetch also charges the request budget. The turn still has its normal 24-step cap.
     f.config["modelCallLimit"] = 48;
     return {"near-limit",chainRequest(0) +
         " Reply with only the first and last ticket, separated by ' / '.",
@@ -680,7 +679,6 @@ Case nearLimit(Fixture& f) {
             f.model.calls.size() >= 22 && f.model.calls.size() <= 24; }};
 }
 
-// The first report's only copy of its terminal ticket is past the old-history preview.
 constexpr std::string_view archiveNote =
     "Archive display note. The receiving manifest was checked against the opening inventory. "
     "The reviewer kept the copy supplied with the shipment and recorded each correction in the inventory log. "

@@ -547,6 +547,8 @@ void responseContract() {
         {"result",{{"ok",true},{"text","Tool evidence"}}}
     }});
     const auto scoped = responseRequest(scopedInput);
+    check(scoped.dump().find(scopedInput.conversationScope) == std::string::npos,
+          "Conversation scope leaked into the model request");
     scopedInput.event["currentTime"] = 1001;
     scopedInput.event.at("turn").push_back({
         {"tool","find_tasks"},{"args",{{"query","second"}}},{"step",2},{"callIndex",1},

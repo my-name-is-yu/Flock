@@ -1,7 +1,0 @@
-{"arm":"initial","sequence":1,"sentBytes":970,"accepted":true,"input":197,"cached":0,"writes":0,"error":null}
-{"arm":"returned-id","sequence":2,"sentBytes":1301,"accepted":true,"input":254,"cached":0,"writes":0,"error":null}
-{"arm": "returned-id", "sealMatched": true}
-{"arm":"local-id","sequence":3,"sentBytes":1261,"accepted":true,"input":254,"cached":0,"writes":0,"error":null}
-{"arm": "local-id", "sealMatched": true}
-{"arm":"local-id-with-assistant","sequence":4,"sentBytes":1417,"accepted":true,"input":269,"cached":0,"writes":0,"error":null}
-{"arm": "local-id-with-assistant", "sealMatched": true}

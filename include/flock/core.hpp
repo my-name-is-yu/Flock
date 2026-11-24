@@ -66,7 +66,7 @@ struct ModelInput {
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
     bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
-    std::string conversationScope{}; // Local routing metadata. Never include it in the model input.
+    std::string conversationScope{};
 };
 enum class ModelErrorCode { inference_failed, invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
 struct ModelError : std::runtime_error {
