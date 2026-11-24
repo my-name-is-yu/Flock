@@ -233,7 +233,7 @@ async function loadMachines() {
   const connections = (await response.json()).filter(connection => connection.botId === botId &&
     (connection.status === 'pending' || connection.status === 'approved'));
   const rows = document.createDocumentFragment();
-  for (const {id, machineId, rules, status} of connections) {
+  for (const {id, machineId, threadId, rules, status} of connections) {
     const paths = element('ul', '', 'machine-paths');
     for (const {operation, path} of rules) {
       const label = operationLabels.get(operation);
@@ -242,10 +242,13 @@ async function loadMachines() {
       entry.append(element('code', path));
       paths.append(entry);
     }
-    const label = rowLabel(machineId);
+    const session = `Session ${threadId}`;
+    const label = rowLabel(machineId, session);
     label.append(paths);
     const item = row(rows, label);
     const actions = element('span', '', 'row-actions');
+    actions.setAttribute('role', 'group');
+    actions.setAttribute('aria-label', `${machineId} · ${session}`);
     if (status === 'pending') {
       const decline = actionButton(actions, 'Decline', () => void changeMachine('decide', {id, approve: false}, 'Connection declined.'));
       decline.classList.add('quiet-danger');
@@ -266,4 +269,5 @@ if (machines.status === 'rejected') status.textContent = 'Couldn’t load connec
 else if (access.status === 'rejected' && (access.reason.cause !== 403 || !machines.value)) {
   status.textContent = 'Couldn’t load this Bot’s access.';
 } else if (channels.status === 'rejected') status.textContent = 'Couldn’t load channel senders.';
-if (location.hash === '#local-connections' && machines.value) $('local-connections').scrollIntoView({block: 'nearest'});
+const target = $(location.hash.slice(1));
+if (target && !target.hidden) target.scrollIntoView({block: 'nearest'});
