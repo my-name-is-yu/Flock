@@ -1973,11 +1973,13 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   elements.conversation.classList.toggle('viewing-source', !!source);
   older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
-  older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier messages';
+  const olderLabel = context?.loadingOlder ? 'Loading…' : 'Show earlier messages';
+  if (older.textContent !== olderLabel) older.textContent = olderLabel;
   const peerStatus = elements['peer-status'];
   const olderFailed = view?.dm?.olderFailed;
   peerStatus.hidden = !olderFailed;
-  peerStatus.textContent = olderFailed ? 'Could not load earlier messages.' : '';
+  const peerLabel = olderFailed ? 'Could not load earlier messages.' : '';
+  if (peerStatus.textContent !== peerLabel) peerStatus.textContent = peerLabel;
   const scroller = elements.conversation;
   const key = context?.newestEvent != null && !context.anchor && timelineKey(context.id, context.peerId);
   const position = !source && key && readingPositions.get(key);
@@ -2013,8 +2015,8 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     data?.presence, data?.activeSessions, data?.parallelTasks, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()),
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
-    updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
-    foldLongMessages();
+    const added = updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
+    foldLongMessages(added);
     moveScroll();
     if (context?.pendingViewMotion && elements.timeline.childElementCount > 0) {
       const pending = context.pendingViewMotion;
@@ -2045,11 +2047,14 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
 // Like ChatGPT, fold any very long message to its first lines behind Show more.
 const foldLines = 12;
 const unfoldedMessages = new Set();
-function foldLongMessages() {
-  for (const text of elements.timeline.querySelectorAll('.foldable-text:not([data-fold-checked])')) {
-    text.dataset.foldChecked = '';
+function foldLongMessages(rows) {
+  const texts = rows.flatMap(row => [...row.querySelectorAll('.foldable-text')]);
+  // Inserting a toggle invalidates layout. Measure all new text before changing any row.
+  const long = texts.filter((text) => {
     const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
-    if (!(text.scrollHeight > lineHeight * (foldLines + 2))) continue;
+    return text.scrollHeight > lineHeight * (foldLines + 2);
+  });
+  for (const text of long) {
     const bubble = text.closest('.bubble');
     const id = text.closest('.event-message')?.id;
     const setFold = (folded) => {

@@ -10,4 +10,5 @@ Json conversation(Store&, std::string_view bot, Id before, std::string_view view
 Json peerConversation(Store&, std::string_view bot, std::string_view peer, Id before, Id anchor = 0,
                       std::string_view viewer = {});
 Json sessions(Store&, std::string_view bot, Id before);
+Json sessionGroups(const Json& tasks);
 } // namespace flockv0::web

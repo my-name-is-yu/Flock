@@ -27,7 +27,8 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     const BotTools& settings, const ConversationCallContext& ctx) {
     using enum CallOutcome;
     const auto& decision = calls.front();
-    if (calls.size() == 1 && decision.tool == "send_to_task" && decision.args.is_object() &&
+    const auto& tool = decision.tool;
+    if (calls.size() == 1 && tool == "send_to_task" && decision.args.is_object() &&
         decision.args.contains("taskId")) {
         bool destinationTask = false;
         try {
@@ -41,17 +42,17 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
             return sendSessionMessage(message,step,decision,tool_batch::turnCallKey(message.id,step),
                                       ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
     }
-    if (calls.size() == 1 && decision.tool == "cancel_task" && decision.args.is_object() &&
+    if (calls.size() == 1 && tool == "cancel_task" && decision.args.is_object() &&
         (decision.args.contains("destination") || decision.args.contains("environmentId") ||
          decision.args.contains("projectId")))
         return cancelDestinationRun(message,step,decision,tool_batch::turnCallKey(message.id,step),
                                     decision.rejection.empty(),ctx.hasWebEvidence,ctx.shutdown);
-    if (effectType == "array" || calls.size() > 1 || isBotTool(decision.tool)) {
+    if (effectType == "array" || calls.size() > 1 || isBotTool(tool) ||
+        tool_batch::conversationRead(tool) != tool_batch::ConversationRead::none) {
         const ToolContext tools{message.bot,message.id,settings,ctx.hasWebEvidence};
         return runToolBatch(message,tools,step,calls,ctx) ? advance : stop;
     }
     const auto key = tool_batch::turnCallKey(message.id,step);
-    const auto& tool = decision.tool;
     const bool offered = decision.rejection.empty();
     if (offered || effectType == "object") {
         if (tool == "message_session")
@@ -84,10 +85,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     if (tool == "reply") return executeConversationReply(message,step,decision,key,ctx.clock);
     if (tool == "request_bot_change") return executeConversationBotChange(message,step,decision,key,ctx);
 
-    const bool git = isGitTool(tool);
-    using enum tool_batch::ConversationRead;
-    const auto read = tool_batch::conversationRead(tool);
-    if (!git && (read == none || read == store))
+    if (!isGitTool(tool))
         return executeLocalConversationCall(message,step,decision,key,ctx);
 
     {
@@ -99,38 +97,15 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
         if (!allowed) return stop;
     }
 
-    ToolCallResult result;
-    if (git) {
-        auto value = gitConversationTool(ctx.gitHost,message,decision,key);
-        if (value.value("policyWaiting",false)) return waiting;
-        result = CompletedToolCall{std::move(value)};
-    } else {
-        result = executeConversationRead(message,decision,ctx.t3,key,ApprovalWait::pause);
-        if (!result) return waiting;
-    }
+    auto result = gitConversationTool(ctx.gitHost,message,decision,key);
+    if (result.value("policyWaiting",false)) return waiting;
 
     std::lock_guard lock(mutex);
     Transaction transaction(db);
     if (!authorizeTurn(message)) { transaction.commit(); return stop; }
-    saveConversationCallResult(message,step,std::move(result->value));
-    if (result->consumeApproval) consumePolicyApproval(key);
+    saveConversationCallResult(message,step,std::move(result));
     transaction.commit();
     return advance;
-}
-
-Store::Impl::ToolCallResult Store::Impl::executeConversationRead(
-    const Message& message, const Decision& decision, T3& t3, std::string_view key, ApprovalWait waitMode) {
-    using enum tool_batch::ConversationRead;
-    const auto read = tool_batch::conversationRead(decision.tool);
-    if (read == session)
-        return sessionReadTool(message,decision,t3,key,waitMode);
-    if (read != environment_readiness) throw std::logic_error("Unsupported network conversation read");
-    if (!message.channelScope.empty()) return CompletedToolCall{toolFailure("Use Flock Web for this action")};
-    try {
-        auto result = readiness(message.bot,message.routing,decision.args,t3);
-        result["ok"] = true;
-        return CompletedToolCall{std::move(result)};
-    } catch (const Conflict& error) { return CompletedToolCall{toolFailure(error.what())}; }
 }
 
 Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(

@@ -1,237 +1,16 @@
 #include "model.hpp"
-#include "settings_file.hpp"
 #include "flock/git_host.hpp"
 #include "flock/workspace_tools.hpp"
 #include "flock/policy.hpp"
 #include "tool_batch.hpp"
 
 #include <algorithm>
-#include <cerrno>
 #include <chrono>
-#include <csignal>
-#include <fcntl.h>
-#include <iostream>
-#include <poll.h>
-#include <spawn.h>
-#include <sys/file.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <thread>
-#include <unistd.h>
-
-extern char** environ;
+#include <ostream>
 
 namespace flockv0::app {
 namespace {
-constexpr int childCredentialLock = 9;
-constexpr std::size_t maxTransport = 8 * 1024 * 1024;
-constexpr std::size_t maxProfile = 4 * 1024 * 1024;
-
-class Descriptor {
-public:
-    explicit Descriptor(int fd) : fd_(fd) {}
-    ~Descriptor() { close(); }
-    Descriptor(const Descriptor&) = delete;
-    Descriptor& operator=(const Descriptor&) = delete;
-    int get() const { return fd_; }
-    void close() {
-        if (fd_ >= 0) ::close(fd_);
-        fd_ = -1;
-    }
-private:
-    int fd_;
-};
-
-class SpawnActions {
-public:
-    SpawnActions() {
-        if (posix_spawn_file_actions_init(&actions) != 0)
-            throw ModelError("Unable to initialize ChatGPT transport", true);
-    }
-    ~SpawnActions() { posix_spawn_file_actions_destroy(&actions); }
-    void duplicate(int from, int to) {
-        if (posix_spawn_file_actions_adddup2(&actions, from, to) != 0)
-            throw ModelError("Unable to initialize ChatGPT transport descriptors", true);
-    }
-    posix_spawn_file_actions_t actions;
-};
-
-class SpawnAttributes {
-public:
-    SpawnAttributes() {
-        if (posix_spawnattr_init(&attributes) != 0)
-            throw ModelError("Unable to initialize ChatGPT transport",true);
-#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
-        if (posix_spawnattr_setflags(&attributes,POSIX_SPAWN_CLOEXEC_DEFAULT) != 0) {
-            posix_spawnattr_destroy(&attributes);
-            throw ModelError("Unable to initialize ChatGPT transport",true);
-        }
-#endif
-    }
-    ~SpawnAttributes() { posix_spawnattr_destroy(&attributes); }
-    posix_spawnattr_t attributes;
-};
-
-class Child {
-public:
-    explicit Child(pid_t pid) : pid_(pid) {}
-    ~Child() {
-        if (pid_ > 0) {
-            kill(pid_, SIGKILL);
-            wait();
-        }
-    }
-    bool wait() {
-        int status = 0;
-        pid_t result;
-        do { result = waitpid(pid_, &status, 0); } while (result < 0 && errno == EINTR);
-        pid_ = -1;
-        return result > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    }
-private:
-    pid_t pid_;
-};
-
-void checkPrivate(int fd, bool directory) {
-    struct stat info {};
-    if (fd < 0 || fstat(fd, &info) != 0 || info.st_uid != getuid() || (info.st_mode & 0077) != 0 ||
-        (directory ? !S_ISDIR(info.st_mode) : !S_ISREG(info.st_mode))) {
-        throw ModelError("Flock's ChatGPT credential directory and lock must be owner-only", false);
-    }
-}
-
-Json invoke(const std::filesystem::path& directory, std::string_view operation, std::string_view input,
-            std::stop_token stop, const CommitModelLogin& commit) {
-    const auto checkStop = [&] {
-        if (stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled",true);
-    };
-    checkStop();
-    const bool showLoginInstructions = operation == "login" && !stop.stop_possible() &&
-        fcntl(STDERR_FILENO,F_GETFD) != -1;
-    std::filesystem::create_directories(directory.parent_path());
-    if (mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST)
-        throw ModelError("Unable to create Flock's private ChatGPT directory", false);
-    Descriptor dir(open(directory.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY));
-    checkPrivate(dir.get(), true);
-    Descriptor lock(openat(dir.get(), "lock", O_CREAT | O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0600));
-    checkPrivate(lock.get(), false);
-    using Clock = std::chrono::steady_clock;
-    using namespace std::chrono_literals;
-    const bool webStatus = operation == "web_status";
-    const auto lockDeadline = Clock::now() + 2s;
-    while (::flock(lock.get(), LOCK_EX | LOCK_NB) != 0) {
-        const auto lockError = errno;
-        checkStop();
-        if (lockError != EWOULDBLOCK && lockError != EINTR)
-            throw ModelError("Unable to lock Flock's ChatGPT credentials",true);
-        if (webStatus || Clock::now() >= lockDeadline)
-            throw ModelError("Flock's ChatGPT credentials are busy. Finish browser sign-in or retry shortly.",true);
-        std::this_thread::sleep_for(25ms);
-    }
-
-    int sockets[2];
-#if defined(__APPLE__)
-    constexpr int socketType = SOCK_STREAM; // On macOS spawn uses CLOEXEC_DEFAULT.
-#else
-    constexpr int socketType = SOCK_STREAM | SOCK_CLOEXEC;
-#endif
-    if (socketpair(AF_UNIX, socketType, 0, sockets) != 0)
-        throw ModelError("Unable to open a local channel for ChatGPT", true);
-    Descriptor parent(sockets[0]), childSocket(sockets[1]);
-    if (fcntl(parent.get(), F_SETFD, FD_CLOEXEC) < 0 || fcntl(childSocket.get(), F_SETFD, FD_CLOEXEC) < 0)
-        throw ModelError("Unable to configure the local ChatGPT channel", true);
-#if defined(SO_NOSIGPIPE)
-    const int enabled = 1;
-    if (setsockopt(parent.get(), SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) != 0)
-        throw ModelError("Unable to configure the local ChatGPT channel", true);
-    constexpr int sendFlags = 0;
-#else
-    constexpr int sendFlags = MSG_NOSIGNAL;
-#endif
-    // Use source descriptors outside the child targets so the order of dup2
-    // calls cannot replace one source with another.
-    const int firstSourceDescriptor = childCredentialLock + 1;
-    Descriptor transport(fcntl(childSocket.get(), F_DUPFD_CLOEXEC, firstSourceDescriptor));
-    Descriptor childLock(fcntl(lock.get(), F_DUPFD_CLOEXEC, firstSourceDescriptor));
-    if (transport.get() < 0 || childLock.get() < 0)
-        throw ModelError("Unable to configure the local ChatGPT channel", true);
-    SpawnActions actions;
-    actions.duplicate(transport.get(), STDIN_FILENO);
-    actions.duplicate(transport.get(), STDOUT_FILENO);
-    actions.duplicate(childLock.get(), childCredentialLock);
-    if (showLoginInstructions)
-        actions.duplicate(STDERR_FILENO, STDERR_FILENO);
-    std::string node = "node", script = FLOCK_CHATGPT_BRIDGE, action(operation), path = directory.string();
-    auto lockArgument = std::to_string(childCredentialLock);
-    char* args[] = {node.data(), script.data(), action.data(), path.data(), lockArgument.data(), nullptr};
-    SpawnAttributes attributes;
-    std::vector<char*> environment;
-    for (auto entry = environ; *entry; ++entry) {
-        const std::string_view variable(*entry);
-        if (variable.starts_with("NODE_OPTIONS=") || variable.starts_with("NODE_DEBUG=") ||
-            variable.starts_with("NODE_DEBUG_NATIVE=") || variable.starts_with("NODE_TLS_REJECT_UNAUTHORIZED=") ||
-            variable.starts_with("SSLKEYLOGFILE=")) continue;
-        environment.push_back(*entry);
-    }
-    environment.push_back(nullptr);
-    pid_t pid;
-    if (posix_spawnp(&pid, node.c_str(), &actions.actions, &attributes.attributes, args, environment.data()) != 0)
-        throw ModelError("Unable to start the ChatGPT transport. Install Node.js 22 or newer.", false);
-    Child child(pid);
-    childSocket.close();
-    transport.close();
-    // For Web login, retain our share of the inherited lock until the
-    // authorized profile replacement completes.
-    if (!commit) lock.close();
-    childLock.close();
-
-    while (!input.empty()) {
-        const auto n = send(parent.get(), input.data(), input.size(), sendFlags);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) throw ModelError("ChatGPT transport closed before receiving the request", true);
-        input.remove_prefix(static_cast<std::size_t>(n));
-    }
-    shutdown(parent.get(), SHUT_WR);
-    std::string output;
-    char buffer[8192];
-    const auto timeout = webStatus ? 1s : (operation == "login" || commit) ? 365s : 150s;
-    const auto deadline = Clock::now() + timeout;
-    for (;;) {
-        checkStop();
-        pollfd reader {parent.get(),POLLIN,0};
-        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now()).count();
-        if (remaining <= 0) throw ModelError("ChatGPT transport exceeded its deadline",true);
-        const int wait = stop.stop_possible() ? std::min(100,static_cast<int>(remaining)) : static_cast<int>(remaining);
-        const auto ready = poll(&reader,1,wait);
-        if (ready < 0 && errno == EINTR) continue;
-        if (ready == 0) continue;
-        if (ready < 0 || (reader.revents & (POLLERR | POLLNVAL)))
-            throw ModelError("Unable to read the ChatGPT transport response",true);
-        const auto n = read(parent.get(), buffer, sizeof(buffer));
-        if (n < 0 && errno == EINTR) continue;
-        if (n < 0) throw ModelError("Unable to read the ChatGPT transport response", true);
-        if (n == 0) break;
-        output.append(buffer, static_cast<std::size_t>(n));
-        if (output.size() > maxTransport) throw ModelError("ChatGPT transport response exceeded the local limit", false);
-    }
-    if (!child.wait()) throw ModelError("ChatGPT transport exited unexpectedly", true);
-    auto response = Json::parse(output,nullptr,false);
-    if (commit && response.is_object() && response.contains("result") && !response.contains("error")) {
-        const auto candidate = response.find("candidate");
-        if (candidate == response.end() || !candidate->is_object())
-            throw ModelError("Flock's ChatGPT transport did not prepare a profile",true);
-        const auto profile = candidate->dump();
-        if (profile.size() > maxProfile)
-            throw ModelError("Flock's ChatGPT profile exceeded the local limit",false);
-        commit([&] {
-            checkStop();
-            writePrivateFile(directory / "profile.json",profile);
-        });
-        response.erase(candidate);
-    }
-    return response;
-}
+constexpr std::size_t maxRequest = 8 * 1024 * 1024;
 
 Json textParameter(std::string description) {
     return {{"type","string"},{"description",std::move(description)}};
@@ -608,57 +387,16 @@ bool nonblank(const std::string& value) {
     return value.find_first_not_of(" \t\r\n") != std::string::npos;
 }
 
-Json tokenUsage(const Json& response) {
-    auto result = Json::object();
-    const auto usage = response.find("usage");
-    if (usage != response.end() && usage->is_object()) {
-        for (const auto* key : {"input_tokens","output_tokens","total_tokens"}) {
-            const auto count = usage->find(key);
-            if (count != usage->end() && count->is_number_integer() && count->get<long double>() >= 0)
-                result[key] = *count;
-        }
-    }
-    return result;
-}
 }
 
-ChatGPTModel::ChatGPTModel(std::filesystem::path directory) : directory_(std::move(directory)) {}
-
-Json ChatGPTModel::call(std::string_view operation, const Json& input, std::stop_token stop,
-                        const CommitModelLogin& commit) {
-    const auto serialized = input.dump(-1, ' ', false, Json::error_handler_t::replace);
-    if (serialized.size() > maxTransport)
-        throw ModelError("Flock's ChatGPT request exceeded the local transport limit",false);
-    const auto response = invoke(directory_,operation,serialized,stop,commit);
-    if (!response.is_object() || (!response.contains("result") && !response.contains("error")))
-        throw ModelError("Flock's ChatGPT transport returned an invalid result", true);
-    if (response.contains("error")) {
-        const auto code = response.value("code","");
-        const auto failure = code == "authentication_required" ? ModelErrorCode::authentication_required
-                                                                 : ModelErrorCode::inference_failed;
-        throw ModelError(response.value("error","ChatGPT transport error"),response.value("transient",false),
-                         tokenUsage(response),failure);
-    }
-    return response["result"];
-}
-
-Json ChatGPTModel::login(bool printUrl, bool reconsent) {
-    return call("login",{{"printUrl",printUrl},{"reconsent",reconsent}});
-}
-Json ChatGPTModel::loginWeb(bool reconsent, std::stop_token stop, bool switchAccount, const CommitModelLogin& commit) {
-    if (!commit) throw ModelError("Flock needs permission to save a ChatGPT profile",false);
-    return call("prepare_login",{{"reconsent",reconsent},{"browserRequired",true},{"switchAccount",switchAccount}},
-                stop,commit);
-}
-Json ChatGPTModel::signOut() { return call("sign_out"); }
-Json ChatGPTModel::status() { return call("status"); }
-Json ChatGPTModel::webStatus() { return call("web_status"); }
-Json ChatGPTModel::models() { return call("models"); }
 ModelTurn ChatGPTModel::decide(const ModelInput& input) {
     const auto begin = std::chrono::steady_clock::now();
     const auto request = responseRequest(input);
-    const auto response = call("infer",request);
-    auto usage = tokenUsage(response);
+    auto body = request.dump(-1, ' ', false, Json::error_handler_t::replace);
+    if (body.size() > maxRequest)
+        throw ModelError("Flock's ChatGPT request exceeded the local transport limit",false);
+    const auto response = chatgpt::infer(transport_,accessToken(),std::move(body));
+    auto usage = chatgpt::tokenUsage(chatgpt::field(response,"usage"));
     usage["wallMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - begin).count();
     try {

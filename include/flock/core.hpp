@@ -345,6 +345,13 @@ public:
     bool hasPeerExchange(std::string_view bot, std::string_view peer) const;
     // A change hint for readers, covering writes on this connection and other connections.
     std::pair<std::int64_t,std::int64_t> changeStamp() const;
+    struct BotViewStamp {
+        std::pair<Id,Id> database;
+        std::size_t gitCredentialCount;
+        bool operator==(const BotViewStamp&) const = default;
+    };
+    // No reusable version when the view can depend on live channel permissions or vault files.
+    std::optional<BotViewStamp> botViewStamp() const;
     struct ConversationChanges {
         Id through;
         std::map<std::string,std::vector<Id>> messages;

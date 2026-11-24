@@ -579,7 +579,7 @@ void responseContract() {
     rejects<ModelError>([&] { responseDecision(Json::array(),completeRequest); },"missing tool accepted");
 }
 
-void oversizedRequestStopsBeforeOpeningBridge() {
+void oversizedRequestStopsBeforeAccessingCredentials() {
     Sandbox temp;
     const auto credentials = temp.path / "credentials";
     ChatGPTModel model(credentials);
@@ -588,7 +588,7 @@ void oversizedRequestStopsBeforeOpeningBridge() {
         Json::array(),{},{"reply"}, {}, Json::array(),botConfig()
     };
     rejects<ModelError>([&] { model.decide(input); },"Oversized escaped request reached the transport");
-    check(!std::filesystem::exists(credentials),"The bridge was opened for a request over its byte limit");
+    check(!std::filesystem::exists(credentials),"An oversized request accessed the credentials");
 }
 
 void missingChatGPTSignInIsTyped() {
@@ -969,7 +969,7 @@ int main() {
         notesAcrossConversationAndWork();
         directionalPeerConfiguration();
         responseContract();
-        oversizedRequestStopsBeforeOpeningBridge();
+        oversizedRequestStopsBeforeAccessingCredentials();
         missingChatGPTSignInIsTyped();
         {
             Sandbox temp;

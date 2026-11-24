@@ -1,4 +1,5 @@
 #include "bot_tools.hpp"
+#include "flock/detail/json_rpc.hpp"
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
 
@@ -191,27 +192,8 @@ public:
 struct McpRejected : Conflict { using Conflict::Conflict; };
 
 Json rpcResult(const Response& response, int id) {
-    Json message;
-    if (response.type.starts_with("text/event-stream")) {
-        std::string event;
-        std::string_view rest(response.body);
-        while (!rest.empty()) {
-            const auto end = rest.find('\n');
-            auto line = rest.substr(0,end);
-            rest.remove_prefix(end == rest.npos ? rest.size() : end+1);
-            if (line.ends_with('\r')) line.remove_suffix(1);
-            if (line.starts_with("data:")) {
-                event += trim(line.substr(5));
-                event += '\n';
-            } else if (line.empty() && !event.empty()) {
-                auto item = parse(event);
-                if (item.contains("id") && item["id"] == id) { message = std::move(item); break; }
-                event.clear();
-            }
-        }
-    } else message = parse(response.body);
-    if (!message.is_object() || message.value("jsonrpc","") != "2.0" ||
-        !message.contains("id") || message["id"] != id)
+    auto message = detail::decodeRpcResponse(response.body, response.type, id, parse);
+    if (!message.is_object() || message.value("jsonrpc","") != "2.0")
         throw Conflict("MCP server returned an invalid response");
     if (!message.contains("result") && message.contains("error") && message.at("error").is_object()) {
         const auto& error = message.at("error");

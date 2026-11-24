@@ -56,7 +56,6 @@ Json& destinationRun(Json& task, std::string_view action);
 bool destinationRunOutstanding(const Json& run);
 void setReportEvidence(Json&, const RunEvidence&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
-std::string gitWebhookKey(Id event, Id pr);
 
 enum class TaskSource { request, handoff, consultation };
 
@@ -248,7 +247,6 @@ struct Store::Impl {
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
     Id latestGitWebhookId() const;
-    Id matchingReviewRequestWebhook(const GitRepository&, Id pr, Id after, const Json& reviewers) const;
     std::set<GitPrKey> gitPrMutationsInFlight;
     class GitPrMutationClaim;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
@@ -272,7 +270,7 @@ struct Store::Impl {
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
     struct CompletedToolCall { Json value; bool consumeApproval = false; };
     using ToolCallResult = std::optional<CompletedToolCall>;
-    ToolCallResult sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key, ApprovalWait);
+    ToolCallResult sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key);
     void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
     std::set<std::string> connectedSessionEnvironments(const conversation::Message&);
     std::optional<WorkSession> resolveWorkSession(const conversation::Message&, std::string_view sessionRef, T3&);
@@ -285,6 +283,7 @@ struct Store::Impl {
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
     Id dataVersion() const;
+    std::pair<Id,Id> changeStamp() const;
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
@@ -364,8 +363,6 @@ struct Store::Impl {
                       const ConversationCallContext&);
     CallOutcome executeConversationStep(const conversation::Message&, int step, const std::vector<ModelCall>&,
                                         std::string_view effectType, const BotTools&, const ConversationCallContext&);
-    ToolCallResult executeConversationRead(const conversation::Message&, const Decision&, T3&,
-                                           std::string_view key, ApprovalWait);
     CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&,
                                              std::string_view key, const ConversationCallContext&);
     CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&,

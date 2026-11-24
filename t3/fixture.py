@@ -23,10 +23,15 @@ class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def reply(self, value=None, code=200, **headers):
+    def reply(self, value=None, code=200, event_stream=False, **headers):
         body = json.dumps(value).encode() if value is not None else b""
+        content_type = "application/json"
+        if event_stream:
+            content_type = "text/event-stream"
+            unrelated = {"jsonrpc": "2.0", "id": str(value["id"]), "result": {}}
+            body = f"data: \n\ndata: {json.dumps(unrelated)}\n\ndata: {json.dumps(value)}\n\n".encode()
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         for key, item in headers.items():
             for header_value in item if isinstance(item, list) else [item]:
@@ -184,7 +189,7 @@ class Fixture(BaseHTTPRequestHandler):
                         state.setdefault("effects", {}).setdefault("t3_thread_launch", []).append(launch)
                         envelope["error"] = {"code": -32602, "message":
                             "Unknown field: delegatedFrom" if mode == "unknown-delegated-from" else "Invalid params"}
-                        self.reply(envelope)
+                        self.reply(envelope, event_stream=mode == "unknown-delegated-from")
                         return
             content = self.tool(tool["name"], tool["arguments"])
             if (tool["name"] == "t3_queue" and tool["arguments"]["action"] == "cancel" and

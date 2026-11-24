@@ -196,6 +196,9 @@ private:
     }
 
     std::string callKey(std::size_t slot) const {
+        // Single conversation reads can resume approvals created before they used ToolBatch.
+        if (calls_.size() == 1 && tool_batch::conversationRead(calls_[slot].tool) != tool_batch::ConversationRead::none)
+            return tool_batch::turnCallKey(message_.id,step_);
         return tool_batch::turnCallKey(message_.id,step_,slot);
     }
 
@@ -233,10 +236,25 @@ private:
         const auto& call = calls_[slot];
         const bool bot = isBotTool(call.tool);
         try {
-            if (!bot) return store_.executeConversationRead(message_,call,ctx_.t3,callKey(slot),ApprovalWait::defer);
-            auto result = store_.executeBotTool(tools_,call);
-            if (!result.contains("ok")) result["ok"] = true;
-            return CompletedToolCall{std::move(result)};
+            if (bot) {
+                auto result = store_.executeBotTool(tools_,call);
+                if (!result.contains("ok")) result["ok"] = true;
+                return CompletedToolCall{std::move(result)};
+            }
+            using enum tool_batch::ConversationRead;
+            switch (tool_batch::conversationRead(call.tool)) {
+                case session:
+                    return store_.sessionReadTool(message_,call,ctx_.t3,callKey(slot));
+                case environment_readiness: {
+                    if (!message_.channelScope.empty())
+                        return CompletedToolCall{toolFailure("Use Flock Web for this action")};
+                    auto result = store_.readiness(message_.bot,message_.routing,call.args,ctx_.t3);
+                    result["ok"] = true;
+                    return CompletedToolCall{std::move(result)};
+                }
+                default:
+                    throw std::logic_error("Unsupported network conversation read");
+            }
         } catch (const ToolOutcomeUnknown& error) {
             return CompletedToolCall{{{"ok",false},{"error",error.what()},{"delivery","unknown"}}};
         } catch (const Conflict& error) {
