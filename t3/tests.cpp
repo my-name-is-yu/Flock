@@ -640,15 +640,20 @@ int main(int argc, char** argv) {
         const auto expired = home.parent_path()/"expired-creds";
         std::filesystem::create_directory(expired);
         std::filesystem::permissions(expired,std::filesystem::perms::owner_all);
+        std::size_t expiredCredentialCount = 0;
         for (const auto& entry : std::filesystem::directory_iterator(home)) {
+            if (!entry.is_regular_file()) continue;
             std::ifstream source(entry.path());
+            check(source.is_open(),"credential file could not be opened");
             auto credential = Json::parse(source,nullptr,false);
             if (!credential.is_object() || credential.value("environmentId","") != "env-1") continue;
             credential["expiresAt"] = unixTime() - 1;
             const auto copy = expired/entry.path().filename();
             std::ofstream(copy) << credential.dump();
             std::filesystem::permissions(copy,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+            ++expiredCredentialCount;
         }
+        check(expiredCredentialCount == 1,"expiry fixture must copy exactly the env-1 credential");
         check(makeT3Mcp(expired)->sessionMessageWake({"env-1","thread"},run) == "unknown",
               "A confirmed credential expiry did not settle as an unknown Run outcome");
         fixture({{"scope", "orchestration:read"}});

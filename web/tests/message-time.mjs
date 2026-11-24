@@ -79,6 +79,11 @@ function fixtures() {
     activeSessions = request ? [{ taskId: 18, threadId: 'working', environmentId: 'local', state: 'running', request }] : [];
     document.dispatchEvent(new Event('visibilitychange'));
   };
+  window.showWorkingTargets = () => {
+    activeSessions = ['Local', 'Mini'].map((name) => ({ taskId: 19, threadId: `thread-${name.toLowerCase()}`,
+      environmentId: `env-${name.toLowerCase()}`, name, state: 'running', request: 'Compare release checks' }));
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   window.showSuggestion = () => {
     activeSessions = [];
     events.push({ id: 5, kind: 'conversation_reply', time: time + 1002, data: {
@@ -108,6 +113,55 @@ async function exercise() {
   check(sessionLabel(sessionRows()[0]) === 'Yesterday', 'An open tab did not refresh Session time at local midnight');
   window.returnAfterMidnight();
   check(sessionLabel(sessionRows()[0]) === 'Nov 20', 'Returning to the tab did not refresh the relative Session time');
+  window.showWorkingTargets();
+  const destinationRows = () => sessionRows().filter((row) => ['Local', 'Mini'].some((name) =>
+    row.querySelector('.activity-title')?.textContent.startsWith(`${name} · Compare release checks`)));
+  for (let attempt = 0; attempt < 20 && destinationRows().length !== 2; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  const destinations = destinationRows();
+  check(destinations.length === 2 && destinations.every((row) => sessionLabel(row) === 'Working'),
+    'Running destination Sessions did not show distinct visible names and live status');
+  const sampleConversation = document.createElement('section');
+  sampleConversation.className = 'conversation';
+  sampleConversation.style.setProperty('--user-bubble', 'rgb(0, 122, 53)');
+  const sampleMessage = document.createElement('article');
+  sampleMessage.className = 'msg user event-message';
+  const sampleBubble = document.createElement('div');
+  sampleBubble.className = 'bubble';
+  const sampleStatus = document.createElement('p');
+  sampleStatus.className = 'event-reason';
+  sampleStatus.textContent = 'Local · Working';
+  const sampleLink = document.createElement('a');
+  sampleLink.className = 'run-link';
+  sampleLink.innerHTML = '<span class="glyph">↗</span>';
+  sampleBubble.append(sampleStatus, sampleLink);
+  sampleMessage.append(sampleBubble);
+  sampleConversation.append(sampleMessage);
+  document.body.append(sampleConversation);
+  const rgb = (value) => value.match(/[\d.]+/g).slice(0, 3).map(Number).map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  const luminance = (value) => {
+    const [red, green, blue] = rgb(value);
+    return .2126 * red + .7152 * green + .0722 * blue;
+  };
+  const contrast = (foreground, background) => {
+    const values = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+    return (values[0] + .05) / (values[1] + .05);
+  };
+  const background = getComputedStyle(sampleBubble).backgroundColor;
+  for (const element of [sampleStatus, sampleLink]) {
+    const style = getComputedStyle(element);
+    check(style.opacity === '1' && getComputedStyle(sampleBubble).opacity === '1' &&
+      contrast(style.color, background) >= 4.5,
+      `User-bubble destination text/link contrast is ${contrast(style.color, background).toFixed(2)}:1`);
+  }
+  const hoverRule = [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
+    .find((rule) => rule.selectorText === '.msg.user .bubble .run-link:hover');
+  check(hoverRule?.style.background === 'transparent',
+    'Hovering a destination link must preserve the user-bubble background');
+  sampleConversation.remove();
   const rows = [...document.querySelectorAll('.event-message')];
   const [first, second, report] = rows.map(row => row.querySelector('.event-text'));
   const singleTime = rows.map(row => row.querySelector('time'));

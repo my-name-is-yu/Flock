@@ -61,4 +61,5 @@ inline void createBot(const std::filesystem::path& path, const Json& config, std
 }
 
 void configuredSchedules();
+void pinnedConversationDestinations();
 }

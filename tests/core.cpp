@@ -101,6 +101,12 @@ int main() {
         unsupportedSchemaLeavesDatabaseIntact(path / "pre-project-selection.db",
             "PRAGMA application_id=0x464c4f43; PRAGMA user_version=6;"
             "CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES (1);");
+        unsupportedSchemaLeavesDatabaseIntact(path / "pre-gateway-identity.db",
+            "PRAGMA application_id=0x464c4f43; PRAGMA user_version=7;"
+            "CREATE TABLE session_message_waits(message_id INTEGER NOT NULL, bot TEXT NOT NULL,"
+            "environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL, title TEXT NOT NULL,"
+            "notified INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(message_id,environment,thread,run));"
+            "INSERT INTO session_message_waits VALUES (1,'release','env','thread','run','Session',0);");
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;

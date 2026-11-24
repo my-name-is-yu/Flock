@@ -2,7 +2,7 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
-Flock reopens databases with the current schema version (7). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
+Flock reopens databases with the current schema version (8). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
 
 ## Build
 
@@ -43,6 +43,19 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
 
 Flock uses the sole connected T3 environment when the Bot starts work. It uses the sole active project, or asks which project to use and remembers the choice for that Bot and environment. You can pin a destination with `environmentId` and `projectId` in the Bot configuration. Optional `conversationEnvironments` entries name other connected environments for requests such as “Run the measurement on the cloud Mac.” Each environment has its own project selection.
+
+For parallel verification on two connected Macs, configure the destination aliases with each machine's canonical T3 project ID. You can also use the Bot's pinned default project or its remembered project for that environment.
+
+```json
+{
+  "conversationEnvironments": {
+    "local Mac": { "environmentId": "<local environment ID>", "projectId": "<local project ID>" },
+    "Mac mini": { "environmentId": "<mini environment ID>", "projectId": "<mini project ID>" }
+  }
+}
+```
+
+In the Bot's Flock conversation, ask it to verify a full Git commit SHA on both aliases in one request, and specify the checks to run. Both T3 projects need the commit in their local Git repositories. The request shows each Run's result, the actual SHA from its Git command output, and its Session link. Ask the Bot to stop the request to stop both Runs. Open the linked Session if a Run needs input in T3.
 
 Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange. Consultations can run without a T3 connection. For work requests, a Bot without a pinned environment uses the sender's environment if the recipient can use it, or its sole eligible connected environment.
 

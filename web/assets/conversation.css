@@ -374,6 +374,7 @@
 .channel-image { display: block; max-width: min(100%, 20rem); max-height: 14rem; object-fit: contain; border-radius: var(--radius-md); }
 .read-only-choices { margin-block: .35rem 0; padding-inline-start: 1.2rem; color: var(--text-2); font-size: var(--text-sm); }
 .event-reason { margin-top: .4rem; color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.user .bubble .event-reason { color: inherit; }
 .glyph { display: inline-grid; place-items: center; }
 .glyph svg { width: 1rem; height: 1rem; }
 .kind-icon { margin-right: .4em; vertical-align: -.17em; color: var(--text-3); }
@@ -387,6 +388,10 @@
   transition: background-color .14s ease, color .14s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
 }
 .run-link:hover { color: var(--accent); background: var(--hover); }
+.msg.user .bubble .run-link,
+.msg.user .bubble .run-link:hover { color: inherit; }
+.msg.user .bubble .run-link:hover { background: transparent; }
+.msg.user .bubble .run-link:focus-visible { outline-color: currentColor; }
 .run-link:active { transform: scale(.9); }
 .run-link .glyph svg { width: .95rem; height: .95rem; transition: transform .16s cubic-bezier(0.23, 1, 0.32, 1); }
 @media (hover: hover) and (pointer: fine) {
