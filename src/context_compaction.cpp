@@ -189,13 +189,13 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
 
     Id start = args.contains("startMessageId") ? identifier(args,"startMessageId",true) : 1;
     const Id requestedEnd = args.contains("endMessageId") ? identifier(args,"endMessageId",true) : 0;
+    const bool exactOrContinuedRead = start == requestedEnd || args.contains("cursor");
     Id end = std::min(boundary,message.id-1);
     if (args.contains("compactionId")) {
         auto row = query("SELECT end_message_id FROM conversation_compactions WHERE bot_id=? AND id=?",{bot,identifier(args,"compactionId",true)});
         if (!row.next()) throw Conflict("Unknown compaction");
         end = std::min(end,row.number(0));
-    } else if (start==requestedEnd || args.contains("cursor")) {
-        // Exact reads and saved cursors can recover entries shortened in the recent history.
+    } else if (exactOrContinuedRead) {
         end = message.id-1;
     }
     if (requestedEnd) end = std::min(end,requestedEnd);

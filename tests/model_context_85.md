@@ -2,7 +2,9 @@
 
 比較元は `3253574e3d725eb4b5dd6923153d64a8ac92945f`。比較元の本体は `18bbd95950e1fbe4c175d9dae37394a7c945d916`、当初の PR #289 の head は `f2f42eb053dc23ef235a55de8baa50ab69a07dbd`。比較元と同じ ChatGPT Direct OAuth、`gpt-6.2-sol`、23回の単一ターンと5ターンの長い会話を使う。 [比較元の計測](model_context_73.md) · [PR #289 からの比較](model_context_cache.md)
 
-採用する変更版 `93a3201d7e0106ef43e35b3986c3721b0f12bf29` は、合算 **86.96%**、1,152,381入力トークン中1,002,112トークンを読み取った。6ターンすべてに正答し、モデル呼び出しは66回から65回、根拠の復元は2回から1回に減った。未読入力150,269トークンは比較元 B1 より39,820少ない。HTTP 本文は6.55 MBで約41%増え、実行時間は217.8秒から409.5秒に延びた。同じ本体の通常実行では83.36〜86.96%が観測された。 [単一ターン](model_context_85_runs/typed-role-recheck-near-limit.jsonl) · [5ターン](model_context_85_runs/typed-role-recheck-multi-turn.jsonl)
+計測版 `93a3201d7e0106ef43e35b3986c3721b0f12bf29` は、合算 **86.96%**、1,152,381入力トークン中1,002,112トークンを読み取った。6ターンすべてに正答し、モデル呼び出しは66回から65回、根拠の復元は2回から1回に減った。未読入力150,269トークンは比較元 B1 より39,820少ない。HTTP 本文は6.55 MBで約41%増え、実行時間は217.8秒から409.5秒に延びた。同じ本体の通常実行では83.36〜86.96%が観測された。 [単一ターン](model_context_85_runs/typed-role-recheck-near-limit.jsonl) · [5ターン](model_context_85_runs/typed-role-recheck-multi-turn.jsonl)
+
+レビュー用のブランチには、計測後に PR #289 に入った再取得と省略処理の修正も取り込んだ。上記の読み取り率は次の再現手順で使う計測版の値。 [PR #289 の取り込み元](https://github.com/my-name-is-yu/Flock/commit/190ebd413add102578245fde29c42cf9e4cdfe74)
 
 ## 認証済みの結果
 
@@ -101,13 +103,14 @@
 
 ## 再現
 
-変更版は `93a3201d7e0106ef43e35b3986c3721b0f12bf29`。次のコマンドは、ソースとプローブの両方があるこの作業ツリーのルートで実行する。比較元を再計測する場合は、比較元 SHA の worktree でも同じ `near-limit` と `multi-turn` を実行する。
+この文書のある作業ツリーのルートから、計測版 `93a3201d7e0106ef43e35b3986c3721b0f12bf29` のバイナリを別の作業ツリーに作る。比較元を再計測する場合も、比較元の SHA を指定して `near-limit` と `multi-turn` を実行する。
 
 ```sh
-cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build --target flock_model_context --parallel 8
-profile=${FLOCK_CONTEXT_PROFILE_DIR:-"$HOME/.config/flock/credentials/chatgpt"}
 results=$(mktemp -d)
+git worktree add --detach "$results/source" 93a3201d7e0106ef43e35b3986c3721b0f12bf29
+cmake -S "$results/source" -B "$results/build" -DBUILD_TESTING=ON
+cmake --build "$results/build" --target flock_model_context --parallel 8
+profile=${FLOCK_CONTEXT_PROFILE_DIR:-"$HOME/.config/flock/credentials/chatgpt"}
 for run in 1 2; do
     if [ "$run" = 1 ]; then
         set -- multi-turn near-limit
@@ -115,12 +118,12 @@ for run in 1 2; do
         set -- near-limit multi-turn
     fi
     for scenario do
-        build/flock_model_context --live "$profile" gpt-6.2-sol "$scenario" \
+        "$results/build/flock_model_context" --live "$profile" gpt-6.2-sol "$scenario" \
             > "$results/$run-$scenario.jsonl"
     done
 done
-build/flock_model_context --live "$profile" gpt-6.2-sol quality-replay > "$results/quality-replay.jsonl"
-build/flock_model_context --live "$profile" gpt-6.2-sol short > "$results/short.jsonl"
+"$results/build/flock_model_context" --live "$profile" gpt-6.2-sol quality-replay > "$results/quality-replay.jsonl"
+"$results/build/flock_model_context" --live "$profile" gpt-6.2-sol short > "$results/short.jsonl"
 python3 tests/model_context_summary.py --per-turn "$results/"*.jsonl
 python3 tests/model_context_probe.py "$profile" gpt-6.2-sol transcript > "$results/typed-probe.jsonl"
 python3 tests/model_context_probe.py "$profile" gpt-6.2-sol websocket-tool-transcript > "$results/pi-tool-delta.jsonl"

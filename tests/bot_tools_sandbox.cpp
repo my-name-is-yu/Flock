@@ -89,7 +89,9 @@ struct Provider : Model {
             emit(call("delegate",{{"instruction","Read private history"},{"doneWhen","Private fixture checked"}}));
         } else {
             if (beforeTurn) beforeTurn(input);
-            const auto& prompt = request.at("input").front().at("content").front().at("text").get_ref<const std::string&>();
+            const auto& first = request.at("input").front();
+            const auto& prompt = (first.value("role","") == "developer" ? first.at("content").at(0).at("text") :
+                                  request.at("instructions")).get_ref<const std::string&>();
             check(prompt.find("untrustedData") != std::string::npos,
                   "Tool output trust was not explained in the prompt");
             const auto& steps = input.event.at("turn");

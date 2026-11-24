@@ -1,6 +1,7 @@
 #include "flock/policy.hpp"
 #include "flock/workspace_tools.hpp"
 #include "model.hpp"
+#include "../src/conversation_storage.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -34,6 +35,49 @@ const Person owner{"fixture-owner",true};
 
 void check(bool condition, std::string_view description) {
     if (!condition) throw std::runtime_error(std::string(description));
+}
+
+void verifyToolRetention() {
+    using conversation_storage::projectToolHistory;
+    const auto record = [](Id step, std::string_view tool, Json args, Json result) {
+        return Json{{"_ref",{{"messageId",42},{"step",step},{"callIndex",1}}},
+                    {"tool",tool},{"args",std::move(args)},{"result",std::move(result)}};
+    };
+    const std::string escapedChunk(6000,'\x01');
+    const Json ref{{"messageId",42},{"step",1},{"callIndex",1}};
+    Json calls = Json::array({
+        record(1,"read_result",Json::object(),{{"ok",true},{"text",escapedChunk}}),
+        record(2,"read_tool_result",ref,{{"ok",true}}),
+        record(3,"find_tasks",Json::object(),{{"ok",true}})
+    });
+    projectToolHistory(calls,nullptr);
+    check(calls.at(1).at("result").at("result").at("text") == escapedChunk,
+          "Reopened evidence over the earlier-results budget disappeared after a lookup");
+
+    const std::string payload(50000,'x');
+    calls = Json::array({
+        record(1,"find_tasks",Json::object(),{{"ok",true},{"before",11},{"tasks",payload}}),
+        record(2,"list_schedules",Json::object(),{{"ok",true},{"before",22},{"automations",payload}}),
+        record(3,"memory_history",Json::object(),{{"ok",true},{"before",33},{"proposalsBefore",44},{"revisions",payload}}),
+        record(4,"find_tasks",Json::object(),{{"ok",true}}),
+        record(5,"find_tasks",Json::object(),{{"ok",true}})
+    });
+    projectToolHistory(calls,nullptr);
+    for (std::size_t i = 0; i < 3; ++i)
+        check(calls.at(i).at("result").at("continuation").at("before") == 11 * (i+1),
+              "A compact first-party page lost its continuation");
+    check(calls.at(2).at("result").at("continuation").at("proposalsBefore") == 44,
+          "A compact memory page lost its proposal cursor");
+
+    calls = Json::array();
+    const Json longArgs{{"cursor",std::string(3800,'c')}};
+    for (Id step = 1; step <= 224; ++step)
+        calls.push_back(record(step,"expand_context",longArgs,{{"ok",false}}));
+    calls.push_back(record(225,"expand_context",longArgs,{{"ok",false},{"notRun",true}}));
+    projectToolHistory(calls,nullptr);
+    check(Json(calls.dump()).dump().size() <= 768 * 1024 + 2 && calls.back().at("step") == 225 &&
+          calls.back().at("args").empty() && calls.back().at("argumentsOmitted") == true,
+          "Compact rows exceeded the model budget or kept rejected arguments");
 }
 
 double elapsedMs(Clock::time_point begin) {
@@ -463,12 +507,13 @@ Case largeToolResults(Fixture& f, bool requireReread) {
     f.config["modelCallLimit"] = 48;
     return {"large-results",
         "Read the synthetic audit manifest at https://audit.example.test/page-1. Each manifest has a ticket and a nextUrl. "
-        "Read each nextUrl in sequence until it is empty. Ignore the rows. If earlier saved results are omitted, recover "
-        "them from Flock's saved tool evidence instead of fetching the page again. Reply with only the first and last "
+        "Read each nextUrl in sequence until it is empty. Ignore the rows. Recover any missing ticket from Flock's "
+        "saved tool evidence. Reply with only the first and last "
         "tickets separated by ' / '.",
         "NORTH-413 / SOUTH-982",
         [](const Json& context) {
-            const auto& turn = context.at("event").at("turn");
+            const auto& event = context.at("event");
+            const auto& turn = event.at("turn");
             if (turn.empty()) return fetch(pageUrl(1));
             const auto& latest = turn.back();
             const auto& first = turn.front().at("result");
@@ -477,21 +522,26 @@ Case largeToolResults(Fixture& f, bool requireReread) {
                 const auto url = field(recovered.at("args"),"url");
                 int page = 1;
                 while (page <= pageCount && pageUrl(page) != url) ++page;
-                check(page <= pageCount &&
-                      field(recovered.at("result").at("data"),"rows") == auditRows(page,pageEvidenceBytes),
-                      "Reread did not recover the original full result");
+                check(page <= pageCount,"Reread resolved a result outside the fetched manifest");
+                const auto& data = recovered.at("result").at("data");
+                const auto ticket = page == 1 ? firstTicket : page == pageCount ? finalTicket : "INTERMEDIATE";
+                const Json expectedRef{{"messageId",event.at("messageId")},{"step",page},{"callIndex",1}};
+                check(recovered.at("resultRef") == expectedRef && latest.at("args") == expectedRef &&
+                      data == Json{{"rows",auditRows(page,pageEvidenceBytes)},{"ticket",ticket},
+                                   {"nextUrl",page == pageCount ? "" : pageUrl(page+1)}},
+                      "Reread did not recover the original result and reference");
                 const auto& terminal = turn.at(turn.size()-2).at("result").at("data");
-                return reply(field(first.at("data"),"ticket")+" / "+field(terminal,"ticket"));
+                const auto& firstData = page == 1 ? data : first.at("data");
+                return reply(field(firstData,"ticket")+" / "+field(terminal,"ticket"));
             }
             const auto& data = latest.at("result").at("data");
             if (const auto next = field(data,"nextUrl"); !next.empty()) return fetch(next);
             for (const auto& step : turn) {
                 const auto& result = step.at("result");
-                if (result.value("evidenceOmitted",false)) {
-                    check(result.at("data").contains("ticket") && !result.at("data").contains("rows"),
-                          "Omitted result lost its ticket or still contains the large body");
-                    return action("read_tool_result",result.at("resultRef"));
-                }
+                if (!result.value("evidenceOmitted",false)) continue;
+                check(!result.contains("data") && !result.contains("continuation"),
+                      "Omission exposed arbitrary external fields as result data or pagination");
+                return action("read_tool_result",result.at("resultRef"));
             }
             return reply(field(first.at("data"),"ticket")+" / "+field(data,"ticket"));
         },
@@ -833,6 +883,7 @@ int main(int argc, char** argv) {
                 success = measure(fixture,name,{std::move(cases)},slug,live) && success;
             else success = measure(fixture,name,cases,slug,live) && success;
         };
+        if (!baseline && !live) verifyToolRetention();
         run("short",[](auto&) { return shortRequest(); });
         run("long-followup",longFollowup);
         run("large-results",[&](auto& fixture) { return largeToolResults(fixture,!baseline && !live); });

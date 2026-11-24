@@ -140,7 +140,8 @@ function mockResponses() {
       assert.ok(tool.parameters.required.every(key => key in args));
       assert.ok(Object.keys(args).every(key => key in tool.parameters.properties));
       if (context.event.kind === "conversation_turn")
-        assert.match(request.input[0].content[0].text, /You are a Flock Bot talking with your user/);
+        assert.match(request.input[0].role === "developer" ? request.input[0].content[0].text : request.instructions,
+          /You are a Flock Bot talking with your user/);
       if (context.event.kind === "bot_request")
         assert.match(tool.parameters.properties.kind.description, /Use result to return work or consultation advice/);
       const response = { type: "response.completed", response: { output: [result] } };
