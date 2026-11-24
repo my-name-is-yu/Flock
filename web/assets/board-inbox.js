@@ -37,7 +37,18 @@ const svgIcons = {
 
 const itemKey = (item) => JSON.stringify([item.botId, item.itemKind, item.itemId]);
 const decisionTarget = (item) => JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices, item.status]);
+// Task waits use the wait ID in both views. Policy approvals have their own identity and generation.
+const isTaskWait = (item) => item.taskId > 0 && item.waitId > 0 &&
+  (!item.itemKind || (item.itemId === item.waitId && item.itemKind !== 'policy_approval'));
+const waitKey = (item) => JSON.stringify([item.botId, item.taskId, item.waitId]);
+const choiceTarget = (item) => decisionTarget({ ...item, itemKind: 'user_question', itemId: item.waitId });
 const savesFlockRule = (decision) => decision === 'always_allow' || decision === 'allow_next_time';
+
+export function taskWaitDecision(botId, task) {
+  const { wait } = task;
+  return { botId, taskId: task.id, waitId: wait.id, targetRevision: task.currentRevision ?? 0,
+    targetGeneration: task.generation, request: task.request, prompt: wait.text, choices: wait.choices ?? [] };
+}
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -168,7 +179,11 @@ function prPreviewCard(rawUrl, title) {
   box.append(head, meta);
   return box;
 }
-function decisionCard(item, submit, source, question, saving) {
+function setCardBusy(card, busy) {
+  for (const control of card.querySelector('.board-inbox-form')?.elements ?? []) control.disabled = busy;
+}
+
+function decisionCard(item, submit, source, question, busy) {
   const article = element('article', '', 'board-inbox-card');
   const prInfo = item.prUrl ? parsePrInfo(item.prUrl) : null;
 
@@ -253,27 +268,22 @@ function decisionCard(item, submit, source, question, saving) {
     buttons.append(btn);
   }
   form.append(buttons);
-  function setBusy(busy) {
-    for (const input of form.elements) input.disabled = busy;
-  }
-  setBusy(Boolean(saving));
-  saving?.then(() => setBusy(false), () => setBusy(false));
-  form.addEventListener('submit', async (event) => {
+  form.addEventListener('submit', (event) => {
     event.preventDefault();
     if (!event.submitter || event.submitter.disabled) return;
     const data = Object.fromEntries(Object.entries(inputs).map(([field, input]) => [field, input.value]));
     if (event.submitter.dataset.prNumber) data.prNumber = Number(event.submitter.dataset.prNumber);
     if (data.deadline) data.deadline = Math.floor(new Date(data.deadline).getTime() / 1000);
-    setBusy(true);
-    try { await submit(item, event.submitter.value, data); }
-    finally { setBusy(false); }
+    void submit(item, event.submitter.value, data);
   });
   article.append(form);
+  setCardBusy(article, busy);
   return article;
 }
 
 export function mountBoardInbox({
-  api, sourceAction, onChange, onAccepted, onRefreshError, canCompose, focusComposer, canDismiss = () => true,
+  api, sourceAction, onChange, onAccepted, onRefreshError, refreshConversation = () => {},
+  canCompose, focusComposer, canDismiss = () => true,
 }) {
   const byId = (id) => document.getElementById(id);
   const main = byId('main');
@@ -308,7 +318,9 @@ export function mountBoardInbox({
   const current = () => mode === 'pending' ? pending().find((item) => itemKey(item) === selected) : undefined;
   const isOpen = () => !!mode;
   const count = (botId) => pending(botId).length;
-  const saveKey = (item) => JSON.stringify([viewer, itemKey(item)]);
+  const saveKey = (item) => isTaskWait(item) ? waitKey(item) : itemKey(item);
+  const inFlight = () => saving.get(viewer);
+  const busy = (item) => inFlight()?.has(saveKey(item)) ?? false;
   const draftKey = (item, choice) => JSON.stringify([viewer, item.botId, item.taskId, ...(choice ? ['choice'] : [])]);
 
   function clearMorph() {
@@ -464,13 +476,29 @@ export function mountBoardInbox({
     try { sessionStorage.setItem(draftStorage, JSON.stringify([...drafts])); } catch {}
   }
 
+  function choice(item) {
+    const key = choiceTarget(item);
+    const saved = drafts.get(draftKey(item, true));
+    const same = saved?.target === key;
+    return { key, text: same && !saved.stale ? saved.text : undefined, stale: same && !!saved.stale };
+  }
+
+  function selectChoice(item, text) {
+    if (busy(item)) return;
+    const target = choiceTarget(item);
+    remember(draftKey(item, true), { target, text });
+    for (const form of document.querySelectorAll('.question-choice-form')) {
+      if (form.dataset.questionKey === target) updateQuestionChoiceForm(form, text, false);
+    }
+  }
+
   function composer() {
     const item = current();
     if (item?.itemKind !== 'user_question' || !item.canDecide || !canCompose()) return null;
     const key = draftKey(item, false);
     const target = decisionTarget(item);
     const saved = drafts.get(key);
-    return { item, key: target, text: saved?.text ?? '', busy: saving.has(saveKey(item)),
+    return { item, key: target, text: saved?.text ?? '', busy: busy(item),
       blocked: !!saved && (saved.target !== target || saved.stale), draftKey: key };
   }
 
@@ -502,30 +530,21 @@ export function mountBoardInbox({
     }
   }
 
-  function questionControls(item, busy) {
+  function questionControls(item, pending) {
     const group = element('div', '', 'board-inbox-question');
-    const target = decisionTarget(item);
-    const saved = drafts.get(draftKey(item, true));
-    const same = saved?.target === target;
-    let selectedAnswer = same && !saved.stale ? saved.text : undefined;
-    const stale = same && saved.stale;
+    const { key, text, stale } = choice(item);
     if (hasQuestionChoices(item.choices)) {
-      const form = questionChoiceForm({
-        key: target, prompt: item.prompt, choices: item.choices, answer: selectedAnswer, busy: busy || stale,
-        select(answer) {
-          selectedAnswer = answer;
-          remember(draftKey(item, true), { target, text: answer });
-          updateQuestionChoiceForm(form, selectedAnswer, saving.has(saveKey(item)));
-        },
-        submit(answer) { void submit(item, 'answer', { text: answer }, draftKey(item, true)); },
-      });
-      group.append(form);
+      group.append(questionChoiceForm({
+        key, prompt: item.prompt, choices: item.choices, answer: text, busy: pending || stale,
+        select: (answer) => selectChoice(item, answer),
+        submit(answer) { void submit(item, 'answer', { text: answer }, { choiceAnswer: true }); },
+      }));
     }
     const write = button('Write an answer', 'text-button question-reply', () => {
       if (!canCompose()) return;
       focusComposer();
     });
-    write.disabled = busy;
+    write.disabled = pending;
     group.append(write);
     const needsReview = element('div', '', 'board-inbox-draft-review');
     reviewDraft(item, needsReview);
@@ -551,15 +570,18 @@ export function mountBoardInbox({
     next.disabled = index < 0 || index >= list.length - 1;
     syncMoreMenu();
     if (!item) return;
-    const pendingWrite = saving.get(saveKey(item));
-    const questionState = item.itemKind === 'user_question' && [!!pendingWrite,
+    const pendingWrite = busy(item);
+    const questionState = item.itemKind === 'user_question' && [pendingWrite,
       drafts.get(draftKey(item, false))?.stale, drafts.get(draftKey(item, true))?.stale];
     const text = JSON.stringify([item, questionState]);
-    if (rendered === text) return;
+    if (rendered === text) {
+      setCardBusy(host, pendingWrite);
+      return;
+    }
     rendered = text;
     const focused = host.contains(document.activeElement);
     const source = sourceAction(item, () => close({ focus: false }));
-    host.replaceChildren(decisionCard(item, submit, source, () => questionControls(item, !!pendingWrite), pendingWrite));
+    host.replaceChildren(decisionCard(item, submit, source, () => questionControls(item, pendingWrite), pendingWrite));
     if (focused) panel.focus({ preventScroll: true });
   }
 
@@ -730,47 +752,67 @@ export function mountBoardInbox({
     invalid_input: 'Check your response and try again.',
   };
 
-  async function submit(item, decision, data, answer, inline = false) {
-    const save = saveKey(item);
-    const active = inline ? items.find((entry) => itemKey(entry) === itemKey(item)) : current();
-    if (!item.canDecide || !active?.canDecide || saving.has(save) || decisionTarget(active) !== decisionTarget(item) ||
+  async function submit(item, decision, data = {}, { inline = false, choiceAnswer = false, conversation } = {}) {
+    const active = conversation ? conversation.active
+      : inline ? items.find((entry) => itemKey(entry) === itemKey(item)) : current();
+    const fingerprint = decisionTarget(item);
+    if (!active?.canDecide || busy(item) || decisionTarget(active) !== fingerprint ||
+        (!conversation && !item.canDecide) ||
         (savesFlockRule(decision) && active.canSaveRule !== true)) return;
     const owner = viewer;
-    const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
-    const fingerprint = decisionTarget(item);
-    const saved = drafts.get(answer);
+    const save = saveKey(item);
     const textKey = draftKey(item, false);
     const choiceKey = draftKey(item, true);
+    const answer = decision === 'answer' ? choiceAnswer ? choiceKey : textKey : undefined;
+    const saved = drafts.get(answer);
+    const otherKey = choiceAnswer ? textKey : choiceKey;
+    const otherDraft = drafts.get(otherKey);
     const isCurrent = () => owner === viewer && current() && decisionTarget(current()) === fingerprint;
-    message.textContent = 'Sending…';
-    const operation = api('inbox/decide', { ...target, decision, data });
-    saving.set(save, operation);
-    renderPending();
-    onChange();
+    const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
+    const writes = inFlight() ?? new Map();
+    writes.set(save, item.botId);
+    saving.set(owner, writes);
     try {
-      const response = await operation;
-      if (!response.accepted) throw new Error('decision_unconfirmed');
-      if (answer) {
-        if (drafts.get(answer) === saved) {
-          remember(textKey);
-          remember(choiceKey);
+      if (conversation) conversation.start();
+      else message.textContent = 'Sending…';
+      renderPending();
+      onChange();
+      let failure;
+      try {
+        const response = await (item.itemKind ? api('inbox/decide', { ...target, decision, data })
+          : api('operations', { ...data, ...target, operation: decision }));
+        if (response?.accepted !== true) throw new Error('decision_unconfirmed');
+      } catch (error) {
+        failure = error;
+      }
+      if (answer && drafts.get(answer) === saved) {
+        if (!failure) {
+          remember(answer);
+          if (drafts.get(otherKey) === otherDraft) remember(otherKey);
+        } else if (failure.message === 'request_changed') {
+          remember(answer, { target: choiceAnswer ? choiceTarget(item) : fingerprint, text: data.text, stale: true });
         }
       }
       if (owner !== viewer) return;
-      epoch++;
-      if (isCurrent()) message.textContent = '';
-      apply(items.filter((entry) => decisionTarget(entry) !== fingerprint));
-      onAccepted(item, { decision });
-      void refresh();
-    } catch (error) {
-      if (answer && error.message === 'request_changed' && drafts.get(answer) === saved) {
-        remember(answer, { target: fingerprint, text: data.text, stale: true });
+      if (isCurrent()) message.textContent = failure
+        ? errors[failure.message] ?? 'Could not confirm your response. Check the request before trying again.' : '';
+      if (!failure) {
+        epoch++;
+        const remaining = items.filter((entry) => conversation
+          ? saveKey(entry) !== save || entry.targetRevision !== item.targetRevision || entry.targetGeneration !== item.targetGeneration
+          : decisionTarget(entry) !== fingerprint);
+        if (remaining.length !== items.length) apply(remaining);
       }
-      if (inline && owner === viewer) onAccepted(item, { error: errors[error.message] ?? 'Could not confirm your response.' });
-      if (isCurrent()) message.textContent = errors[error.message] ?? 'Could not confirm your response. Check the request before trying again.';
-      if (owner === viewer) await refresh();
+      if (conversation) {
+        await conversation.finish(failure, refresh);
+      } else {
+        if (!failure) onAccepted(item, { decision });
+        else if (inline) onAccepted(item, { error: errors[failure.message] ?? 'Could not confirm your response.' });
+        await Promise.all([refresh(), refreshConversation(item)]);
+      }
     } finally {
-      saving.delete(save);
+      writes.delete(save);
+      if (!writes.size) saving.delete(owner);
       if (owner === viewer) {
         renderPending();
         onChange();
@@ -825,9 +867,15 @@ export function mountBoardInbox({
 
   return {
     setContext, refresh, count, itemsFor: scoped, pendingItemsFor: pending, open, openItem, openHistory, close, isOpen, composer, reviewReply,
+    busy, choice, selectChoice,
+    pendingKeys: () => [...inFlight()?.keys() ?? []],
+    pendingForBot: (botId) => [...inFlight()?.values() ?? []].includes(botId),
+    submitConversation(item, decision, data, conversation) {
+      return submit(item, decision, data, { conversation, choiceAnswer: decision === 'answer' });
+    },
     inlinePolicyCard(item) {
-      const card = decisionCard(item, (entry, decision, data) => submit(entry, decision, data, undefined, true),
-        null, null, saving.get(saveKey(item)));
+      const card = decisionCard(item, (entry, decision, data) => submit(entry, decision, data, { inline: true }),
+        null, null, busy(item));
       card.classList.add('policy-inline-card');
       return card;
     },
@@ -841,7 +889,7 @@ export function mountBoardInbox({
     submitAnswer() {
       const draft = composer();
       if (draft && !draft.blocked && draft.text.trim()) {
-        return submit(draft.item, 'answer', { text: draft.text }, draft.draftKey);
+        return submit(draft.item, 'answer', { text: draft.text });
       }
     },
   };
