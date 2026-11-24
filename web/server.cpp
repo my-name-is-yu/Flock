@@ -182,7 +182,9 @@ public:
                    const std::function<void(unsigned)>& afterBind)
         : store_(store), callbacks_(std::move(callbacks)),
           changes_(store,[this](const ChangeFeed::Scope& scope) {
-              return std::visit([&](const auto& target) { return snapshot(scope.person,target); },scope.target);
+              return std::visit([&](const auto& target) -> ChangeFeed::Projection {
+                  return snapshot(scope.person,target);
+              },scope.target);
           }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
@@ -274,7 +276,7 @@ public:
                             ? std::optional{queryId(req,"sessionsAfter",true)} : std::nullopt;
                         const auto changes = store_.conversationChangesSince(changesAfter,id);
                         const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
-                        auto view = store_.policy().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr,actor.id));
+                        auto view = readBotView(actor,id,*bot,sessionsAfter ? &sessionTasks : nullptr);
                         view["bot"]["id"] = id;
                         view["composerPerson"] = web::hasWebIdentities(callbacks_) ? Json(actor.id) : Json(nullptr);
                         view["historyCursor"] = changes.through;
@@ -540,11 +542,37 @@ private:
         return view;
     }
 
-    Json snapshot(const Person& person, const ChangeFeed::BotView& view) const {
-        if (!store_.policy().allows(person,Action::bot_view,view.bot)) return nullptr;
-        const auto bot = findBot(view.bot);
-        if (bot.is_null()) return nullptr;
-        return withConversationAccess(person,view.bot,store_.policy().redactSecrets(view.bot,web::botView(store_,bot,nullptr,person.id)));
+    ChangeFeed::Projection snapshot(const Person& person, const ChangeFeed::BotView& view) const {
+        const auto stamp = store_.botViewStamp();
+        if (!store_.policy().allows(person,Action::bot_view,view.bot)) return Json(nullptr);
+        auto bot = findBot(view.bot);
+        if (bot.is_null()) return bot;
+        auto data = withConversationAccess(person,view.bot,store_.policy().redactSecrets(view.bot,web::botView(store_,bot,nullptr,person.id)));
+        if (stamp && stamp == store_.botViewStamp())
+            return {std::move(data),ChangeFeed::BotVersion{*stamp,std::move(bot)}};
+        return data;
+    }
+
+    Json readBotView(const Person& person, const std::string& id, const Json& bot, const Json* changedSessionTasks) {
+        auto policy = store_.policy();
+        if (const auto cached = changes_.cachedBotView(person,id,bot)) {
+            // Workflow deadlines advance without a write. Session deltas belong to the request's cursor.
+            std::optional<Json> workflows, sessions;
+            if (!cached->data.at("workflows").empty())
+                workflows = policy.redactSecrets(id,store_.workflows(id));
+            if (changedSessionTasks)
+                sessions = policy.redactSecrets(id,web::sessionGroups(*changedSessionTasks));
+            if (store_.botViewStamp() == cached->botVersion->stamp) {
+                auto view = cached->data;
+                if (workflows) view["workflows"] = std::move(*workflows);
+                if (sessions) {
+                    view["sessionTasks"] = std::move(*sessions);
+                    view.erase("sessionsBefore");
+                }
+                return view;
+            }
+        }
+        return policy.redactSecrets(id,web::botView(store_,bot,changedSessionTasks,person.id));
     }
 
     Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {

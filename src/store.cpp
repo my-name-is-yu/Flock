@@ -571,6 +571,13 @@ ORDER BY 1,2
     return changes;
 }
 
+std::optional<Store::BotViewStamp> Store::botViewStamp() const {
+    std::lock_guard lock(p_->mutex);
+    if (!p_->channels.empty() || p_->query("SELECT 1 FROM protected_inputs WHERE status='fulfilled' LIMIT 1").next())
+        return std::nullopt;
+    return BotViewStamp{changeStamp(),p_->gitCredentials.size()};
+}
+
 Id Store::submit(const Intake& item, const Person* requester) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
