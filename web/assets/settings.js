@@ -48,7 +48,6 @@ function updatePolicyControls() {
   for (const control of $('rule-form').elements) control.disabled = disabled;
 }
 
-// Theme is a per-browser preference; theme.js applies it on every page.
 const themeInputs = [...document.querySelectorAll('input[name="theme"]')];
 function reflectTheme() {
   const mode = document.documentElement.dataset.theme ?? 'system';

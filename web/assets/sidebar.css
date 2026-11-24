@@ -275,12 +275,13 @@ a.session-row:hover .activity-open, a.session-row:focus-visible .activity-open {
 @keyframes skeleton-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 
 .status-dot { width: .42rem; height: .42rem; border-radius: 50%; flex: none; background: var(--text-3); }
-.sidebar-foot { position: relative; flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3) var(--space-3) .7rem; min-height: 3rem; }
-/* The connection line only speaks up when something is wrong; then it gets its own row above the footer controls. */
-.connection:has(#connection-text:empty) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.connection { flex-basis: 100%; padding-inline-start: .65rem; }
+.sidebar-foot {
+  position: relative; flex: none; display: grid; justify-items: start; align-content: center;
+  gap: var(--space-2); min-height: 3rem;
+  padding-block: var(--space-2) var(--space-3); padding-inline: .4rem var(--space-3);
+}
 .sidebar-settings {
-  display: inline-flex; align-items: center; gap: .5rem; min-width: 0; padding: .4rem .65rem;
+  display: flex; align-items: center; gap: .4rem; padding: .4rem;
   border-radius: var(--radius-md); color: var(--text-2); font-size: var(--text-sm); text-decoration: none;
   transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
@@ -288,10 +289,11 @@ a.session-row:hover .activity-open, a.session-row:focus-visible .activity-open {
 .sidebar-settings:hover { background: var(--hover); color: var(--text); }
 .sidebar-settings:hover svg { color: var(--text-2); }
 .sidebar-settings:active { transform: scale(.97); }
-.sidebar-foot-links { flex: 1 1 0; display: flex; align-items: center; gap: 0; min-width: 0; margin-inline-start: -.3rem; }
-.sidebar-foot-links .sidebar-settings { padding-inline: .4rem; gap: .4rem; }
-.sidebar-settings { flex: none; }
-.connection { display: flex; align-items: center; gap: .49rem; min-width: 0; font-size: var(--text-xs); color: var(--text-2); }
+.connection {
+  display: flex; align-items: center; gap: .49rem; min-width: 0; padding-inline-start: .95rem;
+  font-size: var(--text-xs); color: var(--text-2);
+}
+.connection:has(#connection-text:empty) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .connection[data-state="ready"] .status-dot { display: none; }
 .connection[data-state="loading"] { animation: connection-delay .2s ease-out .6s both; }
 .connection[data-state="offline"] { color: var(--danger); }
