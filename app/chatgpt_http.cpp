@@ -1,8 +1,15 @@
 #include "chatgpt.hpp"
 
 #include <curl/curl.h>
+#include <sys/socket.h>
+
+#ifndef SO_NOSIGPIPE
+#include <pthread.h>
+#include <signal.h>
+#endif
 
 #include <algorithm>
+#include <cerrno>
 #include <exception>
 
 namespace flockv0::app::chatgpt {
@@ -18,6 +25,48 @@ std::string safeCode(const Json& value) {
     const auto& code = value.get_ref<const std::string&>();
     return code.size() <= 100 && code.find_first_not_of(characters) == code.npos ? code : std::string{};
 }
+
+#if defined(SO_NOSIGPIPE)
+int suppressSocketSigpipe(void*, curl_socket_t socket, curlsocktype) {
+    // On macOS a broken socket can signal the process instead of its writer.
+    const int enabled = 1;
+    return setsockopt(socket,SOL_SOCKET,SO_NOSIGPIPE,&enabled,sizeof(enabled)) == 0
+        ? CURL_SOCKOPT_OK : CURL_SOCKOPT_ERROR;
+}
+#else
+class BlockSigpipe {
+public:
+    BlockSigpipe() {
+        sigemptyset(&blocked_);
+        sigaddset(&blocked_,SIGPIPE);
+        if (pthread_sigmask(SIG_BLOCK,&blocked_,&previous_) != 0) fail();
+        sigset_t pending;
+        if (sigpending(&pending) != 0) {
+            pthread_sigmask(SIG_SETMASK,&previous_,nullptr);
+            fail();
+        }
+        alreadyPending_ = sigismember(&pending,SIGPIPE) == 1;
+    }
+
+    ~BlockSigpipe() {
+        // Writes to closed sockets signal the writing thread. Consume any
+        // SIGPIPE from this transfer before restoring the caller's mask.
+        if (!alreadyPending_) {
+            const timespec noWait{};
+            while (sigtimedwait(&blocked_,nullptr,&noWait) == -1 && errno == EINTR) {}
+        }
+        pthread_sigmask(SIG_SETMASK,&previous_,nullptr);
+    }
+
+    BlockSigpipe(const BlockSigpipe&) = delete;
+    BlockSigpipe& operator=(const BlockSigpipe&) = delete;
+
+private:
+    [[noreturn]] static void fail() { throw ModelError("Unable to protect ChatGPT transport from broken pipes",true); }
+    sigset_t blocked_, previous_;
+    bool alreadyPending_;
+};
+#endif
 
 struct Transfer {
     CURL* curl;
@@ -241,6 +290,10 @@ HttpResponse httpRequest(const HttpRequest& request) {
     static const auto initialized = curl_global_init(CURL_GLOBAL_DEFAULT);
     if (initialized != CURLE_OK) throw ModelError("Unable to initialize ChatGPT transport",true);
     if (request.stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled",true);
+#ifndef SO_NOSIGPIPE
+    // The mask must stay in place through TLS cleanup.
+    const BlockSigpipe blockSigpipe;
+#endif
     const std::unique_ptr<CURL,decltype(&curl_easy_cleanup)> curl(curl_easy_init(),curl_easy_cleanup);
     if (!curl) throw ModelError("Unable to initialize ChatGPT transport",true);
     std::unique_ptr<curl_slist,decltype(&curl_slist_free_all)> headers(nullptr,curl_slist_free_all);
@@ -267,7 +320,11 @@ HttpResponse httpRequest(const HttpRequest& request) {
     set(CURLOPT_FOLLOWLOCATION,0L);
     set(CURLOPT_SSL_VERIFYPEER,1L);
     set(CURLOPT_SSL_VERIFYHOST,2L);
+    if (!request.caFile.empty()) set(CURLOPT_CAINFO,request.caFile.c_str());
     set(CURLOPT_NOSIGNAL,1L);
+#ifdef SO_NOSIGPIPE
+    set(CURLOPT_SOCKOPTFUNCTION,suppressSocketSigpipe);
+#endif
     set(CURLOPT_TIMEOUT_MS,static_cast<long>(request.timeout.count()));
     set(CURLOPT_ACCEPT_ENCODING,"");
     set(CURLOPT_HTTPHEADER,headers.get());

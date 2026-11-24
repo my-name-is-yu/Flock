@@ -1,8 +1,9 @@
+#include "../chatgpt_web.hpp"
 #include "../model.hpp"
 #include "../settings_access.hpp"
 #include "fixtures.hpp"
 #include "flock/base64.hpp"
-#include "flock/board_inbox.hpp"
+#include "flock/web.hpp"
 
 #include <curl/curl.h>
 #include <openssl/bn.h>
@@ -17,11 +18,14 @@
 #include <future>
 #include <iostream>
 #include <map>
+#include <mutex>
+#include <thread>
 
 namespace {
 using namespace flockv0;
 using namespace flockv0::app;
 using namespace flockv0::app::test;
+using namespace std::chrono_literals;
 
 constexpr std::string_view issuer = "https://auth.openai.com";
 constexpr std::string_view resource = "https://api.openai.com/v1";
@@ -113,6 +117,21 @@ Curl curlClient() {
     return client;
 }
 
+void configureLoopback(CURL* curl, const std::string& url) {
+    curl_easy_setopt(curl,CURLOPT_URL,url.c_str());
+    curl_easy_setopt(curl,CURLOPT_PROTOCOLS_STR,"http");
+    curl_easy_setopt(curl,CURLOPT_NOPROXY,"*");
+    curl_easy_setopt(curl,CURLOPT_NOSIGNAL,1L);
+    curl_easy_setopt(curl,CURLOPT_TIMEOUT_MS,3000L);
+}
+
+long statusOf(CURL* curl) {
+    long status = 0;
+    check(curl_easy_perform(curl) == CURLE_OK && curl_easy_getinfo(curl,CURLINFO_RESPONSE_CODE,&status) == CURLE_OK,
+          "Fixture loopback HTTP request failed");
+    return status;
+}
+
 Form formFields(std::string_view query) {
     auto curl = curlClient();
     const auto decode = [&](std::string_view value) {
@@ -146,17 +165,10 @@ void browserCallback(const std::string& redirect, const std::string& state, cons
         (decline ? "&error=access_denied" : "&code=fixture%2Bcode%2Flogin&client_id=" + client);
     auto curl = curlClient();
     const auto get = [&](const std::string& url, long expectedStatus) {
-        curl_easy_setopt(curl.get(),CURLOPT_URL,url.c_str());
-        curl_easy_setopt(curl.get(),CURLOPT_PROTOCOLS_STR,"http");
-        curl_easy_setopt(curl.get(),CURLOPT_NOPROXY,"*");
-        curl_easy_setopt(curl.get(),CURLOPT_NOSIGNAL,1L);
-        curl_easy_setopt(curl.get(),CURLOPT_TIMEOUT_MS,3000L);
+        configureLoopback(curl.get(),url);
         curl_easy_setopt(curl.get(),CURLOPT_WRITEFUNCTION,
             +[](char*, std::size_t size, std::size_t count, void*) { return size * count; });
-        long status = 0;
-        check(curl_easy_perform(curl.get()) == CURLE_OK &&
-              curl_easy_getinfo(curl.get(),CURLINFO_RESPONSE_CODE,&status) == CURLE_OK &&
-              status == expectedStatus,"Unexpected response from the loopback OAuth listener");
+        check(statusOf(curl.get()) == expectedStatus,"Unexpected response from the loopback OAuth listener");
     };
     get(redirect + "?state=unrelated",400);
     get(url,303);
@@ -164,6 +176,60 @@ void browserCallback(const std::string& redirect, const std::string& state, cons
     check(curl_easy_getinfo(curl.get(),CURLINFO_REDIRECT_URL,&location) == CURLE_OK && location && location == complete,
           "Callback did not redirect to a URL without authorization data");
     get(complete,200);
+}
+
+class SettingsBrowser {
+public:
+    explicit SettingsBrowser(const WebServer& server) : origin_("http://127.0.0.1:" + std::to_string(server.port())) {}
+
+    Json get(std::string_view path, std::string_view authorization) const {
+        return send(path,authorization,200,nullptr);
+    }
+
+    Json post(std::string_view path, const Json& body, std::string_view authorization = {}, long status = 200) const {
+        return send(path,authorization,status,&body);
+    }
+
+private:
+    std::string origin_;
+
+    Json send(std::string_view path, std::string_view authorization, long status, const Json* payload) const {
+        auto curl = curlClient();
+        configureLoopback(curl.get(),origin_ + std::string(path));
+        std::unique_ptr<curl_slist,decltype(&curl_slist_free_all)> headers(nullptr,curl_slist_free_all);
+        const auto add = [&](const std::string& header) {
+            auto* appended = curl_slist_append(headers.get(),header.c_str());
+            check(appended != nullptr,"Could not add a fixture browser header");
+            headers.release();
+            headers.reset(appended);
+        };
+        if (!authorization.empty()) add("Authorization: " + std::string(authorization));
+        std::string body;
+        if (payload) {
+            add("Origin: " + origin_);
+            add("X-Flock-Action: 1");
+            add("Content-Type: application/json");
+            body = payload->dump();
+            curl_easy_setopt(curl.get(),CURLOPT_POSTFIELDS,body.c_str());
+        }
+        curl_easy_setopt(curl.get(),CURLOPT_HTTPHEADER,headers.get());
+        std::string response;
+        curl_easy_setopt(curl.get(),CURLOPT_WRITEDATA,&response);
+        curl_easy_setopt(curl.get(),CURLOPT_WRITEFUNCTION,
+            +[](char* bytes, std::size_t size, std::size_t count, void* output) {
+                const auto length = size * count;
+                static_cast<std::string*>(output)->append(bytes,length);
+                return length;
+            });
+        const auto received = statusOf(curl.get());
+        check(received == status,std::string(path) + " returned unexpected HTTP " + std::to_string(received));
+        return Json::parse(response);
+    }
+};
+
+std::string authorizationFor(const Json& credential) {
+    return "Basic " + encodeBase64(credential.at("person").get<std::string>() + ":" +
+                                    credential.at("password").get<std::string>());
 }
 
 chatgpt::HttpResponse jsonResponse(long status, const Json& json) {
@@ -214,11 +280,17 @@ public:
     }
 
     void browserFinished() {
-        if (browser_.valid()) browser_.get();
+        std::future<void> browser;
+        {
+            std::lock_guard lock(browserMutex_);
+            browser = std::move(browser_);
+        }
+        if (browser.valid()) browser.get();
     }
 
 private:
     SigningKey key_;
+    std::mutex browserMutex_;
     std::future<void> browser_;
 
     std::optional<pid_t> openBrowser(const std::string& url) {
@@ -231,6 +303,7 @@ private:
         const auto pid = fork();
         if (pid == 0) _exit(0);
         check(pid > 0,"Could not start the fixture browser opener");
+        std::lock_guard lock(browserMutex_);
         browser_ = std::async(std::launch::async,browserCallback,authorization.at("redirect_uri"),
                               authorization.at("state"),account.client,decline);
         return pid;
@@ -358,34 +431,75 @@ void switchAccountWithCurrentAdministrator() {
     fixture.browserFinished();
     check(readBytes(fixture.profile) == bytes,"A switch without plan usage changed the active profile");
 
+    fixture.seed({{"hostId",profile.at("hostId")},{"clientId",first.client},{"subject",first.subject},
+                  {"email",first.email},{"signedOut",true},{"revocationConfirmed",true}});
+    const auto signedOut = readBytes(fixture.profile);
+    fixture.grantPlan = true;
+    std::promise<void> exchanging, releaseExchange;
+    auto exchangeStarted = exchanging.get_future();
+    auto exchangeReleased = releaseExchange.get_future();
+    bool firstExchange = true;
+    fixture.beforeExchange = [&] {
+        if (!std::exchange(firstExchange,false)) return;
+        exchanging.set_value();
+        check(exchangeReleased.wait_for(4s) == std::future_status::ready,"The fixture token exchange was not released");
+    };
+
     Store store(fixture.home / "flock.sqlite3");
     SettingsAccess access(store,fixture.home,nullptr);
-    const auto owner = access.change(localOwner,{{"operation","prepare"}}).at("credential");
-    access.change(localOwner,{{"operation","activate"},{"password",owner.at("password")}});
-    const auto delegated = access.change(localOwner,{{"operation","invite"},{"person","delegate"},{"adminRoot",true}})
-        .at("credential");
-    const auto authenticated = access.identities().authenticate(
-        "Basic " + encodeBase64("delegate:" + delegated.at("password").get<std::string>()));
-    check(authenticated == Person{"delegate",true},"The test did not authenticate an administrator");
-    fixture.grantPlan = true;
-    fixture.beforeExchange = [&] {
-        access.change(localOwner,{{"operation","role"},{"person","delegate"},{"adminRoot",false}});
-        check(readBytes(fixture.profile) == bytes,"Web authorization published an unverified candidate");
+    auto model = fixture.model();
+    ChatGPTWeb modelWeb(model,access);
+    WebCallbacks callbacks{
+        .bots = [] { return Json::array(); },
+        .intake = [](std::string_view,std::string_view) { return Intake{}; },
+        .authenticate = access.identities().authenticate,
+        .identityRequired = [&] { return access.enabled(); },
+        .changeInstallationSettings = [&](const Person& actor, std::string_view section, const Json& args) {
+            check(section == "access","Unexpected installation settings section");
+            return access.change(actor,args);
+        },
     };
-    rejects<DecisionDenied>([&] {
-        fixture.model().loginWeb(false,{},true,[&](const auto& commit) {
-            access.commitIfAdministrator(authenticated,commit);
-        });
-    },"A demoted administrator switched the active ChatGPT account");
+    modelWeb.configure(callbacks);
+    const auto server = startWeb(store,0,std::move(callbacks));
+    const SettingsBrowser browser(*server);
+    constexpr auto accessPath = "/api/settings/installation/access";
+    constexpr auto loginPath = "/api/settings/model-login";
+    const Json switchAccount{{"reconsent",false},{"switchAccount",true}};
+    const auto owner = browser.post(accessPath,{{"operation","prepare"}}).at("credential");
+    browser.post(accessPath,{{"operation","activate"},{"password",owner.at("password")}});
+    const auto ownerAuth = authorizationFor(owner);
+    const auto delegate = browser.post(accessPath,{{"operation","invite"},{"person","delegate"},{"adminRoot",true}},ownerAuth)
+        .at("credential");
+    const auto delegateAuth = authorizationFor(delegate);
+    const auto modelStatus = [&] { return browser.get("/api/settings",ownerAuth).at("model"); };
+    const auto waitForSignIn = [&] {
+        const auto deadline = std::chrono::steady_clock::now() + 4s;
+        do {
+            auto status = modelStatus();
+            if (!status.at("signingIn").get<bool>()) return status;
+            std::this_thread::sleep_for(20ms);
+        } while (std::chrono::steady_clock::now() < deadline);
+        throw std::runtime_error("The Web sign-in did not settle");
+    };
+    check(modelStatus().at("canSwitch") == true,"The signed-out registration did not offer an account switch");
+    browser.post(loginPath,switchAccount,delegateAuth,202);
+    check(exchangeStarted.wait_for(4s) == std::future_status::ready,"The delegated sign-in did not reach token exchange");
+    check(modelStatus().at("signingIn") == true,"Web settings did not report the pending sign-in");
+    browser.post(accessPath,{{"operation","role"},{"person","delegate"},{"adminRoot",false}},ownerAuth);
+    check(readBytes(fixture.profile) == signedOut,"Web authorization published an unverified candidate");
+    releaseExchange.set_value();
+    const auto denied = waitForSignIn();
     fixture.browserFinished();
-    check(readBytes(fixture.profile) == bytes,"Rejected Web commit did not preserve the prior profile bytes");
+    check(denied.at("signInError").get<std::string>().find("can no longer manage Flock") != std::string::npos &&
+          denied.at("connected") == false,"Web settings did not report that the administrator was demoted");
+    check(readBytes(fixture.profile) == signedOut,"Rejected Web commit did not preserve the prior profile bytes");
 
-    fixture.beforeExchange = {};
-    const auto status = fixture.model().loginWeb(false,{},true,[&](const auto& commit) {
-        access.commitIfAdministrator(localOwner,commit);
-    });
+    browser.post(loginPath,switchAccount,delegateAuth,403);
+    browser.post(loginPath,switchAccount,ownerAuth,202);
+    const auto status = waitForSignIn();
     fixture.browserFinished();
-    check(status.at("planUsage") == true && status.at("account") == second.email &&
+    check(status.at("signInError") == "" && status.at("connected") == true &&
+          status.at("planUsage") == true && status.at("account") == second.email &&
           fixture.stored().at("clientId") == second.client && fixture.stored().at("hostId") == profile.at("hostId"),
           "The current administrator could not publish the new registration");
 }

@@ -21,6 +21,8 @@ struct HttpRequest {
     std::stop_token stop{};
     // Return false once the response is complete. Non-success bodies are buffered.
     std::function<bool(std::string_view, const HttpResponse&)> onData{};
+    // Empty uses the system trust configuration.
+    std::string caFile{};
 };
 
 using HttpTransport = std::function<HttpResponse(const HttpRequest&)>;
