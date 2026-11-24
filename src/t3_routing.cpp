@@ -58,6 +58,40 @@ std::string resolveAlias(const Json& config, std::string_view name) {
     return id;
 }
 
+std::optional<TaskRoute> configuredTaskRoute(const Json& config, std::string_view name) {
+    const auto environment = resolveAlias(config,name);
+    if (environment.empty()) return std::nullopt;
+    const auto aliases = config.find("conversationEnvironments");
+    if (aliases == config.end() || !aliases->is_object()) return TaskRoute{environment,{},{}};
+
+    const std::string canonicalId(name);
+    bool canonical = false;
+    std::string canonicalGateway;
+    std::string canonicalProject;
+    for (const auto& alias : *aliases) {
+        if (conversationEnvironmentId(alias) != name) continue;
+        auto gateway = conversationGatewayEnvironmentId(alias);
+        if (gateway.empty()) gateway = canonicalId;
+        if (canonical && gateway != canonicalGateway) return TaskRoute{};
+        canonical = true;
+        canonicalGateway = std::move(gateway);
+        auto project = field(alias,"projectId");
+        if (!project.empty()) {
+            if (!canonicalProject.empty() && project != canonicalProject) return TaskRoute{};
+            canonicalProject = std::move(project);
+        }
+    }
+    if (canonical) {
+        if (canonicalGateway == canonicalId) canonicalGateway.clear();
+        return TaskRoute{canonicalId,std::move(canonicalProject),std::move(canonicalGateway)};
+    }
+    const auto selected = aliases->find(name);
+    if (selected != aliases->end())
+        return TaskRoute{conversationEnvironmentId(*selected),field(*selected,"projectId"),
+                         conversationGatewayEnvironmentId(*selected)};
+    return TaskRoute{environment,{},{}};
+}
+
 std::string verifiedCommit(std::string commit) {
     if (commit.empty()) return commit;
     if ((commit.size() != 40 && commit.size() != 64) ||
@@ -188,39 +222,12 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
         return resolved(std::string(name));
     if (movingTask && movingTask->at("projectId") != routing.at("projectId")) {
         const auto& config = movingTask->at("config");
-        if (auto original = resolveAlias(config,name); !original.empty())
-            return resolved(original,namedT3Project(config,original,name));
+        if (auto route = configuredTaskRoute(config,name))
+            return resolved(route->environmentId,route->projectId,route->gatewayEnvironmentId);
     }
     const auto& config = routing.at("config");
-    const auto aliases = config.find("conversationEnvironments");
-    if (aliases != config.end() && aliases->is_object()) {
-        const std::string canonicalId(name);
-        bool canonical = false;
-        std::string canonicalGateway;
-        std::string canonicalProject;
-        for (const auto& alias : *aliases) {
-            if (conversationEnvironmentId(alias) != name) continue;
-            auto gateway = conversationGatewayEnvironmentId(alias);
-            if (gateway.empty()) gateway = canonicalId;
-            if (canonical && gateway != canonicalGateway) return {};
-            canonical = true;
-            canonicalGateway = std::move(gateway);
-            auto project = field(alias,"projectId");
-            if (!project.empty()) {
-                if (!canonicalProject.empty() && project != canonicalProject) return {};
-                canonicalProject = std::move(project);
-            }
-        }
-        if (canonical) {
-            if (canonicalGateway == canonicalId) canonicalGateway.clear();
-            return resolved(canonicalId,std::move(canonicalProject),std::move(canonicalGateway));
-        }
-        const auto selected = aliases->find(name);
-        if (selected != aliases->end())
-            return resolved(conversationEnvironmentId(*selected),field(*selected,"projectId"),
-                            conversationGatewayEnvironmentId(*selected));
-    }
-    if (auto alias = resolveAlias(config,name); !alias.empty()) return resolved(std::move(alias));
+    if (auto route = configuredTaskRoute(config,name))
+        return resolved(route->environmentId,route->projectId,route->gatewayEnvironmentId);
     if (configured.empty() && registeredT3Environments(bot).contains(std::string(name))) return resolved(std::string(name));
     return {};
 }

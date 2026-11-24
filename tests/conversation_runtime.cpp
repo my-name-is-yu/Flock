@@ -13,6 +13,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <string_view>
 #include <unistd.h>
 #include <utility>
 
@@ -1773,6 +1774,40 @@ void canonicalMoveKeepsProjectAndGateway() {
           "the next T3 instruction lost the moved target, project, or gateway");
 }
 
+void nonDefaultProjectMoveKeepsCanonicalGateway() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}},
+                                              {"other-project","Other fixture",{}}};
+    const Json aliases = {{"cloud","staging"},
+                          {"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},
+                                            {"gatewayEnvironmentId","desktop"}}}};
+    auto initial = f.routing("Start this work","alpha","desktop","task-project");
+    initial.config["conversationEnvironments"] = aliases;
+    const auto moving = f.store->submit(initial);
+    f.reach(moving,"running");
+    check(f.task(moving).at("projectId") == "task-project",
+          "the task did not start in its non-default project");
+
+    const auto text = "Move this work to cloud";
+    f.script(text,{change(moving,{{"environment","cloud"}})});
+    auto intake = f.routing(text,"alpha","desktop","conversation-project");
+    intake.config["conversationEnvironments"] = aliases;
+    f.store->receive(localOwner,intake,"non-default-canonical-move",text);
+    f.runtime->runConversations();
+    check(f.task(moving)["pendingDestination"] ==
+          Json{{"environmentId","cloud"},{"projectId","cloud-project"},
+               {"gatewayEnvironmentId","desktop"},{"pinned",true}},
+          "the move from a non-default project did not reserve the registered route");
+
+    f.t3.finish("run-1","Old destination settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the moved task was not relaunched");
+    const auto& command = f.t3.sent.back();
+    check(command.environmentId == "cloud" && command.projectId == "cloud-project" &&
+          command.gatewayEnvironmentId == "desktop",
+          "the next T3 instruction silently fell back to the target ID as gateway");
+}
+
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
     rememberCloudProject(f);
@@ -2375,8 +2410,13 @@ void existingSessionStartsNormalWork() {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "non-default-project-move") {
+            nonDefaultProjectMoveKeepsCanonicalGateway();
+            std::cout << "Non-default-project move acceptance passed with simulated T3\n";
+            return 0;
+        }
         durableInboxAndTargetedRevision();
         existingSessionStartsNormalWork();
         linkedResultStartsANewSession();
