@@ -5,17 +5,16 @@
 #include "model.hpp"
 #include "../src/workspace_internal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
-#include <cstdio>
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <mutex>
 #include <sqlite3.h>
 #include <sys/stat.h>
-#include <thread>
 #include <unistd.h>
 
 using namespace flockv0;
@@ -41,27 +40,6 @@ std::string read(const fs::path& path) {
     std::ifstream file(path);
     return {std::istreambuf_iterator<char>(file),{}};
 }
-std::size_t processLines(std::string_view marker) {
-    auto* processList = popen("/bin/ps -axo command=","r");
-    check(processList != nullptr,"Could not inspect host processes");
-    std::size_t matches = 0;
-    char line[4096];
-    while (fgets(line,sizeof(line),processList))
-        if (std::string_view(line).find(marker) != std::string_view::npos) ++matches;
-    check(pclose(processList) == 0,"Could not read host process list");
-    return matches;
-}
-void waitForPipelineStage(std::string_view marker) {
-    for (auto deadline = std::chrono::steady_clock::now()+3s; std::chrono::steady_clock::now() < deadline;) {
-        if (processLines(marker) >= 2) return;
-        std::this_thread::sleep_for(15ms);
-    }
-    check(false,"Pipeline stage did not start");
-}
-void checkPipelineStageExited(std::string_view marker) {
-    check(processLines(marker) == 0,"Pipeline stage remained after command completion");
-}
-
 Decision call(std::string tool, Json args = Json::object()) {
     return {std::move(tool),std::move(args),"Collect the requested evidence"};
 }
@@ -105,9 +83,11 @@ struct Provider : Model {
 };
 
 struct LocalT3 : T3 {
+    bool connected = true;
     bool launched = false;
-    std::string authGeneration(const std::string&,const Json&) override { return "connected"; }
+    std::string authGeneration(const std::string&,const Json&) override { return connected ? "connected" : ""; }
     Delivery send(const Command&) override {
+        check(connected,"Private file work attempted to use the disconnected T3 adapter");
         launched = true;
         return {Delivery::Kind::Accepted,{"private-thread","private-run",{}},{}};
     }
@@ -245,32 +225,22 @@ struct Fixture {
         check(sqlite3_step(row.get()) == SQLITE_ROW,"Fixture SQL row missing");
         return reinterpret_cast<const char*>(sqlite3_column_text(row.get(),0));
     }
-    Json status(Id id, std::string bot = "alpha") {
-        return run(call("workspace_command_status",{{"commandId",id}}),std::move(bot));
-    }
-    Id command(Json argv) {
-        const auto result = run(call("workspace_run_command",{{"argv",std::move(argv)}}));
-        check(result.value("ok",false),result.dump());
-        check(result.at("state") == "running","Command start did not return running");
-        return result.at("commandId");
-    }
-    Id pipeline(Json stages) {
-        const auto result = run(call("workspace_run_command",{{"pipeline",std::move(stages)}}));
-        check(result.value("ok",false),result.dump());
-        check(result.at("state") == "running","Pipeline start did not return running");
-        return result.at("commandId");
-    }
-    Json until(Id id, const std::function<bool(const Json&)>& predicate, std::chrono::seconds timeout = 3s) {
-        for (auto deadline = std::chrono::steady_clock::now()+timeout; std::chrono::steady_clock::now() < deadline;) {
-            auto result = status(id);
-            if (predicate(result)) return result;
-            std::this_thread::sleep_for(15ms);
-        }
-        throw std::runtime_error("Workspace command did not reach the expected state: " + status(id).dump());
-    }
 };
 
-void workspaceAndLifecycle(Fixture& f) {
+void workspaceFiles(Fixture& f) {
+    f.t3.connected = false;
+    f.model.inspectRequest = [](const Json& request) {
+        std::vector<std::string> workspaceTools;
+        bool offersT3 = false;
+        for (const auto& tool : request.at("tools").at(0).at("tools")) {
+            const auto name = tool.at("name").get<std::string>();
+            if (name.starts_with("workspace_")) workspaceTools.push_back(name);
+            offersT3 |= name == "start_task";
+        }
+        check(workspaceTools == std::vector<std::string>{"workspace_read_file","workspace_write_file","workspace_search"} &&
+              offersT3 && request.at("instructions").get<std::string>().find("Use start_task for executable work") != std::string::npos,
+              "The model did not receive file tools and T3 delegation guidance");
+    };
     const auto normal = call("workspace_write_file",{{"path","allowed.txt"},{"text","workspace-only-marker"}});
     f.block(Action::workspace_write,"alpha");
     check(!f.run(normal).at("ok").get<bool>(),"Workspace write bypassed a Never rule");
@@ -281,121 +251,30 @@ void workspaceAndLifecycle(Fixture& f) {
     check(marker.value("files",Json::array()) == Json::array({"allowed.txt"}),"Workspace search missed its marker: " + marker.dump());
     check(f.run(call("workspace_read_file",{{"path","allowed.txt"}})).at("text") == "workspace-only-marker",
           "Workspace read missed its content");
+    fs::create_directory(root/"notes");
+    write(root/"notes"/"empty.txt","");
+    const auto writeOnly = root/"notes"/"write-only.txt";
+    write(writeOnly,"not readable");
+    check(chmod(writeOnly.c_str(),0200) == 0,"Could not make fixture note write-only");
+    const std::string largeNote(9000,'n');
+    write(root/"notes"/"large.txt",largeNote);
+    const auto list = call("workspace_search",{{"path","notes"}});
+    const auto readLarge = call("workspace_read_file",{{"path","notes/large.txt"}});
+    f.block(Action::workspace_read,"alpha");
+    check(!f.run(list).at("ok").get<bool>() && !f.run(readLarge).at("ok").get<bool>(),
+          "Workspace listing or size bypassed a Never rule");
+    f.block(Action::workspace_read,"alpha",false);
+    const auto listing = f.run(list);
+    const auto preview = f.run(readLarge);
+    check(listing.at("files") == Json::array({"notes/empty.txt","notes/large.txt","notes/write-only.txt"}) &&
+          listing.at("truncated") == false,"Workspace listing attempted to read file contents");
+    check(preview.at("bytes") == largeNote.size() && preview.at("truncated") == true &&
+          preview.at("text") == largeNote.substr(0,8192),"Workspace read lost the full byte count or exceeded its preview limit");
+    f.model.inspectRequest = {};
     write(root/"script","#!/bin/sh\n");
     check(chmod((root/"script").c_str(),0700) == 0,"Could not make fixture script executable");
     check(f.run(call("workspace_write_file",{{"path","script"},{"text","#!/bin/sh\nprintf updated"}})).at("ok") == true &&
           access((root/"script").c_str(),X_OK) == 0,"Workspace edit lost executable permissions");
-    f.block(Action::workspace_exec,"alpha");
-    check(!f.run(call("workspace_run_command",{{"argv",Json::array({"pwd"})}})).at("ok").get<bool>(),
-          "Workspace command bypassed a Never rule");
-    f.block(Action::workspace_exec,"alpha",false);
-    const auto finished = [](const Json& state) { return state.at("state") == "exited"; };
-    const auto commandSchema = botToolSchema("workspace_run_command").at("parameters");
-    check(commandSchema.at("properties").contains("argv") && commandSchema.at("properties").contains("pipeline"),
-          "Workspace command schema omitted argv or pipeline");
-    check(commandSchema.at("properties").at("pipeline").at("minItems") == 1 &&
-          commandSchema.at("properties").at("pipeline").at("maxItems") == 4,
-          "Workspace pipeline schema did not bound stage count");
-    const auto rowsBeforePreflight = f.sql("SELECT count(*) FROM workspace_commands");
-    const auto neither = f.run(call("workspace_run_command"));
-    const auto both = f.run(call("workspace_run_command",{{"argv",Json::array({"cat","allowed.txt"})},
-                                                          {"pipeline",Json::array({Json::array({"cat","allowed.txt"})})}}));
-    check(!neither.value("ok",false) && !both.value("ok",false),"Workspace command accepted missing or duplicate invocation modes");
-    check(f.sql("SELECT count(*) FROM workspace_commands") == rowsBeforePreflight,
-          "Invalid invocation mode inserted a command row");
-    const auto rowsBeforeUnsupported = f.sql("SELECT count(*) FROM workspace_commands");
-    const auto unsupported = f.run(call("workspace_run_command",{{"pipeline",Json::array({
-        Json::array({"tee","preflight-side-effect"}),Json::array({"./script"})})}}));
-    check(!unsupported.value("ok",false) && unsupported.dump().find("T3 Session") != std::string::npos &&
-          !fs::exists(root/"preflight-side-effect"),"Unsupported pipeline stage launched earlier work or omitted T3 guidance");
-    check(f.sql("SELECT count(*) FROM workspace_commands") == rowsBeforeUnsupported,
-          "Unsupported pipeline inserted a command row");
-    const std::string budgetCwd(200,'d');
-    fs::create_directories(root/budgetCwd);
-    const auto oversizedStage = [] {
-        Json arguments = Json::array({"echo"});
-        for (int i = 0; i < 31; ++i) arguments.push_back(std::string(250,'x'));
-        return arguments;
-    };
-    const auto rowsBeforeBudget = f.sql("SELECT count(*) FROM workspace_commands");
-    const auto oversized = f.run(call("workspace_run_command",{{"pipeline",Json::array({
-        oversizedStage(),oversizedStage(),oversizedStage(),oversizedStage()})},{"cwd",budgetCwd}}));
-    check(!oversized.value("ok",false) && oversized.dump().find("32768") != std::string::npos,
-          "Oversized serialized pipeline arguments were accepted");
-    check(f.sql("SELECT count(*) FROM workspace_commands") == rowsBeforeBudget,
-          "Oversized serialized pipeline inserted a command row");
-    const auto emptyPipeline = f.run(call("workspace_run_command",{{"pipeline",Json::array()}}));
-    const auto longPipeline = f.run(call("workspace_run_command",{{"pipeline",Json::array({
-        Json::array({"cat"}),Json::array({"cat"}),Json::array({"cat"}),Json::array({"cat"}),Json::array({"cat"})})}}));
-    check(!emptyPipeline.value("ok",false) && !longPipeline.value("ok",false),
-          "Workspace pipeline accepted an empty or overlong stage list");
-    auto allowed = f.until(f.command(Json::array({"cat","allowed.txt"})),finished);
-    check(allowed.at("stdout") == "workspace-only-marker" && allowed.at("exitCode") == 0,allowed.dump());
-    const auto oneStage = f.until(f.pipeline(Json::array({Json::array({"cat","allowed.txt"})})),finished);
-    check(oneStage.at("stdout") == "workspace-only-marker" && oneStage.at("exitCode") == 0,oneStage.dump());
-    const auto threeStage = f.until(f.pipeline(Json::array({
-        Json::array({"printf","%s","a|b; literal"}),Json::array({"tr","|","/"}),Json::array({"wc","-c"})})),finished);
-    check(std::stoull(threeStage.at("stdout").get<std::string>()) == 12 && threeStage.at("exitCode") == 0,
-          "Three-stage pipeline parsed literal argv data or lost output");
-    const auto fourStage = f.until(f.pipeline(Json::array({
-        Json::array({"printf","%s","x"}),Json::array({"tr","x","y"}),
-        Json::array({"cat"}),Json::array({"wc","-c"})})),finished);
-    check(std::stoull(fourStage.at("stdout").get<std::string>()) == 1 && fourStage.at("exitCode") == 0,
-          "Four-stage pipeline failed");
-    const auto partialFailure = f.until(f.pipeline(Json::array({
-        Json::array({"printf","%s","x"}),Json::array({"grep","no-match"}),Json::array({"wc","-c"})})),finished);
-    check(partialFailure.at("exitCode") == 1 && std::stoull(partialFailure.at("stdout").get<std::string>()) == 0,
-          "Pipeline did not return the rightmost nonzero stage status");
-    const auto stderrStages = f.until(f.pipeline(Json::array({
-        Json::array({"cat","missing-stage-one"}),Json::array({"cat","missing-stage-two"}),
-        Json::array({"printf","%s","last-stage"})})),finished);
-    check(stderrStages.at("stdout") == "last-stage" &&
-          stderrStages.at("stderr").get<std::string>().find("missing-stage-one") != std::string::npos &&
-          stderrStages.at("stderr").get<std::string>().find("missing-stage-two") != std::string::npos,
-          "Pipeline did not capture last-stage stdout and all-stage stderr");
-    // Each stream stays below the cap on its own, but their combined output exceeds it.
-    const std::string longMissing(2000,'m');
-    const auto capped = f.until(f.pipeline(Json::array({
-        Json::array({"cat","missing-"+longMissing}),Json::array({"cat","missing-"+longMissing}),
-        Json::array({"cat","missing-"+longMissing}),Json::array({"printf","%04096d","0"})})),finished,5s);
-    const auto stdoutBytes = capped.at("stdout").get_ref<const std::string&>().size();
-    const auto stderrBytes = capped.at("stderr").get_ref<const std::string&>().size();
-    check(capped.at("truncated") == true && stdoutBytes > 0 && stderrBytes > 0 &&
-          stdoutBytes + stderrBytes <= workspaceOutputLimit,
-          "Pipeline output did not enforce the shared stdout/stderr cap");
-    const int processMarkerBase = 100000 + static_cast<int>(getpid()%100000)*10;
-    const std::array<std::string,4> stoppedArguments{
-        std::to_string(processMarkerBase+1),std::to_string(processMarkerBase+2),
-        std::to_string(processMarkerBase+3),std::to_string(processMarkerBase+4)};
-    const std::array<std::string,4> stoppedStages{
-        "sleep "+stoppedArguments[0],"sleep "+stoppedArguments[1],
-        "sleep "+stoppedArguments[2],"sleep "+stoppedArguments[3]};
-    const auto stoppedPipeline = f.pipeline(Json::array({
-        Json::array({"sleep",stoppedArguments[0]}),Json::array({"sleep",stoppedArguments[1]}),
-        Json::array({"sleep",stoppedArguments[2]}),Json::array({"sleep",stoppedArguments[3]})}));
-    for (const auto& stage : stoppedStages) waitForPipelineStage(stage);
-    const auto pipelineStop = f.run(call("workspace_stop_command",{{"commandId",stoppedPipeline}}));
-    check(pipelineStop.at("state") == "stop_requested","Pipeline stop did not record stop_requested");
-    check(f.until(stoppedPipeline,finished).at("exitCode") == 130,"Stopped pipeline did not return 130 after cleanup");
-    for (const auto& stage : stoppedStages) checkPipelineStageExited(stage);
-    const std::array<std::string,2> timedArguments{
-        std::to_string(processMarkerBase+5),std::to_string(processMarkerBase+6)};
-    const std::array<std::string,2> timedStages{
-        "sleep "+timedArguments[0],"sleep "+timedArguments[1]};
-    const auto timedPipeline = f.pipeline(Json::array({
-        Json::array({"sleep",timedArguments[0]}),Json::array({"sleep",timedArguments[1]})}));
-    for (const auto& stage : timedStages) waitForPipelineStage(stage);
-    check(f.until(timedPipeline,finished,12s).at("exitCode") == 124,"Timed-out pipeline did not return 124 after cleanup");
-    for (const auto& stage : timedStages) checkPipelineStageExited(stage);
-#ifdef __APPLE__
-    const auto pipeline = f.until(f.command(Json::array({"sh","-c","/bin/echo x | /usr/bin/tee spawned.txt"})),finished);
-    check(pipeline.at("exitCode") != 0 && !fs::exists(root/"spawned.txt"),
-          "The macOS single-process sandbox allowed a pipeline to spawn children");
-#elif defined(__linux__)
-    const auto absolute = f.until(f.command(Json::array({"/bin/cat","allowed.txt"})),finished);
-    check(absolute.at("stdout") == "workspace-only-marker" && absolute.at("exitCode") == 0,absolute.dump());
-#endif
-
     const auto secret = f.store->policy().requestSecret("beta",{"fixture-key"});
     f.store->policy().submitSecret(owner,"beta",secret,secretMarker);
     const auto secretFile = fs::directory_iterator(f.home/"secrets")->path();
@@ -404,9 +283,9 @@ void workspaceAndLifecycle(Fixture& f) {
     write(peer,peerMarker);
     const auto history = f.home/"private-session.jsonl";
     write(history,historyMarker);
-    auto privateIntake = f.intake("beta");
-    privateIntake.request = dbMarker;
-    f.store->submit(privateIntake);
+    f.t3.connected = true;
+    const auto delegated = f.run(call("start_task",{{"request",dbMarker}}),"beta");
+    check(delegated.at("ok") == true,"The model could not start work in T3");
     for (int i = 0; i < 12 && !f.t3.launched; ++i) f.runtime->tick();
     check(f.t3.launched,"Private T3 fixture did not start");
     const auto sessionScope = Resource::sessionRead("test-environment","private-thread");
@@ -425,8 +304,6 @@ void workspaceAndLifecycle(Fixture& f) {
               "Absolute private file was readable");
         check(f.run(call("workspace_read_file",{{"path","../../"+target.filename().string()}})).at("ok") == false,
               "Traversal was accepted");
-        const auto raw = f.until(f.command(Json::array({"cat",target.string()})),finished);
-        check(raw.at("exitCode") != 0 && raw.at("stdout") == "",raw.dump());
         const auto alias = root/"escape";
         fs::create_symlink(target,alias);
         check(f.run(call("workspace_read_file",{{"path","escape"}})).at("ok") == false,"Symlink read escaped");
@@ -437,83 +314,23 @@ void workspaceAndLifecycle(Fixture& f) {
             check(result.value("ok",true) == false && result.dump().find(secretMarker) == std::string::npos,
                   "Protected query text entered a workspace search");
         else check(result.value("ok",false) && result.at("files").empty(),"Symlink search escaped or failed: " + result.dump());
-        const auto linked = f.run(call("workspace_run_command",{{"argv",Json::array({"cat","escape"})}}));
-        check(linked.at("ok") == false,"Command accepted a symlink to private files");
         fs::remove(alias);
     }
 
-    const auto hardlink = f.until(f.command(Json::array({"ln",peer.string(),"private-link"})),finished);
-    check(hardlink.at("exitCode") != 0 && !fs::exists(root/"private-link"),"Command linked a private file into its workspace");
+    fs::create_hard_link(peer,root/"private-link");
+    check(f.run(call("workspace_read_file",{{"path","private-link"}})).at("ok") == false,
+          "Workspace read exposed a hard-linked private file");
+    const auto files = f.run(call("workspace_search")).at("files");
+    check(std::ranges::find(files,"private-link") == files.end(),
+          "Workspace listing exposed a hard-linked private file");
+    fs::remove(root/"private-link");
 
-    f.block(Action::workspace_write,"alpha");
-    const auto readonly = f.until(f.command(Json::array({"touch","blocked-write"})),finished);
-    check(readonly.at("exitCode") != 0 && !fs::exists(root/"blocked-write"),"Workspace exec bypassed the workspace write restriction");
-    f.block(Action::workspace_write,"alpha",false);
-
-    setenv("FLOCK_SECRET_WORKSPACE_TEST","must-not-be-inherited",1);
-    const auto env = f.until(f.command(Json::array({"printenv"})),finished);
-    unsetenv("FLOCK_SECRET_WORKSPACE_TEST");
-    check(env.at("exitCode") == 0 && env.dump().find("must-not-be-inherited") == std::string::npos,
-          "Workspace command inherited Flock's environment");
-
-    const auto capturedSecret = f.store->policy().requestSecret("alpha",{"capture-proof"});
-    f.store->policy().submitSecret(owner,"alpha",capturedSecret,"command-redaction-fixture");
-    write(root/"captured","command-redaction-fixture");
-    const auto secretCommand = f.command(Json::array({"cat","captured"}));
-    check(f.until(secretCommand,finished).at("stdout") == "[redacted]" &&
-          f.sql("SELECT stdout FROM workspace_commands WHERE id=" + std::to_string(secretCommand)) == "[redacted]",
-          "Command captured a protected value in persistent state");
-
-    const auto streaming = f.command(Json::array({"sh","-c",
-        "i=0; while [ $i -lt 300 ]; do printf '%064d' 1; printf x >&2; i=$((i+1)); done; exec /bin/sleep 60"}));
-    const auto large = f.until(streaming,[](const Json& status) { return status.at("truncated") == true; });
-    check(large.at("state") == "running","Command was not running while output was captured");
-    check(large.at("stdout").get<std::string>().size()+large.at("stderr").get<std::string>().size() <= workspaceOutputLimit,
-          "Command output exceeded its byte ceiling");
-    check(f.status(streaming,"beta").at("ok") == false,"Another Bot could read an active command");
-    const auto stop = f.run(call("workspace_stop_command",{{"commandId",streaming}}));
-    check(stop.at("state") == "stop_requested","Stop did not record stop_requested");
-    f.until(streaming,finished);
-
-    const auto mutating = f.command(Json::array({"sh","-c","printf x >> mutation; exec /bin/sleep 60"}));
-    f.until(mutating,[&](const Json&) { return read(root/"mutation") == "x"; });
-    f.restart();
-    check(f.status(mutating).at("state") == "unknown_after_restart","Running command was not reconciled on restart");
-    f.runtime->runConversations();
-    check(read(root/"mutation") == "x","An unknown-state mutating command ran again");
-}
-
-void workspaceResultSurvivesARejectedTerminalWrite(Fixture& f) {
-    sqlite3* connection = nullptr;
-    const auto opened = sqlite3_open((f.home/"state.db").c_str(),&connection);
-    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(connection,sqlite3_close);
-    check(opened == SQLITE_OK,"Fixture writer open failed");
-    const auto sql = [&](const char* statement) {
-        check(sqlite3_exec(db.get(),statement,nullptr,nullptr,nullptr) == SQLITE_OK,"Fixture write failed");
-    };
-    sql("CREATE TRIGGER reject_workspace_result BEFORE UPDATE OF exit_code ON workspace_commands "
-        "BEGIN SELECT RAISE(ABORT,'terminal write rejected'); END");
-    const auto command = f.command(Json::array({"sh","-c","printf x >> terminal-attempts; printf stdout; printf stderr >&2; exit 7"}));
-    bool rejected = false;
-    const auto deadline = std::chrono::steady_clock::now()+5s;
-    while (std::chrono::steady_clock::now() < deadline && !rejected) {
-        try { f.runtime->tickConcurrent(); }
-        catch (const std::runtime_error& error) {
-            check(std::string_view(error.what()) == "terminal write rejected","Unexpected workspace error");
-            rejected = true;
-        }
-        if (!rejected) std::this_thread::sleep_for(5ms);
-    }
-    check(rejected,"The failed terminal workspace write was swallowed");
-    sql("DROP TRIGGER reject_workspace_result");
-    const auto result = f.status(command);
-    const auto attempts = read(f.home/"workspaces"/"alpha"/"terminal-attempts");
-    check(result.at("state") == "exited" && result.at("stdout") == "stdout" &&
-          attempts == "x" && result.at("stderr").get<std::string>().ends_with("stderr") && result.at("exitCode") == 7,
-          "Retry lost the original command result (attempts " + attempts + "): " + result.dump());
-    const auto next = f.command(Json::array({"printf","next"}));
-    check(f.until(next,[](const auto& row) { return row.at("state") == "exited"; }).at("stdout") == "next",
-          "The terminal retry left the Bot's command slot occupied");
+    write(root/"captured",secretMarker);
+    const auto captured = f.run(call("workspace_read_file",{{"path","captured"}}));
+    check(captured.at("text") == "[redacted]" &&
+          f.sql("SELECT result FROM conversation_steps WHERE message_id=" + std::to_string(f.lastMessage))
+              .find(secretMarker) == std::string::npos,
+          "Workspace read exposed a protected value");
 }
 
 void mountedWorkspaceDirectoryIdentity() {
@@ -931,8 +748,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         protectedArgumentsDoNotChangeToolTargets();
-        workspaceAndLifecycle(fixture);
-        workspaceResultSurvivesARejectedTerminalWrite(fixture);
+        workspaceFiles(fixture);
         mountedWorkspaceDirectoryIdentity();
         externalTools(fixture);
         approvalWhileAnotherTurnIsInferring(fixture);

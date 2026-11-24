@@ -11,7 +11,7 @@ bool allowedAfterWebEvidence(const Decision& call) {
         return true;
     constexpr std::string_view readOnly[]{
         "reply","web_search","web_fetch","workspace_read_file",
-        "workspace_search","workspace_command_status","mcp_discover","mcp_read_resource",
+        "workspace_search","mcp_discover","mcp_read_resource",
         "skill_list","skill_read","inspect_attachment","expand_context"
     };
     return std::ranges::find(readOnly,call.tool) != std::end(readOnly);
@@ -28,14 +28,15 @@ void Store::Impl::saveTurnResults(Id message, int step, const Json& results) {
 }
 
 namespace {
-void recoverSlot(Json& result, const Decision& call) {
+void recoverSlot(Json& result, const ModelCall& call) {
     if (!result.contains("inFlight")) return;
     using enum tool_batch::CallClass;
     if (tool_batch::conversationRead(call.tool) != tool_batch::ConversationRead::none ||
         tool_batch::classify(call) == parallel_read)
         result = nullptr;
     else result = {{"ok",false},{"delivery","unknown"},
-                   {"error","Flock restarted during this tool call. Its outcome is unknown."}};
+                   {"error",call.rejection.empty() ?
+                       "Flock restarted during this tool call. Its outcome is unknown." : call.rejection}};
 }
 
 enum class ProviderState { available, routine, unavailable, failed };
@@ -115,8 +116,7 @@ private:
     Json admissionFailure(const ModelCall& call) {
         if (!call.rejection.empty()) return toolFailure(call.rejection);
         if (tools_.hasWebEvidence && !allowedAfterWebEvidence(call)) return webEvidenceActionDenied();
-        const bool standaloneBotCall = calls_.size() == 1 && isBotTool(call.tool);
-        if (!standaloneBotCall && !tool_batch::batchable(call.tool)) {
+        if (!tool_batch::batchable(call.tool)) {
             auto result = toolFailure(tool_batch::classify(call) == tool_batch::CallClass::terminal ?
                 "Reply after reviewing these results." : "Run this action on its own after reviewing these results.");
             result["notRun"] = true;
