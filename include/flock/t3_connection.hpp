@@ -19,6 +19,8 @@ public:
     // Returns a new bearer only when provider configuration needs to change.
     std::string connect(std::string_view environment, std::string_view person, unsigned port,
                         const std::function<void(std::string_view)>& install = {}, bool refreshProviders = false);
+    // Moves the local provider registration without changing its owner or connected environments.
+    void rebindPort(unsigned port, const std::function<void(std::string_view)>& install);
     bool ownsBearer(std::string_view token) const;
     bool disconnect(std::string_view environment);
     bool providerCleanupPending() const;

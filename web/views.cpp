@@ -1,6 +1,7 @@
 #include "views.hpp"
 #include "flock/markdown.hpp"
 #include "flock/policy.hpp"
+#include "flock/secrets.hpp"
 
 #include <charconv>
 #include <iterator>
@@ -16,6 +17,7 @@ std::string field(const Json& object, std::string_view key) {
 namespace {
 constexpr unsigned conversationSize = 36;
 constexpr unsigned sessionsSize = 6;
+constexpr auto hostedSessionBase = "https://app.t3.codes/threads";
 
 void copyFields(Json& output, const Json& source, std::initializer_list<const char*> keys) {
     if (!source.is_object()) return;
@@ -34,13 +36,12 @@ void copyTrigger(Json& output, const Json& source) {
                 "firedAt","timezone","label","source"});
 }
 
-// The hosted T3 route percent-encodes each ID separately. The Store supplies the owning environment.
-std::string threadSegment(std::string_view id) {
+std::string threadSegment(std::string_view id, std::string_view punctuation = "-_.~") {
     constexpr std::string_view hex = "0123456789ABCDEF";
     std::string segment;
     for (const unsigned char c : id) {
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-            c == '-' || c == '_' || c == '.' || c == '~')
+            punctuation.find(c) != punctuation.npos)
             segment += static_cast<char>(c);
         else {
             segment += '%';
@@ -68,16 +69,27 @@ bool localThreadLink(std::string_view url, std::string_view path) {
     return false;
 }
 
+std::string sessionPath(std::string_view environment, std::string_view thread,
+                        std::string_view punctuation = "-_.~") {
+    if (environment.empty() || thread.empty() || environment == "." || environment == ".." || thread == "." || thread == "..")
+        return {};
+    return "/" + threadSegment(environment,punctuation) + "/" + threadSegment(thread,punctuation);
+}
+
+std::string hostedSessionPath(std::string_view environment, std::string_view thread) {
+    // T3 Code's hosted links also escape dots and tildes.
+    return sessionPath(environment,thread,"-_");
+}
+
 Json runView(const Json& run, std::string_view environment) {
     const auto actualEnvironment = field(run,"environmentId");
     if (!actualEnvironment.empty()) environment = actualEnvironment;
     const auto thread = field(run,"threadId");
-    if (environment.empty() || thread.empty() || environment == "." || environment == ".." || thread == "." || thread == "..")
-        return nullptr;
-    const auto path = "/" + threadSegment(environment) + "/" + threadSegment(thread);
+    const auto loopbackPath = sessionPath(environment,thread);
+    if (loopbackPath.empty()) return nullptr;
     const auto saved = field(run,"link");
     return {{"threadId",thread},{"runId",field(run,"runId")},{"environmentId",environment},
-            {"link",localThreadLink(saved,path) ? saved : "https://app.t3.codes/threads" + path}};
+            {"link",localThreadLink(saved,loopbackPath) ? saved : hostedSessionBase + hostedSessionPath(environment,thread)}};
 }
 
 Json avatarView(const Json& source, std::string_view botId) {
@@ -339,6 +351,15 @@ Json activity(const Json& activeTasks, std::string_view bot) {
 }
 } // namespace
 
+std::string externalSessionLink(const Json& run) {
+    const auto environment = field(run,"environmentId");
+    const auto thread = field(run,"threadId");
+    const auto hosted = hostedSessionPath(environment,thread);
+    if (hosted.empty()) return {};
+    const auto saved = field(run,"link");
+    return saved == hostedSessionBase + hosted ? saved : std::string{};
+}
+
 Json botSettings(const Json& bot) {
     return settingsView(bot);
 }
@@ -361,12 +382,12 @@ Json botList(Store& store, const Json& bots) {
 }
 
 Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
-    const auto policy = store.policy();
-    const auto events = policy.redactSecrets(bot,
-        store.conversation(bot,before,conversationSize + 1,Store::ConversationEvents::all,viewer));
-    const markdown::SensitiveText sensitive = [&](std::string_view text) {
-        return containsProtectedText(policy,bot,text);
-    };
+    auto events = store.conversation(bot,before,conversationSize + 1,Store::ConversationEvents::all,viewer);
+    const auto redactor = store.policy().secretRedactor(bot);
+    events = redactor.record(std::move(events),SecretRedactor::Fields::external);
+    markdown::SensitiveText sensitive;
+    if (!redactor.empty())
+        sensitive = [&](std::string_view text) { return redactor.containsProtectedText(text); };
     const bool more = events.size() > conversationSize;
     Json result = {{"events",Json::array()},{"olderBefore",0}};
     auto& page = result["events"];
@@ -416,14 +437,19 @@ Json sessions(Store& store, std::string_view bot, Id before) {
     return result;
 }
 
+Json sessionGroups(const Json& tasks) {
+    auto groups = Json::array();
+    for (const auto& task : tasks) groups.push_back(sessionGroup(task));
+    return groups;
+}
+
 Json botView(Store& store, const Json& bot, const Json* changedSessionTasks, std::string_view viewer) {
     const auto id = field(bot,"id");
     auto result = conversation(store,id,0,viewer);
     const auto activeTasks = store.activeTasks(id);
     result.update(activity(activeTasks,id));
     if (changedSessionTasks) {
-        auto& groups = result["sessionTasks"] = Json::array();
-        for (const auto& task : *changedSessionTasks) groups.push_back(sessionGroup(task));
+        result["sessionTasks"] = sessionGroups(*changedSessionTasks);
     } else {
         result.update(sessions(store,id,0));
     }

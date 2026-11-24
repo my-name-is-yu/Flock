@@ -1,17 +1,20 @@
 #include "flock/participation.hpp"
+#include "connector_credentials.hpp"
 #include "conversation_storage.hpp"
 
 #include <algorithm>
-#include <array>
+#include <cerrno>
+#include <fcntl.h>
 #include <future>
-#include <openssl/evp.h>
-#include <openssl/rand.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 namespace flockv0 {
 namespace {
 
 constexpr std::string_view tokenPrefix = "flock-t3-";
 constexpr std::size_t maxRequestBytes = 8192;
+using connector_credentials::digest;
 
 // An invitation gives the inviter's stop authority over the invitee in this Session.
 // Follow outgoing edges only. UNION also makes repeated invitations and cycles harmless.
@@ -25,26 +28,6 @@ WITH RECURSIVE stopping(id) AS (
 )
 )SQL";
 
-template<class Bytes>
-std::string hex(const Bytes& bytes) {
-    constexpr std::string_view digits = "0123456789abcdef";
-    std::string result;
-    result.reserve(bytes.size() * 2);
-    for (const auto byte : bytes) {
-        result += digits[byte >> 4];
-        result += digits[byte & 15];
-    }
-    return result;
-}
-
-std::string digest(std::string_view value) {
-    std::array<unsigned char,32> bytes{};
-    unsigned int size = 0;
-    if (EVP_Digest(value.data(),value.size(),bytes.data(),&size,EVP_sha256(),nullptr) != 1 || size != bytes.size())
-        throw std::runtime_error("Could not hash T3 connection data");
-    return hex(bytes);
-}
-
 bool validId(std::string_view value, std::size_t max = 1024) {
     return !value.empty() && value.size() <= max &&
            std::ranges::none_of(value,[](unsigned char c) { return c <= 32 || c == 127; });
@@ -52,15 +35,25 @@ bool validId(std::string_view value, std::size_t max = 1024) {
 
 }
 
-std::string redactT3Tokens(std::string value) {
-    std::size_t at = 0;
-    while ((at = value.find(tokenPrefix,at)) != value.npos) {
-        const auto suffix = std::string_view(value).substr(at + tokenPrefix.size(),64);
-        if (suffix.size() == 64 && suffix.find_first_not_of("0123456789abcdef") == suffix.npos)
-            value.replace(at,tokenPrefix.size()+64,"[T3 connection token]");
-        at += tokenPrefix.size();
+SessionDispatchFileLock::SessionDispatchFileLock(const std::filesystem::path& database, Mode mode) {
+    const auto lockPath = std::filesystem::canonical(database).string() + ".session-dispatch.lock";
+    fd_ = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
+    if (fd_ < 0) throw Conflict("Could not open the T3 dispatch lock");
+    const auto operation = mode == Mode::shared ? LOCK_SH : LOCK_EX;
+    int result;
+    do {
+        result = ::flock(fd_,operation);
+    } while (result != 0 && errno == EINTR);
+    if (result != 0) {
+        close(fd_);
+        throw Conflict("Could not acquire the T3 dispatch lock");
     }
-    return value;
+}
+
+SessionDispatchFileLock::~SessionDispatchFileLock() { close(fd_); }
+
+std::string redactT3Tokens(std::string value) {
+    return connector_credentials::redact(std::move(value),tokenPrefix,"[T3 connection token]");
 }
 
 void Store::Impl::initializeParticipationSchema() {
@@ -120,15 +113,11 @@ std::string T3Connections::connect(std::string_view environment, std::string_vie
     const auto rotate = refreshProviders || [&] {
         auto row = db.query("SELECT person_id,port FROM t3_connector");
         return !row.next() || row.string(0) != person || row.number(1) != port ||
-            !db.query("SELECT 1 FROM t3_connected_environments LIMIT 1").next() ||
-            db.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?",{environment}).next();
+            !db.query("SELECT 1 FROM t3_connected_environments LIMIT 1").next();
     }();
     std::string token;
     if (rotate) {
-        std::array<unsigned char,32> bytes{};
-        if (RAND_bytes(bytes.data(),static_cast<int>(bytes.size())) != 1)
-            throw std::runtime_error("Could not generate T3 connection token");
-        token = std::string(tokenPrefix) + hex(bytes);
+        token = connector_credentials::bearer(tokenPrefix);
         db.exec(R"SQL(
 INSERT INTO t3_connector VALUES(1,?,?,?,?)
 ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id,
@@ -141,6 +130,21 @@ ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id
     return token;
 }
 
+void T3Connections::rebindPort(unsigned port, const std::function<void(std::string_view)>& install) {
+    if (port == 0 || port > 65535 || !install) throw Conflict("Invalid T3 connection port");
+    auto& db = *store_.p_;
+    std::lock_guard lock(db.mutex);
+    Transaction tx(db.db);
+    const auto currentPort = this->port();
+    if (currentPort && currentPort != port) {
+        const auto token = connector_credentials::bearer(tokenPrefix);
+        // The provider can verify its existing registration against the old token until its update succeeds.
+        install(token);
+        db.exec("UPDATE t3_connector SET id=?,token_digest=?,port=?",{actionId(),digest(token),static_cast<Id>(port)});
+    }
+    tx.commit();
+}
+
 bool T3Connections::ownsBearer(std::string_view token) const {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
@@ -149,7 +153,7 @@ bool T3Connections::ownsBearer(std::string_view token) const {
 
 bool T3Connections::disconnect(std::string_view environment) {
     auto& db = *store_.p_;
-    std::lock_guard dispatch(db.sessionDispatchMutex);
+    const SessionDispatchFileLock dispatch(db.path,SessionDispatchFileLock::Mode::exclusive);
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
     auto rows = db.query(R"SQL(
@@ -188,8 +192,7 @@ void T3Connections::providerRemoved() {
 }
 
 std::optional<T3Connection> T3Connections::authenticate(std::string_view token) const {
-    if (!token.starts_with(tokenPrefix) || token.size() != tokenPrefix.size()+64 ||
-        token.substr(tokenPrefix.size()).find_first_not_of("0123456789abcdef") != token.npos) return {};
+    if (!connector_credentials::validBearer(token,tokenPrefix)) return {};
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     auto row = db.query("SELECT id,person_id FROM t3_connector WHERE token_digest=?"
@@ -218,6 +221,11 @@ unsigned T3Connections::port() const {
 
 bool T3Connections::configured() const {
     return port() != 0;
+}
+
+bool Store::Impl::t3EnvironmentConnected(std::string_view environment) {
+    std::lock_guard lock(mutex);
+    return query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?",{environment}).next();
 }
 
 Person Store::Impl::sessionActor(std::string_view person) {
@@ -522,7 +530,7 @@ SessionStopResult SessionParticipation::stop(const T3Connection& connection, std
     auto& db = *store_.p_;
     SessionStop stopped;
     {
-        std::lock_guard dispatch(db.sessionDispatchMutex);
+        const SessionDispatchFileLock dispatch(db.path,SessionDispatchFileLock::Mode::exclusive);
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         stopped = db.stopSessionParticipation(person(connection),bot,{"",std::string(thread)},SessionExit::removed);
@@ -747,7 +755,7 @@ bool Store::Impl::leaveSession(const conversation::Message& message, int step, c
                                T3& t3, std::stop_token shutdown) {
     SessionStop stop;
     {
-        std::lock_guard dispatch(sessionDispatchMutex);
+        const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::exclusive);
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (shutdown.stop_requested()) return false;

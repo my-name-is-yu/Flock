@@ -13,7 +13,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     patches.push(patch);
     if (patches.length === 1) throw new Error('invalid_workspace');
     return { environmentId: 'new-environment', ...patch };
-  }, async () => ['suggested-environment']);
+  }, async () => [{ environmentId: 'suggested-environment', authorization: null }]);
   const edit = card.element.querySelector('.settings-card-edit');
   const form = card.element.querySelector('form');
   const environment = form.elements.environmentId;
