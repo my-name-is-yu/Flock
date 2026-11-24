@@ -2247,6 +2247,10 @@ void environmentsResolveByNameOrId() {
     auto routing = f.routing();
     auto& aliases = routing.config["conversationEnvironments"];
     aliases["cloud"] = "staging";
+    aliases["クラウドMac"] = { {"environmentId","cloud"},{"projectId","cloud-project"},
+                                {"gatewayEnvironmentId","desktop"} };
+    T3Connections connector(*f.store);
+    connector.connect("desktop",localOwner.id,48123);
     for (int i = 0; i < 15; ++i) aliases["alias" + std::to_string(i)] = "executor-" + std::to_string(i);
     aliases["z-final"] = "executor-final";
     constexpr auto text = "Run the benchmark on cloud, the archive on z-final, and the audit on mars";
@@ -2262,7 +2266,9 @@ void environmentsResolveByNameOrId() {
     const auto message = f.store->receive(localOwner,routing,"environments",text);
     f.runtime->runConversations();
     const auto tasks = f.store->tasks("alpha");
-    check(tasks.size() == 2 && f.task(tasks[1]["id"])["environmentId"] == "cloud" &&
+    const auto cloudTask = tasks.size() > 1 ? f.task(tasks[1]["id"]) : Json::object();
+    check(tasks.size() == 2 && cloudTask["environmentId"] == "cloud" &&
+          cloudTask["projectId"] == "cloud-project" && cloudTask.value("gatewayEnvironmentId","") == "desktop" &&
           f.task(tasks[0]["id"])["environmentId"] == "executor-final" &&
           f.lastTurn()[2]["result"]["ok"] == false && f.response(message)["actions"].size() == 2,
           "a canonical ID was shadowed by an alias, an alias was missed, or an unknown environment was accepted");

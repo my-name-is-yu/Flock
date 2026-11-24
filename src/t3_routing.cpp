@@ -194,6 +194,21 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
     const auto& config = routing.at("config");
     const auto aliases = config.find("conversationEnvironments");
     if (aliases != config.end() && aliases->is_object()) {
+        const std::string canonicalId(name);
+        bool canonical = false;
+        std::string canonicalGateway;
+        for (const auto& alias : *aliases) {
+            if (conversationEnvironmentId(alias) != name) continue;
+            auto gateway = conversationGatewayEnvironmentId(alias);
+            if (gateway.empty()) gateway = canonicalId;
+            if (canonical && gateway != canonicalGateway) return {};
+            canonical = true;
+            canonicalGateway = std::move(gateway);
+        }
+        if (canonical) {
+            if (canonicalGateway == canonicalId) canonicalGateway.clear();
+            return resolved(canonicalId,{},std::move(canonicalGateway));
+        }
         const auto selected = aliases->find(name);
         if (selected != aliases->end())
             return resolved(conversationEnvironmentId(*selected),field(*selected,"projectId"),
