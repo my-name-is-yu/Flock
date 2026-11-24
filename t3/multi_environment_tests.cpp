@@ -60,7 +60,10 @@ struct Script final : Model {
             const auto& turn = input.event.at("turn");
             if (turn.empty() && input.event.value("text","") == request) {
                 Json args{{"request",request}};
-                if (parallel) args.update({{"environments",Json::array({"local","mini"})},{"commit",commit}});
+                if (parallel) {
+                    args["environments"] = Json::array({"local","mini"});
+                    if (!commit.empty()) args["commit"] = commit;
+                }
                 return {{{"start_task",std::move(args),"Run the release verification"}}};
             }
             if (!turn.empty()) startResult = turn.back().at("result");
@@ -93,8 +96,8 @@ struct Scenario {
 
     void start(bool parallel = true, bool loseMiniReply = false) {
         model.parallel = parallel;
-        local.configure({{"multiReset",true},{"multiSingle",!parallel}});
-        mini.configure({{"multiReset",true},{"multiHoldLaunchReply",loseMiniReply}});
+        local.configure({{"multiReset",true},{"multiSingle",!parallel},{"multiCommit",model.commit}});
+        mini.configure({{"multiReset",true},{"multiHoldLaunchReply",loseMiniReply},{"multiCommit",model.commit}});
         const Intake routing{bot,{},local.id(),local.project(),{{"conversationEnvironments",{
             {"local",{{"environmentId",local.id()},{"projectId",local.project()}}},
             {"mini",{{"environmentId",mini.id()},{"projectId",mini.project()}}}
@@ -170,6 +173,21 @@ void normal(Scenario& fixture) {
           "the original request must contain both outcomes");
     fixture.checkResult(fixture.local,Scenario::result(task,fixture.local),"completed",fixture.model.commit);
     fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"completed",fixture.model.commit);
+}
+
+void ordinaryMulti(const Endpoint& local, const Endpoint& mini, const std::filesystem::path& directory) {
+    Scenario fixture(local,mini,directory,{},"ordinary-multi");
+    fixture.start();
+    fixture.awaitBothRunning();
+    fixture.local.configure({{"multiStatus","completed"}});
+    fixture.mini.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },
+                         "ordinary multi-environment work should complete without a requested commit");
+    const auto task = fixture.task();
+    check(!task.contains("requestedCommit") && task.at("runOutcome") == "all_completed" &&
+          task.at("runResults").size() == 2,"ordinary work must aggregate both destinations without SHA policy");
+    fixture.checkResult(fixture.local,Scenario::result(task,fixture.local),"completed","");
+    fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"completed","");
 }
 
 void independentSlots(Scenario& fixture) {
@@ -465,6 +483,7 @@ int main(int argc, char** argv) {
             { Scenario fixture(local,mini,directory,commit,"commit-evidence"); commitEvidence(fixture); }
             { Scenario fixture(local,mini,directory,commit,"supervised"); supervised(fixture); }
             { Scenario fixture(local,mini,directory,commit,"stop"); stop(fixture); }
+            ordinaryMulti(local,mini,directory);
             single(local,mini,directory,commit,false);
             single(local,mini,directory,commit,true);
         } else {

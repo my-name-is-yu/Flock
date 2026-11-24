@@ -655,9 +655,12 @@ class Fixture(BaseHTTPRequestHandler):
             prompt = args["message"]
             assert prompt.endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
             if not state.get("multiSingle"):
-                assert args["workspaceStrategy"] == {"type": "worktree", "baseRef": state["multiCommit"],
-                                                     "startFromOrigin": False}
-                assert pre_check in prompt and post_check in prompt and state["multiCommit"] in prompt
+                if state["multiCommit"]:
+                    assert args["workspaceStrategy"] == {"type": "worktree", "baseRef": state["multiCommit"],
+                                                         "startFromOrigin": False}
+                    assert pre_check in prompt and post_check in prompt and state["multiCommit"] in prompt
+                else:
+                    assert "workspaceStrategy" not in args and pre_check not in prompt and post_check not in prompt
             state["multiPrompt"] = prompt
             return {"threadId": thread, "runId": run, "projectId": project, "link": summary["link"]}
         if name == "t3_thread_list":
@@ -698,23 +701,26 @@ class Fixture(BaseHTTPRequestHandler):
                     rows.append(self.item(thread, position, run_id, "command_execution",
                                           f"$ {input}\n{output}\n", status=status))
 
-                first, last = pre_check, post_check
-                if evidence == "duplicate-pre":
-                    last = pre_check
-                elif evidence in ("unmarked", "unmarked-missing-post"):
-                    first = last = "git rev-parse --verify HEAD"
-                elif evidence == "reversed":
-                    first, last = last, first
-                command(2, run, first, expected)
-                if evidence not in ("missing-post", "unmarked-missing-post"):
-                    command(5, "unrelated-run" if evidence == "foreign-post" else final_run, last,
-                            actual + ("\n" + "x" * 600 if evidence == "truncated-post" else ""),
-                            status="failed" if evidence == "failed-post" else "completed")
-                command(6 if evidence == "post-then-work" else 4, final_run, "ctest", "Checks ran")
-                if evidence == "rechecked-mismatch":
-                    command(6, final_run, last, expected)
-                if actual != expected:
-                    command(7, "unrelated-run", post_check, expected)
+                if expected:
+                    first, last = pre_check, post_check
+                    if evidence == "duplicate-pre":
+                        last = pre_check
+                    elif evidence in ("unmarked", "unmarked-missing-post"):
+                        first = last = "git rev-parse --verify HEAD"
+                    elif evidence == "reversed":
+                        first, last = last, first
+                    command(2, run, first, expected)
+                    if evidence not in ("missing-post", "unmarked-missing-post"):
+                        command(5, "unrelated-run" if evidence == "foreign-post" else final_run, last,
+                                actual + ("\n" + "x" * 600 if evidence == "truncated-post" else ""),
+                                status="failed" if evidence == "failed-post" else "completed")
+                    command(6 if evidence == "post-then-work" else 4, final_run, "ctest", "Checks ran")
+                    if evidence == "rechecked-mismatch":
+                        command(6, final_run, last, expected)
+                    if actual != expected:
+                        command(7, "unrelated-run", post_check, expected)
+                else:
+                    command(2, run, "ctest", "Checks ran")
                 if status == "failed":
                     rows.append(self.item(thread, 8, final_run, "error", f"{env} tests failed", status="failed"))
             if evidence != "missing-report":

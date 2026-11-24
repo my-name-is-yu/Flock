@@ -57,8 +57,8 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(
             throw ToolError("The task is " + state,{{"taskId",taskId}});
         if (task.value("replanning",false) || task.value("runStop",Json(nullptr)).is_object())
             throw ToolError("The task is stopping or replanning",{{"taskId",taskId},{"current",taskState(task,message)}});
-        if (task.contains("runTargets"))
-            throw ToolError("Use cancel_task to stop both Runs for this request",{{"taskId",taskId}});
+        if (task.contains("runTargets") || task.contains("runResults"))
+            throw ToolError("Use a destination-specific task instruction for this request",{{"taskId",taskId}});
         if (field(run,"threadId").empty() || field(run,"runId").empty())
             throw ToolError("The task has no running Session. Use send_to_task to pass it on at the next safe point",
                             {{"taskId",taskId},{"current",taskState(task,message)}});

@@ -134,7 +134,7 @@ Json Store::Impl::taskState(const Json& task, const Message& message, bool fullC
                  {"state",task.at("state")},
                  {"replanning",task.value("replanning",false)},{"wait",std::move(wait)}};
     if (task.value("queuedInT3",false)) view["queuedInT3"] = true;
-    if (task.contains("runTargets")) {
+    if (task.contains("runTargets") || task.contains("runResults")) {
         if (task.contains("requestedCommit")) view["requestedCommit"] = task.at("requestedCommit");
         if (task.contains("runOutcome")) view["runOutcome"] = task.at("runOutcome");
         auto& results = view["runResults"] = Json::array();
@@ -440,7 +440,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     if (auto result = localMachineTool(bot,message.channelScope,decision); !result.is_null()) return result;
     if (std::ranges::find(webTools,tool) != webTools.end()) {
         if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
-        if (tool == "continue_fresh_session" && ownTask(identifier(args,"taskId",true),message).contains("runTargets"))
+        const auto freshTask = tool == "continue_fresh_session" ? ownTask(identifier(args,"taskId",true),message) : Json{};
+        if (tool == "continue_fresh_session" && (freshTask.contains("runTargets") || freshTask.contains("runResults")))
             throw ToolError("Use a new request to run more work across T3 environments");
         if (tool == "compact_conversation" || tool == "expand_context" || tool == "continue_fresh_session")
             return contextTool(tool,args,message,step);
@@ -492,10 +493,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                 task["requestedDoneWhen"] = doneWhen;
                 task["criteriaSourceMessageId"] = message.id;
             }
-            if (!targets.empty()) {
-                task["runTargets"] = std::move(targets);
-                if (!commit.empty()) task["requestedCommit"] = std::move(commit);
-            }
+            if (!targets.empty()) task["runTargets"] = std::move(targets);
+            if (!commit.empty()) task["requestedCommit"] = std::move(commit);
             save(task);
         }
         Json receipt{{"ok",true},{"effect","started"},{"taskId",id}};

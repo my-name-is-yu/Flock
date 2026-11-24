@@ -104,6 +104,10 @@ bool Store::Impl::applyProjectCatalog(Json& task, ProjectCatalog catalog) {
     if (selected == projects.end() && projects.size() == 1) selected = projects.begin();
     if (selected != projects.end()) {
         task["projectId"] = selected->id;
+        if (task.contains("runTargets"))
+            for (auto& target : task["runTargets"])
+                if (field(target,"environmentId") == environment && field(target,"projectId").empty())
+                    target["projectId"] = selected->id;
         rememberT3Project(bot,environment,selected->id);
         return true;
     }

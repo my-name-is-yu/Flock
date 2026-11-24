@@ -321,7 +321,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         text("environment","A name or environmentId from task.environments. Omit to use the default.",false);
         fields["environments"] = {{"type","array"},{"minItems",1},{"maxItems",16},
             {"items",textParameter("A name or environmentId from task.environments.")},
-            {"description","Run one task on each selected T3 environment."}};
+            {"description","Run one task on each selected T3 environment. Current safety bound: 16 destinations per task."}};
         text("commit","Optional full Git commit SHA when this task is specifically verifying one commit.",false);
         text("sessionRef","Opaque reference from flock_session_search for the existing Session the user wants to continue in. "
                           "Omit environment, environments, and resume when using it.",false);

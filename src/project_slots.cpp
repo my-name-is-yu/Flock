@@ -13,7 +13,8 @@ CREATE VIEW project_route_queue AS
 WITH candidates AS (
   SELECT task.id,task.state AS slot_state,task.project_id,task.environment_id,NULL AS action_id
   FROM tasks task
-  WHERE json_type(task.data,'$.runTargets') IS NULL AND task.project_id<>''
+  WHERE json_type(task.data,'$.runTargets') IS NULL AND json_type(task.data,'$.runResults') IS NULL
+    AND task.project_id<>''
     AND task.state NOT IN ('completed','cancelled')
   UNION ALL
   SELECT task.id,CASE WHEN outbox.phase IN ('started','accepted') THEN task.state ELSE 'queued' END,

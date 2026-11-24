@@ -76,11 +76,26 @@ void parallelDestinations() {
     runtime.runConversations();
     check(store.tasks().size() == 1,"two aliases for one environment must not create a parallel task");
 
-    model.action.args = {{"request","Verify on the Mini"},{"environment","mini"}};
+    model.action.args = {{"request","Verify on the Mini"},{"environment","mini"},{"commit",std::string(40,'a')}};
     store.receive(localOwner,intake,"single-verification","Verify on the Mini");
     runtime.runConversations();
-    check(model.receipt.value("ok",false) && store.task(model.receipt.at("taskId")).at("projectId") == "mini-project",
-          "a single destination must start in the named pinned project");
+    const auto singleNamed = store.task(model.receipt.at("taskId"));
+    check(model.receipt.value("ok",false) && singleNamed.at("projectId") == "mini-project" &&
+          singleNamed.at("requestedCommit") == std::string(40,'a') && singleNamed.at("runTargets").size() == 1 &&
+          singleNamed.at("runTargets").at(0).at("environmentId") == "mini-env",
+          "a single named destination must retain optional verification and its saved route");
+    model.action.args = {{"request","Verify on the Mini"},{"environments",Json::array({"mini"})}};
+    store.receive(localOwner,intake,"single-array","Verify on the Mini");
+    runtime.runConversations();
+    const auto singleArray = store.task(model.receipt.at("taskId"));
+    check(singleArray.at("runTargets").size() == 1 && singleArray.at("runTargets").at(0) ==
+          singleNamed.at("runTargets").at(0),"a one-item environments list must route like a named single destination");
+    model.action.args = {{"request","Resume the cancelled task"},{"resume",true},
+                         {"sourceResultMessageId",1},{"commit",std::string(40,'a')}};
+    store.receive(localOwner,intake,"resume-with-commit","Verify the saved work again");
+    runtime.runConversations();
+    check(!model.receipt.value("ok",true) && model.receipt.dump().find("Commit verification is not supported") != std::string::npos,
+          "resume must explicitly reject optional commit verification when its saved destination cannot be verified");
 }
 
 void genericDestinationCounts() {

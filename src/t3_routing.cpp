@@ -127,6 +127,8 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
     const auto sessionRef = text(args,"sessionRef",128,false);
     StartDestinations destinations;
     destinations.commit = verifiedCommit(text(args,"commit",64,false));
+    if (resume && !destinations.commit.empty())
+        throw ToolError("Commit verification is not supported when resuming a cancelled task; start a new task on its saved destination.");
     if (const auto environments = args.find("environments"); environments != args.end()) {
         if (!message.channelScope.empty() || routing.contains("sessionOrigin"))
             throw ToolError("Start work across T3 environments from a Flock conversation");
@@ -170,6 +172,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
             throw ToolError("Choose a T3 project before verifying a commit");
         destinations.targets.push_back({{"environmentId",destinations.primary.environmentId},
             {"projectId",destinations.primary.projectId},{"name",environment.empty() ? destinations.primary.environmentId : environment}});
+        redactor(bot).requirePublic({destinations.targets,destinations.commit});
     }
     return destinations;
 }

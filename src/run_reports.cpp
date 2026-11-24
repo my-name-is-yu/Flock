@@ -17,19 +17,19 @@ void setReportEvidence(Json& data, const RunEvidence& evidence) {
     if (evidence.availability == Availability::DiagnosticUnavailable) data["evidenceStatus"] = "diagnostic_unavailable";
 }
 
-Json& verificationRun(Json& task, std::string_view action) {
+Json& destinationRun(Json& task, std::string_view action) {
     auto& runs = task.at("runResults");
     const auto entry = std::ranges::find_if(runs,[&](const Json& run) { return field(run,"actionId") == action; });
     if (entry == runs.end()) throw Conflict("The saved Run is outside this task");
     return *entry;
 }
 
-bool verificationRunOutstanding(const Json& run) {
+bool destinationRunOutstanding(const Json& run) {
     const auto status = field(run,"status");
     return status == "queued" || status == "running" || status == "confirmation_pending";
 }
 
-bool Store::Impl::recordVerificationReport(Json& task, Json& run, const Observation& observed) {
+bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observation& observed) {
     const auto ref = runRef(run);
     auto status = observed.status;
     if (status.empty()) status = "failed";
@@ -57,7 +57,7 @@ bool Store::Impl::recordVerificationReport(Json& task, Json& run, const Observat
     }
     journal(task.at("id"),"report",data);
     const auto& results = task.at("runResults");
-    if (std::ranges::any_of(results,verificationRunOutstanding)) return false;
+    if (std::ranges::any_of(results,destinationRunOutstanding)) return false;
     if (task.at("state") == "cancelling") return true;
     const auto completed = std::ranges::count_if(results,[](const Json& result) { return result.at("status") == "completed"; });
     const auto count = static_cast<std::size_t>(completed);

@@ -725,8 +725,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     } else if (operation == "extend" && reason == "deadline") {
         if (!data.contains("deadline") || !data["deadline"].is_number_integer() ||
             data["deadline"].get<Seconds>() <= unixTime()) throw Conflict("The new deadline must be in the future");
-        auto& timed = deadlineRun.empty() ? task : verificationRun(task,deadlineRun);
-        if (!deadlineRun.empty() && !verificationRunOutstanding(timed)) throw RequestChanged{};
+        auto& timed = deadlineRun.empty() ? task : destinationRun(task,deadlineRun);
+        if (!deadlineRun.empty() && !destinationRunOutstanding(timed)) throw RequestChanged{};
         timed["deadline"] = data.at("deadline");
         next = "running";
         journal(id,"deadline_extended",{{"deadline",timed.at("deadline")},{"waitId",waitId}});
