@@ -197,7 +197,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
     check(bots.get("release").environmentId == config.at("environmentId").get_ref<const std::string&>(),
           "invalid project partly changed the workspace");
     rejects<BotProfileError>([&] {
-        bots.updateWorkspace(store,"release",{{"environmentId",""}},due + 1,report);
+        bots.updateRunSettings(store,"release",{{"environmentId",""}},due + 1,report);
     },"workspace accepted a project with no environment");
     const auto unchanged = bots.get("release");
     check(unchanged.environmentId == config.at("environmentId").get_ref<const std::string&>() &&
