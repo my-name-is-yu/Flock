@@ -119,8 +119,7 @@ async function exercise() {
   for (let attempt = 0; attempt < 20 && destinationRows().length !== 2; attempt++)
     await new Promise(resolve => setTimeout(resolve, 10));
   const destinations = destinationRows();
-  check(destinations.length === 2 && destinations.every((row) =>
-    ['Working', 'Working'].includes(sessionLabel(row))),
+  check(destinations.length === 2 && destinations.every((row) => sessionLabel(row) === 'Working'),
     'Running destination Sessions did not show distinct visible names and live status');
   const rows = [...document.querySelectorAll('.event-message')];
   const [first, second, report] = rows.map(row => row.querySelector('.event-text'));
