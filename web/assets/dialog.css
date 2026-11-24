@@ -148,7 +148,8 @@
 .settings-soul-toggle { justify-self: start; margin-inline-start: -.55rem; }
 .settings-role-header { display: flex; align-items: center; justify-content: space-between; min-height: 1.6rem; }
 .settings-role-edit { margin-inline-end: -.55rem; }
-.settings-soul-empty { margin: 0; color: var(--text-3); font-size: var(--text-md); line-height: 1.7; }
+.settings-soul-empty { margin: 0; color: var(--text-3); }
+.settings-role-form { display: grid; gap: .35rem; }
 .settings-role-input {
   width: 100%; min-height: 9rem; resize: vertical; padding: .6rem .7rem;
   border: 1px solid var(--hairline); border-radius: var(--radius-md); background: var(--field, var(--canvas)); color: var(--text);
@@ -159,6 +160,9 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
 }
 .settings-role-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+.settings-role-feedback { color: var(--text-2); font-size: var(--text-xs); }
+.settings-role-feedback.error { color: var(--danger); }
+.settings-role-feedback:empty { position: absolute; }
 .settings-rows { padding: 0; }
 .settings-row {
   display: flex; align-items: center; gap: .75rem; width: 100%; min-height: 3.1rem; padding: .7rem 1.1rem;

@@ -532,26 +532,33 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image,
 
 Json Bots::updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
-    const auto name = validatedBotName(profile);
 
     std::lock_guard lock(mutex_);
     const auto botDir = path(id);
     const auto file = botDir / "config.json";
     auto config = readBotConfig(file);
+    if (const auto soul = profile.find("soul"); soul != profile.end()) {
+        if (profile.size() != 1 || image) throw Conflict("Save the role separately from other settings");
+        const auto text = validatedBotSoul(*soul);
+        const auto roleFile = botDir / "SOUL.md";
+        if (text.empty()) {
+            std::error_code failure;
+            std::filesystem::remove(roleFile,failure);
+            if (failure) throw Conflict("Unable to clear the Bot role");
+        } else {
+            writeAtomic(roleFile,text);
+        }
+        return cardFromDirectory(id,botDir);
+    }
 
     const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
     const bool changeAvatar = profile.contains("avatar");
-    config["name"] = name;
+    config["name"] = validatedBotName(profile);
     if (changeAvatar)
         config["avatar"] = prepareAvatar(profile,botDir,existingAvatar,image);
 
     const auto previousFile = changeAvatar ? storedAvatarFile(existingAvatar) : std::string{};
     saveProfile(botDir,config,changeAvatar && image ? &*image : nullptr,previousFile);
-    if (const auto soul = profile.find("soul"); soul != profile.end()) {
-        const auto& text = soul->get_ref<const std::string&>();
-        if (text.empty()) std::filesystem::remove(botDir / "SOUL.md");
-        else writeAtomic(botDir / "SOUL.md",text);
-    }
     if (!previousFile.empty() && previousFile != storedAvatarFile(config.at("avatar")) && isAvatarFile(botDir / previousFile)) {
         std::error_code ignore;
         std::filesystem::remove(botDir / previousFile,ignore);

@@ -107,22 +107,16 @@ struct ParsedProfile {
 };
 
 ParsedProfile parseBotProfile(const Json& body, bool creating) {
+    if (!creating && body.contains("soul")) {
+        if (body.size() != 2) throw InputError("invalid_profile_update");
+        return {{{"soul",validatedBotSoul(body.at("soul"))}},std::nullopt};
+    }
     Json profile = {{"name",validatedBotName(body)}};
     if (creating && body.contains("role")) {
         if (!body["role"].is_string() || !validBotRole(body["role"].get_ref<const std::string&>()))
             throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
-    if (!creating && body.contains("soul")) {
-        const auto& soul = body["soul"];
-        if (!soul.is_string()) throw InputError("invalid_soul");
-        const auto& text = soul.get_ref<const std::string&>();
-        if (text.size() > maxBotRoleBytes || text.find('\0') != std::string::npos) throw InputError("invalid_soul");
-        const auto first = text.find_first_not_of(" \t\r\n");
-        profile["soul"] = first == std::string::npos ? std::string{}
-            : text.substr(first,text.find_last_not_of(" \t\r\n") - first + 1);
-    }
-    // Updates may omit the avatar to rename without touching the stored appearance.
     if (!creating && !body.contains("avatar")) return {std::move(profile),std::nullopt};
     auto avatar = validatedAvatarStyle(body);
     std::optional<AvatarImage> image;
@@ -450,7 +444,7 @@ private:
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
                 auto parsed = parseBotProfile(body,false);
                 if (store_.policy().redactSecrets(botId,parsed.profile) != parsed.profile)
-                    return error(res,400,"invalid_bot_profile");
+                    return error(res,400,parsed.profile.contains("soul") ? "role_contains_secrets" : "invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
                 changes_.rescan();
                 return json(res,200,redactBot(botId,web::botSettings(saved)));
