@@ -47,6 +47,8 @@ class Fixture(BaseHTTPRequestHandler):
         origin = self.server.origin
         if self.path == "/fixture/effects":
             self.reply(self.server.state.get("effects", {}))
+        elif self.path == "/fixture/routes":
+            self.reply(self.server.state.get("multiRoutedTargets", []))
         elif self.path == "/.well-known/t3/environment":
             self.reply({"environmentId": self.server.state.get("descriptorEnvironment",
                          self.server.state.get("claimedEnvironment", "env-1")),
@@ -90,11 +92,18 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["resource"] == [origin + "/mcp"] and args["grant_type"] == ["authorization_code"]
             assert args["code"] == ["fixture-code"] and args["redirect_uri"] == state["registered"]
             state["revoked"] = False
-            self.reply({"access_token": "fixture.signed-token", "token_type": "Bearer", "expires_in": 2592000,
+            self.reply({"access_token": state.get("accessToken", "fixture.signed-token"),
+                        "token_type": "Bearer", "expires_in": 2592000,
                         "scope": state.get("scope", "orchestration:read orchestration:operate")})
             return
         args = json.loads(raw)
         if self.path == "/fixture":
+            if args.pop("multiReset", False):
+                assert self.server.multi_environment
+                for key in tuple(state):
+                    if key.startswith("multi") and key not in ("multiProject", "multiCommit"):
+                        state.pop(key)
+                state.pop("effects", None)
             if args.get("advanceStockWorker"):
                 assert self.server.stock_thread
                 subprocess.run(["/usr/bin/git","-C",state["stockTree"],"checkout","--detach",state["stockHead"]],
@@ -143,7 +152,10 @@ class Fixture(BaseHTTPRequestHandler):
             state["registered"] = args["redirect_uris"]
             self.reply({"client_id": "fixture-client"}, code=201)
         elif self.path == "/mcp":
-            if self.headers.get("Authorization") != "Bearer fixture.signed-token" or state.get("revoked"):
+            if state.get("multiDisconnected"):
+                self.reply(code=503)
+                return
+            if self.headers.get("Authorization") != "Bearer " + state.get("accessToken", "fixture.signed-token") or state.get("revoked"):
                 challenge = ('Basic resource_metadata="https://wrong.test/", Negotiate YWJjZA==, '
                              'bEaReR realm="a, \\"b\\"", RESOURCE_METADATA \t= "' + origin +
                              '/protected,resource", Basic realm="next"')
@@ -202,6 +214,15 @@ class Fixture(BaseHTTPRequestHandler):
                 assert self.server.allow_launch_disconnect.wait(15), "crash harness did not kill the Runtime"
                 self.close_connection = True
                 return
+            if self.server.multi_environment and tool["name"] == "t3_thread_launch":
+                self.server.launch_accepted.set()
+                if state.get("multiDropLaunchReply"):
+                    self.close_connection = True
+                    return
+                if state.get("multiHoldLaunchReply"):
+                    assert self.server.allow_launch_disconnect.wait(15), "crash harness did not kill the Runtime"
+                    self.close_connection = True
+                    return
             self.reply(envelope)
         else:
             self.reply(code=404)
@@ -224,9 +245,18 @@ class Fixture(BaseHTTPRequestHandler):
                 (name == "t3_queue" and args["action"] == "cancel") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
-        assert "environmentId" not in args
+        target_tools = ("t3_project_list", "t3_project_read", "t3_thread_launch", "t3_thread_send",
+                        "t3_thread_wait", "t3_thread_read", "t3_thread_interrupt", "t3_thread_list",
+                        "t3_thread_answer", "t3_pending_request", "t3_queue")
+        expected_target = state.get("multiExpectedTarget")
+        if expected_target and name in target_tools:
+            assert args.get("environmentId") == expected_target
+        else:
+            assert "environmentId" not in args
         if self.server.stock_thread:
             return self.stock_tool(name, args)
+        if self.server.multi_environment:
+            return self.multi_environment_tool(name, args)
         if name == "t3_environment_read":
             return {"environmentId": state.get("claimedEnvironment", "env-1"),
                     "label": "T3 fixture", "serverVersion": "0.1.11"}
@@ -595,11 +625,15 @@ class Fixture(BaseHTTPRequestHandler):
                 rows = [row for row in rows if row["itemId"] == args["itemId"]]
         elif args["view"] == "messages":
             rows = [row for row in rows if row["type"] in ("user_message", "assistant_message")]
+        page_size = 20 if "beforePosition" in args and scenario == "session-read" else 2
+        return self.history_page(summary, recent, rows, args, page_size)
+
+    @staticmethod
+    def history_page(summary, recent, rows, args, page_size):
         lower = args.get("afterPosition", -1)
         upper = args.get("beforePosition", float("inf"))
         matches = [row for row in rows if lower < row["position"] < upper]
-        pagination_test_page_size = 20 if "beforePosition" in args and scenario == "session-read" else 2
-        limit = min(args.get("limit", 30), pagination_test_page_size)
+        limit = min(args.get("limit", 30), page_size)
         page = matches[-limit:] if "beforePosition" in args else matches[:limit]
         for row in page:
             text = row["text"].encode("utf-16-le")
@@ -615,6 +649,124 @@ class Fixture(BaseHTTPRequestHandler):
         return {"thread": summary, "recentRuns": recent, "items": page, "hasMore": len(matches) > limit,
                 "nextPosition": page[-1]["position"] if page else None,
                 "earlierPosition": page[0]["position"] if "beforePosition" in args and len(matches) > limit else None}
+
+    def multi_environment_tool(self, name, args):
+        state = self.server.state
+        if "environmentId" in args:
+            state.setdefault("multiRoutedTargets", []).append(args["environmentId"])
+        env = state["claimedEnvironment"]
+        project = state["multiProject"]
+        thread, run = "shared-thread", "shared-run"
+        evidence = state.get("multiEvidence", "full")
+        final_run = "continued-run" if evidence == "restarted" else run
+        pre_check = "git -c flock.check=before rev-parse --verify HEAD"
+        post_check = "git -c flock.check=after rev-parse --verify HEAD"
+        summary = self.summary(thread) | {"projectId": project, "title": "Fixture verification"}
+        terminal = ("completed", "failed", "interrupted")
+        if name == "t3_environment_links":
+            return {"environmentId": env, "links": state.get("multiLinkedEnvironments", []),
+                    "notListed": "No matching linked environment is available."}
+        if name == "t3_environment_read":
+            return {"environmentId": env, "label": env, "serverVersion": "0.1.11"}
+        if name == "t3_project_read":
+            assert args["projectId"] == project
+            return {"id": project, "title": project}
+        if name == "t3_project_list":
+            return {"projects": [{"id": project, "title": project,
+                                  "workspaceRoot": f"/workspace/{project}"}], "nextCursor": None}
+        if name == "t3_thread_launch":
+            if state.get("multiForwardingUnavailable"):
+                return {"_tag": "OrchestratorMcpFailure", "code": "capability_denied",
+                        "message": "Linked environments is off on this machine, so no tool can act on another machine. Leave out environmentId to work here; the user can turn it on in Settings → Labs."}
+            assert args["projectId"] == project and "multiPrompt" not in state, "Run launched twice or in the wrong project"
+            prompt = args["message"]
+            assert prompt.endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
+            if not state.get("multiSingle"):
+                if state["multiCommit"]:
+                    assert args["workspaceStrategy"] == {"type": "worktree", "baseRef": state["multiCommit"],
+                                                         "startFromOrigin": False}
+                    assert pre_check in prompt and post_check in prompt and state["multiCommit"] in prompt
+                else:
+                    assert "workspaceStrategy" not in args and pre_check not in prompt and post_check not in prompt
+            state["multiPrompt"] = prompt
+            return {"threadId": thread, "runId": run, "projectId": project, "link": summary["link"]}
+        if name == "t3_thread_send":
+            assert "multiPrompt" in state and args["threadId"] == thread and args["mode"] == "queue"
+            assert args["clientRequestId"].startswith("flock-turn-")
+            state["multiFollowup"] = args["message"]
+            return {"threadId": thread, "runId": "follow-up-run", "delivery": "queued"}
+        if name == "t3_thread_list":
+            assert args["projectId"] == project and args["cursor"] == 0
+            threads = [summary] if "multiPrompt" in state and not state.get("multiHideLaunch") else []
+            return {"projectId": project, "threads": threads, "total": len(threads), "nextCursor": None}
+        assert "multiPrompt" in state and args["threadId"] == thread
+        status = state.get("multiStatus", "running")
+        if name == "t3_thread_wait":
+            requested_run = args["runId"]
+            assert requested_run in (run, "follow-up-run")
+            delegated = args["untilDelegatedWorkSettled"]
+            timed_out = status not in terminal or (delegated and state.get("multiHoldSettlement", False))
+            wait_run = "continued-run" if evidence == "restarted" and requested_run == run else requested_run
+            result = {"threadId": thread, "runId": wait_run, "status": status, "timedOut": timed_out}
+            if delegated and not timed_out:
+                result["resultRun"] = {"runId": wait_run, "status": status}
+            return result
+        if name == "t3_thread_interrupt":
+            assert status == "running" and args["runId"] == run
+            state["multiStatus"] = "interrupted"
+            return {"threadId": thread, "runId": run, "status": "interrupt_requested"}
+        assert name == "t3_thread_read", name
+        summary |= {"activeRunId": final_run if status not in terminal else None, "latestRunId": final_run,
+                    "pendingRequestCount": 0, "archived": False, "createdAt": "2026-11-21T01:00:00.000Z"}
+        recent = [{"runId": run, "ordinal": 1, "status": status, "startedAt": "2026-11-21T01:00:02.000Z"}]
+        rows = [self.item(thread, 1, run, "user_message", state["multiPrompt"], source="mcp")]
+        if final_run != run:
+            recent.append({"runId": final_run, "ordinal": 2, "status": status,
+                           "startedAt": "2026-11-21T01:00:03.000Z"})
+            rows.append(self.item(thread, 3, final_run, "user_message", "Continue after restart", source="server") |
+                        {"messageId": f"message:restart-continuation:{run}"})
+        if status in terminal:
+            expected = state["multiCommit"]
+            actual = state.get("multiActualCommit", expected)
+            if args["view"] == "activity":
+                def command(position, run_id, input, output, status="completed"):
+                    if env == "env-mini":
+                        input = f"/bin/zsh -lc '{input}'"
+                    rows.append(self.item(thread, position, run_id, "command_execution",
+                                          f"$ {input}\n{output}\n", status=status))
+
+                if expected:
+                    first, last = pre_check, post_check
+                    if evidence == "duplicate-pre":
+                        last = pre_check
+                    elif evidence in ("unmarked", "unmarked-missing-post"):
+                        first = last = "git rev-parse --verify HEAD"
+                    elif evidence == "reversed":
+                        first, last = last, first
+                    command(2, run, first, expected)
+                    if evidence not in ("missing-post", "unmarked-missing-post"):
+                        command(5, "unrelated-run" if evidence == "foreign-post" else final_run, last,
+                                actual + ("\n" + "x" * 600 if evidence == "truncated-post" else ""),
+                                status="failed" if evidence == "failed-post" else "completed")
+                    command(6 if evidence == "post-then-work" else 4, final_run, "ctest", "Checks ran")
+                    if evidence == "rechecked-mismatch":
+                        command(6, final_run, last, expected)
+                    if actual != expected:
+                        command(7, "unrelated-run", post_check, expected)
+                else:
+                    command(2, run, "ctest", "Checks ran")
+                if status == "failed":
+                    rows.append(self.item(thread, 8, final_run, "error", f"{env} tests failed", status="failed"))
+            if evidence != "missing-report":
+                report = "x" * 8193 if evidence == "truncated-report" else f"{env} verification {status}"
+                rows.append(self.item(thread, 9, "unrelated-run" if evidence == "foreign-report" else final_run,
+                                      "assistant_message", report))
+            if evidence == "empty-final-report":
+                rows.append(self.item(thread, 10, final_run, "assistant_message", ""))
+        rows.sort(key=lambda row: row["position"])
+        if "itemId" in args:
+            rows = [row for row in rows if row["itemId"] == args["itemId"]]
+        return self.history_page(summary, recent, rows, args, 2)
 
     def stock_tool(self, name, args):
         state = self.server.state
@@ -776,6 +928,74 @@ def test_peer_recovery(server, runner, temp):
             server.allow_launch_disconnect.set()
     subprocess.run(command + ["recover"], timeout=15, check=True)
     assert server.state["launches"] == [action_id], "recovery resent the launch"
+
+
+def test_multi_environment(local, runner, temp):
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    with ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as mini:
+        mini.origin = f"http://127.0.0.1:{mini.server_port}"
+        mini.state = {}
+        mini.peer_recovery = mini.stock_thread = False
+        mini.multi_environment = True
+        for server, name in ((local, "local"), (mini, "mini")):
+            server.state.update(claimedEnvironment=f"env-{name}", multiProject=f"project-{name}", multiCommit=commit)
+            server.launch_accepted = threading.Event()
+            server.allow_launch_disconnect = threading.Event()
+        threading.Thread(target=mini.serve_forever, daemon=True).start()
+        command = [runner, local.origin, mini.origin, temp + "/creds", commit]
+        try:
+            subprocess.run(command + ["normal"], timeout=30, check=True)
+            local.launch_accepted.clear()
+            mini.launch_accepted.clear()
+            with subprocess.Popen(command + ["crash"]) as process:
+                try:
+                    deadline = time.monotonic() + 10
+                    while not (local.launch_accepted.is_set() and mini.launch_accepted.is_set()):
+                        assert process.poll() is None, f"Runtime exited before both launches were accepted: {process.returncode}"
+                        assert time.monotonic() < deadline, "One environment did not accept its Run"
+                        time.sleep(0.01)
+                    with sqlite3.connect(Path(temp) / "recovery.db") as db:
+                        actions = db.execute("""
+                            SELECT id,json_extract(data,'$.environmentId'),json_extract(data,'$.projectId'),phase
+                            FROM outbox WHERE json_extract(data,'$.tool')='delegate'
+                        """).fetchall()
+                    assert len(actions) == 2, actions
+                    for server in (local, mini):
+                        launch, = server.state["effects"]["t3_thread_launch"]
+                        expected = (launch["clientRequestId"], server.state["claimedEnvironment"], launch["projectId"])
+                        saved, = [action for action in actions if action[:3] == expected]
+                        assert saved[3] in ("started", "accepted")
+                        if server is mini:
+                            assert saved[3] == "started", "lost response unexpectedly confirmed before Flock died"
+                    process.kill()
+                    assert process.wait(timeout=5) == -signal.SIGKILL, "Runtime was not killed by SIGKILL"
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    mini.allow_launch_disconnect.set()
+            with sqlite3.connect(Path(temp) / "recovery.db") as db:
+                legacy_views = db.execute("""
+                    SELECT name,sql FROM sqlite_schema
+                    WHERE name IN ('project_execution_queue','project_slots') ORDER BY name
+                """).fetchall()
+                assert len(legacy_views) == 2
+                db.executescript("""
+                    DROP VIEW task_project_slots;
+                    DROP VIEW project_route_slots;
+                    DROP VIEW project_route_queue;
+                    UPDATE tasks SET data=json_remove(data,'$.runResults[0].deadline','$.runResults[1].deadline');
+                """)
+            subprocess.run(command + ["recover"], timeout=20, check=True)
+            with sqlite3.connect(Path(temp) / "recovery.db") as db:
+                assert db.execute("""
+                    SELECT name,sql FROM sqlite_schema
+                    WHERE name IN ('project_execution_queue','project_slots') ORDER BY name
+                """).fetchall() == legacy_views, "an older Runtime's views changed during migration"
+            subprocess.run(command + ["native-start"], timeout=30, check=True)
+            subprocess.run(command + ["native-resume"], timeout=30, check=True)
+            subprocess.run(command + ["native-unknown"], timeout=30, check=True)
+        finally:
+            mini.shutdown()
 
 
 def test_connection_setup(server, flock, temp):
@@ -1109,6 +1329,7 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     server.state = {}
     server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
     server.stock_thread = sys.argv[2:] == ["pinned-workspace"]
+    server.multi_environment = sys.argv[2:] == ["multi-environment"]
     if server.stock_thread:
         root = temp + "/project"
         good = temp + "/worker"
@@ -1133,6 +1354,9 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     try:
         if server.peer_recovery:
             test_peer_recovery(server, sys.argv[1], temp)
+            code = 0
+        elif server.multi_environment:
+            test_multi_environment(server, sys.argv[1], temp)
             code = 0
         elif sys.argv[2:] == ["connection-setup"]:
             test_connection_setup(server, sys.argv[1], temp)

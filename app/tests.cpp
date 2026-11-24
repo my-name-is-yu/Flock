@@ -389,8 +389,15 @@ void responseContract() {
           turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
           turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
+          turnTool("start_task")["properties"]["environments"]["minItems"] == 1 &&
+          !turnTool("start_task")["properties"]["environments"].contains("maxItems") &&
+          turnTool("start_task")["properties"]["commit"]["type"] == "string" &&
           turnTool("change_task")["required"] == Json::array({"reason","taskId","generation","revisionId","instruction"}) &&
           turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&
+          turnTool("cancel_task")["required"] == Json::array({"reason","taskId","generation"}) &&
+          turnTool("cancel_task")["properties"]["destination"]["type"] == "string" &&
+          turnTool("cancel_task")["properties"]["environmentId"]["type"] == "string" &&
+          turnTool("cancel_task")["properties"]["projectId"]["type"] == "string" &&
           turnTool("find_tasks")["required"] == Json::array({"reason"}) &&
           turnTool("find_tasks")["properties"]["taskId"]["type"] == "integer" &&
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
@@ -582,6 +589,24 @@ void oversizedRequestStopsBeforeAccessingCredentials() {
     };
     rejects<ModelError>([&] { model.decide(input); },"Oversized escaped request reached the transport");
     check(!std::filesystem::exists(credentials),"An oversized request accessed the credentials");
+}
+
+void missingChatGPTSignInIsTyped() {
+    Sandbox temp;
+    ChatGPTModel model(temp.path / "credentials");
+    auto config = botConfig();
+    config["modelProvider"] = "chatgpt";
+    const ModelInput input{
+        Json::object(),{{"kind","conversation_turn"},{"text","Check the release"}},
+        Json::array(),{}, {"reply"}, {}, Json::array(),config
+    };
+    try {
+        model.decide(input);
+        throw std::runtime_error("missing ChatGPT credentials were accepted");
+    } catch (const ModelError& error) {
+        check(error.code == ModelErrorCode::authentication_required,
+              "missing ChatGPT credentials were not classified as sign-in required");
+    }
 }
 
 class AcceptanceModel final : public Model {
@@ -939,11 +964,13 @@ void botProfilesAndAvatars() {
 int main() {
     try {
         configuredSchedules();
+        pinnedConversationDestinations();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();
         directionalPeerConfiguration();
         responseContract();
         oversizedRequestStopsBeforeAccessingCredentials();
+        missingChatGPTSignInIsTyped();
         {
             Sandbox temp;
             Store store(temp.path/"state.db");

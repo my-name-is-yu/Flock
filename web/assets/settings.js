@@ -27,7 +27,6 @@ function updatePolicyControls() {
   for (const control of $('rule-form').elements) control.disabled = disabled;
 }
 
-// Theme is a per-browser preference shared with the sidebar switch; theme.js applies it.
 const themeInputs = [...document.querySelectorAll('input[name="theme"]')];
 function reflectTheme() {
   const mode = document.documentElement.dataset.theme ?? 'system';
