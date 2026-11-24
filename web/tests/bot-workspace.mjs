@@ -96,6 +96,15 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   check(JSON.stringify(patches[2]) === '{"model":"next-model"}' && facts[0].textContent === 'Next model',
     'Model-only save sent location fields or did not show the model name');
 
+  edit.click();
+  await settle();
+  project.value = '';
+  save.click();
+  await settle();
+  check(!form.hidden && project.validity.valueMissing && patches.length === 3,
+    'Clearing an existing project could disable configured schedules');
+  cancel.click();
+
   saved = { model: 'personal-model' };
   card.update(saved);
   edit.click();
