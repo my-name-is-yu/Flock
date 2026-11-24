@@ -41,10 +41,15 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 std::string field(const Json&, std::string_view);
+inline bool hasDestinationSelector(const Json& args) {
+    return args.is_object() && (args.contains("destination") || args.contains("environmentId") ||
+                                args.contains("projectId") || args.contains("gatewayEnvironmentId"));
+}
 std::string conversationEnvironmentId(const Json& alias);
 std::string conversationGatewayEnvironmentId(const Json& alias);
 std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name = {});
 inline constexpr std::string_view runOutboxOperation = "run-outbox/";
+inline constexpr std::string_view runStopOperation = "run-stop/";
 bool terminal(const Json&);
 Json questionTarget(const Json&);
 std::string actionId();

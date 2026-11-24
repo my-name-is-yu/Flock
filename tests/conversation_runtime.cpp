@@ -127,13 +127,19 @@ struct SimulatedT3 : T3 {
     std::map<std::string,Observation> observations;
     std::map<std::pair<std::string,std::string>,SessionMetadata> sessions;
     std::map<std::string,std::vector<T3Project>> projectsByEnvironment;
+    std::map<std::string,T3EnvironmentLinks> linksByGateway;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
+    std::string loseSendForEnvironment;
     std::string login = "original-login";
     InterruptOutcome interruptOutcome = InterruptOutcome::Requested;
 
     std::vector<T3Project> projects(std::string_view environment) override {
         const auto found = projectsByEnvironment.find(std::string(environment));
         return found == projectsByEnvironment.end() ? std::vector<T3Project>{{"project","Fixture Project",{}}} : found->second;
+    }
+    T3EnvironmentLinks linkedEnvironments(std::string_view gateway) override {
+        const auto found = linksByGateway.find(std::string(gateway));
+        return found == linksByGateway.end() ? T3EnvironmentLinks{} : found->second;
     }
 
     std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
@@ -160,8 +166,10 @@ struct SimulatedT3 : T3 {
                          "run-" + suffix,"https://example.test/session-" + suffix};
         check(deliveries.emplace(command.actionId,run).second,"the same work was sent twice");
         observations.emplace(run.runId,Observation{});
-        if (std::exchange(loseNextSend,false)) return {};
-        return {Delivery::Kind::Accepted,run,{}};
+        const bool lostReceipt = std::exchange(loseNextSend,false) || command.environmentId == loseSendForEnvironment;
+        if (command.environmentId == loseSendForEnvironment) loseSendForEnvironment.clear();
+        if (lostReceipt) return {};
+        return {Delivery::Kind::Accepted,run,{},false,command.tool == "message_session" ? "started" : ""};
     }
     Delivery reconcile(const Command& command) override {
         reconciled.push_back(command);
@@ -194,6 +202,7 @@ struct Fixture {
     SimulatedT3 t3;
     std::function<void()> beforeNotes;
     Seconds now = unixTime();
+    bool requireT3Connection = false;
 
     Fixture() {
         char path[] = "/tmp/flock-conversation-runtime-XXXXXX";
@@ -210,10 +219,13 @@ struct Fixture {
     void restart() {
         runtime.reset();
         store = std::make_unique<Store>(dir/"state.db");
+        RuntimeOptions options;
+        options.clock = [this] { return now; };
+        options.requireT3Connection = requireT3Connection;
         runtime = std::make_unique<Runtime>(*store,model,t3,[this](auto) {
             if (beforeNotes) beforeNotes();
             return std::string{};
-        },RuntimeOptions{[this] { return now; }});
+        },std::move(options));
     }
     Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop",
                    std::string project = "project") {
@@ -1833,8 +1845,344 @@ void sameEnvironmentMoveKeepsGateway() {
     f.runtime->runConversations();
     f.t3.finish("run-1","Old linked destination settled");
     f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the same-environment edit was not relaunched");
-    check(f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().gatewayEnvironmentId == "desktop",
-          "the same-environment edit silently changed its registered gateway");
+    check(f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().projectId == "cloud-project" &&
+          f.t3.sent.back().gatewayEnvironmentId == "desktop" &&
+          !f.task(moving).contains("pendingDestination"),
+          "the same-environment edit silently changed its saved route or destination");
+}
+
+void productionGatewayOnlyLaunch() {
+    Fixture f;
+    f.requireT3Connection = true;
+    f.restart();
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    auto route = f.routing("Start linked cloud work");
+    route.config["conversationEnvironments"]["cloud-target"] = {
+        {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}};
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    constexpr auto request = "Start linked cloud work";
+    f.script(request,{start({{"environment","cloud-target"}})});
+    f.store->receive(localOwner,route,"gateway-only-launch",request);
+    f.runtime->runConversations();
+    const auto id = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(id,"running");
+    const auto& command = f.t3.sent.back();
+    check(f.t3.sent.size() == 1 && command.environmentId == "cloud" &&
+          command.projectId == "cloud-project" && command.gatewayEnvironmentId == "desktop",
+          "production connection validation rejected the connected gateway or used the unregistered target");
+}
+
+void discoveredLinkedNameMoveKeepsRoute() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.linksByGateway["desktop"].links.push_back({
+        {"cloud","desktop"},"Cloud via desktop",T3EnvironmentLink::Status::reachable});
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    const auto id = f.store->submit(f.routing("Start on desktop"));
+    f.reach(id,"running");
+    constexpr auto text = "Move to the discovered cloud Session";
+    f.script(text,{[id,text](const ModelInput& input) {
+        const auto task = listed(input,id);
+        const auto environments = input.task.at("environments");
+        const auto found = std::ranges::find_if(environments,[](const Json& environment) {
+            return environment.value("linked",false) && environment.value("environmentId","") == "cloud";
+        });
+        check(found != environments.end(),"the discovered linked destination name was not offered");
+        return Decision{"change_task",{{"taskId",id},{"generation",task.at("generation")},
+            {"revisionId",task.at("revisionId")},{"instruction",text},{"environment",found->at("name")}},
+            "Move this task to the discovered route"};
+    }});
+    f.receive("discovered-route-move",text);
+    check(f.task(id).at("pendingDestination") == Json{{"environmentId","cloud"},
+          {"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"},{"pinned",true}},
+          "change_task did not reserve the discovered environment, project, and gateway together");
+    f.t3.finish("run-1","Desktop work settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the discovered route was not launched");
+    const auto& command = f.t3.sent.back();
+    check(command.environmentId == "cloud" && command.projectId == "cloud-project" &&
+          command.gatewayEnvironmentId == "desktop",
+          "the next command did not use the discovered linked destination tuple");
+}
+
+Id twoLinkedDestinationTask(Fixture& f) {
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    auto route = f.routing("Start work on both linked targets");
+    route.config["conversationEnvironments"] = {
+        {"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}}},
+        {"other-target",{{"environmentId","other"},{"projectId","other-project"},{"gatewayEnvironmentId","desktop"}}}};
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    f.t3.projectsByEnvironment["other"] = {{"other-project","Other fixture",{}}};
+    constexpr auto request = "Start work on both linked targets";
+    f.script(request,{start({{"environments",{"cloud-target","other-target"}}})});
+    f.store->receive(localOwner,route,"two-linked-targets",request);
+    f.runtime->runConversations();
+    const auto id = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"both linked destinations were not dispatched");
+    return id;
+}
+
+Id oneLinkedDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    auto route = f.routing(std::string(request));
+    route.config["conversationEnvironments"]["cloud-target"] = {
+        {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}};
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    f.script(request,{start({{"environments",{"cloud-target"}}})});
+    f.store->receive(localOwner,route,key,request);
+    f.runtime->runConversations();
+    return f.lastTurn().front().at("result").at("taskId").get<Id>();
+}
+
+Id otherAndCloudDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    auto route = f.routing(std::string(request));
+    route.config["conversationEnvironments"] = {
+        {"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}}},
+        {"other-target",{{"environmentId","other"},{"projectId","other-project"},{"gatewayEnvironmentId","desktop"}}}};
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    f.t3.projectsByEnvironment["other"] = {{"other-project","Other fixture",{}}};
+    f.script(request,{start({{"environments",{"other-target","cloud-target"}}})});
+    f.store->receive(localOwner,route,key,request);
+    f.runtime->runConversations();
+    return f.lastTurn().front().at("result").at("taskId").get<Id>();
+}
+
+void gatewayOnlyCancelDoesNotCancelTask() {
+    Fixture f;
+    const auto id = twoLinkedDestinationTask(f);
+    const auto before = f.task(id).at("runResults");
+    const auto text = "Stop only the gateway destination";
+    f.script(text,{[id](const ModelInput& input) {
+        return Decision{"cancel_task",{{"taskId",id},{"generation",listed(input,id).at("generation")},
+                                        {"gatewayEnvironmentId","desktop"}},"Select one destination"};
+    }});
+    f.receive("gateway-only-cancel",text);
+    check(f.task(id).at("state") == "running" && f.t3.interrupted.empty() &&
+          f.task(id).at("runResults") == before &&
+          f.lastTurn().front().at("result").at("ok") == false,
+          "a gateway-only cancel selector changed the whole task or a sibling destination");
+}
+
+void reviseReportReference(Fixture& f, Id message, Id revision) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the task database");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    const auto sql = "UPDATE journal SET data=json_set(data,'$.revisionId'," + std::to_string(revision) +
+                     ") WHERE id=" + std::to_string(message);
+    check(sqlite3_exec(db.get(),sql.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
+          "could not revise the fixture report provenance");
+}
+
+Step sendDestinationWithSource(Id taskId, Id sourceId, std::string environment,
+                               std::string project, std::string instruction) {
+    return [=](const ModelInput& input) {
+        const auto task = listed(input,taskId);
+        return Decision{"send_to_task",{{"taskId",taskId},{"generation",task.at("generation")},
+            {"instruction",instruction},{"sourceResultMessageId",sourceId},
+            {"environmentId",environment},{"projectId",project},{"gatewayEnvironmentId","desktop"}},
+            "Continue from the current destination report"};
+    };
+}
+
+void destinationFollowupValidatesAndRedactsSourceReport() {
+    Fixture f;
+    const auto task = twoLinkedDestinationTask(f);
+    constexpr auto secret = "synthetic-report-secret";
+    const auto secretRef = SecretRef{"report-secret"};
+    auto policy = f.store->policy();
+    policy.submitSecret(localOwner,"alpha",policy.requestSecret("alpha",secretRef),secret);
+    f.t3.finish("run-1",std::string("Measured latency with ") + secret + " and found a stable result.");
+    f.advanceUntil([&] { return !lastTaskEvent(*f.store,task,"report").is_null(); },
+                   "the first destination report was not recorded");
+    const auto reportEvent = lastTaskEvent(*f.store,task,"report");
+    const Id reportId = reportEvent.at("id");
+    const auto revision = reportEvent.at("data").at("revisionId").get<Id>();
+
+    const auto otherTask = f.store->submit(f.routing("Create an unrelated source result"));
+    f.reach(otherTask,"running");
+    const auto otherRun = f.task(otherTask).at("activeRun").at("runId").get<std::string>();
+    f.t3.finish(otherRun,"Unrelated report");
+    f.reach(otherTask,"completed");
+    const Id unrelatedId = lastTaskEvent(*f.store,otherTask,"completed").at("id");
+
+    const auto sentBefore = f.t3.sent.size();
+    constexpr auto wrongTaskText = "Reject another task's report";
+    f.script(wrongTaskText,{sendDestinationWithSource(task,unrelatedId,"other","other-project","Use the report")});
+    f.receive("wrong-source-task",wrongTaskText);
+    check(f.lastTurn().front().at("result").at("ok") == false && f.t3.sent.size() == sentBefore,
+          "a source report from another task reached a destination Session");
+
+    reviseReportReference(f,reportId,revision + 100);
+    constexpr auto wrongRevisionText = "Reject a stale report revision";
+    f.script(wrongRevisionText,{sendDestinationWithSource(task,reportId,"other","other-project","Use the report")});
+    f.receive("wrong-source-revision",wrongRevisionText);
+    check(f.lastTurn().front().at("result").at("ok") == false && f.t3.sent.size() == sentBefore,
+          "a report from another revision reached a destination Session");
+    reviseReportReference(f,reportId,revision);
+
+    f.store->policy().setMode(localOwner,"supervised");
+    constexpr auto followupText = "Continue using the valid report";
+    f.script(followupText,{sendDestinationWithSource(task,reportId,"other","other-project",followupText)});
+    f.receive("valid-source-report",followupText);
+    const auto approvals = f.store->inbox(localOwner);
+    check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" &&
+          approvals.front().at("prompt").get<std::string>().find("stable result") != std::string::npos &&
+          approvals.front().at("prompt").get<std::string>().find(secret) == std::string::npos &&
+          approvals.front().at("prompt").get<std::string>().find("[redacted]") != std::string::npos &&
+          f.t3.sent.size() == sentBefore,
+          "the approved preview omitted valid source context or exposed its synthetic secret");
+    f.store->decideInbox(localOwner,{approvals.front().at("botId"),InboxKind::policy_approval,
+        approvals.front().at("itemId"),approvals.front().at("waitId"),approvals.front().at("taskId"),
+        approvals.front().at("targetRevision"),approvals.front().at("targetGeneration")},"allow_once");
+    f.runtime->runConversations();
+    const auto& sent = f.t3.sent.back();
+    check(f.t3.sent.size() == sentBefore + 1 && sent.tool == "message_session" &&
+          sent.instruction.find("stable result") != std::string::npos &&
+          sent.instruction.find("[redacted]") != std::string::npos &&
+          sent.instruction.find(secret) == std::string::npos,
+          "the approved destination follow-up lost report context or sent its synthetic secret");
+}
+
+void stopDestinationByName(Fixture& f, Id id, std::string_view key, std::string_view text) {
+    f.script(text,{[id](const ModelInput& input) {
+        const auto task = listed(input,id);
+        const auto found = std::ranges::find_if(task.at("runResults"),[](const Json& run) {
+            return run.value("environmentId","") == "cloud";
+        });
+        check(found != task.at("runResults").end(),"the uncertain cloud destination was not offered");
+        return Decision{"cancel_task",{{"taskId",id},{"generation",task.at("generation")},
+            {"destination",found->at("name")}},"Stop the selected destination"};
+    }});
+    f.receive(key,text);
+}
+
+Json destinationResult(const Json& task, std::string_view environment) {
+    const auto& runs = task.at("runResults");
+    const auto found = std::ranges::find_if(runs,[&](const Json& run) {
+        return run.value("environmentId","") == environment;
+    });
+    if (found == runs.end()) throw std::runtime_error("the requested destination was not saved");
+    return *found;
+}
+
+void recoveredDestinationStopHonorsPolicy() {
+    {
+        Fixture f;
+        f.t3.loseSendForEnvironment = "cloud";
+        const auto id = twoLinkedDestinationTask(f);
+        const auto unknown = destinationResult(f.task(id),"cloud");
+        check(unknown.value("threadId","").empty() && unknown.value("runId","").empty(),
+              ("the fixture did not preserve a started destination with unknown receipt IDs: " + unknown.dump()).c_str());
+        const auto actualRun = f.t3.deliveries.at(unknown.at("actionId").get<std::string>());
+        f.store->policy().changeRule(localOwner,RuleKind::never,Action::t3_send,
+            Resource::sessionRead("cloud",actualRun.threadId).target,true);
+        stopDestinationByName(f,id,"deny-recovered-stop","Stop the uncertain cloud destination");
+        for (int i = 0; i < 6; ++i) {
+            f.now += 5;
+            f.tick();
+        }
+        const auto result = destinationResult(f.task(id),"cloud");
+        check(!f.t3.reconciled.empty() && f.t3.interrupted.empty() &&
+              result.value("detail","").find("denied by policy") != std::string::npos,
+              ("reconciliation interrupted a Run whose recovered stop was denied by policy: " +
+               result.dump() + " reconciled=" + std::to_string(f.t3.reconciled.size()) +
+               " interrupted=" + std::to_string(f.t3.interrupted.size())).c_str());
+    }
+    {
+        Fixture f;
+        f.t3.loseSendForEnvironment = "cloud";
+        const auto id = twoLinkedDestinationTask(f);
+        const auto unknown = destinationResult(f.task(id),"cloud");
+        check(unknown.value("threadId","").empty() && unknown.value("runId","").empty(),
+              ("the approval fixture did not start with unknown Run IDs: " + unknown.dump()).c_str());
+        const auto actualRun = f.t3.deliveries.at(unknown.at("actionId").get<std::string>());
+        f.store->policy().setMode(localOwner,"supervised");
+        stopDestinationByName(f,id,"approve-recovered-stop","Stop the uncertain cloud destination");
+        f.now += 5;
+        f.tick();
+        f.now += 5;
+        f.tick();
+        auto cards = f.store->inbox(localOwner);
+        check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" &&
+              f.t3.interrupted.empty(),
+              "the recovered Run stop bypassed its required approval or failed to create a card");
+        f.store->decideInbox(localOwner,{cards.front().at("botId"),InboxKind::policy_approval,
+            cards.front().at("itemId"),cards.front().at("waitId"),cards.front().at("taskId"),
+            cards.front().at("targetRevision"),cards.front().at("targetGeneration")},"allow_once");
+        f.now += 1;
+        f.tick();
+        f.now += 5;
+        f.tick();
+        check(f.t3.reconciled.size() >= 1 && f.t3.interrupted ==
+              std::vector{std::pair<std::string,std::string>{"cloud",actualRun.runId}},
+              "approval settlement did not allow exactly the recovered Run interrupt");
+    }
+}
+
+std::string latestApprovalStatus(Fixture& f) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the task database");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_stmt* rawStatement = nullptr;
+    check(sqlite3_prepare_v2(db.get(),"SELECT status FROM policy_approvals ORDER BY id DESC LIMIT 1",-1,
+                             &rawStatement,nullptr) == SQLITE_OK,"could not read policy approval status");
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(rawStatement,sqlite3_finalize);
+    return sqlite3_step(statement.get()) == SQLITE_ROW
+        ? reinterpret_cast<const char*>(sqlite3_column_text(statement.get(),0)) : "";
+}
+
+void queuedDestinationStopsReleaseSlots() {
+    {
+        Fixture f;
+        T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+        const auto blocker = f.store->submit(f.routing("Hold the cloud project","alpha","cloud","cloud-project"));
+        f.reach(blocker,"running");
+        const auto destination = otherAndCloudDestinationTask(f,"queued-stop","Queue linked cloud work");
+        f.advanceUntil([&] { return f.task(destination).contains("runResults") &&
+                                    destinationResult(f.task(destination),"cloud").at("status") == "queued" &&
+                                    destinationResult(f.task(destination),"other").at("status") == "running"; },
+            ("the linked cloud destination was not queued behind its blocker: " + f.task(destination).dump()).c_str());
+        const auto queuedTask = f.task(destination);
+        check(f.t3.sent.size() == 2 && destinationResult(queuedTask,"other").at("status") == "running",
+              ("the linked destination did not remain queued behind the project slot: sent=" +
+               std::to_string(f.t3.sent.size()) + " task=" + queuedTask.dump()).c_str());
+        const auto follower = oneLinkedDestinationTask(f,"after-queued","Run after the queued cancellation");
+        const auto sentBeforeStop = f.t3.sent.size();
+        stopDestinationByName(f,destination,"stop-behind-slot","Stop the queued cloud destination");
+        f.tick();
+        check(f.t3.sent.size() == sentBeforeStop && f.t3.interrupted.empty() &&
+              destinationResult(f.task(destination),"cloud").at("status") == "cancelled" &&
+              destinationResult(f.task(destination),"other").at("status") == "running",
+              "a ready queued stop dispatched T3 or failed to settle locally");
+        f.t3.finish("run-1","Project slot released");
+        f.reach(blocker,"completed");
+        f.advanceUntil([&] { return f.t3.sent.size() == sentBeforeStop + 1; },
+                       "the follower did not acquire the released cloud project slot");
+        check(f.t3.sent.size() == sentBeforeStop + 1 && f.t3.sent.back().instruction.find("Run after") != std::string::npos,
+              "the cancelled destination retained its slot or launched after release");
+    }
+    {
+        Fixture f;
+        f.store->policy().setMode(localOwner,"supervised");
+        const auto destination = oneLinkedDestinationTask(f,"approval-stop","Wait for linked launch approval");
+        f.advanceUntil([&] { return !f.store->inbox(localOwner).empty(); },
+                       "the linked launch did not request approval");
+        const auto cards = f.store->inbox(localOwner);
+        check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" && f.t3.sent.empty(),
+              "the destination launch did not hold its slot for approval");
+        const auto follower = oneLinkedDestinationTask(f,"after-approval-stop","Run after approval cancellation");
+        stopDestinationByName(f,destination,"cancel-pending-launch","Cancel the pending linked launch");
+        f.tick();
+        f.tick();
+        check(f.t3.sent.empty() && destinationResult(f.task(destination),"cloud").at("status") == "cancelled" &&
+              latestApprovalStatus(f) == "stale" && f.store->inbox(localOwner).empty(),
+              "cancelling a pending launch did not settle its approval locally");
+        f.store->policy().setMode(localOwner,"full");
+        f.advanceUntil([&] { return f.t3.sent.size() == 1; },
+                       "the follower did not acquire the slot after pending-approval cancellation");
+        check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find("Run after approval") != std::string::npos,
+              "the cancelled pending launch held its slot or launched after settlement");
+    }
 }
 
 void cloudDestinationWaitsForItsProject() {
@@ -2446,6 +2794,41 @@ int main(int argc, char** argv) {
             std::cout << "Non-default-project move acceptance passed with simulated T3\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "same-environment-route") {
+            sameEnvironmentMoveKeepsGateway();
+            std::cout << "Same-environment route acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "gateway-only-launch") {
+            productionGatewayOnlyLaunch();
+            std::cout << "Production gateway-only launch acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "discovered-route-move") {
+            discoveredLinkedNameMoveKeepsRoute();
+            std::cout << "Discovered linked route move acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "gateway-only-cancel") {
+            gatewayOnlyCancelDoesNotCancelTask();
+            std::cout << "Gateway-only standalone cancel acceptance passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "destination-followup-report") {
+            destinationFollowupValidatesAndRedactsSourceReport();
+            std::cout << "Destination source report acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "recovered-stop-policy") {
+            recoveredDestinationStopHonorsPolicy();
+            std::cout << "Recovered destination stop policy acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "queued-destination-stop") {
+            queuedDestinationStopsReleaseSlots();
+            std::cout << "Queued destination stop acceptance passed with simulated T3\n";
+            return 0;
+        }
         durableInboxAndTargetedRevision();
         existingSessionStartsNormalWork();
         linkedResultStartsANewSession();
@@ -2492,6 +2875,12 @@ int main(int argc, char** argv) {
         canonicalMoveKeepsProjectAndGateway();
         nonDefaultProjectMoveKeepsCanonicalGateway();
         sameEnvironmentMoveKeepsGateway();
+        gatewayOnlyCancelDoesNotCancelTask();
+        productionGatewayOnlyLaunch();
+        discoveredLinkedNameMoveKeepsRoute();
+        destinationFollowupValidatesAndRedactsSourceReport();
+        recoveredDestinationStopHonorsPolicy();
+        queuedDestinationStopsReleaseSlots();
         moveAsksForTheDestinationProjectAfterSettlement();
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();

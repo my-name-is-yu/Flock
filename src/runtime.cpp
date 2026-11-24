@@ -1027,6 +1027,30 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             destinationRun(current,key)["stopRetryAt"] = now + 5;
             return true;
         })) return;
+        if (action.value("stopPolicy",Json(nullptr)).is_object()) {
+            ApprovalGate gate = ApprovalGate::stale;
+            {
+                std::lock_guard lock(db.mutex);
+                Transaction tx(db.db);
+                const auto current = db.load(id);
+                const auto resource = Resource{Action::t3_send,
+                    Resource::sessionRead(cmd.environmentId,ref.threadId).target};
+                gate = db.approveAction(db.taskPolicyOrigin(current),resource,
+                    std::string(runStopOperation) + key,action.at("stopPolicy"),now,true,Store::Impl::ApprovalWait::defer);
+                if (gate == ApprovalGate::allow) {
+                    auto approved = db.outbox(current,key);
+                    approved.erase("stopPolicy");
+                    db.exec("UPDATE outbox SET data=? WHERE id=?",{approved,key});
+                }
+                tx.commit();
+            }
+            if (gate != ApprovalGate::allow) {
+                destinationStatus(id,key,"confirmation_pending",gate == ApprovalGate::waiting
+                    ? "Waiting for approval to stop the recovered T3 Run"
+                    : "The recovered T3 Run stop was denied by policy");
+                return;
+            }
+        }
         try {
             const SessionDispatchFileLock dispatch(db.path,SessionDispatchFileLock::Mode::shared);
             t3.interrupt(cmd.environmentId,cmd.config,ref);

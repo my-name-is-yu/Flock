@@ -303,6 +303,22 @@ void workspaceCommandRunsAlone() {
     check(results[1].at("ok") == true,"A standalone command suppressed a sibling read");
 }
 
+void gatewayOnlyCancelDoesNotCancelBatchSibling() {
+    Fixture f;
+    const auto task = f.store->submit({"alpha","Keep this task running","env","project"});
+    const auto generation = f.store->task(task).at("generation");
+    f.receive({call("cancel_task",{{"taskId",task},{"generation",generation},
+                                    {"gatewayEnvironmentId","env"}}),search});
+    f.runtime->runConversations();
+    f.checkFinished(2);
+    const auto results = f.results();
+    const auto first = results[0].value("result",results[0]);
+    const auto second = results[1].value("result",results[1]);
+    check((first.value("ok",true) == false || first.contains("error")) && second.value("ok",false) == true &&
+          f.store->task(task).at("state") == "queued" && f.t3.searches == 1,
+          ("a gateway-only batch cancel changed the task or suppressed its sibling: " + results.dump()).c_str());
+}
+
 void conflictingWorkspaceCalls() {
     Fixture f;
     f.receive({call("workspace_write_file",{{"path","ordered.txt"},{"text","Fresh contents"}}),
@@ -635,6 +651,11 @@ void measureBatches() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "gateway-only-cancel") {
+            gatewayOnlyCancelDoesNotCancelBatchSibling();
+            std::cout << "Gateway-only batch cancel acceptance passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--measure") {
             measureBatches();
             return 0;
@@ -646,6 +667,7 @@ int main(int argc, char** argv) {
         followUpNeeded(call("start_task",{{"request","Start a task"}}),"Run this action on its own after reviewing these results.");
         followUpNeeded(call("reply",{{"text","Premature reply"}}),"Reply after reviewing these results.");
         workspaceCommandRunsAlone();
+        gatewayOnlyCancelDoesNotCancelBatchSibling();
         conflictingWorkspaceCalls();
         rejectedCall();
         restartWithPartialResults();

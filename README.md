@@ -192,6 +192,13 @@ sends the instruction to that Session and tracks the new Run, whether the Sessio
 was started in T3 or by a Bot. If the Session is busy, T3 queues the work.
 The normal T3 send policy and T3's Operate permission apply.
 
+Saved task operations are authorized against the task's Bot and conversation scope;
+they also check its current generation, and `change_task` checks the current
+revision. A follow-up to a saved destination additionally validates its recorded
+environment, project, gateway, action and Run, then applies the normal T3 send
+policy and the saved gateway's T3 Operate permission. A linked target does not
+need its own Flock connection record: the saved gateway is the authorized route.
+
 Session search scans up to 64 candidates per page with a shared two-second
 deadline for candidate reads. A cursor after a matched Session first rechecks
 that Session's readability with its own two-second deadline. Follow `nextCursor`

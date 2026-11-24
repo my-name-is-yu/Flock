@@ -42,9 +42,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
             return sendSessionMessage(message,step,decision,tool_batch::turnCallKey(message.id,step),
                                       ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
     }
-    if (calls.size() == 1 && tool == "cancel_task" && decision.args.is_object() &&
-        (decision.args.contains("destination") || decision.args.contains("environmentId") ||
-         decision.args.contains("projectId") || decision.args.contains("gatewayEnvironmentId")))
+    if (calls.size() == 1 && tool == "cancel_task" && hasDestinationSelector(decision.args))
         return cancelDestinationRun(message,step,decision,tool_batch::turnCallKey(message.id,step),
                                     decision.rejection.empty(),ctx.hasWebEvidence,ctx.shutdown);
     if (effectType == "array" || calls.size() > 1 || isBotTool(tool) ||

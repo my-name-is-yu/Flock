@@ -353,7 +353,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             return advance;
         }
         auto origin = policyOrigin(message);
-        Json policyPayload{decision.tool,decision.args,command.authGeneration};
+        Json policyPayload{decision.tool,decision.args,command.authGeneration,command.instruction};
         if (savedTaskTarget) {
             try {
                 const auto task = ownTask(savedTaskId,message);
@@ -510,6 +510,9 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(
             auto updated = action;
             updated["stopRequested"] = true;
             updated["stopOperation"] = key;
+            if (phase == "started" && (selected.threadId.empty() || selected.runId.empty()))
+                updated["stopPolicy"] = {{"tool",decision.tool},{"args",decision.args},
+                                          {"generation",generation},{"revisionId",task.value("currentRevision",Id{})}};
             updated.erase("phase");
             updated.erase("authGeneration");
             exec("UPDATE outbox SET data=? WHERE id=? AND task_id=? AND phase=?",

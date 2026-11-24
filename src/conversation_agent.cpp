@@ -569,7 +569,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                 {"taskId",task.at("id")},{"current",taskState(task,message)}};
     }
     if (tool == "cancel_task") {
-        if (args.contains("destination") || args.contains("environmentId") || args.contains("projectId"))
+        if (hasDestinationSelector(args))
             throw ToolError("Cancel one destination in a standalone cancel_task action");
         const auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
