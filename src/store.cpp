@@ -767,8 +767,11 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
             if (reason != "settings" || (!action.is_null() && action["phase"] != "ready"))
                 throw Conflict("Session settings can only be corrected before an unsent action");
             task["config"]["session"] = normalizeSessionSettings(data["session"]);
-            if (field(action,"tool") == "delegate" && !requestsPrivateWorktree(task.at("config")))
-                task.erase("isolatedWorkspace");
+            if (field(action,"tool") == "delegate") {
+                if (!requestsPrivateWorktree(task.at("config"))) task.erase("isolatedWorkspace");
+                else if (task.at("activeRun").is_null() && task.at("lastRun").is_null() &&
+                         !task.contains("selectedSession")) task["isolatedWorkspace"] = true;
+            }
         }
         if (field(task,"actionId").empty()) {
             if (!task["activeRun"].is_null()) next = "running";

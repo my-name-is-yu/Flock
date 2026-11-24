@@ -1433,6 +1433,24 @@ void wideningAWorktreeReservationWaitsForAnActiveRun() {
     f.reach(second,"completed");
 }
 
+void correctingAnUnsentLaunchAdmitsFreshWorktreesTogether() {
+    Fixture f;
+    f.model.script = [](const ModelInput& input) { return input.event.at("kind") == "result" ? complete() : work(); };
+    auto namedWorktree = newWorktreeConfig;
+    namedWorktree["session"]["workspaceStrategy"]["branch"] = "shared-branch";
+    const auto first = f.store->submit({"alpha","Correct the named checkout","e","p",namedWorktree});
+    f.t3.onPreflight = [] { throw Conflict("The branch already has a checkout"); };
+    const auto wait = f.wait(first,"settings");
+    f.t3.onPreflight = {};
+    const auto second = f.store->submit({"beta","Run an independent patch","e","p",newWorktreeConfig});
+    f.store->operate(localOwner,TaskTarget::from(f.task(first),wait),"reconcile",newWorktreeConfig);
+    f.restart();
+    f.reach(first,"running");
+    f.reach(second,"running");
+    check(f.t3.launches == 2 && f.t3.seen.front().config == newWorktreeConfig,
+          "Correcting an unsent launch to a fresh worktree did not release its project exclusion");
+}
+
 void version7AdmissionUpgradeKeepsExistingReservations() {
     Fixture f;
     f.model.script = [](const ModelInput& input) { return input.event.at("kind") == "result" ? complete() : work(); };
@@ -3047,6 +3065,7 @@ int main() {
             {"project owners on task pages",taskPagesShowProjectOwners},
             {"isolated worktrees and shared checkout across restart",isolatedWorktreesAndSharedCheckoutAcrossRestart},
             {"widening a worktree reservation waits for active work",wideningAWorktreeReservationWaitsForAnActiveRun},
+            {"correcting an unsent launch admits fresh worktrees together",correctingAnUnsentLaunchAdmitsFreshWorktreesTogether},
             {"version 7 admission upgrade keeps existing reservations",version7AdmissionUpgradeKeepsExistingReservations},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Peer completion evidence follows the Session read policy",peerCompletionRespectsSessionReadPolicy},
