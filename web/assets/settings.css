@@ -2,10 +2,10 @@ main { max-width: 40rem; margin: 0 auto; padding: var(--space-5) var(--space-4) 
 .settings-back {
   display: inline-flex; align-items: center; gap: .15rem; margin-inline-start: -.35rem;
   padding: .3rem .45rem .3rem .2rem; border-radius: var(--radius-sm);
-  color: var(--accent); font-size: var(--text-sm); font-weight: 600; text-decoration: none;
+  color: var(--text-2); font-size: var(--text-sm); font-weight: 600; text-decoration: none;
   transition: background-color .16s ease, color .16s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
 }
-.settings-back:hover { background: var(--hover); }
+.settings-back:hover { background: var(--hover); color: var(--text); }
 .settings-back:active { transform: scale(.97); }
 .settings-back svg {
   width: 1.1rem; height: 1.1rem;
@@ -57,6 +57,14 @@ input:focus-visible, select:focus-visible {
 .button {
   transition: background-color .15s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
 }
+:where(.settings-shell, .installation-dialog) .button:not(.primary, .danger, .quiet-danger) {
+  border: 1px solid var(--hairline); background: var(--canvas); color: var(--text);
+}
+:where(.settings-shell, .installation-dialog) .button:not(.primary, .danger, .quiet-danger):hover:not(:disabled) {
+  background: var(--hover);
+}
+.button.primary { background: var(--accent-fill); color: var(--on-accent); }
+.button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
 .button:active:not(:disabled) { transform: scale(.97); }
 form .button { min-height: 2.1rem; }
 .row-label { display: grid; gap: .1rem; min-width: 0; }
@@ -179,9 +187,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
   .segmented label, .settings-nav a[data-section] { transition: none; }
 }
 .settings-row-error .row-label strong { color: var(--danger); }
-.settings-row .button.primary { background: var(--accent-fill); color: var(--on-accent); }
-.settings-row .button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
-.settings-row a.button.primary { background: var(--accent-fill); color: var(--on-accent); }
 .settings-group .t3-connect-options { align-items: start; flex-direction: column; }
 .t3-connect-options details { width: 100%; }
 .t3-connect-options summary { cursor: pointer; width: fit-content; }
@@ -227,12 +232,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .installation-form :is(input, select) { width: 100%; }
 .installation-form-actions {
   display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2);
-}
-.installation-form-actions .primary, .installation-dialog .button.primary {
-  background: var(--accent-fill); color: var(--on-accent);
-}
-.installation-form-actions .primary:hover:not(:disabled), .installation-dialog .button.primary:hover:not(:disabled) {
-  background: var(--accent-fill-hover);
 }
 .installation-feedback {
   margin: var(--space-3) 0 0; padding: .55rem .7rem; border-radius: var(--radius-md);

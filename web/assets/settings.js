@@ -132,9 +132,9 @@ async function loadBots() {
     const rows = document.createDocumentFragment();
     if (!bots.length) row(rows, rowLabel('No Bots yet', 'Create one from the + button in the conversation list.'));
     for (const bot of bots) {
-      const item = row(rows, rowLabel(bot.name, bot.about || 'No role written yet. Choose Settings to describe what it does.'));
+      const item = row(rows, rowLabel(bot.name, bot.about || 'No role yet. Choose Edit to describe what it does.'));
       const actions = element('span', '', 'row-actions');
-      actions.append(link('Settings', `/?${new URLSearchParams({bot: bot.id, settings: '1'})}`, `Settings for ${bot.name}`),
+      actions.append(link('Edit', `/?${new URLSearchParams({bot: bot.id, settings: '1'})}`, `Edit ${bot.name}`),
         link('Access', `/settings/${encodeURIComponent(bot.id)}`, `Access for ${bot.name}`));
       item.append(actions);
     }
@@ -179,7 +179,7 @@ async function signIn(reconsent, control, switchAccount = false) {
   } catch {
     watchingSignIn = false;
     control.disabled = false;
-    $('status').textContent = 'Could not start ChatGPT sign-in.';
+    $('status').textContent = 'Couldn’t start ChatGPT sign-in.';
     return;
   }
   $('status').textContent = '';
@@ -193,7 +193,7 @@ async function signOut() {
   signingOut = true;
   try {
     const response = await postSettings('model-logout', {});
-    if (!response.ok) throw new Error('Could not sign out of ChatGPT. Try again.');
+    if (!response.ok) throw new Error('Couldn’t sign out of ChatGPT. Try again.');
     const {revocationConfirmed} = await response.json();
     await refreshModel();
     $('status').textContent = revocationConfirmed ? 'Signed out of ChatGPT.'
@@ -220,7 +220,7 @@ function renderModel(model) {
   watchingSignIn = !!pending;
   if (!model) return;
   if (model.demo) {
-    row('model', rowLabel('Demo model', 'Bots use a local demo model on this Flock.'));
+    row('model', rowLabel('Demo mode', 'Bots reply with a built-in demo instead of ChatGPT.'));
     return;
   }
   if (pending) {
@@ -318,17 +318,18 @@ function renderConnections({t3, t3Setup: setup, canManagePolicy: editable, canDi
     item.append(actions);
   }
   if (!t3 && !setup) {
-    if (editable) row('connections', rowLabel('Not connected', 'T3 setup is unavailable in this Flock instance.'));
-    else row('connections', rowLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
+    row('connections', editable
+      ? rowLabel('Demo mode', 'Bots run their work in a built-in demo instead of T3.')
+      : rowLabel('Managed by someone else', 'Only the person who connected T3 and Flock admins can see these details.'));
   }
   if (t3CleanupPending) {
-    const item = row('connections', rowLabel('Provider registration remains', 'Retry removing the Flock registration from local coding agents.'));
-    disconnectButton(item, 'Retry cleanup', null);
+    const item = row('connections', rowLabel('Coding agents still list Flock', 'T3 is disconnected, but Flock still appears in Codex or Claude Code on this computer.'));
+    disconnectButton(item, 'Remove from coding agents', null);
   }
   if (setup?.running) {
     const authorization = setup.authorizationUrl;
     const item = row('connections', rowLabel(authorization ? 'Authorize Flock in T3' : 'Connecting to T3…',
-      authorization ? 'Approve read and operate access in T3. This page updates when you’re done.' : 'Starting T3 authorization.'));
+      authorization ? 'Approve access in T3. This page updates when you’re done.' : 'Waiting for T3 to prepare the approval page.'));
     if (authorization) {
       const open = link('Open T3', authorization, 'Open T3 authorization');
       open.classList.add('primary');
@@ -371,9 +372,9 @@ function disconnectT3(environmentId, label) {
     try { saved = (await postSettings('t3-disconnect', {environmentId})).ok; } catch {}
     const refreshed = await refreshConnections();
     $('status').textContent = saved
-      ? (refreshed ? (environmentId ? `Disconnected ${label}.` : 'Provider registration removed.')
+      ? (refreshed ? (environmentId ? `Disconnected ${label}.` : 'Removed Flock from coding agents.')
                    : 'Saved. Reload to see the current connections.')
-      : 'Could not finish disconnecting. Check the current connection status.';
+      : 'Couldn’t finish disconnecting. Check the current connection status.';
   });
 }
 
@@ -395,8 +396,8 @@ function startT3(target) {
     } catch {
       releaseApprovalTab();
       $('status').textContent = target.source === 'url'
-        ? 'Could not start the T3 connection. Check the connection URL.'
-        : 'Could not start the T3 connection.';
+        ? 'Couldn’t start the T3 connection. Check the connection URL.'
+        : 'Couldn’t start the T3 connection.';
     }
   });
 }
@@ -420,10 +421,10 @@ async function submit(path, data) {
   if (saved && path === 'mode') currentMode = data.mode;
   try {
     await load();
-    $('status').textContent = saved ? 'Saved.' : 'Could not save this change.';
+    $('status').textContent = saved ? 'Saved.' : 'Couldn’t save this change.';
   } catch {
     reflectMode(currentMode);
-    $('status').textContent = saved ? 'Saved. Reload to see the current settings.' : 'Could not reload settings.';
+    $('status').textContent = saved ? 'Saved. Reload to see the current settings.' : 'Couldn’t reload settings.';
   } finally {
     savingPolicy = false;
     updatePolicyControls();
@@ -442,4 +443,4 @@ updatePolicyControls();
 load().then(() => {
   if (canManagePolicy) return loadInstallation();
   showInstallationUnavailable();
-}).catch(() => { $('status').textContent = 'Could not load Flock settings.'; });
+}).catch(() => { $('status').textContent = 'Couldn’t load Flock settings.'; });
