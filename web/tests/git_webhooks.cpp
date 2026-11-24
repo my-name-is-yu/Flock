@@ -43,7 +43,7 @@ public:
         }
         if (!event.contains("gitEvent")) {
             if (event.at("turn").empty()) return {"git_request_review",
-                {{"host",hostName},{"repo",repoName},{"taskId",reviewTask},{"prNumber",1},{"reviewers",{"alice"}}},
+                {{"host",hostName},{"repo",repoName},{"taskId",reviewTask},{"prNumber",1},{"reviewers",{"alice","bob"}}},
                 "Request a review for the watched pull request"};
             return {"reply",{{"text","Review requested"}},"Report the requested review"};
         }
@@ -159,6 +159,23 @@ void run() {
     check(store.inbox(localOwner,"owner").size() == inboxBeforeRequest + 1 &&
           store.history(task).dump().find("tool-review-request") != std::string::npos,
           "A signed review webhook duplicated the tool's inbox item or was lost from the conversation");
+
+    auto lateReview = reviewRequested;
+    lateReview["requested_reviewer"]["login"] = "Bob";
+    check(post(client,"pull_request","delayed-review-request",lateReview,202).at("status") == "received",
+          "delayed review request webhook was not enqueued");
+    runtime.runConversations();
+    check(store.inbox(localOwner,"owner").size() == inboxBeforeRequest + 1 &&
+          store.history(task).dump().find("delayed-review-request") != std::string::npos,
+          "A late webhook for the same request created another card or lost the notification");
+
+    auto externalReview = lateReview;
+    externalReview["pull_request"]["title"] = "Review requested again";
+    check(post(client,"pull_request","external-review-request",externalReview,202).at("status") == "received",
+          "external review request webhook was not enqueued");
+    runtime.runConversations();
+    check(store.inbox(localOwner,"owner").size() == inboxBeforeRequest + 2,
+          "A distinct review request was suppressed");
 }
 }
 

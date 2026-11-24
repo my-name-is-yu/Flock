@@ -55,22 +55,6 @@ void Store::Impl::gitInboxItem(const Json& task, std::string_view key, std::stri
         insertPrReview(task,url,title,prompt,key);
 }
 
-std::string gitWebhookKey(Id event, Id pr) {
-    return "webhook/" + std::to_string(event) + "/" + std::to_string(pr);
-}
-
-Id Store::Impl::matchingReviewRequestWebhook(const GitRepository& repo, Id pr, Id after, const Json& reviewers) const {
-    auto match = query(R"SQL(
-SELECT e.id FROM git_webhook_events e
-WHERE e.host=? AND e.repo=? AND e.id>?
- AND json_extract(e.data,'$.kind')='pull_request' AND json_extract(e.data,'$.action')='review_requested'
- AND EXISTS (SELECT 1 FROM json_each(e.data,'$.prNumbers') p WHERE p.value=?)
- AND lower(json_extract(e.data,'$.requestedReviewer')) IN (SELECT lower(value) FROM json_each(?))
-ORDER BY e.id LIMIT 1
-)SQL",{repo.host,repo.repo,after,pr,reviewers.dump()});
-    return match.next() ? match.number(0) : 0;
-}
-
 bool Store::Impl::canReceiveGitWebhook(std::string_view bot, const Json& event) {
     const auto repo = GitRepository::parse(field(event,"host"),field(event,"repo"));
     return query(R"SQL(
@@ -140,12 +124,14 @@ ORDER BY id,pr_number LIMIT ?
         const auto task = load(taskId);
         event.erase("botId");
         event.erase("deliveryId");
+        const auto reviewer = field(event,"requestedReviewer");
         event.erase("requestedReviewer");
         const auto kind = field(event,"kind");
         const auto action = field(event,"action");
         const auto scrub = sharedRedactor();
         event["summary"] = bounded(scrub.text(field(event,"summary")),4000);
-        const auto key = gitWebhookKey(delivery.get<Id>(),pr.get<Id>());
+        const auto key = "webhook/" + std::to_string(delivery.get<Id>()) + "/" + std::to_string(pr.get<Id>());
+        auto inboxKey = key;
         const auto url = field(event,"url");
         const auto prompt = field(event,"summary");
         std::string title;
@@ -153,7 +139,17 @@ ORDER BY id,pr_number LIMIT ?
         if (kind == "code_scan") title = "Code scanning result";
         if (kind == "pull_request" && (action == "review_requested" || action == "ready_for_review"))
             title = "Pull request awaiting review";
-        if (!title.empty()) gitInboxItem(task,key,url,title,prompt.empty() ? title : prompt);
+        if (kind == "pull_request" && action == "review_requested" && !reviewer.empty()) {
+            auto receipt = query(R"SQL(
+DELETE FROM git_review_receipts WHERE rowid=(
+ SELECT rowid FROM git_review_receipts
+ WHERE task_id=? AND host=? AND repo=? AND pr_number=? AND reviewer=lower(?) AND after_event<?
+ ORDER BY after_event,rowid LIMIT 1
+) RETURNING inbox_key
+)SQL",{taskId,event.at("host"),event.at("repo"),pr,reviewer,delivery});
+            if (receipt.next()) inboxKey = receipt.string(0);
+        }
+        if (!title.empty()) gitInboxItem(task,inboxKey,url,title,prompt.empty() ? title : prompt);
 
         const Json routing{{"environmentId",task.at("environmentId")},{"projectId",task.at("projectId")},
                            {"config",task.at("config")},{"gitEvent",event}};

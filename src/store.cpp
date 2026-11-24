@@ -149,6 +149,15 @@ CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
   PRIMARY KEY(host,repo,pr_number),
   FOREIGN KEY(host,repo,pr_number) REFERENCES git_pr_watches(host,repo,pr_number) ON DELETE CASCADE)
 )SQL");
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS git_review_receipts(
+  inbox_key TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
+  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
+  reviewer TEXT NOT NULL, after_event INTEGER NOT NULL,
+  PRIMARY KEY(inbox_key,reviewer))
+)SQL");
+    exec("CREATE INDEX IF NOT EXISTS git_review_receipts_target"
+         " ON git_review_receipts(task_id,host,repo,pr_number,reviewer,after_event)");
     exec("PRAGMA journal_mode=WAL");
     // Open the WAL now so a read-only peer can use a freshly initialized database.
     exec("PRAGMA user_version");
