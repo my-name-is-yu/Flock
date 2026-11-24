@@ -125,6 +125,42 @@ void genericDestinationCounts() {
           "ordinary multi-destination work must persist all routes without a SHA policy");
 }
 
+void destinationInstructionsAreExplicitlyUnavailable() {
+    Sandbox temp;
+    auto intake = pinnedBot(temp);
+    intake.request = "Verify the release";
+    const auto database = temp.path / "state.db";
+    Store store(database);
+    const auto id = store.submit(intake);
+    auto task = store.task(id);
+    task["state"] = "running";
+    task["runResults"] = Json::array({{{"name","mini"},{"environmentId","mini-env"},
+        {"projectId","mini-project"},{"actionId","saved-action"},{"status","running"}}});
+    task.erase("runTargets");
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open(database.c_str(),&raw);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    check(opened == SQLITE_OK,"could not reopen the task database");
+    sqlite3_stmt* rawStatement = nullptr;
+    const auto prepared = sqlite3_prepare_v2(db.get(),"UPDATE tasks SET data=? WHERE id=?",-1,&rawStatement,nullptr);
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(rawStatement,sqlite3_finalize);
+    const auto serialized = task.dump();
+    check(prepared == SQLITE_OK && sqlite3_bind_text(statement.get(),1,serialized.c_str(),-1,SQLITE_TRANSIENT) == SQLITE_OK &&
+          sqlite3_bind_int64(statement.get(),2,id) == SQLITE_OK && sqlite3_step(statement.get()) == SQLITE_DONE,
+          "could not persist the destination Run fixture");
+
+    RoutingModel model;
+    RoutingT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    model.action = {"send_to_task",{{"taskId",id},{"generation",task.at("generation")},
+        {"instruction","Continue the Mini work"}},"Continue this destination only."};
+    store.receive(localOwner,intake,"destination-follow-up","Continue the Mini work");
+    runtime.runConversations();
+    check(!model.receipt.value("ok",true) &&
+          model.receipt.dump().find("Destination-specific follow-up") != std::string::npos,
+          "a destination follow-up must not be accepted while its dispatch path is unavailable");
+}
+
 void moveWithProject(std::string_view alias, std::string_view project, bool sameEnvironment = false) {
     Sandbox temp;
     auto intake = pinnedBot(temp);
@@ -163,6 +199,7 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
 void pinnedConversationDestinations() {
     parallelDestinations();
     genericDestinationCounts();
+    destinationInstructionsAreExplicitlyUnavailable();
     moveWithProject("mini","mini-project");
     moveWithProject("mini-legacy","remembered-project");
     moveWithProject("mini","mini-project",true);

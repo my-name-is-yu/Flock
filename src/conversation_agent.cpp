@@ -505,8 +505,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
         active(task);
-        if (task.contains("runTargets"))
-            throw ToolError("Use cancel_task to stop both Runs, then start a new request for changed work");
+        if (task.contains("runTargets") || task.contains("runResults"))
+            throw ToolError("Destination-specific follow-up and task-wide changes are not available for this task yet");
         const auto instruction = text(args,"instruction",messageSize,true);
         const auto result = source(&task);
         std::optional<TaskChange> change;
