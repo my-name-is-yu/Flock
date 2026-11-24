@@ -36,7 +36,8 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   card.update({}, true);
   edit.click();
   await settle();
-  check(environment.value === 'suggested-environment', 'Single connected environment did not prefill');
+  check(!environment.value && form.querySelector('datalist option').value === 'suggested-environment',
+    'The connected environment should be suggested without pinning it');
   check(!form.querySelector('#settings-model-feedback').hidden, 'A catalog failure did not show feedback');
   cancel.click();
 
@@ -44,6 +45,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   await settle();
   check(catalogCalls === 2 && Array.from(model.options).some((option) => option.value === 'next-model'),
     'Reopening did not load the catalog after a connection failure');
+  environment.value = 'suggested-environment';
   project.value = 'initial-project';
   save.click();
   await settle();
@@ -93,6 +95,23 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   await settle();
   check(JSON.stringify(patches[2]) === '{"model":"next-model"}' && facts[0].textContent === 'Next model',
     'Model-only save sent location fields or did not show the model name');
+
+  saved = { model: 'personal-model' };
+  card.update(saved);
+  edit.click();
+  await settle();
+  model.value = 'next-model';
+  project.value = 'project-without-environment';
+  save.click();
+  await settle();
+  check(!form.hidden && !environment.validity.valid && patches.length === 3,
+    'A project without an environment was submitted');
+  project.value = '';
+  project.dispatchEvent(new Event('input'));
+  save.click();
+  await settle();
+  check(JSON.stringify(patches[3]) === '{"model":"next-model"}' && form.hidden && !facts[0].parentElement.hidden &&
+    facts[0].textContent === 'Next model', 'An unpinned Bot could not save and display a model by itself');
 }
 
 const directory = mkdtempSync(join(tmpdir(), 'flock-bot-workspace-'));

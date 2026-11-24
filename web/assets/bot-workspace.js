@@ -7,7 +7,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
       <h3 class="settings-card-label" id="settings-workspace-label">How it runs</h3>
       <button type="button" class="text-button settings-card-edit">Edit</button>
     </div>
-    <p class="settings-workspace-missing">Set the model and T3 project before this Bot can start work.</p>
+    <p class="settings-workspace-missing">Choose a model before this Bot can start work.</p>
     <dl class="settings-workspace-facts" hidden>
       <dt>Model</dt><dd></dd>
       <dt>Environment</dt><dd></dd>
@@ -18,14 +18,14 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
         <select name="model" required aria-describedby="settings-model-feedback"></select>
       </label>
       <p class="settings-workspace-hint" id="settings-model-feedback" role="status" hidden></p>
-      <label class="settings-workspace-field">Environment
-        <input name="environmentId" list="settings-t3-environments" maxlength="256" required autocomplete="off" spellcheck="false">
+      <label class="settings-workspace-field">Environment (optional)
+        <input name="environmentId" list="settings-t3-environments" maxlength="256" autocomplete="off" spellcheck="false">
       </label>
       <datalist id="settings-t3-environments"></datalist>
-      <label class="settings-workspace-field">Project
-        <input name="projectId" maxlength="256" required autocomplete="off" spellcheck="false">
+      <label class="settings-workspace-field">Project (optional)
+        <input name="projectId" maxlength="256" autocomplete="off" spellcheck="false">
       </label>
-      <p class="settings-workspace-hint">Use the environment and project IDs shown in T3.</p>
+      <p class="settings-workspace-hint">Set both T3 IDs to use a default destination for new sessions and scheduled work.</p>
       <div class="settings-card-actions">
         <button type="button" class="dialog-button quiet">Cancel</button>
         <button type="submit" class="dialog-button primary">Save</button>
@@ -52,7 +52,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   let editable = false;
 
   function showView() {
-    const configured = !!(workspace.model && workspace.environmentId && workspace.projectId);
+    const configured = !!workspace.model;
     element.classList.toggle('needs-setup', !configured);
     edit.textContent = configured ? 'Edit' : 'Set up';
     edit.setAttribute('aria-label', `${edit.textContent} how this Bot runs`);
@@ -61,8 +61,8 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     facts.hidden = !!draft || !configured;
     missing.hidden = !!draft || configured;
     modelText.textContent = catalog.find(({ slug }) => slug === workspace.model)?.displayName ?? workspace.model;
-    environmentText.textContent = workspace.environmentId;
-    projectText.textContent = workspace.projectId;
+    environmentText.textContent = workspace.environmentId || 'Not set';
+    projectText.textContent = workspace.projectId || 'Not set';
   }
   function update({ model = '', environmentId = '', projectId = '' }, canEdit = editable) {
     if (editable === canEdit && workspace?.model === model && workspace.environmentId === environmentId &&
@@ -86,10 +86,6 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     const environments = await loadEnvironments().catch(() => []);
     if (draft !== opened) return;
     suggestions.replaceChildren(...environments.map(({ environmentId }) => new Option(environmentId)));
-    if (!opened.environmentEdited && !environment.value && environments.length === 1) {
-      environment.value = environments[0].environmentId;
-      environment.setCustomValidity('');
-    }
   }
   function showModelOptions(choices, selected, prompt) {
     const placeholder = new Option(prompt, '');
@@ -116,7 +112,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   }
   edit.addEventListener('click', () => {
     if (!editable) return;
-    draft = { initial: workspace, environmentEdited: false };
+    draft = { initial: workspace };
     showModelOptions([], workspace.model, 'Loading models…');
     modelFeedback.hidden = true;
     for (const field of [environment, project]) {
@@ -126,12 +122,14 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     suggestions.replaceChildren();
     showFeedback('');
     showView();
-    (fields.find((field) => !field.value) ?? model).focus();
+    model.focus();
     void suggestEnvironments(draft);
     void refreshModels(draft);
   });
-  for (const field of [environment, project]) field.addEventListener('input', () => field.setCustomValidity(''));
-  environment.addEventListener('input', () => { if (draft) draft.environmentEdited = true; });
+  for (const field of [environment, project]) field.addEventListener('input', () => {
+    environment.setCustomValidity('');
+    project.setCustomValidity('');
+  });
   cancel.addEventListener('click', () => {
     showFeedback('');
     finishEditing();
@@ -145,13 +143,15 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!draft || save.disabled) return;
-    for (const field of [environment, project])
-      field.setCustomValidity(field.value.trim() ? '' : 'Enter the ID shown in T3.');
+    const environmentId = environment.value.trim();
+    const projectId = project.value.trim();
+    environment.setCustomValidity(!environmentId && (projectId || environment.value)
+      ? 'Enter the environment ID shown in T3.' : '');
+    project.setCustomValidity(!projectId && project.value ? 'Enter the project ID shown in T3.' : '');
     if (!form.reportValidity()) return;
     const patch = {};
-    for (const field of fields) {
-      const value = field.value.trim();
-      if (value !== draft.initial[field.name]) patch[field.name] = value;
+    for (const [key, value] of Object.entries({ model: model.value.trim(), environmentId, projectId })) {
+      if (value !== draft.initial[key]) patch[key] = value;
     }
     if (!Object.keys(patch).length) {
       finishEditing();
