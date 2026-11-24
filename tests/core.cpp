@@ -101,6 +101,9 @@ int main() {
         unsupportedSchemaLeavesDatabaseIntact(path / "pre-project-selection.db",
             "PRAGMA application_id=0x464c4f43; PRAGMA user_version=6;"
             "CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES (1);");
+        unsupportedSchemaLeavesDatabaseIntact(path / "dag-workflow-state.db",
+            "PRAGMA application_id=0x464c4f43; PRAGMA user_version=7;"
+            "CREATE TABLE workflows(id INTEGER PRIMARY KEY); INSERT INTO workflows VALUES (1);");
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;

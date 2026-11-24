@@ -21,6 +21,17 @@ bool present(std::string_view value, std::size_t limit = 8000) {
 }
 bool hasRun(const RunRef& r) { return !r.threadId.empty() && !r.runId.empty(); }
 
+Json sessionConfig(const Json& task) {
+    auto config = task.at("config");
+    if (const auto pin = field(task,"inputArtifactVersion"); !pin.empty()) {
+        auto& session = config["session"];
+        session["runtimeMode"] = "approval-required";
+        session["workspaceStrategy"] = {{"type","worktree"},{"baseRef",pin},
+                                        {"startFromOrigin",false},{"expectedCommit",pin}};
+    }
+    return config;
+}
+
 Json revision(const Json& task) { return task.value("currentRevision",Json(nullptr)); }
 
 bool hasPending(const Json& task) {
@@ -402,7 +413,7 @@ ORDER BY id)SQL");
         source.runId = field(report,"resultRunId");
         RunEvidence evidence;
         try {
-            evidence = t3.readRunEvidence(field(report,"environmentId"),task.at("config"),source,field(report,"status"));
+            evidence = t3.readRunEvidence(field(report,"environmentId"),sessionConfig(task),source,field(report,"status"));
         } catch (const std::exception& error) {
             evidence.availability = RunEvidence::Availability::ReportUnavailable;
             evidence.detail = error.what();
@@ -565,7 +576,7 @@ ORDER BY id)SQL");
 
     Observation observe(const Json& task) {
         try {
-            auto observed = t3.observe(field(task,"environmentId"),task["config"],runRef(task["activeRun"]));
+            auto observed = t3.observe(field(task,"environmentId"),sessionConfig(task),runRef(task["activeRun"]));
             const auto scrub = db.redactor(field(task,"botId"));
             scrub.requirePublic(observed.question.requestId);
             if (scrub.text(observed.resultRunId)!=observed.resultRunId) observed.resultRunId.clear();
@@ -712,7 +723,7 @@ ORDER BY id)SQL");
         c.environmentId = action.at("environmentId");
         c.projectId = field(task,"projectId");
         c.instruction = field(action,"instruction");
-        c.config = task["config"];
+        c.config = sessionConfig(task);
         c.target = runRef(action.value("target",Json::object()));
         c.questionId = field(action,"questionId");
         c.answers = action.value("answers",Json::object());
@@ -798,13 +809,7 @@ ORDER BY id)SQL");
 INSERT OR IGNORE INTO session_queue_cancellations(participation_id,run,stop_id)
 SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_through>=?
 )SQL",{outcome.run.runId,participation,task.at("sourceMessageId")});
-                    if (task.contains("workflowId")) {
-                        const auto now = options.clock();
-                        db.exec("UPDATE workflow_stages SET confirmed_state='running',confirmed_at=?,unreachable=0,"
-                                "status=CASE WHEN status='pending' THEN 'running' ELSE status END,"
-                                "deadline=CASE WHEN deadline=0 AND json_extract(spec,'$.softDeadlineSeconds')>0 "
-                                "THEN ?+json_extract(spec,'$.softDeadlineSeconds') ELSE deadline END WHERE task_id=?", {now,now,id});
-                    }
+                    if (task.contains("workflowId")) db.stageStarted(id,options.clock());
                     task["activeRun"] = runJson(outcome.run);
                     task["activeRun"]["ownerBotId"] = task["botId"];
                     task["activeRun"]["environmentId"] = task["environmentId"];
@@ -1079,7 +1084,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
     }
 
     bool canComplete(const Json& task, const Json& event) const {
-        if (task.value("replanning",false)) return false;
+        if (task.contains("workflowId") || task.value("replanning",false)) return false;
         if (!task.value("newSessionRequired",false) && hasSettledRun(task) &&
             task.at("lastRun").at("revisionId") == revision(task) &&
             field(settledSessionReport(task),"evidenceStatus") != "report_unavailable") return true;
@@ -1367,7 +1372,7 @@ ORDER BY j.id
                 if (source.at("taskId") == task.at("sourceTaskId")) quoteSource(source);
         }
         if (task.contains("workflowId")) {
-            for (const auto& source : task.at("sourceResultRefs")) quoteSource(source);
+            for (const auto& source : task.value("sourceResultRefs",Json::array())) quoteSource(source);
             db.appendStageRequirements(instruction,task);
         }
         quotes.remaining += recentReportBudget;
@@ -2303,7 +2308,6 @@ void Runtime::tick() {
     p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit,p_->options.clock()))
         p_->runTurn(id);
-    p_->db.advanceWorkflows(p_->options.clock());
     for (auto id : p_->nextProjects(Impl::batchLimit)) p_->step(id);
     p_->db.deliverChannels(p_->shutdown.get_token());
 }
@@ -2348,7 +2352,6 @@ void Runtime::tickConcurrent() {
             }
         }
     }
-    p_->deferContendedWork("workflows",[&] { p_->db.advanceWorkflows(p_->options.clock()); });
     p_->deferContendedWork("task scheduling",[&] {
         p_->persistTaskInferences();
         for (auto id : p_->nextProjects(Impl::batchLimit - p_->workers.size()))

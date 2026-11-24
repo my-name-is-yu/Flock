@@ -68,6 +68,19 @@ int main(int argc, char** argv) {
         const auto changed = adapter->observe(environment,command.config,started.run);
         check(changed.kind == Observation::Kind::Finished && changed.status == "failed" && changed.report != "Pinned report",
               "settled specialist result is invalidated when the actual workspace drifted");
+        auto recovery = command;
+        recovery.launchReceiptThreadId = started.run.threadId;
+        const auto recovered = adapter->reconcile(recovery);
+        check(recovered.kind == Delivery::Kind::Accepted && recovered.run.runId == started.run.runId,
+              "worktree drift prevented recovery of the exact Run for stopping");
+        auto followUp = command;
+        followUp.tool = "follow_up";
+        followUp.actionId = "verify-rerun";
+        followUp.target = started.run;
+        const auto refused = adapter->send(followUp);
+        check(refused.kind == Delivery::Kind::Settings && refused.definitelyUnsent &&
+              refused.detail.find("changed from the saved commit") != std::string::npos,
+              "follow-up did not reject worktree drift: " + refused.detail);
         command.actionId = "wrong-worker";
         const auto wrong = adapter->send(command);
         check(wrong.kind == Delivery::Kind::NotAccepted && wrong.definitelyUnsent,

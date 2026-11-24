@@ -412,7 +412,7 @@ LaunchArguments launchArgs(const Command& command) {
         if (!gitCommit(*pin) || str(workspace,"type") != "worktree" || str(workspace,"baseRef") != *pin ||
             workspace.value("startFromOrigin",Json(nullptr)) != Json(false) ||
             str(args,"runtimeMode") != "approval-required" || command.actionId.size() > 250)
-            throw Failure(Failure::Kind::Settings, "Invalid pinned specialist workspace");
+            throw Failure(Failure::Kind::Settings, "Invalid pinned worktree");
     }
     if (args.contains("model")) {
         args["modelSelection"] = {{"instanceId", std::move(args["providerInstanceId"])}, {"model", std::move(args["model"])}};
@@ -634,7 +634,7 @@ std::optional<RunEvidence> pinnedEvidenceProblem(Client& client, const Json& con
     const auto pin = str(*workspace,"expectedCommit");
     RunEvidence problem;
     problem.availability = RunEvidence::Availability::ReportUnavailable;
-    problem.detail = "Could not verify the specialist's pinned workspace";
+    problem.detail = "Could not verify the pinned worktree";
     if (!gitCommit(pin) || !loopbackGitHost(origin)) return problem;
     const auto head = threadHead(client,source.threadId);
     const auto& thread = head.at("thread");
@@ -642,7 +642,7 @@ std::optional<RunEvidence> pinnedEvidenceProblem(Client& client, const Json& con
     if (!actual) return problem;
     if (actual->clean && actual->commit == pin) return {};
     problem.availability = RunEvidence::Availability::Available;
-    problem.detail = "The specialist worktree changed from the saved commit";
+    problem.detail = "The pinned worktree changed from the saved commit";
     problem.report = problem.detail;
     return problem;
 }
@@ -755,21 +755,21 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
         if (str(thread,"projectId") != command.projectId || str(thread,"createdBy") != "agent" ||
             str(thread,"creationSource") != "mcp" || boolean(thread,"archived")) invalidResponse();
         if (!member(thread,"latestRunId").is_null() || !member(thread,"activeRunId").is_null())
-            return result(Outcome::Unknown,"The provisioned specialist already has a Run. Check its saved action in T3.");
+            return result(Outcome::Unknown,"The provisioned Session already has a Run. Check its saved action in T3.");
         if (member(thread,"worktreePath").is_null()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
         const auto workspace = workspaceHead(client,command.projectId,thread);
         if (!workspace || !workspace->clean || workspace->commit != pin)
-            return {Outcome::NotAccepted,{},"The provisioned specialist worktree does not match the saved commit",true};
+            return {Outcome::NotAccepted,{},"The provisioned worktree does not match the saved commit",true};
         const auto sent = client.call("t3_thread_send",{{"threadId",threadId},{"mode","queue"},
             {"message",std::move(prompt)},{"clientRequestId",command.actionId+":start"}});
         if (str(sent,"threadId") != threadId || str(sent,"runId").empty() ||
             (str(sent,"delivery") != "started" && str(sent,"delivery") != "queued")) invalidResponse();
         return result(Outcome::Accepted,{}, {threadId,str(sent,"runId"),str(launched,"link")});
     }
-    return result(Outcome::Unknown,"The specialist worktree is still being provisioned");
+    return result(Outcome::Unknown,"The pinned worktree is still being provisioned");
 }
 
 class Adapter final : public T3 {
@@ -789,7 +789,7 @@ public:
             requireOperate(connection);
             if (launch) {
                 if (!pin.empty() && !loopbackGitHost(checkedUrl(connection.mcpUrl).origin))
-                    return result(Outcome::Settings,"Pinned specialist worktrees require a local T3 environment");
+                    return result(Outcome::Settings,"Pinned worktrees require a local T3 environment");
                 Client client(std::move(connection));
                 const auto project = client.call("t3_project_read",{{"projectId",command.projectId}});
                 if (str(project,"id") != command.projectId)
@@ -838,7 +838,7 @@ public:
                 }
                 if (!launchArguments.pin.empty()) {
                     if (!loopbackGitHost(origin))
-                        return {Outcome::Settings,{},"Pinned specialist worktrees require a local T3 environment",true};
+                        return {Outcome::Settings,{},"Pinned worktrees require a local T3 environment",true};
                     invoked = true;
                     auto delivery = launchPinned(client,command,std::move(launchArguments.parameters),launchArguments.pin,launchWarning);
                     delivery.launchWarning = std::move(launchWarning);
@@ -857,8 +857,11 @@ public:
                     previous = threadHead(client,command.target.threadId).at("thread");
                     if (str(previous,"projectId") != command.projectId || boolean(previous,"archived"))
                         return {Outcome::Settings,{},"The selected T3 Session moved projects or was archived",true};
-                } else if (!followUpReady(client, command)) {
-                    return result(Outcome::NotAccepted, "T3 has other work or the assigned Run could not be confirmed as the latest settled Run");
+                } else {
+                    if (auto problem = pinnedEvidenceProblem(client,command.config,command.target,"completed",origin))
+                        return {Outcome::Settings,{},std::move(problem->detail),true};
+                    if (!followUpReady(client, command))
+                        return result(Outcome::NotAccepted, "T3 has other work or the assigned Run could not be confirmed as the latest settled Run");
                 }
                 invoked = true;
                 reply = client.call("t3_thread_send", {{"threadId", command.target.threadId}, {"mode", "queue"},
@@ -895,18 +898,9 @@ public:
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
             if (command.tool == "delegate" || command.tool == "follow_up" || command.tool == "start_in_session") {
+                // Recover the assigned Run even if its worktree has drifted so it can still be stopped.
+                // Worktree proof is checked separately before sending work and before accepting its report.
                 auto recovered = reconcileWork(client, command);
-                if (command.tool == "delegate" && recovered.kind == Outcome::Accepted) {
-                    const auto pin = launchArgs(command).pin;
-                    if (!pin.empty()) {
-                        if (!loopbackGitHost(origin))
-                            return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
-                        const auto head = threadHead(client,recovered.run.threadId);
-                        const auto workspace = workspaceHead(client,command.projectId,head.at("thread"));
-                        if (!workspace || !workspace->clean || workspace->commit != pin)
-                            return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
-                    }
-                }
                 useLocalThreadLink(recovered.run,command.environmentId,origin);
                 return recovered;
             }

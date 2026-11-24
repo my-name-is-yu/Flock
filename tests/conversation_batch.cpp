@@ -428,8 +428,7 @@ void conversationReadParity() {
     f.store->operate(localOwner,TaskTarget::from(f.store->task(task),0),"cancel");
     const auto result = std::stoll(f.query("SELECT id FROM journal WHERE kind='cancelled' AND task_id=" +
                                           std::to_string(task)));
-    f.receive({call("start_workflow",{{"request","Collect the release notes"},{"stages",{
-        {{"stageId","collect"},{"role","collect"}}}}})});
+    f.receive({call("start_workflow",{{"request","Implement the release changes"}})});
     f.runtime->runConversations();
     f.checkFinished(2);
     const auto workflow = f.results().at(0).at("workflowId");

@@ -127,8 +127,7 @@ void workflowLaunchUsesPolicyAndRedactsQueuedPrompt() {
     const Person owner{"owner",true};
     policy.changeNeverRule(owner,Action::environment_launch,"env",true);
     const std::string secret = "workflow-credential-registered-after-queueing";
-    f.call("start_workflow",{{"request","Collect the release notes " + secret},{"stages",Json::array({
-        {{"stageId","collect"},{"role","collect"}}})}});
+    f.call("start_workflow",{{"request","Collect the release notes " + secret}});
     f.ticks(2);
     const Id task = f.status()["stages"][0]["taskId"];
     const auto wait = f.store->task(task).at("wait");
@@ -253,11 +252,15 @@ void overlapKeepsEachSearchFilter() {
 
 void freshStandaloneSessionIncludesEarlierEvidence() {
     Fixture f;
-    f.call("start_workflow",{{"request","Compare the options"},{"stages",Json::array({{{"stageId","compare"},{"role","collect"}}})}});
-    f.ticks(2);
-    const Id sourceTask = f.status()["stages"][0]["taskId"];
+    f.bot.work = [](const ModelInput& input) -> Decision {
+        if (input.event.at("kind")=="intake")
+            return {"delegate",{{"instruction","Compare the available options"}},"Compare them in T3"};
+        return {"complete",{{"report",input.event.at("report")}},"Report the comparison"};
+    };
+    const Id sourceTask = f.call("start_task",{{"request","Compare the options"},{"doneWhen","Report the differences"}}).at("taskId");
+    f.ticks(3);
     f.t3.finish("run-1","Option B must preserve the retry window");
-    f.ticks(1);
+    f.ticks(2);
     const auto history = f.store->history(sourceTask);
     const auto report = std::ranges::find_if(history,[](const Json& item) { return item.at("kind")=="report"; });
     require(report!=history.end(),"fixture did not save the source report");
@@ -288,8 +291,7 @@ void stageRequestKeepsEmbeddedNul() {
     Fixture f;
     std::string request(1,'\0');
     request += "Compare the bytes after the marker";
-    f.call("start_workflow",{{"request","Inspect the binary marker"},{"stages",Json::array({
-        {{"stageId","inspect"},{"role","collect"},{"request",request}}})}});
+    f.call("start_workflow",{{"request",request}});
     f.ticks(2);
     const auto task = f.store->task(f.status()["stages"][0]["taskId"]);
     require(task["request"]==request && task["intent"]==request && task["doneWhen"]==request,
@@ -299,143 +301,69 @@ void stageRequestKeepsEmbeddedNul() {
             "stage dispatch lost the request bytes after the marker");
 }
 
-void verifyAfterRestart(bool advance) {
+void verifyAfterRestart() {
     Fixture f;
     const Id id = f.call("start_workflow",{{"request","Implement feature"},{"verificationCriteria","Run tests"}}).at("workflowId");
     f.ticks(2);
     require(f.t3.commands.size()==1,"expected single implementation Session");
     f.t3.finish("run-1",{{"artifactVersion",shaA}});
     f.ticks(1);
-    require(f.status().at("stages")[1]["status"]=="pending","verification dispatched prematurely");
     const auto beforeRestart = f.status();
+    require(beforeRestart.at("stages")[1]["status"]=="pending" && f.t3.commands.size()==1,
+            "verification dispatched before the implementation settled");
     f.restart();
-    require(f.status()==beforeRestart,"restart lost workflow IDs, dependencies or artifact evidence");
+    require(f.status()==beforeRestart,"restart lost workflow IDs or artifact evidence");
     f.ticks(3);
-    auto status = f.status();
-    require(f.t3.commands.size()==2 && f.t3.commands.back().tool=="delegate" &&
-        f.t3.commands.back().instruction.find(shaA)!=std::string::npos &&
-        f.t3.commands.back().instruction.find("Implement feature")!=std::string::npos &&
-        status["stages"][1]["inputArtifactVersion"]==shaA,"lost pin or reran implementation");
-    if (advance) {
-        f.call("instruct_workflow_stage",{{"workflowId",id},{"stageId","implement"},{"instruction","Revise implementation"}});
-        f.ticks(3);
-        require(f.t3.commands.size()==3 && f.t3.commands.back().target.threadId=="thread-1","wrong revision Session");
-        f.t3.finish("run-3",{{"artifactVersion",shaB}});
-        f.ticks(1);
-        require(f.status()["stages"][0]["outputArtifactVersion"]==shaB,"lost new version");
-    }
+    const auto status = f.status();
+    const auto& verifier = f.t3.commands.back();
+    const auto& session = verifier.config.at("session");
+    const Json worktree = {{"type","worktree"},{"baseRef",shaA},{"startFromOrigin",false},{"expectedCommit",shaA}};
+    require(f.t3.commands.size()==2 && verifier.tool=="delegate" &&
+            verifier.environmentId==f.t3.commands.front().environmentId && verifier.projectId==f.t3.commands.front().projectId &&
+            verifier.instruction.find("Run tests")!=std::string::npos &&
+            verifier.instruction.find("Implement feature")!=std::string::npos &&
+            verifier.instruction.find("run-1")!=std::string::npos &&
+            status["stages"][1]["inputArtifactVersion"]==shaA &&
+            session.at("runtimeMode")=="approval-required" && session.at("workspaceStrategy")==worktree,
+            "verification did not use the implementation's exact commit, evidence and project");
     f.t3.finish("run-2",{{"artifactVersion",shaA},{"verdict","pass"}});
     f.ticks(2);
-    status = f.call("workflow_status",{{"workflowId",id}});
-    require(status["stages"][1]["verified"]==!advance && status["verdicts"].size()==1 &&
-        status["verdicts"][0]["artifactVersion"]==shaA && status["verdicts"][0]["verdict"]=="pass" &&
-        status["status"]==(advance ? "needs_verification" : "completed"),"incorrect versioned verification");
-    require(status["stages"][1].value("currentVerdict",std::string{})==(advance ? "" : "pass"),
-            "the stage showed a verdict for an outdated artifact or lost the current verdict");
-    if (advance) {
-        f.call("instruct_workflow_stage",{{"workflowId",id},{"stageId","verify"},{"instruction","Check the revised artifact"}});
-        f.ticks(2);
-        require(f.t3.commands.back().instruction.find(shaB)!=std::string::npos,"new verification was given an obsolete pin");
-        require(!f.status()["stages"][1].contains("currentVerdict"),"a running verification showed the earlier verdict");
-        f.t3.finish("run-4",{{"artifactVersion",shaB},{"verdict","pass"}});
-        f.ticks(1);
-        status = f.status();
-        require(status["status"]=="completed" && status["stages"][1]["verified"]==true &&
-            status["stages"][1]["currentVerdict"]=="pass" &&
-            status["verdicts"].size()==2 && status["verdicts"][0]["artifactVersion"]==shaA &&
-            status["verdicts"][1]["artifactVersion"]==shaB,"new verification overwrote old evidence");
-        f.call("instruct_workflow_stage",{{"workflowId",id},{"stageId","verify"},{"instruction","Check again"}});
-        f.ticks(2);
-        f.t3.finish("run-5",{{"artifactVersion",shaB}});
-        f.ticks(1);
-        status = f.status();
-        require(status["stages"][1]["status"]=="failed" && !status["stages"][1].contains("currentVerdict") &&
-                status["verdicts"].size()==2,"an invalid report exposed a prior verdict for the same artifact");
-    }
+    const auto finished = f.call("workflow_status",{{"workflowId",id}});
+    require(finished["status"]=="completed" && finished["stages"][1]["verified"]==true &&
+            finished["stages"][1]["currentVerdict"]=="pass" && finished["verdicts"].size()==1 &&
+            finished["verdicts"][0]["artifactVersion"]==shaA &&
+            finished["verdicts"][0]["runRef"]["threadId"]=="thread-2" && f.t3.commands.size()==2,
+            "exact-version verification was lost, misattributed, or duplicated");
 }
 
-void reviseQueuedVerifier() {
+void reviseActiveVerifier() {
     Fixture f;
-    f.call("start_workflow",{{"request","Preserve duplicate rows"},{"verificationCriteria","Run smoke tests"}});
-    f.ticks(2);
-    const Id workflow = f.status().at("workflowId");
-    const auto blocker = f.call("start_workflow",{{"request","Collect logs"},
-        {"stages",Json::array({{{"stageId","logs"},{"role","collect"}}})}}).at("workflowId");
-    f.ticks(1);
-    f.t3.finish("run-1",{{"artifactVersion",shaA}});
-    f.ticks(3);
-    const auto blocked = f.call("workflow_status",{{"workflowId",workflow}});
-    const auto task = f.store->task(blocked["stages"][1]["taskId"]);
-    require(task["state"]=="queued" && task["blockedBy"]["id"]==f.status()["stages"][0]["taskId"],
-            "verifier was not queued behind the other workflow");
-    f.call("change_task",{{"taskId",task["id"]},{"generation",task["generation"]},{"revisionId",task["currentRevision"]},
-        {"doneWhen","Run the duplicate-row regression"},{"instruction","Use the revised criteria."}});
-    f.t3.finish("run-2","Logs collected");
-    f.ticks(4);
-    require(f.status()["workflowId"]==blocker && f.status()["status"]=="completed" && f.t3.commands.size()==3,
-            "verifier did not start when the project slot became available");
-    const auto& assignment = f.t3.commands.back().instruction;
-    require(assignment.find("Run the duplicate-row regression")!=std::string::npos &&
-            assignment.find("Pinned input artifact version: "+shaA)!=std::string::npos &&
-            assignment.find("Return only JSON with artifactVersion and verdict (pass or fail)")!=std::string::npos &&
-            assignment.find("Requested change: Preserve duplicate rows")!=std::string::npos,
-            "queued criteria edit lost the verification assignment");
-    f.t3.finish("run-3",{{"artifactVersion",shaA},{"verdict","pass"}});
-    f.ticks(1);
-    const auto settled = f.call("workflow_status",{{"workflowId",workflow}});
-    require(settled["status"]=="completed" && settled["stages"][1]["verified"]==true &&
-            settled["verdicts"].size()==1 && settled["verdicts"][0]["artifactVersion"]==shaA,
-            "revised verifier did not settle against its pinned artifact");
-}
-
-void rerunRevisedDependentStage() {
-    Fixture f;
-    const Id workflow = f.call("start_workflow",{{"request","Implement feature"},{"verificationCriteria","Run smoke tests"}})
-        .at("workflowId");
+    f.call("start_workflow",{{"request","Implement feature"},{"verificationCriteria","Run smoke tests"}});
     f.ticks(2);
     f.t3.finish("run-1",{{"artifactVersion",shaA}});
     f.ticks(3);
     const auto task = f.store->task(f.status()["stages"][1]["taskId"]);
-    const std::string intent = "Verify backward compatibility", criteria = "Run the migration suite";
     f.call("change_task",{{"taskId",task["id"]},{"generation",task["generation"]},{"revisionId",task["currentRevision"]},
-        {"intent",intent},{"doneWhen",criteria},{"instruction","Use the revised assignment."}});
+        {"doneWhen","Run the migration suite"},{"instruction","Use the revised criteria."}});
     f.ticks(2);
     require(f.t3.interrupts.contains("run-2"),"active verifier did not stop for the revision");
     f.t3.finish("run-2",Json::object(),"interrupted");
     f.ticks(5);
-    require(f.t3.commands.size()==3,"revised verifier did not start");
+    require(f.t3.commands.size()==3 &&
+            f.t3.commands.back().instruction.find("Run the migration suite")!=std::string::npos &&
+            f.t3.commands.back().config["session"]["workspaceStrategy"]["expectedCommit"]==shaA,
+            "revised verification did not retain its exact pin and revised criteria");
     f.t3.finish("run-3",{{"artifactVersion",shaA},{"verdict","pass"}});
     f.ticks(1);
-    require(f.status()["stages"][1]["verified"]==true,"revised verifier did not settle");
-
-    f.call("instruct_workflow_stage",{{"workflowId",workflow},{"stageId","implement"},{"instruction","Build the next revision"}});
-    f.ticks(3);
-    f.t3.finish("run-4",{{"artifactVersion",shaB}});
-    f.ticks(1);
-    f.call("instruct_workflow_stage",{{"workflowId",workflow},{"stageId","verify"},{"instruction","Repeat with the new build"}});
-    f.restart();
-    f.ticks(3);
-    const Id rerun = f.status()["stages"][1]["taskId"];
-    const auto revised = f.store->task(rerun);
-    require(revised["id"]!=task["id"] && revised["intent"]==intent && revised["doneWhen"]==criteria,
-            "dependent rerun lost the task revision");
-    const auto& assignment = f.t3.commands.back().instruction;
-    require(f.t3.commands.size()==5 && assignment.find(intent)!=std::string::npos &&
-            assignment.find(criteria)!=std::string::npos && assignment.find(shaB)!=std::string::npos &&
-            assignment.find(shaA)==std::string::npos && assignment.find("Repeat with the new build")!=std::string::npos,
-            "dependent rerun lost its revised assignment or rebound to the wrong artifact");
-    f.t3.finish("run-5",{{"artifactVersion",shaB},{"verdict","pass"}});
-    f.ticks(1);
-    require(f.status()["status"]=="completed" && f.status()["verdicts"].size()==2,
-            "dependent rerun did not settle or lost earlier evidence");
+    require(f.status()["stages"][1]["verified"]==true,"revised verification did not settle");
 }
 
-void rejectInvalidGraphAndArtifact() {
+void rejectCustomStagesAndMutableArtifact() {
     Fixture f;
-    f.turn("Cycle","start_workflow",{{"request","Invalid cycle"},{"stages",Json::array({
-        {{"stageId","a"},{"role","implement"},{"dependsOn",{"b"}}},
-        {{"stageId","b"},{"role","verify"},{"dependsOn",{"a"}}}})}});
-    require(f.bot.result.at("ok")==false && f.store->workflows("bot").empty(),"partial cyclic workflow was saved");
+    f.turn("Collect notes","start_workflow",{{"request","Collect release notes"},{"stages",Json::array({
+        {{"stageId","notes"},{"role","collect"}}})}});
+    require(f.bot.result.at("ok")==false && f.store->workflows("bot").empty() && f.store->tasks("bot").empty(),
+            "custom stages were accepted or partially materialized");
     f.call("start_workflow",{{"request","Implement feature"}});
     f.ticks(2);
     f.t3.finish("run-1",{{"artifactVersion","main"}});
@@ -447,34 +375,29 @@ void rejectInvalidGraphAndArtifact() {
 
 void stopAndDeadline() {
     Fixture f;
-    auto started = f.call("start_workflow",{{"request","Check independent subsystems"},{"softDeadlineSeconds",1},
-        {"stages",Json::array({{{"stageId","one"},{"role","collect"}},{{"stageId","two"},{"role","collect"}},
-            {{"stageId","three"},{"role","combine"},{"dependsOn",{"one","two"}}}})}});
-    const auto id = started.at("workflowId");
+    const auto id = f.call("start_workflow",{{"request","Implement with a soft deadline"},{"softDeadlineSeconds",1}}).at("workflowId");
     f.ticks(2);
-    require(f.t3.commands.size()==2,"expected two concurrent Sessions");
     ++f.now;
-    f.ticks(1);
-    require(f.status()["stages"][0]["deadlineExceeded"]==true && f.status()["stages"][0]["needsAttention"]==true &&
-        f.status()["stages"][0]["status"]=="running" && f.t3.interrupts.empty(),"deadline interrupted a Session");
+    auto status = f.call("workflow_status",{{"workflowId",id}});
+    require(status["stages"][0]["deadlineExceeded"]==true && status["stages"][0]["needsAttention"]==true &&
+        status["stages"][0]["status"]=="running" && f.t3.interrupts.empty(),"deadline interrupted the Session");
     require(f.call("stop_workflow",{{"workflowId",id}})["allStopped"]==false,"request claimed stop confirmation");
     f.ticks(1);
-    require(f.t3.interrupts==std::set<std::string>{"run-1","run-2"},"missing individual stop request");
-    f.t3.finish("run-1",Json::object(),"cancelled");
-    f.t3.observations["run-2"].kind = Observation::Kind::Unavailable;
+    require(f.t3.interrupts==std::set<std::string>{"run-1"},"missing interrupt");
+    f.t3.observations["run-1"].kind = Observation::Kind::Unavailable;
     f.ticks(2);
-    auto status = f.status();
-    require(status["allStopped"]==false && status["stages"][1]["status"]=="unreachable" &&
-        status["stages"][1]["lastConfirmedState"]=="running","unreachable Session marked stopped");
+    status = f.call("workflow_status",{{"workflowId",id}});
+    require(status["allStopped"]==false && status["stages"][0]["status"]=="unreachable" &&
+        status["stages"][0]["lastConfirmedState"]=="running","unreachable Session marked stopped");
     f.restart();
-    require(f.status()==status,"stop state lost on restart");
-    f.t3.finish("run-2",Json::object(),"cancelled");
+    require(f.call("workflow_status",{{"workflowId",id}})==status,"stop state lost on restart");
+    f.t3.finish("run-1",{{"artifactVersion",shaA}});
     f.ticks(3);
-    require(f.status()["allStopped"]==true && f.status()["status"]=="stopped" && f.t3.commands.size()==2,
-        "stop did not settle or downstream stage started");
+    require(f.status()["allStopped"]==true && f.status()["status"]=="stopped" && f.t3.commands.size()==1,
+        "completed implementation started the verifier after a stop request");
 }
 
-void uncertainLaunchAndStageStop() {
+void uncertainLaunchAndStop() {
     Fixture f;
     f.t3.loseReceipt = true;
     const auto id = f.call("start_workflow",{{"request","New implementation"}}).at("workflowId");
@@ -484,7 +407,7 @@ void uncertainLaunchAndStageStop() {
     f.ticks(1);
     require(f.status()["stages"][0]["runRef"]["runId"]=="run-1" && f.t3.commands.size()==1,
             "ambiguous launch was duplicated or lost");
-    f.call("stop_workflow_stage",{{"workflowId",id},{"stageId","implement"}});
+    f.call("stop_workflow",{{"workflowId",id}});
     f.ticks(1);
     require(f.t3.interrupts.contains("run-1") && f.status()["stages"][0]["status"]=="stop_requested",
             "stage interrupt acknowledgement treated as terminal");
@@ -496,9 +419,7 @@ void uncertainLaunchAndStageStop() {
 void missingStageReportCannotAdvanceWorkflow() {
     for (const bool recover : {false,true}) {
         Fixture f;
-        f.call("start_workflow",{{"request","Review and publish"},{"stages",Json::array({
-            {{"stageId","collect"},{"role","collect"}},
-            {{"stageId","publish"},{"role","publish"},{"dependsOn",{"collect"}}}})}});
+        f.call("start_workflow",{{"request","Implement a release change"}});
         f.ticks(2);
         f.t3.finish("run-1",{{"artifactVersion",shaA}});
         auto& observation = f.t3.observations.at("run-1");
@@ -561,67 +482,6 @@ void stopDuringUnconfirmedStart() {
     require(f.status()["allStopped"]==true && f.t3.commands.size()==1,"reconciled stop admitted a downstream stage");
 }
 
-void reopenedStageWaitsForProject() {
-    Fixture f;
-    const Json one = {{"request","Independent work"},{"stages",Json::array({{{"stageId","only"},{"role","collect"}}})}};
-    const auto first = f.call("start_workflow",one).at("workflowId");
-    f.ticks(2);
-    f.t3.finish("run-1","Initial findings");
-    f.ticks(1);
-    f.call("start_workflow",one);
-    f.ticks(2);
-    const auto revised = f.call("instruct_workflow_stage",{{"workflowId",first},{"stageId","only"},{"instruction","Check again"}});
-    const Id task = revised["stages"][0]["taskId"];
-    require(f.store->task(task)["blockedBy"]["id"]==f.status()["stages"][0]["taskId"],"reopened task bypassed the queue");
-    f.ticks(4);
-    require(f.t3.commands.size()==2,"older stage took another workflow's active slot");
-    f.t3.finish("run-2","Second workflow done");
-    f.ticks(4);
-    require(f.t3.commands.size()==3 && f.t3.commands.back().tool=="follow_up" &&
-            f.t3.commands.back().target.threadId=="thread-1","reopened task lost its Session");
-}
-
-void invalidateDependencyChain() {
-    Fixture f;
-    const auto id = f.call("start_workflow",{{"request","Release tested changes"},{"stages",Json::array({
-        {{"stageId","build"},{"role","implement"}},{{"stageId","notes"},{"role","collect"}},
-        {{"stageId","test"},{"role","verify"},{"dependsOn",{"build"}}},
-        {{"stageId","release"},{"role","publish"},{"dependsOn",{"test","notes"}},{"inputFrom","test"}}})}}).at("workflowId");
-    f.ticks(2);
-    f.t3.finish("run-1",{{"artifactVersion",shaA}});
-    f.t3.finish("run-2","Include the operator notes");
-    f.ticks(3);
-    f.t3.finish("run-3",{{"artifactVersion",shaA},{"verdict","pass"}});
-    f.ticks(3);
-    const auto instruction = f.t3.commands.back().instruction;
-    require(instruction.find("Include the operator notes")!=std::string::npos && instruction.find("run-2")!=std::string::npos &&
-            instruction.find(shaA)!=std::string::npos && instruction.find("run-3")!=std::string::npos,
-            "join did not receive both attributed reports");
-    f.t3.finish("run-4","Released A");
-    f.ticks(1);
-    require(f.status()["status"]=="completed","first release did not finish");
-    const auto revise = [&](std::string stage) {
-        f.call("instruct_workflow_stage",{{"workflowId",id},{"stageId",stage},{"instruction","Repeat for B"}});
-        f.ticks(3);
-    };
-    revise("build");
-    f.t3.finish("run-5",{{"artifactVersion",shaB}});
-    f.ticks(1);
-    require(f.status()["stages"][3]["outdated"]==true,"transitively stale release counted as current");
-    revise("test");
-    f.t3.finish("run-6",{{"artifactVersion",shaB},{"verdict","pass"}});
-    f.ticks(1);
-    f.restart();
-    require(f.status()["stages"][2]["verified"]==true && f.status()["stages"][3]["outdated"]==true &&
-            f.status()["status"]=="needs_verification","B reused the release for A");
-    revise("release");
-    require(f.t3.commands.size()==7 && f.t3.commands.back().instruction.find(shaB)!=std::string::npos,
-            "reopened release did not bind the new dependency");
-    f.t3.finish("run-7","Released B");
-    f.ticks(1);
-    require(f.status()["status"]=="completed","updated release remained stale");
-}
-
 void settledWhileReadingInstruction() {
     Fixture f;
     f.call("start_workflow",{{"request","Preserve duplicate input rows"}});
@@ -681,6 +541,24 @@ void stopBeforeFirstSend() {
         f.ticks(3);
         require(f.t3.commands.empty() && f.status()["allStopped"]==true,"stop admitted pending or prepared work");
     }
+}
+
+void stopBeforeVerificationDispatch() {
+    Fixture f;
+    const Id id = f.call("start_workflow",{{"request","Prepare changes for verification"}}).at("workflowId");
+    f.ticks(2);
+    f.t3.finish("run-1",{{"artifactVersion",shaA}});
+    f.ticks(1);
+    const auto verify = f.status()["stages"][1];
+    require(verify["taskId"]!=0 && verify["status"]=="pending" && f.t3.commands.size()==1,
+            "verification fixture did not reach the queued handoff");
+    f.call("stop_workflow",{{"workflowId",id}});
+    f.restart();
+    f.ticks(4);
+    const auto stopped = f.status();
+    require(stopped["allStopped"]==true && stopped["stages"][1]["status"]=="stopped" &&
+            stopped["artifacts"].size()==1 && stopped["verdicts"].empty() && f.t3.commands.size()==1,
+            "a queued verification survived the stop or lost implementation evidence");
 }
 
 void scopedCompactionPages() {
@@ -808,21 +686,18 @@ int main() {
         expansionCursorKeepsItsSearchRange();
         overlapKeepsEachSearchFilter();
         freshStandaloneSessionIncludesEarlierEvidence();
-        verifyAfterRestart(false);
-        verifyAfterRestart(true);
+        verifyAfterRestart();
         stageRequestKeepsEmbeddedNul();
-        reviseQueuedVerifier();
-        rerunRevisedDependentStage();
-        rejectInvalidGraphAndArtifact();
+        reviseActiveVerifier();
+        rejectCustomStagesAndMutableArtifact();
         stopAndDeadline();
-        uncertainLaunchAndStageStop();
+        uncertainLaunchAndStop();
         missingStageReportCannotAdvanceWorkflow();
         stopDuringUnconfirmedStart();
-        reopenedStageWaitsForProject();
-        invalidateDependencyChain();
         settledWhileReadingInstruction();
         observeAfterUnsentAnswer();
         stopBeforeFirstSend();
+        stopBeforeVerificationDispatch();
         scopedCompactionPages();
         historyKeepsLargestFittingPrefix();
         compactAndContinue();

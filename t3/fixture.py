@@ -652,20 +652,34 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["threadId"] == "pinned-worker" and args["runId"] == "next-run"
             return {"threadId": "pinned-worker", "runId": "next-run", "status": "completed", "timedOut": False,
                     "resultRun": {"runId": "next-run", "status": "completed"}}
+        if name == "t3_queue":
+            assert args["action"] == "list" and args["threadId"] == "pinned-worker"
+            return {"items": [], "nextCursor": None}
         assert name == "t3_thread_read"
         thread = args["threadId"]
+        sent = state.get("stockPromptSends", {}).get(thread + ":" + thread + ":start")
         summary = self.summary(thread) | {
-            "activeRunId": None, "latestRunId": None, "archived": False, "projectId": "project",
+            "activeRunId": None, "latestRunId": "next-run" if sent else None,
+            "archived": False, "projectId": "project", "pendingRequestCount": 0,
             "worktreePath": state["stockWrongTree" if thread == "wrong-worker" else "stockTree"],
         }
         rows = []
-        if thread == "pinned-worker":
-            row = self.item(thread, 1, "next-run", "assistant_message", "Pinned report") | {
-                "textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}
-            if args.get("afterPosition", -1) < row["position"] < args.get("beforePosition", float("inf")):
-                rows.append(row)
-        return {"thread": summary, "items": rows, "recentRuns": [], "hasMore": False,
-                "nextPosition": rows[-1]["position"] if rows else None, "earlierPosition": None}
+        if sent:
+            rows = [
+                self.item(thread, 1, "next-run", "user_message", sent["payload"]["message"], source="mcp") |
+                {"textTruncated": False, "nextTextOffset": None},
+                self.item(thread, 2, "next-run", "assistant_message", "Pinned report") |
+                {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"},
+            ]
+            rows = [row for row in rows
+                    if args.get("afterPosition", -1) < row["position"] < args.get("beforePosition", float("inf"))]
+        limit = args["limit"]
+        before = "beforePosition" in args
+        page = rows[-limit:] if before else rows[:limit]
+        more = len(rows) > limit
+        return {"thread": summary, "items": page, "recentRuns": [], "hasMore": more,
+                "nextPosition": page[-1]["position"] if page else None,
+                "earlierPosition": page[0]["position"] if before and more else None}
 
     def result_history(self, thread_id, scenario, recent, rows):
         def add(run, kind, text, source="provider", **fields):

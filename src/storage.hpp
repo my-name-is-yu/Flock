@@ -282,10 +282,10 @@ struct Store::Impl {
     Json conversationHistory(const conversation::Message&, const Json& summaries, std::size_t expandedBytes) const;
     Json contextTool(std::string_view tool, const Json&, const conversation::Message&, int step);
     Id startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing);
-    Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);
+    Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, const Json& routing, Seconds now);
     Json workflowStatus(Id id, std::string_view bot, Seconds now) const;
-    void advanceWorkflows(Seconds now);
-    void materializeWorkflowStages();
+    void startVerification(const Json& task, Id reportId, const Json& report, const std::string& version);
+    void stageStarted(Id task, Seconds now);
     void appendStageRequirements(std::string& instruction, const Json& task) const;
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);

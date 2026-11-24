@@ -990,14 +990,14 @@ function sessionRow(request, session, status, tone, startedAt) {
 }
 const workflowStatusLabels = {
   pending: 'Not started', running: 'In progress', completed: 'Done', failed: 'Failed',
-  needs_verification: 'Needs another check', stop_requested: 'Stopping', stopped: 'Stopped',
+  stop_requested: 'Stopping', stopped: 'Stopped',
 };
 const stageStatusLabels = {
   pending: 'Waiting', ready: 'Starting', running: 'Working', completed: 'Done', failed: 'Failed',
   stopped: 'Stopped', stop_requested: 'Stopping', unreachable: 'Not responding',
 };
 const stageTone = (status) => ({ completed: 'done', running: 'live', ready: 'live', failed: 'failed', unreachable: 'failed', stopped: 'stopped' })[status] ?? 'waiting';
-const workflowTone = (status) => ({ running: 'live', failed: 'failed', needs_verification: 'waiting', stop_requested: 'waiting' })[status] ?? '';
+const workflowTone = (status) => ({ running: 'live', failed: 'failed', stop_requested: 'waiting' })[status] ?? '';
 const humanStatus = (labels, status) => labels[status] ?? (status.charAt(0).toUpperCase() + status.slice(1)).replaceAll('_', ' ');
 
 function workflowInspectors(data, open) {
@@ -1016,7 +1016,7 @@ function workflowInspectors(data, open) {
   };
   for (const workflow of data?.workflows ?? []) {
     const stages = workflow.stages ?? [];
-    const done = stages.filter((stage) => stage.status === 'completed' && !stage.outdated).length;
+    const done = stages.filter((stage) => stage.status === 'completed').length;
     const status = [humanStatus(workflowStatusLabels, workflow.status), stages.length ? `${done} of ${stages.length} steps` : '']
       .filter(Boolean).join(' · ');
     const item = section(`workflow-${workflow.workflowId}`, workflow.request, status, workflowTone(workflow.status));
@@ -1024,10 +1024,9 @@ function workflowInspectors(data, open) {
     for (const stage of stages) {
       const verdict = stage.currentVerdict;
       const row = node('li', 'workflow-stage');
-      row.dataset.tone = stage.outdated ? 'waiting' : stageTone(stage.status);
+      row.dataset.tone = stageTone(stage.status);
       const notes = [];
       if (verdict) notes.push(verdict === 'pass' ? ['Check passed', 'pass'] : ['Check failed', 'fail']);
-      if (stage.outdated) notes.push(['Needs a rerun after earlier changes', 'warn']);
       if (stage.deadlineExceeded) notes.push(['Taking longer than planned', 'warn']);
       if (stage.stopRequested && stage.status === 'unreachable') notes.push(['Stop requested', 'warn']);
       const text = node('span', 'workflow-stage-text');

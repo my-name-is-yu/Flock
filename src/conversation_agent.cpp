@@ -29,8 +29,8 @@ const std::vector<std::string> turnTools{"start_task","send_to_task","change_tas
                                          "record_task_blocker","withdraw_task_question",
                                          "cancel_task","message_session","invite_bot","leave_session","interrupt_session","read_result",
                                          "find_tasks","flock_session_search","flock_session_events","read_tool_result","reply"};
-const std::vector<std::string> webTools{"start_workflow","workflow_status","instruct_workflow_stage",
-    "stop_workflow_stage","stop_workflow","compact_conversation","expand_context","continue_fresh_session",
+const std::vector<std::string> webTools{"start_workflow","workflow_status","stop_workflow",
+    "compact_conversation","expand_context","continue_fresh_session",
     "list_secrets","request_secret_input",
     "list_connections","check_environment_readiness","update_bot_settings","request_bot_change",
     "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
@@ -421,9 +421,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
         if (tool == "compact_conversation" || tool == "expand_context" || tool == "continue_fresh_session")
             return contextTool(tool,args,message,step);
-        if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" ||
-            tool == "stop_workflow_stage" || tool == "stop_workflow")
-            return workflowTool(tool,args,bot,message.id,step,routing);
+        if (tool == "start_workflow" || tool == "workflow_status" || tool == "stop_workflow")
+            return workflowTool(tool,args,bot,message.id,routing,now);
         const auto actor = turnActor(message);
         auto result = botSettingsTool(bot,actor,message.id,routing,decision);
         if (result.is_null()) result = memory(bot,actor,tool,args,now,true);

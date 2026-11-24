@@ -608,7 +608,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
     model.decideNext = [&](const ModelInput& input) -> Decision {
         check(input.history.empty() && !input.task.contains("workflows"),"Channel received Bot-wide Web context");
         for (const auto* tool : {"compact_conversation","expand_context","continue_fresh_session","start_workflow",
-                                 "workflow_status","instruct_workflow_stage","stop_workflow_stage","stop_workflow"})
+                                 "workflow_status","stop_workflow"})
             check(std::ranges::find(input.tools,tool) == input.tools.end(),"Channel advertised a Web tool");
         const auto& steps = input.event.at("turn");
         if (steps.empty()) return {"expand_context",{{"compactionId",compaction}},{}};

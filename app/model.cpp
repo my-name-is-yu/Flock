@@ -279,25 +279,14 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
             {"additionalProperties",{{"anyOf",Json::array({{{"type","string"}},{{"type","array"},{"items",{{"type","string"}}}}})}}}};
         required.emplace_back("answers");
     } else if (name == "start_workflow") {
-        description = "Run dependent stages in separate Sessions. Defaults to implementation then verification.";
-        text("request","Initial implementation request.");
+        description = "Implement a Git change, then independently verify the resulting commit in a separate local T3 worktree.";
+        text("request","Implementation request.");
         text("verificationCriteria","Checks the verification Session must perform.",false);
-        integer("softDeadlineSeconds","Signal attention after this many seconds.");
-        Json stage = {{"stageId",textParameter("Unique identifier.")},{"role",textParameter("implement, verify or custom role.")},
-            {"name",textParameter("Display name.")},{"request",textParameter("Stage assignment.")},
-            {"dependsOn",{{"type","array"},{"items",{{"type","string"}}}}},
-            {"inputFrom",textParameter("Dependency supplying the pinned artifact, required for multi-input verification.")},
-            {"softDeadlineSeconds",{{"type","integer"},{"minimum",1}}}};
-        fields["stages"] = {{"type","array"},{"minItems",1},{"maxItems",32},{"items",{
-            {"type","object"},{"properties",stage},{"required",{"stageId","role"}},{"additionalProperties",false}}}};
-    } else if (name == "workflow_status" || name == "stop_workflow" ||
-               name == "instruct_workflow_stage" || name == "stop_workflow_stage") {
-        description = name == "workflow_status" ? "Inspect stages, pinned versions, verdicts and confirmed stops." :
-            name == "instruct_workflow_stage" ? "Give a stage additional instructions at its next safe point." :
-            "Request cancellation and inspect confirmation for each affected Session.";
-        integer("workflowId","The workflow to inspect or operate.",true);
-        if (name.ends_with("_stage")) text("stageId","Target stage identifier.");
-        if (name == "instruct_workflow_stage") text("instruction","Additional instruction for the stage.");
+        integer("softDeadlineSeconds","Signal attention after this many seconds per step.");
+    } else if (name == "workflow_status" || name == "stop_workflow") {
+        description = name == "workflow_status" ? "Inspect implementation, the pinned commit, verification verdict and stop confirmation." :
+            "Request cancellation and inspect whether the workflow has stopped.";
+        integer("workflowId","The workflow to inspect or stop.",true);
     } else if (name == "compact_conversation") {
         description = "Replace older model history with an inspectable cumulative summary that advances the previous boundary.";
         integer("endMessageId","Last covered message, before the current turn.",true);
@@ -709,7 +698,9 @@ Direct the person to Flock if they ask how to answer it.
 When the machine owner needs to decide, share the returned reviewUrl or relay reviewInstructions.
 In an external channel, tell the owner to open the review link in a browser on the Flock host.
 
-In Flock Web, use start_workflow for work split across Sessions. Check workflow_status before reporting stops or verification.
+In Flock Web, use start_workflow when the user asks for a Git change and independent verification of the resulting commit in local T3.
+For custom phases, parallel subtasks or combined reports, use start_task and ask the T3 Session to coordinate the work.
+Check workflow_status before reporting verification or a confirmed workflow stop.
 Report each verdict with its pinned version. A soft deadline signals attention. Stop confirmation requires allStopped.
 Use compact_conversation for cumulative summaries, expand_context for original evidence, and continue_fresh_session
 when the user wants a fresh work Session for the same task.

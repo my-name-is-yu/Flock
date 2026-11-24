@@ -31,7 +31,7 @@ void classification() {
         "mcp_call_tool","git_repo_info","git_pr_status","git_commit_status","git_read_ci_logs"});
     expect(exclusive,{"start_task","send_to_task","change_task","answer_task_question","record_task_blocker",
         "withdraw_task_question","cancel_task","message_session","invite_bot","leave_session","interrupt_session",
-        "start_workflow","instruct_workflow_stage","stop_workflow_stage","stop_workflow","compact_conversation",
+        "start_workflow","stop_workflow","compact_conversation",
         "continue_fresh_session","request_secret_input","update_bot_settings","request_bot_change","propose_memory_edit",
         "apply_memory_edit","revert_memory_edit","create_schedule","remove_schedule","create_reminder","create_trigger",
         "channel_edit_message","channel_react","channel_send_attachment","publish_artifact","request_local_machine_connection",
