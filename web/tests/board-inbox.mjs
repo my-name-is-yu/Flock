@@ -49,13 +49,14 @@ async function exercise(mountBoardInbox) {
   let finishDocs;
   let rejectApproval;
   let readInbox;
+  let historySignal;
   let retries = 0;
   const choices = () => item.querySelector('.question-choice-form');
   const selected = () => choices().querySelector('input:checked')?.value;
   const sendChoice = () => choices().querySelector('button');
   const submissions = () => calls.filter(([path]) => path === 'inbox/decide').map(([, data]) => data);
   const board = mountBoardInbox({
-    async api(path, data) {
+    async api(path, data, { signal } = {}) {
       calls.push([path, data]);
       if (path === 'inbox/decide') {
         if (data.itemId === approval.itemId) await new Promise((_, reject) => { rejectApproval = reject; });
@@ -70,7 +71,10 @@ async function exercise(mountBoardInbox) {
         }
         return { accepted: true };
       }
-      if (path.startsWith('inbox/history')) return { decisions: [] };
+      if (path.startsWith('inbox/history')) {
+        historySignal = signal;
+        return { decisions: [] };
+      }
       if (path !== 'inbox') throw new Error('Unexpected route ' + path);
       if (readInbox) {
         const read = readInbox;
@@ -224,6 +228,7 @@ async function exercise(mountBoardInbox) {
   check(calls.some(([path]) => path === 'inbox/history?bot=release'), 'History did not request this Bot’s history');
   byId('decision-close').click();
   check(layer.hidden && !conversation.inert, 'The close action left the conversation disabled');
+  check(historySignal?.aborted, 'Closing decision history did not abort its fetch signal');
 
   const denied = (status) => Object.assign(new Error('access_denied'), { status });
   questions = [revised];
@@ -396,7 +401,7 @@ async function exerciseLiveRetry() {
     'The Inbox did not load on the Bot stream');
   const badge = document.querySelector('#bot-list .decision-count');
   const preview = document.querySelector('#bot-list .bot-preview');
-  if (badge.hidden || badge.textContent !== '1' || preview.textContent !== fixture.bot.preview ||
+  if (badge.hidden || badge.textContent !== '2' || preview.textContent !== fixture.bot.preview ||
       !preview.querySelector('.presence-dot').hidden)
     throw new Error('The Bot row did not show the last message and a single waiting indicator');
   const { width, height } = badge.getBoundingClientRect();

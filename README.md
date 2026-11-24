@@ -102,6 +102,8 @@ Use the Bot's message box in the Web UI to send a new request, ask for progress,
 
 To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock message release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 
+In a Bot’s settings, open **Recurring requests** to add or remove scheduled requests. You can also ask the Bot in its conversation. Requests defined in `config.json` appear in the list and are managed in that file.
+
 ```sh
 build/app/flock --help
 build/app/flock tasks

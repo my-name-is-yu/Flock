@@ -15,6 +15,7 @@ import { replyArrivalId } from '/reply-arrival.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 import { mountConversationFind } from '/conversation-find.mjs';
+import { createRecurringRequests } from '/recurring-requests.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -225,13 +226,13 @@ function changed(key, ...values) {
   return true;
 }
 const responseViewers = new WeakMap();
-async function api(path, body, signal) {
-  const init = { credentials: 'same-origin', signal };
-  if (body) Object.assign(init, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Flock-Action': '1' },
-    body: JSON.stringify(body),
+async function api(path, body, { method = body ? 'POST' : 'GET', signal } = {}) {
+  const headers = new Headers();
+  if (method !== 'GET') headers.set('X-Flock-Action', '1');
+  if (body) headers.set('Content-Type', 'application/json');
+  const response = await fetch(`/api/${path}`, {
+    method, headers, credentials: 'same-origin', signal, body: body ? JSON.stringify(body) : undefined,
   });
-  const response = await fetch(`/api/${path}`, init);
   const data = await response.json();
   if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status });
   const viewer = response.headers.get('X-Flock-Viewer');
@@ -1388,7 +1389,7 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     const request = context.pendingSource = { id };
     let page;
     try {
-      page = await api(botQuery('conversation', context.id, id + 1), undefined, signal);
+      page = await api(botQuery('conversation', context.id, id + 1), undefined, { signal });
     } catch {}
     if (context !== view || context.pendingSource !== request) return;
     context.pendingSource = null;
@@ -2338,13 +2339,15 @@ function renderComposer() {
 const detailNav = byId('detail-nav');
 const settingsSections = {
   general: ['General', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
-  cron: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
+  recurring: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
 };
+const settingsTabs = Object.keys(settingsSections);
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
 let detailRole = null;
 let detailWorkspace = null;
 let detailOrigin = null;
+let recurringRequests = null;
 
 function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
@@ -2360,8 +2363,15 @@ function clearDetailSectionTransition() {
   detailSectionTimer = 0;
   elements['detail-body'].classList.remove('section-switching');
 }
+function setDetail(selection) {
+  releaseDetailRole();
+  detailWorkspace = null;
+  recurringRequests?.close();
+  recurringRequests = selection?.kind === 'settings' ? createRecurringRequests(view.id, api) : null;
+  detail = selection;
+}
 function closeDetail() {
-  detail = null;
+  setDetail(null);
   clearDetailSectionTransition();
   releaseDetailAvatar();
   if (elements.detail.open) elements.detail.close();
@@ -2370,9 +2380,7 @@ function openDetail(selection) {
   if (!view?.data) return;
   decisions.close({ focus: false });
   clearDetailSectionTransition();
-  releaseDetailRole();
-  detailWorkspace = null;
-  detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
+  setDetail(selection.kind === 'settings' ? { section: 'general', ...selection } : selection);
   signatures.delete('detail');
   renderDetail();
   if (elements.detail.open) return;
@@ -2388,20 +2396,15 @@ elements.detail.addEventListener('cancel', (event) => {
 });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
+  setDetail(null);
   clearDetailSectionTransition();
   releaseDetailAvatar();
-  detail = null;
-  releaseDetailRole();
-  detailWorkspace = null;
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
   if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
 });
 
-function sectionsFor(bot) {
-  return bot.cron.length ? ['general', 'cron'] : ['general'];
-}
 function selectSection(section, focus = false) {
   if (detail?.kind !== 'settings' || detail.section === section) return;
   detail.section = section;
@@ -2624,9 +2627,9 @@ function generalContent(bot) {
   renderNameDisplay();
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
-  rows.append(bot.cron.length
-    ? settingsRow('Recurring requests', String(bot.cron.length), () => selectSection('cron', true))
-    : settingsRow('Recurring requests', 'None'));
+  const requests = settingsRow('Recurring requests', '', () => selectSection('recurring', true));
+  requests.querySelector('.settings-row-value').append(recurringRequests.count);
+  rows.append(requests);
   const settings = document.createElement('a');
   settings.className = 'settings-row';
   settings.href = '/settings/' + encodeURIComponent(bot.id);
@@ -2662,25 +2665,9 @@ function roleCard(bot) {
   });
   return detailRole.element;
 }
-function cronContent(bot) {
-  const list = node('div', 'settings-card cron-list');
-  for (const item of bot.cron) {
-    const row = node('div', 'cron-row');
-    const when = node('p', 'cron-when');
-    when.append(
-      node('span', null, item.active ? 'Active' : 'Configured only'),
-      node('code', 'cron-expression', item.schedule),
-      node('span', 'cron-zone', item.timezone),
-    );
-    row.append(when, node('p', 'cron-request', item.request));
-    list.append(row);
-  }
-  return [list];
-}
 function settingsContent(bot, section = 'general') {
-  // Without recurring requests there are no section tabs, so "General" would name nothing.
-  elements['detail-title'].textContent = section === 'general' && !bot.cron.length ? 'Settings' : settingsSections[section][0];
-  if (section === 'cron') return cronContent(bot);
+  elements['detail-title'].textContent = settingsSections[section][0];
+  if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
   return generalContent(bot);
 }
 function waitForm(label, fields, submit, id) {
@@ -2808,10 +2795,8 @@ function renderDetail() {
   if (!detail || !view) return;
   if (detail.kind === 'settings') {
     const bot = view.data.bot;
-    const sections = sectionsFor(bot);
-    if (!sections.includes(detail.section)) detail.section = 'general';
     labelDetail(`${bot.name} settings`);
-    renderDetailNav(sections, detail.section);
+    renderDetailNav(settingsTabs, detail.section);
     const { soul, environmentId, projectId, model, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
     const canEdit = bot.canDelete === true;
@@ -3150,7 +3135,7 @@ const findPanel = byId('conversation-find');
 const conversationFind = mountConversationFind({
   toggle: byId('find-conversation'),
   panel: findPanel,
-  readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, signal),
+  readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, { signal }),
   describeAuthor: (context, event) => {
     const side = messageSide(event);
     return side === 'user' ? 'You' : side === 'external' ? 'Other sender' : side === 'system' ? 'System' : context.data.bot.name;
@@ -3290,7 +3275,6 @@ elements.detail.addEventListener('click', (event) => {
     closeDetail();
   }
 });
-elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open || !settingsReturnFocus) return;
   if (narrow.matches) openNavigation(true, false);

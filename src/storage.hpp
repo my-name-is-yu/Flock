@@ -235,7 +235,7 @@ struct Store::Impl {
     std::vector<ScheduleImportError> stageConfiguredSchedules(
         std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
     void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
-    Json automations(std::string_view bot, Id before) const;
+    Json automations(std::string_view bot, Id before, bool activeOnly = false) const;
     Json cancelAutomation(std::string_view bot, Id id);
     void fireDueAutomations(Seconds now);
     void fireAutomation(Id, const Statement&, Seconds now);

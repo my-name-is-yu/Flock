@@ -193,7 +193,9 @@ the same Bot and document identifiers to `/api/memory/reject` to dismiss a
 pending proposal. Shared documents require the corresponding person scope
 unless the caller is the local owner or a root identity.
 
-Use `GET /api/schedules?bot=ID` with an optional `before` cursor. Create with
+Use `GET /api/schedules?bot=ID` with an optional `before` cursor. Add `active=1`
+to list only active entries. The first active page also includes `canManage`
+and `unscheduledRequests` from the Bot's configuration. Create with
 `POST /api/schedules` and `botId`, `kind`, and `request`. A `schedule` takes
 `cron` and `timezone`. A `reminder` takes a future `fireAt` in Unix seconds, `timezone`,
 and optional `label`. A `trigger` takes `source` and an optional object
