@@ -183,3 +183,10 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .settings-row a.button { text-decoration: none; }
 .machine-row .row-label small { white-space: pre-line; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .row-actions input { width: 14rem; }
+/* Secondary controls stay neutral, as in T3 Code's settings; only primary actions take the accent. */
+.settings-nav .settings-back { color: var(--text-2); }
+.settings-nav .settings-back:hover { color: var(--text); }
+.settings-page .button:not(.primary, .danger, .quiet-danger) {
+  border: 1px solid var(--hairline); background: var(--canvas); color: var(--text);
+}
+.settings-page .button:not(.primary, .danger, .quiet-danger):hover:not(:disabled) { background: var(--hover); }
