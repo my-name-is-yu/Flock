@@ -38,6 +38,7 @@ const std::vector<std::string> webTools{"start_workflow","workflow_status","inst
 
 std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
+        case ModelErrorCode::authentication_required: return "authentication_required";
         case ModelErrorCode::invalid_tool_count: return "invalid_tool_count";
         case ModelErrorCode::invalid_tool_output: return "invalid_tool_output";
         case ModelErrorCode::unavailable_tool: return "unavailable_tool";
@@ -389,7 +390,12 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
     if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object()) {
         for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) {
             const auto id = taskEnvironment(message.bot,message.routing,alias.key());
-            if (!id.empty()) environments.push_back({{"name",alias.key()},{"environmentId",id}});
+            if (!id.empty()) {
+                auto choice = Json{{"name",alias.key()},{"environmentId",id}};
+                const auto gateway = conversationGatewayEnvironmentId(alias.value());
+                if (!gateway.empty()) choice["gatewayEnvironmentId"] = gateway;
+                environments.push_back(std::move(choice));
+            }
         }
     }
 
@@ -827,6 +833,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                     "SELECT 1 FROM conversation_model_failures WHERE repair_attempt_id=?",{checkpoint.attempt}).next();
                 Id repair = 0;
                 if (checkpoint.attempt && error.code != ModelErrorCode::inference_failed &&
+                    error.code != ModelErrorCode::authentication_required &&
                     !query("SELECT 1 FROM conversation_model_failures WHERE message_id=? AND repair_attempt_id IS NOT NULL",
                            {id}).next()) {
                     repair = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
@@ -839,7 +846,10 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                           repair ? Json(repair) : Json(nullptr)});
                 if (!repair) {
                     if (error.retryFrom && !isRepair) deferConversation(id,*error.retryFrom);
-                    else finishTurn(message,failure,nullptr,"error");
+                    else finishTurn(message,error.code == ModelErrorCode::authentication_required
+                        ? (ja ? "ChatGPTへのサインインが必要です。Flockの設定でサインインしてから、もう一度メッセージを送ってください。"
+                              : "This Flock needs a ChatGPT sign-in. Open Flock Settings, sign in to ChatGPT, then send your message again.")
+                        : failure,nullptr,"error");
                 }
             }
         }

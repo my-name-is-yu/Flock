@@ -630,9 +630,13 @@ Json ChatGPTModel::call(std::string_view operation, const Json& input, std::stop
     const auto response = invoke(directory_,operation,serialized,stop,commit);
     if (!response.is_object() || (!response.contains("result") && !response.contains("error")))
         throw ModelError("Flock's ChatGPT transport returned an invalid result", true);
-    if (response.contains("error"))
+    if (response.contains("error")) {
+        const auto code = response.value("code","");
+        const auto failure = code == "authentication_required" ? ModelErrorCode::authentication_required
+                                                                 : ModelErrorCode::inference_failed;
         throw ModelError(response.value("error","ChatGPT transport error"),response.value("transient",false),
-                         tokenUsage(response));
+                         tokenUsage(response),failure);
+    }
     return response["result"];
 }
 

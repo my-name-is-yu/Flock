@@ -591,6 +591,24 @@ void oversizedRequestStopsBeforeOpeningBridge() {
     check(!std::filesystem::exists(credentials),"The bridge was opened for a request over its byte limit");
 }
 
+void missingChatGPTSignInIsTyped() {
+    Sandbox temp;
+    ChatGPTModel model(temp.path / "credentials");
+    auto config = botConfig();
+    config["modelProvider"] = "chatgpt";
+    const ModelInput input{
+        Json::object(),{{"kind","conversation_turn"},{"text","Check the release"}},
+        Json::array(),{}, {"reply"}, {}, Json::array(),config
+    };
+    try {
+        model.decide(input);
+        throw std::runtime_error("missing ChatGPT credentials were accepted");
+    } catch (const ModelError& error) {
+        check(error.code == ModelErrorCode::authentication_required,
+              "missing ChatGPT credentials were not classified as sign-in required");
+    }
+}
+
 class AcceptanceModel final : public Model {
 public:
     std::vector<Json> requests;
@@ -952,6 +970,7 @@ int main() {
         directionalPeerConfiguration();
         responseContract();
         oversizedRequestStopsBeforeOpeningBridge();
+        missingChatGPTSignInIsTyped();
         {
             Sandbox temp;
             Store store(temp.path/"state.db");

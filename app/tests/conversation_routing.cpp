@@ -18,6 +18,12 @@ struct RoutingModel final : Model {
     }
 };
 
+struct MissingAuthModel final : Model {
+    ModelTurn decide(const ModelInput&) override {
+        throw ModelError("private provider detail",ModelErrorCode::authentication_required);
+    }
+};
+
 struct RoutingT3 final : T3 {
     std::vector<Command> commands;
     std::string authGeneration(const std::string&, const Json&) override { return "test-auth"; }
@@ -194,6 +200,24 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
           t3.commands.front().projectId == project,
           "the move did not use the requested or remembered project for " + std::string(alias));
 }
+
+void missingChatGPTSignInIsActionable() {
+    Sandbox temp;
+    const auto intake = pinnedBot(temp);
+    MissingAuthModel model;
+    RoutingT3 t3;
+    Store store(temp.path / "state.db");
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    store.receive(localOwner,intake,"missing-chatgpt-sign-in","Check the release");
+    runtime.runConversations();
+    const auto events = store.conversation("release");
+    const auto reply = std::ranges::find_if(events,[](const Json& event) {
+        return event.value("kind","") == "conversation_reply";
+    });
+    check(reply != events.end() && reply->at("data").at("text").get<std::string>().find("Open Flock Settings") != std::string::npos &&
+          reply->at("data").at("text").get<std::string>().find("private provider detail") == std::string::npos,
+          "missing ChatGPT sign-in did not give a safe, actionable reply");
+}
 }
 
 void pinnedConversationDestinations() {
@@ -203,5 +227,6 @@ void pinnedConversationDestinations() {
     moveWithProject("mini","mini-project");
     moveWithProject("mini-legacy","remembered-project");
     moveWithProject("mini","mini-project",true);
+    missingChatGPTSignInIsActionable();
 }
 }

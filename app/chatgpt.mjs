@@ -357,7 +357,8 @@ async function signOut() {
 
 async function accessToken() {
   let profile = readProfile();
-  if (!status(profile).planUsage) throw new Failure("Use 'flock model login' and grant ChatGPT plan usage");
+  if (!status(profile).planUsage)
+    throw new Failure("Use 'flock model login' and grant ChatGPT plan usage", false, "authentication_required");
   const now = Date.now();
   if (profile.pending || (profile.expiresAt <= now + 60_000 && (profile.earliestRefreshAt ?? 0) <= now)) {
     const discovery = await discover();
@@ -511,6 +512,7 @@ try {
   console.log(JSON.stringify({
     error: known ? error.message : "Flock's ChatGPT transport failed",
     transient: known && error.transient,
+    code: known && error.code === "authentication_required" ? error.code : undefined,
     usage: known ? error.usage : undefined,
   }));
 } finally {
