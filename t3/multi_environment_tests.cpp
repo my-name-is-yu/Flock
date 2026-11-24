@@ -63,6 +63,7 @@ struct Script final : Model {
     std::string commit;
     Json startResult;
     Json sendResult;
+    Json wrongGatewaySendResult;
     Json ambiguousResult;
     Json conflictingResult;
     Json cancelResult;
@@ -73,16 +74,32 @@ struct Script final : Model {
     Id cancelGeneration = 0;
     bool parallel = true;
     bool linkedOnly = false;
+    bool nativeLinked = false;
+    bool nativeGatewayOptionsSeen = false;
     std::string selectedEnvironment;
+    std::string nativeTargetEnvironment;
+    std::string nativeProject;
+    std::string nativeGateway;
+    std::string nativeChoice;
+    Json nativeEnvironmentOptions = Json::array();
+    Json nativeEnvironmentIssues = Json::array();
 
     ModelTurn decide(const ModelInput& input) override {
         const auto& kind = input.event.at("kind");
         if (kind == "conversation_turn") {
             const auto& text = input.event.value("text","");
             if (input.event.at("turn").empty() && (text == "Send instruction to Mini" ||
-                text == "Send instruction without destination" || text == "Send instruction with conflicting selectors")) {
+                text == "Send linked instruction" || text == "Send linked instruction through other gateway" ||
+                text == "Send instruction without destination" ||
+                text == "Send instruction with conflicting selectors")) {
                 Json args{{"taskId",followUpTask},{"generation",followUpGeneration},{"instruction","Check the Mini result"}};
                 if (text == "Send instruction to Mini") args["destination"] = "mini";
+                if (text == "Send linked instruction" || text == "Send linked instruction through other gateway") {
+                    args["environmentId"] = nativeTargetEnvironment;
+                    args["projectId"] = nativeProject;
+                    args["gatewayEnvironmentId"] = text == "Send linked instruction"
+                        ? nativeGateway : nativeTargetEnvironment;
+                }
                 if (text == "Send instruction with conflicting selectors") {
                     args["destination"] = "mini";
                     args["environmentId"] = "env-local";
@@ -90,6 +107,10 @@ struct Script final : Model {
                 }
                 return {{{"send_to_task",std::move(args),"Send to the selected destination"}}};
             }
+            if (input.event.at("turn").empty() && text == "Stop linked target")
+                return {{{"cancel_task",{{"taskId",cancelTask},{"generation",cancelGeneration},
+                    {"environmentId",nativeTargetEnvironment},{"projectId",nativeProject},
+                    {"gatewayEnvironmentId",nativeGateway}},"Stop only the selected linked target"}}};
             if (input.event.at("turn").empty() && (text == "Stop Mini" || text == "Stop Mini again"))
                 return {{{"cancel_task",{{"taskId",cancelTask},{"generation",cancelGeneration},
                            {"destination","mini"}},"Stop only Mini"}}};
@@ -97,17 +118,36 @@ struct Script final : Model {
             if (turn.empty() && input.event.value("text","") == request) {
                 Json args{{"request",request}};
                 if (!selectedEnvironment.empty()) args["environment"] = selectedEnvironment;
+                if (nativeLinked) {
+                    nativeEnvironmentOptions = input.task.value("environments",Json::array());
+                    nativeEnvironmentIssues = input.task.value("linkedEnvironmentIssues",Json::array());
+                    std::string localGatewayName;
+                    bool localGateway = false;
+                    bool secondGateway = false;
+                    for (const auto& choice : input.task.at("environments")) {
+                        if (choice.value("linked",false) && choice.value("environmentId","") == nativeTargetEnvironment) {
+                            const auto gateway = choice.value("gatewayEnvironmentId","");
+                            if (gateway == nativeGateway) { localGatewayName = choice.at("name"); localGateway = true; }
+                            if (gateway == nativeTargetEnvironment) secondGateway = true;
+                        }
+                    }
+                    nativeGatewayOptionsSeen = localGateway && secondGateway && !localGatewayName.empty();
+                    nativeChoice = localGatewayName;
+                }
                 if (parallel) {
-                    args["environments"] = linkedOnly ? Json::array({"mini"}) : Json::array({"local","mini"});
+                    args["environments"] = nativeLinked ? Json::array({nativeChoice})
+                        : linkedOnly ? Json::array({"mini"}) : Json::array({"local","mini"});
                     if (!commit.empty()) args["commit"] = commit;
                 }
                 return {{{"start_task",std::move(args),"Run the release verification"}}};
             }
             if (!turn.empty()) {
-                if (text == "Send instruction to Mini") sendResult = turn.back().at("result");
+                if (text == "Send instruction to Mini" || text == "Send linked instruction") sendResult = turn.back().at("result");
+                else if (text == "Send linked instruction through other gateway")
+                    wrongGatewaySendResult = turn.back().at("result");
                 else if (text == "Send instruction without destination") ambiguousResult = turn.back().at("result");
                 else if (text == "Send instruction with conflicting selectors") conflictingResult = turn.back().at("result");
-                else if (text == "Stop Mini") cancelResult = turn.back().at("result");
+                else if (text == "Stop Mini" || text == "Stop linked target") cancelResult = turn.back().at("result");
                 else if (text == "Stop Mini again") repeatCancelResult = turn.back().at("result");
                 else startResult = turn.back().at("result");
             }
@@ -172,6 +212,32 @@ struct Scenario {
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok",false),
               "conversation could not start linked-environment work: " + model.startResult.dump());
+        taskId = model.startResult.at("taskId");
+    }
+
+    void startNativeLinked(bool dropLaunchReply = false) {
+        model.parallel = true;
+        model.nativeLinked = true;
+        model.nativeTargetEnvironment = mini.id();
+        model.nativeProject = mini.project();
+        model.nativeGateway = local.id();
+        T3Connections connections(store);
+        connections.connect(local.id(),localOwner.id,3210);
+        connections.connect(mini.id(),localOwner.id,3210);
+        local.configure({{"multiReset",true},{"multiSingle",true},{"multiCommit",model.commit},
+            {"multiExpectedTarget",mini.id()},{"multiProject",mini.project()},
+            {"multiDropLaunchReply",dropLaunchReply},{"multiLinkedEnvironments",Json::array({
+                {{"environmentId",mini.id()},{"label","Mini"},{"status","reachable"}}})}});
+        mini.configure({{"multiReset",true},{"multiSingle",true},{"multiCommit",model.commit},
+            {"multiLinkedEnvironments",Json::array({
+                {{"environmentId",mini.id()},{"label","Mini"},{"status","reachable"}}})}});
+        const Intake routing{bot,{},local.id(),local.project(),Json::object()};
+        store.receive(localOwner,routing,"native-linked-fixture",request);
+        runtime.runConversations();
+        check(model.startResult.is_object() && model.startResult.value("ok",false) &&
+              model.nativeGatewayOptionsSeen,"the model must receive distinct gateway choices for the same linked target: " +
+              model.nativeEnvironmentOptions.dump() + " issues=" + model.nativeEnvironmentIssues.dump() +
+              " result=" + model.startResult.dump());
         taskId = model.startResult.at("taskId");
     }
 
@@ -297,6 +363,85 @@ void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const 
           !routed.empty() && std::all_of(routed.begin(),routed.end(),
               [&](const auto& target) { return target == mini.id(); }),
           "linked launch, follow-up, and stop must use gateway credentials while preserving the target ID");
+}
+
+void resumeNativeLinkedRoute(const Endpoint& local, const Endpoint& mini,
+                             const std::filesystem::path& directory) {
+    Scenario resumed(local,mini,directory,{},"native-linked-restart");
+    const auto tasks = resumed.store.tasks(bot);
+    check(tasks.size() == 1,"the native linked task must survive process restart");
+    resumed.taskId = tasks.front().at("id");
+    resumed.model.nativeTargetEnvironment = mini.id();
+    resumed.model.nativeProject = mini.project();
+    resumed.model.nativeGateway = local.id();
+    resumed.model.followUpTask = resumed.taskId;
+    resumed.model.followUpGeneration = resumed.task().at("generation");
+    const Intake changedContext{bot,{},mini.id(),mini.project(),Json::object()};
+    resumed.store.receive(localOwner,changedContext,"native-linked-wrong-gateway","Send linked instruction through other gateway");
+    resumed.runtime.runConversations();
+    check(!resumed.model.wrongGatewaySendResult.value("ok",true) &&
+          local.effects("t3_thread_send").empty() && mini.effects("t3_thread_send").empty(),
+          "a saved target selector with a different gateway must fail without switching credentials");
+    resumed.store.receive(localOwner,changedContext,"native-linked-restart-followup","Send linked instruction");
+    resumed.runtime.runConversations();
+    check(resumed.model.sendResult.value("ok",false) && local.effects("t3_thread_send").size() == 1 &&
+          mini.effects("t3_thread_send").empty(),
+          "after restart and a changed client context, follow-up must use the saved gateway and target");
+    resumed.model.cancelTask = resumed.taskId;
+    resumed.model.cancelGeneration = resumed.task().at("generation");
+    resumed.store.receive(localOwner,changedContext,"native-linked-restart-stop","Stop linked target");
+    resumed.runtime.runConversations();
+    resumed.advanceUntil([&](const Json&) { return local.effects("t3_thread_interrupt").size() == 1; },
+                         "the saved linked Run should be interrupted through its original gateway");
+    resumed.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },
+                         "the linked stop should settle after process restart");
+    const auto task = resumed.task();
+    const auto result = Scenario::result(task,mini);
+    const auto routed = local.routedTargets();
+    check(resumed.model.cancelResult.value("ok",false) && task.value("state","") == "completed" &&
+          result.value("status","") == "interrupted" && result.value("gatewayEnvironmentId","") == local.id() &&
+          local.effects("t3_thread_launch").size() == 1 &&
+          mini.effects("t3_thread_launch").empty() && local.effects("t3_thread_send").size() == 1 &&
+          mini.effects("t3_thread_send").empty() && local.effects("t3_thread_interrupt").size() == 1 &&
+          mini.effects("t3_thread_interrupt").empty() && !routed.empty() &&
+          std::all_of(routed.begin(),routed.end(),[&](const auto& target) { return target == mini.id(); }),
+          "restart recovery must retain the exact gateway and target without credential overwrite or rerouting");
+}
+
+void nativeLinkedUnknownAcceptance(const Endpoint& local, const Endpoint& mini,
+                                   const std::filesystem::path& directory) {
+    Scenario fixture(local,mini,directory,{},"native-linked-unknown-acceptance");
+    fixture.startNativeLinked(true);
+    fixture.advanceUntil([&](const Json& task) {
+        const auto result = Scenario::result(task,fixture.mini);
+        return result.value("status","") == "confirmation_pending" &&
+            result.value("gatewayEnvironmentId","") == fixture.local.id();
+    },"a linked launch with a lost reply should remain uncertain on its saved gateway");
+    fixture.model.cancelTask = fixture.taskId;
+    fixture.model.cancelGeneration = fixture.task().at("generation");
+    const Intake changedContext{bot,{},mini.id(),mini.project(),Json::object()};
+    fixture.store.receive(localOwner,changedContext,"native-linked-unknown-stop","Stop linked target");
+    fixture.runtime.runConversations();
+    check(fixture.model.cancelResult.value("ok",false),"an uncertain linked destination must accept a local stop intent");
+    const auto authGeneration = fixture.adapter->authGeneration(local.id(),Json::object());
+    local.configure({{"accessToken","fixture.rotated-signed-token"}});
+    local.login(directory);
+    check(fixture.adapter->authGeneration(local.id(),Json::object()) != authGeneration,
+          "the fixture must change gateway auth generation before reconciling the linked launch");
+    for (int tick = 0; tick < 70; ++tick) {
+        ++fixture.now;
+        fixture.runtime.tickConcurrent();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const auto task = fixture.task();
+    const auto result = Scenario::result(task,mini);
+    const auto routed = local.routedTargets();
+    check(task.value("state","") == "completed" && result.value("status","") == "interrupted" &&
+          result.value("gatewayEnvironmentId","") == local.id() &&
+          local.effects("t3_thread_launch").size() == 1 && mini.effects("t3_thread_launch").empty() &&
+          local.effects("t3_thread_interrupt").size() == 1 && mini.effects("t3_thread_interrupt").empty() &&
+          !routed.empty() && std::all_of(routed.begin(),routed.end(),[&](const auto& target) { return target == mini.id(); }),
+          "linked unknown acceptance must reconcile read-only after gateway auth changes and never relaunch on another gateway");
 }
 
 void linkedForwardingUnavailable(const Endpoint& local, const Endpoint& mini,
@@ -736,7 +881,22 @@ int main(int argc, char** argv) {
         const std::filesystem::path directory = argv[3];
         const std::string commit = argv[4];
         const std::string_view phase = argv[5];
-        if (phase == "normal") {
+        if (phase == "native-start") {
+            Scenario fixture(local,mini,directory,commit,"native-linked-restart");
+            fixture.startNativeLinked();
+            fixture.advanceUntil([&](const Json& task) {
+                return Scenario::result(task,mini).value("status","") == "running";
+            },"the selected native linked target should start through its gateway");
+            const auto selected = Scenario::result(fixture.task(),mini);
+            check(selected.value("environmentId","") == mini.id() &&
+                  selected.value("gatewayEnvironmentId","") == local.id() &&
+                  selected.value("projectId","") == mini.project(),
+                  "the selected linked destination must persist its exact gateway, target, and project: " + selected.dump());
+        } else if (phase == "native-resume") {
+            resumeNativeLinkedRoute(local,mini,directory);
+        } else if (phase == "native-unknown") {
+            nativeLinkedUnknownAcceptance(local,mini,directory);
+        } else if (phase == "normal") {
             local.login(directory);
             mini.login(directory);
             { Scenario fixture(local,mini,directory,commit,"normal"); normal(fixture); }

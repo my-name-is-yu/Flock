@@ -21,15 +21,24 @@ SavedDestination selectSavedDestination(const Json& task, const Json& args, bool
     const bool hasName = args.contains("destination");
     const bool hasEnvironment = args.contains("environmentId");
     const bool hasProject = args.contains("projectId");
-    if (hasName && (hasEnvironment || hasProject))
+    const bool hasGateway = args.contains("gatewayEnvironmentId");
+    if (hasName && (hasEnvironment || hasProject || hasGateway))
         throw ToolError("Select a destination either by friendly name or by environmentId and projectId, not both");
     if (hasEnvironment != hasProject)
         throw ToolError("Select a destination by both environmentId and projectId");
+    if (hasGateway && !hasEnvironment)
+        throw ToolError("Select gatewayEnvironmentId only with environmentId and projectId");
     const auto name = text(args,"destination",256,false);
     const auto environment = text(args,"environmentId",256,false);
     const auto project = text(args,"projectId",256,false);
+    const auto gateway = text(args,"gatewayEnvironmentId",256,false);
+    const auto savedGateway = [](const Json& run) {
+        const auto gateway = field(run,"gatewayEnvironmentId");
+        return gateway.empty() ? field(run,"environmentId") : gateway;
+    };
     if ((hasName && name.empty()) || (hasEnvironment && (environment.empty() || project.empty())))
         throw ToolError("Destination selectors must not be empty");
+    if (hasGateway && gateway.empty()) throw ToolError("gatewayEnvironmentId must not be empty");
 
     const Json* selected = nullptr;
     if (!hasName && !hasEnvironment) {
@@ -41,7 +50,8 @@ SavedDestination selectSavedDestination(const Json& task, const Json& args, bool
         std::vector<const Json*> matches;
         for (const auto& run : task.at("runResults")) {
             const bool match = hasName ? run.value("name","") == name
-                : run.value("environmentId","") == environment && run.value("projectId","") == project;
+                : run.value("environmentId","") == environment && run.value("projectId","") == project &&
+                    (!hasGateway || savedGateway(run) == gateway);
             if (match) matches.push_back(&run);
         }
         if (matches.size() != 1)

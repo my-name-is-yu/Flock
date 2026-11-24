@@ -211,6 +211,9 @@ class Fixture(BaseHTTPRequestHandler):
                 return
             if self.server.multi_environment and tool["name"] == "t3_thread_launch":
                 self.server.launch_accepted.set()
+                if state.get("multiDropLaunchReply"):
+                    self.close_connection = True
+                    return
                 if state.get("multiHoldLaunchReply"):
                     assert self.server.allow_launch_disconnect.wait(15), "crash harness did not kill the Runtime"
                     self.close_connection = True
@@ -655,13 +658,17 @@ class Fixture(BaseHTTPRequestHandler):
         post_check = "git -c flock.check=after rev-parse --verify HEAD"
         summary = self.summary(thread) | {"projectId": project, "title": "Fixture verification"}
         terminal = ("completed", "failed", "interrupted")
+        if name == "t3_environment_links":
+            return {"environmentId": env, "links": state.get("multiLinkedEnvironments", []),
+                    "notListed": "No matching linked environment is available."}
         if name == "t3_environment_read":
             return {"environmentId": env, "label": env, "serverVersion": "0.1.11"}
         if name == "t3_project_read":
             assert args["projectId"] == project
             return {"id": project, "title": project}
         if name == "t3_project_list":
-            return {"projects": [{"id": project, "title": project}], "nextCursor": None}
+            return {"projects": [{"id": project, "title": project,
+                                  "workspaceRoot": f"/workspace/{project}"}], "nextCursor": None}
         if name == "t3_thread_launch":
             if state.get("multiForwardingUnavailable"):
                 return {"_tag": "OrchestratorMcpFailure", "code": "capability_denied",
@@ -690,12 +697,14 @@ class Fixture(BaseHTTPRequestHandler):
         assert "multiPrompt" in state and args["threadId"] == thread
         status = state.get("multiStatus", "running")
         if name == "t3_thread_wait":
-            assert args["runId"] == run
+            requested_run = args["runId"]
+            assert requested_run in (run, "follow-up-run")
             delegated = args["untilDelegatedWorkSettled"]
             timed_out = status not in terminal or (delegated and state.get("multiHoldSettlement", False))
-            result = {"threadId": thread, "runId": final_run, "status": status, "timedOut": timed_out}
+            wait_run = "continued-run" if evidence == "restarted" and requested_run == run else requested_run
+            result = {"threadId": thread, "runId": wait_run, "status": status, "timedOut": timed_out}
             if delegated and not timed_out:
-                result["resultRun"] = {"runId": final_run, "status": status}
+                result["resultRun"] = {"runId": wait_run, "status": status}
             return result
         if name == "t3_thread_interrupt":
             assert status == "running" and args["runId"] == run
@@ -977,6 +986,9 @@ def test_multi_environment(local, runner, temp):
                     SELECT name,sql FROM sqlite_schema
                     WHERE name IN ('project_execution_queue','project_slots') ORDER BY name
                 """).fetchall() == legacy_views, "an older Runtime's views changed during migration"
+            subprocess.run(command + ["native-start"], timeout=30, check=True)
+            subprocess.run(command + ["native-resume"], timeout=30, check=True)
+            subprocess.run(command + ["native-unknown"], timeout=30, check=True)
         finally:
             mini.shutdown()
 

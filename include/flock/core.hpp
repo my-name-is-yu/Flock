@@ -202,6 +202,19 @@ struct SessionCounts {
 struct T3Project {
     std::string id, title, directory;
 };
+struct T3EnvironmentRoute {
+    std::string environmentId, gatewayEnvironmentId;
+};
+struct T3EnvironmentLink {
+    enum class Status { reachable, unreachable, expired };
+    T3EnvironmentRoute route;
+    std::string label;
+    Status status = Status::unreachable;
+};
+struct T3EnvironmentLinks {
+    std::vector<T3EnvironmentLink> links;
+    std::string unavailable;
+};
 
 class T3 {
 public:
@@ -226,6 +239,8 @@ public:
     virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
     virtual std::vector<T3Project> projects(std::string_view) { return {}; }
+    virtual std::vector<T3Project> projects(const T3EnvironmentRoute& route) { return projects(route.environmentId); }
+    virtual T3EnvironmentLinks linkedEnvironments(std::string_view) { return {}; }
     virtual std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
         std::string_view, std::string_view, Id, SessionReadDeadline) { return {}; }
     virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }

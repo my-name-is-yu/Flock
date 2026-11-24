@@ -79,6 +79,8 @@ struct PeerExchange {
 };
 
 struct TaskRoute { std::string environmentId, projectId, gatewayEnvironmentId; };
+struct LinkedTaskDestination { std::string name; TaskRoute route; };
+struct LinkedTaskDestinations { std::vector<LinkedTaskDestination> choices; std::vector<std::string> unavailable; };
 struct StartDestinations {
     TaskRoute primary;
     Json targets = Json::array();
@@ -372,7 +374,8 @@ struct Store::Impl {
                                              std::string_view key, const ConversationCallContext&);
     std::optional<Json> applyLocalConversationCall(const conversation::Message&, int step, const Decision&,
                                                    std::string_view key, Seconds now, ApprovalWait,
-                                                   const WorkSession* selectedSession = nullptr);
+                                                   const WorkSession* selectedSession,
+                                                   const LinkedTaskDestinations& linked);
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
@@ -392,11 +395,12 @@ struct Store::Impl {
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
     Json taskState(const Json& task, const conversation::Message&, bool fullContract = false) const;
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
-    Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images);
+    Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
+                   const LinkedTaskDestinations& linked);
     Json gitConversationTool(GitHost*, const conversation::Message&, const Decision&, std::string_view key);
     bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now,
-                       const WorkSession* selectedSession);
+                       const WorkSession* selectedSession, const LinkedTaskDestinations& linked);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route,
                     const conversation::QuestionAnchor* question = nullptr);
     void pauseTurn(const conversation::Message&);
@@ -422,7 +426,8 @@ struct Store::Impl {
     TaskRoute taskRoute(std::string_view bot, const Json& routing, std::string_view name,
                         const Json* movingTask = nullptr);
     StartDestinations startDestinations(const conversation::Message&, const Json& args, bool resume,
-                                       const WorkSession* selectedSession);
+                                       const WorkSession* selectedSession, const LinkedTaskDestinations& linked);
+    LinkedTaskDestinations discoverLinkedTaskDestinations(T3&, std::string_view bot);
     TaskChange taskChange(const conversation::Message&, const Json& args, const Json& task);
     std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,

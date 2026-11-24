@@ -2,6 +2,7 @@
 #include "conversation_storage.hpp"
 
 #include <algorithm>
+#include <tuple>
 
 namespace flockv0 {
 std::string conversationEnvironmentId(const Json& alias) {
@@ -81,6 +82,78 @@ std::set<std::string> Store::Impl::registeredT3Environments(std::string_view bot
     return result;
 }
 
+LinkedTaskDestinations Store::Impl::discoverLinkedTaskDestinations(T3& t3, std::string_view bot) {
+    std::set<std::string> gateways;
+    {
+        std::lock_guard lock(mutex);
+        gateways = registeredT3Environments(bot);
+    }
+    LinkedTaskDestinations result;
+    const auto scrub = redactor(bot);
+    std::set<std::tuple<std::string,std::string,std::string>> seenRoutes;
+    std::set<std::string> seenNames;
+    for (const auto& gateway : gateways) {
+        T3EnvironmentLinks links;
+        try {
+            links = t3.linkedEnvironments(gateway);
+        } catch (const std::exception&) {
+            links.unavailable = "Flock could not list linked environments through T3 gateway " + gateway + ".";
+        }
+        if (!links.unavailable.empty()) {
+            result.unavailable.push_back(scrub.text(links.unavailable));
+            continue;
+        }
+        for (const auto& link : links.links) {
+            const auto& target = link.route.environmentId;
+            if (link.route.gatewayEnvironmentId != gateway || target.empty()) {
+                result.unavailable.push_back(scrub.text(
+                    "T3 returned an invalid linked-environment identity for gateway " + gateway + "."));
+                continue;
+            }
+            if (link.status != T3EnvironmentLink::Status::reachable) {
+                const auto status = link.status == T3EnvironmentLink::Status::expired ? "expired" : "unreachable";
+                result.unavailable.push_back(scrub.text("Linked target " + link.label + " via " + gateway + " is " + status + "."));
+                continue;
+            }
+            bool permitted = false;
+            {
+                std::lock_guard lock(mutex);
+                Policy policy(*this);
+                permitted = policy.allows(bot,Action::environment_inspect,target) &&
+                    !policy.forbidden(bot,Action::environment_launch,target);
+            }
+            if (!permitted) continue;
+            try {
+                auto projects = t3.projects(link.route);
+                if (projects.empty()) {
+                    result.unavailable.push_back(scrub.text("No available T3 projects were found for linked target " +
+                        link.label + " via " + gateway + "."));
+                    continue;
+                }
+                for (const auto& project : projects) {
+                    if (project.id.empty() || project.title.empty() ||
+                        !seenRoutes.emplace(target,project.id,gateway).second) continue;
+                    scrub.requirePublic({target,project.id,gateway});
+                    const auto identity = " (" + target + " via " + gateway + ")";
+                    const auto projectLabel = " — " + scrub.text(project.title) + " (" + project.id + ")";
+                    if (identity.size() + projectLabel.size() >= 256) {
+                        result.unavailable.push_back("A linked destination identity is too long to select safely.");
+                        continue;
+                    }
+                    const auto label = bounded(scrub.text(link.label),256 - identity.size() - projectLabel.size());
+                    const auto name = label + identity + projectLabel;
+                    if (!seenNames.insert(name).second) continue;
+                    result.choices.push_back({name,{target,project.id,gateway}});
+                }
+            } catch (const std::exception&) {
+                result.unavailable.push_back(scrub.text("Flock could not list projects for linked target " +
+                    link.label + " through gateway " + gateway + ". Check linked-environment access in T3."));
+            }
+        }
+    }
+    return result;
+}
+
 std::string Store::Impl::defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred) {
     if (!configured.empty()) return std::string(configured);
     const auto connected = registeredT3Environments(bot);
@@ -132,7 +205,8 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
 }
 
 StartDestinations Store::Impl::startDestinations(const conversation::Message& message, const Json& args, bool resume,
-                                                const WorkSession* selectedSession) {
+                                                const WorkSession* selectedSession,
+                                                const LinkedTaskDestinations& linked) {
     using conversation_storage::text;
     using conversation_storage::ToolError;
     const auto& bot = message.bot;
@@ -140,6 +214,28 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
     const auto environment = text(args,"environment",256,false);
     const auto sessionRef = text(args,"sessionRef",128,false);
     StartDestinations destinations;
+    const auto routeForName = [&](const std::string& name) {
+        auto configured = taskRoute(bot,routing,name);
+        std::vector<const LinkedTaskDestination*> matches;
+        for (const auto& choice : linked.choices)
+            if (choice.name == name || choice.route.environmentId == name) matches.push_back(&choice);
+        if (matches.size() > 1)
+            throw ToolError("This T3 environment is linked through more than one gateway. Choose the destination name that identifies its gateway.");
+        if (matches.empty()) return configured;
+        const auto& selected = matches.front()->route;
+        if (!configured.environmentId.empty() &&
+            (configured.environmentId != selected.environmentId || configured.projectId != selected.projectId ||
+             (configured.gatewayEnvironmentId.empty() ? configured.environmentId : configured.gatewayEnvironmentId) !=
+                selected.gatewayEnvironmentId))
+            throw ToolError("This destination name resolves to both a configured route and a linked T3 gateway. Choose an unambiguous destination.");
+        if (!registeredT3Environments(bot).contains(selected.gatewayEnvironmentId))
+            throw ToolError("The selected T3 gateway is no longer connected. Flock will not switch gateways.");
+        Policy policy(*this);
+        if (!policy.allows(bot,Action::environment_inspect,selected.environmentId) ||
+            policy.forbidden(bot,Action::environment_launch,selected.environmentId))
+            throw ToolError("Flock cannot launch in the linked target under the current permissions.");
+        return selected;
+    };
     destinations.commit = verifiedCommit(text(args,"commit",64,false));
     if (resume && !destinations.commit.empty())
         throw ToolError("Commit verification is not supported when resuming a cancelled task; start a new task on its saved destination.");
@@ -153,9 +249,11 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
         std::set<std::pair<std::string,std::string>> selected;
         for (const auto& choice : *environments) {
             const auto name = text(Json{{"environment",choice}},"environment",256,true);
-            auto route = taskRoute(bot,routing,name);
+            auto route = routeForName(name);
             if (route.environmentId.empty())
-                throw ToolError("Choose names or IDs from task.environments");
+                throw ToolError(linked.unavailable.empty()
+                    ? "Choose names or IDs from task.environments"
+                    : "The linked destination is unavailable through its T3 gateway. Check the link and gateway; Flock will not use a different environment.");
             if (route.projectId.empty()) route.projectId = rememberedT3Project(bot,route.environmentId);
             if (route.projectId.empty())
                 throw ToolError("Choose a T3 project for " + name +
@@ -177,11 +275,13 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
         if (!environment.empty() || resume)
             throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
         destinations.primary = {selectedSession->environmentId,selectedSession->projectId,{}};
-    } else destinations.primary = taskRoute(bot,routing,environment);
+    } else destinations.primary = environment.empty() ? taskRoute(bot,routing,environment) : routeForName(environment);
     if (destinations.primary.environmentId.empty())
         throw ToolError(environment.empty()
             ? "Choose a connected T3 environment to start work. Use task.environments or connect T3 in Settings."
-            : "Unknown environment " + environment + "; use one of task.environments");
+            : (linked.unavailable.empty()
+                ? "Unknown environment " + environment + "; use one of task.environments"
+                : "The linked destination is unavailable through its T3 gateway. Check the link and gateway; Flock will not use a different environment."));
     if (!destinations.commit.empty()) {
         if (destinations.primary.projectId.empty())
             destinations.primary.projectId = rememberedT3Project(bot,destinations.primary.environmentId);

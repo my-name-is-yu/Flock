@@ -1274,8 +1274,14 @@ public:
     }
 
     std::vector<T3Project> projects(std::string_view environment) override {
-        Client client(loadCredential(directory_,std::string(environment)),
-                      std::chrono::steady_clock::now()+std::chrono::seconds(5));
+        return projects(T3EnvironmentRoute{std::string(environment),{}});
+    }
+
+    std::vector<T3Project> projects(const T3EnvironmentRoute& route) override {
+        const auto gateway = route.gatewayEnvironmentId.empty() ? route.environmentId : route.gatewayEnvironmentId;
+        const auto target = route.environmentId == gateway ? std::string{} : route.environmentId;
+        Client client(loadCredential(directory_,gateway),
+                      std::chrono::steady_clock::now()+std::chrono::seconds(5),target);
         std::vector<T3Project> projects;
         std::set<std::string> seen;
         Id cursor = 0;
@@ -1304,6 +1310,35 @@ public:
             const auto offset = position(next);
             if (offset <= cursor) invalidResponse();
             cursor = offset;
+        }
+    }
+
+    T3EnvironmentLinks linkedEnvironments(std::string_view gateway) override {
+        try {
+            Client client(loadCredential(directory_,std::string(gateway)),
+                      std::chrono::steady_clock::now()+std::chrono::seconds(5));
+            const auto response = client.call("t3_environment_links",Json::object());
+            if (str(response,"environmentId") != gateway) invalidResponse();
+            if (!response.contains("notListed") || !response["notListed"].is_string()) invalidResponse();
+            T3EnvironmentLinks result;
+            for (const auto& entry : array(response,"links")) {
+                auto environment = str(entry,"environmentId");
+                auto label = str(entry,"label");
+                const auto status = str(entry,"status");
+                if (environment.empty() || environment.size() > 1024 || label.empty() || label.size() > 256)
+                    invalidResponse();
+                T3EnvironmentLink::Status parsed;
+                if (status == "reachable") parsed = T3EnvironmentLink::Status::reachable;
+                else if (status == "unreachable") parsed = T3EnvironmentLink::Status::unreachable;
+                else if (status == "expired") parsed = T3EnvironmentLink::Status::expired;
+                else invalidResponse();
+                result.links.push_back({{std::move(environment),std::string(gateway)},std::move(label),parsed});
+            }
+            return result;
+        } catch (const Failure&) {
+            return {{},"Linked environments are unavailable through this T3 connection. Enable linked environments in T3 Settings → Labs and reconnect the gateway."};
+        } catch (const std::exception&) {
+            return {{},"Flock could not list linked environments through this T3 connection. Check its connection and try again."};
         }
     }
 

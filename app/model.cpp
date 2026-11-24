@@ -315,12 +315,12 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         integer("taskId","Owned task to continue.",true);
         text("instruction","Additional handoff context.",false);
     } else if (name == "start_task") {
-        description = "Start a new task for work the user asked for in one T3 Session or on one or more T3 environments.";
+        description = "Start a new task for work the user asked for in one T3 Session or on one or more T3 environments, including reachable linked environments listed in task.environments.";
         text("request","The work to do, written for the Bot that will own the task. Include everything it needs.");
         text("doneWhen","Acceptance criteria the user stated or clearly implied. Omit when none were given.",false);
-        text("environment","A name or environmentId from task.environments. Omit to use the default.",false);
+        text("environment","A name or environmentId from task.environments. For a linked destination, use its full listed name so Flock preserves the selected gateway. Omit to use the default.",false);
         fields["environments"] = {{"type","array"},{"minItems",1},{"maxItems",16},
-            {"items",textParameter("A name or environmentId from task.environments.")},
+            {"items",textParameter("A name or environmentId from task.environments. Use the full listed name for a linked destination; its name identifies the gateway as well as the target.")},
             {"description","Run one task on each selected T3 environment. Current safety bound: 16 destinations per task."}};
         text("commit","Optional full Git commit SHA when this task is specifically verifying one commit.",false);
         text("sessionRef","Opaque reference from flock_session_search for the existing Session the user wants to continue in. "
@@ -329,7 +329,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         fields["resume"] = {{"type","boolean"},{"description",
             "True only to resume the cancelled task that produced sourceResultMessageId, inheriting its criteria and instructions."}};
     } else if (name == "send_to_task") {
-        description = "Send an additional instruction to a task. For a multi-destination task, select one saved destination by friendly name, or by environmentId and projectId together. Omit the selector only when exactly one destination is available.";
+        description = "Send an additional instruction to a task. For a multi-destination task, select one saved destination by friendly name, or by environmentId and projectId together; include gatewayEnvironmentId when that pair is ambiguous. Omit the selector only when exactly one destination is available.";
         integer("taskId","The task to instruct.",true);
         integer("generation","The task's generation from the latest task list or tool result.",true);
         fields["generation"]["minimum"] = 0;
@@ -337,6 +337,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         text("destination","Saved friendly name of the destination to message.",false);
         text("environmentId","Saved destination environment ID; provide with projectId.",false);
         text("projectId","Saved destination project ID; provide with environmentId.",false);
+        text("gatewayEnvironmentId","Saved gateway ID; optionally provide with environmentId and projectId to disambiguate gateways.",false);
         integer("sourceResultMessageId","A result of this task's current revision that the instruction refers to.");
     } else if (name == "change_task") {
         description = "Change an active task's intent, acceptance criteria, or environment. The current run stops and the task replans.";
@@ -372,13 +373,14 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         }
         else integer("waitId","The waitId of the open user_question.",true);
     } else if (name == "cancel_task") {
-        description = "Stop an active task. Omit the destination selector to stop the whole task, or select one saved destination to stop only its Run.";
+        description = "Stop an active task. Omit the destination selector to stop the whole task, or select one saved destination to stop only its Run. Include gatewayEnvironmentId with environmentId and projectId when they match more than one saved gateway.";
         integer("taskId","The task to stop.",true);
         integer("generation","The task's generation from the latest task list or tool result.",true);
         fields["generation"]["minimum"] = 0;
         text("destination","Saved friendly name of the destination Run to stop.",false);
         text("environmentId","Saved destination environment ID; provide with projectId.",false);
         text("projectId","Saved destination project ID; provide with environmentId.",false);
+        text("gatewayEnvironmentId","Saved gateway ID; optionally provide with environmentId and projectId to disambiguate gateways.",false);
     } else if (name == "message_session") {
         description = "Queue a message in a T3 Session and wake this Bot once when its work ends or needs a person.";
         text("environmentId","Environment ID from flock_session_search.");
@@ -696,7 +698,9 @@ safe point, change_task changes its intent, criteria, or environment, answer_tas
 open user_question, and cancel_task stops the whole task. Use record_task_blocker to record what
 blocks an active task and withdraw_task_question when an open question no longer needs an answer.
 Use one start_task with environments for work that targets one or more T3 environments. Choose
-destinations from task.environments and ask only when a destination or project is ambiguous. Supply a
+destinations from task.environments and ask only when a destination or project is ambiguous. For linked
+targets, use the listed destination name that includes its gateway; if linked targets are unavailable,
+tell the user what T3 gateway or link needs attention and do not silently use another environment. Supply a
 full commit SHA only when the user asks to verify the same commit. Read runResults for each environment's
 status, report, and Session link. If a Run needs input, direct the user to that Session. Use cancel_task
 to stop all Runs in the task.

@@ -269,7 +269,8 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
     return turn;
 }
 
-Json Store::Impl::turnInput(const Message& message, int step, Seconds now, Json machines, std::vector<ModelImage>& images) {
+Json Store::Impl::turnInput(const Message& message, int step, Seconds now, Json machines,
+                            std::vector<ModelImage>& images, const LinkedTaskDestinations& linked) {
     if (message.principalSource == PrincipalSource::gitWebhook) {
         auto event = Json{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
             {"currentTime",now},{"replyTo",nullptr},{"turn",conversationSteps(message,step,images)},
@@ -398,6 +399,13 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
             }
         }
     }
+    for (const auto& linkedChoice : linked.choices) {
+        environments.push_back({{"name",scrub.text(linkedChoice.name)},
+            {"environmentId",linkedChoice.route.environmentId},
+            {"projectId",linkedChoice.route.projectId},
+            {"gatewayEnvironmentId",linkedChoice.route.gatewayEnvironmentId},
+            {"linked",true}});
+    }
 
     const auto channel = channelContext(message.id,message.bot,&images);
     auto turn = conversationSteps(message,step,images);
@@ -412,6 +420,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
     if (web) event["attachments"] = attachmentViews(message.id);
     Json task{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)},
               {"localMachines",std::move(machines)}};
+    if (!linked.unavailable.empty()) task["linkedEnvironmentIssues"] = linked.unavailable;
     if (web) {
         auto& workflows = task["workflows"] = Json::array();
         auto recent = query("SELECT id,CASE WHEN message_id>? THEN request ELSE '' END FROM workflows "
@@ -423,7 +432,8 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
-                                Seconds now, const WorkSession* selectedSession) {
+                                Seconds now, const WorkSession* selectedSession,
+                                const LinkedTaskDestinations& linked) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -487,7 +497,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto request = text(args,"request",messageSize,true);
         const auto doneWhen = text(args,"doneWhen",8000,false);
         const bool resume = args.value("resume",false);
-        auto [destination,targets,commit] = startDestinations(message,args,resume,selectedSession);
+        auto [destination,targets,commit] = startDestinations(message,args,resume,selectedSession,linked);
         const auto result = source(nullptr);
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
@@ -914,6 +924,7 @@ LIMIT 1
                        "error");
                 return;
             }
+            const auto linkedDestinations = discoverLinkedTaskDestinations(t3,message.bot);
             ModelInput input;
             {
                 std::lock_guard lock(mutex);
@@ -949,7 +960,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 }
                 std::vector<ModelImage> images;
                 auto [offered,machines] = available();
-                const auto context = turnInput(message,step,now,std::move(machines),images);
+                const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
                          .images = std::move(images)};
