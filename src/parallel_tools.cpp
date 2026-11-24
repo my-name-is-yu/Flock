@@ -225,7 +225,7 @@ private:
         Transaction transaction(store_.db);
         if (authorize()) {
             auto result = store_.applyLocalConversationCall(message_,step_,calls_[slot],callKey(slot),
-                                                            ctx_.clock(),ApprovalWait::defer);
+                ctx_.clock(),ApprovalWait::defer,nullptr,LinkedTaskDestinations{});
             if (result) saveSlot(slot,store_.redactor(message_.bot).record(std::move(*result)));
             else approvalWaiting_ = true;
         }

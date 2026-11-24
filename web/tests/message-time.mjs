@@ -16,8 +16,12 @@ function fixtures() {
     return nativeMatchMedia(query);
   };
   window.EventSource = undefined;
-  const bot = { id: 'release', name: 'Release' };
+  const bot = { id: 'release', name: 'Release', peers: [{ id: 'triage' }] };
   const peer = { id: 'triage', name: 'Triage' };
+  window.renameBot = (name) => {
+    bot.name = name;
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   const time = new Date(2026, 10, 20, 13).getTime() / 1000;
   const sessionCreatedAt = new Date(2026, 10, 20, 17, 30).toISOString();
   const RealDate = Date;
@@ -79,6 +83,11 @@ function fixtures() {
     activeSessions = request ? [{ taskId: 18, threadId: 'working', environmentId: 'local', state: 'running', request }] : [];
     document.dispatchEvent(new Event('visibilitychange'));
   };
+  window.showWorkingTargets = () => {
+    activeSessions = ['Local', 'Mini'].map((name) => ({ taskId: 19, threadId: `thread-${name.toLowerCase()}`,
+      environmentId: `env-${name.toLowerCase()}`, name, state: 'running', request: 'Compare release checks' }));
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   window.showSuggestion = () => {
     activeSessions = [];
     events.push({ id: 5, kind: 'conversation_reply', time: time + 1002, data: {
@@ -108,6 +117,55 @@ async function exercise() {
   check(sessionLabel(sessionRows()[0]) === 'Yesterday', 'An open tab did not refresh Session time at local midnight');
   window.returnAfterMidnight();
   check(sessionLabel(sessionRows()[0]) === 'Nov 20', 'Returning to the tab did not refresh the relative Session time');
+  window.showWorkingTargets();
+  const destinationRows = () => sessionRows().filter((row) => ['Local', 'Mini'].some((name) =>
+    row.querySelector('.activity-title')?.textContent.startsWith(`${name} · Compare release checks`)));
+  for (let attempt = 0; attempt < 20 && destinationRows().length !== 2; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  const destinations = destinationRows();
+  check(destinations.length === 2 && destinations.every((row) => sessionLabel(row) === 'Working'),
+    'Running destination Sessions did not show distinct visible names and live status');
+  const sampleConversation = document.createElement('section');
+  sampleConversation.className = 'conversation';
+  sampleConversation.style.setProperty('--user-bubble', 'rgb(0, 122, 53)');
+  const sampleMessage = document.createElement('article');
+  sampleMessage.className = 'msg user event-message';
+  const sampleBubble = document.createElement('div');
+  sampleBubble.className = 'bubble';
+  const sampleStatus = document.createElement('p');
+  sampleStatus.className = 'event-reason';
+  sampleStatus.textContent = 'Local · Working';
+  const sampleLink = document.createElement('a');
+  sampleLink.className = 'run-link';
+  sampleLink.innerHTML = '<span class="glyph">↗</span>';
+  sampleBubble.append(sampleStatus, sampleLink);
+  sampleMessage.append(sampleBubble);
+  sampleConversation.append(sampleMessage);
+  document.body.append(sampleConversation);
+  const rgb = (value) => value.match(/[\d.]+/g).slice(0, 3).map(Number).map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  const luminance = (value) => {
+    const [red, green, blue] = rgb(value);
+    return .2126 * red + .7152 * green + .0722 * blue;
+  };
+  const contrast = (foreground, background) => {
+    const values = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+    return (values[0] + .05) / (values[1] + .05);
+  };
+  const background = getComputedStyle(sampleBubble).backgroundColor;
+  for (const element of [sampleStatus, sampleLink]) {
+    const style = getComputedStyle(element);
+    check(style.opacity === '1' && getComputedStyle(sampleBubble).opacity === '1' &&
+      contrast(style.color, background) >= 4.5,
+      `User-bubble destination text/link contrast is ${contrast(style.color, background).toFixed(2)}:1`);
+  }
+  const hoverRule = [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
+    .find((rule) => rule.selectorText === '.msg.user .bubble .run-link:hover');
+  check(hoverRule?.style.background === 'transparent',
+    'Hovering a destination link must preserve the user-bubble background');
+  sampleConversation.remove();
   const rows = [...document.querySelectorAll('.event-message')];
   const [first, second, report] = rows.map(row => row.querySelector('.event-text'));
   const singleTime = rows.map(row => row.querySelector('time'));
@@ -255,6 +313,9 @@ async function exercise() {
     'The read-only DM lost a centered separator or exposed the composer');
   check(release.tabIndex === 0 && release.querySelectorAll('time').length === 1 && eventTime(release).dateTime,
     'The peer message did not expose a focusable semantic timestamp');
+  const descriptionId = document.getElementById('peer-heading').getAttribute('aria-describedby');
+  check(document.getElementById(descriptionId)?.textContent === 'Read-only conversation between Bots',
+    'The Bot conversation heading lost its read-only description');
 
   const forwardedTime = eventTime(forwarded);
   const source = forwarded.querySelector('.peer-forwarded-message');
@@ -274,6 +335,19 @@ async function exercise() {
     await new Promise(resolve => setTimeout(resolve, 10));
   check(document.getElementById('event-9') === release && release.querySelector('.msg-meta').classList.contains('sr-only') &&
     senders() === 'Release,Triage,Triage,Triage', 'Prepending peer history replaced the loaded row or repeated its sender label');
+
+  document.getElementById('peer-parent-link').click();
+  const picker = document.getElementById('peer-picker');
+  for (let attempt = 0; attempt < 20 && picker.hidden; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(!picker.hidden, 'The Bot conversation picker did not become available');
+  picker.click();
+  const title = document.getElementById('detail-title');
+  check(title.textContent === 'Release talks with', 'The conversation picker did not name the current Bot');
+  window.renameBot('Deploy');
+  for (let attempt = 0; attempt < 20 && title.textContent !== 'Deploy talks with'; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(title.textContent === 'Deploy talks with', 'The open conversation picker kept the old Bot name');
 }
 
 const assets = new URL('../assets/', import.meta.url);

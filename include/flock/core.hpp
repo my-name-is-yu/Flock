@@ -67,7 +67,7 @@ struct ModelInput {
     bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
 };
-enum class ModelErrorCode { inference_failed, invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
+enum class ModelErrorCode { inference_failed, authentication_required, invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
 struct ModelError : std::runtime_error {
     ModelError(std::string message, bool retryable, Json measurements = Json::object(),
                ModelErrorCode failureCode = ModelErrorCode::inference_failed)
@@ -86,6 +86,7 @@ public:
 
 struct RunRef {
     std::string threadId, runId, link;
+    std::string gatewayEnvironmentId;
 };
 struct Question {
     std::string requestId;
@@ -110,12 +111,15 @@ struct Observation {
     std::string detail;
     RunEvidence::Availability evidence = RunEvidence::Availability::Available;
     std::string sessionCreatedAt{};
+    std::string checkedCommit{};
+    bool commitEvidenceUnavailable = false;
 };
 inline constexpr std::size_t maxSessionPromptBytes = 120000;
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
 
 struct SessionTarget {
     std::string environmentId, threadId;
+    std::string gatewayEnvironmentId;
     bool operator==(const SessionTarget&) const = default;
 };
 struct SessionOrigin {
@@ -132,6 +136,7 @@ struct Command {
     std::string ownerBotId;
     std::string launchReceiptThreadId; // From the launch response, even if the Run ID was pending.
     std::optional<SessionOrigin> sessionOrigin;
+    std::string gatewayEnvironmentId;
 };
 struct Delivery {
     enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
@@ -147,6 +152,7 @@ struct ReadRequest {
     std::string environmentId, threadId, runId, itemId, cursor, view = "messages";
     std::size_t offset = 0;
     Json config = Json::object();
+    std::string gatewayEnvironmentId;
 };
 struct Excerpt {
     std::string text, threadId, runId, itemId, nextCursor;
@@ -196,6 +202,19 @@ struct SessionCounts {
 struct T3Project {
     std::string id, title, directory;
 };
+struct T3EnvironmentRoute {
+    std::string environmentId, gatewayEnvironmentId;
+};
+struct T3EnvironmentLink {
+    enum class Status { reachable, unreachable, expired };
+    T3EnvironmentRoute route;
+    std::string label;
+    Status status = Status::unreachable;
+};
+struct T3EnvironmentLinks {
+    std::vector<T3EnvironmentLink> links;
+    std::string unavailable;
+};
 
 class T3 {
 public:
@@ -220,6 +239,8 @@ public:
     virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
     virtual std::vector<T3Project> projects(std::string_view) { return {}; }
+    virtual std::vector<T3Project> projects(const T3EnvironmentRoute& route) { return projects(route.environmentId); }
+    virtual T3EnvironmentLinks linkedEnvironments(std::string_view) { return {}; }
     virtual std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
         std::string_view, std::string_view, Id, SessionReadDeadline) { return {}; }
     virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }

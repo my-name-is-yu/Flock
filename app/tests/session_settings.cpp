@@ -34,7 +34,8 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
     const auto intake = [&](std::string_view bot, std::string_view request) { return bots.get(bot).intake(request); };
     auto config = botConfig();
     config["environmentId"] = "env-1";
-    config["projectId"] = "project";
+    config["projectId"] = "default-project";
+    config["conversationEnvironments"]["fixture"] = {{"environmentId","env-1"},{"projectId","project"}};
     config["session"]["workspaceStrategy"]["branch"] = "fixture-work";
 
     const Json legacy = {{"workspaceStrategy",{{"kind","worktree"},{"remote","origin"},{"branch","main"}}}};

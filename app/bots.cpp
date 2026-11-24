@@ -276,14 +276,26 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
     if (config.contains("conversationEnvironments")) {
         const auto& destinations = config["conversationEnvironments"];
-        if (!destinations.is_object() || destinations.size() > 16)
-            throw Conflict("conversationEnvironments must map up to 16 names to T3 environment IDs");
+        if (!destinations.is_object())
+            throw Conflict("conversationEnvironments must map names to T3 destinations");
         auto& saved = bot.settings["conversationEnvironments"] = Json::object();
         for (auto alias = destinations.begin(); alias != destinations.end(); ++alias) {
-            const auto environment = validatedString(destinations,alias.key().c_str());
+            const auto environment = alias->is_object() ? validatedString(*alias,"environmentId")
+                : validatedString(destinations,alias.key().c_str());
             if (alias.key().empty() || alias.key().size() > 80 || !validPlainId(environment))
                 throw Conflict("Use short conversation environment names and canonical T3 environment IDs");
-            saved[alias.key()] = environment;
+            if (alias->is_object()) {
+                const auto project = validatedString(*alias,"projectId");
+                const bool hasGateway = alias->contains("gatewayEnvironmentId");
+                const auto gateway = hasGateway ? validatedString(*alias,"gatewayEnvironmentId") : std::string{};
+                if (alias->size() != (hasGateway ? 3u : 2u) || !validPlainId(project) ||
+                    (hasGateway && !validPlainId(gateway)))
+                    throw Conflict("T3 destination objects require canonical environmentId, projectId, and optional gatewayEnvironmentId");
+                saved[alias.key()] = {{"environmentId",environment},{"projectId",project}};
+                if (hasGateway) saved[alias.key()]["gatewayEnvironmentId"] = gateway;
+            } else {
+                saved[alias.key()] = environment;
+            }
         }
     }
     const auto timeout = config.value("runTimeoutSeconds",Json(1800));

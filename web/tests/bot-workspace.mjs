@@ -24,6 +24,9 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   card.update({});
   placeRows(body, [document.createElement('header'), card.element]);
   edit.click();
+  check(edit.hidden && form.hidden, 'A viewer could open the workspace editor');
+  card.update({}, true);
+  edit.click();
   await settle();
   check(environment.value === 'suggested-environment', 'Single connected environment did not prefill');
   cancel.click();

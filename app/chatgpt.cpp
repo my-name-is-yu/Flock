@@ -261,7 +261,8 @@ Json ChatGPTModel::webStatus() {
 std::string ChatGPTModel::accessToken() {
     ProfileLock lock(directory_);
     auto profile = lock.read();
-    if (!planUsage(profile)) throw ModelError("Use 'flock model login' and grant ChatGPT plan usage",false);
+    if (!planUsage(profile))
+        throw ModelError("Use 'flock model login' and grant ChatGPT plan usage",ModelErrorCode::authentication_required);
     const auto now = chatgpt::nowMillis();
     if (!field(profile,"pending").is_null() ||
         (timestamp(profile,"expiresAt") <= now + 60'000 && timestamp(profile,"earliestRefreshAt") <= now))

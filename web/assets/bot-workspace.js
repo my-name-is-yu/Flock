@@ -41,22 +41,25 @@ export function createBotWorkspaceCard(saveWorkspace, loadEnvironments) {
   const feedback = element.querySelector('.settings-card-feedback');
   let workspace;
   let draft;
+  let editable = false;
 
   function showView() {
     const configured = !!(workspace.environmentId && workspace.projectId);
     element.classList.toggle('needs-setup', !configured);
     edit.textContent = configured ? 'Edit' : 'Set up';
     edit.setAttribute('aria-label', `${edit.textContent} where this Bot works`);
-    edit.hidden = !!draft;
+    edit.hidden = !editable || !!draft;
     form.hidden = !draft;
     facts.hidden = !!draft || !configured;
     missing.hidden = !!draft || configured;
     environmentText.textContent = workspace.environmentId;
     projectText.textContent = workspace.projectId;
   }
-  function update({ environmentId = '', projectId = '' }) {
-    if (workspace?.environmentId === environmentId && workspace.projectId === projectId) return;
+  function update({ environmentId = '', projectId = '' }, canEdit = editable) {
+    if (editable === canEdit && workspace?.environmentId === environmentId && workspace.projectId === projectId) return;
+    editable = canEdit;
     workspace = { environmentId, projectId };
+    if (!editable) draft = null;
     showView();
   }
   function showFeedback(message, error = false) {
@@ -79,6 +82,7 @@ export function createBotWorkspaceCard(saveWorkspace, loadEnvironments) {
     }
   }
   edit.addEventListener('click', () => {
+    if (!editable) return;
     draft = { initial: workspace, environmentEdited: false };
     for (const field of fields) {
       field.value = workspace[field.name];

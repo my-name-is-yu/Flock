@@ -29,6 +29,7 @@ export function createBotRoleCard(saveRole) {
   const save = form.querySelector('button[type="submit"]');
   const feedback = element.querySelector('.settings-card-feedback');
   let text;
+  let editable = false;
   let originalSoul;
   let initialText;
 
@@ -41,7 +42,10 @@ export function createBotRoleCard(saveRole) {
     toggle.textContent = expanded ? 'Show less' : 'Show all';
     toggle.setAttribute('aria-expanded', String(expanded));
   }
-  function update(next) {
+  function update(next, canEdit = editable) {
+    editable = canEdit;
+    if (!editable && !form.hidden) finishEditing();
+    edit.hidden = !editable || !form.hidden;
     if (text === next) return;
     text = next;
     preview.textContent = text || 'Describe what this Bot does and how it decides.';
@@ -61,11 +65,13 @@ export function createBotRoleCard(saveRole) {
     const active = document.activeElement;
     const restoreFocus = active === document.body || element.contains(active);
     form.hidden = true;
-    edit.hidden = preview.hidden = false;
+    preview.hidden = false;
+    edit.hidden = !editable;
     measurePreview();
-    if (restoreFocus) edit.focus();
+    if (restoreFocus && editable) edit.focus();
   }
   edit.addEventListener('click', () => {
+    if (!editable) return;
     showFeedback('');
     edit.hidden = preview.hidden = toggle.hidden = true;
     form.hidden = false;
@@ -78,13 +84,13 @@ export function createBotRoleCard(saveRole) {
     showFeedback('');
     finishEditing();
   });
-  input.addEventListener('keydown', (event) => {
-    if (event.isComposing) return;
+  form.addEventListener('keydown', (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
       cancel.click();
-    } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    } else if (event.target === input && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       save.click();
     }
