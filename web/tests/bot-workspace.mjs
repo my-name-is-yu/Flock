@@ -37,10 +37,21 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   check(!form.querySelector('#settings-model-feedback').hidden, 'A catalog failure did not show feedback');
   cancel.click();
 
+  edit.click();
+  await settle();
+  check(catalogCalls === 2 && Array.from(model.options).some((option) => option.value === 'next-model'),
+    'Reopening did not load the catalog after a connection failure');
+  project.value = 'initial-project';
+  save.click();
+  await settle();
+  check(patches.length === 0 && !form.hidden && model.validity.valueMissing,
+    'Bot setup submitted without a model');
+  cancel.click();
+
   card.update({ environmentId: 'original-environment', projectId: 'original-project', model: 'unlisted-model' });
   edit.click();
   await settle();
-  check(catalogCalls === 2 && model.value === 'unlisted-model' &&
+  check(catalogCalls === 3 && model.value === 'unlisted-model' &&
     Array.from(model.options).some((option) => option.value === 'next-model'),
     'Reopening did not retry the catalog or preserve the saved model outside the catalog');
   project.value = 'draft-project';

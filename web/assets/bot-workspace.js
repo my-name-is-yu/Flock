@@ -15,7 +15,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     </dl>
     <form class="settings-workspace-form" hidden>
       <label class="settings-workspace-field">Model
-        <select name="model" aria-describedby="settings-model-feedback"></select>
+        <select name="model" required aria-describedby="settings-model-feedback"></select>
       </label>
       <p class="settings-workspace-hint" id="settings-model-feedback" role="status" hidden></p>
       <label class="settings-workspace-field">Environment
