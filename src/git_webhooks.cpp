@@ -142,11 +142,13 @@ ORDER BY id,pr_number LIMIT ?
         if (kind == "pull_request" && action == "review_requested" && !reviewer.empty()) {
             auto receipt = query(R"SQL(
 DELETE FROM git_review_receipts WHERE rowid=(
- SELECT rowid FROM git_review_receipts
- WHERE task_id=? AND host=? AND repo=? AND pr_number=? AND reviewer=lower(?) AND after_event<?
- ORDER BY after_event,rowid LIMIT 1
+ SELECT r.rowid FROM git_review_receipts r
+ LEFT JOIN pr_review_items i ON i.task_id=r.task_id AND i.git_key=r.inbox_key
+ WHERE r.task_id=? AND r.host=? AND r.repo=? AND r.pr_number=? AND r.reviewer=lower(?) AND r.after_event<?
+   AND (i.id IS NULL OR (i.status='pending' AND i.target_revision=?))
+ ORDER BY r.after_event,r.rowid LIMIT 1
 ) RETURNING inbox_key
-)SQL",{taskId,event.at("host"),event.at("repo"),pr,reviewer,delivery});
+)SQL",{taskId,event.at("host"),event.at("repo"),pr,reviewer,delivery,task.value("currentRevision",Id{0})});
             if (receipt.next()) inboxKey = receipt.string(0);
         }
         if (!title.empty()) gitInboxItem(task,inboxKey,url,title,prompt.empty() ? title : prompt);

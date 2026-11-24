@@ -318,8 +318,12 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (kind == pr_review && (review.number(0) != item.targetRevision || task.value("replanning",false)))
             throw RequestChanged{};
         if (kind == pr_reconciliation) p_->decideGitPr(item,decision,data,task);
-        else p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
-                      {decision == "approve" ? "approved" : "changes_requested",item.itemId});
+        else {
+            p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
+                     {decision == "approve" ? "approved" : "changes_requested",item.itemId});
+            p_->exec("DELETE FROM git_review_receipts WHERE inbox_key=(SELECT git_key FROM pr_review_items WHERE id=?)",
+                     {item.itemId});
+        }
         p_->recordInboxDecision(actor,item,decision);
     } else {
         if (item.itemId != item.waitId) throw RequestChanged{};

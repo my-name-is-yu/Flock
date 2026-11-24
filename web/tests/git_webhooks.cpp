@@ -176,6 +176,24 @@ void run() {
     runtime.runConversations();
     check(store.inbox(localOwner,"owner").size() == inboxBeforeRequest + 2,
           "A distinct review request was suppressed");
+
+    const auto inboxBeforeMissingWebhook = store.inbox(localOwner,"owner").size();
+    store.receive(localOwner,intake(),"review-without-webhook","Request another review");
+    runtime.runConversations();
+    const auto afterRequest = store.inbox(localOwner,"owner");
+    check(afterRequest.size() == inboxBeforeMissingWebhook + 1 &&
+          afterRequest.front().at("prompt") == "Review requested on the Git host.",
+          "The tool should create a card even if no webhook arrives");
+    store.decideInbox(localOwner,target(afterRequest.front()),"approve");
+
+    auto laterReview = reviewRequested;
+    laterReview["pull_request"]["title"] = "Another review requested";
+    check(post(client,"pull_request","review-after-prior-decision",laterReview,202).at("status") == "received",
+          "later review request webhook was not enqueued");
+    runtime.runConversations();
+    check(store.inbox(localOwner,"owner").size() == inboxBeforeMissingWebhook + 1 &&
+          store.history(task).dump().find("review-after-prior-decision") != std::string::npos,
+          "A handled review with a missing webhook hid a later request");
 }
 }
 
