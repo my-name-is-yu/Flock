@@ -11,4 +11,16 @@
 <section id="sharing" hidden><h2>Who can use this Bot</h2><div id="people"></div>
 <form id="members"><label>Person ID <input required name="person"></label><button class="button">Add member</button></form></section>
 </div>
+<section id="channel-senders" aria-labelledby="channel-heading" hidden>
+  <h2 id="channel-heading">Channel senders</h2>
+  <div class="settings-group">
+    <div id="channel-links"></div>
+    <form id="channel-sender-form" class="rule-form" hidden>
+      <label>Channel <select id="channel-bridge" name="bridge" required></select></label>
+      <label>Sender ID <input name="sender" required autocomplete="off" spellcheck="false"></label>
+      <label>Flock person ID <input name="person" required autocomplete="off" spellcheck="false"></label>
+      <button class="button">Link sender</button>
+    </form>
+  </div>
+</section>
 </main></body></html>

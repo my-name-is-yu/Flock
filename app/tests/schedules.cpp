@@ -151,11 +151,13 @@ void configuredScheduleLifecycle() {
     sync(next);
     check(schedule().at("status") == "canceled","sync reactivated an explicit cancellation");
 
-    const auto routing = bots.get("release").intake("");
-    store.createAutomation(owner,routing,{{"kind","reminder"},{"timezone","Asia/Tokyo"},{"fireAt",next+1},
-        {"request","Check again"}},next);
-    store.createAutomation(owner,routing,{{"kind","trigger"},{"source","deploy"},{"request","Deploy check"}},next);
-    std::filesystem::remove_all(folder);
+    for (const auto* removedBot : {"release","other"}) {
+        const auto routing = bots.get(removedBot).intake("");
+        store.createAutomation(owner,routing,{{"kind","reminder"},{"timezone","Asia/Tokyo"},{"fireAt",next+1},
+            {"request","Check again"}},next);
+        store.createAutomation(owner,routing,{{"kind","trigger"},{"source","deploy"},{"request","Deploy check"}},next);
+        std::filesystem::remove_all(home / removedBot);
+    }
     sync(next);
     store.fireDueAutomations(next+1);
     rejects<AccessDenied>([&] { store.receiveWebhook(owner,"deploy","event-1",Json::object(),next+1); },

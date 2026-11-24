@@ -81,9 +81,9 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   async function suggestEnvironments(opened) {
     const environments = await loadEnvironments().catch(() => []);
     if (draft !== opened) return;
-    suggestions.replaceChildren(...environments.map((id) => new Option(id)));
+    suggestions.replaceChildren(...environments.map(({ environmentId }) => new Option(environmentId)));
     if (!opened.environmentEdited && !environment.value && environments.length === 1) {
-      environment.value = environments[0];
+      environment.value = environments[0].environmentId;
       environment.setCustomValidity('');
     }
   }

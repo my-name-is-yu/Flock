@@ -17,7 +17,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     if (patches.length === 1) throw new Error('invalid_workspace');
     saved = { ...saved, ...patch };
     return saved;
-  }, async () => ['suggested-environment'], async () => {
+  }, async () => [{ environmentId: 'suggested-environment', authorization: null }], async () => {
     if (++catalogCalls === 1) throw new Error('models_unavailable');
     return choices;
   });

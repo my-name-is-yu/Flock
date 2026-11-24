@@ -1,19 +1,20 @@
 #include "flock/web.hpp"
 
-#ifdef FLOCK_TEST_CHATGPT
 #include "bots.hpp"
 #include "model.hpp"
-#endif
 
 #include <httplib.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <ranges>
+#include <sys/stat.h>
 
 using namespace flockv0;
 namespace {
@@ -105,6 +106,7 @@ struct FixedModel : Model {
         }
         if (text == missingBudgetQuestion) return reply("見積もりに必要な明細の件数を教えてください。");
         if (text == "markdown fixture") return reply("**完了**：[結果を見る](https://example.com/result)");
+        if (text == "nested URL fixture") return reply("[Result](https://example.test/?q=%252525252541)");
         if (text == budgetDetail) {
             check(input.history.dump().find("見積もりに必要な明細の件数") != std::string::npos,
                   "The follow-up did not see the Bot's earlier question");
@@ -138,6 +140,10 @@ struct FixedT3 : T3 {
     unsigned launches = 0, interruptions = 0;
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
+    std::vector<T3Project> projects(std::string_view environment) override {
+        check(environment == "backup-env","project discovery queried the wrong environment");
+        return {{"backup-release","Backup release","release"}};
+    }
     Delivery send(const Command& command) override {
         if (command.tool == "delegate") {
             ++launches;
@@ -389,8 +395,11 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     tick(runtime,4);
     const auto resolved = browser.get("/api/view?bot=release");
     const auto tasks = store.tasks("release");
-    check(tasks.size() == 1 && conversationReply(resolved,receipt.at("messageId")).at("actions").at(0).at("tool") == "start_task" &&
-          store.task(tasks[0]["id"]).at("runs").back().at("environmentId") == "backup-env",
+    check(tasks.size() == 1 && conversationReply(resolved,receipt.at("messageId")).at("actions").at(0).at("tool") == "start_task",
+          "the chosen destination did not create a Task");
+    const auto task = store.task(tasks.at(0).at("id"));
+    check(task.at("projectId") == "backup-release" && !task.at("runs").empty() &&
+          task.at("runs").back().at("environmentId") == "backup-env",
           "the chosen destination did not receive the new Run");
 }
 
@@ -479,6 +488,14 @@ void conversationEntry(const std::filesystem::path& path) {
             userMessageProjectionPreservedSource = event["data"]["text"] == "markdown fixture" &&
                 event["data"]["textHtml"] == "<p>markdown fixture</p>";
     check(userMessageProjectionPreservedSource,"Web user-message projection changed canonical text or omitted rendered HTML");
+
+    const auto nestedUrlReceipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","nested-url-reply"},
+        {"text","nested URL fixture"}},201);
+    tick(runtime,3);
+    const auto nestedUrlReply = conversationReply(browser.get("/api/view?bot=release"),nestedUrlReceipt.at("messageId"));
+    check(nestedUrlReply.at("text") == "[Result](https://example.test/?q=%252525252541)" &&
+          nestedUrlReply.at("textHtml") == "<p>[redacted]</p>",
+          "Web rendered a URL that exceeded the decoding limit in a reply without protected values");
 
     const auto summary = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","options-summary"},
         {"text","2案目を要約して"}},201);
@@ -714,7 +731,6 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
               shared.dump().find("fixture-shared-reader") == std::string::npos,"the DM exposed a person ID");
     }
 }
-#ifdef FLOCK_TEST_CHATGPT
 void fullModeProfiles(const std::filesystem::path& directory) {
     Store store(directory/"state.db");
     app::Bots bots(directory/"bots");
@@ -749,14 +765,170 @@ void fullModeProfiles(const std::filesystem::path& directory) {
     check(bots.cards().at(0).at("name") == "Reviewer","Never rule did not block the profile write");
 }
 
+constexpr auto blockers = "Summarize the release blockers.";
+constexpr auto signingReport = "The signing certificate expired on 18 November.";
+constexpr auto consultation = "Ask Verifier to confirm the release criteria.";
+constexpr auto consultationReply = "Publish only after the certificate is renewed.";
+constexpr auto whyBlocked = "Why is the release blocked?";
+constexpr auto renewal = "When will the signing certificate be renewed?";
+constexpr auto notes = "Prepare release notes.";
+constexpr auto checksums = "Check artifact checksums in the backup environment.";
+
+Json chatGPTToolCall(std::string_view name, Json arguments, std::string_view reason) {
+    arguments["reason"] = reason;
+    return {{"type","function_call"},{"namespace","flock"},{"status","completed"},
+            {"name",name},{"arguments",arguments.dump()}};
+}
+
+Json chatGPTConversationTool(const Json& task, const Json& event) {
+    const auto text = event.at("text").get<std::string>();
+    const auto& steps = event.at("turn");
+    if (!steps.empty()) {
+        const auto& last = steps.back();
+        const auto& result = last.at("result");
+        check(result.at("ok") == true,"ChatGPT tool did not succeed: " + result.dump());
+        if (last.at("tool") == "read_result") {
+            check(result.at("text") == signingReport,"read_result did not return the saved report");
+            if (text == whyBlocked)
+                return chatGPTToolCall("reply",{{"text","The release is blocked by the expired signing certificate."}},
+                    "The report identifies the expired certificate.");
+            check(text == renewal,"unexpected follow-up after reading the report");
+            return chatGPTToolCall("reply",{{"text","What is the planned certificate renewal date?"}},
+                "The report only gives the expiration date.");
+        }
+        return chatGPTToolCall("reply",{{"text","I queued your request."}},"Confirm the new task.");
+    }
+    if (text == blockers || text == consultation || text == notes)
+        return chatGPTToolCall("start_task",{{"request",text}},"Start the requested work.");
+    if (text == checksums) {
+        check(std::ranges::any_of(task.at("environments"),[](const Json& env) { return env.at("name") == "backup"; }),
+              "the backup destination was missing from the production request");
+        return chatGPTToolCall("start_task",{{"request",text},{"environment","backup"}},"Use the requested destination.");
+    }
+    if (text == whyBlocked || text == renewal) {
+        const auto& tasks = task.at("tasks");
+        const auto source = std::ranges::find_if(tasks,[](const Json& item) { return item.at("request") == blockers; });
+        check(source != tasks.end() && source->at("latestResult").at("excerpt") == signingReport,
+              "the saved report was missing from the conversation context");
+        return chatGPTToolCall("read_result",{{"messageId",source->at("latestResult").at("messageId")}},"Read the saved report.");
+    }
+    check(text == "それ止めて","unexpected composer message: " + text);
+    std::vector<std::string> active;
+    for (const auto& item : task.at("tasks"))
+        if (item.at("state") == "running") active.push_back(item.at("request"));
+    auto sorted = active;
+    std::ranges::sort(sorted);
+    check(sorted == std::vector<std::string>{checksums,notes},"expected both running tasks in the stop request context");
+    return chatGPTToolCall("reply",{{"text","どの作業を停止しますか？"},{"suggestions",active}},"Two tasks are running.");
+}
+
+Json chatGPTOutput(const Json& task, const Json& event) {
+    const auto& kind = event.at("kind");
+    if (kind == "conversation_turn") return chatGPTConversationTool(task,event);
+    if (kind == "intake") {
+        const auto& request = task.at("request");
+        if (request == consultation) {
+            check(task.at("peers") == Json::array({{{"botId","verifier"},{"name","Verifier"}}}),
+                  "the Verifier Bot was missing from the consultation context");
+            return chatGPTToolCall("send_bot_message",{{"botId","verifier"},{"kind","consult"},
+                {"text","What are the release criteria?"}},"Verifier owns the release criteria.");
+        }
+        check(request == blockers || request == notes || request == checksums,"unexpected ChatGPT intake");
+        return chatGPTToolCall("delegate",{{"instruction",request},{"doneWhen","Return the findings and their evidence."}},
+            "A Session must check the release artifacts.");
+    }
+    if (kind == "result") {
+        check(event.at("report") == signingReport,"the result event dropped the Session report");
+        return chatGPTToolCall("complete",{{"report",signingReport}},"The Session identified the blocker and the expiration date.");
+    }
+    if (kind == "bot_request") {
+        check(task.at("botId") == "verifier" && event.at("text") == "What are the release criteria?",
+              "the consultation did not reach Verifier with its request text");
+        return chatGPTToolCall("reply_to_bot",{{"kind","result"},{"text",consultationReply}},"The release criterion is available.");
+    }
+    check(kind == "bot_result","unexpected ChatGPT model event: " + kind.dump());
+    check(event.at("fromBotId") == "verifier" && event.at("text") == consultationReply,
+          "the consultation result did not carry Verifier's reply");
+    return chatGPTToolCall("complete",{{"report",consultationReply}},"Verifier confirmed the release criterion.");
+}
+
+app::chatgpt::HttpResponse chatGPTResponse(const app::chatgpt::HttpRequest& http) {
+    check(http.url == "https://api.openai.com/v1/responses" && http.authorization == "Bearer fixture-access" &&
+          http.contentType == "application/json" && http.accept == "text/event-stream",
+          "unexpected ChatGPT request URL or headers");
+    const auto request = Json::parse(http.body);
+    check(request.at("model") == "fixture-model" && request.at("stream") == true,
+          "ChatGPT request did not select the model and enable streaming");
+    const auto& group = request.at("tools").at(0);
+    check(group.at("name") == "flock","the Flock tool namespace was missing");
+    const auto context = Json::parse(request.at("input").at(0).at("content").at(0).at("text").get<std::string>());
+    const auto& event = context.at("event");
+    const auto result = chatGPTOutput(context.at("task"),event);
+    const auto& tools = group.at("tools");
+    const auto tool = std::ranges::find_if(tools,[&](const Json& item) { return item.at("name") == result.at("name"); });
+    check(tool != tools.end(),"response tool was missing from the production request: " + result.at("name").dump());
+    const auto args = Json::parse(result.at("arguments").get<std::string>());
+    const auto& parameters = tool->at("parameters");
+    for (const auto& key : parameters.at("required"))
+        check(args.contains(key.get<std::string>()),"fixture omitted a required tool argument: " + key.dump());
+    const auto& properties = parameters.at("properties");
+    for (const auto& [key,value] : args.items())
+        check(properties.contains(key),"fixture used an unknown tool argument: " + key);
+    if (event.at("kind") == "conversation_turn")
+        check(request.at("instructions").get_ref<const std::string&>().find("You are a Flock Bot talking with your user") !=
+              std::string::npos,"ChatGPT did not receive the conversation instructions");
+    if (event.at("kind") == "bot_request")
+        check(properties.at("kind").at("description").get_ref<const std::string&>().find("Use result to return work or consultation advice") !=
+              std::string::npos,"ChatGPT did not receive the consultation reply instructions");
+
+    const Json response = {{"type","response.completed"},{"response",{{"output",Json::array({result})}}}};
+    const auto stream = "data: " + response.dump() + "\n\n";
+    const app::chatgpt::HttpResponse metadata{200,"text/event-stream",{}, {}};
+    check(static_cast<bool>(http.onData),"ChatGPT request did not accept response chunks");
+    check(http.onData(std::string_view(stream).substr(0,stream.size() - 1),metadata),
+          "ChatGPT stopped reading before the SSE event delimiter");
+    check(!http.onData("\n",metadata),"ChatGPT kept reading after receiving a completion event");
+    return metadata;
+}
+
 void chatGPTConversation(const std::filesystem::path& home) {
+    const auto credentials = home / "credentials" / "chatgpt";
+    std::filesystem::create_directories(credentials);
+    check(chmod(credentials.c_str(),0700) == 0,"could not protect the ChatGPT test directory");
+    const auto expires = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch() + std::chrono::hours(1)).count();
+    const Json profile = {{"subject","fixture"},{"accessToken","fixture-access"},{"refreshToken","fixture-refresh"},
+                          {"granted",{"chatgpt.tokens.use.direct"}},{"expiresAt",expires}};
+    const auto profilePath = credentials / "profile.json";
+    std::ofstream(profilePath) << profile.dump();
+    check(chmod(profilePath.c_str(),0600) == 0,"could not protect the ChatGPT test profile");
+    const auto writeBot = [&](std::string_view id, Json config) {
+        const auto directory = home / "bots" / id;
+        std::filesystem::create_directories(directory);
+        config.update(Json{{"modelProvider","chatgpt"},{"model","fixture-model"},{"environmentId","local-env"},{"projectId",id}});
+        std::ofstream(directory / "config.json") << config.dump();
+    };
+    writeBot("release",{{"name","Release"},{"allowedBots",{"verifier"}},
+                        {"conversationEnvironments",{{"backup","backup-env"}}}});
+    writeBot("verifier",{{"name","Verifier"}});
     const app::Bots bots(home / "bots");
     Store store(home / "conversation.sqlite",[&](std::string_view bot) { return bots.initialMemory(bot); });
-    app::ChatGPTModel model(home / "credentials" / "chatgpt");
+    std::exception_ptr fixtureError;
+    app::ChatGPTModel model(credentials,[&](const app::chatgpt::HttpRequest& request) {
+        try { return chatGPTResponse(request); }
+        catch (...) {
+            if (!fixtureError) fixtureError = std::current_exception();
+            throw;
+        }
+    });
     FixedT3 t3;
     RuntimeOptions options;
     options.peers = [&](std::string_view bot) { return bots.peers(bot); };
     Runtime runtime(store,model,t3,[&](std::string_view bot) { return bots.soul(bot); },options);
+    const auto advance = [&](int steps) {
+        tick(runtime,steps);
+        if (fixtureError) std::rethrow_exception(fixtureError);
+    };
     const auto server = startWeb(store,0,{
         [&] { return bots.cards(); },
         [&](std::string_view bot,std::string_view request) { return bots.get(bot).intake(request); },
@@ -779,9 +951,9 @@ void chatGPTConversation(const std::filesystem::path& home) {
         return message->at("taskId");
     };
 
-    const auto request = send("blockers","Summarize the release blockers.");
+    const auto request = send("blockers",blockers);
     check(store.tasks().empty(),"composer created a Task before the Bot's turn");
-    tick(runtime,5);
+    advance(5);
     check(conversationReply(view(),request).at("actions").at(0).at("tool") == "start_task" && store.tasks().size() == 1,
           "ordinary composer request did not create exactly one Task");
     const auto releaseTask = linkedTask(request);
@@ -789,31 +961,31 @@ void chatGPTConversation(const std::filesystem::path& home) {
           "the Task did not start one Run");
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished, .status = "completed",
-        .report = "The signing certificate expired on 18 November.",
+        .report = signingReport,
         .itemId = "blockers-report"
     };
-    tick(runtime,3);
+    advance(3);
     const auto completed = store.task(releaseTask);
     check(completed.at("state") == "completed","the Session report did not become a completed result");
     const auto result = conversationCompletion(view(),releaseTask);
     check(result.at("data").at("run").at("itemId") == "blockers-report","the result lost the report item");
     t3.observations.clear();
 
-    const auto question = send("why-blocked","Why is the release blocked?");
-    tick(runtime,3);
+    const auto question = send("why-blocked",whyBlocked);
+    advance(3);
     const auto answer = conversationReply(view(),question);
     check(answer.at("route") == "reply" && answer.at("text") == "The release is blocked by the expired signing certificate." &&
           answer.at("actions").empty(),"result answer was not grounded in the saved report");
-    const auto missing = send("renewal-date","When will the signing certificate be renewed?");
-    tick(runtime,3);
+    const auto missing = send("renewal-date",renewal);
+    advance(3);
     const auto clarification = conversationReply(view(),missing);
     check(clarification.at("text") == "What is the planned certificate renewal date?",
           "missing evidence did not produce a question for the user");
     check(store.tasks().size() == 1 && t3.launches == 1 && store.task(releaseTask).at("runs") == completed.at("runs"),
           "result follow-ups created a Task or changed Runs");
 
-    const auto consult = send("consult-verifier","Ask Verifier to confirm the release criteria.");
-    tick(runtime,8);
+    const auto consult = send("consult-verifier",consultation);
+    advance(8);
     const auto consultTask = linkedTask(consult);
     const auto page = view();
     Json messages = Json::array();
@@ -827,20 +999,21 @@ void chatGPTConversation(const std::filesystem::path& home) {
           outgoing.at("requestKind") == "consult" && incoming.at("fromBotId") == "verifier" &&
           incoming.at("messageType") == "result" && incoming.at("toBotId") == "release" &&
           incoming.at("exchangeId") == outgoing.at("exchangeId") && incoming.at("replyTo") == outgoing.at("messageId") &&
-          incoming.at("text") == "Publish only after the certificate is renewed.",
+          incoming.at("text") == consultationReply,
           "Verifier's reply did not return to its original exchange");
     check(store.task(consultTask).at("state") == "completed" && store.tasks("verifier").size() == 1 && t3.launches == 1,
           "the originating Task did not resume after the consultation");
 
-    const auto first = send("notes","Prepare release notes.");
-    const auto second = send("checksums","Check artifact checksums in the backup environment.");
-    tick(runtime,5);
+    const auto first = send("notes",notes);
+    const auto second = send("checksums",checksums);
+    advance(5);
     const auto firstTask = store.task(linkedTask(first));
     const auto secondTask = store.task(linkedTask(second));
     const auto& firstRuns = firstTask.at("runs");
     const auto& secondRuns = secondTask.at("runs");
     check(!firstRuns.empty() && !secondRuns.empty(),"both composer requests must launch a Run");
-    check(firstRuns.back().at("environmentId") == "local-env" && secondRuns.back().at("environmentId") == "backup-env",
+    check(firstRuns.back().at("environmentId") == "local-env" && firstTask.at("projectId") == "release" &&
+          secondRuns.back().at("environmentId") == "backup-env" && secondTask.at("projectId") == "backup-release",
           "the composer Runs did not keep each request on its own destination");
     const auto active = view().at("activeSessions");
     check(firstTask.at("state") == "running" && secondTask.at("state") == "running" &&
@@ -849,7 +1022,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
           ", launches=" + std::to_string(t3.launches));
     const auto taskCount = store.tasks().size();
     const auto stop = send("stop","それ止めて");
-    tick(runtime,3);
+    advance(3);
     const auto afterStop = view();
     const auto confirm = conversationReply(afterStop,stop);
     const auto& suggestions = confirm.at("suggestions");
@@ -862,7 +1035,6 @@ void chatGPTConversation(const std::filesystem::path& home) {
           store.task(secondTask.at("id")).at("runs") == secondTask.at("runs") && t3.interruptions == 0,
           "ambiguous stop changed a Run or created work");
 }
-#endif
 
 void botRolePreviewRedactsBeforeBounding(const std::filesystem::path& path) {
     Store store(path);
@@ -1335,17 +1507,13 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
 
 int main(int argc,char** argv) {
     try {
-#ifdef FLOCK_TEST_CHATGPT
-        if (argc == 2) {
-            chatGPTConversation(argv[1]);
+        TestDirectory directory;
+        if (argc == 2 && std::string_view(argv[1]) == "--chatgpt") {
+            chatGPTConversation(directory.path);
             std::cout << "web ChatGPT conversation behavior passed\n";
             return 0;
         }
-#endif
-        TestDirectory directory;
-#ifdef FLOCK_TEST_CHATGPT
         fullModeProfiles(directory.path / "full-mode-profiles");
-#endif
         inspectors(directory.path / "inspectors.db");
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
