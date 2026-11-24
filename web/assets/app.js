@@ -671,8 +671,9 @@ function createSidebarEntry(botId) {
         toggle.setAttribute('aria-label', `${bot.name} menu`);
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
-      // A Bot blocked on the person says so in place of its last message, so the row reads at a glance.
-      const waiting = bot.presence === 'waiting';
+      // The count badge already says the Bot needs this person, so the row keeps its last message.
+      // Without a badge, a Bot blocked on the person says so in place of that message.
+      const waiting = bot.presence === 'waiting' && !count;
       const previewLabel = waiting ? 'Waiting for you' : bot.preview || '';
       if (previewText.data !== previewLabel) previewText.data = previewLabel;
       preview.classList.toggle('waiting', waiting);
