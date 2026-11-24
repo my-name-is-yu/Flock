@@ -7,7 +7,10 @@ struct BotProfileError : Conflict {
     std::string code;
 };
 
+inline constexpr std::size_t maxBotRoleBytes = 8192;
+
 std::string validatedBotName(const Json& profile);
+std::string validatedBotSoul(const Json& soul);
 bool validBotRole(std::string_view role);
 Json validatedAvatarStyle(const Json& profile);
 

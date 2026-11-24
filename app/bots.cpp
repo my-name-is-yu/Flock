@@ -22,16 +22,21 @@ bool plainId(std::string_view id) {
         std::none_of(id.begin(),id.end(),[](unsigned char ch) { return ch <= 32 || ch == 127; });
 }
 
-std::string readText(const std::filesystem::path& file, std::size_t limit, bool optional = false) {
+std::string readUpTo(const std::filesystem::path& file, std::size_t bytes, bool optional) {
     std::ifstream input(file,std::ios::binary);
     if (!input) {
         if (optional && !std::filesystem::exists(file)) return {};
         throw Conflict("Unable to read " + file.filename().string());
     }
-    std::string out(limit + 1,'\0');
+    std::string out(bytes,'\0');
     input.read(out.data(),static_cast<std::streamsize>(out.size()));
     if (input.bad()) throw Conflict("Unable to read " + file.filename().string());
     out.resize(static_cast<std::size_t>(input.gcount()));
+    return out;
+}
+
+std::string readText(const std::filesystem::path& file, std::size_t limit, bool optional = false) {
+    auto out = readUpTo(file,limit + 1,optional);
     if (out.size() > limit) {
         if (!optional) throw Conflict(file.filename().string() + " exceeds the configured size limit");
         out = bounded(out,limit);
@@ -328,7 +333,7 @@ Bot Bots::get(std::string_view id) const {
 }
 
 std::string Bots::soul(std::string_view id) const {
-    return readText(path(id) / "SOUL.md",8192,true);
+    return readText(path(id) / "SOUL.md",maxBotRoleBytes,true);
 }
 
 std::string Bots::initialMemory(std::string_view id) const {
@@ -383,7 +388,7 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
         }
     }
 
-    Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",8192,true)},{"cron",schedules}};
+    Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
     if (config.contains("role") && config["role"].is_string() && validBotRole(config["role"].get_ref<const std::string&>()))
         item["role"] = config["role"];
     if (const auto stored = config.find("avatar"); stored != config.end() && stored->is_object()) {
@@ -545,16 +550,34 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image,
 
 Json Bots::updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
-    const auto name = validatedBotName(profile);
 
     std::lock_guard lock(mutex_);
     const auto botDir = path(id);
     const auto file = botDir / "config.json";
     auto config = readBotConfig(file);
+    if (const auto soul = profile.find("soul"); soul != profile.end()) {
+        const auto original = profile.find("originalSoul");
+        if (profile.size() != 2 || original == profile.end() || !original->is_string() || image)
+            throw Conflict("Save the role separately from other settings with its original text");
+        const auto text = validatedBotSoul(*soul);
+        const auto roleFile = botDir / "SOUL.md";
+        const auto& expected = original->get_ref<const std::string&>();
+        if (expected.size() > maxBotRoleBytes || expected.find('\0') != expected.npos ||
+            readUpTo(roleFile,maxBotRoleBytes + 1,true) != expected)
+            throw BotProfileError("role_changed","The Bot role changed or contains text the editor could not show");
+        if (text.empty()) {
+            std::error_code failure;
+            std::filesystem::remove(roleFile,failure);
+            if (failure) throw Conflict("Unable to clear the Bot role");
+        } else {
+            writeAtomic(roleFile,text);
+        }
+        return cardFromDirectory(id,botDir);
+    }
 
     const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
     const bool changeAvatar = profile.contains("avatar");
-    config["name"] = name;
+    config["name"] = validatedBotName(profile);
     if (changeAvatar)
         config["avatar"] = prepareAvatar(profile,botDir,existingAvatar,image);
 

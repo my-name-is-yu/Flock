@@ -1165,6 +1165,69 @@ void botRolePreviewRedactsBeforeBounding(const std::filesystem::path& path) {
           "Bot role preview must redact a multiline secret before splitting or truncating");
 }
 
+void botRoleSavesRequireCompleteOriginal(const std::filesystem::path& home) {
+    const auto botDir = home / "bots" / "release";
+    std::filesystem::create_directories(botDir);
+    std::ofstream(botDir / "config.json") << R"({"name":"Release"})";
+    const auto roleFile = botDir / "SOUL.md";
+    const auto writeRole = [&](const std::string& text) { std::ofstream(roleFile,std::ios::binary) << text; };
+    const auto readRole = [&] {
+        std::ifstream input(roleFile,std::ios::binary);
+        check(static_cast<bool>(input),"could not read role fixture");
+        return std::string(std::istreambuf_iterator<char>(input),{});
+    };
+    app::Bots bots(home / "bots");
+    Store store(home / "flock.db");
+    auto policy = store.policy();
+    const auto request = policy.requestSecret("release",{"fixture-role-token"});
+    policy.submitSecret(localOwner,"release",request,privateValue);
+    auto cb = callbacks();
+    cb.bots = [&] { return bots.cards(); };
+    cb.updateBot = [&](std::string_view bot,const Json& profile,const std::optional<AvatarImage>& image) {
+        return bots.updateProfile(bot,profile,image);
+    };
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    const auto viewRole = [&] { return browser.get("/api/view?bot=release").at("bot").at("soul"); };
+    const auto save = [&](const Json& original,std::string_view edit,int status) {
+        return browser.post("/api/bots/profile",{{"botId","release"},{"soul",edit},{"originalSoul",original}},status);
+    };
+    const auto expectRefused = [&](const Json& original,std::string_view edit,const std::string& unchanged) {
+        check(save(original,edit,409).at("error") == "role_changed" && readRole() == unchanged,
+              "refused role edit changed SOUL.md");
+    };
+
+    const auto withSecret = "Review releases using " + std::string(privateValue);
+    writeRole(withSecret);
+    const auto redacted = viewRole();
+    check(redacted == "Review releases using [redacted]","role settings did not show redacted text");
+    expectRefused(redacted,"Review release candidates",withSecret);
+    expectRefused(withSecret,"Review release candidates",withSecret);
+
+    const auto prefix = std::string(maxBotRoleBytes,'a');
+    const auto oversized = prefix + "Unseen instructions";
+    writeRole(oversized);
+    const auto truncated = viewRole();
+    check(truncated == prefix,"role settings did not show the bounded preview");
+    expectRefused(truncated,"",oversized);
+    expectRefused(prefix + "U","",oversized);
+
+    const std::string original = "Review releases.\r\nCheck the tests.\r\n";
+    writeRole(original);
+    const auto stale = viewRole();
+    check(stale == original,"role settings changed the original line endings");
+    const std::string changed = "Review weekly releases.";
+    writeRole(changed);
+    expectRefused(stale,"Review monthly releases.",changed);
+
+    writeRole(prefix);
+    const auto edited = save(viewRole(),"Review monthly releases.",200);
+    check(edited.at("soul") == "Review monthly releases." && readRole() == "Review monthly releases.",
+          "editing a complete role did not persist the new text");
+    check(save(viewRole(),"",200).at("soul") == "" && !std::filesystem::exists(roleFile),
+          "clearing a complete role did not remove SOUL.md");
+}
+
 void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     Store store(path);
     auto cb = callbacks();
@@ -1635,6 +1698,7 @@ int main(int argc,char** argv) {
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");
+        botRoleSavesRequireCompleteOriginal(directory.path / "role-edit");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         queuedWebAuthority(directory.path / "queued-web-authority.sqlite");
         memoryAutomationEndpoints(directory.path / "automation.sqlite");

@@ -884,6 +884,17 @@ void botProfilesAndAvatars() {
           renamed.at("avatar").at("version") == uploaded.at("avatar").at("version"),
           "renaming Bot lost existing uploaded image");
 
+    const auto described = bots.updateProfile("scout",{
+        {"soul"," \tScouts new releases.\n"},{"originalSoul",created.at("soul")},
+    });
+    check(described.at("soul") == "Scouts new releases." && bots.soul("scout") == "Scouts new releases." &&
+          described.at("name") == "Scout Renamed" &&
+          described.at("avatar").at("version") == uploaded.at("avatar").at("version"),
+          "role update failed to save the text or changed the name or avatar");
+    const auto cleared = bots.updateProfile("scout",{{"soul"," \n\t"},{"originalSoul",described.at("soul")}});
+    check(cleared.at("soul") == "" && !std::filesystem::exists(temp.path / "bots" / "scout" / "SOUL.md"),
+          "clearing a Bot role left SOUL.md behind");
+
     // Replacing with GIF deletes old PNG file and updates version hash.
     const auto replaced = bots.updateProfile("scout",{
         {"name","Scout Renamed"},

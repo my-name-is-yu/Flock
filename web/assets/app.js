@@ -4,6 +4,7 @@ import { actionLabel, approvalSummary } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
+import { createBotRoleCard } from '/bot-role.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
@@ -2340,16 +2341,17 @@ const settingsSections = {
 };
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
+let detailRole = null;
 let detailOrigin = null;
 
 function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
   detailAvatar = null;
 }
-const roleSize = new ResizeObserver(([{ target: soul }]) => {
-  const lineHeight = parseFloat(getComputedStyle(soul).lineHeight);
-  soul.nextElementSibling.hidden = soul.scrollHeight <= Math.ceil(8 * lineHeight);
-});
+function releaseDetailRole() {
+  detailRole?.dispose();
+  detailRole = null;
+}
 let detailSectionTimer = 0;
 function clearDetailSectionTransition() {
   clearTimeout(detailSectionTimer);
@@ -2366,6 +2368,7 @@ function openDetail(selection) {
   if (!view?.data) return;
   decisions.close({ focus: false });
   clearDetailSectionTransition();
+  releaseDetailRole();
   detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
   signatures.delete('detail');
   renderDetail();
@@ -2384,7 +2387,8 @@ elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
   clearDetailSectionTransition();
   releaseDetailAvatar();
-  roleSize.disconnect();
+  detail = null;
+  releaseDetailRole();
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
@@ -2616,7 +2620,6 @@ function generalContent(bot) {
   renderNameDisplay();
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
-  if (!bot.soul) rows.append(settingsRow('Role', 'None'));
   rows.append(bot.cron.length
     ? settingsRow('Recurring requests', String(bot.cron.length), () => selectSection('cron', true))
     : settingsRow('Recurring requests', 'None'));
@@ -2632,25 +2635,19 @@ function generalContent(bot) {
     remove.setAttribute('aria-haspopup', 'dialog');
     rows.append(remove);
   }
-  if (!bot.soul) return [hero, rows];
-  const role = node('section', 'settings-card settings-role');
-  const heading = node('h3', 'settings-card-label', 'Role');
-  heading.id = 'settings-role-label';
-  role.setAttribute('aria-labelledby', heading.id);
-  const soul = node('p', 'settings-soul', bot.soul);
-  soul.id = 'settings-role-text';
-  soul.dataset.folded = 'true';
-  const toggle = button('Show all', 'text-button settings-soul-toggle', () => {
-    const folded = soul.dataset.folded === 'true';
-    soul.dataset.folded = String(!folded);
-    toggle.textContent = folded ? 'Show less' : 'Show all';
-    toggle.setAttribute('aria-expanded', String(folded));
+  return [hero, roleCard(bot), rows];
+}
+function roleCard(bot) {
+  detailRole ??= createBotRoleCard(async (soul, originalSoul) => {
+    const saved = await api('bots/profile', { botId: bot.id, soul, originalSoul }).catch((error) => {
+      if (error.message === 'role_changed' && view?.id === bot.id) void view.refresh();
+      throw error;
+    });
+    void refreshBots();
+    if (view?.id === bot.id) void view.refresh();
+    return saved.soul;
   });
-  toggle.hidden = true;
-  toggle.setAttribute('aria-expanded', 'false');
-  toggle.setAttribute('aria-controls', soul.id);
-  role.append(heading, soul, toggle);
-  return [hero, role, rows];
+  return detailRole.element;
 }
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
@@ -2788,11 +2785,9 @@ function labelDetail(label) {
 }
 function replaceDetail(render) {
   releaseDetailAvatar();
-  roleSize.disconnect();
-  const body = elements['detail-body'];
-  body.replaceChildren(...render());
-  const soul = body.querySelector('.settings-soul');
-  if (soul) roleSize.observe(soul);
+  const content = render();
+  if (detailRole && !content.includes(detailRole.element)) releaseDetailRole();
+  placeRows(elements['detail-body'], content);
   if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
 }
 function renderDetail() {
@@ -2803,7 +2798,9 @@ function renderDetail() {
     if (!sections.includes(detail.section)) detail.section = 'general';
     labelDetail(`${bot.name} settings`);
     renderDetailNav(sections, detail.section);
-    if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
+    const { soul, ...settings } = bot;
+    if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
+    detailRole?.update(soul, bot.canDelete === true);
     return;
   }
   labelDetail(null);
