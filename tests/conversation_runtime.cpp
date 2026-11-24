@@ -2461,6 +2461,7 @@ int main(int argc, char** argv) {
         cancellationReleasesOnlyAfterStopConfirmation();
         cloudDestinationWaitsForItsProject();
         canonicalMoveKeepsProjectAndGateway();
+        nonDefaultProjectMoveKeepsCanonicalGateway();
         moveAsksForTheDestinationProjectAfterSettlement();
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();
