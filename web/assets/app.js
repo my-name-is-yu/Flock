@@ -2373,6 +2373,7 @@ function openDetail(selection) {
   decisions.close({ focus: false });
   clearDetailSectionTransition();
   detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
+  if (selection.kind === 'settings' && !elements.detail.open) scheduleCache.delete(view.id);
   signatures.delete('detail');
   renderDetail();
   if (elements.detail.open) return;
@@ -2397,8 +2398,8 @@ elements.detail.addEventListener('close', () => {
   if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
 });
 
-function sectionsFor(bot) {
-  return bot.cron.length ? ['general', 'cron'] : ['general'];
+function sectionsFor() {
+  return ['general', 'cron'];
 }
 function selectSection(section, focus = false) {
   if (detail?.kind !== 'settings' || detail.section === section) return;
@@ -2591,9 +2592,9 @@ function generalContent(bot) {
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
   if (!bot.soul) rows.append(settingsRow('Role', 'None'));
-  rows.append(bot.cron.length
-    ? settingsRow('Recurring requests', String(bot.cron.length), () => selectSection('cron', true))
-    : settingsRow('Recurring requests', 'None'));
+  const schedules = scheduleCache.get(bot.id);
+  const scheduleCount = schedules?.items ? String(schedules.items.length || 'None') : '';
+  rows.append(settingsRow('Recurring requests', scheduleCount, () => selectSection('cron', true)));
   const settings = document.createElement('a');
   settings.className = 'settings-row';
   settings.href = '/settings/' + encodeURIComponent(bot.id);
@@ -2620,24 +2621,139 @@ function generalContent(bot) {
   role.append(heading, soul, toggle);
   return [hero, role, rows];
 }
-function cronContent(bot) {
-  const list = node('div', 'settings-card cron-list');
-  for (const item of bot.cron) {
-    const row = node('div', 'cron-row');
-    const when = node('p', 'cron-when');
-    when.append(
-      node('span', null, item.active ? 'Active' : 'Configured only'),
-      node('code', 'cron-expression', item.schedule),
-      node('span', 'cron-zone', item.timezone),
-    );
-    row.append(when, node('p', 'cron-request', item.request));
-    list.append(row);
+const scheduleCache = new Map();
+const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Etc/UTC';
+async function loadSchedules(botId) {
+  scheduleCache.set(botId, { loading: true });
+  let entry;
+  try {
+    const data = await api(botQuery('schedules', botId));
+    entry = { items: data.automations.filter((item) => item.status === 'active') };
+  } catch {
+    entry = { error: true };
   }
-  return [list];
+  scheduleCache.set(botId, entry);
+  if (detail?.kind === 'settings' && view?.id === botId) renderDetail();
+}
+function scheduleWhen(item) {
+  if (item.kind === 'reminder') return `Once, ${fullTime.format(item.fireAt * 1000)}`;
+  if (item.kind === 'trigger') return `When ${item.source} sends an event`;
+  const [minute, hour, day, month, weekday] = item.cron.split(/\s+/);
+  const plain = /^\d+$/;
+  if (!plain.test(minute) || !plain.test(hour) || day !== '*' || month !== '*') return item.cron;
+  const time = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
+  if (weekday === '*') return `Every day at ${time}`;
+  if (weekday === '1-5') return `Weekdays at ${time}`;
+  if (/^[0-7]$/.test(weekday)) return `Every ${weekdays[Number(weekday) % 7]} at ${time}`;
+  return item.cron;
+}
+function scheduleRow(bot, item) {
+  const row = node('div', 'cron-row');
+  const when = node('p', 'cron-when');
+  when.append(node('span', null, scheduleWhen(item)));
+  if (item.timezone && item.timezone !== browserZone) when.append(node('span', 'cron-zone', item.timezone));
+  const text = node('div', 'cron-text');
+  text.append(when, node('p', 'cron-request', item.request));
+  row.append(text);
+  if (item.configId) {
+    text.append(node('p', 'cron-note', 'Set in this Bot’s configuration'));
+    return row;
+  }
+  const remove = button('Remove', 'text-button cron-remove', async () => {
+    remove.disabled = true;
+    try {
+      await fetch(`/api/schedules?${new URLSearchParams({ bot: bot.id, id: item.id })}`, {
+        method: 'DELETE', credentials: 'same-origin', headers: { 'X-Flock-Action': '1' },
+      }).then((response) => { if (!response.ok) throw new Error(); });
+      await loadSchedules(bot.id);
+    } catch {
+      remove.disabled = false;
+      row.append(node('p', 'cron-error', 'Couldn’t remove this request.'));
+    }
+  });
+  remove.setAttribute('aria-label', `Remove “${item.request}”`);
+  row.append(remove);
+  return row;
+}
+function scheduleForm(bot) {
+  const form = node('form', 'settings-card cron-form');
+  form.append(node('h3', 'settings-card-label', 'Add a recurring request'));
+  const request = node('textarea', 'cron-request-input');
+  request.name = 'request';
+  request.required = true;
+  request.rows = 2;
+  request.maxLength = 8000;
+  request.placeholder = 'For example: Summarize what changed since yesterday.';
+  request.setAttribute('aria-label', 'Request');
+  const repeat = node('select');
+  repeat.name = 'repeat';
+  repeat.setAttribute('aria-label', 'Repeat');
+  for (const [value, label] of [['daily', 'Every day'], ['weekdays', 'Weekdays'], ['weekly', 'Every week on']]) {
+    const option = node('option', null, label);
+    option.value = value;
+    repeat.append(option);
+  }
+  const weekday = node('select');
+  weekday.name = 'weekday';
+  weekday.setAttribute('aria-label', 'Day');
+  weekdays.forEach((name, index) => {
+    const option = node('option', null, name);
+    option.value = String(index);
+    weekday.append(option);
+  });
+  weekday.value = '1';
+  weekday.hidden = true;
+  repeat.addEventListener('change', () => { weekday.hidden = repeat.value !== 'weekly'; });
+  const time = node('input');
+  Object.assign(time, { type: 'time', name: 'time', value: '09:00', required: true });
+  time.setAttribute('aria-label', 'Time');
+  const zone = node('span', 'cron-zone', browserZone);
+  const add = button('Add', 'dialog-button primary');
+  add.type = 'submit';
+  const when = node('div', 'cron-form-when');
+  when.append(repeat, weekday, time, zone, add);
+  const error = node('p', 'cron-error');
+  error.hidden = true;
+  form.append(request, when, error);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const [hour, minute] = time.value.split(':').map(Number);
+    const days = { daily: '*', weekdays: '1-5', weekly: weekday.value }[repeat.value];
+    add.disabled = true;
+    error.hidden = true;
+    try {
+      await api('schedules', { botId: bot.id, kind: 'schedule', request: request.value.trim(),
+        cron: `${minute} ${hour} * * ${days}`, timezone: browserZone });
+      form.reset();
+      await loadSchedules(bot.id);
+    } catch {
+      add.disabled = false;
+      error.textContent = 'Couldn’t add this request. Check that this Bot has a project to work in.';
+      error.hidden = false;
+    }
+  });
+  return form;
+}
+function cronContent(bot) {
+  const schedules = scheduleCache.get(bot.id);
+  const list = node('div', 'settings-card cron-list');
+  if (!schedules || schedules.loading) list.append(node('p', 'cron-empty', 'Loading…'));
+  else if (schedules.error) list.append(node('p', 'cron-empty', 'Couldn’t load recurring requests.'));
+  else {
+    for (const item of schedules.items) list.append(scheduleRow(bot, item));
+    for (const item of bot.cron.filter((entry) => !entry.active)) {
+      const row = node('div', 'cron-row');
+      row.append(node('p', 'cron-when', item.schedule), node('p', 'cron-request', item.request),
+        node('p', 'cron-error', 'This request from the Bot’s configuration isn’t scheduled. Check its time and time zone.'));
+      list.append(row);
+    }
+    if (!list.childElementCount) list.append(node('p', 'cron-empty', 'Nothing repeats yet. Add a request below, or ask the Bot in the conversation.'));
+  }
+  return [list, scheduleForm(bot)];
 }
 function settingsContent(bot, section = 'general') {
-  // Without recurring requests there are no section tabs, so "General" would name nothing.
-  elements['detail-title'].textContent = section === 'general' && !bot.cron.length ? 'Settings' : settingsSections[section][0];
+  elements['detail-title'].textContent = settingsSections[section][0];
   if (section === 'cron') return cronContent(bot);
   return generalContent(bot);
 }
@@ -2764,11 +2880,12 @@ function renderDetail() {
   if (!detail || !view) return;
   if (detail.kind === 'settings') {
     const bot = view.data.bot;
-    const sections = sectionsFor(bot);
+    const sections = sectionsFor();
+    if (!scheduleCache.has(bot.id)) void loadSchedules(bot.id);
     if (!sections.includes(detail.section)) detail.section = 'general';
     labelDetail(`${bot.name} settings`);
     renderDetailNav(sections, detail.section);
-    if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
+    if (changed('detail', detail, bot, scheduleCache.get(bot.id))) replaceDetail(() => settingsContent(bot, detail.section));
     return;
   }
   labelDetail(null);
