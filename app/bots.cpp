@@ -244,10 +244,14 @@ std::vector<std::string> Bots::ids() const {
 }
 
 namespace {
-Json readBotConfig(const std::filesystem::path& file) {
-    auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
+Json parseBotConfig(std::string_view text) {
+    auto config = Json::parse(text,nullptr,false);
     if (!config.is_object()) throw Conflict("Invalid Bot config.json");
     return config;
+}
+
+Json readBotConfig(const std::filesystem::path& file) {
+    return parseBotConfig(readText(file,maxConfigBytes));
 }
 
 Bot configuredBot(std::string_view id, const Json& config, std::vector<std::string>* scheduleErrors = nullptr) {
@@ -308,6 +312,50 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if (const auto role = config.find("role"); role != config.end() && role->is_string())
         bot.role = bounded(role->get_ref<const std::string&>(), 80);
     return bot;
+}
+
+std::vector<ConfiguredSchedule> configuredSchedules(
+        std::string_view id, const Json& config, std::vector<std::string>& errors) {
+    std::vector<ConfiguredSchedule> schedules;
+    try {
+        const auto cron = config.value("cron",Json::array());
+        if (!cron.is_array()) throw Conflict("cron must be an array");
+        if (!cron.empty()) {
+            const auto bot = configuredBot(id,config,&errors);
+            if (bot.environmentId.empty() || bot.projectId.empty())
+                throw Conflict("Configured schedules need a T3 environment and project");
+            std::map<std::string_view,std::size_t> counts;
+            for (const auto& entry : cron) {
+                const auto key = entry.find("id");
+                if (key == entry.end() || !key->is_string()) continue;
+                const auto& scheduleId = key->get_ref<const std::string&>();
+                if (validBotId(scheduleId)) ++counts[scheduleId];
+            }
+            for (std::size_t i = 0; i < cron.size(); ++i) {
+                const auto& entry = cron[i];
+                try {
+                    const auto scheduleId = validatedString(entry,"id");
+                    if (validBotId(scheduleId) && counts.at(scheduleId) > 1)
+                        throw Conflict("Duplicate configured schedule ID");
+                    schedules.push_back({scheduleId,validatedString(entry,"schedule"),
+                        validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
+                } catch (const Conflict& error) {
+                    errors.push_back("cron entry " + std::to_string(i + 1) + ": " + error.what());
+                }
+            }
+        }
+    } catch (const Conflict& error) {
+        errors.emplace_back(error.what());
+    } catch (const Json::exception& error) {
+        errors.emplace_back(error.what());
+    }
+    return schedules;
+}
+
+void reportScheduleErrors(std::string_view id, const std::vector<ScheduleImportError>& importErrors,
+                          const std::vector<std::string>& configErrors, const Bots::ScheduleReporter& report) {
+    for (const auto& error : importErrors) report(id,"cron schedule " + error.id + ": " + error.message);
+    for (const auto& error : configErrors) report(id,error);
 }
 }
 
@@ -586,11 +634,12 @@ Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& sett
                              const ScheduleReporter& report) {
     if (!settings.is_object() || settings.empty() || settings.size() != botRunSettingCount(settings))
         throw BotProfileError("invalid_profile_update","Save how the Bot runs separately from its profile");
-    std::lock_guard settingsLock(runSettingsMutex_);
-    {
+    std::vector<std::string> configErrors;
+    const auto importErrors = store.syncSchedules(id,now,[&](const auto& commit) {
         std::lock_guard lock(mutex_);
         const auto file = path(id) / "config.json";
-        auto config = readBotConfig(file);
+        const auto original = readText(file,maxConfigBytes);
+        auto config = parseBotConfig(original);
         for (const auto& [key,value] : settings.items()) {
             auto setting = validatedBotRunSetting(key,value);
             if (setting.empty()) {
@@ -601,9 +650,20 @@ Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& sett
                 if (key == "model") config["modelProvider"] = "chatgpt";
             }
         }
-        writeAtomic(file,profileText(config));
-    }
-    syncBotSchedules(store,id,now,report);
+        const auto updated = profileText(config);
+        const auto schedules = configuredSchedules(id,config,configErrors);
+        bool published = false;
+        try {
+            commit(schedules,[&] {
+                writeAtomic(file,updated);
+                published = true;
+            });
+        } catch (...) {
+            if (published) writeAtomic(file,original);
+            throw;
+        }
+    });
+    reportScheduleErrors(id,importErrors,configErrors,report);
     std::lock_guard lock(mutex_);
     return cardLocked(id);
 }
@@ -629,41 +689,13 @@ void Bots::syncBotSchedules(Store& store, std::string_view id, Seconds now, cons
     std::vector<ConfiguredSchedule> schedules;
     std::vector<std::string> errors;
     try {
-        const auto config = readBotConfig(path(id) / "config.json");
-        const auto cron = config.value("cron",Json::array());
-        if (!cron.is_array()) throw Conflict("cron must be an array");
-        if (!cron.empty()) {
-            const auto bot = configuredBot(id,config,&errors);
-            if (bot.environmentId.empty() || bot.projectId.empty())
-                throw Conflict("Configured schedules need a T3 environment and project");
-            std::map<std::string_view,std::size_t> counts;
-            for (const auto& entry : cron) {
-                const auto key = entry.find("id");
-                if (key == entry.end() || !key->is_string()) continue;
-                const auto& scheduleId = key->get_ref<const std::string&>();
-                if (validBotId(scheduleId)) ++counts[scheduleId];
-            }
-            for (std::size_t i = 0; i < cron.size(); ++i) {
-                const auto& entry = cron[i];
-                try {
-                    const auto scheduleId = validatedString(entry,"id");
-                    if (validBotId(scheduleId) && counts.at(scheduleId) > 1)
-                        throw Conflict("Duplicate configured schedule ID");
-                    schedules.push_back({scheduleId,validatedString(entry,"schedule"),
-                        validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
-                } catch (const Conflict& error) {
-                    errors.push_back("cron entry " + std::to_string(i + 1) + ": " + error.what());
-                }
-            }
-        }
+        schedules = configuredSchedules(id,readBotConfig(path(id) / "config.json"),errors);
     } catch (const Conflict& error) {
         errors.emplace_back(error.what());
     } catch (const Json::exception& error) {
         errors.emplace_back(error.what());
     }
-    for (const auto& error : store.syncSchedules(id,schedules,now))
-        report(id,"cron schedule " + error.id + ": " + error.message);
-    for (const auto& error : errors) report(id,error);
+    reportScheduleErrors(id,store.syncSchedules(id,schedules,now),errors,report);
 }
 
 void Bots::syncSchedules(Store& store, Seconds now, const ScheduleReporter& report) const {

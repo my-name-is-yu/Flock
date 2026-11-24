@@ -1,5 +1,7 @@
 #include "fixtures.hpp"
 
+#include <sqlite3.h>
+
 namespace flockv0::app::test {
 namespace {
 void cronSyntaxAndTimeZones() {
@@ -229,6 +231,39 @@ void runSettingsChangesResyncConfiguredSchedules() {
     check(store.tasks("release").size() == 1,"a configured schedule fired after its destination was cleared");
 }
 
+void failedScheduleSyncLeavesWorkspaceUnchanged() {
+    Sandbox temp;
+    const auto home = temp.path / "bots";
+    const auto database = temp.path / "tasks.db";
+    auto config = botConfig();
+    config["cron"] = Json::array({
+        {{"id","daily"},{"schedule","0 0 * * *"},{"timezone","Etc/UTC"},{"request","Daily check"}},
+    });
+    createBot(home / "release",config,"","");
+    Bots bots(home);
+    Store store(database);
+    const auto due = utc(2026,1,2,0,0);
+    const auto report = [](std::string_view, std::string_view error) { throw std::runtime_error(std::string(error)); };
+    bots.syncSchedules(store,due - 60,report);
+
+    sqlite3* handle = nullptr;
+    const auto opened = sqlite3_open(database.c_str(),&handle);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> connection(handle,sqlite3_close);
+    check(opened == SQLITE_OK && sqlite3_exec(connection.get(),R"SQL(
+CREATE TRIGGER reject_schedule_routing BEFORE UPDATE OF routing ON automations
+BEGIN SELECT RAISE(ABORT,'schedule write rejected'); END;
+)SQL",nullptr,nullptr,nullptr) == SQLITE_OK,"could not reject the schedule route write");
+
+    rejects<std::runtime_error>([&] {
+        bots.updateRunSettings(store,"release",{{"projectId","next-project"}},due,report);
+    },"workspace save succeeded after the schedule write failed");
+    store.fireDueAutomations(due);
+    const auto tasks = store.tasks("release");
+    check(tasks.size() == 1 && tasks.front().at("projectId") == config.at("projectId") &&
+          bots.get("release").projectId == config.at("projectId").get_ref<const std::string&>(),
+          "a failed schedule update published a destination that did not match the due task");
+}
+
 void invalidEntriesPreserveDueSchedule() {
     Sandbox temp;
     const auto home = temp.path / "bots";
@@ -318,6 +353,7 @@ void configuredSchedules() {
     cronIntakeAndRestart();
     configuredScheduleLifecycle();
     runSettingsChangesResyncConfiguredSchedules();
+    failedScheduleSyncLeavesWorkspaceUnchanged();
     invalidSessionSettingsPreserveDueTimes();
     invalidEntriesPreserveDueSchedule();
     malformedDuplicatesDeactivateSchedules();
