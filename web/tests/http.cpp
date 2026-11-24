@@ -1368,7 +1368,8 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     cb.updateBot = [&](std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image) {
         auto& card = profiles.at(std::string(botId));
         if (profile.contains("soul")) {
-            check(profile.size() == 1 && !image,"role update forwarded other settings");
+            check(profile.size() == 2 && profile.at("originalSoul") == card.at("soul") && !image,
+                  "role update omitted the original text or forwarded other settings");
             card["soul"] = profile.at("soul");
             return card;
         }
@@ -1461,22 +1462,34 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == originalUrl,
           "name-only update changed the avatar");
 
-    const auto roleOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul"," \tCheck releases.\r\n"}},200);
+    const auto noOriginal = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul","Other role"}},400);
+    check(noOriginal.at("error") == "invalid_profile_update","role update accepted without original text");
+    const auto roleOnly = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"soul"," \tCheck releases.\r\n"},{"originalSoul",""},
+    },200);
     check(roleOnly.at("soul") == "Check releases." && roleOnly.at("name") == "Scout Name" &&
           roleOnly.at("avatar").at("imageUrl") == originalUrl,"role-only update lost profile settings");
-    const auto mixed = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Stale Name"},{"soul","Other role"}},400);
+    const auto mixed = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"name","Stale Name"},{"soul","Other role"},{"originalSoul",roleOnly.at("soul")},
+    },400);
     check(mixed.at("error") == "invalid_profile_update","role and name were accepted in the same request");
     for (const Json& invalid : Json::array({nullptr,std::string("a\0b",3),std::string(maxBotRoleBytes + 1,'x')})) {
-        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul",invalid}},400);
+        const auto rejected = browser.post("/api/bots/profile",{
+            {"botId","bot-1"},{"soul",invalid},{"originalSoul",roleOnly.at("soul")},
+        },400);
         check(rejected.at("error") == "invalid_soul","invalid role was accepted");
     }
     const auto secret = store.policy().requestSecret("bot-1",{"fixture-role-token"});
     store.policy().submitSecret(localOwner,"bot-1",secret,privateValue);
-    const auto credentials = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul","Use " + std::string(privateValue)}},400);
+    const auto credentials = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"soul","Use " + std::string(privateValue)},{"originalSoul",roleOnly.at("soul")},
+    },400);
     check(credentials.at("error") == "role_contains_secrets","role update accepted a stored secret");
     const auto nameAfterRole = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Latest"}},200);
     check(nameAfterRole.at("soul") == "Check releases.","rename or rejected role update changed the role");
-    const auto cleared = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul"," \t\n"}},200);
+    const auto cleared = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"soul"," \t\n"},{"originalSoul",roleOnly.at("soul")},
+    },200);
     check(cleared.at("soul") == "" && cleared.at("name") == "Scout Latest","clearing the role changed the name");
 
     // Replace with GIF updates version and content-type.

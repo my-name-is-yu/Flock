@@ -2665,8 +2665,11 @@ function generalContent(bot) {
   return [hero, roleCard(bot), rows];
 }
 function roleCard(bot) {
-  detailRole ??= createBotRoleCard(async (soul) => {
-    const saved = await api('bots/profile', { botId: bot.id, soul });
+  detailRole ??= createBotRoleCard(async (soul, originalSoul) => {
+    const saved = await api('bots/profile', { botId: bot.id, soul, originalSoul }).catch((error) => {
+      if (error.message === 'role_changed' && view?.id === bot.id) void view.refresh();
+      throw error;
+    });
     void refreshBots();
     if (view?.id === bot.id) void view.refresh();
     return saved.soul;

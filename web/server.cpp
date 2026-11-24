@@ -109,8 +109,10 @@ struct ParsedProfile {
 
 ParsedProfile parseBotProfile(const Json& body, bool creating) {
     if (!creating && body.contains("soul")) {
-        if (body.size() != 2) throw InputError("invalid_profile_update");
-        return {{{"soul",validatedBotSoul(body.at("soul"))}},std::nullopt};
+        const auto original = body.find("originalSoul");
+        if (body.size() != 3 || original == body.end() || !original->is_string())
+            throw InputError("invalid_profile_update");
+        return {{{"soul",validatedBotSoul(body.at("soul"))},{"originalSoul",*original}},std::nullopt};
     }
     Json profile = {{"name",validatedBotName(body)}};
     if (creating && body.contains("role")) {
@@ -468,7 +470,11 @@ private:
                 if (!store_.policy().allows(web::person(callbacks_,req),Action::bot_settings,botId)) return error(res,403,"access_denied");
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
                 auto parsed = parseBotProfile(body,false);
-                if (store_.policy().redactSecrets(botId,parsed.profile) != parsed.profile)
+                const auto redacted = store_.policy().redactSecrets(botId,parsed.profile);
+                if (const auto original = parsed.profile.find("originalSoul");
+                    original != parsed.profile.end() && redacted.at("originalSoul") != *original)
+                    return error(res,409,"role_changed");
+                if (redacted != parsed.profile)
                     return error(res,400,parsed.profile.contains("soul") ? "role_contains_secrets" : "invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
                 changes_.rescan();
@@ -481,7 +487,7 @@ private:
             changes_.rescan();
             return json(res,201,redactBot(web::field(created,"id"),web::botSettings(created)));
         } catch (const InputError& e) { error(res,400,e.what()); }
-        catch (const BotProfileError& e) { error(res,400,e.code); }
+        catch (const BotProfileError& e) { error(res,e.code == "role_changed" ? 409 : 400,e.code); }
         catch (const Conflict&) { error(res,400,"invalid_bot_profile"); }
     }
 
