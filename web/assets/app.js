@@ -19,7 +19,7 @@ const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile-avatar', 'profile-avatar-button',
   'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
-  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-summary', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
@@ -1633,7 +1633,7 @@ function eventCard(event, context, place, report) {
         bubble.append(link);
       }
     }
-    replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
+    replyTarget = ['Reply to this review', { kind: 'review', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
       : data.report || (data.destination ? 'No Session report is available.' : 'The session submitted a report.');
@@ -1739,7 +1739,7 @@ function eventCard(event, context, place, report) {
     actions.append(control);
   }
   if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
+    const reply = iconButton('reply', 'Answer this question', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
     reply.disabled = decisions.busy(taskWaitDecision(view.id, pendingWait));
     actions.append(reply);
   }
@@ -2217,7 +2217,6 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
 }
-const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
 const activeReply = (composer) => decisions.reviewReply() ?? composer.reply;
 const screenshotAnchor = (reply) => reply?.messageId ?? 0;
@@ -2315,6 +2314,35 @@ function fitMessage() {
   // Measuring the textarea briefly frees space and can clamp the timeline's scroll position.
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
 }
+
+function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
+  const answering = target?.kind === 'wait';
+  const reviewing = target?.kind === 'review';
+  const working = ['working', 'thinking'].includes(data.presence);
+  const fieldLabel = answering ? 'Write your answer' : reviewing ? 'Reply to this review' :
+    target ? 'Write a reply' : 'Message';
+  elements['decision-reply-context'].hidden = !inboxReply;
+  elements['reply-context'].hidden = !target || inboxReply;
+  elements['compose-label'].textContent = fieldLabel;
+  elements.message.placeholder = suggestion ? `${suggestion.text} (press Enter to use this suggestion)` :
+    target ? fieldLabel : working ? `Guide ${data.bot.name} while it works` : `Message ${data.bot.name}`;
+  const sendLabel = answering ? 'Send answer' : target ? 'Send reply' : 'Send message';
+  elements.send.setAttribute('aria-label', sendLabel);
+  elements.send.title = sendLabel;
+
+  const summaryId = inboxReply ? 'decision-reply-target' : 'reply-summary';
+  elements.message.setAttribute('aria-describedby', target ? `${summaryId} notice` : 'notice');
+  if (!target) return;
+
+  let summary = target.summary;
+  if (!summary && target.messageId) {
+    const source = events.get(target.messageId)?.data;
+    if (source) summary = answering ? waitText(source) : reviewing ? source.title : source.report ?? source.text;
+  }
+  elements[inboxReply ? 'decision-reply-label' : 'reply-label'].textContent = answering ? 'Answering' : 'Replying to';
+  elements[summaryId].textContent = summary || (answering ? waitLabel('user_question') : 'Earlier message');
+}
+
 function renderComposer() {
   const context = view;
   const readOnly = context?.data?.canDecide === false;
@@ -2325,7 +2353,6 @@ function renderComposer() {
   elements['view-only-notice'].hidden = !available || canDecide;
   const decision = canDecide ? decisions.composer() : null;
   const review = canDecide ? decisions.reviewReply() : null;
-  elements['decision-reply-context'].hidden = !decision && !review;
   if (!canDecide || !context.composer) {
     composition = null;
     elements['composer-ghost'].hidden = true;
@@ -2342,27 +2369,14 @@ function renderComposer() {
   const body = decision?.text ?? composer.textAt(screenshotAnchor(reply));
   const busy = !!decision?.busy || sendingMessages.has(composer);
   const closedReply = closedQuestion(context, reply);
-  const source = reply && context.events.get(reply.messageId)?.data;
-  const summary = reply?.summary ?? (source && (reply.kind === 'wait' ? waitText(source) : source.report ?? source.text));
-  if (decision || review) {
-    elements['decision-reply-label'].textContent = 'Replying to';
-    elements['decision-reply-target'].textContent = decision?.item.requestTitle ?? review.summary;
-  }
-  elements['reply-context'].hidden = !reply || !!review;
-  elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
-  elements['reply-question'].textContent = reply ? summary ?? 'Earlier message' : '';
-  elements['compose-label'].textContent = decision ? `Replying to ${decision.item.requestTitle}` :
-    review ? `Replying to ${review.summary}` : reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
-  const working = ['working', 'thinking'].includes(context.data.presence);
-  elements.message.placeholder = (decision || review) ? 'Ask a question or give direction' :
-    reply ? 'Write a reply' : working ? `Guide ${context.data.bot.name} while it works` : `Message ${context.data.bot.name}`;
   const suggestion = nextSuggestion(context);
+  const target = decision ? { kind: 'wait', summary: decision.item.prompt?.trim() } : reply;
+  renderComposerCopy(context, target, !!(decision || review), suggestion);
   const ghost = elements['composer-ghost'];
   ghost.hidden = !suggestion;
   ghost.firstElementChild.textContent = suggestion?.text ?? '';
   elements.message.classList.toggle('has-ghost', !!suggestion);
-  if (suggestion) elements.message.placeholder = `${suggestion.text} (press Enter to use this suggestion)`;
   if (!composition && elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
@@ -2376,9 +2390,6 @@ function renderComposer() {
   elements.send.disabled = busy || !!composition || closedReply || !!decision?.blocked || !!screenshots?.loading ||
     !body.trim() || byteLength(body) > (decision ? 8000 : composerLimit(reply));
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
-  const sendLabel = decision ? 'Send written answer' : reply ? 'Send reply' : 'Send message';
-  elements.send.setAttribute('aria-label', sendLabel);
-  elements.send.title = sendLabel;
   const screenshotError = !busy && !closedReply && screenshots?.error;
   elements.notice.textContent = notice?.isError ? notice.text :
     (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
