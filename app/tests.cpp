@@ -823,6 +823,14 @@ void botProfilesAndAvatars() {
           renamed.at("avatar").at("version") == uploaded.at("avatar").at("version"),
           "renaming Bot lost existing uploaded image");
 
+    const auto described = bots.updateProfile("scout",{{"name","Scout Renamed"},{"soul","Scouts new releases."}},std::nullopt);
+    check(described.at("soul") == "Scouts new releases." && bots.soul("scout") == "Scouts new releases." &&
+          described.at("avatar").at("version") == uploaded.at("avatar").at("version"),
+          "saving a Bot role did not write SOUL.md or changed its avatar");
+    const auto cleared = bots.updateProfile("scout",{{"name","Scout Renamed"},{"soul",""}},std::nullopt);
+    check(cleared.at("soul") == "" && !std::filesystem::exists(temp.path / "bots" / "scout" / "SOUL.md"),
+          "clearing a Bot role left SOUL.md behind");
+
     // Replacing with GIF deletes old PNG file and updates version hash.
     const auto replaced = bots.updateProfile("scout",{
         {"name","Scout Renamed"},

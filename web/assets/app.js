@@ -2590,7 +2590,6 @@ function generalContent(bot) {
   renderNameDisplay();
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
-  if (!bot.soul) rows.append(settingsRow('Role', 'None'));
   rows.append(bot.cron.length
     ? settingsRow('Recurring requests', String(bot.cron.length), () => selectSection('cron', true))
     : settingsRow('Recurring requests', 'None'));
@@ -2600,25 +2599,94 @@ function generalContent(bot) {
   settings.append(node('span', 'settings-row-label', 'Sharing and connections'));
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
-  if (!bot.soul) return [hero, rows];
+  return [hero, roleCard(bot, statusNote), rows];
+}
+function roleCard(bot, statusNote) {
   const role = node('section', 'settings-card settings-role');
+  const header = node('div', 'settings-role-header');
   const heading = node('h3', 'settings-card-label', 'Role');
   heading.id = 'settings-role-label';
   role.setAttribute('aria-labelledby', heading.id);
-  const soul = node('p', 'settings-soul', bot.soul);
-  soul.id = 'settings-role-text';
-  soul.dataset.folded = 'true';
-  const toggle = button('Show all', 'text-button settings-soul-toggle', () => {
-    const folded = soul.dataset.folded === 'true';
-    soul.dataset.folded = String(!folded);
-    toggle.textContent = folded ? 'Show less' : 'Show all';
-    toggle.setAttribute('aria-expanded', String(folded));
-  });
-  toggle.hidden = true;
-  toggle.setAttribute('aria-expanded', 'false');
-  toggle.setAttribute('aria-controls', soul.id);
-  role.append(heading, soul, toggle);
-  return [hero, role, rows];
+  const edit = button('Edit', 'text-button settings-role-edit', beginEdit);
+  edit.setAttribute('aria-label', 'Edit role');
+  header.append(heading, edit);
+
+  function renderView() {
+    edit.hidden = false;
+    if (!bot.soul) {
+      role.replaceChildren(header, node('p', 'settings-soul-empty', 'Describe what this Bot does and how it decides.'));
+      return;
+    }
+    const soul = node('p', 'settings-soul', bot.soul);
+    soul.id = 'settings-role-text';
+    soul.dataset.folded = 'true';
+    const toggle = button('Show all', 'text-button settings-soul-toggle', () => {
+      const folded = soul.dataset.folded === 'true';
+      soul.dataset.folded = String(!folded);
+      toggle.textContent = folded ? 'Show less' : 'Show all';
+      toggle.setAttribute('aria-expanded', String(folded));
+    });
+    toggle.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', soul.id);
+    role.replaceChildren(header, soul, toggle);
+    if (soul.isConnected) roleSize.observe(soul);
+  }
+  function beginEdit() {
+    edit.hidden = true;
+    const input = node('textarea', 'settings-role-input');
+    input.value = bot.soul ?? '';
+    input.rows = 8;
+    input.maxLength = 8192;
+    input.placeholder = 'For example: Reviews release branches, runs the checks, and reports what blocks shipping.';
+    input.setAttribute('aria-labelledby', heading.id);
+    const actions = node('div', 'settings-role-actions');
+    const cancel = button('Cancel', 'dialog-button quiet', () => {
+      renderView();
+      edit.focus();
+    });
+    const save = button('Save', 'dialog-button primary', async () => {
+      if (input.value.trim() === (bot.soul ?? '').trim()) {
+        renderView();
+        edit.focus();
+        return;
+      }
+      input.disabled = save.disabled = cancel.disabled = true;
+      statusNote.classList.remove('error');
+      statusNote.hidden = true;
+      try {
+        await api('bots/profile', { botId: bot.id, name: bot.name, soul: input.value });
+        await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
+        if (detail?.kind === 'settings') {
+          detail = { ...detail, status: 'Role updated' };
+          signatures.delete('detail');
+          renderDetail();
+        }
+      } catch (error) {
+        input.disabled = save.disabled = cancel.disabled = false;
+        statusNote.classList.add('error');
+        statusNote.textContent = error.message === 'invalid_bot_profile'
+          ? 'Remove passwords or keys from the role before saving.'
+          : 'Couldn’t save the role.';
+        statusNote.hidden = false;
+      }
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        cancel.click();
+      } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        save.click();
+      }
+    });
+    actions.append(cancel, save);
+    role.replaceChildren(header, input, actions);
+    input.focus();
+  }
+  renderView();
+  return role;
 }
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');

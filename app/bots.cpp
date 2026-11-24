@@ -314,7 +314,7 @@ Bot Bots::get(std::string_view id) const {
 }
 
 std::string Bots::soul(std::string_view id) const {
-    return readText(path(id) / "SOUL.md",8192,true);
+    return readText(path(id) / "SOUL.md",maxBotRoleBytes,true);
 }
 
 std::string Bots::initialMemory(std::string_view id) const {
@@ -370,7 +370,7 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
         }
     }
 
-    Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",8192,true)},{"cron",schedules}};
+    Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
     if (config.contains("role") && config["role"].is_string() && validBotRole(config["role"].get_ref<const std::string&>()))
         item["role"] = config["role"];
     if (const auto stored = config.find("avatar"); stored != config.end() && stored->is_object()) {
@@ -547,6 +547,11 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
 
     const auto previousFile = changeAvatar ? storedAvatarFile(existingAvatar) : std::string{};
     saveProfile(botDir,config,changeAvatar && image ? &*image : nullptr,previousFile);
+    if (const auto soul = profile.find("soul"); soul != profile.end()) {
+        const auto& text = soul->get_ref<const std::string&>();
+        if (text.empty()) std::filesystem::remove(botDir / "SOUL.md");
+        else writeAtomic(botDir / "SOUL.md",text);
+    }
     if (!previousFile.empty() && previousFile != storedAvatarFile(config.at("avatar")) && isAvatarFile(botDir / previousFile)) {
         std::error_code ignore;
         std::filesystem::remove(botDir / previousFile,ignore);
