@@ -208,11 +208,27 @@ Json Store::Impl::cancelAutomation(std::string_view bot, Id id) {
 
 std::vector<ScheduleImportError> Store::syncSchedules(
         std::string_view bot, const std::vector<ConfiguredSchedule>& schedules, Seconds now) {
+    return syncSchedules(bot,now,[&](const auto& commit) { commit(schedules,[] {}); });
+}
+
+std::vector<ScheduleImportError> Store::syncSchedules(
+        std::string_view bot, Seconds now, const EditConfiguredSchedules& edit) {
     if (now < 0 || now > lastAutomationTime) throw Conflict("Clock is outside the supported range");
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    if (p_->botDeleted(bot)) return {};
-    const auto scrub = p_->redactor(bot);
+    std::vector<ScheduleImportError> errors;
+    edit([&](const auto& schedules, const auto& publish) {
+        errors = p_->stageConfiguredSchedules(bot,schedules,now);
+        publish();
+        tx.commit();
+    });
+    return errors;
+}
+
+std::vector<ScheduleImportError> Store::Impl::stageConfiguredSchedules(
+        std::string_view bot, const std::vector<ConfiguredSchedule>& schedules, Seconds now) {
+    if (botDeleted(bot)) return {};
+    const auto scrub = redactor(bot);
     std::map<std::string_view,std::size_t> counts;
     for (const auto& schedule : schedules) ++counts[schedule.id];
 
@@ -223,17 +239,16 @@ std::vector<ScheduleImportError> Store::syncSchedules(
             if (!validBotId(schedule.id) || schedule.routing.botId != bot)
                 throw Conflict("Invalid configured schedule");
             if (counts.at(schedule.id) > 1) throw Conflict("Duplicate configured schedule ID");
-            p_->syncSchedule(schedule,now,scrub);
+            syncSchedule(schedule,now,scrub);
             configured.insert(schedule.id);
         } catch (const Conflict& error) {
             errors.push_back({scrub.text(schedule.id),error.what()});
         }
     }
-    p_->exec(R"SQL(
+    exec(R"SQL(
 UPDATE automations SET status='inactive',next_run_at=NULL,error=NULL WHERE bot_id=? AND status IN ('active','failed','delivered')
 AND config_id IS NOT NULL AND config_id NOT IN (SELECT value FROM json_each(?))
 )SQL",{bot,Json(configured)});
-    tx.commit();
     return errors;
 }
 

@@ -39,7 +39,6 @@ public:
 private:
     std::filesystem::path directory_;
     mutable std::mutex mutex_;
-    std::mutex workspaceMutex_;
     std::filesystem::path path(std::string_view id) const;
     Json cardLocked(std::string_view id) const;
     Json cardFromDirectory(std::string_view id, const std::filesystem::path&) const;
