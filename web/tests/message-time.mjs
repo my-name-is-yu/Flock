@@ -16,8 +16,12 @@ function fixtures() {
     return nativeMatchMedia(query);
   };
   window.EventSource = undefined;
-  const bot = { id: 'release', name: 'Release' };
+  const bot = { id: 'release', name: 'Release', peers: [{ id: 'triage' }] };
   const peer = { id: 'triage', name: 'Triage' };
+  window.renameBot = (name) => {
+    bot.name = name;
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   const time = new Date(2026, 10, 20, 13).getTime() / 1000;
   const sessionCreatedAt = new Date(2026, 10, 20, 17, 30).toISOString();
   const RealDate = Date;
@@ -309,6 +313,9 @@ async function exercise() {
     'The read-only DM lost a centered separator or exposed the composer');
   check(release.tabIndex === 0 && release.querySelectorAll('time').length === 1 && eventTime(release).dateTime,
     'The peer message did not expose a focusable semantic timestamp');
+  const descriptionId = document.getElementById('peer-heading').getAttribute('aria-describedby');
+  check(document.getElementById(descriptionId)?.textContent === 'Read-only conversation between Bots',
+    'The Bot conversation heading lost its read-only description');
 
   const forwardedTime = eventTime(forwarded);
   const source = forwarded.querySelector('.peer-forwarded-message');
@@ -328,6 +335,19 @@ async function exercise() {
     await new Promise(resolve => setTimeout(resolve, 10));
   check(document.getElementById('event-9') === release && release.querySelector('.msg-meta').classList.contains('sr-only') &&
     senders() === 'Release,Triage,Triage,Triage', 'Prepending peer history replaced the loaded row or repeated its sender label');
+
+  document.getElementById('peer-parent-link').click();
+  const picker = document.getElementById('peer-picker');
+  for (let attempt = 0; attempt < 20 && picker.hidden; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(!picker.hidden, 'The Bot conversation picker did not become available');
+  picker.click();
+  const title = document.getElementById('detail-title');
+  check(title.textContent === 'Release talks with', 'The conversation picker did not name the current Bot');
+  window.renameBot('Deploy');
+  for (let attempt = 0; attempt < 20 && title.textContent !== 'Deploy talks with'; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(title.textContent === 'Deploy talks with', 'The open conversation picker kept the old Bot name');
 }
 
 const assets = new URL('../assets/', import.meta.url);

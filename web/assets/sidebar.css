@@ -276,12 +276,13 @@ a.session-row:hover .activity-open, a.session-row:focus-visible .activity-open {
 @keyframes skeleton-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 
 .status-dot { width: .42rem; height: .42rem; border-radius: 50%; flex: none; background: var(--text-3); }
-.sidebar-foot { position: relative; flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3) var(--space-3) .7rem; min-height: 3rem; }
-/* The connection line only speaks up when something is wrong; then it gets its own row above the footer controls. */
-.connection:has(#connection-text:empty) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.connection { flex-basis: 100%; padding-inline-start: .65rem; }
+.sidebar-foot {
+  position: relative; flex: none; display: grid; justify-items: start; align-content: center;
+  gap: var(--space-2); min-height: 3rem;
+  padding-block: var(--space-2) var(--space-3); padding-inline: .4rem var(--space-3);
+}
 .sidebar-settings {
-  display: inline-flex; align-items: center; gap: .5rem; min-width: 0; padding: .4rem .65rem;
+  display: flex; align-items: center; gap: .4rem; padding: .4rem;
   border-radius: var(--radius-md); color: var(--text-2); font-size: var(--text-sm); text-decoration: none;
   transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
@@ -289,50 +290,16 @@ a.session-row:hover .activity-open, a.session-row:focus-visible .activity-open {
 .sidebar-settings:hover { background: var(--hover); color: var(--text); }
 .sidebar-settings:hover svg { color: var(--text-2); }
 .sidebar-settings:active { transform: scale(.97); }
-.sidebar-foot-links { flex: 1 1 0; display: flex; align-items: center; gap: 0; min-width: 0; margin-inline-start: -.3rem; }
-.sidebar-foot-links .sidebar-settings { padding-inline: .4rem; gap: .4rem; }
-.sidebar-settings { flex: none; }
-.connection { display: flex; align-items: center; gap: .49rem; min-width: 0; font-size: var(--text-xs); color: var(--text-2); }
+.connection {
+  display: flex; align-items: center; gap: .49rem; min-width: 0; padding-inline-start: .95rem;
+  font-size: var(--text-xs); color: var(--text-2);
+}
+.connection:has(#connection-text:empty) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .connection[data-state="ready"] .status-dot { display: none; }
 .connection[data-state="loading"] { animation: connection-delay .2s ease-out .6s both; }
 .connection[data-state="offline"] { color: var(--danger); }
 .connection[data-state="offline"] .status-dot { background: var(--danger); }
 @keyframes connection-delay { from { opacity: 0; } to { opacity: 1; } }
-.theme-switch {
-  position: relative; isolation: isolate;
-  display: flex; gap: 2px; margin-left: auto; padding: 2px;
-  border-radius: var(--radius-md); background: var(--hover);
-}
-.theme-switch::before {
-  content: "";
-  position: absolute; top: 2px; bottom: 2px; left: 0; z-index: 0;
-  width: var(--seg-w, 0px);
-  transform: translateX(var(--seg-x, 0px));
-  border-radius: var(--radius-sm);
-  background: var(--canvas);
-  box-shadow: 0 1px 2px var(--shadow-color);
-  opacity: 0;
-  pointer-events: none;
-}
-.theme-switch.seg-ready::before { opacity: 1; }
-.theme-switch.seg-animated::before {
-  transition: transform 240ms cubic-bezier(0.22, 1.15, 0.36, 1),
-              width 240ms cubic-bezier(0.22, 1.15, 0.36, 1),
-              background-color 220ms cubic-bezier(.2, .8, .2, 1),
-              box-shadow 220ms cubic-bezier(.2, .8, .2, 1);
-}
-.theme-switch button {
-  position: relative; z-index: 1;
-  width: 1.75rem; height: 1.6rem; border: 0; border-radius: var(--radius-sm); padding: 0;
-  display: grid; place-items: center; background: transparent; color: var(--text-3);
-  transition: color 180ms ease, transform var(--dur-press) var(--ease-out);
-}
-.theme-switch button:hover { color: var(--text); }
-.theme-switch button:active { transform: scale(.92); }
-.theme-switch button[aria-pressed="true"] { color: var(--text); }
-.theme-switch:not(.seg-ready) button[aria-pressed="true"] { background: var(--canvas); box-shadow: 0 1px 2px var(--shadow-color); }
-.theme-switch svg { width: .95rem; height: .95rem; }
-
 .nav-backdrop { display: none; }
 
 @media (max-width: 700px) {
@@ -371,6 +338,5 @@ a.session-row:hover .activity-open, a.session-row:focus-visible .activity-open {
   .connection[data-state="loading"], .working-dots i, .pin-presence, .activity-status.live .activity-mark { animation: none; }
   .skeleton-line, .skeleton-avatar { animation: none; opacity: .7; }
   .pin:active, .bot-select:active, .row-menu:active, .menu-popover button:active,
-  button.activity:active, a.activity:active, .theme-switch button:active { transform: none; }
-  .theme-switch.seg-animated::before, .theme-switch button { transition: none; }
+  button.activity:active, a.activity:active { transform: none; }
 }

@@ -308,16 +308,20 @@ async function exercise(mountBoardInbox) {
 }
 
 function liveFixture() {
-  const bot = { id: 'release', name: 'Release', latestIncomingEventId: 0 };
+  const bot = { id: 'release', name: 'Release', latestIncomingEventId: 0,
+    presence: 'waiting', preview: 'Which branch?' };
   const decision = { botId: bot.id, botName: bot.name, itemKind: 'user_question', itemId: 1, waitId: 1,
-    taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'Draft notes', prompt: 'Which branch?' };
+    taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'ask:Which branch?', prompt: 'Which branch?', canDecide: true };
+  const question = { id: 1, reason: 'user_question', text: decision.prompt, messageId: 2 };
+  const review = { ...decision, itemKind: 'pr_review', itemId: 3, waitId: 0, taskId: 4, conversationEventId: 3,
+    requestTitle: 'Prepare the release', prTitle: 'Release notes', prompt: 'Review these notes.' };
   const approval = { ...decision, itemKind: 'policy_approval', itemId: 2, taskId: 2, waitId: 2,
     action: 'repository.pr', target: 'team/guide', requestTitle: 'repository.pr · team/guide',
     prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true, canSaveRule: false, status: 'pending' };
   const wait = {id: 2, reason: 'policy_approval', text: approval.requestTitle};
   const stopWait = { id: 9, reason: 'model_failure', text: 'The last attempt failed.' };
   const stopTask = { id: 3, currentRevision: 5, generation: 7, request: 'Check the release', wait: stopWait };
-  const fixture = window.inboxFixture = { bot, reads: 0, approvalReady: false, updated: false, failed: false,
+  const fixture = window.inboxFixture = { bot, decision, review, reads: 0, approvalReady: false, updated: false, failed: false,
     showStop: false, canDecide: true, stopRequests: [], answers: [] };
   window.EventSource = class extends EventTarget {
     constructor(path) {
@@ -344,6 +348,12 @@ function liveFixture() {
       if (fixture.updated) events.push({id: 5, taskId: 2, time: 2, kind: 'wait_closed',
         data: { waitId: 2, resolution: 'allow_once' }});
       const waits = fixture.updated ? [] : [{id: 2, wait}];
+      if (!fixture.updated) {
+        events.unshift({ id: question.messageId, taskId: decision.taskId, time: 1, kind: 'waiting', data: question },
+          { id: review.conversationEventId, taskId: review.taskId, time: 1, kind: 'pr_review_requested',
+            data: { title: review.prTitle, text: review.prompt } });
+        waits.push({ id: decision.taskId, wait: question });
+      }
       if (fixture.showStop) {
         waits.push(stopTask);
         events.push({ id: 6, taskId: stopTask.id, time: 3, kind: 'waiting', data: stopWait });
@@ -364,7 +374,8 @@ function liveFixture() {
         return Response.json({ error: 'server_error' }, { status: 503 });
       }
       if (fixture.question) return Response.json({ items: [fixture.question] });
-      return Response.json({ items: fixture.updated ? [] : fixture.approvalReady ? [decision, approval] : [decision] });
+      const items = fixture.approvalReady ? [decision, review, approval] : [decision, review];
+      return Response.json({ items: fixture.updated ? [] : items });
     }
     throw new Error('Unexpected route ' + path);
   };
@@ -383,8 +394,54 @@ async function exerciseLiveRetry() {
   }
   await waitFor(() => !trigger.hidden && fixture.stream?.path === '/api/events?bot=release',
     'The Inbox did not load on the Bot stream');
+  const badge = document.querySelector('#bot-list .decision-count');
+  const preview = document.querySelector('#bot-list .bot-preview');
+  if (badge.hidden || badge.textContent !== '1' || preview.textContent !== fixture.bot.preview ||
+      !preview.querySelector('.presence-dot').hidden)
+    throw new Error('The Bot row did not show the last message and a single waiting indicator');
+  const { width, height } = badge.getBoundingClientRect();
+  if (width < 24 || height < 24) throw new Error('The count button is smaller than 24 × 24 pixels');
   const stream = fixture.stream;
   await waitFor(() => document.getElementById('event-4'), 'The pending wait did not appear');
+  const byId = (id) => document.getElementById(id);
+  const expectComposer = ({ inbox = false, label, summary, placeholder, send }) => {
+    const chip = byId(inbox ? 'decision-reply-context' : 'reply-context');
+    const target = chip.querySelector('.reply-summary');
+    const field = byId('message');
+    if (chip.hidden || !byId(inbox ? 'reply-context' : 'decision-reply-context').hidden ||
+        chip.querySelector('.reply-label').textContent !== label || target.textContent !== summary ||
+        field.placeholder !== placeholder || field.labels[0].textContent !== placeholder ||
+        field.getAttribute('aria-describedby') !== `${target.id} notice` || byId('send').getAttribute('aria-label') !== send)
+      throw new Error(`The ${inbox ? 'Inbox' : 'conversation'} composer did not present ${label} ${summary}`);
+  };
+  const answerCopy = { label: 'Answering', summary: fixture.decision.prompt, placeholder: 'Write your answer', send: 'Send answer' };
+  const reviewCopy = { label: 'Replying to', summary: fixture.review.prTitle, placeholder: 'Reply to this review', send: 'Send reply' };
+  trigger.click();
+  const write = panel.querySelector('button.question-reply');
+  if (write?.textContent !== 'Write an answer') throw new Error('The Inbox question did not offer to write an answer');
+  write.click();
+  expectComposer({ ...answerCopy, inbox: true });
+  const prompt = fixture.decision.prompt;
+  fixture.decision.prompt = '';
+  stream.dispatchEvent(new MessageEvent('change', { data: '{"list":true,"bot":"release"}' }));
+  await waitFor(() => byId('decision-reply-target').textContent === `Question from ${fixture.bot.name}`,
+    'The Inbox exposed the task request when the question text was missing');
+  fixture.decision.prompt = prompt;
+  byId('decision-next').click();
+  expectComposer({ ...reviewCopy, inbox: true });
+  byId('decision-close').click();
+  const writeInline = document.querySelector('#event-2 button.question-reply');
+  if (writeInline?.textContent !== 'Write an answer') throw new Error('The conversation question did not offer to write an answer');
+  writeInline.click();
+  expectComposer(answerCopy);
+  document.querySelector('#event-2 button[aria-label="Answer this question"]').click();
+  expectComposer(answerCopy);
+  document.querySelector('#event-3 button[aria-label="Reply to this review"]').click();
+  expectComposer(reviewCopy);
+  byId('cancel-reply').click();
+  if (byId('compose-label').textContent !== 'Message' || byId('message').getAttribute('aria-describedby') !== 'notice')
+    throw new Error('Canceling the reply retained the reply composer copy');
+
   const reads = fixture.reads;
   fixture.approvalReady = true;
   stream.dispatchEvent(new Event('ready'));
@@ -407,6 +464,8 @@ async function exerciseLiveRetry() {
   await waitFor(() => fixture.failed, 'The live invalidation did not fetch the Inbox');
   if (trigger.hidden || panel.hidden) throw new Error('A transient Inbox failure cleared the pending decision');
   await waitFor(() => trigger.hidden && panel.hidden, 'The Inbox stayed stale with a healthy stream after HTTP 503');
+  if (!badge.hidden || preview.textContent !== 'Waiting for you' || preview.querySelector('.presence-dot').hidden)
+    throw new Error('The waiting Bot did not restore its status after losing its count');
   const resolution = document.querySelector('#event-4 .msg-resolution');
   if (approvalCard() || !resolution?.textContent.includes('Allowed once'))
     throw new Error('Resolving the approval did not restore its waiting event and decision');
