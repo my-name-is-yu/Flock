@@ -310,6 +310,7 @@ struct Store::Impl {
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
     void initializeConversationSchema();
+    void upgradeSessionMessageWaitSchema();
     void initializeModelBudgetSchema();
     void initializeWorkspaceSchema();
     void initializeAttachmentsSchema();
@@ -347,9 +348,17 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
-    struct SessionSendReceipt { std::string bot; SessionTarget target; std::string title; Delivery delivery; };
+    struct SessionSendReceipt {
+        std::string bot;
+        SessionTarget target;
+        std::string title;
+        Delivery delivery;
+        Id taskId = 0;
+        std::string actionId;
+    };
     std::map<Id,SessionSendReceipt> sessionSendReceipts;
     void recordSessionSendRun(Id, const SessionSendReceipt&);
+    bool advanceDestinationSessionMessageRun(Json&, Json&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,
                  const PeerResolver&, std::stop_token);

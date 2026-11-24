@@ -123,12 +123,15 @@ struct Script : Model {
 struct SimulatedT3 : T3 {
     std::vector<Command> sent, reconciled;
     std::vector<std::pair<std::string,std::string>> interrupted;
+    std::vector<RunRef> interruptedRuns, observedRuns;
+    std::vector<std::pair<SessionTarget,RunRef>> sessionWakeCalls;
     std::map<std::string,RunRef> deliveries;
     std::map<std::string,Observation> observations;
     std::map<std::pair<std::string,std::string>,SessionMetadata> sessions;
     std::map<std::string,std::vector<T3Project>> projectsByEnvironment;
     std::map<std::string,T3EnvironmentLinks> linksByGateway;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
+    bool queueNextMessage = false, waitForSessionRuns = false;
     std::string loseSendForEnvironment;
     std::string login = "original-login";
     InterruptOutcome interruptOutcome = InterruptOutcome::Requested;
@@ -157,19 +160,31 @@ struct SimulatedT3 : T3 {
     std::string authGeneration(const std::string&,const Json&) override {
         return login;
     }
+    std::string sessionMessageWake(const SessionTarget& target, const RunRef& run) override {
+        sessionWakeCalls.emplace_back(target,run);
+        const auto observation = observations.find(run.runId);
+        if (waitForSessionRuns && observation != observations.end() &&
+            observation->second.kind == Observation::Kind::Running) return {};
+        return "finished";
+    }
     Delivery send(const Command& command) override {
         sent.push_back(command);
         check(!command.actionId.empty(),"T3 received work without a request ID");
         check(command.authGeneration == login,"a dispatched instruction lacks its authentication generation");
         const auto suffix = std::to_string(sent.size());
-        const RunRef run{command.tool == "delegate" ? "session-" + suffix : command.target.threadId,
-                         "run-" + suffix,"https://example.test/session-" + suffix};
+        auto run = RunRef{command.tool == "delegate" ? "session-" + suffix : command.target.threadId,
+                          "run-" + suffix,"https://example.test/session-" + suffix};
+        run.gatewayEnvironmentId = command.gatewayEnvironmentId;
         check(deliveries.emplace(command.actionId,run).second,"the same work was sent twice");
-        observations.emplace(run.runId,Observation{});
+        auto observation = Observation{};
+        const bool queued = command.tool == "message_session" && std::exchange(queueNextMessage,false);
+        if (queued) observation.status = "queued";
+        observations.emplace(run.runId,std::move(observation));
         const bool lostReceipt = std::exchange(loseNextSend,false) || command.environmentId == loseSendForEnvironment;
         if (command.environmentId == loseSendForEnvironment) loseSendForEnvironment.clear();
         if (lostReceipt) return {};
-        return {Delivery::Kind::Accepted,run,{},false,command.tool == "message_session" ? "started" : ""};
+        const auto delivery = command.tool != "message_session" ? "" : queued ? "queued" : "started";
+        return {Delivery::Kind::Accepted,run,{},false,delivery};
     }
     Delivery reconcile(const Command& command) override {
         reconciled.push_back(command);
@@ -177,10 +192,12 @@ struct SimulatedT3 : T3 {
         return {Delivery::Kind::Accepted,deliveries.at(command.actionId),{}};
     }
     Observation observe(const std::string&,const Json&,const RunRef& run) override {
+        observedRuns.push_back(run);
         return observations.at(run.runId);
     }
     InterruptOutcome interrupt(const std::string& environment,const Json&,const RunRef& run) override {
         interrupted.emplace_back(environment,run.runId);
+        interruptedRuns.push_back(run);
         if (std::exchange(loseNextStop,false)) throw std::runtime_error("simulated interrupted acknowledgement");
         return interruptOutcome;
     }
@@ -204,11 +221,34 @@ struct Fixture {
     Seconds now = unixTime();
     bool requireT3Connection = false;
 
-    Fixture() {
+    explicit Fixture(bool legacySessionWaits = false) {
         char path[] = "/tmp/flock-conversation-runtime-XXXXXX";
         const auto* created = mkdtemp(path);
         if (!created) throw std::runtime_error("cannot create a test directory");
         dir = created;
+        if (legacySessionWaits) {
+            restart();
+            runtime.reset();
+            store.reset();
+            sqlite3* database = nullptr;
+            if (sqlite3_open((dir/"state.db").c_str(),&database) != SQLITE_OK)
+                throw std::runtime_error("cannot create the legacy Session wait database");
+            const auto* schema = R"SQL(PRAGMA foreign_keys=OFF;
+DROP TABLE session_message_waits;
+CREATE TABLE session_message_waits(
+  message_id INTEGER NOT NULL REFERENCES messages(id),bot TEXT NOT NULL,
+  environment TEXT NOT NULL,thread TEXT NOT NULL,run TEXT NOT NULL,title TEXT NOT NULL,
+  gateway_environment TEXT NOT NULL DEFAULT '',notified INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(message_id,environment,thread,run)))SQL";
+            char* error = nullptr;
+            if (sqlite3_exec(database,schema,nullptr,nullptr,&error) != SQLITE_OK) {
+                const std::string detail = error ? error : sqlite3_errmsg(database);
+                sqlite3_free(error);
+                sqlite3_close(database);
+                throw std::runtime_error(detail);
+            }
+            sqlite3_close(database);
+        }
         restart();
     }
     ~Fixture() {
@@ -1921,6 +1961,158 @@ Id twoLinkedDestinationTask(Fixture& f) {
     return id;
 }
 
+Json destinationRunFor(const Json& task, std::string_view environment) {
+    const auto& runs = task.at("runResults");
+    const auto found = std::ranges::find_if(runs,[&](const Json& run) {
+        return run.value("environmentId","") == environment;
+    });
+    if (found == runs.end()) throw std::runtime_error("the requested destination was not saved");
+    return *found;
+}
+
+Json inspectTask(Fixture& f, Id id, std::string_view key) {
+    const auto text = "Inspect task " + std::to_string(id);
+    f.script(text,{[id](const ModelInput&) {
+        return Decision{"find_tasks",{{"taskId",id}},"Show current task status"};
+    }});
+    f.receive(key,text);
+    return f.lastTurn().front().at("result").at("tasks").front();
+}
+
+Step sendCloudFollowup(Id id) {
+    return send(id,{{"environmentId","cloud"},{"projectId","cloud-project"},
+                    {"gatewayEnvironmentId","desktop"}});
+}
+
+void savedDestinationFollowupsRemainTaskWork() {
+    Fixture f(true);
+    f.requireT3Connection = true;
+    f.restart();
+    f.t3.waitForSessionRuns = true;
+    const auto id = twoLinkedDestinationTask(f);
+    f.advanceUntil([&] {
+        const auto task = f.task(id);
+        return destinationRunFor(task,"cloud").value("status","") == "running" &&
+               destinationRunFor(task,"other").value("status","") == "running";
+    },"the original linked destination Runs did not become active");
+    const auto original = f.task(id);
+    const auto cloudOriginal = destinationRunFor(original,"cloud").at("runId").get<std::string>();
+    const auto siblingOriginal = destinationRunFor(original,"other").at("runId").get<std::string>();
+
+    constexpr auto firstInstruction = "Add the first cloud instruction";
+    f.script(firstInstruction,{sendCloudFollowup(id)});
+    f.receive("first-cloud-followup",firstInstruction);
+    const auto firstRun = f.t3.deliveries.at(f.t3.sent.back().actionId);
+
+    f.t3.queueNextMessage = true;
+    constexpr auto secondInstruction = "Queue the second cloud instruction";
+    f.script(secondInstruction,{sendCloudFollowup(id)});
+    f.receive("second-cloud-followup",secondInstruction);
+    const auto secondRun = f.t3.deliveries.at(f.t3.sent.back().actionId);
+    f.tick(2);
+
+    f.t3.finish(cloudOriginal,"Original cloud Run complete");
+    f.t3.finish(siblingOriginal,"Original sibling Run complete");
+    f.advanceUntil([&] {
+        const auto task = f.task(id);
+        const auto cloud = destinationRunFor(task,"cloud");
+        return task.at("state") == "running" && cloud.value("status","") == "running" &&
+               cloud.value("runId","") == firstRun.runId;
+    },"the completed destination Run settled the task before its follow-up");
+    const auto active = inspectTask(f,id,"first-followup-status");
+    const auto activeCloud = destinationRunFor(active,"cloud");
+    check(active.at("state") == "running" && activeCloud.at("status") == "running" &&
+          activeCloud.at("runId") == firstRun.runId &&
+          destinationRunFor(active,"other").at("status") == "completed",
+          "the task projection did not show the active destination follow-up");
+    const auto wakeCountBeforeRestart = f.t3.sessionWakeCalls.size();
+    f.restart();
+    f.tick();
+    const auto restarted = inspectTask(f,id,"restarted-followup-status");
+    check(restarted.at("state") == "running" &&
+          destinationRunFor(restarted,"cloud").at("status") == "running" &&
+          destinationRunFor(restarted,"cloud").at("runId") == firstRun.runId &&
+          destinationRunFor(restarted,"other").at("status") == "completed",
+          "the active follow-up was not restored after restart");
+    check(f.t3.sessionWakeCalls.size() > wakeCountBeforeRestart &&
+          std::ranges::any_of(f.t3.sessionWakeCalls,[&](const auto& call) {
+              return call.first.environmentId == "cloud" && call.first.gatewayEnvironmentId == "desktop" &&
+                     call.second.runId == firstRun.runId;
+          }),"the linked follow-up was not woken through its registered gateway");
+    check(std::ranges::any_of(f.t3.observedRuns,[&](const RunRef& run) {
+              return run.runId == firstRun.runId && run.gatewayEnvironmentId == "desktop";
+          }),"the linked follow-up was not observed through its registered gateway");
+
+    f.t3.finish(firstRun.runId,"First cloud follow-up complete");
+    f.advanceUntil([&] {
+        const auto cloud = destinationRunFor(f.task(id),"cloud");
+        return cloud.value("runId","") == secondRun.runId && cloud.value("status","") == "queued";
+    },"the next queued Session instruction was lost after the prior follow-up settled");
+    const auto queued = inspectTask(f,id,"second-followup-status");
+    check(queued.at("state") == "running" && destinationRunFor(queued,"cloud").at("runId") == secondRun.runId &&
+          destinationRunFor(queued,"cloud").at("status") == "queued",
+          "the queued follow-up was not reflected in the destination projection");
+
+    f.t3.finish(secondRun.runId,"Second cloud follow-up complete");
+    f.advanceUntil([&] { return f.task(id).at("state") == "completed"; },
+                   "the task did not settle after all destination follow-ups completed");
+}
+
+void savedDestinationFollowupStopTargetsOnlyItsRun() {
+    Fixture f;
+    f.requireT3Connection = true;
+    f.restart();
+    f.t3.waitForSessionRuns = true;
+    const auto id = twoLinkedDestinationTask(f);
+    f.advanceUntil([&] {
+        const auto task = f.task(id);
+        return destinationRunFor(task,"cloud").value("status","") == "running" &&
+               destinationRunFor(task,"other").value("status","") == "running";
+    },"the original linked destination Runs did not become active");
+    const auto cloudOriginal = destinationRunFor(f.task(id),"cloud").at("runId").get<std::string>();
+    f.t3.finish(cloudOriginal,"Original cloud Run complete");
+    f.advanceUntil([&] {
+        const auto task = f.task(id);
+        return destinationRunFor(task,"cloud").value("status","") == "completed" && task.at("state") == "running";
+    },"the original cloud Run did not settle while its sibling remained active");
+
+    constexpr auto instruction = "Add a cloud operation that can be stopped";
+    f.script(instruction,{sendCloudFollowup(id)});
+    f.receive("stoppable-cloud-followup",instruction);
+    const auto followupRun = f.t3.deliveries.at(f.t3.sent.back().actionId);
+    f.tick(2);
+    f.restart();
+    f.tick();
+    const auto restarted = inspectTask(f,id,"restarted-stoppable-followup");
+    check(destinationRunFor(restarted,"cloud").at("runId") == followupRun.runId &&
+          destinationRunFor(restarted,"cloud").at("status") == "running" &&
+          destinationRunFor(restarted,"other").at("status") == "running",
+          "the stoppable follow-up was not restored after restart");
+    f.store->policy().setMode(localOwner,"supervised");
+
+    constexpr auto stopRequest = "Stop only the cloud follow-up";
+    f.script(stopRequest,{[id](const ModelInput& input) {
+        const auto task = listed(input,id);
+        return Decision{"cancel_task",{{"taskId",id},{"generation",task.at("generation")},
+            {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}},
+            "Stop the selected destination Run"};
+    }});
+    f.receive("stop-cloud-followup",stopRequest);
+    const auto approvals = f.store->inbox(localOwner);
+    check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" &&
+          f.t3.interrupted.empty(),"stopping the follow-up bypassed its existing T3 policy approval");
+    f.store->decideInbox(localOwner,{approvals.front().at("botId"),InboxKind::policy_approval,
+        approvals.front().at("itemId"),approvals.front().at("waitId"),approvals.front().at("taskId"),
+        approvals.front().at("targetRevision"),approvals.front().at("targetGeneration")},"allow_once");
+    f.runtime->runConversations();
+    f.tick();
+    check(f.t3.interrupted.size() == 1 && f.t3.interrupted.front().first == "cloud" &&
+          f.t3.interrupted.front().second == followupRun.runId &&
+          f.t3.interruptedRuns.front().gatewayEnvironmentId == "desktop" &&
+          destinationRunFor(f.task(id),"other").at("status") == "running",
+          "the target-specific stop missed the live follow-up or affected its sibling");
+}
+
 Id oneLinkedDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
     T3Connections(*f.store).connect("desktop",localOwner.id,48123);
     auto route = f.routing(std::string(request));
@@ -2863,6 +3055,16 @@ int main(int argc, char** argv) {
             std::cout << "Destination source report acceptance passed with simulated T3\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "followup-settlement") {
+            savedDestinationFollowupsRemainTaskWork();
+            std::cout << "Saved destination follow-up settlement passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "followup-stop") {
+            savedDestinationFollowupStopTargetsOnlyItsRun();
+            std::cout << "Saved destination follow-up stop passed with simulated T3\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "recovered-stop-policy") {
             recoveredDestinationStopHonorsPolicy();
             std::cout << "Recovered destination stop policy acceptance passed with simulated T3\n";
@@ -2928,6 +3130,8 @@ int main(int argc, char** argv) {
         productionGatewayOnlyLaunch();
         discoveredLinkedNameMoveKeepsRoute();
         destinationFollowupValidatesAndRedactsSourceReport();
+        savedDestinationFollowupsRemainTaskWork();
+        savedDestinationFollowupStopTargetsOnlyItsRun();
         recoveredDestinationStopHonorsPolicy();
         startedRunOutboxApprovalIsStale();
         queuedDestinationStopsReleaseSlots();

@@ -145,6 +145,11 @@ void Store::Impl::openSchema() {
         initialize.commit();
     }
     initializeProjectQueue();
+    {
+        Transaction migration(db);
+        upgradeSessionMessageWaitSchema();
+        migration.commit();
+    }
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_review_receipts(
   inbox_key TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),

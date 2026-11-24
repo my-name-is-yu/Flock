@@ -29,6 +29,42 @@ bool destinationRunOutstanding(const Json& run) {
     return status == "queued" || status == "running" || status == "confirmation_pending";
 }
 
+bool Store::Impl::advanceDestinationSessionMessageRun(Json& task, Json& run) {
+    auto pending = query(R"SQL(
+SELECT w.environment,w.thread,w.run,w.gateway_environment,w.delivery,w.link
+FROM session_message_waits w
+WHERE w.task_id=? AND w.action_id=?
+  AND w.environment=? AND w.thread=? AND w.gateway_environment=?
+  AND NOT EXISTS (
+    SELECT 1 FROM journal j WHERE j.task_id=? AND j.kind='report'
+      AND json_extract(j.data,'$.environmentId')=w.environment
+      AND json_extract(j.data,'$.run.runId')=w.run
+      AND json_extract(j.data,'$.run.threadId')=w.thread)
+ORDER BY w.rowid LIMIT 1)SQL",
+        {task.at("id"),field(run,"actionId"),field(run,"environmentId"),field(run,"threadId"),
+         field(run,"gatewayEnvironmentId"),task.at("id")});
+    if (!pending.next()) return false;
+    const auto environment = pending.string(0);
+    const auto thread = pending.string(1);
+    const auto runId = pending.string(2);
+    const auto gateway = pending.string(3);
+    const auto delivery = pending.string(4);
+    const auto link = pending.string(5);
+    if (runId == field(run,"runId")) return false;
+    exec("UPDATE runs SET thread_id=?,run_id=?,link=? WHERE action_id=? AND task_id=? AND environment_id=?",
+         {thread,runId,link.empty() ? field(run,"link") : link,field(run,"actionId"),task.at("id"),environment});
+    if (sqlite3_changes(db) != 1) return false;
+    run["threadId"] = thread;
+    run["runId"] = runId;
+    run["gatewayEnvironmentId"] = gateway;
+    if (!link.empty()) run["link"] = link;
+    run["status"] = delivery == "queued" ? "queued" : "running";
+    run.erase("retryAt");
+    run.erase("stopRetryAt");
+    run.erase("evidenceAttempts");
+    return true;
+}
+
 bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observation& observed) {
     const auto ref = runRef(run);
     auto status = observed.status;
@@ -56,6 +92,7 @@ bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observati
         task["state"] = "running";
     }
     journal(task.at("id"),"report",data);
+    if (advanceDestinationSessionMessageRun(task,run)) return false;
     const auto& results = task.at("runResults");
     if (std::ranges::any_of(results,destinationRunOutstanding)) return false;
     if (task.at("state") == "cancelling") return true;

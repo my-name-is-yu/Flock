@@ -219,12 +219,25 @@ bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
 }
 
 void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt) {
-    const auto& [bot,target,title,delivery] = receipt;
+    const auto& target = receipt.target;
+    const auto& delivery = receipt.delivery;
     if (!acceptedSessionSend(target,delivery)) return;
-    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment)"
-         " VALUES(?,?,?,?,?,?,?,?)",
-         {message,bot,target.environmentId,target.threadId,delivery.run.runId,title,
-          sessionParticipationStopped(bot,target,message) ? 1 : 0,target.gatewayEnvironmentId});
+    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment,"
+         "task_id,action_id,delivery,link) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,0),NULLIF(?,''),?,?)",
+         {message,receipt.bot,target.environmentId,target.threadId,delivery.run.runId,receipt.title,
+          sessionParticipationStopped(receipt.bot,target,message) ? 1 : 0,target.gatewayEnvironmentId,
+          receipt.taskId,receipt.actionId,delivery.delivery == "queued" ? "queued" : "started",
+          redactor(receipt.bot).text(delivery.run.link)});
+    if (!receipt.taskId || receipt.actionId.empty()) return;
+    auto task = load(receipt.taskId);
+    auto& run = destinationRun(task,receipt.actionId);
+    auto report = query(R"SQL(
+SELECT 1 FROM journal WHERE task_id=? AND kind='report'
+AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run.runId')=?
+AND json_extract(data,'$.run.threadId')=? LIMIT 1)SQL",
+        {receipt.taskId,field(run,"environmentId"),field(run,"runId"),field(run,"threadId")});
+    if ((!destinationRunOutstanding(run) || report.next()) && advanceDestinationSessionMessageRun(task,run))
+        save(task);
 }
 
 Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
@@ -416,7 +429,8 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     std::lock_guard lock(mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
     const auto checkpoint = sessionSendReceipts.insert_or_assign(
-        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt)}).first;
+        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt),
+                              savedTaskTarget ? savedTaskId : 0,savedActionId}).first;
     Transaction transaction(db);
     recordSessionSendRun(id,checkpoint->second);
     saveReceipt(checkpoint->second.delivery);
