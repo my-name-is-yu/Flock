@@ -222,7 +222,7 @@ public:
         }
     }
 
-    std::optional<ApprovalGate> authorizeEventTool(const Decision& call, std::string_view key, ApprovalWait waitMode) {
+    std::optional<ApprovalGate> authorizeEventTool(const Decision& call, std::string_view key) {
         std::lock_guard lock(store_.mutex);
         Transaction tx(store_.db);
         const auto session = eventSession(call.args);
@@ -230,7 +230,7 @@ public:
         const auto resource = Resource::sessionRead(session->target.environmentId,session->target.threadId);
         if (policy_.forbidden(bot_,resource.action,resource.target)) return std::nullopt;
         const auto gate = store_.approveAction(store_.policyOrigin(message_),resource,key,
-                                               Json::array({call.tool,call.args}),store_.policyClock(),false,waitMode);
+                                               Json::array({call.tool,call.args}),store_.policyClock(),false,ApprovalWait::defer);
         if (gate == ApprovalGate::allow) approved_ = session->target;
         tx.commit();
         return gate;
@@ -620,15 +620,14 @@ JOIN json_each(?3) target ON target.value=entry.value
 };
 
 Store::Impl::ToolCallResult Store::Impl::sessionReadTool(
-    const conversation::Message& message, const Decision& decision, T3& t3, std::string_view key,
-    ApprovalWait waitMode) {
+    const conversation::Message& message, const Decision& decision, T3& t3, std::string_view key) {
     Policy policy(*this);
     SessionEvidence evidence(*this,policy,message,t3);
     bool consumeApproval = false;
     try {
         if (!decision.args.is_object()) throw Conflict("Tool arguments must be an object");
         if (decision.tool == "flock_session_search") return CompletedToolCall{evidence.search(decision.args)};
-        if (const auto gate = evidence.authorizeEventTool(decision,key,waitMode)) {
+        if (const auto gate = evidence.authorizeEventTool(decision,key)) {
             if (*gate == ApprovalGate::waiting) return std::nullopt;
             if (*gate != ApprovalGate::allow)
                 return CompletedToolCall{scopedResult(failure(approvalError(*gate)))};
