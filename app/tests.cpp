@@ -1,6 +1,7 @@
 #include "bots.hpp"
 #include "demo.hpp"
 #include "model.hpp"
+#include "flock/workspace_tools.hpp"
 #include "tests/fixtures.hpp"
 #include "../tests/task_history.hpp"
 
@@ -309,6 +310,14 @@ void directionalPeerConfiguration() {
         "receiver must use its own route and settings");
     check(bots.peers("verifier").empty(),"peer configuration must be directional and default to empty");
 
+    verifier.erase("environmentId");
+    verifier.erase("projectId");
+    write(temp.path / "verifier" / "config.json",verifier.dump());
+    const auto automatic = bots.peers("release");
+    check(automatic.size() == 1 && automatic[0].intake.botId == "verifier" &&
+          automatic[0].intake.environmentId.empty() && automatic[0].intake.projectId.empty(),
+          "an allowed peer disappeared when using automatic routing");
+
     release["allowedBots"] = Json::array();
     write(temp.path / "release" / "config.json",release.dump());
     check(bots.peers("release").empty(),"resolver must observe peer configuration changes");
@@ -380,8 +389,15 @@ void responseContract() {
           turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
           turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
+          turnTool("start_task")["properties"]["environments"]["minItems"] == 1 &&
+          !turnTool("start_task")["properties"]["environments"].contains("maxItems") &&
+          turnTool("start_task")["properties"]["commit"]["type"] == "string" &&
           turnTool("change_task")["required"] == Json::array({"reason","taskId","generation","revisionId","instruction"}) &&
           turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&
+          turnTool("cancel_task")["required"] == Json::array({"reason","taskId","generation"}) &&
+          turnTool("cancel_task")["properties"]["destination"]["type"] == "string" &&
+          turnTool("cancel_task")["properties"]["environmentId"]["type"] == "string" &&
+          turnTool("cancel_task")["properties"]["projectId"]["type"] == "string" &&
           turnTool("find_tasks")["required"] == Json::array({"reason"}) &&
           turnTool("find_tasks")["properties"]["taskId"]["type"] == "integer" &&
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
@@ -435,6 +451,33 @@ void responseContract() {
     check(responseDecision(modelCall("flock_session_search",searchArgs),turn).calls.at(0).args.at("project") == "Release" &&
           responseDecision(modelCall("flock_session_events",eventArgs),turn).calls.at(0).args.at("attachmentRef") == "opaque-attachment",
           "model Session calls were not decoded using the live schemas");
+    auto batchInput = input;
+    batchInput.tools = {"flock_session_search","reply"};
+    check(responseRequest(batchInput).at("parallel_tool_calls") == false,"One batchable tool enabled parallel calls");
+    batchInput.tools.push_back("read_memory");
+    check(responseRequest(batchInput).at("parallel_tool_calls") == true,"A batchable Store read was missed");
+    batchInput.tools.pop_back();
+    batchInput.tools.push_back("check_environment_readiness");
+    const auto batchRequest = responseRequest(batchInput);
+    check(batchRequest.at("parallel_tool_calls") == true,"Two batchable reads did not enable parallel calls");
+    auto mixedCalls = modelCall("flock_session_search",searchArgs);
+    mixedCalls.push_back(modelCall("check_environment_readiness",{{"reason","Check the connection"}}).front());
+    const auto mixed = responseDecision(mixedCalls,batchRequest);
+    check(mixed.calls.size() == 2 && mixed.calls[0].tool == "flock_session_search" &&
+          mixed.calls[1].tool == "check_environment_readiness" && mixed.rejections.empty(),
+          "Mixed Session and readiness reads were not decoded in order");
+    mixedCalls.push_back(modelCall("start_task",{{"reason","Start work"}}).front());
+    mixedCalls.push_back(modelCall("reply",{{"reason","Reply"},{"unexpected","Sensitive data"}}).front());
+    const auto partial = responseDecision(mixedCalls,batchRequest);
+    check(partial.calls.size() == 4 && partial.rejections.size() == 2 && partial.rejections.contains(2) &&
+          partial.rejections.contains(3) && partial.calls[2].args.empty() && partial.calls[3].args.empty(),
+          "Invalid batch calls were not rejected individually");
+    auto malformed = mixedCalls;
+    malformed[1]["status"] = "incomplete";
+    rejects<ModelError>([&] { responseDecision(malformed,batchRequest); },"Malformed output was accepted in a batch");
+    const auto firstCall = mixedCalls.front();
+    while (mixedCalls.size() <= flockv0::maxToolCalls) mixedCalls.push_back(firstCall);
+    rejects<ModelError>([&] { responseDecision(mixedCalls,batchRequest); },"Oversized batch was accepted");
     auto spoofed = eventArgs;
     spoofed["botId"] = "someone-else";
     rejects<ModelError>([&] { responseDecision(modelCall("flock_session_events",spoofed),turn); },
@@ -536,7 +579,7 @@ void responseContract() {
     rejects<ModelError>([&] { responseDecision(Json::array(),completeRequest); },"missing tool accepted");
 }
 
-void oversizedRequestStopsBeforeOpeningBridge() {
+void oversizedRequestStopsBeforeAccessingCredentials() {
     Sandbox temp;
     const auto credentials = temp.path / "credentials";
     ChatGPTModel model(credentials);
@@ -545,7 +588,25 @@ void oversizedRequestStopsBeforeOpeningBridge() {
         Json::array(),{},{"reply"}, {}, Json::array(),botConfig()
     };
     rejects<ModelError>([&] { model.decide(input); },"Oversized escaped request reached the transport");
-    check(!std::filesystem::exists(credentials),"The bridge was opened for a request over its byte limit");
+    check(!std::filesystem::exists(credentials),"An oversized request accessed the credentials");
+}
+
+void missingChatGPTSignInIsTyped() {
+    Sandbox temp;
+    ChatGPTModel model(temp.path / "credentials");
+    auto config = botConfig();
+    config["modelProvider"] = "chatgpt";
+    const ModelInput input{
+        Json::object(),{{"kind","conversation_turn"},{"text","Check the release"}},
+        Json::array(),{}, {"reply"}, {}, Json::array(),config
+    };
+    try {
+        model.decide(input);
+        throw std::runtime_error("missing ChatGPT credentials were accepted");
+    } catch (const ModelError& error) {
+        check(error.code == ModelErrorCode::authentication_required,
+              "missing ChatGPT credentials were not classified as sign-in required");
+    }
 }
 
 class AcceptanceModel final : public Model {
@@ -823,6 +884,17 @@ void botProfilesAndAvatars() {
           renamed.at("avatar").at("version") == uploaded.at("avatar").at("version"),
           "renaming Bot lost existing uploaded image");
 
+    const auto described = bots.updateProfile("scout",{
+        {"soul"," \tScouts new releases.\n"},{"originalSoul",created.at("soul")},
+    });
+    check(described.at("soul") == "Scouts new releases." && bots.soul("scout") == "Scouts new releases." &&
+          described.at("name") == "Scout Renamed" &&
+          described.at("avatar").at("version") == uploaded.at("avatar").at("version"),
+          "role update failed to save the text or changed the name or avatar");
+    const auto cleared = bots.updateProfile("scout",{{"soul"," \n\t"},{"originalSoul",described.at("soul")}});
+    check(cleared.at("soul") == "" && !std::filesystem::exists(temp.path / "bots" / "scout" / "SOUL.md"),
+          "clearing a Bot role left SOUL.md behind");
+
     // Replacing with GIF deletes old PNG file and updates version hash.
     const auto replaced = bots.updateProfile("scout",{
         {"name","Scout Renamed"},
@@ -903,11 +975,13 @@ void botProfilesAndAvatars() {
 int main() {
     try {
         configuredSchedules();
+        pinnedConversationDestinations();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();
         directionalPeerConfiguration();
         responseContract();
-        oversizedRequestStopsBeforeOpeningBridge();
+        oversizedRequestStopsBeforeAccessingCredentials();
+        missingChatGPTSignInIsTyped();
         {
             Sandbox temp;
             Store store(temp.path/"state.db");

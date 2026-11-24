@@ -212,6 +212,11 @@ void protectedHtml() {
           markdown::toHtml(nestedUrl("A&B",4),ampersand) == redacted &&
           markdown::toHtml(nestedUrl("safe/value",5),ampersand) == redacted,
           "nested URL percent encoding was missed or did not fail closed at the decoding bound");
+    const auto afterNull = "[docs](https://example.com/?q=%00safe%252525252Fvalue)";
+    check(markdown::toHtml(afterNull) == redacted && markdown::toHtml(afterNull,ampersand) == redacted,
+          "a decoded NUL hid the remaining bytes from the URL decoding bound");
+    check(markdown::toHtml("[docs](https://example.com/?q=%00A%2526B)",ampersand) == redacted,
+          "the sensitive-text check did not decode the whole URL");
     check(markdown::toHtml("[credential](https://example.com/?token=A+B)",literalPlus) == redacted &&
           markdown::toHtml("[credential](https://example.com/?token=A%2BB)",literalPlus) == redacted &&
           markdown::toHtml("[credential](https://example.com/?token=A%2BB)",space) == redacted,

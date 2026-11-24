@@ -51,22 +51,12 @@
       </div>
       <div class="sidebar-foot">
         <div id="connection" class="connection" data-state="loading" role="status"><span class="status-dot" aria-hidden="true"></span><span id="connection-text">Connecting…</span></div>
-        <nav class="sidebar-foot-links" aria-label="Flock">
-        <a class="sidebar-settings" href="/settings" aria-label="Flock settings" title="Flock settings">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </a>
+        <nav aria-label="Flock">
+          <a class="sidebar-settings" href="/settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <span>Settings</span>
+          </a>
         </nav>
-        <div id="theme-switch" class="theme-switch" role="group" aria-label="Theme">
-          <button type="button" data-theme-mode="system" aria-pressed="true" aria-label="Use system theme" title="Use system theme">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16v4"/></svg>
-          </button>
-          <button type="button" data-theme-mode="light" aria-pressed="false" aria-label="Light" title="Light">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 3v1.8M12 19.2V21M3 12h1.8M19.2 12H21M5.6 5.6l1.3 1.3M17.1 17.1l1.3 1.3M5.6 18.4l1.3-1.3M17.1 6.9l1.3-1.3"/></svg>
-          </button>
-          <button type="button" data-theme-mode="dark" aria-pressed="false" aria-label="Dark" title="Dark">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.5 14.6A7.6 7.6 0 0 1 9.4 4.5a7.6 7.6 0 1 0 10.1 10.1Z"/></svg>
-          </button>
-        </div>
       </div>
     </aside>
     <div id="nav-backdrop" class="nav-backdrop" aria-hidden="true"></div>
@@ -101,7 +91,7 @@
                 <bdi id="peer-name-second" class="peer-thread-label"></bdi>
               </span>
             </h1>
-            <span id="peer-description" hidden>Read-only Bot DM</span>
+            <span id="peer-description" hidden>Read-only conversation between Bots</span>
           </div>
           <button id="peer-back" class="icon-button peer-back" type="button" title="Back to conversation (Esc)" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
@@ -123,7 +113,7 @@
                 </button>
                 <button id="peer-picker" class="conversation-action" type="button" aria-haspopup="dialog" hidden>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 3V6a2 2 0 0 1 1-2Zm14 4a2 2 0 0 1 2 2v10l-5-3h-4"/></svg>
-                  <span>Bot DMs</span>
+                  <span>Talks with other Bots</span>
                 </button>
               </div>
             </details>
@@ -199,12 +189,12 @@
         <form id="composer" class="composer">
           <div id="decision-reply-context" class="decision-reply-context" hidden>
             <svg class="decision-reply-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>
-            <p class="reply-target"><span id="decision-reply-label"></span> <span id="decision-reply-target" dir="auto"></span></p>
+            <p class="reply-target"><span id="decision-reply-label" class="reply-label"></span> <span id="decision-reply-target" class="reply-summary" dir="auto"></span></p>
           </div>
           <div class="composer-box">
             <div id="reply-context" class="reply-context" hidden>
               <svg class="reply-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
-              <p class="reply-target"><span id="reply-label" class="sr-only"></span><span id="reply-question"></span></p>
+              <p class="reply-target"><span id="reply-label" class="reply-label"></span> <span id="reply-summary" class="reply-summary" dir="auto"></span></p>
               <button id="cancel-reply" type="button" class="reply-cancel" aria-label="Cancel reply" title="Cancel reply (Esc)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
               </button>
@@ -239,5 +229,16 @@
     <div id="detail-body" class="dialog-body"></div>
   </dialog>
   <dialog id="bot-editor" class="bot-editor-dialog" aria-labelledby="studio-title"></dialog>
+  <dialog id="bot-delete" class="detail bot-delete-dialog" aria-labelledby="bot-delete-title" aria-describedby="bot-delete-description">
+    <div class="dialog-head"><h2 id="bot-delete-title"></h2></div>
+    <div class="dialog-body">
+      <p id="bot-delete-description">This removes the Bot and stops its schedules. Past activity stays in storage, and this conversation will be unavailable in Flock.</p>
+      <p id="bot-delete-feedback" class="bot-delete-feedback" role="status"></p>
+      <div class="bot-delete-actions">
+        <button id="bot-delete-cancel" type="button" class="dialog-button quiet" autofocus>Cancel</button>
+        <button id="bot-delete-confirm" type="button" class="dialog-button danger">Delete Bot</button>
+      </div>
+    </div>
+  </dialog>
 </body>
 </html>

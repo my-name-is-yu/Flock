@@ -221,7 +221,7 @@ int main(int argc, char** argv) {
         auto signIn = [&](const std::string& environment) {
             return loginT3(home, environment, endpoint, [&](const std::string& authorization) {
                 fixture({{"authorization", authorization}});
-            });
+            }).operate;
         };
         for (const auto& [stage, code] : std::map<std::string, std::string>{
                  {"discovery", "invalid_resource"}, {"registration", "invalid_client_metadata"}, {"token", "invalid_grant"}}) {
@@ -242,7 +242,24 @@ int main(int argc, char** argv) {
         check(ownerOnly(home), "credential directory is owner-only");
         for (const auto& entry : std::filesystem::recursive_directory_iterator(home))
             check(ownerOnly(entry.path()), "stored credentials are owner-only");
+        const auto discoveredHome = home / "discovered";
+        fixture({{"claimedEnvironment", "env-discovered"}});
+        const auto login = loginT3(discoveredHome,std::nullopt,endpoint,[&](const std::string& authorization) {
+            fixture({{"authorization", authorization}});
+        },true,[](const std::string& environment, const std::function<void()>& save) {
+            check(environment == "env-discovered", "connection uses the authenticated environment identity");
+            save();
+        });
+        check(login.operate && login.environmentId == "env-discovered",
+              "URL-only login returns the authenticated environment and Operate approval");
+        check(!makeT3Mcp(discoveredHome)->authGeneration("env-discovered",Json::object()).empty(),
+              "URL-only login saves credentials under the discovered environment ID");
+        fixture({{"claimedEnvironment", "env-1"}});
         auto adapter = makeT3Mcp(home);
+        const auto projects = adapter->projects("env-1");
+        check(projects.size() == 2 && projects[0].id == "project" && projects[0].title == "Release Pipeline" &&
+              projects[0].directory == "release" && projects[1].id == "docs" && projects[1].directory == "docs",
+              "Project discovery did not page through live projects or exclude archived projects");
         Command launch;
         launch.actionId = "flock-action-0123";
         launch.tool = "delegate";
@@ -623,15 +640,20 @@ int main(int argc, char** argv) {
         const auto expired = home.parent_path()/"expired-creds";
         std::filesystem::create_directory(expired);
         std::filesystem::permissions(expired,std::filesystem::perms::owner_all);
+        std::size_t expiredCredentialCount = 0;
         for (const auto& entry : std::filesystem::directory_iterator(home)) {
+            if (!entry.is_regular_file()) continue;
             std::ifstream source(entry.path());
+            check(source.is_open(),"credential file could not be opened");
             auto credential = Json::parse(source,nullptr,false);
             if (!credential.is_object() || credential.value("environmentId","") != "env-1") continue;
             credential["expiresAt"] = unixTime() - 1;
             const auto copy = expired/entry.path().filename();
             std::ofstream(copy) << credential.dump();
             std::filesystem::permissions(copy,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+            ++expiredCredentialCount;
         }
+        check(expiredCredentialCount == 1,"expiry fixture must copy exactly the env-1 credential");
         check(makeT3Mcp(expired)->sessionMessageWake({"env-1","thread"},run) == "unknown",
               "A confirmed credential expiry did not settle as an unknown Run outcome");
         fixture({{"scope", "orchestration:read"}});

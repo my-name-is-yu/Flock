@@ -5,11 +5,64 @@
 #include <set>
 
 namespace flockv0 {
-using conversation_storage::verifiedEnvironment;
 using conversation_storage::identifier;
+using conversation_storage::text;
 using conversation_storage::ToolError;
 
 namespace {
+struct SavedDestination {
+    Json run;
+    std::string actionId, name, environmentId, projectId, threadId, runId, status, gatewayEnvironmentId;
+};
+
+SavedDestination selectSavedDestination(const Json& task, const Json& args, bool allowOmitted) {
+    if (!task.contains("runResults") || !task.at("runResults").is_array())
+        throw ToolError("The destination is unavailable");
+    const bool hasName = args.contains("destination");
+    const bool hasEnvironment = args.contains("environmentId");
+    const bool hasProject = args.contains("projectId");
+    const bool hasGateway = args.contains("gatewayEnvironmentId");
+    if (hasName && (hasEnvironment || hasProject || hasGateway))
+        throw ToolError("Select a destination either by friendly name or by environmentId and projectId, not both");
+    if (hasEnvironment != hasProject)
+        throw ToolError("Select a destination by both environmentId and projectId");
+    if (hasGateway && !hasEnvironment)
+        throw ToolError("Select gatewayEnvironmentId only with environmentId and projectId");
+    const auto name = text(args,"destination",256,false);
+    const auto environment = text(args,"environmentId",256,false);
+    const auto project = text(args,"projectId",256,false);
+    const auto gateway = text(args,"gatewayEnvironmentId",256,false);
+    const auto savedGateway = [](const Json& run) {
+        const auto gateway = field(run,"gatewayEnvironmentId");
+        return gateway.empty() ? field(run,"environmentId") : gateway;
+    };
+    if ((hasName && name.empty()) || (hasEnvironment && (environment.empty() || project.empty())))
+        throw ToolError("Destination selectors must not be empty");
+    if (hasGateway && gateway.empty()) throw ToolError("gatewayEnvironmentId must not be empty");
+
+    const Json* selected = nullptr;
+    if (!hasName && !hasEnvironment) {
+        if (!allowOmitted) throw ToolError("Select a destination by friendly name or environmentId and projectId");
+        if (task.at("runResults").size() != 1)
+            throw ToolError("Choose a destination by friendly name or environmentId and projectId");
+        selected = &task.at("runResults").front();
+    } else {
+        std::vector<const Json*> matches;
+        for (const auto& run : task.at("runResults")) {
+            const bool match = hasName ? run.value("name","") == name
+                : run.value("environmentId","") == environment && run.value("projectId","") == project &&
+                    (!hasGateway || savedGateway(run) == gateway);
+            if (match) matches.push_back(&run);
+        }
+        if (matches.size() != 1)
+            throw ToolError(matches.empty() ? "The destination is unavailable" : "The destination selector is ambiguous");
+        selected = matches.front();
+    }
+    return {*selected,field(*selected,"actionId"),field(*selected,"name"),field(*selected,"environmentId"),
+            field(*selected,"projectId"),field(*selected,"threadId"),field(*selected,"runId"),field(*selected,"status"),
+            field(*selected,"gatewayEnvironmentId")};
+}
+
 struct SessionEffect {
     Id taskId, generation;
     Json run;
@@ -35,8 +88,10 @@ struct SessionEffect {
 };
 }
 
-bool Store::Impl::runSessionEffect(const conversation::Message& message, int step, const Decision& decision,
-                                   bool offered, bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
+Store::Impl::CallOutcome Store::Impl::runSessionEffect(
+    const conversation::Message& message, int step, const Decision& decision, std::string_view key,
+    bool offered, bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
+    using enum CallOutcome;
     const auto id = message.id;
     const auto fail = [&](const ToolError& error) {
         auto failure = error.details;
@@ -56,6 +111,9 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
             throw ToolError("The task is " + state,{{"taskId",taskId}});
         if (task.value("replanning",false) || task.value("runStop",Json(nullptr)).is_object())
             throw ToolError("The task is stopping or replanning",{{"taskId",taskId},{"current",taskState(task,message)}});
+        if (task.contains("runTargets") || task.contains("runResults"))
+            throw ToolError("Session actions are not available for tasks with destination Runs; use cancel_task to stop the whole task",
+                            {{"taskId",taskId}});
         if (field(run,"threadId").empty() || field(run,"runId").empty())
             throw ToolError("The task has no running Session. Use send_to_task to pass it on at the next safe point",
                             {{"taskId",taskId},{"current",taskState(task,message)}});
@@ -65,8 +123,8 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (shutdown.stop_requested()) return false;
-        if (!authorizeTurn(message)) { transaction.commit(); return false; }
+        if (shutdown.stop_requested()) return stop;
+        if (!authorizeTurn(message)) { transaction.commit(); return stop; }
         auto saved = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? "
                            "AND result IS NULL AND effect IS NOT NULL",{id,step});
         if (saved.next()) {
@@ -88,7 +146,7 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
                 command.actionId = "flock-turn-" + std::to_string(id) + "-" + std::to_string(step);
                 command.ownerBotId = message.bot;
                 command.environmentId = run.at("environmentId");
-                command.projectId = field(task,"projectId");
+                command.projectId = run.value("projectId",field(task,"projectId"));
                 command.config = task.at("config");
                 command.target = runRef(run);
                 effect.emplace(SessionEffect{taskId,expected,run,std::move(command)});
@@ -96,18 +154,18 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
         }
         transaction.commit();
     }
-    if (!effect) return true;
+    if (!effect) return advance;
 
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (shutdown.stop_requested()) return false;
-        if (!authorizeTurn(message)) { transaction.commit(); return false; }
+        if (shutdown.stop_requested()) return stop;
+        if (!authorizeTurn(message)) { transaction.commit(); return stop; }
         try { admit(effect->taskId,effect->generation,effect->run); }
         catch (const ToolError& error) {
             fail(error);
             transaction.commit();
-            return true;
+            return advance;
         }
         const Resource resource{Action::t3_send,
             Resource::sessionRead(effect->command.environmentId,effect->command.target.threadId).target};
@@ -115,16 +173,16 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
         origin.task = effect->taskId;
         origin.generation = effect->generation;
         origin.revision = ownTask(effect->taskId,message).value("currentRevision",Id{});
-        const auto gate = approveAction(origin,resource,"turn/" + std::to_string(id) + "/" + std::to_string(step),
+        const auto gate = approveAction(origin,resource,key,
                                        Json::array({decision.tool,args,effect->run}),policyClock());
         if (gate != ApprovalGate::allow) {
             if (gate != ApprovalGate::waiting) fail(ToolError(std::string(approvalError(gate))));
             transaction.commit();
-            return gate != ApprovalGate::waiting;
+            return gate == ApprovalGate::waiting ? waiting : advance;
         }
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{effect->checkpoint(),id,step});
-        if (!sqlite3_changes(db)) return false;
+        if (!sqlite3_changes(db)) return stop;
         transaction.commit();
     }
 
@@ -143,14 +201,14 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
     std::lock_guard lock(mutex);
     Transaction transaction(db);
     if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step}).next())
-        return false;
+        return stop;
     if (outcome.value("ok",false)) {
         Json entry = {{"messageId",id},{"step",step},{"run",outcome.value("run",effect->run)}};
         journal(effect->taskId,"interrupt_requested",entry);
     }
     saveTurnResults(id,step,Json::array({outcome}));
     transaction.commit();
-    return true;
+    return advance;
 }
 
 namespace {
@@ -163,13 +221,16 @@ bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
 void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt) {
     const auto& [bot,target,title,delivery] = receipt;
     if (!acceptedSessionSend(target,delivery)) return;
-    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified) VALUES(?,?,?,?,?,?,?)",
+    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment)"
+         " VALUES(?,?,?,?,?,?,?,?)",
          {message,bot,target.environmentId,target.threadId,delivery.run.runId,title,
-          sessionParticipationStopped(bot,target,message) ? 1 : 0});
+          sessionParticipationStopped(bot,target,message) ? 1 : 0,target.gatewayEnvironmentId});
 }
 
-bool Store::Impl::sendSessionMessage(const conversation::Message& message, int step, const Decision& decision,
-                                     bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
+Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
+    const conversation::Message& message, int step, const Decision& decision, std::string_view key,
+    bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
+    using enum CallOutcome;
     const auto id = message.id;
     const auto save = [&](Json result) {
         saveTurnResults(id,step,Json::array({redactor(message.bot).record(std::move(result))}));
@@ -179,16 +240,42 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
     command.actionId = "flock-turn-" + std::to_string(id) + "-" + std::to_string(step);
     command.ownerBotId = message.bot;
     std::string error;
+    bool savedTaskTarget = false;
+    Id savedTaskId = 0, savedGeneration = 0;
+    std::string savedActionId;
     try {
-        command.environmentId = conversation_storage::text(decision.args,"environmentId",256,true);
-        command.target.threadId = conversation_storage::text(decision.args,"threadId",256,true);
+        if (decision.tool == "send_to_task") {
+            std::lock_guard lock(mutex);
+            Transaction transaction(db);
+            const auto task = ownTask(conversation_storage::identifier(decision.args,"taskId",true),message);
+            if (conversation_storage::identifier(decision.args,"generation",true,0) != task.at("generation"))
+                throw ToolError("stale",{{"taskId",task.at("id")},{"current",taskState(task,message)}});
+            if (terminal(task) || task.at("state") == "cancelling")
+                throw ToolError("The task is " + field(task,"state"),{{"taskId",task.at("id")}});
+            const auto selected = selectSavedDestination(task,decision.args,true);
+            command.environmentId = selected.environmentId;
+            command.gatewayEnvironmentId = selected.gatewayEnvironmentId;
+            command.target.threadId = selected.threadId;
+            command.target.gatewayEnvironmentId = selected.gatewayEnvironmentId;
+            if (command.environmentId.empty() || command.target.threadId.empty()) throw ToolError("The destination Session is unavailable");
+            savedTaskTarget = true;
+            savedTaskId = task.at("id");
+            savedGeneration = task.at("generation");
+            savedActionId = selected.actionId;
+            command.instruction = conversation_storage::text(decision.args,"instruction",conversation_storage::messageSize,true);
+            transaction.commit();
+        } else {
+            command.environmentId = conversation_storage::text(decision.args,"environmentId",256,true);
+            command.target.threadId = conversation_storage::text(decision.args,"threadId",256,true);
+            command.instruction = conversation_storage::text(decision.args,"text",conversation_storage::messageSize,true);
+        }
         const auto name = redactor(message.bot).text(message.routing.at("config").value("botDisplayName",message.bot));
-        command.instruction = name + ": " +
-            conversation_storage::text(decision.args,"text",conversation_storage::messageSize,true);
-        if (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId"))
+        command.instruction = name + ": " + command.instruction;
+        if (decision.tool == "message_session" &&
+            (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
             throw ToolError("Use the Session identifiers");
     } catch (const ToolError& failure) { error = failure.what(); }
-    const SessionTarget target{command.environmentId,command.target.threadId};
+    const SessionTarget target{command.environmentId,command.target.threadId,command.gatewayEnvironmentId};
     const Resource resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target};
     const auto saveReceipt = [&](const Delivery& receipt) {
         if (acceptedSessionSend(target,receipt)) {
@@ -204,9 +291,9 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (!authorizeTurn(message)) { transaction.commit(); return false; }
+        if (!authorizeTurn(message)) { transaction.commit(); return stop; }
         auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step});
-        if (!row.next()) return false;
+        if (!row.next()) return stop;
         if (!row.string(0).empty()) {
             if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end()) {
                 recordSessionSendRun(id,receipt->second);
@@ -220,7 +307,7 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
             save(toolFailure(error));
         } else if (Policy(*this).forbidden(message.bot,resource.action,resource.target)) {
             save(toolFailure(approvalError(ApprovalGate::denied)));
-        } else if (!connectedSessionAccess(message,target)) {
+        } else if (!savedTaskTarget && !connectedSessionAccess(message,target)) {
             save(toolFailure("This Session is unavailable through your T3 connection"));
         }
         auto result = query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NOT NULL",{id,step});
@@ -228,44 +315,76 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         transaction.commit();
         if (done) {
             sessionSendReceipts.erase(id);
-            return true;
+            return advance;
         }
     }
     std::string title;
     try {
-        command.authGeneration = t3.authGeneration(target.environmentId,command.config);
-        if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
-        else error = "This Session is unavailable through your T3 connection";
+        command.authGeneration = t3.authGeneration(
+            target.gatewayEnvironmentId.empty() ? target.environmentId : target.gatewayEnvironmentId,command.config);
+        if (!savedTaskTarget) {
+            if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
+            else error = "This Session is unavailable through your T3 connection";
+        }
     } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
-    // A stop takes the exclusive lock. Hold this through the wire call so a stop cannot
-    // commit between recording a dispatch and starting it.
-    std::shared_lock dispatch(sessionDispatchMutex);
+    const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::shared);
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (shutdown.stop_requested()) return false;
-        if (!authorizeTurn(message)) { transaction.commit(); return false; }
+        if (shutdown.stop_requested()) return stop;
+        if (!authorizeTurn(message)) { transaction.commit(); return stop; }
         if (sessionParticipationStopped(message.bot,target,id)) {
             save(toolFailure(stopped));
             transaction.commit();
-            return true;
+            return advance;
         }
-        if (!error.empty() || !connectedSessionAccess(message,target)) {
+        if (!error.empty() || (!savedTaskTarget && !connectedSessionAccess(message,target))) {
             save(toolFailure(error.empty() ? "This Session is unavailable through your T3 connection" : error));
             transaction.commit();
-            return true;
+            return advance;
         }
-        const auto gate = approveAction(policyOrigin(message),resource,
-            "turn/" + std::to_string(id) + "/" + std::to_string(step),
-            Json::array({decision.tool,decision.args,command.authGeneration}),policyClock());
+        auto origin = policyOrigin(message);
+        Json policyPayload{decision.tool,decision.args,command.authGeneration};
+        if (savedTaskTarget) {
+            try {
+                const auto task = ownTask(savedTaskId,message);
+                if (task.at("generation") != savedGeneration)
+                    throw ToolError("stale",{{"taskId",savedTaskId},{"current",taskState(task,message)}});
+                if (terminal(task) || task.at("state") == "cancelling")
+                    throw ToolError("The task is " + field(task,"state"),{{"taskId",savedTaskId}});
+                const auto selected = selectSavedDestination(task,decision.args,true);
+                if (selected.actionId != savedActionId || selected.environmentId != target.environmentId ||
+                    selected.threadId != target.threadId || selected.runId.empty())
+                    throw ToolError("The destination Session is unavailable");
+                const auto action = outbox(task,selected.actionId);
+                if (action.is_null() || !action.value("destinationAction",false) ||
+                    action.value("phase","") != "accepted" || action.value("stopRequested",false) ||
+                    field(action,"environmentId") != selected.environmentId ||
+                    field(action,"projectId") != selected.projectId ||
+                    field(action,"gatewayEnvironmentId") != selected.gatewayEnvironmentId)
+                    throw ToolError("The destination Session is unavailable");
+                if (!query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
+                            {selected.actionId,savedTaskId,selected.environmentId,selected.threadId,selected.runId}).next())
+                    throw ToolError("The destination Session is unavailable");
+                origin.task = savedTaskId;
+                origin.generation = savedGeneration;
+                origin.revision = task.value("currentRevision",Id{});
+                policyPayload.push_back(selected.actionId);
+            } catch (const ToolError& failure) {
+                save(toolFailure(failure.what()));
+                transaction.commit();
+                return advance;
+            }
+        }
+        const auto gate = approveAction(origin,resource,key,policyPayload,policyClock());
         if (gate != ApprovalGate::allow) {
             if (gate != ApprovalGate::waiting) save(toolFailure(approvalError(gate)));
             transaction.commit();
-            return gate != ApprovalGate::waiting;
+            return gate == ApprovalGate::waiting ? waiting : advance;
         }
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{Json{{"kind","message_session"}},id,step});
-        if (!sqlite3_changes(db)) return false;
+        if (!sqlite3_changes(db)) return stop;
         const auto read = Resource::sessionRead(target.environmentId,target.threadId);
         if (!message.channelScope.empty() || !Policy(*this).allows(message.bot,read)) title.clear();
         title = bounded(redactT3Tokens(redactor(message.bot).text(title)),512);
@@ -294,7 +413,108 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     saveReceipt(checkpoint->second.delivery);
     transaction.commit();
     sessionSendReceipts.erase(checkpoint);
-    return true;
+    return advance;
+}
+
+Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(
+    const conversation::Message& message, int step, const Decision& decision, std::string_view key,
+    bool offered, bool hasWebEvidence, std::stop_token shutdown) {
+    using enum CallOutcome;
+    if (shutdown.stop_requested()) return stop;
+    std::optional<SessionDispatchFileLock> dispatch;
+    try { dispatch.emplace(path,SessionDispatchFileLock::Mode::exclusive); }
+    catch (const std::exception& error) {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (authorizeTurn(message))
+            saveTurnResults(message.id,step,Json::array({toolFailure(error.what())}));
+        transaction.commit();
+        return advance;
+    }
+    std::lock_guard lock(mutex);
+    Transaction transaction(db);
+    if (!authorizeTurn(message)) { transaction.commit(); return stop; }
+    const auto save = [&](Json result) {
+        saveTurnResults(message.id,step,Json::array({redactor(message.bot).record(std::move(result))}));
+    };
+    const auto fail = [&](const ToolError& error) {
+        auto result = error.details;
+        result["ok"] = false;
+        result["error"] = error.what();
+        save(std::move(result));
+    };
+    auto existing = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
+                          {message.id,step});
+    if (!existing.next()) { transaction.commit(); return stop; }
+    if (!existing.string(0).empty()) {
+        save({{"ok",true},{"effect","stop_requested"},{"delivery","unknown"},
+              {"error","The saved stop request is still being reconciled in T3"}});
+        transaction.commit();
+        return advance;
+    }
+    if (!offered) save(toolFailure("The cancellation action was not offered"));
+    else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) save(webEvidenceActionDenied());
+    else try {
+        if (!decision.args.is_object()) throw ToolError("Tool arguments must be an object");
+        const auto taskId = identifier(decision.args,"taskId",true);
+        const auto generation = identifier(decision.args,"generation",true,0);
+        const auto task = ownTask(taskId,message);
+        if (generation != task.at("generation"))
+            throw ToolError("stale",{{"taskId",taskId},{"current",taskState(task,message)}});
+        const auto selected = selectSavedDestination(task,decision.args,false);
+        const auto action = outbox(task,selected.actionId);
+        if (action.is_null() || !action.value("destinationAction",false) ||
+            field(action,"environmentId") != selected.environmentId || field(action,"projectId") != selected.projectId)
+            throw ToolError("The destination is unavailable");
+        if (!destinationRunOutstanding(selected.run)) {
+            save({{"ok",true},{"effect","already_settled"},{"taskId",taskId},{"destination",selected.name}});
+        } else if (task.at("state") == "cancelling") {
+            throw ToolError("The whole task is already stopping",{{"taskId",taskId}});
+        } else if (terminal(task)) {
+            throw ToolError("The task is " + field(task,"state"),{{"taskId",taskId}});
+        } else if (action.value("stopRequested",false)) {
+            save({{"ok",true},{"effect","already_requested"},{"taskId",taskId},{"destination",selected.name}});
+        } else {
+            const auto phase = field(action,"phase");
+            if (phase != "ready" && phase != "started" && phase != "accepted")
+                throw ToolError("The destination is unavailable");
+            const bool exactRun = phase == "accepted" && !selected.threadId.empty() && !selected.runId.empty() &&
+                query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
+                      {selected.actionId,taskId,selected.environmentId,selected.threadId,selected.runId}).next();
+            if (phase == "accepted" && !exactRun) throw ToolError("The destination Session is unavailable");
+            if (exactRun) {
+                const Resource resource{Action::t3_send,
+                    Resource::sessionRead(selected.environmentId,selected.threadId).target};
+                auto origin = policyOrigin(message);
+                origin.task = taskId;
+                origin.generation = generation;
+                origin.revision = task.value("currentRevision",Id{});
+                const auto gate = approveAction(origin,resource,key,
+                    Json::array({decision.tool,decision.args,runJson(runRef(selected.run))}),policyClock());
+                if (gate != ApprovalGate::allow) {
+                    if (gate != ApprovalGate::waiting) fail(ToolError(std::string(approvalError(gate))));
+                    transaction.commit();
+                    return gate == ApprovalGate::waiting ? waiting : advance;
+                }
+            }
+            auto updated = action;
+            updated["stopRequested"] = true;
+            updated["stopOperation"] = key;
+            updated.erase("phase");
+            updated.erase("authGeneration");
+            exec("UPDATE outbox SET data=? WHERE id=? AND task_id=? AND phase=?",
+                 Json::array({updated,selected.actionId,taskId,phase}));
+            if (!sqlite3_changes(db)) throw ToolError("The destination changed before its stop request was saved");
+            exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL AND effect IS NULL",
+                 {Json{{"kind","destination_cancel"},{"taskId",taskId},{"generation",generation},
+                       {"actionId",selected.actionId},{"environmentId",selected.environmentId},
+                       {"projectId",selected.projectId},{"run",runJson(runRef(selected.run))}},message.id,step});
+            if (!sqlite3_changes(db)) throw ToolError("The stop request could not be saved");
+            save({{"ok",true},{"effect","stop_requested"},{"taskId",taskId},{"destination",selected.name}});
+        }
+    } catch (const ToolError& error) { fail(error); }
+    transaction.commit();
+    return advance;
 }
 
 void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
@@ -302,10 +522,11 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
     std::vector<Wait> waits;
     {
         std::lock_guard lock(mutex);
-        auto rows = query("SELECT rowid,message_id,bot,environment,thread,run,title "
+        auto rows = query("SELECT rowid,message_id,bot,environment,thread,run,title,gateway_environment "
                           "FROM session_message_waits WHERE notified=0 ORDER BY rowid");
         while (rows.next())
-            waits.push_back({rows.number(0),rows.number(1),rows.string(2),{rows.string(3),rows.string(4)},rows.string(5),rows.string(6)});
+            waits.push_back({rows.number(0),rows.number(1),rows.string(2),
+                {rows.string(3),rows.string(4),rows.string(7)},rows.string(5),rows.string(6)});
     }
     for (const auto& wait : waits) {
         if (shutdown.stop_requested()) return;
@@ -326,7 +547,8 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
                 continue;
             }
         }
-        const auto reason = t3.sessionMessageWake(wait.target,{wait.target.threadId,wait.run,{}});
+        const auto reason = t3.sessionMessageWake(
+            wait.target,{wait.target.threadId,wait.run,{},wait.target.gatewayEnvironmentId});
         if (reason.empty() || shutdown.stop_requested()) continue;
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -366,15 +588,14 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
 }
 
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
-                                      std::string_view environment, Id messageId, const Json& source,
+                                      const TaskRoute& destination, Id messageId, const Json& source,
                                       bool resume, const WorkSession* selectedSession) {
-    const auto destination = selectedSession ? selectedSession->environmentId
-        : environment.empty() ? field(routing,"environmentId") : verifiedEnvironment(routing,routing,environment);
-    const auto project = selectedSession ? selectedSession->projectId : field(routing,"projectId");
     if (selectedSession) redactor(bot).requirePublic(selectedSession->threadId);
-    const auto id = submit({std::string(bot),std::string(request),destination,project,routing.at("config")},
-                           messageId,source);
+    const auto id = submit({std::string(bot),std::string(request),destination.environmentId,destination.projectId,
+                           routing.at("config")},messageId,source);
     auto task = load(id);
+    if (!destination.gatewayEnvironmentId.empty() && destination.gatewayEnvironmentId != destination.environmentId)
+        task["gatewayEnvironmentId"] = destination.gatewayEnvironmentId;
     if (routing.contains("sessionOrigin")) task["sessionOrigin"] = routing.at("sessionOrigin");
     else if (resume) {
         auto parent = query(R"SQL(
@@ -389,8 +610,11 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
     if (task.contains("sessionOrigin"))
         task["sessionOrigin"]["title"] = redactor(bot).text(field(task.at("sessionOrigin"),"title"));
     if (selectedSession)
-        task["selectedSession"] = {{"environmentId",destination},{"projectId",project},
+        task["selectedSession"] = {{"environmentId",destination.environmentId},{"projectId",destination.projectId},
                                    {"threadId",selectedSession->threadId}};
+    if (selectedSession && !destination.gatewayEnvironmentId.empty() &&
+        destination.gatewayEnvironmentId != destination.environmentId)
+        task["selectedSession"]["gatewayEnvironmentId"] = destination.gatewayEnvironmentId;
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId,bot});
     task["sourceMessageCoversFullRequest"] = source.is_null() && message.next() && message.string(0) == request;
@@ -438,7 +662,7 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
 }
 
 bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::string_view instruction,
-                                    const Json& source, const Json& routing, const TaskChange* change) {
+                                    const Json& source, const TaskChange* change) {
     Id revision = task.value("currentRevision",Id{});
     bool conflicting = task.value("replanning",false);
     if (change) {
@@ -446,15 +670,29 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
         const auto oldDone = effectiveDoneWhen(task);
         const auto intent = change->intent.empty() ? oldIntent : change->intent;
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
-        const auto environment = verifiedEnvironment(task,routing,change->environment);
-        const bool destinationChanged = !environment.empty() &&
-            environment != task.value("pendingEnvironmentId",field(task,"environmentId"));
+        const auto& environment = change->route.environmentId;
+        const auto pendingRoute = PendingDestination::read(task);
+        const auto currentEnvironment = pendingRoute ? pendingRoute->route.environmentId : field(task,"environmentId");
+        const auto currentProject = pendingRoute ? pendingRoute->route.projectId : field(task,"projectId");
+        const auto currentGateway = pendingRoute ? pendingRoute->route.gatewayEnvironmentId :
+            (field(task,"gatewayEnvironmentId").empty() ? currentEnvironment : field(task,"gatewayEnvironmentId"));
+        const auto gateway = change->route.gatewayEnvironmentId.empty() ? environment :
+            change->route.gatewayEnvironmentId;
+        const bool destinationChanged = !environment.empty() && (environment != currentEnvironment ||
+            (!change->route.projectId.empty() && change->route.projectId != currentProject) || gateway != currentGateway);
+        std::optional<PendingDestination> nextRoute;
         if (destinationChanged) {
-            const auto id = task.at("id").get<Id>();
-            const auto peer = peerExchange(id);
-            if (peer && peer->recipient == id && peer->kind == "work" &&
-                peerWorkRouteWouldCycle(peer->sender,environment,field(task,"projectId")))
-                throw Conflict("This destination would make project queues wait for one another");
+            auto project = change->route.projectId;
+            const bool pinned = !project.empty();
+            if (!pinned) project = rememberedT3Project(field(task,"botId"),environment);
+            if (recipientRouteWouldCycle(task.at("id"),environment,project)) {
+                if (pinned) throw Conflict("This destination would make project queues wait for one another");
+                project.clear();
+            }
+            auto route = change->route;
+            route.projectId = std::move(project);
+            route.gatewayEnvironmentId = gateway;
+            nextRoute = PendingDestination{std::move(route),pinned};
         }
         const bool criteriaChanged = oldDone != done;
         const bool intentChanged = oldIntent != intent;
@@ -471,8 +709,8 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
             if (intentChanged) task["sourceMessageCoversFullRequest"] = false;
             conflicting = true;
         }
-        if (destinationChanged) {
-            task["pendingEnvironmentId"] = environment;
+        if (nextRoute) {
+            nextRoute->write(task);
             conflicting = true;
         }
     }
@@ -528,6 +766,7 @@ void Store::Impl::withdrawTaskQuestion(Json& task, Id waitId) {
     if (task.at("state") != "waiting" || field(wait,"reason") != "user_question" ||
         wait.at("id") != waitId || !waitIsActionable(task))
         throw Conflict("The question is no longer open");
+    if (wait.contains("projectChoices")) throw Conflict("Choose a T3 project before this task can start");
     auto updated = currentEvent(task);
     for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
     updated["withdrawnUserQuestion"] = field(wait,"text");

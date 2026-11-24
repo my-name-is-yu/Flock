@@ -31,6 +31,7 @@ std::string sign(std::string_view body) {
 class Bot final : public Model {
 public:
     unsigned received = 0;
+    Id reviewTask = 0;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
@@ -39,6 +40,12 @@ public:
         if (event.at("kind") == "result") {
             if (!event.contains("gitResults")) return {"git_open_pr",openArgs(),"Publish the Session change"};
             return {"complete",{{"report","Opened pull request"}},"Report the published PR"};
+        }
+        if (!event.contains("gitEvent")) {
+            if (event.at("turn").empty()) return {"git_request_review",
+                {{"host",hostName},{"repo",repoName},{"taskId",reviewTask},{"prNumber",1},{"reviewers",{"alice","bob"}}},
+                "Request a review for the watched pull request"};
+            return {"reply",{{"text","Review requested"}},"Report the requested review"};
         }
         const auto& delivery = event.at("gitEvent");
         if (event.at("turn").empty()) {
@@ -135,6 +142,58 @@ void run() {
     const auto inbox = client.Get("/api/inbox?bot=owner",httplib::Headers{{"Authorization","Basic fixture"}});
     check(inbox && inbox->status == 200 && inbox->body.find("Pull request review submitted") != std::string::npos &&
           inbox->body.find("Code scanning result") != std::string::npos,"review or scan missing in the Web inbox");
+
+    const auto inboxBeforeRequest = store.inbox(localOwner,"owner").size();
+    model.reviewTask = task;
+    const Json reviewRequested{{"action","review_requested"},{"repository",repository},
+        {"pull_request",{{"number",1},{"head",{{"sha",newSha}}},{"title","Change"}}},
+        {"requested_reviewer",{{"login","Alice"}}}};
+    host->beforeCall = [&](const GitContext&) {
+        check(post(client,"pull_request","tool-review-request",reviewRequested,202).at("status") == "received",
+              "review request webhook not enqueued during the host call");
+    };
+    store.receive(localOwner,intake(),"request-review","Request a review");
+    runtime.runConversations();
+    host->beforeCall = {};
+    runtime.runConversations();
+    check(store.inbox(localOwner,"owner").size() == inboxBeforeRequest + 1 &&
+          store.history(task).dump().find("tool-review-request") != std::string::npos,
+          "A signed review webhook duplicated the tool's inbox item or was lost from the conversation");
+
+    auto lateReview = reviewRequested;
+    lateReview["requested_reviewer"]["login"] = "Bob";
+    check(post(client,"pull_request","delayed-review-request",lateReview,202).at("status") == "received",
+          "delayed review request webhook was not enqueued");
+    runtime.runConversations();
+    check(store.inbox(localOwner,"owner").size() == inboxBeforeRequest + 1 &&
+          store.history(task).dump().find("delayed-review-request") != std::string::npos,
+          "A late webhook for the same request created another card or lost the notification");
+
+    auto externalReview = lateReview;
+    externalReview["pull_request"]["title"] = "Review requested again";
+    check(post(client,"pull_request","external-review-request",externalReview,202).at("status") == "received",
+          "external review request webhook was not enqueued");
+    runtime.runConversations();
+    check(store.inbox(localOwner,"owner").size() == inboxBeforeRequest + 2,
+          "A distinct review request was suppressed");
+
+    const auto inboxBeforeMissingWebhook = store.inbox(localOwner,"owner").size();
+    store.receive(localOwner,intake(),"review-without-webhook","Request another review");
+    runtime.runConversations();
+    const auto afterRequest = store.inbox(localOwner,"owner");
+    check(afterRequest.size() == inboxBeforeMissingWebhook + 1 &&
+          afterRequest.front().at("prompt") == "Review requested on the Git host.",
+          "The tool should create a card even if no webhook arrives");
+    store.decideInbox(localOwner,target(afterRequest.front()),"approve");
+
+    auto laterReview = reviewRequested;
+    laterReview["pull_request"]["title"] = "Another review requested";
+    check(post(client,"pull_request","review-after-prior-decision",laterReview,202).at("status") == "received",
+          "later review request webhook was not enqueued");
+    runtime.runConversations();
+    check(store.inbox(localOwner,"owner").size() == inboxBeforeMissingWebhook + 1 &&
+          store.history(task).dump().find("review-after-prior-decision") != std::string::npos,
+          "A handled review with a missing webhook hid a later request");
 }
 }
 

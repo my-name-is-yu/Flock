@@ -45,6 +45,7 @@ struct ChannelConnector {
 
 ChannelCapabilities channelCapabilities(ChannelKind);
 std::string channelPolicyTarget(const ChannelOrigin&);
+std::string normalizeArtifactBaseUrl(std::string);
 
 struct ChannelResource {
     std::string name, mimeType, bytes;

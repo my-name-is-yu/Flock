@@ -4,8 +4,10 @@ import { actionLabel, approvalSummary } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
+import { createBotRoleCard } from '/bot-role.js';
+import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
-import { mountBoardInbox, pullRequestLink } from '/board-inbox.js';
+import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
 import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
@@ -19,11 +21,11 @@ const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile-avatar', 'profile-avatar-button',
   'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
-  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-summary', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
-  'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
+  'bot-editor', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
   'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
@@ -79,6 +81,7 @@ const sessionEndLabels = {
 const stateLabels = {
   ...sessionEndLabels,
   queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for you',
+  confirmation_pending: 'Confirmation pending',
   cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
@@ -107,7 +110,7 @@ const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
   session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
   approve: 'Approved', extend: 'Deadline extended', reconcile: 'Check requested', supply: 'Secret saved',
-  allow_once: 'Allowed once', always_allow: 'Always allowed', deny: 'Denied', expired: 'Approval expired',
+  allow_once: 'Allowed once', always_allow: 'Allowed for this Flock', deny: 'Denied', expired: 'Approval expired',
   stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
   superseded: 'Replaced', superseded_instruction: 'Replaced by a newer instruction',
 };
@@ -115,8 +118,8 @@ const closedLabels = {
 const decisionConfirmations = {
   answer: (name) => `Answer recorded for ${name}.`,
   allow_once: () => 'Allowed once.',
-  always_allow: () => 'Allowed and saved as a rule.',
-  allow_next_time: () => 'Allow rule saved.',
+  always_allow: () => 'Allowed and saved as a rule for this Flock.',
+  allow_next_time: () => 'Allow rule saved for this Flock.',
   deny: () => 'Denied.',
   approve: () => 'Approved.',
   request_changes: (name) => `Change request recorded for ${name}.`,
@@ -134,9 +137,9 @@ const errors = {
   already_closed: 'This request was already answered or closed.',
   access_denied: 'You do not have permission to respond to this request.',
   bot_not_found: 'Bot not found.',
-  invalid_peer: 'Choose another Bot for this DM.',
-  peer_not_allowed: 'This Bot DM is unavailable.',
-  peer_not_found: 'This Bot DM is unavailable.',
+  invalid_peer: 'Choose another Bot.',
+  peer_not_allowed: 'This conversation between Bots isn’t available.',
+  peer_not_found: 'This conversation between Bots isn’t available.',
   peer_message_not_found: 'This message is unavailable.',
 };
 
@@ -153,11 +156,11 @@ const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
 const composerDrafts = createComposerDraftStore();
 const screenshotDrafts = new WeakMap();
 const sendingMessages = new Set();
-const pendingWaits = new Map();
 const notices = new Map();
 const signatures = new Map();
 const readingPositions = new Map();
 let bots = [];
+let rosterRevision = 0;
 let listLoaded = false;
 let view = null;
 let visibilityGeneration = 0;
@@ -252,63 +255,6 @@ function setConnection(state) {
   elements.connection.dataset.state = state;
   elements['connection-text'].textContent = state === 'offline' ? 'Can’t reach Flock. Reconnecting…' : '';
   renderHeader();
-}
-let themeSwitchTimer = 0;
-function resolvedTheme(mode) {
-  return mode === 'system'
-    ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-    : mode;
-}
-function syncThemeIndicator(animate = false) {
-  const group = elements['theme-switch'];
-  const active = group?.querySelector('button[aria-pressed="true"]');
-  if (!group || !active || !active.offsetWidth) return;
-  const x = `${active.offsetLeft}px`;
-  const w = `${active.offsetWidth}px`;
-  const wasReady = group.classList.contains('seg-ready');
-  if (wasReady && group.style.getPropertyValue('--seg-x') === x && group.style.getPropertyValue('--seg-w') === w) {
-    return;
-  }
-  if (animate && wasReady && !reducedMotion.matches) {
-    if (!group.classList.contains('seg-animated')) {
-      group.classList.add('seg-animated');
-      void group.offsetWidth;
-    }
-  } else {
-    group.classList.remove('seg-animated');
-  }
-  group.style.setProperty('--seg-x', x);
-  group.style.setProperty('--seg-w', w);
-  group.classList.add('seg-ready');
-}
-function renderTheme(mode, animate = false) {
-  for (const option of elements['theme-switch'].querySelectorAll('button')) {
-    option.setAttribute('aria-pressed', option.dataset.themeMode === mode);
-  }
-  syncThemeIndicator(animate);
-}
-function setTheme(mode) {
-  const group = elements['theme-switch'];
-  const active = group.querySelector('button[aria-pressed="true"]');
-  const prevMode = active?.dataset.themeMode ?? 'system';
-  const prevResolved = resolvedTheme(prevMode);
-  const nextResolved = resolvedTheme(mode);
-  save('flock-theme', mode);
-  if (!reducedMotion.matches) {
-    if (group.classList.contains('seg-ready')) group.classList.add('seg-animated');
-    if (prevResolved !== nextResolved) {
-      const root = document.documentElement;
-      root.classList.add('theme-switching');
-      clearTimeout(themeSwitchTimer);
-      themeSwitchTimer = setTimeout(() => {
-        root.classList.remove('theme-switching');
-        themeSwitchTimer = 0;
-      }, 260);
-    }
-    void document.documentElement.offsetWidth;
-  }
-  renderTheme(mode, true);
-  document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
 }
 const mainElement = byId('main');
 const navBackdrop = byId('nav-backdrop');
@@ -481,6 +427,7 @@ function peerLink(botId, peerId, label, className, anchor = 0) {
 }
 
 const sidebarIcons = {
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M9 6V4h6v2M6 6l1 14h10l1-14M10 10v6m4-6v6"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>',
   pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z"/><path d="M12 14v6"/></svg>',
   inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>',
@@ -561,15 +508,25 @@ function menuPopover(bot) {
     }],
     ['Open settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
-  actions.forEach(([label, icon, run], index) => {
+  const menuItem = ([label, icon, run], index) => {
     const item = button(null, null, run);
     item.innerHTML = icon;
     item.append(node('span', null, label));
     item.setAttribute('role', 'menuitem');
     item.tabIndex = -1;
     item.dataset.focus = `item:${bot.id}:${index}`;
-    list.append(item);
-  });
+    return item;
+  };
+  list.append(...actions.map(menuItem));
+  if (bot.canDelete) {
+    const remove = menuItem(['Delete', sidebarIcons.trash, () => {
+      closeMenu();
+      botDeletion.open(bots.find(({ id }) => id === bot.id), document.activeElement);
+    }], actions.length);
+    remove.classList.add('danger');
+    remove.setAttribute('aria-haspopup', 'dialog');
+    list.append(remove);
+  }
   list.addEventListener('keydown', (event) => {
     const items = [...list.querySelectorAll('[role="menuitem"]')];
     const index = items.indexOf(document.activeElement);
@@ -672,15 +629,14 @@ function createSidebarEntry(botId) {
         toggle.setAttribute('aria-label', `${bot.name} menu`);
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
-      // A Bot blocked on the person says so in place of its last message, so the row reads at a glance.
-      const waiting = bot.presence === 'waiting';
-      const previewLabel = waiting ? 'Waiting for you' : bot.preview || '';
+      const showWaitingPreview = bot.presence === 'waiting' && !count;
+      const previewLabel = showWaitingPreview ? stateLabels.waiting : bot.preview || '';
       if (previewText.data !== previewLabel) previewText.data = previewLabel;
-      preview.classList.toggle('waiting', waiting);
-      if (waiting) preview.setAttribute('aria-hidden', 'true');
+      preview.classList.toggle('waiting', showWaitingPreview);
+      if (showWaitingPreview) preview.setAttribute('aria-hidden', 'true');
       else preview.removeAttribute('aria-hidden');
       const hasPresence = activePresence.has(bot.presence);
-      presenceDot.hidden = !waiting;
+      presenceDot.hidden = !showWaitingPreview;
       dots.hidden = !busyPresence.has(bot.presence);
       preview.hidden = !previewLabel && dots.hidden;
       pinPresence.hidden = !pinned || !hasPresence;
@@ -696,6 +652,11 @@ function createSidebarEntry(botId) {
       toggle.setAttribute('aria-expanded', expanded);
       if (expanded) {
         toggle.setAttribute('aria-controls', 'bot-menu');
+        if (popover && previousBot?.canDelete !== bot.canDelete) {
+          if (popover.contains(document.activeElement)) toggle.focus();
+          popover.remove();
+          popover = null;
+        }
         if (!popover) {
           popover = menuPopover(bot);
           row.append(popover);
@@ -911,7 +872,6 @@ function renderHeader() {
     scopeAvatar?.destroy();
     scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
     if (bot) elements['activity-scope-name'].textContent = bot.name;
-    // Accent tokens follow the open Bot, including its Bot-to-Bot DMs; the empty state keeps Flock purple.
     if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
     else document.documentElement.style.removeProperty('--bot-accent');
   }
@@ -959,8 +919,9 @@ function activityRow(tag, className, title, status, statusClass) {
 }
 function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
-  const row = activityRow(link ? 'a' : 'div', 'session-row', request, status, tone);
-  row.title = Number.isFinite(startedAt) ? `${request} · Started ${fullTime.format(startedAt)}` : request;
+  const title = [session.name, request].filter(Boolean).join(' · ');
+  const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
+  row.title = [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · ');
   if (link) {
     row.href = link;
     row.target = '_blank';
@@ -1057,7 +1018,7 @@ let previousSessionsLoading = false;
 function renderActivity() {
   const data = view?.data;
   const loading = !!view && !data;
-  const pending = view?.id ? decisions.itemsFor(view.id) : [];
+  const pending = view?.id ? decisions.pendingItemsFor(view.id) : [];
   if (changed('waits', view?.id, loading, pending)) {
     const revealedWaits = previousWaitsLoading && !loading;
     previousWaitsLoading = loading;
@@ -1098,7 +1059,8 @@ function renderActivity() {
       if (activeKeys.has(identity)) continue;
       activeKeys.add(identity);
       live.push(sessionRow(run.request, run, stateLabels[run.state] ?? run.state,
-        run.state === 'waiting' ? 'waiting' : 'live', run.createdAt ? run.createdAt * 1000 : undefined));
+        ['waiting', 'confirmation_pending'].includes(run.state) ? 'waiting' : 'live',
+        run.createdAt ? run.createdAt * 1000 : undefined));
     }
     const ended = [];
     for (const task of groups.sort((a, b) => b.id - a.id)) {
@@ -1201,33 +1163,24 @@ async function copyMessage(control, text) {
     }, 1600);
   } catch { if (view) setNotice(view, 'Could not copy the text.', true); }
 }
-const questionKey = (task) => JSON.stringify([task.id, task.wait.id, task.currentRevision ?? 0, task.generation]);
-
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
   const choices = task.wait.choices;
+  const item = taskWaitDecision(context.id, task);
+  const busy = decisions.busy(item);
   if (hasQuestionChoices(choices)) {
-    const key = questionKey(task);
-    const selections = context.questionChoices ??= new Map();
+    const { key, text, stale } = decisions.choice(item);
     actions.append(questionChoiceForm({
-      key, prompt: target.summary, choices, dialog, answer: selections.get(key), busy: pendingWaits.has(task.wait.id),
-      select(answer) {
-        selections.set(key, answer);
-        for (const form of document.querySelectorAll('.question-choice-form')) {
-          if (form.dataset.questionKey === key) updateQuestionChoiceForm(form, answer, pendingWaits.has(task.wait.id));
-        }
-      },
-      submit(answer) {
-        const current = view === context && context.data?.waits.find((item) => item.wait.id === task.wait.id);
-        if (current && questionKey(current) === key) void operate(context, current, 'answer', { text: answer });
-      },
+      key, prompt: target.summary, choices, dialog, answer: text, busy: busy || stale,
+      select: (answer) => decisions.selectChoice(item, answer),
+      submit: (answer) => void operate(context, task, 'answer', { text: answer }),
     }));
   }
   const reply = questionReplyButton(() => {
     if (view?.id === context.id) beginReply(target);
   }, dialog);
-  reply.disabled = pendingWaits.has(task.wait.id);
+  reply.disabled = busy;
   actions.append(reply);
   return actions;
 }
@@ -1236,15 +1189,19 @@ function readOnlyChoices(choices) {
   for (const choice of choices) options.append(node('li', null, choice));
   return options;
 }
+function pausedDecision(botId, turn) {
+  return { botId, itemKind: 'conversation_model_budget', itemId: turn.replyToMessageId, waitId: turn.messageId,
+    taskId: 0, targetRevision: 0, targetGeneration: turn.messageId };
+}
 function pausedActions(turn) {
+  const context = view;
+  const item = pausedDecision(context.id, turn);
   const actions = node('div', 'event-actions');
-  const waitMessageId = turn.messageId;
-  const key = `message/${waitMessageId}`;
-  const approve = button('Approve one more model call', 'button', () => void submitOperation(view, key, {
-    itemKind: 'conversation_model_budget', itemId: turn.replyToMessageId, waitId: waitMessageId,
-    taskId: 0, targetRevision: 0, targetGeneration: waitMessageId, decision: 'approve',
-  }));
-  approve.disabled = pendingWaits.has(key);
+  const approve = button('Approve one more model call', 'button', () => {
+    const current = context.data?.pausedConversations?.find((entry) => entry.messageId === item.waitId);
+    void submitConversationDecision(context, item, current && pausedDecision(context.id, current), 'approve');
+  });
+  approve.disabled = decisions.busy(item);
   actions.append(approve);
   return actions;
 }
@@ -1484,6 +1441,20 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
+function verificationLine(run, showLink) {
+  const status = Object.hasOwn(stateLabels, run.state) ? stateLabels[run.state] : run.state;
+  const line = node('p', 'event-reason', [run.name, status].filter(Boolean).join(' · '));
+  if (run.commit) line.append(' · ', node('code', null, run.commit));
+  if (showLink) {
+    const link = runIcon(run);
+    if (link) {
+      link.setAttribute('aria-label', `Open ${run.name} in T3`);
+      line.append(link);
+    }
+  }
+  return line;
+}
+
 function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
@@ -1606,21 +1577,23 @@ function eventCard(event, context, place, report) {
         bubble.append(link);
       }
     }
-    replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
+    replyTarget = ['Reply to this review', { kind: 'review', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
-      : data.report || 'The session submitted a report.';
+      : data.report || (data.destination ? 'No Session report is available.' : 'The session submitted a report.');
     text.textContent = copy;
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
     if (link) text.append(link);
     bubble.append(text);
     if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
-    if (typeof data.status === 'string' && data.status && data.status !== 'completed') {
+    if (data.destination) {
+      bubble.append(verificationLine({name: data.destination, state: data.status, commit: data.commit}, false));
+    } else if (typeof data.status === 'string' && data.status && data.status !== 'completed') {
       const status = Object.hasOwn(stateLabels, data.status) ? stateLabels[data.status] : data.status;
       bubble.append(node('p', 'event-reason', `Work ${status.toLowerCase()}`));
     }
-    if (data.evidenceStatus && data.detail) bubble.append(node('p', 'event-reason', data.detail));
+    if ((data.evidenceStatus || data.destination) && data.detail) bubble.append(node('p', 'event-reason', data.detail));
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
@@ -1668,6 +1641,12 @@ function eventCard(event, context, place, report) {
     else if (event.id === context.latestWebMessageId && data.status === 'received')
       extras.push(node('p', 'msg-note', 'Received'));
     if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
+    if (['request', 'conversation_message'].includes(event.kind)) {
+      for (const run of context.parallelTasks.get(event.taskId) ?? []) {
+        bubble.append(verificationLine(run, true));
+        if (run.detail) bubble.append(node('p', 'event-reason', run.detail));
+      }
+    }
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
       const owner = bots.find((item) => item.id === blocker.botId)?.name ?? blocker.botId;
@@ -1704,8 +1683,8 @@ function eventCard(event, context, place, report) {
     actions.append(control);
   }
   if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
-    reply.disabled = pendingWaits.has(pendingWait.wait.id);
+    const reply = iconButton('reply', 'Answer this question', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
+    reply.disabled = decisions.busy(taskWaitDecision(view.id, pendingWait));
     actions.append(reply);
   }
 
@@ -1803,7 +1782,7 @@ function leavePeerConversation(updateHistory = true) {
 
 function peerThread(events, dm, keep) {
   if (!events.length) {
-    const title = dm.error ? 'DM unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
+    const title = dm.error ? 'Conversation unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
     return [keep('empty', [title, dm.error], () => {
       const empty = node('div', 'empty-state');
       empty.append(node('h2', null, title));
@@ -1931,11 +1910,13 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   elements.conversation.classList.toggle('viewing-source', !!source);
   older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
-  older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier messages';
+  const olderLabel = context?.loadingOlder ? 'Loading…' : 'Show earlier messages';
+  if (older.textContent !== olderLabel) older.textContent = olderLabel;
   const peerStatus = elements['peer-status'];
   const olderFailed = view?.dm?.olderFailed;
   peerStatus.hidden = !olderFailed;
-  peerStatus.textContent = olderFailed ? 'Could not load earlier messages.' : '';
+  const peerLabel = olderFailed ? 'Could not load earlier messages.' : '';
+  if (peerStatus.textContent !== peerLabel) peerStatus.textContent = peerLabel;
   const scroller = elements.conversation;
   const key = context?.newestEvent != null && !context.anchor && timelineKey(context.id, context.peerId);
   const position = !source && key && readingPositions.get(key);
@@ -1957,7 +1938,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const dm = view.dm;
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
     if (!changed('timeline', dm.id, dm.peerId, dm.anchor, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
-    scroller.setAttribute('aria-label', 'Bot DM history');
+    scroller.setAttribute('aria-label', 'Conversation between Bots');
     updateTimelineRows(dm, (keep) => peerThread(events, dm, keep));
     moveScroll();
     if (dm.pendingViewMotion && elements.timeline.childElementCount > 0) {
@@ -1967,12 +1948,13 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     }
     return;
   }
-  if (changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()),
+  if (changed('timeline', view?.id, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued,
+    decisions.pendingKeys(), listLoaded, data?.presence, data?.activeSessions, data?.parallelTasks, data?.sessionTasks,
+    data?.pausedConversations, bots, dayFormat.format(Date.now()),
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
-    updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
-    foldLongMessages();
+    const added = updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
+    foldLongMessages(added);
     moveScroll();
     if (context?.pendingViewMotion && elements.timeline.childElementCount > 0) {
       const pending = context.pendingViewMotion;
@@ -2003,11 +1985,14 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
 // Like ChatGPT, fold any very long message to its first lines behind Show more.
 const foldLines = 12;
 const unfoldedMessages = new Set();
-function foldLongMessages() {
-  for (const text of elements.timeline.querySelectorAll('.foldable-text:not([data-fold-checked])')) {
-    text.dataset.foldChecked = '';
+function foldLongMessages(rows) {
+  const texts = rows.flatMap(row => [...row.querySelectorAll('.foldable-text')]);
+  // Inserting a toggle invalidates layout. Measure all new text before changing any row.
+  const long = texts.filter((text) => {
     const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
-    if (!(text.scrollHeight > lineHeight * (foldLines + 2))) continue;
+    return text.scrollHeight > lineHeight * (foldLines + 2);
+  });
+  for (const text of long) {
     const bubble = text.closest('.bubble');
     const id = text.closest('.event-message')?.id;
     const setFold = (folded) => {
@@ -2063,6 +2048,7 @@ function conversationRows(data, events, keep, source) {
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
+    parallelTasks: new Map((data?.parallelTasks ?? []).map((task) => [task.id, task.runs])),
     closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
   };
   const bot = timeline.bot;
@@ -2108,7 +2094,7 @@ function conversationRows(data, events, keep, source) {
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const approval = replacements.get(event.id);
     if (approval) {
-      rows.push(keep(`event-${event.id}`, ['approval', approval], () => {
+      rows.push(keep(`event-${event.id}`, ['approval', approval, decisions.busy(approval)], () => {
         const card = decisions.inlinePolicyCard(approval);
         card.id = `event-${event.id}`;
         card.tabIndex = -1;
@@ -2118,14 +2104,19 @@ function conversationRows(data, events, keep, source) {
       return;
     }
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
+    const waitDecision = wait && taskWaitDecision(view.id, wait);
     const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
-    const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
+    const request = ['request', 'conversation_message'].includes(event.kind);
+    const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
         place.groupStart, place.taskStart, place.afterQuestion, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
-        wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
+        waitDecision && decisions.busy(waitDecision),
+        wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), paused,
+        paused && decisions.busy(pausedDecision(view.id, paused)), blocker, blockedOwner,
+        request ? timeline.parallelTasks.get(event.taskId) : null,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
@@ -2134,7 +2125,7 @@ function conversationRows(data, events, keep, source) {
     rows.push(row);
     for (const item of approvals) {
       if (!anchoredToWait.has(item.itemId) && item.conversationEventId === event.id)
-        rows.push(keep(`policy-${item.itemId}`, item, () => decisions.inlinePolicyCard(item)));
+        rows.push(keep(`policy-${item.itemId}`, [item, decisions.busy(item)], () => decisions.inlinePolicyCard(item)));
     }
     previous = event;
   });
@@ -2170,7 +2161,6 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
 }
-const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
 const activeReply = (composer) => decisions.reviewReply() ?? composer.reply;
 const screenshotAnchor = (reply) => reply?.messageId ?? 0;
@@ -2245,7 +2235,7 @@ const closedQuestion = (context, reply) => reply?.kind === 'wait' &&
 let composition = null;
 function scheduleNoticeFade(context, notice) {
   const bot = context.id;
-  if (!notice || notice.isError || notice.timer || sendingMessages.has(context.composer) || [...pendingWaits.values()].includes(bot)) return;
+  if (!notice || notice.isError || notice.timer || sendingMessages.has(context.composer) || decisions.pendingForBot(bot)) return;
   notice.timer = setTimeout(() => {
     notice.timer = null;
     if (notices.get(bot) !== notice || !showingComposer(bot)) return;
@@ -2268,6 +2258,35 @@ function fitMessage() {
   // Measuring the textarea briefly frees space and can clamp the timeline's scroll position.
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
 }
+
+function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
+  const answering = target?.kind === 'wait';
+  const reviewing = target?.kind === 'review';
+  const working = ['working', 'thinking'].includes(data.presence);
+  const fieldLabel = answering ? 'Write your answer' : reviewing ? 'Reply to this review' :
+    target ? 'Write a reply' : 'Message';
+  elements['decision-reply-context'].hidden = !inboxReply;
+  elements['reply-context'].hidden = !target || inboxReply;
+  elements['compose-label'].textContent = fieldLabel;
+  elements.message.placeholder = suggestion ? `${suggestion.text} (press Enter to use this suggestion)` :
+    target ? fieldLabel : working ? `Guide ${data.bot.name} while it works` : `Message ${data.bot.name}`;
+  const sendLabel = answering ? 'Send answer' : target ? 'Send reply' : 'Send message';
+  elements.send.setAttribute('aria-label', sendLabel);
+  elements.send.title = sendLabel;
+
+  const summaryId = inboxReply ? 'decision-reply-target' : 'reply-summary';
+  elements.message.setAttribute('aria-describedby', target ? `${summaryId} notice` : 'notice');
+  if (!target) return;
+
+  let summary = target.summary;
+  if (!summary && target.messageId) {
+    const source = events.get(target.messageId)?.data;
+    if (source) summary = answering ? waitText(source) : reviewing ? source.title : source.report ?? source.text;
+  }
+  elements[inboxReply ? 'decision-reply-label' : 'reply-label'].textContent = answering ? 'Answering' : 'Replying to';
+  elements[summaryId].textContent = summary || (answering ? waitLabel('user_question') : 'Earlier message');
+}
+
 function renderComposer() {
   const context = view;
   const readOnly = context?.data?.canDecide === false;
@@ -2278,7 +2297,6 @@ function renderComposer() {
   elements['view-only-notice'].hidden = !available || canDecide;
   const decision = canDecide ? decisions.composer() : null;
   const review = canDecide ? decisions.reviewReply() : null;
-  elements['decision-reply-context'].hidden = !decision && !review;
   if (!canDecide || !context.composer) {
     composition = null;
     elements['composer-ghost'].hidden = true;
@@ -2295,27 +2313,14 @@ function renderComposer() {
   const body = decision?.text ?? composer.textAt(screenshotAnchor(reply));
   const busy = !!decision?.busy || sendingMessages.has(composer);
   const closedReply = closedQuestion(context, reply);
-  const source = reply && context.events.get(reply.messageId)?.data;
-  const summary = reply?.summary ?? (source && (reply.kind === 'wait' ? waitText(source) : source.report ?? source.text));
-  if (decision || review) {
-    elements['decision-reply-label'].textContent = 'Replying to';
-    elements['decision-reply-target'].textContent = decision?.item.requestTitle ?? review.summary;
-  }
-  elements['reply-context'].hidden = !reply || !!review;
-  elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
-  elements['reply-question'].textContent = reply ? summary ?? 'Earlier message' : '';
-  elements['compose-label'].textContent = decision ? `Replying to ${decision.item.requestTitle}` :
-    review ? `Replying to ${review.summary}` : reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
-  const working = ['working', 'thinking'].includes(context.data.presence);
-  elements.message.placeholder = (decision || review) ? 'Ask a question or give direction' :
-    reply ? 'Write a reply' : working ? `Guide ${context.data.bot.name} while it works` : `Message ${context.data.bot.name}`;
   const suggestion = nextSuggestion(context);
+  const target = decision ? { kind: 'wait', summary: decision.item.prompt?.trim() } : reply;
+  renderComposerCopy(context, target, !!(decision || review), suggestion);
   const ghost = elements['composer-ghost'];
   ghost.hidden = !suggestion;
   ghost.firstElementChild.textContent = suggestion?.text ?? '';
   elements.message.classList.toggle('has-ghost', !!suggestion);
-  if (suggestion) elements.message.placeholder = `${suggestion.text} (press Enter to use this suggestion)`;
   if (!composition && elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
@@ -2329,9 +2334,6 @@ function renderComposer() {
   elements.send.disabled = busy || !!composition || closedReply || !!decision?.blocked || !!screenshots?.loading ||
     !body.trim() || byteLength(body) > (decision ? 8000 : composerLimit(reply));
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
-  const sendLabel = decision ? 'Send written answer' : reply ? 'Send reply' : 'Send message';
-  elements.send.setAttribute('aria-label', sendLabel);
-  elements.send.title = sendLabel;
   const screenshotError = !busy && !closedReply && screenshots?.error;
   elements.notice.textContent = notice?.isError ? notice.text :
     (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
@@ -2348,6 +2350,7 @@ const settingsSections = {
 const settingsTabs = Object.keys(settingsSections);
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
+let detailRole = null;
 let detailOrigin = null;
 let recurringRequests = null;
 
@@ -2355,10 +2358,10 @@ function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
   detailAvatar = null;
 }
-const roleSize = new ResizeObserver(([{ target: soul }]) => {
-  const lineHeight = parseFloat(getComputedStyle(soul).lineHeight);
-  soul.nextElementSibling.hidden = soul.scrollHeight <= Math.ceil(8 * lineHeight);
-});
+function releaseDetailRole() {
+  detailRole?.dispose();
+  detailRole = null;
+}
 let detailSectionTimer = 0;
 function clearDetailSectionTransition() {
   clearTimeout(detailSectionTimer);
@@ -2366,6 +2369,7 @@ function clearDetailSectionTransition() {
   elements['detail-body'].classList.remove('section-switching');
 }
 function setDetail(selection) {
+  releaseDetailRole();
   recurringRequests?.close();
   recurringRequests = selection?.kind === 'settings' ? createRecurringRequests(view.id, api) : null;
   detail = selection;
@@ -2399,7 +2403,6 @@ elements.detail.addEventListener('close', () => {
   setDetail(null);
   clearDetailSectionTransition();
   releaseDetailAvatar();
-  roleSize.disconnect();
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
@@ -2506,7 +2509,6 @@ function openNewBot(origin = elements['new-bot-button']) {
   botEditor.openCreate({ bots, origin });
 }
 
-// The header avatar is hidden in a Bot DM; the conversation menu stays visible there.
 function headerFocusTarget() {
   return elements['profile-identity'].hidden ? conversationActionsTrigger : elements['profile-avatar-button'];
 }
@@ -2516,6 +2518,39 @@ function openEditAppearance(bot) {
   closeDetail();
   botEditor.openEdit(bot, { bots, origin: headerFocusTarget() });
 }
+
+function focusAfterBotDeletion() {
+  if (elements.detail.open) {
+    (byId('delete-bot-settings') ?? elements['close-detail']).focus();
+    return;
+  }
+  if (narrow.matches && !workspace.classList.contains('nav-open')) {
+    elements['open-navigation'].focus();
+    return;
+  }
+  if (!narrow.matches && workspace.classList.contains('sidebar-collapsed')) {
+    byId('toggle-chat-sidebar').focus();
+    return;
+  }
+  if (view) focusKey(`bot:${view.id}`);
+  if (!sidebar.contains(document.activeElement)) elements['new-bot-button'].focus();
+}
+
+const botDeletion = mountBotDeletion(byId('bot-delete'), {
+  remove: (botId) => api('bots/delete', { botId }),
+  focusFallback: focusAfterBotDeletion,
+  onDeleted(id) {
+    if (pins.delete(id)) save('flock-pins', [...pins]);
+    if (settingsReturnFocus === id) settingsReturnFocus = null;
+    rosterRevision++;
+    bots = bots.filter((bot) => bot.id !== id);
+    readState.delete(id);
+    if (view?.id === id) selectLocation();
+    else if (view?.dm?.peerId === id) leavePeerConversation(false);
+    else render();
+    void refreshBots();
+  },
+});
 
 const pencilIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 function generalContent(bot) {
@@ -2596,7 +2631,6 @@ function generalContent(bot) {
   renderNameDisplay();
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
-  if (!bot.soul) rows.append(settingsRow('Role', 'None'));
   const requests = settingsRow('Recurring requests', '', () => selectSection('recurring', true));
   requests.querySelector('.settings-row-value').append(recurringRequests.count);
   rows.append(requests);
@@ -2606,25 +2640,25 @@ function generalContent(bot) {
   settings.append(node('span', 'settings-row-label', 'Sharing and connections'));
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
-  if (!bot.soul) return [hero, rows];
-  const role = node('section', 'settings-card settings-role');
-  const heading = node('h3', 'settings-card-label', 'Role');
-  heading.id = 'settings-role-label';
-  role.setAttribute('aria-labelledby', heading.id);
-  const soul = node('p', 'settings-soul', bot.soul);
-  soul.id = 'settings-role-text';
-  soul.dataset.folded = 'true';
-  const toggle = button('Show all', 'text-button settings-soul-toggle', () => {
-    const folded = soul.dataset.folded === 'true';
-    soul.dataset.folded = String(!folded);
-    toggle.textContent = folded ? 'Show less' : 'Show all';
-    toggle.setAttribute('aria-expanded', String(folded));
+  if (bot.canDelete) {
+    const remove = button('Delete', 'settings-row danger', (event) => botDeletion.open(bot, event.currentTarget));
+    remove.id = 'delete-bot-settings';
+    remove.setAttribute('aria-haspopup', 'dialog');
+    rows.append(remove);
+  }
+  return [hero, roleCard(bot), rows];
+}
+function roleCard(bot) {
+  detailRole ??= createBotRoleCard(async (soul, originalSoul) => {
+    const saved = await api('bots/profile', { botId: bot.id, soul, originalSoul }).catch((error) => {
+      if (error.message === 'role_changed' && view?.id === bot.id) void view.refresh();
+      throw error;
+    });
+    void refreshBots();
+    if (view?.id === bot.id) void view.refresh();
+    return saved.soul;
   });
-  toggle.hidden = true;
-  toggle.setAttribute('aria-expanded', 'false');
-  toggle.setAttribute('aria-controls', soul.id);
-  role.append(heading, soul, toggle);
-  return [hero, role, rows];
+  return detailRole.element;
 }
 function settingsContent(bot, section = 'general') {
   elements['detail-title'].textContent = settingsSections[section][0];
@@ -2655,7 +2689,7 @@ function localDateTime(timestamp) {
   const date = new Date(timestamp);
   return new Date(timestamp - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
-function waitContent(context, task) {
+function waitContent(context, task, deadlineDraft) {
   const wait = task.wait;
   const canDecide = context.data.canDecide === true;
   elements['detail-title'].textContent = waitLabel(wait.reason);
@@ -2670,7 +2704,10 @@ function waitContent(context, task) {
   const content = [request, reason];
   const actions = node('div', 'wait-actions');
   const primary = node('div', 'wait-primary');
-  const perform = (operation, fields) => void operate(context, task, operation, fields);
+  const perform = (operation, fields) => {
+    const current = context.data.waits.find(item => item.id === task.id && item.wait.id === wait.id);
+    if (current) void operate(context, current, operation, fields);
+  };
   const action = (label, operation) => button(label, 'dialog-button primary', () => perform(operation));
   const approveInT3 = canDecide && wait.reason === 't3_input';
   const runLink = linkToRun(wait.run, approveInT3 ? 'Approve in T3' : 'Open in T3');
@@ -2690,11 +2727,12 @@ function waitContent(context, task) {
   else if (wait.reason === 'model_failure') primary.append(action('Try again', 'retry'));
   else if (wait.reason === 'deadline') {
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
-      type: 'datetime-local', value: localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
+      type: 'datetime-local', value: deadlineDraft ?? localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
       const next = Math.floor(new Date(deadline).getTime() / 1000);
       if (next > Date.now() / 1000) perform('extend', { deadline: next });
       else showDetailError(errors.invalid_deadline);
     }, 'wait-deadline-form');
+    form.dataset.waitId = String(wait.id);
     submit.classList.add('primary');
     content.push(form);
     primary.append(submit);
@@ -2743,11 +2781,9 @@ function labelDetail(label) {
 }
 function replaceDetail(render) {
   releaseDetailAvatar();
-  roleSize.disconnect();
-  const body = elements['detail-body'];
-  body.replaceChildren(...render());
-  const soul = body.querySelector('.settings-soul');
-  if (soul) roleSize.observe(soul);
+  const content = render();
+  if (detailRole && !content.includes(detailRole.element)) releaseDetailRole();
+  placeRows(elements['detail-body'], content);
   if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
 }
 function renderDetail() {
@@ -2756,16 +2792,19 @@ function renderDetail() {
     const bot = view.data.bot;
     labelDetail(`${bot.name} settings`);
     renderDetailNav(settingsTabs, detail.section);
-    if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
+    const { soul, ...settings } = bot;
+    if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
+    detailRole?.update(soul, bot.canDelete === true);
     return;
   }
   labelDetail(null);
   renderDetailNav([], null);
   if (detail.kind === 'peers') {
+    const botName = view.data.bot.name;
     const peers = botPeers(view.id).map(({ id }) => participant(id));
-    if (changed('detail', detail, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
+    if (changed('detail', detail, botName, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
       const active = document.activeElement?.dataset.peerChoice;
-      elements['detail-title'].textContent = 'Bot DMs';
+      elements['detail-title'].textContent = `${botName} talks with`;
       const list = node('ul', 'peer-picker-list');
       for (const bot of peers) {
         const item = node('li');
@@ -2775,7 +2814,7 @@ function renderDetail() {
         item.append(link);
         list.append(item);
       }
-      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', 'No Bot DMs available.')]);
+      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', `${botName} hasn’t talked with other Bots yet.`)]);
       if (active) [...list.querySelectorAll('a')].find((link) => link.dataset.peerChoice === active)?.focus();
     }
     return;
@@ -2788,14 +2827,25 @@ function renderDetail() {
     }
     return;
   }
-  if (changed('detail', detail, task, waitLabel(task.wait.reason), waitText(task.wait)))
-    replaceDetail(() => waitContent(view, task));
-  const busy = pendingWaits.has(task.wait.id);
+  const { generation, ...waitDetails } = task;
+  const waitGeneration = task.wait.reason === 'deadline' ? null : generation;
+  if (changed('detail', detail, waitDetails, waitGeneration, waitLabel(task.wait.reason), waitText(task.wait))) {
+    const input = elements['detail-body'].querySelector('#wait-deadline-form input');
+    const sameWait = input?.form?.dataset.waitId === String(task.wait.id);
+    const restoreFocus = sameWait && input === document.activeElement;
+    replaceDetail(() => waitContent(view, task, sameWait ? input.value : undefined));
+    if (restoreFocus) elements['detail-body'].querySelector('#wait-deadline-form input')?.focus();
+  }
+  const item = taskWaitDecision(view.id, task);
+  const busy = decisions.busy(item);
   for (const control of elements['detail-body'].querySelectorAll('button, input')) {
     if (!control.closest('.question-choice-form')) control.disabled = busy;
   }
   const choiceForm = elements['detail-body'].querySelector('.question-choice-form');
-  if (choiceForm) updateQuestionChoiceForm(choiceForm, view.questionChoices?.get(questionKey(task)), busy);
+  if (choiceForm) {
+    const { text, stale } = decisions.choice(item);
+    updateQuestionChoiceForm(choiceForm, text, busy || stale);
+  }
 }
 function render(scroll, liveAfterId) {
   decisions.setContext(view?.dm ? null : view?.id, sidebarViewer);
@@ -2825,10 +2875,6 @@ function mergeLatest(context, latest) {
   if (!context.data) context.sessionsBefore = latest.sessionsBefore;
   mergeSessionTasks(context, latest.sessionTasks);
   context.data = latest;
-  if (context.questionChoices?.size) {
-    const current = new Set(latest.waits.map(questionKey));
-    for (const key of context.questionChoices.keys()) if (!current.has(key)) context.questionChoices.delete(key);
-  }
   const composer = context.composer = latest.canDecide === true ? composerDrafts(context.id, latest.composerPerson) : null;
   if (!composer) return;
   if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text &&
@@ -2866,8 +2912,13 @@ async function refreshPeerConversation(context, scroll) {
     }
   } catch (error) {
     if (!isCurrent()) return;
+    const unavailable = error.status === 403 || error.status === 404;
     if (dm.newestEvent == null) dm.error = errors[error.message] ?? 'Could not load this conversation.';
-    if (![403, 404].includes(error.status)) retrySync();
+    else if (unavailable) {
+      leavePeerConversation(false);
+      return;
+    }
+    if (!unavailable) retrySync();
   }
   renderTimeline(scroll);
 }
@@ -2909,8 +2960,10 @@ async function refreshView(context, scroll, liveGeneration) {
   }
 }
 const refreshBots = coalescedRefresh(async () => {
+  const revisionAtFetch = rosterRevision;
   try {
     const latest = await api('bots');
+    if (revisionAtFetch !== rosterRevision) return;
     const viewer = responseViewers.get(latest) ?? null;
     const previous = viewer === sidebarViewer ? readState : null;
     sidebarViewer = viewer;
@@ -2929,6 +2982,7 @@ const refreshBots = coalescedRefresh(async () => {
     render();
     await decisions.refresh();
   } catch (error) {
+    if (revisionAtFetch !== rosterRevision) return;
     if (error.status === 401 || error.status === 403) {
       sidebarViewer = null;
       decisions.setContext(null, null);
@@ -2988,32 +3042,35 @@ async function loadSessions() {
   }
 }
 
-async function operate(context, task, operation, fields = {}) {
-  const waitId = task.wait.id;
-  await submitOperation(context, waitId, { taskId: task.id, waitId, operation,
-    targetRevision: task.currentRevision ?? 0, targetGeneration: task.generation, ...fields });
+function operate(context, task, operation, data) {
+  const current = context.data?.waits.find((entry) => entry.id === task.id && entry.wait.id === task.wait.id);
+  return submitConversationDecision(context, taskWaitDecision(context.id, task),
+    current && taskWaitDecision(context.id, current), operation, data);
 }
-async function submitOperation(context, key, payload) {
-  if (context?.data?.canDecide !== true || pendingWaits.has(key)) return;
-  const isOpen = () => !payload.itemKind && view === context && detail?.waitId === payload.waitId;
-  pendingWaits.set(key, context.id);
-  setNotice(context, 'Submitting action…');
-  if (view?.id === context.id) render();
-  let failed = false;
-  try {
-    await api(payload.itemKind ? 'inbox/decide' : 'operations', { botId: context.id, ...payload });
-    setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
-    if (isOpen()) closeDetail();
-  } catch (error) {
-    const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
-    setNotice(context, message, true);
-    if (isOpen()) showDetailError(message);
-    failed = true;
-  } finally {
-    if ((failed || !liveUpdates.live) && view?.id === context.id) await Promise.all([view.refresh(), refreshBots()]);
-    pendingWaits.delete(key);
-    if (view?.id === context.id) render();
-  }
+function submitConversationDecision(context, item, active, operation, data) {
+  if (view !== context || context.dm || context.data?.canDecide !== true ||
+      (responseViewers.get(context.data) ?? null) !== sidebarViewer || !active) return;
+  const selection = detail;
+  const isOpen = () => !item.itemKind && view === context && detail === selection &&
+    detail?.taskId === item.taskId && detail?.waitId === item.waitId;
+  return decisions.submitConversation(item, operation, data, {
+    active: { ...active, canDecide: true },
+    start: () => setNotice(context, 'Submitting action…'),
+    finish(error, refreshInbox) {
+      if (error) {
+        const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
+        setNotice(context, message, true);
+        if (isOpen()) showDetailError(message);
+      } else {
+        setNotice(context, operation === 'answer' ? 'Answer received.' : 'Action received.');
+        if (isOpen()) closeDetail();
+      }
+      if (view?.id === context.id) {
+        return Promise.all([view.refresh(), error || !liveUpdates.live ? refreshBots() : refreshInbox()]);
+      }
+      return refreshInbox();
+    },
+  });
 }
 async function submit(event) {
   event.preventDefault();
@@ -3090,6 +3147,9 @@ const decisions = mountBoardInbox({
   api,
   sourceAction: cardSourceAction,
   onRefreshError: retrySync,
+  refreshConversation(item) {
+    if (view && (view.id === item.botId || view.id === item.conversationBotId)) return view.refresh();
+  },
   canCompose: () => !!view?.composer && !view.dm && responseViewers.get(view.data) === sidebarViewer,
   canDismiss: () => !menu && !conversationActions.open && !workspace.classList.contains('nav-open'),
   focusComposer() {
@@ -3103,28 +3163,16 @@ const decisions = mountBoardInbox({
     renderActivity();
     renderComposer();
     renderTimeline();
+    renderDetail();
     scheduleReadCheck();
   },
   onAccepted(item, { decision, error }) {
     if (!view || (view.id !== item.botId && view.id !== item.conversationBotId)) return;
     const name = bots.find((bot) => bot.id === item.botId)?.name ?? 'The Bot';
     setNotice(view, error ?? decisionConfirmations[decision]?.(name) ?? 'Response sent.', !!error);
-    void view.refresh();
   },
 });
 
-function reflectTheme() {
-  renderTheme(document.documentElement.dataset.theme ?? 'system');
-}
-reflectTheme();
-document.addEventListener('flock-theme', reflectTheme);
-if (typeof ResizeObserver !== 'undefined') {
-  new ResizeObserver(() => syncThemeIndicator(false)).observe(elements['theme-switch']);
-}
-elements['theme-switch'].addEventListener('click', (event) => {
-  const option = event.target.closest('button[data-theme-mode]');
-  if (option) setTheme(option.dataset.themeMode);
-});
 elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
@@ -3395,6 +3443,7 @@ document.addEventListener('click', (event) => {
   if (!conversationActions.contains(event.target)) closeConversationActions();
 });
 document.addEventListener('keydown', (event) => {
+  if (botDeletion.isOpen()) return;
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
   if (digit && !event.isComposing && !elements.detail.open && !elements['bot-editor'].open &&
       !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {

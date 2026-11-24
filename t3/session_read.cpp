@@ -16,7 +16,9 @@ auto withSession(const std::filesystem::path& directory, const SessionTarget& ta
                  SessionReadDeadline deadline = {})
     -> decltype(read(std::declval<Client&>())) {
     try {
-        Client client(loadCredential(directory,target.environmentId),deadline);
+        const auto gateway = target.gatewayEnvironmentId.empty() ? target.environmentId : target.gatewayEnvironmentId;
+        const auto targetEnvironment = gateway == target.environmentId ? std::string{} : target.environmentId;
+        Client client(loadCredential(directory,gateway),deadline,targetEnvironment);
         return read(client);
     } catch (const Failure& error) {
         if (error.kind == Failure::Kind::Auth || error.kind == Failure::Kind::Settings ||

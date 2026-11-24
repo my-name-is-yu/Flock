@@ -2,11 +2,11 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
-Flock reopens databases with the current schema version (6). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
+Flock reopens databases with the current schema version (8). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
 
 ## Build
 
-You need a C++20 compiler, CMake 3.24 or later, and development libraries for SQLite 3.35 or later, libcurl, OpenSSL, libpng 1.6 or later, and libjpeg. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
+You need a C++20 compiler, CMake 3.24 or later, and development libraries for SQLite 3.35 or later, libcurl, OpenSSL, libpng 1.6 or later, and libjpeg. Connection tests use Python 3. Some optional tests use Node.js.
 
 ```sh
 cmake -S . -B build
@@ -14,7 +14,14 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+For one-off verification, run `./scripts/verify.sh`. It creates a temporary
+build directory and removes it when the command exits. Use `--keep-build` to
+keep the directory for debugging. Set `CMAKE_BUILD_PARALLEL_LEVEL` to control
+build concurrency.
+
 ## Configure a Bot
+
+Edit the Bot's instructions under **Role** in its Web settings.
 
 The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.
 
@@ -23,8 +30,6 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
   "name": "Release",
   "modelProvider": "chatgpt",
   "model": "gpt-6.2-sol",
-  "environmentId": "<T3 environment ID>",
-  "projectId": "<T3 project ID>",
   "allowedBots": ["verifier"],
   "conversationEnvironments": {
     "cloud Mac": "<connected T3 environment ID>"
@@ -33,7 +38,39 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
   "modelCallLimit": 20,
   "session": {
     "runtimeMode": "approval-required"
-  },
+  }
+}
+```
+
+In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
+
+Flock uses the sole connected T3 environment when the Bot starts work. It uses the sole active project, or asks which project to use and remembers the choice for that Bot and environment. You can pin a destination with `environmentId` and `projectId` in the Bot configuration. Optional `conversationEnvironments` entries name other connected environments for requests such as “Run the measurement on the cloud Mac.” Each environment has its own project selection.
+
+For parallel verification on two connected Macs, configure the destination aliases with each machine's canonical T3 project ID. You can also use the Bot's pinned default project or its remembered project for that environment.
+
+```json
+{
+  "conversationEnvironments": {
+    "local Mac": { "environmentId": "<local environment ID>", "projectId": "<local project ID>" },
+    "Mac mini": { "environmentId": "<mini environment ID>", "projectId": "<mini project ID>" }
+  }
+}
+```
+
+In the Bot's Flock conversation, ask it to verify a full Git commit SHA on both aliases in one request, and specify the checks to run. Both T3 projects need the commit in their local Git repositories. The request shows each Run's result, the actual SHA from its Git command output, and its Session link. Ask the Bot to stop the request to stop both Runs. Open the linked Session if a Run needs input in T3.
+
+Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange. Consultations can run without a T3 connection. For work requests, a Bot without a pinned environment uses the sender's environment if the recipient can use it, or its sole eligible connected environment.
+
+Optional `modelCallLimit` sets the initial allowance per request (20 by default). Each step of the Bot's conversation turn, the tasks it starts, and work or consultations passed to other Bots share that allowance. Failed attempts and retries count. Use **Approve one more model call** on the paused message or task to continue. See the [CLI guide](app/README.md#model-call-allowance) for details.
+
+### Scheduled requests
+
+For scheduled work, add the destination IDs and schedule to the Bot configuration.
+
+```json
+{
+  "environmentId": "<T3 environment ID>",
+  "projectId": "<T3 project ID>",
   "cron": [
     {
       "id": "release-notes",
@@ -45,25 +82,16 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 }
 ```
 
-In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
-
-Optional `conversationEnvironments` entries map names used in requests such as “Run the measurement on the cloud Mac” to T3 environments with access to the same `projectId`. Each target environment needs its own T3 connection and execution permissions. Use a configured name or canonical ID. If an alias matches a canonical ID, that spelling selects the canonical ID. The Bot asks in the conversation when the destination is unclear.
-
-Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange.
-
-Optional `modelCallLimit` sets the initial allowance per request (20 by default). Each step of the Bot's conversation turn, the tasks it starts, and work or consultations passed to other Bots share that allowance. Failed attempts and retries count. Use **Approve one more model call** on the paused message or task to continue. See the [CLI guide](app/README.md#model-call-allowance) for details.
-
 ## Connect a live model and T3
 
 ```sh
 build/app/flock model login
 build/app/flock model status
 build/app/flock model models
-build/app/flock t3 connect <environment-id> <MCP-URL>
 build/app/flock run
 ```
 
-Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to use your plan and check that `model status` shows `planUsage: true`. In T3, approve Operate access and choose permissions that cover Flock's Session settings. Use the connected environment ID in the Bot configuration. Open the Web UI at the local URL printed by the CLI. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
+In ChatGPT, authorize Flock to use your plan and check that `model status` shows `planUsage: true`. Open the Web UI at the URL printed by the CLI, choose **Flock settings → Connections → Connect local T3**, and approve Operate access in T3. For a T3 server on another machine, use **Use a connection URL** and paste its MCP URL. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
 
 In a T3 Session, ask for a Bot by name or select `/skill:flock-<bot>` or
 `$flock-<bot>` in the provider's skill menu. The Bot replies in the same Session.
@@ -87,6 +115,26 @@ build/app/flock answer <task-id> <wait-id> <revision-id> <generation> 'main'
 To check whether a live model applies different completion criteria, run `build/app/flock model acceptance <model-slug>` with an authorized ChatGPT connection. The command prints the decision and rationale for each trial as JSON Lines.
 
 The Bot normally evaluates the Session's final report. It can retry an unavailable final report once Flock has verified which Run produced it. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime allows up to three evidence reads per event and saves history excerpts of up to 8 KiB each in SQLite.
+
+### Ask a Bot from an external MCP client
+
+With Flock's Web listener running, provision a connection from the Flock host using the same state directory.
+
+```sh
+build/app/flock external-mcp connect local-owner release
+```
+
+Use `local-owner` with local access, or supply an existing Flock user who can make decisions for each named Bot. Each command creates a separate connection and prints its `connectionId` and `bearerToken` once. Configure the client for Streamable HTTP at `http://127.0.0.1:PORT/mcp/flock/external` with the printed token in its `Authorization: Bearer` header. The listener is loopback-only. For a client on another host, use an HTTPS ingress that forwards only `/mcp/flock/external` with the loopback Host header and the client's Authorization header.
+
+| MCP tool | Arguments and result |
+| --- | --- |
+| `flock_submit_task` | Send `bot`, `text` (up to 8,192 UTF-8 bytes), and a client-generated `requestId`. Save the returned `taskId`. Retry with the same three values if the response is lost. |
+| `flock_get_task` | Send `taskId` to poll `status`, any pending `question`, the final `result`, and `sessionLink`. The link uses T3's own access controls. |
+| `flock_answer_question` | Send `taskId` and `text` (up to 8,000 UTF-8 bytes) with the question's `waitId`, `targetRevision`, and `targetGeneration`. Poll again if the question changed or closed. |
+
+For a completed task, `sessionLink` points to the Session that supplied the result. Flock returns `null` when the source has no hosted T3 link or current permissions prevent sharing it. Local-only Sessions also return `null`.
+
+Flock uses the Bot's configured T3 environment or its sole eligible connected environment. A connection can read and answer only tasks it submitted, including after a Flock restart. Run `flock external-mcp disconnect CONNECTION_ID` to revoke the credential. Existing tasks and receipts stay in Flock.
 
 ### Installation policy
 
@@ -120,11 +168,13 @@ flock rules remove ask repository.pr 'github.com/acme/*'
 ```
 
 The requester's cards appear in the Decision Inbox and inline with their
-originating conversation when there is one. The requester or installation
-root can choose **Allow once**, **Always allow**, or **Deny**. Always allow
-saves an exact rule. Deny blocks another attempt until a new message from a
-person. Work requested by a person stays open. Background approvals expire
-after 30 minutes and offer **Always allow next time** for future work. A
+originating conversation when there is one. The requester or an installation
+administrator can choose **Allow once** or **Deny**. Deny blocks another attempt
+until a new message from a person. An installation administrator can choose
+**Allow for this Flock** to approve the action and save an exact rule for all
+Bots in the installation. Work requested by a person stays open. Background
+approvals expire after 30 minutes. An administrator can choose **Allow next time
+for this Flock** on an expired card to save a rule for future work. A
 card-requiring action without an eligible requester is recorded and denied.
 
 A message from a linked Flock person can start work that needs approval. Flock

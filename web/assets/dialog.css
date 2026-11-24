@@ -146,6 +146,23 @@
   mask-image: linear-gradient(#000 calc(100% - 2lh), transparent);
 }
 .settings-soul-toggle { justify-self: start; margin-inline-start: -.55rem; }
+.settings-role-header { display: flex; align-items: center; justify-content: space-between; min-height: 1.6rem; }
+.settings-role-edit { margin-inline-end: -.55rem; }
+.settings-soul-empty { margin: 0; color: var(--text-3); }
+.settings-role-form { display: grid; gap: .35rem; }
+.settings-role-input {
+  width: 100%; min-height: 9rem; resize: vertical; padding: .6rem .7rem;
+  border: 1px solid var(--hairline); border-radius: var(--radius-md); background: var(--field, var(--canvas)); color: var(--text);
+  font: inherit; font-size: var(--text-md); line-height: 1.6;
+}
+.settings-role-input:focus-visible {
+  outline: none; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
+}
+.settings-role-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+.settings-role-feedback { color: var(--text-2); font-size: var(--text-xs); }
+.settings-role-feedback.error { color: var(--danger); }
+.settings-role-feedback:empty { position: absolute; }
 .settings-rows { padding: 0; }
 .settings-row {
   display: flex; align-items: center; gap: .75rem; width: 100%; min-height: 3.1rem; padding: .7rem 1.1rem;
@@ -247,6 +264,14 @@ a.settings-row svg { margin-left: auto; }
 .dialog-button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
 .dialog-button.quiet { background: none; color: var(--text-2); }
 .dialog-button.quiet:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+
+.settings-row.danger { color: var(--danger); }
+button.settings-row.danger:hover { background: var(--danger-soft); }
+.bot-delete-dialog { width: min(26rem, calc(100% - 2rem)); }
+.bot-delete-dialog p { color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; }
+.bot-delete-feedback:empty { position: absolute; }
+.bot-delete-dialog .bot-delete-feedback.error { color: var(--danger); }
+.bot-delete-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); }
 
 @media (max-width: 700px) {
   .detail, .detail.has-nav {

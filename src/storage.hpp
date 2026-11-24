@@ -9,7 +9,6 @@
 #include <map>
 #include <mutex>
 #include <set>
-#include <shared_mutex>
 #include <sqlite3.h>
 #include <utility>
 #include <variant>
@@ -42,6 +41,10 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 std::string field(const Json&, std::string_view);
+std::string conversationEnvironmentId(const Json& alias);
+std::string conversationGatewayEnvironmentId(const Json& alias);
+std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name = {});
+inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 bool terminal(const Json&);
 Json questionTarget(const Json&);
 std::string actionId();
@@ -49,9 +52,12 @@ std::string taskIntent(const Json& task);
 std::string effectiveDoneWhen(const Json& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
+Json& destinationRun(Json& task, std::string_view action);
+bool destinationRunOutstanding(const Json& run);
+void setReportEvidence(Json&, const RunEvidence&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
-enum class RequestJournal { record, skip };
+enum class TaskSource { request, handoff, consultation };
 
 bool modelArgumentsContainProtected(const SecretRedactor&, std::string_view tool, const Json& args);
 
@@ -71,10 +77,26 @@ struct PeerExchange {
     bool allowsReplan(Id task) const { return recipient == task && kind == "work" && phase == "working"; }
 };
 
-struct TaskChange { std::string intent, doneWhen, environment; };
+struct TaskRoute { std::string environmentId, projectId, gatewayEnvironmentId; };
+struct LinkedTaskDestination { std::string name; TaskRoute route; };
+struct LinkedTaskDestinations { std::vector<LinkedTaskDestination> choices; std::vector<std::string> unavailable; };
+struct StartDestinations {
+    TaskRoute primary;
+    Json targets = Json::array();
+    std::string commit;
+};
+struct TaskChange { std::string intent, doneWhen; TaskRoute route; };
+struct PendingDestination {
+    TaskRoute route;
+    bool pinned;
+    static std::optional<PendingDestination> read(const Json& task);
+    void write(Json& task) const;
+};
+using ProjectCatalog = std::variant<std::vector<T3Project>,std::string>;
 
 struct ConversationModelFailure {
     std::optional<Seconds> retryFrom;
+    ModelErrorCode code = ModelErrorCode::inference_failed;
 };
 
 struct ConversationModelCheckpoint {
@@ -108,8 +130,26 @@ enum class SessionExit { removed, left };
 struct SessionStop {
     Id participation = 0, cutoff = 0;
 };
+
+class SessionDispatchFileLock {
+public:
+    enum class Mode { shared, exclusive };
+    SessionDispatchFileLock(const std::filesystem::path& database, Mode);
+    ~SessionDispatchFileLock();
+    SessionDispatchFileLock(const SessionDispatchFileLock&) = delete;
+    SessionDispatchFileLock& operator=(const SessionDispatchFileLock&) = delete;
+private:
+    int fd_;
+};
+
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
 std::string_view approvalError(ApprovalGate);
+enum class GitWatchStart { operationIntent, mutationAdmission };
+struct GitPrKey {
+    std::string host, repo;
+    Id number;
+    auto operator<=>(const GitPrKey&) const = default;
+};
 
 struct Store::Impl {
     sqlite3* db = nullptr;
@@ -122,13 +162,14 @@ struct Store::Impl {
     std::map<std::string,std::shared_ptr<LocalMachine>,std::less<>> localMachines;
     std::vector<std::string> rootPeople;
     WebIdentityResolver resolveWebIdentity;
+    bool liveInteractiveRoles = false;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
-    std::shared_mutex sessionDispatchMutex;
     std::mutex sessionQueueCancellationMutex;
     std::function<Seconds()> policyClock = unixTime;
     void openSchema();
     void initializeSchema();
+    bool botDeleted(std::string_view bot) const;
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource,
@@ -158,15 +199,18 @@ struct Store::Impl {
     void initializePolicySchema();
     PolicyOrigin policyOrigin(const conversation::Message&);
     PolicyOrigin taskPolicyOrigin(const Json&);
+    enum class ApprovalWait { pause, defer };
     ApprovalGate approveAction(const PolicyOrigin&, const Resource&, std::string_view operation,
-                               const Json& payload, Seconds now, bool claim = true);
-    bool currentPolicyApproval(Id turn, Id task, Id revision, Id generation) const;
+                               const Json& payload, Seconds now, bool claim = true, ApprovalWait = ApprovalWait::pause);
+    void consumePolicyApproval(std::string_view operation);
+    bool currentPolicyApproval(Id turn, Id task, Id revision, Id generation, std::string_view operation) const;
     void settlePolicyApprovals(std::optional<Seconds> now = {});
     void decidePolicyApproval(const Person&, const InboxTarget&, std::string_view);
     Json policyApprovalCards(const Person&, std::string_view bot);
     void releasePolicyTurn(Id turn);
     void releasePolicyTask(Id approval, std::string_view resolution);
     void initializeParticipationSchema();
+    void initializeExternalMcpSchema();
     Person sessionActor(std::string_view person);
     bool activeSessionOrigin(const conversation::Message&) const;
     bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
@@ -175,8 +219,10 @@ struct Store::Impl {
     SessionStop stopSessionParticipation(const Person&, std::string_view bot, const SessionTarget&, SessionExit, Id message = 0);
     SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
+    bool t3EnvironmentConnected(std::string_view environment);
     void initializeMemorySchema();
     void initializeAutomationSchema();
+    void retireAutomations(const Json& botIds);
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
     void createMemory(std::string_view key, std::string_view bot, std::string_view id,
                       std::string_view content, Seconds now);
@@ -192,6 +238,7 @@ struct Store::Impl {
     void fireAutomation(Id, const Statement&, Seconds now);
     SecretRedactor sharedRedactor() const;
     void initializeBoardInboxSchema();
+    Statement actionablePrReviews(std::string_view bot) const;
     void initializeGitSchema();
     Json gitTool(GitHost&, std::string_view bot, Id task, const Json& routing, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
@@ -200,8 +247,13 @@ struct Store::Impl {
     Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
+    Id latestGitWebhookId() const;
+    std::set<GitPrKey> gitPrMutationsInFlight;
+    class GitPrMutationClaim;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
-    bool watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest&);
+    bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
+    bool watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest&,
+                    GitWatchStart = GitWatchStart::operationIntent);
     void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const Json& task);
     std::vector<std::string> gitCredentials;
     Id gitRedactionEpoch = 0;
@@ -217,7 +269,9 @@ struct Store::Impl {
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
-    Json sessionReadTool(const conversation::Message&, int step, const Decision&, T3&);
+    struct CompletedToolCall { Json value; bool consumeApproval = false; };
+    using ToolCallResult = std::optional<CompletedToolCall>;
+    ToolCallResult sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key);
     void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
     std::set<std::string> connectedSessionEnvironments(const conversation::Message&);
     std::optional<WorkSession> resolveWorkSession(const conversation::Message&, std::string_view sessionRef, T3&);
@@ -230,6 +284,7 @@ struct Store::Impl {
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
     Id dataVersion() const;
+    std::pair<Id,Id> changeStamp() const;
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
@@ -269,7 +324,8 @@ struct Store::Impl {
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
     void saveTurnResults(Id, int step, const Json& results);
-    bool runBotTools(const ToolContext&, int step, const std::vector<ModelCall>&, std::stop_token);
+    class ToolBatch;
+    std::map<std::pair<Id,int>,std::map<std::size_t,ToolCallResult>> unpersistedToolResults;
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
@@ -292,13 +348,44 @@ struct Store::Impl {
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,
                  const PeerResolver&, std::stop_token);
-    bool sendSessionMessage(const conversation::Message&, int, const Decision&, bool hasWebEvidence, T3&, std::stop_token);
+    enum class CallOutcome { advance, waiting, stop, finished };
+    struct ConversationCallContext {
+        T3& t3;
+        const std::function<Seconds()>& clock;
+        GitHost* gitHost;
+        const ApplyBotChange& applyBotChange;
+        const ReconcileBotCreation& reconcileBotCreation;
+        const IntakeResolver& intake;
+        const PeerResolver& peers;
+        std::stop_token shutdown;
+        bool hasWebEvidence;
+    };
+    bool runToolBatch(const conversation::Message&, const ToolContext&, int step, const std::vector<ModelCall>&,
+                      const ConversationCallContext&);
+    CallOutcome executeConversationStep(const conversation::Message&, int step, const std::vector<ModelCall>&,
+                                        std::string_view effectType, const BotTools&, const ConversationCallContext&);
+    CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&,
+                                             std::string_view key, const ConversationCallContext&);
+    CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&,
+                                          std::string_view key, const std::function<Seconds()>&);
+    CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&,
+                                             std::string_view key, const ConversationCallContext&);
+    std::optional<Json> applyLocalConversationCall(const conversation::Message&, int step, const Decision&,
+                                                   std::string_view key, Seconds now, ApprovalWait,
+                                                   const WorkSession* selectedSession,
+                                                   const LinkedTaskDestinations& linked);
+    std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
+    void saveConversationCallResult(const conversation::Message&, int step, Json result);
+    CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
+                                   bool hasWebEvidence, T3&, std::stop_token);
+    CallOutcome cancelDestinationRun(const conversation::Message&, int step, const Decision&, std::string_view key,
+                                     bool offered, bool hasWebEvidence, std::stop_token);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&,
                           const PeerResolver&, std::stop_token);
     bool leaveSession(const conversation::Message&, int, const Decision&, T3&, std::stop_token);
     void wakeSessionMessages(T3&, std::stop_token);
-    bool runSessionEffect(const conversation::Message&, int step, const Decision&, bool offered, bool hasWebEvidence,
-                          T3&, std::stop_token);
+    CallOutcome runSessionEffect(const conversation::Message&, int step, const Decision&, std::string_view key,
+                                 bool offered, bool hasWebEvidence, T3&, std::stop_token);
     bool isNextTurn(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
     Person turnActor(const conversation::Message&);
@@ -306,33 +393,51 @@ struct Store::Impl {
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
     Json taskState(const Json& task, const conversation::Message&, bool fullContract = false) const;
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
-    Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images);
-    Json gitConversationTool(GitHost*, const conversation::Message&, int step, const Decision&);
-    bool gitConversationEffectStarted(Id message, int step) const;
+    Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
+                   const LinkedTaskDestinations& linked);
+    Json gitConversationTool(GitHost*, const conversation::Message&, const Decision&, std::string_view key);
     bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now,
-                       const WorkSession* selectedSession);
+                       const WorkSession* selectedSession, const LinkedTaskDestinations& linked);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route,
                     const conversation::QuestionAnchor* question = nullptr);
     void pauseTurn(const conversation::Message&);
     Json ownTask(Id taskId, const conversation::Message&) const;
     Json resultReference(Id messageId, const conversation::Message&) const;
     Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
-                             std::string_view environment, Id messageId, const Json& source, bool resume,
+                             const TaskRoute&, Id messageId, const Json& source, bool resume,
                              const WorkSession* selectedSession = nullptr);
     bool acceptInstruction(Json& task, Id messageId, int step, std::string_view instruction,
-                           const Json& source, const Json& routing, const TaskChange* change);
+                           const Json& source, const TaskChange* change);
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
+    void initializeProjectQueue();
+    bool projectRouteReady(Id task, std::string_view action) const;
+    std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;
+    void rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project);
+    bool projectQuestionOpen(std::string_view bot, std::string_view environment) const;
+    ProjectCatalog readProjectCatalog(T3&, std::string_view bot, std::string_view environment, bool requireConnection);
+    bool applyProjectCatalog(Json& task, ProjectCatalog catalog);
+    std::set<std::string> registeredT3Environments(std::string_view bot);
+    std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {});
+    TaskRoute taskRoute(std::string_view bot, const Json& routing, std::string_view name,
+                        const Json* movingTask = nullptr);
+    StartDestinations startDestinations(const conversation::Message&, const Json& args, bool resume,
+                                       const WorkSession* selectedSession, const LinkedTaskDestinations& linked);
+    LinkedTaskDestinations discoverLinkedTaskDestinations(T3&, std::string_view bot);
+    TaskChange taskChange(const conversation::Message&, const Json& args, const Json& task);
+    std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
+    Id submitRequest(const Intake&, const Person* requester);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
-              RequestJournal requestJournal = RequestJournal::record, const Json& trigger = nullptr);
+              TaskSource sourceKind = TaskSource::request, const Json& trigger = nullptr);
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&,
                  Id sourceMessage = 0, std::optional<InboxKind> = {});
     bool waitIsActionable(const Json& task) const;
     Id waitAnchor(Id task, Id wait) const;
     std::optional<PeerExchange> peerExchange(Id) const;
     bool peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const;
+    bool recipientRouteWouldCycle(Id task, std::string_view environment, std::string_view project) const;
     bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&, SessionStop stop = {});
@@ -341,8 +446,9 @@ struct Store::Impl {
     Json currentEvent(const Json&) const;
     void wait(Json&, std::string_view reason, Json data = Json::object());
     void clearWait(Json&, std::string_view resolution);
+    bool recordDestinationReport(Json& task, Json& run, const Observation&);
     void consumeEvent(const Json&);
-    Json outbox(const Json&) const;
+    Json outbox(const Json&, std::string_view actionId = {}) const;
     void unlockQuestion(Json&, std::string_view reason);
 };
 

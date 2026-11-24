@@ -18,9 +18,10 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 }
 }
 
-void Store::setWebIdentityResolver(WebIdentityResolver resolver) {
+void Store::setWebIdentityResolver(WebIdentityResolver resolver, bool liveInteractiveRoles) {
     std::lock_guard lock(p_->mutex);
     p_->resolveWebIdentity = std::move(resolver);
+    p_->liveInteractiveRoles = liveInteractiveRoles;
 }
 
 void Store::Impl::initializeConversationSchema() {
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS conversation_steps(
 CREATE TABLE IF NOT EXISTS session_message_waits(
   message_id INTEGER NOT NULL REFERENCES messages(id),
   bot TEXT NOT NULL, environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL, title TEXT NOT NULL,
+  gateway_environment TEXT NOT NULL DEFAULT '',
   notified INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(message_id,environment,thread,run));
 CREATE TABLE IF NOT EXISTS task_revisions(

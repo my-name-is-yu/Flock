@@ -103,7 +103,16 @@ std::vector<std::string> Store::Impl::visibleBoardBots(const Person& actor, std:
     const Policy policy(*this);
     if (!bot.empty()) return policy.allows(actor,Action::bot_view,bot) ? std::vector{std::string(bot)} : std::vector<std::string>{};
     auto rows = actor.adminRoot ? query(R"SQL(
-SELECT bot_id FROM tasks UNION SELECT bot_id FROM messages UNION SELECT bot FROM bot_owners UNION SELECT bot FROM bot_members
+-- Seek the next Bot ID in each index, regardless of how much history belongs to it.
+WITH RECURSIVE task_bots(bot) AS (
+  SELECT min(bot_id) FROM tasks
+  UNION ALL SELECT (SELECT min(bot_id) FROM tasks WHERE bot_id>task_bots.bot) FROM task_bots WHERE bot IS NOT NULL
+), message_bots(bot) AS (
+  SELECT min(bot_id) FROM messages
+  UNION ALL SELECT (SELECT min(bot_id) FROM messages WHERE bot_id>message_bots.bot) FROM message_bots WHERE bot IS NOT NULL
+)
+SELECT bot FROM task_bots WHERE bot IS NOT NULL UNION SELECT bot FROM message_bots WHERE bot IS NOT NULL
+UNION SELECT bot FROM bot_owners UNION SELECT bot FROM bot_members
 UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION SELECT bot_id FROM inbox_decisions
 )SQL") : query("SELECT bot FROM bot_owners WHERE person=?1 UNION SELECT bot FROM bot_members WHERE person=?1 ORDER BY bot",{actor.id});
     std::vector<std::string> result;
@@ -112,6 +121,18 @@ UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION S
         if (policy.allows(actor,Action::bot_view,id)) result.push_back(std::move(id));
     }
     return result;
+}
+
+Statement Store::Impl::actionablePrReviews(std::string_view bot) const {
+    return query(R"SQL(
+SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
+FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
+LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
+AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
+WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
+    p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
+    AND NOT coalesce(json_extract(t.data,'$.replanning'),0))) ORDER BY p.id DESC
+)SQL",{bot});
 }
 
 Json Store::inbox(const Person& actor, std::string_view bot) const {
@@ -169,9 +190,10 @@ ORDER BY w.id DESC
         }
         auto turns = p_->query(R"SQL(
 SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
+-- Seek the populated pause IDs instead of visiting all messages for the Bot.
 FROM conversation_turns t
-JOIN messages m ON m.id=t.message_id JOIN journal j ON j.id=t.pause_id
-WHERE m.bot_id=? AND t.status='paused' ORDER BY t.pause_id DESC
+CROSS JOIN messages m ON m.id=t.message_id CROSS JOIN journal j ON j.id=t.pause_id
+WHERE t.pause_id IS NOT NULL AND t.status='paused' AND m.bot_id=? ORDER BY t.pause_id DESC
 )SQL",{id});
         while (turns.next()) {
             add({id,conversation_model_budget,turns.number(0),turns.number(2),0,0,turns.number(2)},
@@ -187,15 +209,7 @@ ORDER BY p.id DESC
 )SQL",{id});
         while (inputs.next())
             addProtectedInput(protected_input,inputs.number(0),"Protected input",inputs.string(2),"Supply a value for "+inputs.string(1),inputs.number(3));
-        auto reviews = p_->query(R"SQL(
-SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
-FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
-LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
-AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
-WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
-    p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
-    AND NOT coalesce(json_extract(t.data,'$.replanning'),0))) ORDER BY p.id DESC
-)SQL",{id});
+        auto reviews = p_->actionablePrReviews(id);
         while (reviews.next()) {
             const auto task = reviews.json(3);
             const auto kind = reviews.number(7) ? pr_reconciliation : pr_review;
@@ -314,8 +328,12 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (kind == pr_review && (review.number(0) != item.targetRevision || task.value("replanning",false)))
             throw RequestChanged{};
         if (kind == pr_reconciliation) p_->decideGitPr(item,decision,data,task);
-        else p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
-                      {decision == "approve" ? "approved" : "changes_requested",item.itemId});
+        else {
+            p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
+                     {decision == "approve" ? "approved" : "changes_requested",item.itemId});
+            p_->exec("DELETE FROM git_review_receipts WHERE inbox_key=(SELECT git_key FROM pr_review_items WHERE id=?)",
+                     {item.itemId});
+        }
         p_->recordInboxDecision(actor,item,decision);
     } else {
         if (item.itemId != item.waitId) throw RequestChanged{};

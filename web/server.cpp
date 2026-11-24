@@ -8,12 +8,13 @@
 #include "flock/board_inbox.hpp"
 #include "flock/base64.hpp"
 #include "channel_routes.hpp"
-#include "session_mcp_routes.hpp"
+#include "mcp_routes.hpp"
 
 #include <httplib.h>
 
 #include <algorithm>
 #include <charconv>
+#include <future>
 #include <limits>
 #include <map>
 #include <set>
@@ -55,13 +56,13 @@ bool acceptsMissingPage(const Request& req) {
 }
 
 void setViewer(Response& res, const WebCallbacks& callbacks, const Person& person) {
-    const Json viewer = callbacks.authenticate ? Json(person.id) : Json(nullptr);
+    const Json viewer = web::hasWebIdentities(callbacks) ? Json(person.id) : Json(nullptr);
     res.set_header("X-Flock-Viewer",viewer.dump(-1,' ',true,Json::error_handler_t::replace));
 }
 
 std::string_view verifiedViewer(const WebCallbacks& callbacks, const Person& person) {
     // Local access shares one principal, so it cannot identify a human author.
-    return callbacks.authenticate && person.id != localOwner.id ? std::string_view{person.id} : std::string_view{};
+    return web::hasWebIdentities(callbacks) && person.id != localOwner.id ? std::string_view{person.id} : std::string_view{};
 }
 
 struct InputError : std::runtime_error { using std::runtime_error::runtime_error; };
@@ -107,13 +108,18 @@ struct ParsedProfile {
 };
 
 ParsedProfile parseBotProfile(const Json& body, bool creating) {
+    if (!creating && body.contains("soul")) {
+        const auto original = body.find("originalSoul");
+        if (body.size() != 3 || original == body.end() || !original->is_string())
+            throw InputError("invalid_profile_update");
+        return {{{"soul",validatedBotSoul(body.at("soul"))},{"originalSoul",*original}},std::nullopt};
+    }
     Json profile = {{"name",validatedBotName(body)}};
     if (creating && body.contains("role")) {
         if (!body["role"].is_string() || !validBotRole(body["role"].get_ref<const std::string&>()))
             throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
-    // Updates may omit the avatar to rename without touching the stored appearance.
     if (!creating && !body.contains("avatar")) return {std::move(profile),std::nullopt};
     auto avatar = validatedAvatarStyle(body);
     std::optional<AvatarImage> image;
@@ -177,14 +183,17 @@ bool localApprovalNavigation(const Request& req) {
 
 class LoopbackServer final : public WebServer {
 public:
-    LoopbackServer(Store& store, unsigned port, WebCallbacks callbacks)
+    LoopbackServer(Store& store, unsigned port, WebCallbacks callbacks,
+                   const std::function<void(unsigned)>& afterBind)
         : store_(store), callbacks_(std::move(callbacks)),
           changes_(store,[this](const ChangeFeed::Scope& scope) {
-              return std::visit([&](const auto& target) { return snapshot(scope.person,target); },scope.target);
+              return std::visit([&](const auto& target) -> ChangeFeed::Projection {
+                  return snapshot(scope.person,target);
+              },scope.target);
           }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
-        if (callbacks_.authenticate) {
+        if (callbacks_.authenticate && !callbacks_.identityRequired) {
             store_.policy().requireWebIdentity();
             store_.setWebIdentityResolver(callbacks_.resolveIdentity);
         }
@@ -233,7 +242,7 @@ public:
         web::boardInboxRoutes(server_,store_,callbacks_);
         web::gitRoutes(server_,store_,callbacks_);
         web::channelRoutes(server_,store_,callbacks_);
-        web::sessionMcpRoutes(server_,store_,callbacks_);
+        web::mcpRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             const auto actor = web::person(callbacks_,req);
             setViewer(res,callbacks_,actor);
@@ -272,9 +281,9 @@ public:
                             ? std::optional{queryId(req,"sessionsAfter",true)} : std::nullopt;
                         const auto changes = store_.conversationChangesSince(changesAfter,id);
                         const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
-                        auto view = store_.policy().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr,actor.id));
+                        auto view = readBotView(actor,id,*bot,sessionsAfter ? &sessionTasks : nullptr);
                         view["bot"]["id"] = id;
-                        view["composerPerson"] = callbacks_.authenticate ? Json(actor.id) : Json(nullptr);
+                        view["composerPerson"] = web::hasWebIdentities(callbacks_) ? Json(actor.id) : Json(nullptr);
                         view["historyCursor"] = changes.through;
                         view["changedMessageIds"] = Json::array();
                         if (const auto changed = changes.messages.find(id); changed != changes.messages.end())
@@ -290,19 +299,32 @@ public:
         }
         server_.Post("/api/bots",[this](const Request& req, Response& res) { saveBot(req,res,false); });
         server_.Post("/api/bots/profile",[this](const Request& req, Response& res) { saveBot(req,res,true); });
+        server_.Post("/api/bots/delete",[this](const Request& req, Response& res) { deleteBot(req,res); });
         server_.Post("/api/messages",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Message); });
         server_.Post("/api/operations",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Operation); });
 
         const auto bound = port ? (server_.bind_to_port(loopback,static_cast<int>(port)) ? static_cast<int>(port) : -1)
                                 : server_.bind_to_any_port(loopback);
-        if (bound <= 0) throw std::runtime_error(port ?
-            "Could not bind the Flock Web loopback listener on port " + std::to_string(port) + ". Check whether the port is in use." :
-            "Could not bind the Flock Web loopback listener");
+        if (bound <= 0) {
+            server_.stop();
+            throw std::runtime_error(port ? "Could not bind the Flock Web loopback listener on port " +
+                std::to_string(port) + ". Check whether the port is in use." :
+                "Could not bind the Flock Web loopback listener");
+        }
         port_ = static_cast<unsigned>(bound);
+        std::promise<bool> serve;
         try {
-            worker_ = std::thread([this] { server_.listen_after_bind(); });
+            worker_ = std::thread([this,ready = serve.get_future()]() mutable {
+                if (ready.get()) server_.listen_after_bind();
+            });
+            if (afterBind) afterBind(port_);
+            serve.set_value(true);
         } catch (...) {
             server_.stop();
+            if (worker_.joinable()) {
+                serve.set_value(false);
+                worker_.join();
+            }
             throw;
         }
         server_.wait_until_ready();
@@ -340,15 +362,23 @@ private:
         auto subscription = changes_.subscribe({person,std::move(target)});
         if (!subscription) return error(res,503,"event_stream_unavailable");
         auto cursor = std::make_shared<web::ChangeFeed::Cursor>(std::move(*subscription));
+        auto authorization = callbacks_.identityRequired ? req.get_header_value("Authorization") : std::string{};
         res.set_chunked_content_provider("text/event-stream",
-            [this,cursor](std::size_t offset, httplib::DataSink& sink) {
+            [this,cursor,person,authorization = std::move(authorization)](std::size_t offset, httplib::DataSink& sink) {
                 if (!sink.is_writable()) return false;
+                const auto authorized = [&] {
+                    return !callbacks_.identityRequired || callbacks_.authenticate(authorization) == person;
+                };
+                if (!authorized()) {
+                    sink.done();
+                    return true;
+                }
                 if (offset == 0) {
                     constexpr std::string_view ready = "retry: 2500\nevent: ready\ndata: {}\n\n";
                     return sink.write(ready.data(),ready.size());
                 }
                 const auto update = changes_.next(*cursor);
-                if (!update) {
+                if (!update || !authorized()) {
                     sink.done();
                     return true;
                 }
@@ -381,7 +411,7 @@ private:
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
-        if (req.path == "/mcp/flock") {
+        if (req.path == web::sessionMcpPath || req.path == web::externalMcpPath) {
             if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
             else if (req.method != "POST" && req.method != "GET" && req.method != "DELETE") {
                 res.set_header("Allow","POST");
@@ -440,8 +470,12 @@ private:
                 if (!store_.policy().allows(web::person(callbacks_,req),Action::bot_settings,botId)) return error(res,403,"access_denied");
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
                 auto parsed = parseBotProfile(body,false);
-                if (store_.policy().redactSecrets(botId,parsed.profile) != parsed.profile)
-                    return error(res,400,"invalid_bot_profile");
+                const auto redacted = store_.policy().redactSecrets(botId,parsed.profile);
+                if (const auto original = parsed.profile.find("originalSoul");
+                    original != parsed.profile.end() && redacted.at("originalSoul") != *original)
+                    return error(res,409,"role_changed");
+                if (redacted != parsed.profile)
+                    return error(res,400,parsed.profile.contains("soul") ? "role_contains_secrets" : "invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
                 changes_.rescan();
                 return json(res,200,redactBot(botId,web::botSettings(saved)));
@@ -453,8 +487,26 @@ private:
             changes_.rescan();
             return json(res,201,redactBot(web::field(created,"id"),web::botSettings(created)));
         } catch (const InputError& e) { error(res,400,e.what()); }
-        catch (const BotProfileError& e) { error(res,400,e.code); }
+        catch (const BotProfileError& e) { error(res,e.code == "role_changed" ? 409 : 400,e.code); }
         catch (const Conflict&) { error(res,400,"invalid_bot_profile"); }
+    }
+
+    void deleteBot(const Request& req, Response& res) {
+        if (req.body.size() > maxStandardPayload) return error(res,413,"payload_too_large");
+        const auto body = Json::parse(req.body,nullptr,false);
+        if (!body.is_object()) return error(res,400,"invalid_json");
+        const auto bot = web::field(body,"botId");
+        if (!validBotId(bot)) return error(res,400,"invalid_bot");
+        const auto actor = web::person(callbacks_,req);
+        if (findBot(bot).is_null()) {
+            if (!store_.policy().allows(actor,Action::bot_settings,bot)) return error(res,403,"access_denied");
+            return error(res,404,"bot_not_found");
+        }
+        try { store_.deleteBot(actor,bot); }
+        catch (const DecisionDenied&) { return error(res,403,"access_denied"); }
+        catch (const BotBusy&) { return error(res,409,"bot_busy"); }
+        changes_.rescan();
+        json(res,200,{{"ok",true}});
     }
 
     Json bots() const {
@@ -493,15 +545,43 @@ private:
     }
 
     Json withConversationAccess(const Person& actor, std::string_view bot, Json view) const {
-        view["canDecide"] = store_.policy().allows(actor,Action::bot_decide,bot);
+        auto policy = store_.policy();
+        view["canDecide"] = policy.allows(actor,Action::bot_decide,bot);
+        view["bot"]["canDelete"] = policy.allows(actor,Action::bot_settings,bot);
         return view;
     }
 
-    Json snapshot(const Person& person, const ChangeFeed::BotView& view) const {
-        if (!store_.policy().allows(person,Action::bot_view,view.bot)) return nullptr;
-        const auto bot = findBot(view.bot);
-        if (bot.is_null()) return nullptr;
-        return withConversationAccess(person,view.bot,store_.policy().redactSecrets(view.bot,web::botView(store_,bot,nullptr,person.id)));
+    ChangeFeed::Projection snapshot(const Person& person, const ChangeFeed::BotView& view) const {
+        const auto stamp = store_.botViewStamp();
+        if (!store_.policy().allows(person,Action::bot_view,view.bot)) return Json(nullptr);
+        auto bot = findBot(view.bot);
+        if (bot.is_null()) return bot;
+        auto data = withConversationAccess(person,view.bot,store_.policy().redactSecrets(view.bot,web::botView(store_,bot,nullptr,person.id)));
+        if (stamp && stamp == store_.botViewStamp())
+            return {std::move(data),ChangeFeed::BotVersion{*stamp,std::move(bot)}};
+        return data;
+    }
+
+    Json readBotView(const Person& person, const std::string& id, const Json& bot, const Json* changedSessionTasks) {
+        auto policy = store_.policy();
+        if (const auto cached = changes_.cachedBotView(person,id,bot)) {
+            // Workflow deadlines advance without a write. Session deltas belong to the request's cursor.
+            std::optional<Json> workflows, sessions;
+            if (!cached->data.at("workflows").empty())
+                workflows = policy.redactSecrets(id,store_.workflows(id));
+            if (changedSessionTasks)
+                sessions = policy.redactSecrets(id,web::sessionGroups(*changedSessionTasks));
+            if (store_.botViewStamp() == cached->botVersion->stamp) {
+                auto view = cached->data;
+                if (workflows) view["workflows"] = std::move(*workflows);
+                if (sessions) {
+                    view["sessionTasks"] = std::move(*sessions);
+                    view.erase("sessionsBefore");
+                }
+                return view;
+            }
+        }
+        return policy.redactSecrets(id,web::botView(store_,bot,changedSessionTasks,person.id));
     }
 
     Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {
@@ -540,6 +620,7 @@ private:
         for (auto& bot : list) {
             const auto id = web::field(bot,"id");
             bot = redactBot(id,bot);
+            bot["canDelete"] = policy.allows(person,Action::bot_settings,id);
             if (auto about = bot.find("about"); about != bot.end()) {
                 const auto& soul = about->get_ref<const std::string&>();
                 const auto firstLine = std::string_view(soul).substr(0,soul.find_first_of("\r\n"));
@@ -589,7 +670,8 @@ private:
                 const auto attachments = body.value("attachments",Json::array());
                 const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo,attachments);
                 if (previous) return json(res,201,*previous);
-                if (callbacks_.authenticate && !callbacks_.resolveIdentity)
+                const bool identityRequired = web::hasWebIdentities(callbacks_);
+                if (identityRequired && !callbacks_.resolveIdentity)
                     return error(res,503,"message_identity_unavailable");
                 Intake intake;
                 try { intake = callbacks_.intake(bot,request); }
@@ -597,7 +679,7 @@ private:
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                const auto receipt = callbacks_.authenticate
+                const auto receipt = identityRequired
                     ? store_.receiveWeb(actor,intake,clientMessageId,request,replyTo,attachments)
                     : store_.receive(actor,intake,clientMessageId,request,replyTo,attachments);
                 return json(res,201,receipt);
@@ -628,8 +710,9 @@ private:
 };
 } // namespace
 
-std::unique_ptr<WebServer> startWeb(Store& store, unsigned port, WebCallbacks callbacks) {
-    auto server = std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
+std::unique_ptr<WebServer> startWeb(Store& store, unsigned port, WebCallbacks callbacks,
+                                    std::function<void(unsigned)> afterBind) {
+    auto server = std::make_unique<LoopbackServer>(store,port,std::move(callbacks),afterBind);
     store.setWebOrigin("http://" + std::string(loopback) + ":" + std::to_string(server->port()));
     return server;
 }

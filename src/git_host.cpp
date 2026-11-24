@@ -280,6 +280,30 @@ WHERE r.task_id=? AND r.id=? AND a.task=r.task_id AND a.bot=?
     projection.commit();
 }
 
+class Store::Impl::GitPrMutationClaim {
+public:
+    explicit GitPrMutationClaim(Impl& store) : store_(store) {}
+    GitPrMutationClaim(const GitPrMutationClaim&) = delete;
+    GitPrMutationClaim& operator=(const GitPrMutationClaim&) = delete;
+    ~GitPrMutationClaim() { release(); }
+
+    void acquire(const GitRepository& repo, Id pr, Id task) {
+        if (store_.gitPrWatchUnavailable(repo,pr,task)) throw Conflict("This pull request belongs to another task");
+        claim_ = store_.gitPrMutationsInFlight.emplace(repo.host,repo.repo,pr).first;
+    }
+
+    void release() {
+        if (!claim_) return;
+        std::lock_guard lock(store_.mutex);
+        store_.gitPrMutationsInFlight.erase(*claim_);
+        claim_.reset();
+    }
+
+private:
+    Impl& store_;
+    std::optional<std::set<GitPrKey>::iterator> claim_;
+};
+
 Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const Json& routing,
                           const Decision& decision, std::string_view invocation, std::optional<Id> generation, Id turn) {
     if (decision.tool == "git_read_result" && !generation) throw Conflict("Saved Git reads are available within their task");
@@ -372,14 +396,9 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
         result["ok"] = result.at("status") == "created";
         return result;
     }
-    const bool watchPr = decision.tool == "git_update_pr" || decision.tool == "git_request_review";
-    if (watchPr) {
-        if (args.contains("baseRef")) branch(args,"baseRef");
-        std::lock_guard lock(mutex);
-        if (query("SELECT 1 FROM git_pr_watches WHERE host=? AND repo=? AND pr_number=? AND task_id<>?",
-                  {repo.host,repo.repo,args.at("prNumber"),taskId}).next())
-            throw Conflict("This pull request belongs to another task");
-    }
+    const bool requestedReview = decision.tool == "git_request_review";
+    const bool watchPr = decision.tool == "git_update_pr" || requestedReview;
+    if (watchPr && args.contains("baseRef")) branch(args,"baseRef");
     if (op == "read") {
         Json result;
         try {
@@ -414,7 +433,9 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     const bool createComment = decision.tool == "git_comment" && !target.contains("commentId");
     const auto key = Json::array({invocation,decision.tool,target}).dump();
     const Json dedupe = createComment ? Json(target.dump()) : Json(nullptr);
+    const auto reviewKey = requestedReview ? "review/" + actionId() : std::string{};
     Id eventCursor = 0;
+    GitPrMutationClaim watchMutation(*this);
     {
         std::lock_guard lock(mutex);
         Transaction tx(db);
@@ -425,13 +446,20 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             return {{"ok",false},{"status","unknown"},{"error","The host outcome is unknown. Check the target before retrying."}};
         }
         if (watchPr) {
-            auto events = query("SELECT coalesce(max(id),0) FROM git_webhook_events");
-            events.next();
-            eventCursor = events.number(0);
+            watchMutation.acquire(repo,args.at("prNumber"),taskId);
+            eventCursor = latestGitWebhookId();
         }
         if (policy.forbidden(bot,*parseAction("repository." + std::string(op)),repo.resource()))
             throw Conflict("Repository access denied");
         exec("INSERT INTO git_mutations(task_id,invocation,dedupe) VALUES(?,?,?)",{taskId,key,dedupe});
+        if (requestedReview) {
+            // A webhook can be delivered before the Git host returns the result.
+            exec(R"SQL(
+INSERT INTO git_review_receipts
+SELECT ?1,?2,?3,?4,?5,lower(value),?6 FROM json_each(?7) WHERE true
+ON CONFLICT(inbox_key,reviewer) DO NOTHING
+)SQL",{reviewKey,taskId,repo.host,repo.repo,args.at("prNumber"),eventCursor,args.at("reviewers").dump()});
+        }
         journal(taskId,"git_mutation",sharedRedactor().record(gitJournal(context,decision.tool,repo,
             {{"status","pending"},{"target",audit}})));
         tx.commit();
@@ -445,31 +473,30 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     }
     std::lock_guard lock(mutex);
     Transaction tx(db);
+    watchMutation.release();
     const auto scrub = sharedRedactor();
     if (result.value("ok",false)) result["data"] = scrub.payload(result.at("data"),false,gitResultTextLimit);
     else result["error"] = scrub.text(field(result,"error"));
+    if (requestedReview && result.value("status","") == "failed")
+        exec("DELETE FROM git_review_receipts WHERE inbox_key=?",{reviewKey});
     if (result.value("ok",false) && (watchPr || decision.tool == "git_submit_review")) {
         const auto pr = args.at("prNumber").get<Id>();
         const auto url = "https://" + repo.resource() + "/pull/" + std::to_string(pr);
-        const bool requested = decision.tool == "git_request_review";
         if (watchPr) {
             const auto sha = field(result.at("data"),"headSha");
-            result["watchAttached"] = watchGitPr(taskId,bot,runJson(context.run),eventCursor,{{repo,repo,{},{}},pr,url,{},sha,false});
+            result["watchAttached"] = watchGitPr(taskId,bot,runJson(context.run),eventCursor,
+                                                 {{repo,repo,{},{}},pr,url,{},sha,false},GitWatchStart::mutationAdmission);
         }
-        if ((requested && result.at("watchAttached") == true) || decision.tool == "git_submit_review")
-            gitInboxItem(load(taskId),"review/" + actionId(),url,
-                requested ? "Pull request awaiting review" : "Pull request review submitted",
-                requested ? "Review requested on the Git host." : field(args,"verdict"));
+        if (requestedReview && result.at("watchAttached") == true)
+            gitInboxItem(load(taskId),reviewKey,url,"Pull request awaiting review","Review requested on the Git host.");
+        else if (decision.tool == "git_submit_review")
+            gitInboxItem(load(taskId),"review/" + actionId(),url,"Pull request review submitted",field(args,"verdict"));
     }
     exec("UPDATE git_mutations SET result=?1,dedupe=CASE WHEN json_extract(?1,'$.status')='failed' THEN NULL ELSE dedupe END"
          " WHERE task_id=?2 AND invocation=?3",{result,taskId,key});
     journal(taskId,"git_mutation",scrub.record(gitJournal(context,decision.tool,repo,{{"target",audit},{"outcome",result}})));
     tx.commit();
     return result;
-}
-
-bool Store::Impl::gitConversationEffectStarted(Id message, int step) const {
-    return gitEffectStarted("turn/" + std::to_string(message) + "/" + std::to_string(step));
 }
 
 bool Store::Impl::gitEffectStarted(std::string_view invocation, Id taskId) const {
@@ -480,7 +507,8 @@ LIMIT 1
 )SQL",{taskId,invocation}).next();
 }
 
-Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message& message, int step, const Decision& decision) {
+Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message& message, const Decision& decision,
+                                      std::string_view key) {
     try {
         if (!host || !message.channelScope.empty()) throw Conflict("Git tools are available in Flock Web with a connected Git host");
         auto call = decision;
@@ -493,8 +521,7 @@ Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message
                 throw Conflict("Git notification tools must use the watched target");
             call.args["taskId"] = owner;
         }
-        return gitTool(*host,message.bot,0,message.routing,call,
-                       "turn/" + std::to_string(message.id) + "/" + std::to_string(step),{},message.id);
+        return gitTool(*host,message.bot,0,message.routing,call,key,{},message.id);
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {

@@ -87,6 +87,10 @@ std::optional<GitWebhook> githubEvent(const httplib::Request& request) {
         event.kind = type == "pull_request" ? "pull_request" : type == "pull_request_review" ? "review" : "comment";
         event.headSha = str(pr.at("head"),"sha");
         event.summary = str(pr,"title");
+        if (event.kind == "pull_request" && event.action == "review_requested") {
+            const auto reviewer = payload.find("requested_reviewer");
+            if (reviewer != payload.end() && reviewer->is_object()) event.requestedReviewer = str(*reviewer,"login");
+        }
         if (event.kind == "review") {
             const auto& review = payload.at("review");
             event.summary = str(review,"state") + "\n" + str(review,"body");

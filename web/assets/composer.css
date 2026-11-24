@@ -83,8 +83,6 @@
 }
 .decision-reply-mark { width: 1rem; height: 1rem; flex: none; color: var(--text-3); }
 .decision-reply-context .reply-target { font-size: .82rem; color: var(--text-2); }
-.decision-reply-context #decision-reply-label { color: var(--text-2); font-weight: 500; }
-.decision-reply-context #decision-reply-target { color: var(--text); font-weight: 500; unicode-bidi: isolate; }
 
 .reply-context {
   grid-area: reply; display: flex; align-items: center; gap: .5rem;
@@ -98,8 +96,8 @@
 }
 .reply-mark { width: 1rem; height: 1rem; flex: none; color: var(--accent); }
 .reply-target { flex: 1; min-width: 0; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#reply-question::before { content: "「"; }
-#reply-question::after { content: "」"; }
+.reply-label { color: var(--text-2); font-weight: 500; }
+.reply-summary { color: var(--text); font-weight: 500; unicode-bidi: isolate; }
 .reply-cancel {
   flex: none; display: grid; place-items: center;
   width: var(--composer-control-size); height: var(--composer-control-size); padding: 0;

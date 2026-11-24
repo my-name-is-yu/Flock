@@ -22,16 +22,21 @@ bool plainId(std::string_view id) {
         std::none_of(id.begin(),id.end(),[](unsigned char ch) { return ch <= 32 || ch == 127; });
 }
 
-std::string readText(const std::filesystem::path& file, std::size_t limit, bool optional = false) {
+std::string readUpTo(const std::filesystem::path& file, std::size_t bytes, bool optional) {
     std::ifstream input(file,std::ios::binary);
     if (!input) {
         if (optional && !std::filesystem::exists(file)) return {};
         throw Conflict("Unable to read " + file.filename().string());
     }
-    std::string out(limit + 1,'\0');
+    std::string out(bytes,'\0');
     input.read(out.data(),static_cast<std::streamsize>(out.size()));
     if (input.bad()) throw Conflict("Unable to read " + file.filename().string());
     out.resize(static_cast<std::size_t>(input.gcount()));
+    return out;
+}
+
+std::string readText(const std::filesystem::path& file, std::size_t limit, bool optional = false) {
+    auto out = readUpTo(file,limit + 1,optional);
     if (out.size() > limit) {
         if (!optional) throw Conflict(file.filename().string() + " exceeds the configured size limit");
         out = bounded(out,limit);
@@ -259,6 +264,8 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if ((!bot.environmentId.empty() && !plainId(bot.environmentId)) ||
         (!bot.projectId.empty() && !plainId(bot.projectId)))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
+    if (!bot.projectId.empty() && bot.environmentId.empty())
+        throw Conflict("A pinned T3 project needs its environmentId");
     bot.settings = {{"botDisplayName",bot.name},{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
     for (const auto key : {"services","mcpServers"}) {
         if (!config.contains(key)) continue;
@@ -270,14 +277,26 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
     if (config.contains("conversationEnvironments")) {
         const auto& destinations = config["conversationEnvironments"];
-        if (!destinations.is_object() || destinations.size() > 16)
-            throw Conflict("conversationEnvironments must map up to 16 names to T3 environment IDs");
+        if (!destinations.is_object())
+            throw Conflict("conversationEnvironments must map names to T3 destinations");
         auto& saved = bot.settings["conversationEnvironments"] = Json::object();
         for (auto alias = destinations.begin(); alias != destinations.end(); ++alias) {
-            const auto environment = validatedString(destinations,alias.key().c_str());
+            const auto environment = alias->is_object() ? validatedString(*alias,"environmentId")
+                : validatedString(destinations,alias.key().c_str());
             if (alias.key().empty() || alias.key().size() > 80 || !plainId(environment))
                 throw Conflict("Use short conversation environment names and canonical T3 environment IDs");
-            saved[alias.key()] = environment;
+            if (alias->is_object()) {
+                const auto project = validatedString(*alias,"projectId");
+                const bool hasGateway = alias->contains("gatewayEnvironmentId");
+                const auto gateway = hasGateway ? validatedString(*alias,"gatewayEnvironmentId") : std::string{};
+                if (alias->size() != (hasGateway ? 3u : 2u) || !plainId(project) ||
+                    (hasGateway && !plainId(gateway)))
+                    throw Conflict("T3 destination objects require canonical environmentId, projectId, and optional gatewayEnvironmentId");
+                saved[alias.key()] = {{"environmentId",environment},{"projectId",project}};
+                if (hasGateway) saved[alias.key()]["gatewayEnvironmentId"] = gateway;
+            } else {
+                saved[alias.key()] = environment;
+            }
         }
     }
     const auto timeout = config.value("runTimeoutSeconds",Json(1800));
@@ -314,7 +333,7 @@ Bot Bots::get(std::string_view id) const {
 }
 
 std::string Bots::soul(std::string_view id) const {
-    return readText(path(id) / "SOUL.md",8192,true);
+    return readText(path(id) / "SOUL.md",maxBotRoleBytes,true);
 }
 
 std::string Bots::initialMemory(std::string_view id) const {
@@ -335,8 +354,7 @@ std::vector<PeerBot> Bots::peers(std::string_view id) const {
     if (!sender) return {};
     std::vector<PeerBot> result;
     for (const auto& peerId : sender->allowedBots) {
-        if (const auto peer = tryGetConfiguredBot(peerId);
-            peer && !peer->environmentId.empty() && !peer->projectId.empty())
+        if (const auto peer = tryGetConfiguredBot(peerId))
             result.push_back({peer->name,peer->intake(""),peer->role});
     }
     return result;
@@ -370,7 +388,7 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
         }
     }
 
-    Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",8192,true)},{"cron",schedules}};
+    Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
     if (config.contains("role") && config["role"].is_string() && validBotRole(config["role"].get_ref<const std::string&>()))
         item["role"] = config["role"];
     if (const auto stored = config.find("avatar"); stored != config.end() && stored->is_object()) {
@@ -532,16 +550,34 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image,
 
 Json Bots::updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
-    const auto name = validatedBotName(profile);
 
     std::lock_guard lock(mutex_);
     const auto botDir = path(id);
     const auto file = botDir / "config.json";
     auto config = readBotConfig(file);
+    if (const auto soul = profile.find("soul"); soul != profile.end()) {
+        const auto original = profile.find("originalSoul");
+        if (profile.size() != 2 || original == profile.end() || !original->is_string() || image)
+            throw Conflict("Save the role separately from other settings with its original text");
+        const auto text = validatedBotSoul(*soul);
+        const auto roleFile = botDir / "SOUL.md";
+        const auto& expected = original->get_ref<const std::string&>();
+        if (expected.size() > maxBotRoleBytes || expected.find('\0') != expected.npos ||
+            readUpTo(roleFile,maxBotRoleBytes + 1,true) != expected)
+            throw BotProfileError("role_changed","The Bot role changed or contains text the editor could not show");
+        if (text.empty()) {
+            std::error_code failure;
+            std::filesystem::remove(roleFile,failure);
+            if (failure) throw Conflict("Unable to clear the Bot role");
+        } else {
+            writeAtomic(roleFile,text);
+        }
+        return cardFromDirectory(id,botDir);
+    }
 
     const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
     const bool changeAvatar = profile.contains("avatar");
-    config["name"] = name;
+    config["name"] = validatedBotName(profile);
     if (changeAvatar)
         config["avatar"] = prepareAvatar(profile,botDir,existingAvatar,image);
 
