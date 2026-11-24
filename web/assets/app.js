@@ -1239,11 +1239,6 @@ function channelLabel(kind) {
   if (kind === 'imessage') return 'via iMessage';
   return 'via external channel';
 }
-function reasonText(text) {
-  const reason = node('p', 'event-reason');
-  reason.append(node('span', 'sr-only', 'Reason: '), document.createTextNode(text));
-  return reason;
-}
 function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
   const time = node('time', 'msg-time', clock.format(timestamp));
@@ -1532,7 +1527,6 @@ function eventCard(event, context, place, report) {
     copy = waitText(data, { spokenByBot: true });
     text.textContent = copy;
     bubble.append(text);
-    if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
     const choices = pendingWait?.wait.choices ?? data.choices;
     if (!context.canDecide && choices?.length) bubble.append(readOnlyChoices(choices));
     if (context.canDecide && pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
@@ -1609,7 +1603,6 @@ function eventCard(event, context, place, report) {
     if (link) text.append(link);
     bubble.append(text);
     if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
-    if (data.reason) bubble.append(reasonText(data.reason));
   } else {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     if (event.kind === 'conversation_message' && typeof data.textHtml === 'string') {
@@ -2710,7 +2703,6 @@ function waitContent(context, task, deadlineDraft) {
   if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
   const reason = node('div', 'wait-reason');
   reason.append(node('p', 'wait-text', waitText(wait)));
-  if (wait.decisionReason) reason.append(node('p', 'wait-why', wait.decisionReason));
   if (wait.reason === 'deadline' && task.deadline)
     reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
   const content = [request, reason];

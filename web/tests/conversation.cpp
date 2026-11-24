@@ -521,9 +521,12 @@ void conversationEntry(const std::filesystem::path& path) {
     tick(runtime,2);
     check(store.task(taskId).at("state") == "completed","the comparison did not complete");
     const auto result = conversationCompletion(browser.get("/api/view?bot=release"),taskId);
-    check(result.at("data").at("text") == proposedOptions,"the conversation lost the completion report");
+    const auto& resultData = result.at("data");
+    check(resultData.at("text") == proposedOptions,"the conversation lost the completion report");
+    check(!resultData.contains("reason") && !resultData.contains("doneWhen"),
+          "the completed result exposed internal decision fields");
     model.comparisonResult = result.at("id");
-    const auto& reportRun = result.at("data").at("run");
+    const auto& reportRun = resultData.at("run");
     check(reportRun["threadId"] == "thread-release" && reportRun["runId"] == "run-1" && reportRun["itemId"] == "comparison-report",
           "the conversation did not link the Run and report item that produced the result");
 
@@ -651,6 +654,14 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto question = firstWait.at("messageId").get<Id>();
     const auto otherQuestion = secondWait.at("messageId").get<Id>();
     check(question > 0 && otherQuestion > 0 && question != otherQuestion,"pending questions did not have distinct reply anchors");
+    check(!firstWait.contains("decisionReason") && !secondWait.contains("decisionReason"),
+          "the pending waits exposed the model's rationale");
+    const auto& events = waitPage.at("events");
+    const auto questionEvent = std::ranges::find_if(events,[&](const Json& event) {
+        return event.at("kind") == "waiting" && event.at("id") == question;
+    });
+    check(questionEvent != events.end() && !questionEvent->at("data").contains("decisionReason"),
+          "the conversation omitted the question or exposed the model's rationale");
     const Json reply = {{"botId","triage"},{"clientMessageId","answer-first"},{"text","Status\n\nApprove\n\nseparately: keep this answer together"},{"replyToMessageId",question}};
     const auto answerReceipt = browser.post("/api/messages",reply,201);
     tick(runtime,2);
