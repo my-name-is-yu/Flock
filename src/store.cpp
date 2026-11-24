@@ -249,7 +249,6 @@ CREATE TABLE IF NOT EXISTS conversation_model_failures(
 )SQL");
     exec("CREATE UNIQUE INDEX IF NOT EXISTS conversation_model_repairs"
          " ON conversation_model_failures(message_id) WHERE repair_attempt_id IS NOT NULL");
-    initializeWorkspaceSchema();
     initializeAttachmentsSchema();
     initializeCompactionSchema();
     initializeWorkflowSchema();
