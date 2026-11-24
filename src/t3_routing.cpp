@@ -7,6 +7,9 @@ namespace flockv0 {
 std::string conversationEnvironmentId(const Json& alias) {
     return alias.is_string() ? alias.get<std::string>() : field(alias,"environmentId");
 }
+std::string conversationGatewayEnvironmentId(const Json& alias) {
+    return field(alias,"gatewayEnvironmentId");
+}
 
 namespace {
 std::string namedT3Project(const Json& config, std::string_view environment, std::string_view name) {
@@ -92,7 +95,7 @@ std::string Store::Impl::taskEnvironment(std::string_view bot, const Json& routi
 TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std::string_view name,
                                 const Json* movingTask) {
     const auto configured = field(routing,"environmentId");
-    const auto resolved = [&](std::string environment, std::string project = {}) -> TaskRoute {
+    const auto resolved = [&](std::string environment, std::string project = {}, std::string gateway = {}) -> TaskRoute {
         if (environment.empty()) return {};
         if (project.empty() && movingTask) {
             project = namedT3Project(routing.at("config"),environment,name);
@@ -101,7 +104,10 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
                 else if (environment == configured) project = field(routing,"projectId");
             }
         } else if (project.empty()) project = configuredT3Project(routing,environment,name);
-        return {std::move(environment),std::move(project)};
+        const bool linkedGateway = !gateway.empty() && gateway != environment;
+        if (gateway.empty()) gateway = environment;
+        if (linkedGateway && !registeredT3Environments(bot).contains(gateway)) return {};
+        return {std::move(environment),std::move(project),std::move(gateway)};
     };
     if (name.empty()) return resolved(defaultT3Environment(bot,configured,
         field(routing.value("sessionOrigin",Json::object()),"environmentId")));
@@ -112,7 +118,15 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
         if (auto original = resolveAlias(config,name); !original.empty())
             return resolved(original,namedT3Project(config,original,name));
     }
-    if (auto alias = resolveAlias(routing.at("config"),name); !alias.empty()) return resolved(std::move(alias));
+    const auto& config = routing.at("config");
+    const auto aliases = config.find("conversationEnvironments");
+    if (aliases != config.end() && aliases->is_object()) {
+        const auto selected = aliases->find(name);
+        if (selected != aliases->end())
+            return resolved(conversationEnvironmentId(*selected),field(*selected,"projectId"),
+                            conversationGatewayEnvironmentId(*selected));
+    }
+    if (auto alias = resolveAlias(config,name); !alias.empty()) return resolved(std::move(alias));
     if (configured.empty() && registeredT3Environments(bot).contains(std::string(name))) return resolved(std::string(name));
     return {};
 }
@@ -148,7 +162,10 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
                                 " first, or configure its projectId in conversationEnvironments");
             if (!selected.emplace(route.environmentId,route.projectId).second)
                 throw ToolError("Choose each environment and project only once");
-            destinations.targets.push_back({{"environmentId",route.environmentId},{"projectId",route.projectId},{"name",name}});
+            auto target = Json{{"environmentId",route.environmentId},{"projectId",route.projectId},{"name",name}};
+            if (!route.gatewayEnvironmentId.empty() && route.gatewayEnvironmentId != route.environmentId)
+                target["gatewayEnvironmentId"] = route.gatewayEnvironmentId;
+            destinations.targets.push_back(std::move(target));
             if (destinations.primary.environmentId.empty()) destinations.primary = std::move(route);
         }
         redactor(bot).requirePublic({destinations.targets,destinations.commit});
@@ -159,7 +176,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
     if (selectedSession) {
         if (!environment.empty() || resume)
             throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
-        destinations.primary = {selectedSession->environmentId,selectedSession->projectId};
+        destinations.primary = {selectedSession->environmentId,selectedSession->projectId,{}};
     } else destinations.primary = taskRoute(bot,routing,environment);
     if (destinations.primary.environmentId.empty())
         throw ToolError(environment.empty()
@@ -170,8 +187,13 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
             destinations.primary.projectId = rememberedT3Project(bot,destinations.primary.environmentId);
         if (destinations.primary.projectId.empty())
             throw ToolError("Choose a T3 project before verifying a commit");
-        destinations.targets.push_back({{"environmentId",destinations.primary.environmentId},
-            {"projectId",destinations.primary.projectId},{"name",environment.empty() ? destinations.primary.environmentId : environment}});
+        auto target = Json{{"environmentId",destinations.primary.environmentId},
+            {"projectId",destinations.primary.projectId},
+            {"name",environment.empty() ? destinations.primary.environmentId : environment}};
+        if (!destinations.primary.gatewayEnvironmentId.empty() &&
+            destinations.primary.gatewayEnvironmentId != destinations.primary.environmentId)
+            target["gatewayEnvironmentId"] = destinations.primary.gatewayEnvironmentId;
+        destinations.targets.push_back(std::move(target));
         redactor(bot).requirePublic({destinations.targets,destinations.commit});
     }
     return destinations;

@@ -1,12 +1,15 @@
 #include "flock/board_inbox.hpp"
 #include "flock/policy.hpp"
+#include "flock/t3_connection.hpp"
 #include "internal.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <iostream>
 #include <sqlite3.h>
 #include <thread>
+#include <vector>
 
 using namespace flockv0;
 using flockv0::t3detail::http;
@@ -40,6 +43,12 @@ struct Endpoint {
         return Json::parse(response.body).value(tool,Json::array());
     }
 
+    std::vector<std::string> routedTargets() const {
+        const auto response = http(origin+"/fixture/routes","GET");
+        check(response.status == 200,"could not read routed target IDs");
+        return Json::parse(response.body).get<std::vector<std::string>>();
+    }
+
     void login(const std::filesystem::path& directory) const {
         const auto signedIn = loginT3(directory,id(),origin+"/mcp",[&](const auto& authorization) {
             configure({{"authorization",authorization}});
@@ -63,6 +72,8 @@ struct Script final : Model {
     Id cancelTask = 0;
     Id cancelGeneration = 0;
     bool parallel = true;
+    bool linkedOnly = false;
+    std::string selectedEnvironment;
 
     ModelTurn decide(const ModelInput& input) override {
         const auto& kind = input.event.at("kind");
@@ -85,8 +96,9 @@ struct Script final : Model {
             const auto& turn = input.event.at("turn");
             if (turn.empty() && input.event.value("text","") == request) {
                 Json args{{"request",request}};
+                if (!selectedEnvironment.empty()) args["environment"] = selectedEnvironment;
                 if (parallel) {
-                    args["environments"] = Json::array({"local","mini"});
+                    args["environments"] = linkedOnly ? Json::array({"mini"}) : Json::array({"local","mini"});
                     if (!commit.empty()) args["commit"] = commit;
                 }
                 return {{{"start_task",std::move(args),"Run the release verification"}}};
@@ -128,6 +140,7 @@ struct Scenario {
 
     void start(bool parallel = true, bool loseMiniReply = false) {
         model.parallel = parallel;
+        model.selectedEnvironment.clear();
         local.configure({{"multiReset",true},{"multiSingle",!parallel},{"multiCommit",model.commit}});
         mini.configure({{"multiReset",true},{"multiHoldLaunchReply",loseMiniReply},{"multiCommit",model.commit}});
         const Intake routing{bot,{},local.id(),local.project(),{{"conversationEnvironments",{
@@ -138,6 +151,27 @@ struct Scenario {
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok",false),
               "conversation could not start the verification: " + model.startResult.dump());
+        taskId = model.startResult.at("taskId");
+    }
+
+    void startLinkedMini(bool forwardingUnavailable = false) {
+        model.parallel = true;
+        model.linkedOnly = true;
+        model.selectedEnvironment.clear();
+        T3Connections(store).connect(local.id(),localOwner.id,3210);
+        local.configure({{"multiReset",true},{"multiSingle",true},{"multiCommit",model.commit},
+                         {"multiExpectedTarget",mini.id()},
+                         {"multiForwardingUnavailable",forwardingUnavailable}});
+        mini.configure({{"multiReset",true},{"multiHoldLaunchReply",false},{"multiCommit",model.commit}});
+        const Intake routing{bot,{},local.id(),local.project(),{{"conversationEnvironments",{
+            {"local",{{"environmentId",local.id()},{"projectId",local.project()}}},
+            {"mini",{{"environmentId",mini.id()},{"projectId",local.project()},
+                      {"gatewayEnvironmentId",local.id()}}}
+        }}}};
+        store.receive(localOwner,routing,"linked-fixture",request);
+        runtime.runConversations();
+        check(model.startResult.is_object() && model.startResult.value("ok",false),
+              "conversation could not start linked-environment work: " + model.startResult.dump());
         taskId = model.startResult.at("taskId");
     }
 
@@ -220,6 +254,65 @@ void ordinaryMulti(const Endpoint& local, const Endpoint& mini, const std::files
           task.at("runResults").size() == 2,"ordinary work must aggregate both destinations without SHA policy");
     fixture.checkResult(fixture.local,Scenario::result(task,fixture.local),"completed","");
     fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"completed","");
+}
+
+void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const std::filesystem::path& directory) {
+    Scenario fixture(local,mini,directory,{},"linked-target");
+    fixture.startLinkedMini();
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.mini).value("status","") == "running";
+    },"the linked target should launch through its gateway");
+    fixture.model.followUpTask = fixture.taskId;
+    fixture.model.followUpGeneration = fixture.task().at("generation");
+    const Intake routing{bot,{},local.id(),local.project(),{{"conversationEnvironments",{
+        {"local",{{"environmentId",local.id()},{"projectId",local.project()}}},
+        {"mini",{{"environmentId",mini.id()},{"projectId",local.project()},
+                  {"gatewayEnvironmentId",local.id()}}}
+    }}}};
+    fixture.store.receive(localOwner,routing,"linked-send-fixture","Send instruction to Mini");
+    fixture.runtime.runConversations();
+    check(fixture.model.sendResult.value("ok",false) && local.effects("t3_thread_send").size() == 1 &&
+          mini.effects("t3_thread_send").empty(),
+          "a saved linked-target follow-up must use the gateway credential and target environment ID");
+    fixture.model.cancelTask = fixture.taskId;
+    fixture.model.cancelGeneration = fixture.task().at("generation");
+    fixture.store.receive(localOwner,routing,"linked-stop-fixture","Stop Mini");
+    fixture.runtime.runConversations();
+    fixture.advanceUntil([&](const Json&) { return local.effects("t3_thread_interrupt").size() == 1; },
+                         "the linked target stop should dispatch through the gateway");
+    check(fixture.model.cancelResult.value("ok",false) &&
+          local.effects("t3_thread_interrupt").size() == 1 && mini.effects("t3_thread_interrupt").empty(),
+          "a saved linked-target stop must interrupt through the gateway without relaunching: " +
+          fixture.model.cancelResult.dump());
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },
+                         "the linked target stop should settle");
+    const auto task = fixture.task();
+    const auto result = Scenario::result(task,fixture.mini);
+    const auto routed = local.routedTargets();
+    check(result.value("gatewayEnvironmentId","") == local.id() &&
+          result.value("environmentId","") == mini.id() && result.at("status") == "interrupted" &&
+          local.effects("t3_thread_launch").size() == 1 && mini.effects("t3_thread_launch").empty() &&
+          local.effects("t3_thread_send").size() == 1 && mini.effects("t3_thread_send").empty() &&
+          local.effects("t3_thread_interrupt").size() == 1 && mini.effects("t3_thread_interrupt").empty() &&
+          !routed.empty() && std::all_of(routed.begin(),routed.end(),
+              [&](const auto& target) { return target == mini.id(); }),
+          "linked launch, follow-up, and stop must use gateway credentials while preserving the target ID");
+}
+
+void linkedForwardingUnavailable(const Endpoint& local, const Endpoint& mini,
+                                 const std::filesystem::path& directory) {
+    Scenario fixture(local,mini,directory,{},"linked-forwarding-unavailable");
+    fixture.startLinkedMini(true);
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,mini).value("status","") == "failed";
+    },"a disabled linked-environment gate should fail the target action");
+    const auto routed = local.routedTargets();
+    check(fixture.task().dump().find("This T3 connection cannot forward to linked environments") != std::string::npos &&
+          local.effects("t3_thread_launch").size() == 1 && mini.effects("t3_thread_launch").empty() &&
+          !routed.empty() && std::all_of(routed.begin(),routed.end(),
+              [&](const auto& target) { return target == mini.id(); }),
+          "a forwarding gate must be actionable and must not retry or route to another target: " +
+          fixture.task().dump() + " routed=" + Json(routed).dump());
 }
 
 void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std::filesystem::path& directory) {
@@ -342,6 +435,11 @@ void cancelUnknownAcceptance(const Endpoint& local, const Endpoint& mini, const 
     fixture.store.receive(localOwner,routing,"cancel-unknown-mini-fixture","Stop Mini");
     fixture.runtime.runConversations();
     check(fixture.model.cancelResult.value("ok",false),"an uncertain saved destination must accept a local stop intent");
+    const auto authGeneration = fixture.adapter->authGeneration(mini.id(),Json::object());
+    mini.configure({{"accessToken","fixture.rotated-signed-token"}});
+    mini.login(directory);
+    check(fixture.adapter->authGeneration(mini.id(),Json::object()) != authGeneration,
+          "the fixture must change auth generation before reconciling the uncertain launch");
     fixture.local.configure({{"multiStatus","completed"}});
     for (int tick = 0; tick < 70; ++tick) {
         ++fixture.now;
@@ -350,10 +448,10 @@ void cancelUnknownAcceptance(const Endpoint& local, const Endpoint& mini, const 
     }
     const auto task = fixture.task();
     check(Scenario::result(task,fixture.local).at("status") == "completed" &&
-          Scenario::result(task,fixture.mini).at("status") == "confirmation_pending" &&
-          task.at("state") == "running" && mini.effects("t3_thread_launch").size() == 1 &&
-          mini.effects("t3_thread_interrupt").empty() && fixture.store.tasks(bot).size() == 1,
-          "unknown acceptance must retain uncertainty and its slot without relaunching after cancellation");
+          Scenario::result(task,fixture.mini).at("status") == "interrupted" &&
+          task.at("state") == "completed" && mini.effects("t3_thread_launch").size() == 1 &&
+          mini.effects("t3_thread_interrupt").size() == 1 && fixture.store.tasks(bot).size() == 1,
+          "unknown acceptance must reconcile read-only after auth changes, stop the known Run, and never relaunch");
 }
 
 void independentSlots(Scenario& fixture) {
@@ -650,6 +748,8 @@ int main(int argc, char** argv) {
             { Scenario fixture(local,mini,directory,commit,"supervised"); supervised(fixture); }
             { Scenario fixture(local,mini,directory,commit,"stop"); stop(fixture); }
             ordinaryMulti(local,mini,directory);
+            linkedTargetUsesGateway(local,mini,directory);
+            linkedForwardingUnavailable(local,mini,directory);
             sendToOneDestination(local,mini,directory);
             cancelOneDestination(local,mini,directory);
             cancelUnknownAcceptance(local,mini,directory);

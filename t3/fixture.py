@@ -42,6 +42,8 @@ class Fixture(BaseHTTPRequestHandler):
         origin = self.server.origin
         if self.path == "/fixture/effects":
             self.reply(self.server.state.get("effects", {}))
+        elif self.path == "/fixture/routes":
+            self.reply(self.server.state.get("multiRoutedTargets", []))
         elif self.path == "/.well-known/t3/environment":
             self.reply({"environmentId": self.server.state.get("descriptorEnvironment",
                          self.server.state.get("claimedEnvironment", "env-1")),
@@ -85,7 +87,8 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["resource"] == [origin + "/mcp"] and args["grant_type"] == ["authorization_code"]
             assert args["code"] == ["fixture-code"] and args["redirect_uri"] == state["registered"]
             state["revoked"] = False
-            self.reply({"access_token": "fixture.signed-token", "token_type": "Bearer", "expires_in": 2592000,
+            self.reply({"access_token": state.get("accessToken", "fixture.signed-token"),
+                        "token_type": "Bearer", "expires_in": 2592000,
                         "scope": state.get("scope", "orchestration:read orchestration:operate")})
             return
         args = json.loads(raw)
@@ -147,7 +150,7 @@ class Fixture(BaseHTTPRequestHandler):
             if state.get("multiDisconnected"):
                 self.reply(code=503)
                 return
-            if self.headers.get("Authorization") != "Bearer fixture.signed-token" or state.get("revoked"):
+            if self.headers.get("Authorization") != "Bearer " + state.get("accessToken", "fixture.signed-token") or state.get("revoked"):
                 challenge = ('Basic resource_metadata="https://wrong.test/", Negotiate YWJjZA==, '
                              'bEaReR realm="a, \\"b\\"", RESOURCE_METADATA \t= "' + origin +
                              '/protected,resource", Basic realm="next"')
@@ -234,7 +237,14 @@ class Fixture(BaseHTTPRequestHandler):
                 (name == "t3_queue" and args["action"] == "cancel") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
-        assert "environmentId" not in args
+        target_tools = ("t3_project_list", "t3_project_read", "t3_thread_launch", "t3_thread_send",
+                        "t3_thread_wait", "t3_thread_read", "t3_thread_interrupt", "t3_thread_list",
+                        "t3_thread_answer", "t3_pending_request", "t3_queue")
+        expected_target = state.get("multiExpectedTarget")
+        if expected_target and name in target_tools:
+            assert args.get("environmentId") == expected_target
+        else:
+            assert "environmentId" not in args
         if self.server.stock_thread:
             return self.stock_tool(name, args)
         if self.server.multi_environment:
@@ -634,6 +644,8 @@ class Fixture(BaseHTTPRequestHandler):
 
     def multi_environment_tool(self, name, args):
         state = self.server.state
+        if "environmentId" in args:
+            state.setdefault("multiRoutedTargets", []).append(args["environmentId"])
         env = state["claimedEnvironment"]
         project = state["multiProject"]
         thread, run = "shared-thread", "shared-run"
@@ -651,6 +663,9 @@ class Fixture(BaseHTTPRequestHandler):
         if name == "t3_project_list":
             return {"projects": [{"id": project, "title": project}], "nextCursor": None}
         if name == "t3_thread_launch":
+            if state.get("multiForwardingUnavailable"):
+                return {"_tag": "OrchestratorMcpFailure", "code": "capability_denied",
+                        "message": "Linked environments is off on this machine, so no tool can act on another machine. Leave out environmentId to work here; the user can turn it on in Settings → Labs."}
             assert args["projectId"] == project and "multiPrompt" not in state, "Run launched twice or in the wrong project"
             prompt = args["message"]
             assert prompt.endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")

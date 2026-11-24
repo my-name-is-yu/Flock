@@ -88,10 +88,12 @@ std::string actionId() {
     return id;
 }
 Json runJson(const RunRef& run) {
-    return {{"threadId", run.threadId}, {"runId", run.runId}, {"link", run.link}};
+    Json result{{"threadId", run.threadId}, {"runId", run.runId}, {"link", run.link}};
+    if (!run.gatewayEnvironmentId.empty()) result["gatewayEnvironmentId"] = run.gatewayEnvironmentId;
+    return result;
 }
 RunRef runRef(const Json& data) {
-    return {field(data,"threadId"), field(data,"runId"), field(data,"link")};
+    return {field(data,"threadId"), field(data,"runId"), field(data,"link"), field(data,"gatewayEnvironmentId")};
 }
 
 Json questionTarget(const Json& task) {

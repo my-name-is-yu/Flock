@@ -282,9 +282,13 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
                 throw Conflict("Use short conversation environment names and canonical T3 environment IDs");
             if (alias->is_object()) {
                 const auto project = validatedString(*alias,"projectId");
-                if (alias->size() != 2 || !plainId(project))
-                    throw Conflict("T3 destination objects require canonical environmentId and projectId");
+                const bool hasGateway = alias->contains("gatewayEnvironmentId");
+                const auto gateway = hasGateway ? validatedString(*alias,"gatewayEnvironmentId") : std::string{};
+                if (alias->size() != (hasGateway ? 3u : 2u) || !plainId(project) ||
+                    (hasGateway && !plainId(gateway)))
+                    throw Conflict("T3 destination objects require canonical environmentId, projectId, and optional gatewayEnvironmentId");
                 saved[alias.key()] = {{"environmentId",environment},{"projectId",project}};
+                if (hasGateway) saved[alias.key()]["gatewayEnvironmentId"] = gateway;
             } else {
                 saved[alias.key()] = environment;
             }

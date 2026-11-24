@@ -740,6 +740,12 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
                 {"markedChecks",action.value("markedCommitChecks",false)}};
         }
         c.target = runRef(action.value("target",Json::object()));
+        c.gatewayEnvironmentId = action.value("gatewayEnvironmentId",std::string{});
+        if (c.gatewayEnvironmentId.empty()) c.gatewayEnvironmentId = c.target.gatewayEnvironmentId;
+        if (c.gatewayEnvironmentId.empty() && !action.contains("destinationAction"))
+            c.gatewayEnvironmentId = task.value("gatewayEnvironmentId",c.environmentId);
+        if (c.target.gatewayEnvironmentId.empty() && c.gatewayEnvironmentId != c.environmentId)
+            c.target.gatewayEnvironmentId = c.gatewayEnvironmentId;
         c.questionId = field(action,"questionId");
         c.answers = action.value("answers",Json::object());
         c.authGeneration = field(action,"authGeneration");
@@ -748,7 +754,8 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
         c.launchReceiptThreadId = field(action,"launchReceiptThreadId");
         if (c.tool == "delegate" && task.contains("sessionOrigin")) {
             const auto& origin = task.at("sessionOrigin");
-            c.sessionOrigin = SessionOrigin{{field(origin,"environmentId"),field(origin,"threadId")},field(origin,"title")};
+            c.sessionOrigin = SessionOrigin{{field(origin,"environmentId"),field(origin,"threadId"),
+                                             field(origin,"gatewayEnvironmentId")},field(origin,"title")};
         }
         return c;
     }
@@ -909,8 +916,24 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             return;
         }
         if (stopRequested && phase == "started") {
-            destinationStatus(id,key,"confirmation_pending",
-                "T3 acceptance is unconfirmed; Flock will not retry this Run after the stop request.");
+            if (now < run.value("retryAt",Seconds{})) return;
+            try {
+                const auto cmd = command(task,action);
+                auto reconciled = t3.reconcile(cmd);
+                if (reconciled.kind == Delivery::Kind::Accepted && hasRun(reconciled.run)) {
+                    applyDelivery(id,action,std::move(reconciled));
+                    return;
+                }
+            } catch (const std::exception&) {
+            }
+            changeTask(id,[&](Json& current) {
+                auto& saved = destinationRun(current,key);
+                if (!destinationRunOutstanding(saved)) return false;
+                setDestinationStatus(saved,"confirmation_pending",
+                    "T3 acceptance is unconfirmed; Flock will not retry this Run after the stop request.");
+                saved["retryAt"] = now + 5;
+                return true;
+            });
             return;
         }
         const bool unconfirmedRunNeedsDeadlineCheck = phase == "started" && !stopping &&
@@ -988,6 +1011,11 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             Json saved = destination ? db.outbox(task,key) : Json(nullptr);
             if (destination ? (saved.is_null() || (saved.at("phase") != "ready" && saved.at("phase") != "started"))
                              : task.at("actionId") != action.at("id")) return false;
+            if (outcome.run.gatewayEnvironmentId.empty()) {
+                auto gateway = field(action,"gatewayEnvironmentId");
+                if (gateway.empty() && !destination) gateway = field(task,"gatewayEnvironmentId");
+                if (gateway != field(action,"environmentId")) outcome.run.gatewayEnvironmentId = std::move(gateway);
+            }
             if (!outcome.launchWarning.empty()) {
                 task["launchWarning"] = db.redactor(field(task,"botId")).text(outcome.launchWarning);
                 db.journal(id,"session_lineage_unavailable",{{"actionId",key},{"text",task["launchWarning"]}});
@@ -1090,13 +1118,15 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             if (const auto origin = current.find("sessionOrigin"); origin != current.end()) {
                 const auto source = db.loadTurnMessage(current.at("sourceMessageId"));
                 const auto actor = db.turnActor(source);
-                const SessionTarget parent{field(*origin,"environmentId"),field(*origin,"threadId")};
+                const SessionTarget parent{field(*origin,"environmentId"),field(*origin,"threadId"),
+                                           field(*origin,"gatewayEnvironmentId")};
                 if (!db.activeSessionOrigin(cmd.ownerBotId,actor.id,parent,cmd.environmentId,source.id) ||
                     !policy.allows(actor,Action::bot_decide,cmd.ownerBotId) ||
                     !policy.allows(cmd.ownerBotId,Action::environment_inspect,parent.environmentId)) return false;
                 if (!sendsToSession) return true;
             }
-            if (db.sessionParticipationStopped(cmd.ownerBotId,{cmd.environmentId,cmd.target.threadId},
+            if (db.sessionParticipationStopped(cmd.ownerBotId,{cmd.environmentId,cmd.target.threadId,
+                cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId},
                                                current.value("sourceMessageId",Id{}))) return false;
             if (!usesExistingSession || !current.contains("selectedSession")) return cmd.tool != "start_in_session";
             const auto& selected = current.at("selectedSession");
@@ -1217,7 +1247,8 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             std::optional<Delivery> stopped;
             try {
                 stopped = t3.preflight(cmd);
-                if (!stopped) cmd.authGeneration = t3.authGeneration(cmd.environmentId,cmd.config);
+                if (!stopped) cmd.authGeneration = t3.authGeneration(
+                    cmd.gatewayEnvironmentId.empty() ? cmd.environmentId : cmd.gatewayEnvironmentId,cmd.config);
             } catch (const std::exception& error) {
                 stopped = Delivery{Delivery::Kind::Settings,{},error.what()};
             }
@@ -1245,7 +1276,8 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 }
                 if (usesExistingSession && current.contains("sourceMessageId")) {
                     const auto source = db.loadTurnMessage(current.at("sourceMessageId"));
-                    const SessionTarget target{cmd.environmentId,cmd.target.threadId};
+                    const SessionTarget target{cmd.environmentId,cmd.target.threadId,
+                        cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId};
                     auto participant = db.query(R"SQL(
 SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=? AND state='active'
 )SQL",{cmd.ownerBotId,target.environmentId,target.threadId});
@@ -1417,6 +1449,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
     bool readEvidence(const Json& task, const Json& event, const Json& args, const Json& usage = Json::object()) {
         ReadRequest req;
         req.environmentId = field(task,"environmentId");
+        req.gatewayEnvironmentId = field(task,"gatewayEnvironmentId");
         req.config = task["config"];
         req.threadId = field(args,"threadId");
         req.runId = field(args,"runId");
@@ -1429,6 +1462,9 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         const auto active = runRef(report.value("run",Json::object()));
         if (active.threadId == req.threadId && (active.runId == req.runId || field(report,"resultRunId") == req.runId)) {
             req.environmentId = report.at("environmentId");
+            req.gatewayEnvironmentId = active.gatewayEnvironmentId;
+            if (req.gatewayEnvironmentId.empty() && !task.contains("runTargets") && !task.contains("runResults"))
+                req.gatewayEnvironmentId = field(task,"gatewayEnvironmentId");
         } else {
             std::lock_guard lock(db.mutex);
             auto row = db.query("SELECT DISTINCT environment_id FROM runs WHERE task_id=? AND thread_id=? AND run_id=? LIMIT 2",
@@ -1653,7 +1689,7 @@ ORDER BY j.id
             if (task.value("newSessionRequired",false)) task.erase("selectedSession");
             else {
                 const auto& selected = task.at("selectedSession");
-                target = runJson({field(selected,"threadId"),{},{}});
+                target = runJson({field(selected,"threadId"),{},{},{}});
                 tool = "start_in_session";
             }
         }
@@ -1672,6 +1708,8 @@ ORDER BY j.id
             {"instruction",std::move(instruction)},{"questionId",field(args,"requestId")},
             {"answers",args.value("answers",Json::object())},{"revisionId",revision(task)},
             {"instructions",prompt.pending},{"contextIds",prompt.contextIds},{"sourceResultRefs",prompt.resultReferences},{"chargesBudget",charge}};
+        const auto gateway = field(route,"gatewayEnvironmentId");
+        if (!gateway.empty() && gateway != field(route,"environmentId")) out["gatewayEnvironmentId"] = gateway;
         if (destination) out["destinationAction"] = true;
         if (tool == "delegate" || tool == "start_in_session") {
             if (destination && task.contains("requestedCommit")) {

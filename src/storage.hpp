@@ -42,6 +42,7 @@ private:
 };
 std::string field(const Json&, std::string_view);
 std::string conversationEnvironmentId(const Json& alias);
+std::string conversationGatewayEnvironmentId(const Json& alias);
 std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name = {});
 inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 bool terminal(const Json&);
@@ -77,7 +78,7 @@ struct PeerExchange {
     bool allowsReplan(Id task) const { return recipient == task && kind == "work" && phase == "working"; }
 };
 
-struct TaskRoute { std::string environmentId, projectId; };
+struct TaskRoute { std::string environmentId, projectId, gatewayEnvironmentId; };
 struct StartDestinations {
     TaskRoute primary;
     Json targets = Json::array();

@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS conversation_steps(
 CREATE TABLE IF NOT EXISTS session_message_waits(
   message_id INTEGER NOT NULL REFERENCES messages(id),
   bot TEXT NOT NULL, environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL, title TEXT NOT NULL,
+  gateway_environment TEXT NOT NULL DEFAULT '',
   notified INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(message_id,environment,thread,run));
 CREATE TABLE IF NOT EXISTS task_revisions(
@@ -78,6 +79,11 @@ CREATE TABLE IF NOT EXISTS task_revisions(
   UNIQUE(task_id,number));
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK)
         throw StorageError(db);
+    auto waitColumns = query("PRAGMA table_info(session_message_waits)");
+    bool hasGateway = false;
+    while (waitColumns.next()) hasGateway |= waitColumns.string(1) == "gateway_environment";
+    if (!hasGateway)
+        exec("ALTER TABLE session_message_waits ADD COLUMN gateway_environment TEXT NOT NULL DEFAULT ''");
 }
 
 Id Store::Impl::addRevision(Json& task, std::string_view intent, std::string_view doneWhen, Id source) {

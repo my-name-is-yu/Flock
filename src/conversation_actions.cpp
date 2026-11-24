@@ -12,7 +12,7 @@ using conversation_storage::ToolError;
 namespace {
 struct SavedDestination {
     Json run;
-    std::string actionId, name, environmentId, projectId, threadId, runId, status;
+    std::string actionId, name, environmentId, projectId, threadId, runId, status, gatewayEnvironmentId;
 };
 
 SavedDestination selectSavedDestination(const Json& task, const Json& args, bool allowOmitted) {
@@ -49,7 +49,8 @@ SavedDestination selectSavedDestination(const Json& task, const Json& args, bool
         selected = matches.front();
     }
     return {*selected,field(*selected,"actionId"),field(*selected,"name"),field(*selected,"environmentId"),
-            field(*selected,"projectId"),field(*selected,"threadId"),field(*selected,"runId"),field(*selected,"status")};
+            field(*selected,"projectId"),field(*selected,"threadId"),field(*selected,"runId"),field(*selected,"status"),
+            field(*selected,"gatewayEnvironmentId")};
 }
 
 struct SessionEffect {
@@ -210,9 +211,10 @@ bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
 void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt) {
     const auto& [bot,target,title,delivery] = receipt;
     if (!acceptedSessionSend(target,delivery)) return;
-    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified) VALUES(?,?,?,?,?,?,?)",
+    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment)"
+         " VALUES(?,?,?,?,?,?,?,?)",
          {message,bot,target.environmentId,target.threadId,delivery.run.runId,title,
-          sessionParticipationStopped(bot,target,message) ? 1 : 0});
+          sessionParticipationStopped(bot,target,message) ? 1 : 0,target.gatewayEnvironmentId});
 }
 
 Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
@@ -242,7 +244,9 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
                 throw ToolError("The task is " + field(task,"state"),{{"taskId",task.at("id")}});
             const auto selected = selectSavedDestination(task,decision.args,true);
             command.environmentId = selected.environmentId;
+            command.gatewayEnvironmentId = selected.gatewayEnvironmentId;
             command.target.threadId = selected.threadId;
+            command.target.gatewayEnvironmentId = selected.gatewayEnvironmentId;
             if (command.environmentId.empty() || command.target.threadId.empty()) throw ToolError("The destination Session is unavailable");
             savedTaskTarget = true;
             savedTaskId = task.at("id");
@@ -261,7 +265,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
             throw ToolError("Use the Session identifiers");
     } catch (const ToolError& failure) { error = failure.what(); }
-    const SessionTarget target{command.environmentId,command.target.threadId};
+    const SessionTarget target{command.environmentId,command.target.threadId,command.gatewayEnvironmentId};
     const Resource resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target};
     const auto saveReceipt = [&](const Delivery& receipt) {
         if (acceptedSessionSend(target,receipt)) {
@@ -306,7 +310,8 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     }
     std::string title;
     try {
-        command.authGeneration = t3.authGeneration(target.environmentId,command.config);
+        command.authGeneration = t3.authGeneration(
+            target.gatewayEnvironmentId.empty() ? target.environmentId : target.gatewayEnvironmentId,command.config);
         if (!savedTaskTarget) {
             if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
             else error = "This Session is unavailable through your T3 connection";
@@ -345,7 +350,8 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
                 if (action.is_null() || !action.value("destinationAction",false) ||
                     action.value("phase","") != "accepted" || action.value("stopRequested",false) ||
                     field(action,"environmentId") != selected.environmentId ||
-                    field(action,"projectId") != selected.projectId)
+                    field(action,"projectId") != selected.projectId ||
+                    field(action,"gatewayEnvironmentId") != selected.gatewayEnvironmentId)
                     throw ToolError("The destination Session is unavailable");
                 if (!query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
                             {selected.actionId,savedTaskId,selected.environmentId,selected.threadId,selected.runId}).next())
@@ -506,10 +512,11 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
     std::vector<Wait> waits;
     {
         std::lock_guard lock(mutex);
-        auto rows = query("SELECT rowid,message_id,bot,environment,thread,run,title "
+        auto rows = query("SELECT rowid,message_id,bot,environment,thread,run,title,gateway_environment "
                           "FROM session_message_waits WHERE notified=0 ORDER BY rowid");
         while (rows.next())
-            waits.push_back({rows.number(0),rows.number(1),rows.string(2),{rows.string(3),rows.string(4)},rows.string(5),rows.string(6)});
+            waits.push_back({rows.number(0),rows.number(1),rows.string(2),
+                {rows.string(3),rows.string(4),rows.string(7)},rows.string(5),rows.string(6)});
     }
     for (const auto& wait : waits) {
         if (shutdown.stop_requested()) return;
@@ -530,7 +537,8 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
                 continue;
             }
         }
-        const auto reason = t3.sessionMessageWake(wait.target,{wait.target.threadId,wait.run,{}});
+        const auto reason = t3.sessionMessageWake(
+            wait.target,{wait.target.threadId,wait.run,{},wait.target.gatewayEnvironmentId});
         if (reason.empty() || shutdown.stop_requested()) continue;
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -576,6 +584,8 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
     const auto id = submit({std::string(bot),std::string(request),destination.environmentId,destination.projectId,
                            routing.at("config")},messageId,source);
     auto task = load(id);
+    if (!destination.gatewayEnvironmentId.empty() && destination.gatewayEnvironmentId != destination.environmentId)
+        task["gatewayEnvironmentId"] = destination.gatewayEnvironmentId;
     if (routing.contains("sessionOrigin")) task["sessionOrigin"] = routing.at("sessionOrigin");
     else if (resume) {
         auto parent = query(R"SQL(
@@ -592,6 +602,9 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
     if (selectedSession)
         task["selectedSession"] = {{"environmentId",destination.environmentId},{"projectId",destination.projectId},
                                    {"threadId",selectedSession->threadId}};
+    if (selectedSession && !destination.gatewayEnvironmentId.empty() &&
+        destination.gatewayEnvironmentId != destination.environmentId)
+        task["selectedSession"]["gatewayEnvironmentId"] = destination.gatewayEnvironmentId;
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId,bot});
     task["sourceMessageCoversFullRequest"] = source.is_null() && message.next() && message.string(0) == request;

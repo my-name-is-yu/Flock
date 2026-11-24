@@ -67,7 +67,7 @@ struct ModelInput {
     bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
 };
-enum class ModelErrorCode { inference_failed, invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
+enum class ModelErrorCode { inference_failed, authentication_required, invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
 struct ModelError : std::runtime_error {
     ModelError(std::string message, bool retryable, Json measurements = Json::object(),
                ModelErrorCode failureCode = ModelErrorCode::inference_failed)
@@ -86,6 +86,7 @@ public:
 
 struct RunRef {
     std::string threadId, runId, link;
+    std::string gatewayEnvironmentId;
 };
 struct Question {
     std::string requestId;
@@ -118,6 +119,7 @@ std::string sessionPrompt(const std::string& actionId, const std::string& instru
 
 struct SessionTarget {
     std::string environmentId, threadId;
+    std::string gatewayEnvironmentId;
     bool operator==(const SessionTarget&) const = default;
 };
 struct SessionOrigin {
@@ -134,6 +136,7 @@ struct Command {
     std::string ownerBotId;
     std::string launchReceiptThreadId; // From the launch response, even if the Run ID was pending.
     std::optional<SessionOrigin> sessionOrigin;
+    std::string gatewayEnvironmentId;
 };
 struct Delivery {
     enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
@@ -149,6 +152,7 @@ struct ReadRequest {
     std::string environmentId, threadId, runId, itemId, cursor, view = "messages";
     std::size_t offset = 0;
     Json config = Json::object();
+    std::string gatewayEnvironmentId;
 };
 struct Excerpt {
     std::string text, threadId, runId, itemId, nextCursor;
