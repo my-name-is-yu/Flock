@@ -1,3 +1,4 @@
+find_package(Threads REQUIRED)
 find_package(tomlplusplus 3.4 CONFIG QUIET)
 if(NOT TARGET tomlplusplus::tomlplusplus)
   FetchContent_Declare(tomlplusplus
@@ -7,14 +8,14 @@ if(NOT TARGET tomlplusplus::tomlplusplus)
   FetchContent_MakeAvailable(tomlplusplus)
 endif()
 
-configure_file(chatgpt.mjs chatgpt.mjs COPYONLY)
-add_library(flock_app_support bots.cpp model.cpp bot_tools.cpp git_github.cpp t3_setup.cpp settings_file.cpp)
+add_library(flock_app_support bots.cpp model.cpp chatgpt.cpp chatgpt_browser.cpp chatgpt_http.cpp chatgpt_oauth.cpp
+                             bot_tools.cpp git_github.cpp t3_setup.cpp settings_file.cpp)
 target_include_directories(flock_app_support PRIVATE "${PROJECT_SOURCE_DIR}/src")
-target_link_libraries(flock_app_support PUBLIC flock_core PRIVATE CURL::libcurl tomlplusplus::tomlplusplus)
-target_compile_definitions(flock_app_support PRIVATE FLOCK_CHATGPT_BRIDGE="${CMAKE_CURRENT_BINARY_DIR}/chatgpt.mjs")
+target_link_libraries(flock_app_support PUBLIC flock_core
+                      PRIVATE CURL::libcurl OpenSSL::Crypto Threads::Threads tomlplusplus::tomlplusplus)
 target_compile_options(flock_app_support PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(flock main.cpp demo.cpp settings_system.cpp settings_access.cpp settings_connections.cpp
+add_executable(flock main.cpp demo.cpp chatgpt_web.cpp settings_system.cpp settings_access.cpp settings_connections.cpp
                      t3_connection_setup.cpp)
 target_link_libraries(flock PRIVATE flock_app_support CURL::libcurl OpenSSL::Crypto)
 target_compile_options(flock PRIVATE -Wall -Wextra -Wpedantic)
@@ -26,7 +27,27 @@ if(BUILD_TESTING)
   add_executable(flock_app_tests tests.cpp session_tests.cpp tests/schedules.cpp demo.cpp)
   target_link_libraries(flock_app_tests PRIVATE flock_app_support)
   add_test(NAME flock_app COMMAND flock_app_tests)
+  add_executable(flock_app_chatgpt_transport tests/chatgpt_transport.cpp)
+  target_link_libraries(flock_app_chatgpt_transport PRIVATE flock_app_support)
+  target_compile_options(flock_app_chatgpt_transport PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_app_chatgpt_transport COMMAND flock_app_chatgpt_transport)
+  add_executable(flock_app_chatgpt_oauth tests/chatgpt_oauth.cpp chatgpt_web.cpp settings_access.cpp)
+  target_link_libraries(flock_app_chatgpt_oauth PRIVATE flock_app_support flock_web CURL::libcurl OpenSSL::Crypto)
+  target_compile_options(flock_app_chatgpt_oauth PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_app_chatgpt_oauth COMMAND flock_app_chatgpt_oauth)
+  add_executable(flock_app_chatgpt_browser tests/chatgpt_browser.cpp)
+  target_link_libraries(flock_app_chatgpt_browser PRIVATE flock_app_support)
+  target_compile_options(flock_app_chatgpt_browser PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_app_chatgpt_browser COMMAND flock_app_chatgpt_browser)
+  set_tests_properties(flock_app_chatgpt_oauth flock_app_chatgpt_browser PROPERTIES TIMEOUT 15)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_program(FLOCK_TEST_OPENSSL openssl)
+  if(FLOCK_TEST_OPENSSL)
+    add_test(NAME flock_app_chatgpt_tls
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/chatgpt_tls.py"
+              "$<TARGET_FILE:flock_app_chatgpt_transport>" "${FLOCK_TEST_OPENSSL}")
+    set_tests_properties(flock_app_chatgpt_tls PROPERTIES TIMEOUT 15)
+  endif()
   add_executable(flock_app_session_settings tests/session_settings.cpp)
   target_link_libraries(flock_app_session_settings PRIVATE flock_app_support flock_t3)
   add_test(NAME flock_app_session_settings COMMAND "${Python3_EXECUTABLE}"
@@ -45,8 +66,5 @@ if(BUILD_TESTING)
     add_test(NAME flock_app_installation_system
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/installation-system.mjs" "$<TARGET_FILE:flock>")
     set_tests_properties(flock_app_installation_system PROPERTIES TIMEOUT 20)
-    add_test(NAME flock_app_login
-      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/login.mjs" "$<TARGET_FILE:flock>")
-    set_tests_properties(flock_app_login PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 25)
   endif()
 endif()

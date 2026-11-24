@@ -1,5 +1,6 @@
 #include "bots.hpp"
 #include "demo.hpp"
+#include "chatgpt_web.hpp"
 #include "model.hpp"
 #include "git_github.hpp"
 #include "settings_access.hpp"
@@ -20,7 +21,6 @@
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
-#include <mutex>
 #include <thread>
 
 namespace flockv0::app {
@@ -218,71 +218,13 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     }
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
-    std::function<Json()> modelStatus;
-    std::function<bool(const Person&,bool)> modelLogin;
-    std::function<bool(const Person&)> modelSwitch;
-    std::function<std::optional<bool>()> modelLogout;
-    struct SignIn {
-        std::mutex mutex;
-        bool running = false;
-        unsigned attempts = 0;
-        std::string error;
-        std::jthread worker;
-    } signIn;
+    std::optional<ChatGPTWeb> chatgptWeb;
     if (fixed) {
         model = makeDemoModel();
         t3 = makeDemoT3();
-        modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
     } else {
         auto chatgpt = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
-        modelStatus = [model = chatgpt.get(),&signIn] {
-            unsigned attempts;
-            {
-                std::lock_guard lock(signIn.mutex);
-                if (signIn.running) return Json{{"signingIn",true}};
-                attempts = signIn.attempts;
-            }
-            Json status;
-            try { status = model->webStatus(); }
-            catch (const std::exception&) { status = {{"unavailable",true}}; }
-            std::lock_guard lock(signIn.mutex);
-            if (signIn.running) return Json{{"signingIn",true}};
-            if (signIn.attempts != attempts) status = {{"unavailable",true}};
-            if (!signIn.error.empty()) status["signInError"] = signIn.error;
-            return status;
-        };
-        const auto startSignIn = [&signIn,&access,directory = home / "credentials" / "chatgpt"](
-            const Person& actor, bool reconsent, bool switchAccount) {
-            std::lock_guard lock(signIn.mutex);
-            if (signIn.running) return false;
-            signIn.worker = std::jthread([&signIn,&access,directory,actor,reconsent,switchAccount](std::stop_token stop) {
-                std::string error;
-                try {
-                    ChatGPTModel(directory).loginWeb(reconsent,stop,switchAccount,[&](const auto& commit) {
-                        access.commitIfAdministrator(actor,commit);
-                    });
-                } catch (const DecisionDenied&) { error = "The account that started sign-in can no longer manage Flock."; }
-                catch (const ModelError& failure) { error = failure.what(); }
-                catch (const std::exception&) { error = "Could not sign in to ChatGPT."; }
-                std::lock_guard lock(signIn.mutex);
-                signIn.running = false;
-                signIn.error = std::move(error);
-            });
-            signIn.running = true;
-            ++signIn.attempts;
-            signIn.error.clear();
-            return true;
-        };
-        modelLogin = [startSignIn](const Person& actor, bool reconsent) { return startSignIn(actor,reconsent,false); };
-        modelSwitch = [startSignIn](const Person& actor) { return startSignIn(actor,false,true); };
-        modelLogout = [&signIn,account = chatgpt.get()]() -> std::optional<bool> {
-            std::lock_guard lock(signIn.mutex);
-            if (signIn.running) return std::nullopt;
-            ++signIn.attempts;
-            const auto revoked = account->signOut().at("revocationConfirmed").get<bool>();
-            signIn.error.clear();
-            return revoked;
-        };
+        chatgptWeb.emplace(*chatgpt,access);
         model = std::move(chatgpt);
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
@@ -349,10 +291,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     callbacks.identityRequired = [&access] { return access.enabled(); };
     connections.configureChannels(store,callbacks);
     callbacks.sessionT3 = t3.get();
-    callbacks.modelStatus = modelStatus;
-    callbacks.modelLogin = modelLogin;
-    callbacks.modelSwitch = modelSwitch;
-    callbacks.modelLogout = modelLogout;
+    if (chatgptWeb) chatgptWeb->configure(callbacks);
+    else callbacks.modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
     callbacks.installationSettings = [&](const Person& actor) {
         auto availableConnections = connections.view();
         availableConnections.at("channels")["canManageHost"] = actor == localOwner;
@@ -541,6 +481,8 @@ int runCli(Arguments& args) {
 }
 
 int main(int argc,char** argv) {
+    // ChatGPT's in-process TLS transport must not write session keys to disk.
+    unsetenv("SSLKEYLOGFILE");
     try {
         flockv0::app::Arguments args(argc,argv);
         return flockv0::app::runCli(args);

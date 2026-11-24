@@ -1,7 +1,6 @@
 # Flock CLI
 
-Build from the repository root with CMake 3.24+ and a C++20 compiler. The
-ChatGPT transport requires Node.js 22+ on `PATH`.
+Build from the repository root with CMake 3.24+ and a C++20 compiler.
 
 ```sh
 cmake -S . -B build
@@ -189,10 +188,9 @@ status 0.
 build/app/flock model acceptance MODEL_SLUG > model-acceptance.jsonl
 ```
 
-The C++ Runtime owns the decision contract, state transitions, and T3 side
-effects. The local Node transport performs the Flock OAuth flow and streams
-the public Responses endpoint. It inherits a short-lived credential lock and
-releases it before inference. Credentials live under
+The C++ runtime performs the Flock OAuth flow and streams the public Responses
+endpoint using libcurl and OpenSSL. It locks the profile while signing in or
+refreshing credentials and releases the lock before inference. Credentials live under
 `credentials/chatgpt/`; T3 credentials have their own directory. Each Flock
 home has one ChatGPT connection. See the official [sign-in guide][signin],
 [model requests][models], and [function calling constraints][limits].
