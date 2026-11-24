@@ -415,14 +415,19 @@ Json sessions(Store& store, std::string_view bot, Id before) {
     return result;
 }
 
+Json sessionGroups(const Json& tasks) {
+    auto groups = Json::array();
+    for (const auto& task : tasks) groups.push_back(sessionGroup(task));
+    return groups;
+}
+
 Json botView(Store& store, const Json& bot, const Json* changedSessionTasks, std::string_view viewer) {
     const auto id = field(bot,"id");
     auto result = conversation(store,id,0,viewer);
     const auto activeTasks = store.activeTasks(id);
     result.update(activity(activeTasks,id));
     if (changedSessionTasks) {
-        auto& groups = result["sessionTasks"] = Json::array();
-        for (const auto& task : *changedSessionTasks) groups.push_back(sessionGroup(task));
+        result["sessionTasks"] = sessionGroups(*changedSessionTasks);
     } else {
         result.update(sessions(store,id,0));
     }

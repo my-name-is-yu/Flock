@@ -31,13 +31,24 @@ public:
         auto operator<=>(const Scope&) const = default;
     };
     using Cursor = std::map<Scope,std::uint64_t>;
-    using Load = std::function<Json(const Scope&)>;
+    struct BotVersion {
+        Store::BotViewStamp stamp;
+        Json descriptor;
+    };
+    struct Projection {
+        Projection(Json data, std::optional<BotVersion> version = std::nullopt)
+            : data(std::move(data)), botVersion(std::move(version)) {}
+        Json data;
+        std::optional<BotVersion> botVersion;
+    };
+    using Load = std::function<Projection(const Scope&)>;
 
     ChangeFeed(Store&, Load);
     ~ChangeFeed();
     std::optional<Cursor> subscribe(const Scope& view);
     void release(const Cursor&);
     std::optional<Json> next(Cursor&);
+    std::shared_ptr<const Projection> cachedBotView(const Person&, const std::string& bot, const Json& descriptor);
     void rescan();
     void stop();
 
@@ -46,7 +57,7 @@ private:
     struct Watched {
         std::size_t subscribers = 0;
         std::uint64_t revision = 0;
-        std::optional<Json> snapshot;
+        std::shared_ptr<const Projection> snapshot;
         Refresh pending = Refresh::None;
     };
     void monitor();

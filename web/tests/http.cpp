@@ -935,6 +935,69 @@ void recurringRequestStatus(const std::filesystem::path& path) {
     });
 }
 
+void watchedBotView(const std::filesystem::path& path) {
+    Store store(path), cli(path);
+    auto web = callbacks();
+    std::atomic<bool> renamed = false;
+    web.bots = [bots = web.bots,&renamed] {
+        auto cards = bots();
+        if (renamed.load()) cards.at(0)["name"] = "Release Notes";
+        return cards;
+    };
+    web.authenticate = [](std::string_view token) {
+        if (token == "Bearer reader") return Person{"reader"};
+        if (token == "Bearer owner") return localOwner;
+        return Person{};
+    };
+    store.policy().setMember(localOwner,"release","reader",true);
+    const auto intake = web.intake("release","Check staging");
+    store.submit(intake);
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    tick(runtime,3);
+    const auto link = store.receive(localOwner,intake,"link","[docs](https://example.com/A%26Bcache-test)").at("messageId");
+
+    const auto server = startWeb(store,0,web);
+    Browser reader(*server), owner(*server), stream(*server);
+    for (auto* browser : {&reader,&stream}) browser->client.set_default_headers({{"Authorization","Bearer reader"}});
+    owner.client.set_default_headers({{"Authorization","Bearer owner"}});
+    const std::string viewPath = "/api/view?bot=release";
+    const auto baseline = reader.get(viewPath);
+    const auto deltaPath = viewPath + "&sessionsAfter=" + baseline.at("sessionCursor").dump();
+    const auto delta = reader.get(deltaPath);
+    check(!baseline.at("sessionTasks").empty() && delta.at("sessionTasks").empty() && !delta.contains("sessionsBefore"),
+          "fixture did not distinguish the full session page from its delta");
+    check(baseline.at("events").back().at("data").at("textHtml").get<std::string>().find("href=") != std::string::npos,
+          "fixture did not contain a rendered link");
+
+    Id arrival = 0;
+    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
+        check(change.value("bot","") == "release","missing the initial selected Bot projection");
+        if (!arrival) {
+            check(reader.get(viewPath) == baseline && reader.get(deltaPath) == delta,
+                  "the watched projection changed a full or cursor-based response");
+            check(owner.get(viewPath).at("bot").at("canDelete") == true && baseline.at("bot").at("canDelete") == false,
+                  "the watched projection crossed viewer scopes");
+            renamed = true;
+            check(reader.get(viewPath).at("bot").at("name") == "Release Notes","the watched projection hid a descriptor change");
+            renamed = false;
+            arrival = cli.receive(localOwner,intake,"cli","Written by the CLI").at("messageId");
+            check(reader.get(viewPath).at("events").back().at("id") == arrival,"the watched projection hid a concurrent CLI write");
+            return true;
+        }
+
+        store.protectGitCredential("A&Bcache-test");
+        const auto events = reader.get(viewPath).at("events");
+        const auto scrubbed = std::ranges::find_if(events,[&](const Json& event) { return event.at("id") == link; });
+        check(scrubbed != events.end() && scrubbed->at("data").at("textHtml").get<std::string>().find("href=") == std::string::npos,
+              "a watched projection retained a link containing newly protected text");
+        cli.policy().setMember(localOwner,"release","reader",false);
+        Browser::checked(reader.client.Get(viewPath),403);
+        return false;
+    });
+}
+
 void eventStream(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
@@ -1579,6 +1642,7 @@ int main() {
         sidebarReplies(directory.path / "sidebar.db");
         failedCompletion(directory.path / "failed-completion.db");
         recurringRequestStatus(directory.path / "recurring-requests.db");
+        watchedBotView(directory.path / "watched-bot-view.db");
         eventStream(directory.path / "events.db");
         conversationPermissions(directory.path / "conversation-permissions.db");
         retryEventProjection(directory.path / "retry-events.db");
