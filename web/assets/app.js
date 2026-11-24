@@ -5,6 +5,7 @@ import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { createBotRoleCard } from '/bot-role.js';
+import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
@@ -2342,6 +2343,7 @@ const settingsSections = {
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
 let detailRole = null;
+let detailWorkspace = null;
 let detailOrigin = null;
 
 function releaseDetailAvatar() {
@@ -2369,6 +2371,7 @@ function openDetail(selection) {
   decisions.close({ focus: false });
   clearDetailSectionTransition();
   releaseDetailRole();
+  detailWorkspace = null;
   detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
   signatures.delete('detail');
   renderDetail();
@@ -2389,6 +2392,7 @@ elements.detail.addEventListener('close', () => {
   releaseDetailAvatar();
   detail = null;
   releaseDetailRole();
+  detailWorkspace = null;
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
@@ -2635,7 +2639,15 @@ function generalContent(bot) {
     remove.setAttribute('aria-haspopup', 'dialog');
     rows.append(remove);
   }
-  return [hero, roleCard(bot), rows];
+  return [hero, workspaceCard(bot), roleCard(bot), rows];
+}
+function workspaceCard(bot) {
+  detailWorkspace ??= createBotWorkspaceCard(async (workspace) => {
+    const saved = await api('bots/profile', { botId: bot.id, ...workspace });
+    if (view?.id === bot.id) void view.refresh();
+    return saved;
+  }, async () => (await api('settings')).t3?.environments ?? []);
+  return detailWorkspace.element;
 }
 function roleCard(bot) {
   detailRole ??= createBotRoleCard(async (soul, originalSoul) => {
@@ -2787,6 +2799,7 @@ function replaceDetail(render) {
   releaseDetailAvatar();
   const content = render();
   if (detailRole && !content.includes(detailRole.element)) releaseDetailRole();
+  if (detailWorkspace && !content.includes(detailWorkspace.element)) detailWorkspace = null;
   placeRows(elements['detail-body'], content);
   if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
 }
@@ -2798,9 +2811,11 @@ function renderDetail() {
     if (!sections.includes(detail.section)) detail.section = 'general';
     labelDetail(`${bot.name} settings`);
     renderDetailNav(sections, detail.section);
-    const { soul, ...settings } = bot;
+    const { soul, environmentId, projectId, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
-    detailRole?.update(soul, bot.canDelete === true);
+    const canEdit = bot.canDelete === true;
+    detailRole?.update(soul, canEdit);
+    detailWorkspace?.update({ environmentId, projectId }, canEdit);
     return;
   }
   labelDetail(null);

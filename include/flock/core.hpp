@@ -280,6 +280,9 @@ using WebIdentityResolver = std::function<std::optional<bool>(std::string_view p
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
+    using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&,
+                                                       const std::function<void()>&)>;
+    using EditConfiguredSchedules = std::function<void(const CommitConfiguredSchedules&)>;
     explicit Store(std::filesystem::path database, MemorySeed = {});
     ~Store();
     Store(const Store&) = delete;
@@ -295,6 +298,8 @@ public:
     Json cancelAutomation(const Person&, std::string_view bot, Id id);
     [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
         std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
+    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
+        std::string_view bot, Seconds now, const EditConfiguredSchedules&);
     void pruneAutomations(const std::vector<std::string>& configuredBots);
     void fireDueAutomations(Seconds now);
     Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,

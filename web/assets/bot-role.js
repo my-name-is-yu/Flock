@@ -3,9 +3,9 @@ export function createBotRoleCard(saveRole) {
   element.className = 'settings-card settings-role';
   element.setAttribute('aria-labelledby', 'settings-role-label');
   element.innerHTML = `
-    <div class="settings-role-header">
+    <div class="settings-card-header">
       <h3 class="settings-card-label" id="settings-role-label">Role</h3>
-      <button type="button" class="text-button settings-role-edit" aria-label="Edit role">Edit</button>
+      <button type="button" class="text-button settings-card-edit" aria-label="Edit role">Edit</button>
     </div>
     <p class="settings-soul" id="settings-role-text" data-folded="true"></p>
     <button type="button" class="text-button settings-soul-toggle" aria-expanded="false"
@@ -13,21 +13,21 @@ export function createBotRoleCard(saveRole) {
     <form class="settings-role-form" hidden>
       <textarea class="settings-role-input" rows="8" aria-labelledby="settings-role-label"
         placeholder="For example: Reviews release branches, runs the checks, and reports what blocks shipping."></textarea>
-      <div class="settings-role-actions">
+      <div class="settings-card-actions">
         <button type="button" class="dialog-button quiet">Cancel</button>
         <button type="submit" class="dialog-button primary">Save</button>
       </div>
     </form>
-    <p class="settings-role-feedback" role="status"></p>
+    <p class="settings-card-feedback" role="status"></p>
   `;
-  const edit = element.querySelector('.settings-role-edit');
+  const edit = element.querySelector('.settings-card-edit');
   const preview = element.querySelector('.settings-soul');
   const toggle = element.querySelector('.settings-soul-toggle');
   const form = element.querySelector('form');
   const input = form.querySelector('textarea');
   const cancel = form.querySelector('button[type="button"]');
   const save = form.querySelector('button[type="submit"]');
-  const feedback = element.querySelector('.settings-role-feedback');
+  const feedback = element.querySelector('.settings-card-feedback');
   let text;
   let editable = false;
   let originalSoul;

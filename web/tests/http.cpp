@@ -1373,6 +1373,15 @@ void botProfileEndpoints(const std::filesystem::path& path) {
             card["soul"] = profile.at("soul");
             return card;
         }
+        if (botWorkspaceFieldCount(profile)) {
+            check(!image,"workspace update carried an image");
+            for (const auto& [key, value] : profile.items()) {
+                check(key == "environmentId" || key == "projectId","workspace update forwarded other settings");
+                if (value == "") card.erase(key);
+                else card[key] = value;
+            }
+            return card;
+        }
         if (!profile.contains("avatar")) {
             card["name"] = profile.at("name");
             return card;
@@ -1487,6 +1496,27 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     check(credentials.at("error") == "role_contains_secrets","role update accepted a stored secret");
     const auto nameAfterRole = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Latest"}},200);
     check(nameAfterRole.at("soul") == "Check releases.","rename or rejected role update changed the role");
+
+    const auto workspace = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"environmentId"," env-1 "},{"projectId","project-1"},
+    },200);
+    check(workspace.at("name") == "Scout Latest" && workspace.at("soul") == "Check releases." &&
+          workspace.at("avatar").at("imageUrl") == originalUrl && workspace.at("environmentId") == "env-1" &&
+          workspace.at("projectId") == "project-1","workspace update lost another setting or failed to return the new destination");
+    for (const auto& extra : {"name","soul","avatar","model"}) {
+        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"projectId","project-2"},{extra,"stale"}},400);
+        check(rejected.at("error") == "invalid_profile_update","workspace update accepted an unrelated field");
+    }
+    for (const Json& invalid : Json::array({42," \t\n","has space",std::string("a\0b",3),std::string(257,'x')})) {
+        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"projectId",invalid}},400);
+        check(rejected.at("error") == "invalid_workspace","invalid project ID was accepted");
+    }
+    const auto partial = browser.post("/api/bots/profile",{{"botId","bot-1"},{"environmentId","env-2"}},200);
+    check(partial.at("environmentId") == "env-2" && partial.at("projectId") == "project-1","partial update replaced the project");
+    const auto clearedProject = browser.post("/api/bots/profile",{{"botId","bot-1"},{"projectId",""}},200);
+    check(!clearedProject.contains("projectId") && clearedProject.at("environmentId") == "env-2",
+          "explicitly clearing a project also cleared the environment");
+
     const auto cleared = browser.post("/api/bots/profile",{
         {"botId","bot-1"},{"soul"," \t\n"},{"originalSoul",roleOnly.at("soul")},
     },200);

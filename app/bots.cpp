@@ -17,11 +17,6 @@ namespace flockv0::app {
 namespace {
 constexpr std::size_t maxConfigBytes = 128 * 1024;
 
-bool plainId(std::string_view id) {
-    return !id.empty() && id.size() <= 256 &&
-        std::none_of(id.begin(),id.end(),[](unsigned char ch) { return ch <= 32 || ch == 127; });
-}
-
 std::string readUpTo(const std::filesystem::path& file, std::size_t bytes, bool optional) {
     std::ifstream input(file,std::ios::binary);
     if (!input) {
@@ -249,10 +244,14 @@ std::vector<std::string> Bots::ids() const {
 }
 
 namespace {
-Json readBotConfig(const std::filesystem::path& file) {
-    auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
+Json parseBotConfig(std::string_view text) {
+    auto config = Json::parse(text,nullptr,false);
     if (!config.is_object()) throw Conflict("Invalid Bot config.json");
     return config;
+}
+
+Json readBotConfig(const std::filesystem::path& file) {
+    return parseBotConfig(readText(file,maxConfigBytes));
 }
 
 Bot configuredBot(std::string_view id, const Json& config, std::vector<std::string>* scheduleErrors = nullptr) {
@@ -261,8 +260,8 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     bot.name = config.contains("name") ? validatedString(config,"name") : bot.id;
     if (config.contains("environmentId")) bot.environmentId = validatedString(config,"environmentId");
     if (config.contains("projectId")) bot.projectId = validatedString(config,"projectId");
-    if ((!bot.environmentId.empty() && !plainId(bot.environmentId)) ||
-        (!bot.projectId.empty() && !plainId(bot.projectId)))
+    if ((!bot.environmentId.empty() && !validPlainId(bot.environmentId)) ||
+        (!bot.projectId.empty() && !validPlainId(bot.projectId)))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
     if (!bot.projectId.empty() && bot.environmentId.empty())
         throw Conflict("A pinned T3 project needs its environmentId");
@@ -271,7 +270,7 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
         if (!config.contains(key)) continue;
         if (!config[key].is_array()) throw Conflict("Connection names must be an array");
         for (const auto& name : config[key])
-            if (!name.is_string() || !plainId(name.get<std::string>())) throw Conflict("Invalid connection name");
+            if (!name.is_string() || !validPlainId(name.get_ref<const std::string&>())) throw Conflict("Invalid connection name");
         bot.settings[key] = config[key];
     }
     if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
@@ -283,14 +282,14 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
         for (auto alias = destinations.begin(); alias != destinations.end(); ++alias) {
             const auto environment = alias->is_object() ? validatedString(*alias,"environmentId")
                 : validatedString(destinations,alias.key().c_str());
-            if (alias.key().empty() || alias.key().size() > 80 || !plainId(environment))
+            if (alias.key().empty() || alias.key().size() > 80 || !validPlainId(environment))
                 throw Conflict("Use short conversation environment names and canonical T3 environment IDs");
             if (alias->is_object()) {
                 const auto project = validatedString(*alias,"projectId");
                 const bool hasGateway = alias->contains("gatewayEnvironmentId");
                 const auto gateway = hasGateway ? validatedString(*alias,"gatewayEnvironmentId") : std::string{};
-                if (alias->size() != (hasGateway ? 3u : 2u) || !plainId(project) ||
-                    (hasGateway && !plainId(gateway)))
+                if (alias->size() != (hasGateway ? 3u : 2u) || !validPlainId(project) ||
+                    (hasGateway && !validPlainId(gateway)))
                     throw Conflict("T3 destination objects require canonical environmentId, projectId, and optional gatewayEnvironmentId");
                 saved[alias.key()] = {{"environmentId",environment},{"projectId",project}};
                 if (hasGateway) saved[alias.key()]["gatewayEnvironmentId"] = gateway;
@@ -325,6 +324,50 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if (const auto role = config.find("role"); role != config.end() && role->is_string())
         bot.role = bounded(role->get_ref<const std::string&>(), 80);
     return bot;
+}
+
+std::vector<ConfiguredSchedule> configuredSchedules(
+        std::string_view id, const Json& config, std::vector<std::string>& errors) {
+    std::vector<ConfiguredSchedule> schedules;
+    try {
+        const auto cron = config.value("cron",Json::array());
+        if (!cron.is_array()) throw Conflict("cron must be an array");
+        if (!cron.empty()) {
+            const auto bot = configuredBot(id,config,&errors);
+            if (bot.environmentId.empty() || bot.projectId.empty())
+                throw Conflict("Configured schedules need a T3 environment and project");
+            std::map<std::string_view,std::size_t> counts;
+            for (const auto& entry : cron) {
+                const auto key = entry.find("id");
+                if (key == entry.end() || !key->is_string()) continue;
+                const auto& scheduleId = key->get_ref<const std::string&>();
+                if (validBotId(scheduleId)) ++counts[scheduleId];
+            }
+            for (std::size_t i = 0; i < cron.size(); ++i) {
+                const auto& entry = cron[i];
+                try {
+                    const auto scheduleId = validatedString(entry,"id");
+                    if (validBotId(scheduleId) && counts.at(scheduleId) > 1)
+                        throw Conflict("Duplicate configured schedule ID");
+                    schedules.push_back({scheduleId,validatedString(entry,"schedule"),
+                        validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
+                } catch (const Conflict& error) {
+                    errors.push_back("cron entry " + std::to_string(i + 1) + ": " + error.what());
+                }
+            }
+        }
+    } catch (const Conflict& error) {
+        errors.emplace_back(error.what());
+    } catch (const Json::exception& error) {
+        errors.emplace_back(error.what());
+    }
+    return schedules;
+}
+
+void reportScheduleErrors(std::string_view id, const std::vector<ScheduleImportError>& importErrors,
+                          const std::vector<std::string>& configErrors, const Bots::ScheduleReporter& report) {
+    for (const auto& error : importErrors) report(id,"cron schedule " + error.id + ": " + error.message);
+    for (const auto& error : configErrors) report(id,error);
 }
 }
 
@@ -389,6 +432,9 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     }
 
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
+    for (const auto* key : botWorkspaceFields)
+        if (const auto value = config.find(key); value != config.end() && value->is_string() &&
+            validPlainId(value->get_ref<const std::string&>())) item[key] = *value;
     if (config.contains("role") && config["role"].is_string() && validBotRole(config["role"].get_ref<const std::string&>()))
         item["role"] = config["role"];
     if (const auto stored = config.find("avatar"); stored != config.end() && stored->is_object()) {
@@ -550,6 +596,7 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image,
 
 Json Bots::updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
+    if (botWorkspaceFieldCount(profile)) throw Conflict("Save where the Bot works separately from its profile");
 
     std::lock_guard lock(mutex_);
     const auto botDir = path(id);
@@ -590,6 +637,41 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
     return cardLocked(id);
 }
 
+Json Bots::updateWorkspace(Store& store, std::string_view id, const Json& workspace, Seconds now,
+                           const ScheduleReporter& report) {
+    if (!workspace.is_object() || workspace.empty() || workspace.size() != botWorkspaceFieldCount(workspace))
+        throw BotProfileError("invalid_profile_update","Save where the Bot works separately from its profile");
+    std::vector<std::string> configErrors;
+    const auto importErrors = store.syncSchedules(id,now,[&](const auto& commit) {
+        std::lock_guard lock(mutex_);
+        const auto file = path(id) / "config.json";
+        const auto original = readText(file,maxConfigBytes);
+        auto config = parseBotConfig(original);
+        for (const auto& [key,value] : workspace.items()) {
+            const auto destination = validatedBotWorkspaceId(value);
+            if (destination.empty()) config.erase(key);
+            else config[key] = destination;
+        }
+        if (config.contains("projectId") && !config.contains("environmentId"))
+            throw BotProfileError("invalid_workspace","A pinned T3 project needs its environmentId");
+        const auto updated = profileText(config);
+        const auto schedules = configuredSchedules(id,config,configErrors);
+        bool published = false;
+        try {
+            commit(schedules,[&] {
+                writeAtomic(file,updated);
+                published = true;
+            });
+        } catch (...) {
+            if (published) writeAtomic(file,original);
+            throw;
+        }
+    });
+    reportScheduleErrors(id,importErrors,configErrors,report);
+    std::lock_guard lock(mutex_);
+    return cardLocked(id);
+}
+
 std::optional<AvatarImage> Bots::avatarImage(std::string_view id) const {
     std::lock_guard lock(mutex_);
     try {
@@ -607,49 +689,22 @@ std::optional<AvatarImage> Bots::avatarImage(std::string_view id) const {
     }
 }
 
-void Bots::syncSchedules(Store& store, Seconds now,
-                         const std::function<void(std::string_view,std::string_view)>& report) const {
-    const auto botIds = ids();
-    for (const auto& id : botIds) {
-        std::vector<ConfiguredSchedule> schedules;
-        std::vector<std::string> errors;
-        try {
-            const auto config = readBotConfig(path(id) / "config.json");
-            const auto cron = config.value("cron",Json::array());
-            if (!cron.is_array()) throw Conflict("cron must be an array");
-            if (!cron.empty()) {
-                const auto bot = configuredBot(id,config,&errors);
-                if (bot.environmentId.empty() || bot.projectId.empty())
-                    throw Conflict("Configured schedules need a T3 environment and project");
-                std::map<std::string_view,std::size_t> counts;
-                for (const auto& entry : cron) {
-                    const auto key = entry.find("id");
-                    if (key == entry.end() || !key->is_string()) continue;
-                    const auto& scheduleId = key->get_ref<const std::string&>();
-                    if (validBotId(scheduleId)) ++counts[scheduleId];
-                }
-                for (std::size_t i = 0; i < cron.size(); ++i) {
-                    const auto& entry = cron[i];
-                    try {
-                        const auto scheduleId = validatedString(entry,"id");
-                        if (validBotId(scheduleId) && counts.at(scheduleId) > 1)
-                            throw Conflict("Duplicate configured schedule ID");
-                        schedules.push_back({scheduleId,validatedString(entry,"schedule"),
-                            validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
-                    } catch (const Conflict& error) {
-                        errors.push_back("cron entry " + std::to_string(i + 1) + ": " + error.what());
-                    }
-                }
-            }
-        } catch (const Conflict& error) {
-            errors.emplace_back(error.what());
-        } catch (const Json::exception& error) {
-            errors.emplace_back(error.what());
-        }
-        for (const auto& error : store.syncSchedules(id,schedules,now))
-            report(id,"cron schedule " + error.id + ": " + error.message);
-        for (const auto& error : errors) report(id,error);
+void Bots::syncBotSchedules(Store& store, std::string_view id, Seconds now, const ScheduleReporter& report) const {
+    std::vector<ConfiguredSchedule> schedules;
+    std::vector<std::string> errors;
+    try {
+        schedules = configuredSchedules(id,readBotConfig(path(id) / "config.json"),errors);
+    } catch (const Conflict& error) {
+        errors.emplace_back(error.what());
+    } catch (const Json::exception& error) {
+        errors.emplace_back(error.what());
     }
+    reportScheduleErrors(id,store.syncSchedules(id,schedules,now),errors,report);
+}
+
+void Bots::syncSchedules(Store& store, Seconds now, const ScheduleReporter& report) const {
+    const auto botIds = ids();
+    for (const auto& id : botIds) syncBotSchedules(store,id,now,report);
     store.pruneAutomations(botIds);
 }
 }
