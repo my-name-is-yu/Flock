@@ -684,15 +684,14 @@ function createSidebarEntry(botId) {
         toggle.setAttribute('aria-label', `${bot.name} menu`);
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
-      // A Bot blocked on the person says so in place of its last message, so the row reads at a glance.
-      const waiting = bot.presence === 'waiting';
-      const previewLabel = waiting ? 'Waiting for you' : bot.preview || '';
+      const showWaitingPreview = bot.presence === 'waiting' && !count;
+      const previewLabel = showWaitingPreview ? stateLabels.waiting : bot.preview || '';
       if (previewText.data !== previewLabel) previewText.data = previewLabel;
-      preview.classList.toggle('waiting', waiting);
-      if (waiting) preview.setAttribute('aria-hidden', 'true');
+      preview.classList.toggle('waiting', showWaitingPreview);
+      if (showWaitingPreview) preview.setAttribute('aria-hidden', 'true');
       else preview.removeAttribute('aria-hidden');
       const hasPresence = activePresence.has(bot.presence);
-      presenceDot.hidden = !waiting;
+      presenceDot.hidden = !showWaitingPreview;
       dots.hidden = !busyPresence.has(bot.presence);
       preview.hidden = !previewLabel && dots.hidden;
       pinPresence.hidden = !pinned || !hasPresence;
