@@ -155,6 +155,7 @@ struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
     const MemorySeed memorySeed;
+    const IntakeResolver automationIntake;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     class SessionEvidence;
@@ -238,6 +239,7 @@ struct Store::Impl {
     Json cancelAutomation(std::string_view bot, Id id);
     void fireDueAutomations(Seconds now);
     void fireAutomation(Id, const Statement&, Seconds now);
+    Json automationRoute(std::string_view bot, Json routing) const;
     SecretRedactor sharedRedactor() const;
     void initializeBoardInboxSchema();
     Statement actionablePrReviews(std::string_view bot) const;
@@ -281,7 +283,7 @@ struct Store::Impl {
     bool permitsWorkSession(Id sourceMessageId, const WorkSession&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
-    explicit Impl(std::filesystem::path path, MemorySeed);
+    explicit Impl(std::filesystem::path path, MemorySeed, IntakeResolver);
     ~Impl();
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;

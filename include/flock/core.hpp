@@ -283,7 +283,7 @@ public:
     using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&,
                                                        const std::function<void()>&)>;
     using EditConfiguredSchedules = std::function<void(const CommitConfiguredSchedules&)>;
-    explicit Store(std::filesystem::path database, MemorySeed = {});
+    explicit Store(std::filesystem::path database, MemorySeed = {}, IntakeResolver automationIntake = {});
     ~Store();
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;

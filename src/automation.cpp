@@ -357,6 +357,22 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
     }
 }
 
+Json Store::Impl::automationRoute(std::string_view bot, Json routing) const {
+    if (!automationIntake) return routing;
+    try {
+        const auto current = automationIntake(bot,{}).config;
+        const auto model = field(current,"model");
+        const auto provider = field(current,"modelProvider");
+        if (!model.empty() && !provider.empty()) {
+            routing.at("config")["model"] = model;
+            routing.at("config")["modelProvider"] = provider;
+        }
+    } catch (const Conflict&) {
+        // Keep the saved model when the Bot configuration is temporarily unavailable.
+    }
+    return routing;
+}
+
 void Store::Impl::fireAutomation(Id id, const Statement& row, Seconds now) {
     const auto bot = row.string(0);
     const auto def = row.json(1);
@@ -377,7 +393,8 @@ void Store::Impl::fireAutomation(Id id, const Statement& row, Seconds now) {
             if (def.contains("label")) trigger["label"] = def.at("label");
             auto scrub = redactor(bot);
             trigger = scrub.record(std::move(trigger));
-            const auto task = submit(intake(bot,field(def,"request"),row.json(2)),0,nullptr,TaskSource::request,trigger);
+            const auto routing = automationRoute(bot,row.json(2));
+            const auto task = submit(intake(bot,field(def,"request"),routing),0,nullptr,TaskSource::request,trigger);
             const auto receipts = Json::array({{{"taskId",task},{"botId",bot},{"triggerId",id}}});
             exec("INSERT INTO automation_firings VALUES(?,?,?,?)",{key,bot,now,receipts});
         }
@@ -414,7 +431,7 @@ AND json_extract(definition,'$.source')=? ORDER BY id
         auto& receipts = received.try_emplace(bot,Json::array()).first->second;
         const auto def = rows.json(2);
         if (!matchesEvent(def.at("eventFilter"),event,scrub)) continue;
-        const auto routing = rows.json(3);
+        const auto routing = p_->automationRoute(bot,rows.json(3));
         const Json destination = {bot,routing};
         if (scrub.record(destination,SecretRedactor::Fields::external) != destination) continue;
         const auto request = bounded(scrub.text(field(def,"request")),maxRequestBytes);
