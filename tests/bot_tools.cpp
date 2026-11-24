@@ -268,6 +268,7 @@ void workspaceFiles(Fixture& f) {
     const auto preview = f.run(readLarge);
     check(listing.at("files") == Json::array({"notes/empty.txt","notes/large.txt","notes/write-only.txt"}) &&
           listing.at("truncated") == false,"Workspace listing attempted to read file contents");
+    check(chmod(writeOnly.c_str(),0600) == 0,"Could not restore fixture permissions for the content search");
     check(preview.at("bytes") == largeNote.size() && preview.at("truncated") == true &&
           preview.at("text") == largeNote.substr(0,8192),"Workspace read lost the full byte count or exceeded its preview limit");
     f.model.inspectRequest = {};
