@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/detail/json_rpc.hpp"
 
 #include <curl/curl.h>
 
@@ -62,34 +63,13 @@ bool rejectsDelegatedFrom(std::string_view message) {
 
 Json rpcResponse(const HttpResponse& response, unsigned id) {
     const auto type = response.headers.find("content-type");
-    Json message;
-    if (type == response.headers.end() || !type->second.starts_with("text/event-stream")) {
-        message = parse(response.body);
-    } else {
-        std::string event;
-        std::string_view tail = response.body;
-        while (!tail.empty()) {
-            const auto end = tail.find('\n');
-            auto line = tail.substr(0, end);
-            tail.remove_prefix(end == std::string_view::npos ? tail.size() : end + 1);
-            if (line.ends_with('\r')) line.remove_suffix(1);
-            if (line.starts_with("data:")) {
-                line.remove_prefix(5);
-                if (line.starts_with(' ')) line.remove_prefix(1);
-                if (!event.empty()) event += '\n';
-                event += line;
-            } else if (line.empty() && !event.empty()) {
-                auto candidate = parse(event);
-                if (candidate.is_object() && candidate.contains("id") && candidate["id"] == id) {
-                    message = std::move(candidate);
-                    break;
-                }
-                event.clear();
-            }
-        }
-    }
-    if (str(message, "jsonrpc") != "2.0" || !message.contains("id") || message["id"] != id)
-        invalidResponse();
+    const std::string_view contentType = type == response.headers.end() ? std::string_view{} : type->second;
+    auto message = detail::decodeRpcResponse(response.body, contentType, id, [](std::string_view frame) {
+        // T3 ignores SSE events whose data fields are empty.
+        if (frame.find_first_not_of('\n') == frame.npos) return Json();
+        return parse(frame);
+    });
+    if (str(message, "jsonrpc") != "2.0") invalidResponse();
     if (message.contains("error")) {
         const auto& error = message["error"];
         if (message.contains("result") || !error.contains("code") || !error["code"].is_number_integer() ||
