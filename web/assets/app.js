@@ -910,7 +910,6 @@ function renderHeader() {
     scopeAvatar?.destroy();
     scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
     if (bot) elements['activity-scope-name'].textContent = bot.name;
-    // Accent tokens follow the open Bot, including its Bot-to-Bot DMs; the empty state keeps Flock purple.
     if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
     else document.documentElement.style.removeProperty('--bot-accent');
   }
@@ -2500,7 +2499,6 @@ function openNewBot(origin = elements['new-bot-button']) {
   botEditor.openCreate({ bots, origin });
 }
 
-// The header avatar is hidden in a Bot DM; the conversation menu stays visible there.
 function headerFocusTarget() {
   return elements['profile-identity'].hidden ? conversationActionsTrigger : elements['profile-avatar-button'];
 }
@@ -2774,10 +2772,11 @@ function renderDetail() {
   labelDetail(null);
   renderDetailNav([], null);
   if (detail.kind === 'peers') {
+    const botName = view.data.bot.name;
     const peers = botPeers(view.id).map(({ id }) => participant(id));
-    if (changed('detail', detail, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
+    if (changed('detail', detail, botName, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
       const active = document.activeElement?.dataset.peerChoice;
-      elements['detail-title'].textContent = `${view.data.bot.name} talks with`;
+      elements['detail-title'].textContent = `${botName} talks with`;
       const list = node('ul', 'peer-picker-list');
       for (const bot of peers) {
         const item = node('li');
@@ -2787,7 +2786,7 @@ function renderDetail() {
         item.append(link);
         list.append(item);
       }
-      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', `${view.data.bot.name} hasn’t talked with other Bots yet.`)]);
+      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', `${botName} hasn’t talked with other Bots yet.`)]);
       if (active) [...list.querySelectorAll('a')].find((link) => link.dataset.peerChoice === active)?.focus();
     }
     return;
