@@ -142,6 +142,15 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS git_review_receipts(
+  inbox_key TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
+  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
+  reviewer TEXT NOT NULL, after_event INTEGER NOT NULL,
+  PRIMARY KEY(inbox_key,reviewer))
+)SQL");
+    exec("CREATE INDEX IF NOT EXISTS git_review_receipts_target"
+         " ON git_review_receipts(task_id,host,repo,pr_number,reviewer,after_event)");
     exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_pr_watch_origins(

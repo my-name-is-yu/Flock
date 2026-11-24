@@ -49,7 +49,6 @@ std::string effectiveDoneWhen(const Json& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
-std::string gitWebhookKey(Id event, Id pr);
 
 enum class TaskSource { request, handoff, consultation };
 
@@ -233,7 +232,6 @@ struct Store::Impl {
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
     Id latestGitWebhookId() const;
-    Id matchingReviewRequestWebhook(const GitRepository&, Id pr, Id after, const Json& reviewers) const;
     std::set<GitPrKey> gitPrMutationsInFlight;
     class GitPrMutationClaim;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
