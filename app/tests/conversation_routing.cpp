@@ -41,7 +41,8 @@ Intake pinnedBot(const Sandbox& temp) {
     config["conversationEnvironments"] = {
         {"mini",{{"environmentId","mini-env"},{"projectId","mini-project"}}},
         {"mini-legacy","mini-env"},
-        {"local","env-canonical"}};
+        {"local","env-canonical"},
+        {"cloud",{{"environmentId","cloud-env"},{"projectId","cloud-project"}}}};
     const auto folder = temp.path / "bots";
     createBot(folder / "release",config,"Verify revisions.","");
     const auto intake = Bots(folder).get("release").intake("");
@@ -82,6 +83,33 @@ void parallelDestinations() {
           "a single destination must start in the named pinned project");
 }
 
+void genericDestinationCounts() {
+    Sandbox temp;
+    const auto intake = pinnedBot(temp);
+    RoutingModel model;
+    RoutingT3 t3;
+    Store store(temp.path / "state.db");
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    model.action = {"start_task",{{"request","Run on the Mini"},{"environments",{"mini"}}},
+                    "Use the one selected destination."};
+    store.receive(localOwner,intake,"single-route-work","Run this on the Mini");
+    runtime.runConversations();
+    auto tasks = store.tasks();
+    check(tasks.size() == 1,"one destination must create one conversation task");
+    const auto single = store.task(tasks.front().at("id"));
+    check(single.at("runTargets").size() == 1 && !single.contains("requestedCommit"),
+          "ordinary one-destination work must not require commit verification");
+
+    model.action.args = {{"request","Run on all three"},{"environments",{"mini","local","cloud"}}};
+    store.receive(localOwner,intake,"three-route-work","Run this on all three destinations");
+    runtime.runConversations();
+    tasks = store.tasks();
+    check(tasks.size() == 2,"three destinations must remain one additional conversation task");
+    const auto multi = store.task(tasks.front().at("id"));
+    check(multi.at("runTargets").size() == 3 && !multi.contains("requestedCommit"),
+          "ordinary multi-destination work must persist all routes without a SHA policy");
+}
+
 void moveWithProject(std::string_view alias, std::string_view project, bool sameEnvironment = false) {
     Sandbox temp;
     auto intake = pinnedBot(temp);
@@ -119,6 +147,7 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
 
 void pinnedConversationDestinations() {
     parallelDestinations();
+    genericDestinationCounts();
     moveWithProject("mini","mini-project");
     moveWithProject("mini-legacy","remembered-project");
     moveWithProject("mini","mini-project",true);

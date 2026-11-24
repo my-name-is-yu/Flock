@@ -1653,7 +1653,7 @@ ORDER BY j.id
             {"answers",args.value("answers",Json::object())},{"revisionId",revision(task)},
             {"instructions",prompt.pending},{"contextIds",prompt.contextIds},{"sourceResultRefs",prompt.resultReferences},{"chargesBudget",charge}};
         if (tool == "delegate" || tool == "start_in_session") {
-            if (check) {
+            if (check && task.contains("requestedCommit")) {
                 out["expectedCommit"] = task.at("requestedCommit");
                 out["markedCommitChecks"] = true;
                 out["instruction"] = field(out,"instruction") +
@@ -2268,7 +2268,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
             {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
         if (task.contains("runTargets")) {
             summary["runTargets"] = task.at("runTargets");
-            summary["requestedCommit"] = task.at("requestedCommit");
+            if (task.contains("requestedCommit")) summary["requestedCommit"] = task.at("requestedCommit");
         }
         if (task.contains("sourceMessageId")) summary["sourceMessageId"] = task.at("sourceMessageId");
         if (task.contains("selectedSession") && !task.value("newSessionRequired",false)) summary["usesSelectedSession"] = true;

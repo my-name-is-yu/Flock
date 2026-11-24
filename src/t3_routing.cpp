@@ -53,6 +53,17 @@ std::string resolveAlias(const Json& config, std::string_view name) {
     if (id.size() > 1024 || id.find_first_not_of(valid) != std::string::npos) return {};
     return id;
 }
+
+std::string verifiedCommit(std::string commit) {
+    if (commit.empty()) return commit;
+    if ((commit.size() != 40 && commit.size() != 64) ||
+        commit.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+        throw conversation_storage::ToolError("Supply a full commit SHA to verify");
+    std::ranges::transform(commit,commit.begin(),[](char ch) {
+        return ch >= 'A' && ch <= 'F' ? static_cast<char>(ch - 'A' + 'a') : ch;
+    });
+    return commit;
+}
 }
 
 std::set<std::string> Store::Impl::registeredT3Environments(std::string_view bot) {
@@ -115,37 +126,32 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
     const auto environment = text(args,"environment",256,false);
     const auto sessionRef = text(args,"sessionRef",128,false);
     StartDestinations destinations;
-    destinations.commit = text(args,"commit",64,false);
+    destinations.commit = verifiedCommit(text(args,"commit",64,false));
     if (const auto environments = args.find("environments"); environments != args.end()) {
         if (!message.channelScope.empty() || routing.contains("sessionOrigin"))
             throw ToolError("Start work across T3 environments from a Flock conversation");
         if (!environment.empty() || !sessionRef.empty() || selectedSession || resume)
-            throw ToolError("Choose either two environments or a single destination for this request");
-        if (!environments->is_array() || environments->size() != 2)
-            throw ToolError("Choose two distinct names or IDs from task.environments");
-        auto& commit = destinations.commit;
-        if ((commit.size() != 40 && commit.size() != 64) ||
-            commit.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
-            throw ToolError("Supply the full commit SHA to verify on both environments");
-        std::ranges::transform(commit,commit.begin(),[](char ch) {
-            return ch >= 'A' && ch <= 'F' ? static_cast<char>(ch - 'A' + 'a') : ch;
-        });
+            throw ToolError("Choose either multiple environments or a single destination for this request");
+        if (!environments->is_array() || environments->empty() || environments->size() > 16)
+            throw ToolError("Choose one or more names or IDs from task.environments");
+        std::set<std::pair<std::string,std::string>> selected;
         for (const auto& choice : *environments) {
             const auto name = text(Json{{"environment",choice}},"environment",256,true);
             auto route = taskRoute(bot,routing,name);
-            if (route.environmentId.empty() || route.environmentId == destinations.primary.environmentId)
-                throw ToolError("Choose two distinct names or IDs from task.environments");
+            if (route.environmentId.empty())
+                throw ToolError("Choose names or IDs from task.environments");
             if (route.projectId.empty()) route.projectId = rememberedT3Project(bot,route.environmentId);
             if (route.projectId.empty())
                 throw ToolError("Choose a T3 project for " + name +
                                 " first, or configure its projectId in conversationEnvironments");
+            if (!selected.emplace(route.environmentId,route.projectId).second)
+                throw ToolError("Choose each environment and project only once");
             destinations.targets.push_back({{"environmentId",route.environmentId},{"projectId",route.projectId},{"name",name}});
             if (destinations.primary.environmentId.empty()) destinations.primary = std::move(route);
         }
-        redactor(bot).requirePublic({destinations.targets,commit});
+        redactor(bot).requirePublic({destinations.targets,destinations.commit});
         return destinations;
     }
-    if (!destinations.commit.empty()) throw ToolError("A pinned commit requires two T3 environments");
     if (!sessionRef.empty() && (!selectedSession || !permitsWorkSession(message,*selectedSession)))
         throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
     if (selectedSession) {
@@ -157,6 +163,14 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
         throw ToolError(environment.empty()
             ? "Choose a connected T3 environment to start work. Use task.environments or connect T3 in Settings."
             : "Unknown environment " + environment + "; use one of task.environments");
+    if (!destinations.commit.empty()) {
+        if (destinations.primary.projectId.empty())
+            destinations.primary.projectId = rememberedT3Project(bot,destinations.primary.environmentId);
+        if (destinations.primary.projectId.empty())
+            throw ToolError("Choose a T3 project before verifying a commit");
+        destinations.targets.push_back({{"environmentId",destinations.primary.environmentId},
+            {"projectId",destinations.primary.projectId},{"name",environment.empty() ? destinations.primary.environmentId : environment}});
+    }
     return destinations;
 }
 

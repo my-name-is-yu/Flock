@@ -135,7 +135,7 @@ Json Store::Impl::taskState(const Json& task, const Message& message, bool fullC
                  {"replanning",task.value("replanning",false)},{"wait",std::move(wait)}};
     if (task.value("queuedInT3",false)) view["queuedInT3"] = true;
     if (task.contains("runTargets")) {
-        view["requestedCommit"] = task.at("requestedCommit");
+        if (task.contains("requestedCommit")) view["requestedCommit"] = task.at("requestedCommit");
         if (task.contains("runOutcome")) view["runOutcome"] = task.at("runOutcome");
         auto& results = view["runResults"] = Json::array();
         if (task.contains("runResults")) {
@@ -494,7 +494,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             }
             if (!targets.empty()) {
                 task["runTargets"] = std::move(targets);
-                task["requestedCommit"] = std::move(commit);
+                if (!commit.empty()) task["requestedCommit"] = std::move(commit);
             }
             save(task);
         }

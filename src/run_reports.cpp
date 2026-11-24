@@ -34,14 +34,16 @@ bool Store::Impl::recordVerificationReport(Json& task, Json& run, const Observat
     auto status = observed.status;
     if (status.empty()) status = "failed";
     auto detail = observed.detail;
-    if (status == "completed" && observed.checkedCommit != field(task,"requestedCommit")) {
+    if (status == "completed" && task.contains("requestedCommit") &&
+        observed.checkedCommit != field(task,"requestedCommit")) {
         status = "failed";
         if (detail.empty()) detail = "The Run did not verify the requested commit.";
     }
     Json data = {{"kind","result"},{"run",runJson(ref)},{"environmentId",run.at("environmentId")},
         {"projectId",run.at("projectId")},{"destination",run.at("name")},{"status",status},
-        {"commit",observed.checkedCommit},{"requestedCommit",task.at("requestedCommit")},
+        {"commit",observed.checkedCommit},
         {"revisionId",task.value("currentRevision",Json(nullptr))},{"resultRunId",observed.resultRunId.empty() ? ref.runId : observed.resultRunId}};
+    if (task.contains("requestedCommit")) data["requestedCommit"] = task.at("requestedCommit");
     setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,std::move(detail),
         observed.truncated,observed.sessionCreatedAt});
     for (const auto* key : {"status","commit","report","detail","evidenceStatus","sessionCreatedAt"})
@@ -61,10 +63,12 @@ bool Store::Impl::recordVerificationReport(Json& task, Json& run, const Observat
     const auto count = static_cast<std::size_t>(completed);
     task["runOutcome"] = count == results.size() ? "all_completed" : count > 0 ? "partial_failure" : "failed";
     task["state"] = "completed";
-    journal(task.at("id"),"completed",{
-        {"text",std::to_string(count) + " of " + std::to_string(results.size()) + " T3 Runs completed with a verified commit."},
-        {"runOutcome",task.at("runOutcome")},{"requestedCommit",task.at("requestedCommit")},
-        {"doneWhen",task.at("doneWhen")},{"revisionId",data.at("revisionId")}});
+    auto summary = std::to_string(count) + " of " + std::to_string(results.size()) + " T3 Runs completed";
+    if (task.contains("requestedCommit")) summary += " with a verified commit";
+    Json completion = {{"text",std::move(summary) + "."},{"runOutcome",task.at("runOutcome")},
+        {"doneWhen",task.at("doneWhen")},{"revisionId",data.at("revisionId")}};
+    if (task.contains("requestedCommit")) completion["requestedCommit"] = task.at("requestedCommit");
+    journal(task.at("id"),"completed",std::move(completion));
     return true;
 }
 }
