@@ -1298,6 +1298,7 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
         {"timezone","Asia/Tokyo"},{"fireAt",2'000'000'000}},409);
     const auto cancelPath = "/api/schedules?bot=release&id=" + std::to_string(reminder);
     Browser::checked(browser.client.Delete(cancelPath),403);
+    Browser::checked(browser.client.Delete(cancelPath,httplib::Headers{{"X-Flock-Action","1"}}),403);
     check(Browser::checked(browser.client.Delete(cancelPath,browser.headers()),200).at("status") == "canceled",
           "Web schedule cancellation failed");
     const auto trigger = browser.post("/api/schedules",{{"botId","release"},{"kind","trigger"},{"source","deploy"},
@@ -1314,6 +1315,8 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     };
     check(send(webhook("skip","test")).at("tasks").empty(),"Webhook filter did not match exactly");
     browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+    check(browser.get("/api/schedules?bot=release&active=1").at("canManage") == false,
+          "a Bot member was offered schedule controls");
     store.policy().setMember(localOwner,"release","reader",false);
     Browser::checked(browser.client.Post("/api/webhooks/deploy",headers,webhook("event-1","main"),"application/json"),403);
     store.policy().setMember(localOwner,"release","reader",true);

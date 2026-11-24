@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS automations(
   UNIQUE(bot_id,config_id));
 CREATE INDEX IF NOT EXISTS automation_due ON automations(next_run_at) WHERE status='active' AND next_run_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS automation_bot ON automations(bot_id,id DESC);
+CREATE INDEX IF NOT EXISTS automation_active_bot ON automations(bot_id,id DESC) WHERE status='active';
 CREATE INDEX IF NOT EXISTS automation_source ON automations(json_extract(definition,'$.source'))
   WHERE status='active' AND kind='trigger';
 CREATE TABLE IF NOT EXISTS automation_firings(
@@ -142,20 +143,21 @@ VALUES(?,?,?,?,'active',?,?,?)
     return {{"id",last()},{"status","active"},{"nextRunAt",item.next ? Json(*item.next) : Json(nullptr)}};
 }
 
-Json Store::automations(const Person& actor, std::string_view bot, Id before) const {
+Json Store::automations(const Person& actor, std::string_view bot, Id before, bool activeOnly) const {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db,Transaction::Mode::read);
     if (!Policy(*p_).allows(actor,Action::bot_view,bot)) throw AccessDenied("Automation access denied");
-    auto result = p_->automations(bot,before);
+    auto result = p_->automations(bot,before,activeOnly);
     tx.commit();
     return result;
 }
 
-Json Store::Impl::automations(std::string_view bot, Id before) const {
-    auto rows = query(R"SQL(
+Json Store::Impl::automations(std::string_view bot, Id before, bool activeOnly) const {
+    const auto sql = std::string{R"SQL(
 SELECT id,bot_id,definition,status,next_run_at,created_by,created_at,config_id,error
-FROM automations WHERE bot_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 21
-)SQL",{bot,before,before});
+FROM automations WHERE bot_id=? AND (?=0 OR id<?)
+)SQL"} + (activeOnly ? "AND status='active' " : "") + "ORDER BY id DESC LIMIT 21";
+    auto rows = query(sql.c_str(),{bot,before,before});
     Json items = Json::array();
     Id next = 0;
     const auto scrub = redactor(bot);

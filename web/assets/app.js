@@ -12,6 +12,7 @@ import { replyArrivalId } from '/reply-arrival.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 import { mountConversationFind } from '/conversation-find.mjs';
+import { createRecurringRequests } from '/recurring-requests.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -221,13 +222,13 @@ function changed(key, ...values) {
   return true;
 }
 const responseViewers = new WeakMap();
-async function api(path, body, signal) {
-  const init = { credentials: 'same-origin', signal };
-  if (body) Object.assign(init, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Flock-Action': '1' },
-    body: JSON.stringify(body),
+async function api(path, body, { method = body ? 'POST' : 'GET', signal } = {}) {
+  const headers = new Headers();
+  if (method !== 'GET') headers.set('X-Flock-Action', '1');
+  if (body) headers.set('Content-Type', 'application/json');
+  const response = await fetch(`/api/${path}`, {
+    method, headers, credentials: 'same-origin', signal, body: body ? JSON.stringify(body) : undefined,
   });
-  const response = await fetch(`/api/${path}`, init);
   const data = await response.json();
   if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status });
   const viewer = response.headers.get('X-Flock-Viewer');
@@ -1435,7 +1436,7 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     const request = context.pendingSource = { id };
     let page;
     try {
-      page = await api(botQuery('conversation', context.id, id + 1), undefined, signal);
+      page = await api(botQuery('conversation', context.id, id + 1), undefined, { signal });
     } catch {}
     if (context !== view || context.pendingSource !== request) return;
     context.pendingSource = null;
@@ -2342,11 +2343,13 @@ function renderComposer() {
 const detailNav = byId('detail-nav');
 const settingsSections = {
   general: ['General', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
-  cron: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
+  recurring: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
 };
+const settingsTabs = Object.keys(settingsSections);
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
 let detailOrigin = null;
+let recurringRequests = null;
 
 function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
@@ -2362,8 +2365,13 @@ function clearDetailSectionTransition() {
   detailSectionTimer = 0;
   elements['detail-body'].classList.remove('section-switching');
 }
+function setDetail(selection) {
+  recurringRequests?.close();
+  recurringRequests = selection?.kind === 'settings' ? createRecurringRequests(view.id, api) : null;
+  detail = selection;
+}
 function closeDetail() {
-  detail = null;
+  setDetail(null);
   clearDetailSectionTransition();
   releaseDetailAvatar();
   if (elements.detail.open) elements.detail.close();
@@ -2372,8 +2380,7 @@ function openDetail(selection) {
   if (!view?.data) return;
   decisions.close({ focus: false });
   clearDetailSectionTransition();
-  detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
-  if (selection.kind === 'settings' && !elements.detail.open) scheduleCache.delete(view.id);
+  setDetail(selection.kind === 'settings' ? { section: 'general', ...selection } : selection);
   signatures.delete('detail');
   renderDetail();
   if (elements.detail.open) return;
@@ -2389,6 +2396,7 @@ elements.detail.addEventListener('cancel', (event) => {
 });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
+  setDetail(null);
   clearDetailSectionTransition();
   releaseDetailAvatar();
   roleSize.disconnect();
@@ -2398,9 +2406,6 @@ elements.detail.addEventListener('close', () => {
   if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
 });
 
-function sectionsFor() {
-  return ['general', 'cron'];
-}
 function selectSection(section, focus = false) {
   if (detail?.kind !== 'settings' || detail.section === section) return;
   detail.section = section;
@@ -2592,9 +2597,9 @@ function generalContent(bot) {
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
   if (!bot.soul) rows.append(settingsRow('Role', 'None'));
-  const schedules = scheduleCache.get(bot.id);
-  const scheduleCount = schedules?.items ? String(schedules.items.length || 'None') : '';
-  rows.append(settingsRow('Recurring requests', scheduleCount, () => selectSection('cron', true)));
+  const requests = settingsRow('Recurring requests', '', () => selectSection('recurring', true));
+  requests.querySelector('.settings-row-value').append(recurringRequests.count);
+  rows.append(requests);
   const settings = document.createElement('a');
   settings.className = 'settings-row';
   settings.href = '/settings/' + encodeURIComponent(bot.id);
@@ -2621,140 +2626,9 @@ function generalContent(bot) {
   role.append(heading, soul, toggle);
   return [hero, role, rows];
 }
-const scheduleCache = new Map();
-const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Etc/UTC';
-async function loadSchedules(botId) {
-  scheduleCache.set(botId, { loading: true });
-  let entry;
-  try {
-    const data = await api(botQuery('schedules', botId));
-    entry = { items: data.automations.filter((item) => item.status === 'active') };
-  } catch {
-    entry = { error: true };
-  }
-  scheduleCache.set(botId, entry);
-  if (detail?.kind === 'settings' && view?.id === botId) renderDetail();
-}
-function scheduleWhen(item) {
-  if (item.kind === 'reminder') return `Once, ${fullTime.format(item.fireAt * 1000)}`;
-  if (item.kind === 'trigger') return `When ${item.source} sends an event`;
-  const [minute, hour, day, month, weekday] = item.cron.split(/\s+/);
-  const plain = /^\d+$/;
-  if (!plain.test(minute) || !plain.test(hour) || day !== '*' || month !== '*') return item.cron;
-  const time = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
-  if (weekday === '*') return `Every day at ${time}`;
-  if (weekday === '1-5') return `Weekdays at ${time}`;
-  if (/^[0-7]$/.test(weekday)) return `Every ${weekdays[Number(weekday) % 7]} at ${time}`;
-  return item.cron;
-}
-function scheduleRow(bot, item) {
-  const row = node('div', 'cron-row');
-  const when = node('p', 'cron-when');
-  when.append(node('span', null, scheduleWhen(item)));
-  if (item.timezone && item.timezone !== browserZone) when.append(node('span', 'cron-zone', item.timezone));
-  const text = node('div', 'cron-text');
-  text.append(when, node('p', 'cron-request', item.request));
-  row.append(text);
-  if (item.configId) {
-    text.append(node('p', 'cron-note', 'Set in this Bot’s configuration'));
-    return row;
-  }
-  const remove = button('Remove', 'text-button cron-remove', async () => {
-    remove.disabled = true;
-    try {
-      await fetch(`/api/schedules?${new URLSearchParams({ bot: bot.id, id: item.id })}`, {
-        method: 'DELETE', credentials: 'same-origin', headers: { 'X-Flock-Action': '1' },
-      }).then((response) => { if (!response.ok) throw new Error(); });
-      await loadSchedules(bot.id);
-    } catch {
-      remove.disabled = false;
-      row.append(node('p', 'cron-error', 'Couldn’t remove this request.'));
-    }
-  });
-  remove.setAttribute('aria-label', `Remove “${item.request}”`);
-  row.append(remove);
-  return row;
-}
-function scheduleForm(bot) {
-  const form = node('form', 'settings-card cron-form');
-  form.append(node('h3', 'settings-card-label', 'Add a recurring request'));
-  const request = node('textarea', 'cron-request-input');
-  request.name = 'request';
-  request.required = true;
-  request.rows = 2;
-  request.maxLength = 8000;
-  request.placeholder = 'For example: Summarize what changed since yesterday.';
-  request.setAttribute('aria-label', 'Request');
-  const repeat = node('select');
-  repeat.name = 'repeat';
-  repeat.setAttribute('aria-label', 'Repeat');
-  for (const [value, label] of [['daily', 'Every day'], ['weekdays', 'Weekdays'], ['weekly', 'Every week on']]) {
-    const option = node('option', null, label);
-    option.value = value;
-    repeat.append(option);
-  }
-  const weekday = node('select');
-  weekday.name = 'weekday';
-  weekday.setAttribute('aria-label', 'Day');
-  weekdays.forEach((name, index) => {
-    const option = node('option', null, name);
-    option.value = String(index);
-    weekday.append(option);
-  });
-  weekday.value = '1';
-  weekday.hidden = true;
-  repeat.addEventListener('change', () => { weekday.hidden = repeat.value !== 'weekly'; });
-  const time = node('input');
-  Object.assign(time, { type: 'time', name: 'time', value: '09:00', required: true });
-  time.setAttribute('aria-label', 'Time');
-  const zone = node('span', 'cron-zone', browserZone);
-  const add = button('Add', 'dialog-button primary');
-  add.type = 'submit';
-  const when = node('div', 'cron-form-when');
-  when.append(repeat, weekday, time, zone, add);
-  const error = node('p', 'cron-error');
-  error.hidden = true;
-  form.append(request, when, error);
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const [hour, minute] = time.value.split(':').map(Number);
-    const days = { daily: '*', weekdays: '1-5', weekly: weekday.value }[repeat.value];
-    add.disabled = true;
-    error.hidden = true;
-    try {
-      await api('schedules', { botId: bot.id, kind: 'schedule', request: request.value.trim(),
-        cron: `${minute} ${hour} * * ${days}`, timezone: browserZone });
-      form.reset();
-      await loadSchedules(bot.id);
-    } catch {
-      add.disabled = false;
-      error.textContent = 'Couldn’t add this request. Check that this Bot has a project to work in.';
-      error.hidden = false;
-    }
-  });
-  return form;
-}
-function cronContent(bot) {
-  const schedules = scheduleCache.get(bot.id);
-  const list = node('div', 'settings-card cron-list');
-  if (!schedules || schedules.loading) list.append(node('p', 'cron-empty', 'Loading…'));
-  else if (schedules.error) list.append(node('p', 'cron-empty', 'Couldn’t load recurring requests.'));
-  else {
-    for (const item of schedules.items) list.append(scheduleRow(bot, item));
-    for (const item of bot.cron.filter((entry) => !entry.active)) {
-      const row = node('div', 'cron-row');
-      row.append(node('p', 'cron-when', item.schedule), node('p', 'cron-request', item.request),
-        node('p', 'cron-error', 'This request from the Bot’s configuration isn’t scheduled. Check its time and time zone.'));
-      list.append(row);
-    }
-    if (!list.childElementCount) list.append(node('p', 'cron-empty', 'Nothing repeats yet. Add a request below, or ask the Bot in the conversation.'));
-  }
-  return [list, scheduleForm(bot)];
-}
 function settingsContent(bot, section = 'general') {
   elements['detail-title'].textContent = settingsSections[section][0];
-  if (section === 'cron') return cronContent(bot);
+  if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
   return generalContent(bot);
 }
 function waitForm(label, fields, submit, id) {
@@ -2880,12 +2754,9 @@ function renderDetail() {
   if (!detail || !view) return;
   if (detail.kind === 'settings') {
     const bot = view.data.bot;
-    const sections = sectionsFor();
-    if (!scheduleCache.has(bot.id)) void loadSchedules(bot.id);
-    if (!sections.includes(detail.section)) detail.section = 'general';
     labelDetail(`${bot.name} settings`);
-    renderDetailNav(sections, detail.section);
-    if (changed('detail', detail, bot, scheduleCache.get(bot.id))) replaceDetail(() => settingsContent(bot, detail.section));
+    renderDetailNav(settingsTabs, detail.section);
+    if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
     return;
   }
   labelDetail(null);
@@ -3200,7 +3071,7 @@ const findPanel = byId('conversation-find');
 const conversationFind = mountConversationFind({
   toggle: byId('find-conversation'),
   panel: findPanel,
-  readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, signal),
+  readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, { signal }),
   describeAuthor: (context, event) => {
     const side = messageSide(event);
     return side === 'user' ? 'You' : side === 'external' ? 'Other sender' : side === 'system' ? 'System' : context.data.bot.name;
@@ -3349,7 +3220,6 @@ elements.detail.addEventListener('click', (event) => {
     closeDetail();
   }
 });
-elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open || !settingsReturnFocus) return;
   if (narrow.matches) openNavigation(true, false);

@@ -673,12 +673,8 @@ void exercise(const std::filesystem::path& path) {
           "release Bot question or available answers were incorrect");
     check(triagePage["waits"].size() == 1 && triagePage["waits"][0]["id"] == triage,"T3 wait belongs to wrong Bot");
     check(releasePage["bot"]["soul"] == "利用者向けのリリースノートをまとめる。" &&
-          triagePage["bot"]["soul"] == "報告された問題を整理する。" && triagePage["bot"]["cron"].empty(),
+          triagePage["bot"]["soul"] == "報告された問題を整理する。" && !releasePage["bot"].contains("cron"),
           "selected Bots showed incorrect settings");
-    const auto& schedule = releasePage.at("bot").at("cron").at(0);
-    check(schedule == Json{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
-          {"request","前日の変更を確認する"},{"active",false}},
-          "Release's scheduled request was incorrect");
     check(releasePage["sessionTasks"][0]["sessions"][0]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
           triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage" &&
           triagePage["sessionTasks"][0]["sessions"][0]["link"] == "http://localhost:3773/linked%20env/thread-triage",
@@ -890,35 +886,31 @@ void recurringRequestStatus(const std::filesystem::path& path) {
         {"edited","0 8 * * *","Etc/UTC",web.intake("release","Check staging")},
     },now);
     check(errors.size() == 1 && errors.front().id == "invalid","fixture accepted an unsupported weekday");
-    const auto rows = store.automations(owner,"release").at("automations");
-    const auto daily = std::ranges::find_if(rows,[](const Json& row) { return row.at("configId") == "daily"; });
-    check(daily != rows.end(),"fixture did not activate the configured schedule");
-    for (int i = 0; i < 20; ++i) {
-        store.createAutomation(owner,web.intake("release","Check staging"),{
+    for (int i = 0; i < 40; ++i) {
+        const auto reminder = store.createAutomation(owner,web.intake("release","Check staging"),{
             {"kind","reminder"},{"timezone","Etc/UTC"},{"fireAt",now + 60},{"request","Check staging"},
         },now);
+        if (i >= 20) store.cancelAutomation(owner,"release",reminder.at("id").get<Id>());
     }
 
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
-    const auto requests = [&] { return browser.get("/api/view?bot=release").at("bot").at("cron"); };
-    const auto configured = requests();
-    check(configured.at(0).at("active") == true,"newer automations hid an active configured schedule");
-    check(configured.at(1).at("active") == false && configured.at(1).at("schedule") == "0 9 * * Mon" &&
-          configured.at(1).at("timezone") == "Asia/Tokyo","invalid cron lost the original configuration or appeared active");
-    check(configured.at(2).at("active") == false,"an unapplied edit appeared active");
+    const auto pathForActive = std::string("/api/schedules?bot=release&active=1");
+    const auto first = browser.get(pathForActive);
+    check(first.at("canManage") == true && first.at("unscheduledRequests") == Json::array({"Invalid weekday","Check staging"}),
+          "missing or incorrect configured request warnings");
+    const auto& recent = first.at("automations");
+    check(recent.size() == 20 && std::ranges::all_of(recent,[](const Json& row) { return row.at("status") == "active"; }),
+          "canceled entries consumed the active page");
+    const auto second = browser.get(pathForActive + "&before=" + std::to_string(first.at("before").get<Id>()));
+    const auto& older = second.at("automations");
+    check(older.size() == 2 && older.at(1).at("configId") == "daily" && second.at("before") == 0,
+          "newer entries hid an active configured request");
 
-    Browser stream(*server);
-    unsigned updates = 0;
-    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
-        check(change.at("bot") == "release","schedule update invalidated a different Bot");
-        if (updates++ == 0) {
-            Store(path).cancelAutomation(owner,"release",daily->at("id").get<Id>());
-            return true;
-        }
-        check(requests().at(0).at("active") == false,"canceled schedule still appeared active");
-        return false;
-    });
+    Store(path).cancelAutomation(owner,"release",older.at(1).at("id").get<Id>());
+    check(browser.get(pathForActive).at("unscheduledRequests") ==
+          Json::array({"前日の変更を確認する","Invalid weekday","Check staging"}),
+          "canceled configured request still appeared scheduled");
 }
 
 void eventStream(const std::filesystem::path& path) {

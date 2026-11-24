@@ -49,8 +49,6 @@ In the same directory, use `SOUL.md` for the Bot's role and decision criteria an
 
 Optional `conversationEnvironments` entries map names used in requests such as “Run the measurement on the cloud Mac” to T3 environments with access to the same `projectId`. Each target environment needs its own T3 connection and execution permissions. Use a configured name or canonical ID. If an alias matches a canonical ID, that spelling selects the canonical ID. The Bot asks in the conversation when the destination is unclear.
 
-Recurring requests can also be added and removed under **Recurring requests** in the Bot's settings in the Web UI, or by asking the Bot in its conversation. Entries in `cron` show there but are changed only in `config.json`.
-
 Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange.
 
 Optional `modelCallLimit` sets the initial allowance per request (20 by default). Each step of the Bot's conversation turn, the tasks it starts, and work or consultations passed to other Bots share that allowance. Failed attempts and retries count. Use **Approve one more model call** on the paused message or task to continue. See the [CLI guide](app/README.md#model-call-allowance) for details.
@@ -75,6 +73,8 @@ See [Ask a Bot from a T3 Session](web/README.md#ask-a-bot-from-a-t3-session) for
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.
 
 To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock message release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
+
+In a Bot’s settings, open **Recurring requests** to add or remove scheduled requests. You can also ask the Bot in its conversation. Requests defined in `config.json` appear in the list and are managed in that file.
 
 ```sh
 build/app/flock --help
