@@ -404,8 +404,13 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             transaction.commit();
             return gate == ApprovalGate::waiting ? waiting : advance;
         }
+        Json effect{{"kind","message_session"}};
+        if (savedTaskTarget) {
+            effect["taskId"] = savedTaskId;
+            effect["actionId"] = savedActionId;
+        }
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
-             "AND result IS NULL AND effect IS NULL",{Json{{"kind","message_session"}},id,step});
+             "AND result IS NULL AND effect IS NULL",{effect,id,step});
         if (!sqlite3_changes(db)) return stop;
         const auto read = Resource::sessionRead(target.environmentId,target.threadId);
         if (!message.channelScope.empty() || !Policy(*this).allows(message.bot,read)) title.clear();

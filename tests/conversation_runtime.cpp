@@ -13,7 +13,9 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <string_view>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 
@@ -121,6 +123,8 @@ struct Script : Model {
 };
 
 struct SimulatedT3 : T3 {
+    std::mutex stateMutex;
+    std::function<void(const Command&)> beforeSend;
     std::vector<Command> sent, reconciled;
     std::vector<std::pair<std::string,std::string>> interrupted;
     std::vector<RunRef> interruptedRuns, observedRuns;
@@ -137,16 +141,19 @@ struct SimulatedT3 : T3 {
     InterruptOutcome interruptOutcome = InterruptOutcome::Requested;
 
     std::vector<T3Project> projects(std::string_view environment) override {
+        std::lock_guard lock(stateMutex);
         const auto found = projectsByEnvironment.find(std::string(environment));
         return found == projectsByEnvironment.end() ? std::vector<T3Project>{{"project","Fixture Project",{}}} : found->second;
     }
     T3EnvironmentLinks linkedEnvironments(std::string_view gateway) override {
+        std::lock_guard lock(stateMutex);
         const auto found = linksByGateway.find(std::string(gateway));
         return found == linksByGateway.end() ? T3EnvironmentLinks{} : found->second;
     }
 
     std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
         std::string_view environment, std::string_view project, Id, SessionReadDeadline) override {
+        std::lock_guard lock(stateMutex);
         std::vector<std::string> threads;
         for (const auto& [target,metadata] : sessions)
             if (target.first == environment && (project.empty() || project == metadata.projectId))
@@ -154,13 +161,16 @@ struct SimulatedT3 : T3 {
         return {std::move(threads),std::nullopt};
     }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
+        std::lock_guard lock(stateMutex);
         const auto item = sessions.find({target.environmentId,target.threadId});
         return item == sessions.end() ? std::nullopt : std::optional(item->second);
     }
     std::string authGeneration(const std::string&,const Json&) override {
+        std::lock_guard lock(stateMutex);
         return login;
     }
     std::string sessionMessageWake(const SessionTarget& target, const RunRef& run) override {
+        std::lock_guard lock(stateMutex);
         sessionWakeCalls.emplace_back(target,run);
         const auto observation = observations.find(run.runId);
         if (waitForSessionRuns && observation != observations.end() &&
@@ -168,46 +178,84 @@ struct SimulatedT3 : T3 {
         return "finished";
     }
     Delivery send(const Command& command) override {
-        sent.push_back(command);
-        check(!command.actionId.empty(),"T3 received work without a request ID");
-        check(command.authGeneration == login,"a dispatched instruction lacks its authentication generation");
-        const auto suffix = std::to_string(sent.size());
-        auto run = RunRef{command.tool == "delegate" ? "session-" + suffix : command.target.threadId,
-                          "run-" + suffix,"https://example.test/session-" + suffix};
-        run.gatewayEnvironmentId = command.gatewayEnvironmentId;
-        check(deliveries.emplace(command.actionId,run).second,"the same work was sent twice");
-        auto observation = Observation{};
-        const bool queued = command.tool == "message_session" && std::exchange(queueNextMessage,false);
-        if (queued) observation.status = "queued";
-        observations.emplace(run.runId,std::move(observation));
-        const bool lostReceipt = std::exchange(loseNextSend,false) || command.environmentId == loseSendForEnvironment;
-        if (command.environmentId == loseSendForEnvironment) loseSendForEnvironment.clear();
-        if (lostReceipt) return {};
-        const auto delivery = command.tool != "message_session" ? "" : queued ? "queued" : "started";
-        return {Delivery::Kind::Accepted,run,{},false,delivery};
+        std::function<void(const Command&)> gate;
+        Delivery result;
+        {
+            std::lock_guard lock(stateMutex);
+            sent.push_back(command);
+            check(!command.actionId.empty(),"T3 received work without a request ID");
+            check(command.authGeneration == login,"a dispatched instruction lacks its authentication generation");
+            const auto suffix = std::to_string(sent.size());
+            auto run = RunRef{command.tool == "delegate" ? "session-" + suffix : command.target.threadId,
+                              "run-" + suffix,"https://example.test/session-" + suffix};
+            run.gatewayEnvironmentId = command.gatewayEnvironmentId;
+            check(deliveries.emplace(command.actionId,run).second,"the same work was sent twice");
+            auto observation = Observation{};
+            const bool queued = command.tool == "message_session" && std::exchange(queueNextMessage,false);
+            if (queued) observation.status = "queued";
+            observations.emplace(run.runId,std::move(observation));
+            const bool lostReceipt = std::exchange(loseNextSend,false) || command.environmentId == loseSendForEnvironment;
+            if (command.environmentId == loseSendForEnvironment) loseSendForEnvironment.clear();
+            if (lostReceipt) return {};
+            const auto delivery = command.tool != "message_session" ? "" : queued ? "queued" : "started";
+            result = {Delivery::Kind::Accepted,run,{},false,delivery};
+            gate = beforeSend;
+        }
+        if (gate) gate(command);
+        return result;
     }
     Delivery reconcile(const Command& command) override {
+        std::lock_guard lock(stateMutex);
         reconciled.push_back(command);
         if (!deliveryVisible || !deliveries.contains(command.actionId)) return {};
         return {Delivery::Kind::Accepted,deliveries.at(command.actionId),{}};
     }
     Observation observe(const std::string&,const Json&,const RunRef& run) override {
+        std::lock_guard lock(stateMutex);
         observedRuns.push_back(run);
         return observations.at(run.runId);
     }
     InterruptOutcome interrupt(const std::string& environment,const Json&,const RunRef& run) override {
+        std::lock_guard lock(stateMutex);
         interrupted.emplace_back(environment,run.runId);
         interruptedRuns.push_back(run);
         if (std::exchange(loseNextStop,false)) throw std::runtime_error("simulated interrupted acknowledgement");
         return interruptOutcome;
     }
-    void finish(std::string_view run, std::string text, bool settled = true) {
+    void finish(std::string_view run, std::string text, bool settled = true,
+                std::string status = "completed", std::string checkedCommit = {}) {
+        std::lock_guard lock(stateMutex);
         auto& report = observations.at(std::string(run));
         report.kind = settled ? Observation::Kind::Finished : Observation::Kind::Settling;
-        report.status = "completed";
+        report.status = std::move(status);
         report.report = std::move(text);
         report.resultRunId = run;
         report.itemId = "report-" + std::string(run);
+        report.checkedCommit = std::move(checkedCommit);
+    }
+    RunRef delivered(std::string_view action) {
+        std::lock_guard lock(stateMutex);
+        return deliveries.at(std::string(action));
+    }
+    bool observedVia(std::string_view run, std::string_view gateway) {
+        std::lock_guard lock(stateMutex);
+        return std::ranges::any_of(observedRuns,[&](const RunRef& item) {
+            return item.runId == run && item.gatewayEnvironmentId == gateway;
+        });
+    }
+    bool wokenVia(const SessionTarget& target, std::string_view run) {
+        std::lock_guard lock(stateMutex);
+        return std::ranges::any_of(sessionWakeCalls,[&](const auto& call) {
+            return call.first.environmentId == target.environmentId &&
+                   call.first.gatewayEnvironmentId == target.gatewayEnvironmentId &&
+                   call.second.runId == run;
+        });
+    }
+    bool interruptedOnlyVia(std::string_view environment, std::string_view run, std::string_view gateway) {
+        std::lock_guard lock(stateMutex);
+        return interrupted.size() == 1 && interrupted.front().first == environment &&
+               interruptedRuns.size() == 1 && interruptedRuns.front().runId == run &&
+               interruptedRuns.front().gatewayEnvironmentId == gateway;
     }
 };
 
@@ -292,6 +340,14 @@ CREATE TABLE session_message_waits(
         for (int i = 0; i < 16; ++i) {
             if (reached()) return;
             tick();
+        }
+        if (!reached()) throw std::runtime_error(why);
+    }
+    void advanceConcurrentlyUntil(const std::function<bool()>& reached, const std::string& why) {
+        for (int i = 0; i < 256; ++i) {
+            if (reached()) return;
+            runtime->tickConcurrent();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         if (!reached()) throw std::runtime_error(why);
     }
@@ -2125,6 +2181,131 @@ Id oneLinkedDestinationTask(Fixture& f, std::string_view key, std::string_view r
     return f.lastTurn().front().at("result").at("taskId").get<Id>();
 }
 
+void lateSavedDestinationReceiptKeepsTaskAndSlot() {
+    Fixture f;
+    f.requireT3Connection = true;
+    f.restart();
+    f.t3.waitForSessionRuns = true;
+    constexpr auto parentRequest = "Start linked work before a delayed instruction";
+    const Id taskId = oneLinkedDestinationTask(f,"late-receipt-parent",parentRequest);
+    f.advanceUntil([&] {
+        const auto task = f.task(taskId);
+        return task.contains("runResults") && destinationRunFor(task,"cloud").value("status","") == "running";
+    },"the original linked Run did not start");
+    const auto originalRun = destinationRunFor(f.task(taskId),"cloud").at("runId").get<std::string>();
+
+    constexpr auto queuedRequest = "Queue a sibling behind the linked task";
+    const Id queuedId = oneLinkedDestinationTask(f,"late-receipt-queued",queuedRequest);
+    f.tick();
+
+    std::promise<Command> enteredSend;
+    auto enteredSendFuture = enteredSend.get_future();
+    std::promise<void> releaseSend;
+    auto releaseSendFuture = releaseSend.get_future().share();
+    f.t3.beforeSend = [&](const Command& command) {
+        if (command.tool == "message_session") {
+            enteredSend.set_value(command);
+            releaseSendFuture.wait();
+        }
+    };
+    constexpr auto instruction = "Add linked follow-up while the original finishes";
+    f.script(instruction,{sendCloudFollowup(taskId)});
+    const auto receipt = f.enqueue("late-linked-followup",instruction);
+    f.runtime->tickConcurrent();
+    if (enteredSendFuture.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        releaseSend.set_value();
+        throw std::runtime_error("the linked follow-up did not reach the controlled T3 send");
+    }
+    const auto command = enteredSendFuture.get();
+    const auto followupRun = f.t3.delivered(command.actionId);
+    constexpr auto originalReport = "Original linked Run report with its own commit";
+    f.t3.finish(originalRun,originalReport,true,"completed","old-commit");
+
+    bool originalSettledBeforeReceipt = false;
+    try {
+        for (int i = 0; i < 256 && !originalSettledBeforeReceipt; ++i) {
+            f.runtime->tickConcurrent();
+            const auto current = f.task(taskId);
+            const auto run = destinationRunFor(current,"cloud");
+            const auto report = lastTaskEvent(*f.store,taskId,"report");
+            originalSettledBeforeReceipt = current.at("state") == "running" &&
+                run.value("status","") == "confirmation_pending" && !report.is_null() &&
+                report.at("data").at("run").at("runId") == originalRun;
+            if (!originalSettledBeforeReceipt) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    } catch (...) {
+        releaseSend.set_value();
+        throw;
+    }
+    const auto beforeReceipt = f.task(taskId);
+    const auto queuedBeforeReceipt = f.task(queuedId);
+    const auto originalHistory = lastTaskEvent(*f.store,taskId,"report");
+    releaseSend.set_value();
+
+    f.advanceConcurrentlyUntil([&] {
+        const auto current = f.task(taskId);
+        const auto run = destinationRunFor(current,"cloud");
+        return !f.response(receipt).is_null() && current.at("state") == "running" &&
+            run.value("status","") == "running" && run.value("runId","") == followupRun.runId &&
+            f.t3.observedVia(followupRun.runId,"desktop") &&
+            f.t3.wokenVia({"cloud",followupRun.threadId,"desktop"},followupRun.runId);
+    },"the accepted follow-up was not restored, observed, and woken through its linked gateway");
+    const auto visible = inspectTask(f,taskId,"late-followup-visible");
+    const auto currentRun = destinationRunFor(visible,"cloud");
+    check(originalSettledBeforeReceipt && beforeReceipt.at("state") == "running" &&
+          destinationRunFor(beforeReceipt,"cloud").at("status") == "confirmation_pending" &&
+          queuedBeforeReceipt.at("state") == "queued" && f.task(queuedId).at("state") == "queued",
+          "a delayed follow-up receipt released the task or its queued project sibling");
+    check(visible.at("state") == "running" && currentRun.at("status") == "running" &&
+          currentRun.at("runId") == followupRun.runId &&
+          !currentRun.contains("commit") && !currentRun.contains("report"),
+          "the current destination did not show the follow-up Run without the original Run's result");
+    check(originalHistory.at("data").at("run").at("runId") == originalRun &&
+          originalHistory.at("data").at("commit") == "old-commit" &&
+          originalHistory.at("data").at("report") == originalReport,
+          "the original Run report and commit were not retained in task history");
+
+    f.store->policy().setMode(localOwner,"supervised");
+    constexpr auto stopRequest = "Stop only the delayed linked follow-up";
+    f.script(stopRequest,{[taskId](const ModelInput& input) {
+        const auto task = listed(input,taskId);
+        return Decision{"cancel_task",{{"taskId",taskId},{"generation",task.at("generation")},
+            {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}},
+            "Stop the accepted linked follow-up"};
+    }});
+    f.receive("stop-late-linked-followup",stopRequest);
+    const auto approvals = f.store->inbox(localOwner);
+    check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" &&
+          f.t3.interrupted.empty(),"the late follow-up stop bypassed the saved T3 policy");
+    f.store->decideInbox(localOwner,{approvals.front().at("botId"),InboxKind::policy_approval,
+        approvals.front().at("itemId"),approvals.front().at("waitId"),approvals.front().at("taskId"),
+        approvals.front().at("targetRevision"),approvals.front().at("targetGeneration")},"allow_once");
+    f.runtime->runConversations();
+    f.advanceConcurrentlyUntil([&] {
+        return f.t3.interruptedOnlyVia("cloud",followupRun.runId,"desktop");
+    },"the approved stop did not interrupt the live follow-up through its linked gateway");
+    const auto afterStopRequest = f.task(taskId);
+    const auto queuedAfterStopRequest = f.task(queuedId);
+    check(f.t3.interruptedOnlyVia("cloud",followupRun.runId,"desktop") &&
+          afterStopRequest.at("state") == "running" && queuedAfterStopRequest.at("state") == "queued",
+          "the target-specific stop missed the live follow-up or released its queued sibling early");
+
+    f.t3.finish(followupRun.runId,"The linked follow-up was stopped",true,"cancelled");
+    f.now += 5;
+    f.advanceConcurrentlyUntil([&] {
+        const auto current = f.task(taskId);
+        return current.contains("runResults") &&
+            destinationRunFor(current,"cloud").value("status","") == "cancelled";
+    },"the stopped follow-up did not settle in its destination projection");
+    f.advanceConcurrentlyUntil([&] { return f.task(queuedId).at("state") == "running"; },
+                               "the queued sibling did not acquire the project slot after the stopped follow-up settled");
+    const auto settledParent = f.task(taskId);
+    const auto queuedSibling = f.task(queuedId);
+    if (queuedSibling.at("state") != "running")
+        throw std::runtime_error("the queued sibling did not acquire the project slot after the stopped follow-up settled: parent=" +
+            settledParent.dump() + " sibling=" + queuedSibling.dump());
+}
+
 Id otherAndCloudDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
     T3Connections(*f.store).connect("desktop",localOwner.id,48123);
     auto route = f.routing(std::string(request));
@@ -3060,6 +3241,11 @@ int main(int argc, char** argv) {
             std::cout << "Saved destination follow-up settlement passed with simulated T3\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "followup-late-receipt") {
+            lateSavedDestinationReceiptKeepsTaskAndSlot();
+            std::cout << "Late saved destination follow-up receipt passed with simulated T3\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "followup-stop") {
             savedDestinationFollowupStopTargetsOnlyItsRun();
             std::cout << "Saved destination follow-up stop passed with simulated T3\n";
@@ -3132,6 +3318,7 @@ int main(int argc, char** argv) {
         destinationFollowupValidatesAndRedactsSourceReport();
         savedDestinationFollowupsRemainTaskWork();
         savedDestinationFollowupStopTargetsOnlyItsRun();
+        lateSavedDestinationReceiptKeepsTaskAndSlot();
         recoveredDestinationStopHonorsPolicy();
         startedRunOutboxApprovalIsStale();
         queuedDestinationStopsReleaseSlots();

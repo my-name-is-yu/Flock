@@ -59,6 +59,7 @@ ORDER BY w.rowid LIMIT 1)SQL",
     run["gatewayEnvironmentId"] = gateway;
     if (!link.empty()) run["link"] = link;
     run["status"] = delivery == "queued" ? "queued" : "running";
+    for (const auto* key : {"commit","report","detail","evidenceStatus","sessionCreatedAt"}) run.erase(key);
     run.erase("retryAt");
     run.erase("stopRetryAt");
     run.erase("evidenceAttempts");
@@ -91,8 +92,32 @@ bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observati
         clearWait(task,"run_finished");
         task["state"] = "running";
     }
-    journal(task.at("id"),"report",data);
+    auto priorReport = query("SELECT 1 FROM journal WHERE task_id=? AND kind='report' "
+                             "AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run.runId')=? "
+                             "AND json_extract(data,'$.run.threadId')=? AND json_extract(data,'$.revisionId') IS ? LIMIT 1",
+        {task.at("id"),run.at("environmentId"),ref.runId,ref.threadId,
+         task.value("currentRevision",Json(nullptr))});
+    if (!priorReport.next()) journal(task.at("id"),"report",data);
     if (advanceDestinationSessionMessageRun(task,run)) return false;
+    auto pendingSends = query(R"SQL(
+SELECT json_extract(effect,'$.actionId') FROM conversation_steps
+WHERE result IS NULL AND json_extract(effect,'$.kind')='message_session'
+  AND json_extract(effect,'$.taskId')=?
+)SQL",{task.at("id")});
+    bool waitingForSend = false;
+    while (pendingSends.next()) {
+        waitingForSend = true;
+        const auto actionId = pendingSends.string(0);
+        const auto destination = std::ranges::find_if(task.at("runResults"),[&](const Json& candidate) {
+            return field(candidate,"actionId") == actionId;
+        });
+        if (destination == task.at("runResults").end()) continue;
+        if (!destinationRunOutstanding(*destination)) {
+            (*destination)["status"] = "confirmation_pending";
+            (*destination)["retryAt"] = policyClock() + 5;
+        }
+    }
+    if (waitingForSend) return false;
     const auto& results = task.at("runResults");
     if (std::ranges::any_of(results,destinationRunOutstanding)) return false;
     if (task.at("state") == "cancelling") return true;
