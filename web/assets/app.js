@@ -5,6 +5,7 @@ import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { createBotRoleCard } from '/bot-role.js';
+import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
@@ -2351,6 +2352,7 @@ const settingsTabs = Object.keys(settingsSections);
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
 let detailRole = null;
+let detailWorkspace = null;
 let detailOrigin = null;
 let recurringRequests = null;
 
@@ -2370,6 +2372,7 @@ function clearDetailSectionTransition() {
 }
 function setDetail(selection) {
   releaseDetailRole();
+  detailWorkspace = null;
   recurringRequests?.close();
   recurringRequests = selection?.kind === 'settings' ? createRecurringRequests(view.id, api) : null;
   detail = selection;
@@ -2646,7 +2649,16 @@ function generalContent(bot) {
     remove.setAttribute('aria-haspopup', 'dialog');
     rows.append(remove);
   }
-  return [hero, roleCard(bot), rows];
+  return [hero, workspaceCard(bot), roleCard(bot), rows];
+}
+function workspaceCard(bot) {
+  detailWorkspace ??= createBotWorkspaceCard(async (workspace) => {
+    const saved = await api('bots/profile', { botId: bot.id, ...workspace });
+    if (view?.id === bot.id) void view.refresh();
+    return saved;
+  }, async () => (await api('settings')).t3?.environments ?? [],
+  async () => (await api(botQuery('settings/models', bot.id))).models);
+  return detailWorkspace.element;
 }
 function roleCard(bot) {
   detailRole ??= createBotRoleCard(async (soul, originalSoul) => {
@@ -2783,6 +2795,7 @@ function replaceDetail(render) {
   releaseDetailAvatar();
   const content = render();
   if (detailRole && !content.includes(detailRole.element)) releaseDetailRole();
+  if (detailWorkspace && !content.includes(detailWorkspace.element)) detailWorkspace = null;
   placeRows(elements['detail-body'], content);
   if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
 }
@@ -2792,9 +2805,11 @@ function renderDetail() {
     const bot = view.data.bot;
     labelDetail(`${bot.name} settings`);
     renderDetailNav(settingsTabs, detail.section);
-    const { soul, ...settings } = bot;
+    const { soul, environmentId, projectId, model, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
-    detailRole?.update(soul, bot.canDelete === true);
+    const canEdit = bot.canDelete === true;
+    detailRole?.update(soul, canEdit);
+    detailWorkspace?.update({ environmentId, projectId, model }, canEdit);
     return;
   }
   labelDetail(null);

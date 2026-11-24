@@ -114,6 +114,14 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
             throw InputError("invalid_profile_update");
         return {{{"soul",validatedBotSoul(body.at("soul"))},{"originalSoul",*original}},std::nullopt};
     }
+    if (const auto fields = creating ? 0 : botRunSettingCount(body); fields) {
+        if (body.size() != fields + 1) throw InputError("invalid_profile_update");
+        Json settings = Json::object();
+        for (const auto* key : botRunSettingFields) {
+            if (const auto value = body.find(key); value != body.end()) settings[key] = validatedBotRunSetting(key,*value);
+        }
+        return {std::move(settings),std::nullopt};
+    }
     Json profile = {{"name",validatedBotName(body)}};
     if (creating && body.contains("role")) {
         if (!body["role"].is_string() || !validBotRole(body["role"].get_ref<const std::string&>()))

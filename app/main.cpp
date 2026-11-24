@@ -272,9 +272,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
     options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store,*model,*t3,soul,options);
-    bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
+    const auto reportSchedule = [](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
-    });
+    };
+    bots.syncSchedules(store,options.clock(),reportSchedule);
     Json exportedBots;
     // Web callbacks and the filesystem refresh both update the same on-disk skills.
     std::mutex skillMutex;
@@ -304,7 +305,9 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             return created;
         },
         [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
-            auto updated = bots.updateProfile(botId,profile,image);
+            auto updated = botRunSettingCount(profile)
+                ? bots.updateRunSettings(store,botId,profile,options.clock(),reportSchedule)
+                : bots.updateProfile(botId,profile,image);
             syncSkills();
             return updated;
         },
@@ -319,7 +322,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     connections.configureChannels(store,callbacks);
     callbacks.sessionT3 = t3.get();
     if (chatgptWeb) chatgptWeb->configure(callbacks);
-    else callbacks.modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
+    else {
+        callbacks.modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
+        callbacks.modelCatalog = [] { return Json::array({{{"slug","demo"},{"displayName","Demo"}}}); };
+    }
     callbacks.installationSettings = [&](const Person& actor) {
         auto availableConnections = connections.view();
         availableConnections.at("channels")["canManageHost"] = actor == localOwner;
