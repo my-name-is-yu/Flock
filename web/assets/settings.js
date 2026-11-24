@@ -1,7 +1,8 @@
 import { actionLabel, actionLabels } from '/action-labels.mjs';
 import {
-  actionButton, confirmSetting, emptyLabel, loadInstallation, postSettings, row, showInstallationUnavailable, statusBadge,
+  confirmSetting, loadInstallation, postSettings, showInstallationUnavailable, statusBadge,
 } from '/installation-settings.js';
+import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
 
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
@@ -55,8 +56,8 @@ async function load() {
   reflectMode(mode);
   $('rules').replaceChildren();
   if (!rules.length) row('rules', canManagePolicy
-    ? emptyLabel('No rules yet', 'Choose Allow for this Flock on an approval card or add a rule below.')
-    : emptyLabel('No rules yet', 'An installation administrator can add rules.'));
+    ? rowLabel('No rules yet', 'Choose Allow for this Flock on an approval card or add a rule below.')
+    : rowLabel('No rules yet', 'An installation administrator can add rules.'));
   for (const {kind, action, target} of rules) {
     const label = document.createElement('span');
     label.className = 'row-label';
@@ -79,19 +80,19 @@ async function load() {
   updatePolicyControls();
 }
 
-// One section shows at a time, chosen by the URL hash, like a settings window's sidebar.
-const sectionNames = { appearance: 'Appearance', permissions: 'Permissions', connections: 'Connections', access: 'Access', system: 'System' };
+const navigation = settingsNavigation();
 function showSection() {
-  const hash = location.hash.slice(1);
-  const section = Object.hasOwn(sectionNames, hash) ? hash : 'appearance';
+  const active = navigation.get(location.hash.slice(1)) ?? navigation.get('appearance');
+  const section = active.dataset.section;
   for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== section;
-  for (const link of document.querySelectorAll('[data-section]')) {
-    if (link.dataset.section === section) link.setAttribute('aria-current', 'page');
+  for (const link of navigation.values()) {
+    if (link === active) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
-  $('crumb').textContent = sectionNames[section];
+  $('crumb').textContent = active.textContent;
   $('settings-scope').textContent = section === 'appearance' ? 'Applies to this browser' : 'Applies to this Flock';
-  document.title = `${sectionNames[section]} · Flock settings`;
+  document.title = `${active.textContent} · Flock settings`;
+  if (section === 'bots') void loadBots();
 }
 addEventListener('hashchange', showSection);
 showSection();
@@ -122,6 +123,28 @@ function link(label, href, name) {
   anchor.href = href;
   return anchor;
 }
+async function loadBots() {
+  const list = $('bots');
+  try {
+    const response = await fetch('/api/bots');
+    if (!response.ok) throw new Error();
+    const bots = await response.json();
+    const rows = document.createDocumentFragment();
+    if (!bots.length) row(rows, rowLabel('No Bots yet', 'Create one from the + button in the conversation list.'));
+    for (const bot of bots) {
+      const item = row(rows, rowLabel(bot.name, bot.about || 'No role written yet. Choose Settings to describe what it does.'));
+      const actions = element('span', '', 'row-actions');
+      actions.append(link('Settings', `/?${new URLSearchParams({bot: bot.id, settings: '1'})}`, `Settings for ${bot.name}`),
+        link('Access', `/settings/${encodeURIComponent(bot.id)}`, `Access for ${bot.name}`));
+      item.append(actions);
+    }
+    list.replaceChildren(rows);
+  } catch {
+    list.replaceChildren();
+    row(list, rowLabel('Couldn’t load Bots', 'Reload the page to try again.'));
+  }
+}
+
 let modelPoll = 0;
 let modelRequest = 0;
 let watchingSignIn = false;
@@ -197,26 +220,26 @@ function renderModel(model) {
   watchingSignIn = !!pending;
   if (!model) return;
   if (model.demo) {
-    row('model', emptyLabel('Demo model', 'Bots use a local demo model on this Flock.'));
+    row('model', rowLabel('Demo model', 'Bots use a local demo model on this Flock.'));
     return;
   }
   if (pending) {
-    row('model', emptyLabel('Waiting for ChatGPT…', 'Finish signing in in the browser on the machine running Flock.'));
+    row('model', rowLabel('Waiting for ChatGPT…', 'Finish signing in in the browser on the machine running Flock.'));
     pollModel();
     return;
   }
-  if (model.signInError) row('model', emptyLabel('Sign-in didn’t finish', model.signInError)).classList.add('settings-row-error');
+  if (model.signInError) row('model', rowLabel('Sign-in didn’t finish', model.signInError)).classList.add('settings-row-error');
   if (model.unavailable) {
-    row('model', emptyLabel('ChatGPT', 'Flock couldn’t check the connection right now.'));
+    row('model', rowLabel('ChatGPT', 'Flock couldn’t check the connection right now.'));
   } else if (model.connected && !model.needsSignIn) {
-    const item = row('model', emptyLabel('Signed in', model.account || 'A ChatGPT account is linked to this Flock.'));
+    const item = row('model', rowLabel('Signed in', model.account || 'A ChatGPT account is linked to this Flock.'));
     modelAccountActions(item, model);
     if (!model.planUsage) {
-      const usage = row('model', emptyLabel('Plan usage unavailable', 'Allow plan usage so your Bots can use your ChatGPT plan.'));
+      const usage = row('model', rowLabel('Plan usage unavailable', 'Allow plan usage so your Bots can use your ChatGPT plan.'));
       if (model.canSignIn) actionButton(usage, 'Allow plan usage', (event) => void signIn(true, event.currentTarget), true);
     }
   } else {
-    const item = row('model', emptyLabel('ChatGPT sign-in needed', 'Sign in so your Bots can use your ChatGPT plan.'));
+    const item = row('model', rowLabel('ChatGPT sign-in needed', 'Sign in so your Bots can use your ChatGPT plan.'));
     if (model.canSignIn) actionButton(item, 'Sign in with ChatGPT', (event) => void signIn(false, event.currentTarget), true);
     if (model.canSwitch || (model.connected && model.canSignOut)) modelAccountActions(item, model);
   }
@@ -285,7 +308,7 @@ function renderConnections({t3, t3Setup: setup, canManagePolicy: editable, canDi
     const expiry = authorized && expiresAt
       ? `Authorization expires ${new Date(expiresAt * 1000).toLocaleDateString()}`
       : '';
-    const item = row('connections', emptyLabel(name, expiry));
+    const item = row('connections', rowLabel(name, expiry));
     const actions = document.createElement('div');
     actions.className = 'connection-actions';
     actions.append(statusBadge(authorized ? 'Authorized' : 'Sign-in needed', authorized ? 'checked' : ''));
@@ -295,16 +318,16 @@ function renderConnections({t3, t3Setup: setup, canManagePolicy: editable, canDi
     item.append(actions);
   }
   if (!t3 && !setup) {
-    if (editable) row('connections', emptyLabel('Not connected', 'T3 setup is unavailable in this Flock instance.'));
-    else row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
+    if (editable) row('connections', rowLabel('Not connected', 'T3 setup is unavailable in this Flock instance.'));
+    else row('connections', rowLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
   if (t3CleanupPending) {
-    const item = row('connections', emptyLabel('Provider registration remains', 'Retry removing the Flock registration from local coding agents.'));
+    const item = row('connections', rowLabel('Provider registration remains', 'Retry removing the Flock registration from local coding agents.'));
     disconnectButton(item, 'Retry cleanup', null);
   }
   if (setup?.running) {
     const authorization = setup.authorizationUrl;
-    const item = row('connections', emptyLabel(authorization ? 'Authorize Flock in T3' : 'Connecting to T3…',
+    const item = row('connections', rowLabel(authorization ? 'Authorize Flock in T3' : 'Connecting to T3…',
       authorization ? 'Approve read and operate access in T3. This page updates when you’re done.' : 'Starting T3 authorization.'));
     if (authorization) {
       const open = link('Open T3', authorization, 'Open T3 authorization');
@@ -314,7 +337,7 @@ function renderConnections({t3, t3Setup: setup, canManagePolicy: editable, canDi
       item.append(open);
     }
   } else if (setup?.error) {
-    row('connections', emptyLabel('Connection didn’t finish', setup.error)).classList.add('settings-row-error');
+    row('connections', rowLabel('Connection didn’t finish', setup.error)).classList.add('settings-row-error');
   }
 }
 

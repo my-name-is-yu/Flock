@@ -296,7 +296,7 @@ and proxy only its artifact preview path to Flock. Published links contain
 random access tokens, honor current workspace permission, and serve sandboxed HTML.
 
 Local machine entries name the Flock host and its owner. The owner can review
-requests under **Sharing and connections → Local machine connections**. Open
+requests under **Flock settings → Bots → Access → Connected computers**. Open
 approval links in a browser on the Flock host, where Web listens on loopback. Each
 approval lists exact absolute paths for `read_file` or `list_directory`
 within one active Session. A trusted Session bridge authenticates the caller

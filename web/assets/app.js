@@ -2626,7 +2626,7 @@ function generalContent(bot) {
   const settings = document.createElement('a');
   settings.className = 'settings-row';
   settings.href = '/settings/' + encodeURIComponent(bot.id);
-  settings.append(node('span', 'settings-row-label', 'Sharing and connections'));
+  settings.append(node('span', 'settings-row-label', 'Access'));
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
   if (bot.canDelete) {
