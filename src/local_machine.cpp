@@ -185,7 +185,7 @@ VALUES(?,?,?,?,?,?,?,?,'pending'))SQL",{bot,task,environment,thread,run,machineI
     Json result{{"ok",true},{"connectionId",id},{"status",status}};
     if (status == "pending") {
         if (!scope.empty() && webOrigin.empty())
-            result["reviewInstructions"] = "On the Flock host, start Flock Web and open this Bot's Settings, then Sharing and connections, and select Local machine connections.";
+            result["reviewInstructions"] = "On the Flock host, start Flock Web and open Flock settings, choose Bots, then this Bot's Access, and review Connected computers.";
         else
             result["reviewUrl"] = (scope.empty() ? std::string{} : webOrigin) + "/settings/" + std::string(bot) + "#local-connections";
     }

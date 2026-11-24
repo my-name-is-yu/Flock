@@ -145,7 +145,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     store.receiveChannel(ChannelKind::slack,"Bearer fixture-channel",event,cb.intake);
     runtime.runConversations();
     check(model.review.at("status") == "pending" && !model.review.contains("reviewUrl") &&
-          model.review.at("reviewInstructions").get<std::string>().find("Sharing and connections, and select Local machine connections") != std::string::npos,
+          model.review.at("reviewInstructions").get<std::string>().find("this Bot's Access, and review Connected computers") != std::string::npos,
           "Headless channel approval needs Web navigation guidance");
     const auto id = model.review.at("connectionId");
 

@@ -154,7 +154,7 @@ async function loadBots() {
     const actions = document.createElement('span');
     actions.className = 'row-actions';
     actions.append(link('Settings', `/?${new URLSearchParams({ bot: bot.id, settings: '1' })}`, `Settings for ${bot.name}`),
-      link('Sharing', `/settings/${encodeURIComponent(bot.id)}`, `Sharing for ${bot.name}`));
+      link('Access', `/settings/${encodeURIComponent(bot.id)}`, `Access for ${bot.name}`));
     item.append(actions);
   }
 }

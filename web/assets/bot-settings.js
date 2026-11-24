@@ -3,11 +3,19 @@ import { accentColor } from '/avatars.js';
 const [, , botId] = location.pathname.split('/').map(decodeURIComponent);
 const $ = (id) => document.getElementById(id);
 $('back').href = '/?' + new URLSearchParams({bot: botId});
+function showName(name) {
+  $('crumb-bot').textContent = name;
+  $('sharing-heading').textContent = `Who can use ${name}`;
+  document.title = `${name} access · Flock settings`;
+}
+showName(botId);
 fetch('/api/bots').then(r => r.ok ? r.json() : []).then(bots => {
   const bot = bots.find(item => item.id === botId);
-  $('back-label').textContent = bot?.name || botId;
-  if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
-}).catch(() => { $('back-label').textContent = botId; });
+  if (!bot) return;
+  showName(bot.name);
+  document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
+}).catch(() => {});
+
 function post(url, data) {
   return fetch(url, {
     method: 'POST', headers: {'Content-Type':'application/json','X-Flock-Action':'1'},
@@ -22,81 +30,84 @@ async function submit(path, data) {
     $('status').textContent = 'Saved.';
     return true;
   } catch {
-    $('status').textContent = 'Could not save this change.';
+    $('status').textContent = 'Couldn’t save this change.';
     return false;
   }
 }
-$('members').onsubmit = (event) => {
+$('members').onsubmit = async (event) => {
   event.preventDefault();
-  void submit('members', {add:true, ...Object.fromEntries(new FormData(event.target))});
+  const form = event.target;
+  const person = new FormData(form).get('person').trim();
+  if (await submit('members', {add: true, person})) form.reset();
 };
-function row(id, text) {
-  const item = document.createElement('p');
-  item.textContent = text;
-  $(id).append(item);
+
+function label(title, ...detail) {
+  const element = document.createElement('span');
+  element.className = 'row-label';
+  const heading = document.createElement('strong');
+  heading.textContent = title;
+  element.append(heading);
+  if (detail.length) {
+    const sub = document.createElement('small');
+    sub.append(...detail);
+    element.append(sub);
+  }
+  return element;
+}
+function row(list, content) {
+  const item = document.createElement('div');
+  item.className = 'settings-row';
+  item.append(content);
+  $(list).append(item);
   return item;
 }
-function button(row, label, action) {
-  const b = document.createElement('button');
-  b.textContent = label;
-  b.className = /^(Deny|Decline|Remove|Disconnect)$/.test(label) ? 'button danger' : 'button';
-  b.onclick = action;
-  row.append(b);
+function button(item, text, action, tone = '') {
+  const control = document.createElement('button');
+  control.type = 'button';
+  control.textContent = text;
+  control.className = tone ? `button ${tone}` : 'button';
+  control.onclick = action;
+  item.append(control);
+  return control;
 }
+
 async function load() {
   const response = await fetch('/api/bot-settings?' + new URLSearchParams({bot:botId}));
   if (!response.ok) throw Error();
   const data = await response.json();
-  $('administration').hidden = false;
   for (const id of ['inputs','people']) $(id).replaceChildren();
   for (const request of data.secretInputs.filter(x => x.status === 'pending')) {
-    const item = row('inputs',request.name);
+    const item = row('inputs', label(request.name));
     const input = document.createElement('input');
-    input.setAttribute('aria-label',request.name);
+    input.setAttribute('aria-label', request.name);
     input.type = 'password';
     input.autocomplete = 'new-password';
-    item.append(input);
-    button(item,'Save secret',() => {
+    const actions = document.createElement('span');
+    actions.className = 'row-actions';
+    actions.append(input);
+    button(actions, 'Save', () => {
       const value = input.value;
       input.value = '';
-      void submit('secret',{requestId:request.id,value});
-    });
+      void submit('secret', {requestId: request.id, value});
+    }, 'primary');
+    item.append(actions);
   }
   $('secrets').hidden = !$('inputs').childElementCount;
   $('sharing').hidden = false;
   $('members').hidden = !data.canManageMembers;
   for (const person of data.members) {
-    const item = row('people',person);
-    if (data.canManageMembers) button(item,'Remove',() => submit('members',{person,add:false}));
+    const item = row('people', label(person));
+    if (data.canManageMembers) button(item, 'Remove', () => submit('members', {person, add: false}), 'quiet-danger');
   }
-  if (!data.canManage) {
-    note('people', 'Sharing managed by the owner', 'The Bot’s owner decides who else can use it.');
-  } else if (!data.members.length) {
-    if (data.canManageMembers)
-      note('people', 'No shared members', 'Add a person ID below to share this Bot.');
-    else
-      note('people', 'No shared members', 'Set ',
-        code('FLOCK_WEB_IDENTITIES_FILE'), ' to the path of an owner-only JSON file listing who can sign in. ',
-        'Restart Flock, then add the person’s ID here.');
-  }
+  if (!data.canManage)
+    row('people', label('Managed by the owner', 'The Bot’s owner decides who else can use it.'));
+  else if (!data.members.length)
+    row('people', data.canManageMembers
+      ? label('Only you', 'Add a person’s ID below to share this Bot with them.')
+      : label('Only you', 'Sharing becomes available once other people can sign in to this Flock.'));
 }
-function code(text) {
-  const element = document.createElement('code');
-  element.textContent = text;
-  return element;
-}
-function note(id, title, ...detail) {
-  const item = document.createElement('p');
-  const label = document.createElement('span');
-  label.className = 'row-label';
-  const heading = document.createElement('strong');
-  heading.textContent = title;
-  const sub = document.createElement('small');
-  sub.append(...detail);
-  label.append(heading, sub);
-  item.append(label);
-  $(id).append(item);
-}
+
+const operations = {read_file: 'Read', list_directory: 'List'};
 async function loadMachines() {
   const response = await fetch('/api/channels/local-connections');
   if (!response.ok) throw Error();
@@ -105,34 +116,29 @@ async function loadMachines() {
   $('local-connections').hidden = connections.length === 0;
   $('machines').replaceChildren();
   for (const connection of connections) {
-    const item = document.createElement('div');
-    $('machines').append(item);
-    const title = document.createElement('p');
-    title.textContent = connection.machineId + ' · ' + connection.threadId;
-    item.append(title);
-    const rules = document.createElement('ul');
-    for (const rule of connection.rules) {
-      const entry = document.createElement('li');
-      entry.textContent = (rule.operation === 'read_file' ? 'Read ' : 'List ') + rule.path;
-      rules.append(entry);
-    }
-    item.append(rules);
+    const access = connection.rules.map(rule => `${operations[rule.operation] ?? 'List'} ${rule.path}`).join('\n');
+    const pending = connection.status === 'pending';
+    const item = row('machines', label(connection.machineId, access));
+    item.classList.add('machine-row');
     const change = async (action, approve) => {
       try {
-        const result = await post('/api/channels/local-connections/' + action, {id:connection.id, approve});
+        const result = await post('/api/channels/local-connections/' + action, {id: connection.id, approve});
         if (!result.ok) throw Error();
         await loadMachines();
-        $('status').textContent = 'Local connection updated.';
-      } catch { $('status').textContent = 'Could not update this local connection.'; }
+        $('status').textContent = pending ? (approve ? 'Connection approved.' : 'Connection declined.') : 'Computer disconnected.';
+      } catch { $('status').textContent = 'Couldn’t update this connection.'; }
     };
-    if (connection.status === 'pending') {
-      button(item,'Approve',() => change('decide',true));
-      button(item,'Decline',() => change('decide',false));
-    } else button(item,'Disconnect',() => change('disconnect'));
+    const actions = document.createElement('span');
+    actions.className = 'row-actions';
+    if (pending) {
+      button(actions, 'Decline', () => change('decide', false), 'quiet-danger');
+      button(actions, 'Approve', () => change('decide', true), 'primary');
+    } else button(actions, 'Disconnect', () => change('disconnect'), 'quiet-danger');
+    item.append(actions);
   }
   return connections.length;
 }
 const [machines, admin] = await Promise.allSettled([loadMachines(), load()]);
-if (machines.status === 'rejected') $('status').textContent = 'Could not load local machine connections.';
-else if (admin.status === 'rejected' && !machines.value) $('status').textContent = 'Could not load Bot settings.';
+if (machines.status === 'rejected') $('status').textContent = 'Couldn’t load connected computers.';
+else if (admin.status === 'rejected' && !machines.value) $('status').textContent = 'Couldn’t load this Bot’s access.';
 document.getElementById(location.hash.slice(1))?.scrollIntoView();

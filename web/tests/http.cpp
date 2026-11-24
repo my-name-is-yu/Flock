@@ -1456,7 +1456,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
     check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&
-          botPage && botPage->status == 200 && botPage->body.find("Sharing and connections") != std::string::npos,
+          botPage && botPage->status == 200 && botPage->body.find("Access · Flock settings") != std::string::npos,
           "Settings pages did not serve their own content");
     browser.post("/api/settings/mode",{{"mode","supervised"}});
     const auto rule = settings.at("rules").at(0);
