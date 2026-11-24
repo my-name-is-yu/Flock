@@ -22,7 +22,7 @@ const elements = Object.fromEntries([
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
-  'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
+  'bot-editor', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
   'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
@@ -251,63 +251,6 @@ function setConnection(state) {
   elements.connection.dataset.state = state;
   elements['connection-text'].textContent = state === 'offline' ? 'Can’t reach Flock. Reconnecting…' : '';
   renderHeader();
-}
-let themeSwitchTimer = 0;
-function resolvedTheme(mode) {
-  return mode === 'system'
-    ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-    : mode;
-}
-function syncThemeIndicator(animate = false) {
-  const group = elements['theme-switch'];
-  const active = group?.querySelector('button[aria-pressed="true"]');
-  if (!group || !active || !active.offsetWidth) return;
-  const x = `${active.offsetLeft}px`;
-  const w = `${active.offsetWidth}px`;
-  const wasReady = group.classList.contains('seg-ready');
-  if (wasReady && group.style.getPropertyValue('--seg-x') === x && group.style.getPropertyValue('--seg-w') === w) {
-    return;
-  }
-  if (animate && wasReady && !reducedMotion.matches) {
-    if (!group.classList.contains('seg-animated')) {
-      group.classList.add('seg-animated');
-      void group.offsetWidth;
-    }
-  } else {
-    group.classList.remove('seg-animated');
-  }
-  group.style.setProperty('--seg-x', x);
-  group.style.setProperty('--seg-w', w);
-  group.classList.add('seg-ready');
-}
-function renderTheme(mode, animate = false) {
-  for (const option of elements['theme-switch'].querySelectorAll('button')) {
-    option.setAttribute('aria-pressed', option.dataset.themeMode === mode);
-  }
-  syncThemeIndicator(animate);
-}
-function setTheme(mode) {
-  const group = elements['theme-switch'];
-  const active = group.querySelector('button[aria-pressed="true"]');
-  const prevMode = active?.dataset.themeMode ?? 'system';
-  const prevResolved = resolvedTheme(prevMode);
-  const nextResolved = resolvedTheme(mode);
-  save('flock-theme', mode);
-  if (!reducedMotion.matches) {
-    if (group.classList.contains('seg-ready')) group.classList.add('seg-animated');
-    if (prevResolved !== nextResolved) {
-      const root = document.documentElement;
-      root.classList.add('theme-switching');
-      clearTimeout(themeSwitchTimer);
-      themeSwitchTimer = setTimeout(() => {
-        root.classList.remove('theme-switching');
-        themeSwitchTimer = 0;
-      }, 260);
-    }
-    void document.documentElement.offsetWidth;
-  }
-  renderTheme(mode, true);
-  document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
 }
 const mainElement = byId('main');
 const navBackdrop = byId('nav-backdrop');
@@ -3125,18 +3068,6 @@ const decisions = mountBoardInbox({
   },
 });
 
-function reflectTheme() {
-  renderTheme(document.documentElement.dataset.theme ?? 'system');
-}
-reflectTheme();
-document.addEventListener('flock-theme', reflectTheme);
-if (typeof ResizeObserver !== 'undefined') {
-  new ResizeObserver(() => syncThemeIndicator(false)).observe(elements['theme-switch']);
-}
-elements['theme-switch'].addEventListener('click', (event) => {
-  const option = event.target.closest('button[data-theme-mode]');
-  if (option) setTheme(option.dataset.themeMode);
-});
 elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
