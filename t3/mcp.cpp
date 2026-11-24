@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/detail/json_rpc.hpp"
 
 #include <curl/curl.h>
 
@@ -62,34 +63,13 @@ bool rejectsDelegatedFrom(std::string_view message) {
 
 Json rpcResponse(const HttpResponse& response, unsigned id) {
     const auto type = response.headers.find("content-type");
-    Json message;
-    if (type == response.headers.end() || !type->second.starts_with("text/event-stream")) {
-        message = parse(response.body);
-    } else {
-        std::string event;
-        std::string_view tail = response.body;
-        while (!tail.empty()) {
-            const auto end = tail.find('\n');
-            auto line = tail.substr(0, end);
-            tail.remove_prefix(end == std::string_view::npos ? tail.size() : end + 1);
-            if (line.ends_with('\r')) line.remove_suffix(1);
-            if (line.starts_with("data:")) {
-                line.remove_prefix(5);
-                if (line.starts_with(' ')) line.remove_prefix(1);
-                if (!event.empty()) event += '\n';
-                event += line;
-            } else if (line.empty() && !event.empty()) {
-                auto candidate = parse(event);
-                if (candidate.is_object() && candidate.contains("id") && candidate["id"] == id) {
-                    message = std::move(candidate);
-                    break;
-                }
-                event.clear();
-            }
-        }
-    }
-    if (str(message, "jsonrpc") != "2.0" || !message.contains("id") || message["id"] != id)
-        invalidResponse();
+    const std::string_view contentType = type == response.headers.end() ? std::string_view{} : type->second;
+    auto message = detail::decodeRpcResponse(response.body, contentType, id, [](std::string_view frame) {
+        // T3 ignores SSE events whose data fields are empty.
+        if (frame.find_first_not_of('\n') == frame.npos) return Json();
+        return parse(frame);
+    });
+    if (str(message, "jsonrpc") != "2.0") invalidResponse();
     if (message.contains("error")) {
         const auto& error = message["error"];
         if (message.contains("result") || !error.contains("code") || !error["code"].is_number_integer() ||
@@ -209,8 +189,8 @@ HttpResponse http(const std::string& url, std::string_view method, const Headers
     return response;
 }
 
-Client::Client(Credential credential, SessionReadDeadline deadline)
-    : credential_(std::move(credential)), deadline_(deadline), headers_{
+Client::Client(Credential credential, SessionReadDeadline deadline, std::string targetEnvironmentId)
+    : credential_(std::move(credential)), deadline_(deadline), targetEnvironmentId_(std::move(targetEnvironmentId)), headers_{
     {"Authorization", "Bearer " + credential_.token}, {"Accept", "application/json, text/event-stream"},
     {"Content-Type", "application/json"}} {
     try {
@@ -246,6 +226,13 @@ HttpResponse Client::request(std::string_view method, const std::string& body, l
             throw SessionReadTimeout();
         throw;
     }
+    if (response.status == 403) {
+        const auto body = Json::parse(response.body,nullptr,false);
+        if (body.is_object() && str(body,"error") == "linked_environments_off")
+            throw Failure(Failure::Kind::Settings,
+                          "Linked environments are turned off in T3 Settings > Labs. Turn them on to use this target.",
+                          Failure::Reason::LinkedEnvironmentUnavailable);
+    }
     if (response.status == 401 || response.status == 403)
         throw Failure(Failure::Kind::Auth, "T3 refused the OAuth credential or its access level");
     if (response.status < 200 || response.status >= 300)
@@ -270,6 +257,12 @@ static Failure toolFailure(const Json& payload) {
     const auto message = str(error, "message");
     if ((code == "invalid_request" || code == "invalid_params") && rejectsDelegatedFrom(message))
         return Failure(Failure::Kind::Tool,"T3 rejected the delegatedFrom launch field",Failure::Reason::DelegatedFromRejected);
+    if ((code == "capability_denied" &&
+         message.starts_with("Linked environments is off on this machine, so no tool can act on another machine.")) ||
+        (code == "orchestration_error" && message == "This environment cannot reach linked environments."))
+        return Failure(Failure::Kind::Settings,
+                       "This T3 connection cannot forward to linked environments. Enable linked environments in T3 Settings > Labs or use a connection with forwarding enabled.",
+                       Failure::Reason::LinkedEnvironmentUnavailable);
     if (code == "capability_denied" || code == "thread_credential_required" ||
         code == "runtime_mode_escalation_denied" || code == "interaction_mode_escalation_denied")
         return Failure(Failure::Kind::Auth, "T3 OAuth approval does not allow this operation or mode");
@@ -292,6 +285,16 @@ static Failure toolFailure(const Json& payload) {
 }
 
 Json Client::call(std::string_view tool, Json arguments) {
+    const bool targetTool = tool == "t3_project_list" || tool == "t3_project_read" ||
+        tool == "t3_thread_launch" || tool == "t3_thread_send" || tool == "t3_thread_wait" ||
+        tool == "t3_thread_read" || tool == "t3_thread_interrupt" || tool == "t3_thread_list" ||
+        tool == "t3_pending_request" || tool == "t3_queue";
+    if (!targetEnvironmentId_.empty() && targetTool) {
+        if (!arguments.is_object()) invalidResponse();
+        if (arguments.contains("environmentId") && arguments.at("environmentId") != targetEnvironmentId_)
+            invalidResponse();
+        arguments["environmentId"] = targetEnvironmentId_;
+    }
     auto response = rpc("tools/call", {{"name", tool}, {"arguments", std::move(arguments)}});
     if (response.contains("isError") && !response["isError"].is_boolean()) invalidResponse();
     const bool isError = response.value("isError", false);

@@ -5,6 +5,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -199,6 +200,77 @@ void retryAcrossConnections() {
     check(receive(restarted,"retry","Write a release note") == a,"Receipt was lost on restart");
     execution.runtime.runConversations();
     check(calls == 2 && restarted.tasks("alpha").size() == 1,"The retry ran an applied message again");
+}
+
+void dueAutomationWakesAfterIdle(bool externalWrite, bool duringTick) {
+    Fixture fixture;
+    Store store(fixture.database()), writer(fixture.database());
+    ScriptedModel model;
+    SimulatedT3 t3;
+    std::atomic<Seconds> now{100};
+    auto reminder = Fixture::bot("beta");
+    reminder.request = "Fire a scheduled reminder";
+    const auto createReminder = [&](Seconds from) {
+        writer.createAutomation(localOwner,reminder,{{"kind","reminder"},{"timezone","Etc/UTC"},
+                                  {"fireAt",from + 1},{"request",reminder.request}},from);
+    };
+    const auto makeDue = [&] {
+        if (externalWrite) createReminder(now.load() - 1);
+        else ++now;
+    };
+    const auto tickThread = std::this_thread::get_id();
+    enum class DueReminder { Unarmed, AfterApprovalClockRead, OnNextClockRead };
+    auto dueReminder = DueReminder::Unarmed;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
+                    RuntimeOptions{.clock = [&] {
+                        if (std::this_thread::get_id() == tickThread) {
+                            switch (dueReminder) {
+                            case DueReminder::Unarmed: break;
+                            case DueReminder::AfterApprovalClockRead:
+                                dueReminder = DueReminder::OnNextClockRead;
+                                break;
+                            case DueReminder::OnNextClockRead:
+                                dueReminder = DueReminder::Unarmed;
+                                makeDue();
+                                break;
+                            }
+                        }
+                        return now.load();
+                    }});
+    if (!externalWrite) createReminder(now.load());
+    runtime.tickConcurrent();
+    runtime.tickConcurrent();
+    check(store.tasks("beta").empty(),"A reminder ran before it was due");
+
+    if (duringTick) dueReminder = DueReminder::AfterApprovalClockRead;
+    else makeDue();
+    runtime.tickConcurrent();
+    check(store.tasks("beta").size() == 1,"An idle check missed a newly due reminder");
+}
+
+void failedAutomationDoesNotInvalidateOtherMaintenance() {
+    Fixture fixture;
+    Store store(fixture.database());
+    ScriptedModel model;
+    SimulatedT3 t3;
+    auto maintenanceWriteLock = fixture.connect();
+    const auto releaseWriteLock = [&] { Fixture::sql(maintenanceWriteLock.get(),"ROLLBACK"); };
+    int errors = 0;
+    bool unexpectedMaintenanceWrite = false;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{
+        .clock = [] { return Seconds{-1}; },
+        .automationError = [&](std::string_view) { ++errors; },
+        .storageContention = [&](std::string_view) {
+            if (!unexpectedMaintenanceWrite) releaseWriteLock();
+            unexpectedMaintenanceWrite = true;
+        }
+    });
+    runtime.tickConcurrent();
+
+    Fixture::sql(maintenanceWriteLock.get(),"BEGIN IMMEDIATE");
+    runtime.tickConcurrent();
+    if (!unexpectedMaintenanceWrite) releaseWriteLock();
+    check(errors == 2 && !unexpectedMaintenanceWrite,"Retrying an automation error repeated completed maintenance");
 }
 
 void savedDecisionIsAppliedWithoutAnotherModelCall() {
@@ -427,7 +499,7 @@ void transientFailureResumesAfterTheLastFinishedStep() {
           "Restart lost the deterministic budget or stored a redundant routing ID");
 }
 
-void concurrentWorkerRecoversFromWriterContention() {
+void concurrentWorkerRecoversFromWriterContention(bool repairResponse) {
     using namespace std::chrono_literals;
     Fixture fixture;
     Store store(fixture.database());
@@ -450,6 +522,14 @@ void concurrentWorkerRecoversFromWriterContention() {
                 if (++blockedCalls == 1) {
                     entered.set_value();
                     resume.wait();
+                }
+                if (repairResponse) {
+                    if (input.feedback.empty()) {
+                        throw ModelError("Unexpected batch",false,{{"input_tokens",7}},ModelErrorCode::invalid_tool_count);
+                    }
+                    check(input.feedback.find("invalid_tool_count") != std::string::npos,
+                          "The contended repair lost its reason");
+                    return say("Done.");
                 }
                 return Decision{"complete",{{"report","This tool was not offered"}},"Check the checkpoint"};
             }
@@ -474,13 +554,92 @@ void concurrentWorkerRecoversFromWriterContention() {
         if (other && !reply(store,blocked).is_null() && !reply(store,other,"beta").is_null()) break;
         std::this_thread::sleep_for(5ms);
     }
-    check(reported && blockedCalls == 1 && reply(store,blocked)["text"] == "Done." &&
+    check(reported && blockedCalls == (repairResponse ? 2 : 1) && reply(store,blocked)["text"] == "Done." &&
           reply(store,other,"beta")["text"] == "Done." &&
           fixture.count("SELECT json_extract(usage,'$.input_tokens') FROM model_attempts WHERE message_id=" +
                         std::to_string(blocked) + " ORDER BY id LIMIT 1") == 7 &&
-          fixture.count("SELECT count(*) FROM conversation_steps WHERE message_id=" + std::to_string(blocked) +
-                        " AND step=1 AND json_extract(decision,'$[0].rejection')='Tool unavailable for this turn'") == 1,
+          fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(blocked)) == 2,
           "A contended worker stopped the Runtime or left a Bot without a reply");
+    if (repairResponse)
+        check(fixture.count("SELECT count(*) FROM conversation_model_failures WHERE message_id=" + std::to_string(blocked) +
+                            " AND reason='invalid_tool_count' AND repair_attempt_id IS NOT NULL") == 1,
+              "SQLite contention lost or duplicated the repair");
+    else
+        check(fixture.count("SELECT count(*) FROM conversation_steps WHERE message_id=" + std::to_string(blocked) +
+                            " AND step=1 AND json_extract(decision,'$[0].rejection')='Tool unavailable for this turn'") == 1,
+              "SQLite contention lost the saved rejection");
+}
+
+void repairSurvivesRestart(bool alreadyClaimed) {
+    Fixture fixture;
+    Id message;
+    {
+        Store store(fixture.database());
+        RuntimeFixture execution(store);
+        auto intake = Fixture::bot();
+        intake.config["modelCallLimit"] = 3;
+        message = receive(store,"repair","Write a release note",0,intake);
+        execution.model.conversation = [&](const ModelInput& input) -> Decision {
+            if (turn(input).empty())
+                return {"start_task",{{"request","Write a release note"}},"Start the requested task"};
+            execution.runtime.requestStop();
+            throw ModelError("Unexpected batch",false,{{"output_tokens",42}},ModelErrorCode::invalid_tool_count);
+        };
+        execution.runtime.runConversations();
+        check(execution.model.turns.size() == 2 && reply(store,message).is_null() &&
+              store.tasks("alpha").size() == 1 && execution.t3.launches == 0,
+              "The rejected response dispatched an action or finished the turn");
+    }
+    check(fixture.count("SELECT count(*) FROM conversation_model_failures f JOIN model_attempts a ON a.id=f.attempt_id"
+                        " WHERE f.step=2 AND f.reason='invalid_tool_count' AND f.repair_attempt_id IS NOT NULL"
+                        " AND json_extract(a.usage,'$.output_tokens')=42") == 1,
+          "The repair reservation and rejection were not stored with the failed attempt's usage");
+    if (alreadyClaimed) {
+        // Simulate a worker that committed its reservation claim and exited before saving the model outcome.
+        fixture.sql("BEGIN;"
+                    "UPDATE conversation_steps SET attempt_id=(SELECT repair_attempt_id FROM conversation_model_failures)"
+                    " WHERE step=2;"
+                    "UPDATE conversation_turns SET reserved_attempt=NULL;"
+                    "COMMIT;");
+    }
+
+    Store reopened(fixture.database());
+    RuntimeFixture execution(reopened);
+    execution.model.conversation = [&](const ModelInput& input) {
+        check(turn(input).size() == 1 && turn(input).at(0).at("tool") == "start_task" &&
+              input.feedback.find("invalid_tool_count") != std::string::npos,
+              "The repair lost the completed step or the reason for rejection");
+        return say("The task is queued.");
+    };
+    execution.runtime.runConversations();
+    check(execution.model.turns.size() == (alreadyClaimed ? 0 : 1) && reopened.tasks("alpha").size() == 1 &&
+          reply(reopened,message).at("route") == (alreadyClaimed ? "error" : "reply") &&
+          fixture.count("SELECT count(*) FROM model_attempts") == 3,
+          "Restart duplicated an operation or charged another repair attempt");
+    if (alreadyClaimed)
+        check(fixture.count("SELECT count(*) FROM conversation_model_failures WHERE reason='repair_interrupted'") == 1,
+              "The interrupted repair lost its diagnostic");
+}
+
+void invalidResponseRepairRespectsBudget(bool hasBudget) {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    auto intake = Fixture::bot();
+    const Id limit = hasBudget ? 3 : 1;
+    intake.config["modelCallLimit"] = limit;
+    const auto message = receive(store,"invalid","Inspect the T3 environment",0,intake);
+    execution.model.conversation = [](const ModelInput&) -> Decision {
+        throw ModelError("Unexpected batch",ModelErrorCode::invalid_tool_count);
+    };
+    execution.runtime.runConversations();
+    const auto attempts = hasBudget ? 2 : 1;
+    check(execution.model.turns.size() == attempts && reply(store,message).at("route") == "error" &&
+          fixture.count("SELECT count(*) FROM model_attempts") == attempts &&
+          fixture.count("SELECT count(*) FROM conversation_model_failures") == attempts &&
+          fixture.count("SELECT count(*) FROM conversation_steps WHERE decision IS NOT NULL OR effect IS NOT NULL") == 0 &&
+          execution.t3.launches == 0,
+          "A rejected repair retried again, increased the budget, or ran a tool");
 }
 
 void shutdownLeavesAnUnsentRunReadyForRestart() {
@@ -808,6 +967,11 @@ void conversationPagesCombineTaskAndMessageHistory() {
 int main() {
     try {
         retryAcrossConnections();
+        for (bool duringTick : {false,true}) {
+            dueAutomationWakesAfterIdle(false,duringTick);
+            dueAutomationWakesAfterIdle(true,duringTick);
+        }
+        failedAutomationDoesNotInvalidateOtherMaintenance();
         savedDecisionIsAppliedWithoutAnotherModelCall();
         missingToolCannotBeAddedAfterInferenceStarts();
         protectedArgumentKeyCannotReachTaskIntake();
@@ -817,7 +981,12 @@ int main() {
         sessionNoteIsNotResentAfterARestart(false,true);
         sessionNoteIsNotResentAfterARestart(true,true);
         sessionNoteIsNotResentAfterARestart(false,false);
-        concurrentWorkerRecoversFromWriterContention();
+        concurrentWorkerRecoversFromWriterContention(false);
+        concurrentWorkerRecoversFromWriterContention(true);
+        repairSurvivesRestart(false);
+        repairSurvivesRestart(true);
+        invalidResponseRepairRespectsBudget(false);
+        invalidResponseRepairRespectsBudget(true);
         concurrentWorkerSurfacesStructuralStorageFailure();
         shutdownLeavesAnUnsentRunReadyForRestart();
         modelFailureReportsWhatWasAlreadyDone();

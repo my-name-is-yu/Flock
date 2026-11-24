@@ -15,7 +15,7 @@ inline Json initializeParams() {
 struct Failure : std::runtime_error {
     enum class Kind { Auth, Settings, Wire, Rpc, Tool };
     enum class Reason { Other, QuestionGone, WorkSettings, HistoryNotFound, ProjectNotFound, Timeout,
-                        DelegatedFromRejected, CredentialExpired };
+                        DelegatedFromRejected, CredentialExpired, LinkedEnvironmentUnavailable };
     Kind kind;
     Reason reason;
     explicit Failure(Kind category, std::string message, Reason reason = Reason::Other)
@@ -67,6 +67,7 @@ struct Credential {
     std::string mcpUrl, token, generation;
     Seconds expiresAt = 0;
     bool operate = false;
+    std::string label;
 };
 struct WorkspaceHead {
     std::string commit;
@@ -76,7 +77,7 @@ Credential loadCredential(const std::filesystem::path&, const std::string& envir
 
 class Client {
 public:
-    explicit Client(Credential credential, SessionReadDeadline deadline = {});
+    explicit Client(Credential credential, SessionReadDeadline deadline = {}, std::string targetEnvironmentId = {});
     ~Client();
     Client(const Client&) = delete;
     Client& operator=(const Client&) = delete;
@@ -86,6 +87,7 @@ private:
     HttpResponse request(std::string_view method, const std::string& body, long timeoutMs = 6000);
     Credential credential_;
     SessionReadDeadline deadline_;
+    std::string targetEnvironmentId_;
     Headers headers_;
     unsigned nextId_ = 0;
 };

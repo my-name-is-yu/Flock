@@ -1,7 +1,6 @@
 # Flock CLI
 
-Build from the repository root with CMake 3.24+ and a C++20 compiler. The
-ChatGPT transport requires Node.js 22+ on `PATH`.
+Build from the repository root with CMake 3.24+ and a C++20 compiler.
 
 ```sh
 cmake -S . -B build
@@ -91,7 +90,7 @@ for the requested `shared_memory` operation.
 build/app/flock model login
 build/app/flock model status
 build/app/flock model models
-build/app/flock t3 connect ENVIRONMENT_ID https://T3_HOST/mcp
+build/app/flock t3 connect
 build/app/flock run
 ```
 
@@ -99,8 +98,9 @@ Approve the two Flock connections in your browser. For ChatGPT sign-in, grant
 permission to use the eligible ChatGPT plan and check for `planUsage: true` in
 `flock model status`. Copy a slug from `flock model models` into each Bot
 configuration. Use `flock model login --reconsent` if plan usage is missing.
-For T3, approve Operate access. Use the connected environment ID in the Bot
-configuration. For T3 on this machine, use the loopback MCP URL published by T3.
+For T3, approve Operate access. `flock t3 connect` discovers the running local
+T3 server. To connect another machine, pass its MCP URL as the argument. When
+authorization expires, use `flock t3 reconnect ENVIRONMENT` to approve again.
 If Flock pauses a launch because of the installation policy, check the active
 mode and rules in **Flock settings**.
 
@@ -188,10 +188,9 @@ status 0.
 build/app/flock model acceptance MODEL_SLUG > model-acceptance.jsonl
 ```
 
-The C++ Runtime owns the decision contract, state transitions, and T3 side
-effects. The local Node transport performs the Flock OAuth flow and streams
-the public Responses endpoint. It inherits a short-lived credential lock and
-releases it before inference. Credentials live under
+The C++ runtime performs the Flock OAuth flow and streams the public Responses
+endpoint using libcurl and OpenSSL. It locks the profile while signing in or
+refreshing credentials and releases the lock before inference. Credentials live under
 `credentials/chatgpt/`; T3 credentials have their own directory. Each Flock
 home has one ChatGPT connection. See the official [sign-in guide][signin],
 [model requests][models], and [function calling constraints][limits].
@@ -260,6 +259,17 @@ host-managed bearer token. Discovery lists one collection per call and returns
 `nextCursor` when another page is available.
 
 Each authorized Bot tool action counts against the request's shared
-`modelCallLimit`. Calls in a parallel batch reserve available action slots
-in provider order. An approval resumes the next pending action when a batch
-pauses. The Bot receives results in provider order when the batch finishes.
+`modelCallLimit`. ChatGPT can propose several independent reads in one conversation
+response when at least two batchable tools are offered. Conversation batches can
+read Session search and events, environment readiness, tasks and task results,
+workflow status, schedules, secret names, connections, saved tool results, and
+memory and revision history. Store reads run under the Store mutex, and T3 reads
+can overlap. Flock schedules conflicting Bot tools in order and saves results
+while individual calls wait for approval. The Bot receives results in provider
+order, then can reply or propose an action on its own. Git reads and workspace
+command launches must be requested on their own. Use the command status to check
+completion before reading files the command produces.
+
+Run `ctest --test-dir build -R '^flock_tool_batch_measure$' -V` to compare
+single-call and batch timings, model attempts, budget units, and budget pauses
+using deterministic fake providers.

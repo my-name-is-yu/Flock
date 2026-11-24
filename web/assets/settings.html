@@ -14,20 +14,23 @@
 <body><div class="settings-shell">
   <nav class="settings-nav" aria-label="Settings sections">
     <a class="settings-back" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>Conversations</a>
-    <a href="#general" data-section="general"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>General</a>
+    <a href="#appearance" data-section="appearance"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4m11.2-11.2L19 5"/></svg>Appearance</a>
     <a href="#permissions" data-section="permissions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 5 6.5v5c0 4.2 2.9 7.6 7 9 4.1-1.4 7-4.8 7-9v-5z"/><path d="m9 12 2 2 4-4"/></svg>Permissions</a>
-    <a href="#bots" data-section="bots"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>Bots</a>
     <a href="#connections" data-section="connections"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 15 15 9"/><path d="M10.5 6.5 12 5a4.2 4.2 0 0 1 6 6l-1.5 1.5M13.5 17.5 12 19a4.2 4.2 0 0 1-6-6l1.5-1.5"/></svg>Connections</a>
+    <a href="#access" data-section="access"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="7.5" r="3"/><path d="M4.5 19v-2a5.5 5.5 0 0 1 11 0v2M17 5a3 3 0 0 1 0 5.7M18 13a4.2 4.2 0 0 1 2.5 4v2"/></svg>Access</a>
+    <a href="#system" data-section="system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M8.5 20h7M12 16.5V20M7.5 10.5h2.5"/></svg>System</a>
   </nav>
   <main class="settings-page">
-    <h1 class="settings-crumb"><span>Settings</span><span class="settings-crumb-sep" aria-hidden="true">/</span><span id="crumb">General</span></h1>
+    <header class="settings-header">
+      <h1 class="settings-crumb"><span>Settings</span><span class="settings-crumb-sep" aria-hidden="true">/</span><span id="crumb">Appearance</span></h1>
+      <p class="settings-scope" id="settings-scope">Applies to this browser</p>
+    </header>
     <p id="status" role="status"></p>
-    <div class="settings-panel" data-panel="general">
-      <section aria-labelledby="appearance-heading">
-        <h2 id="appearance-heading">Appearance</h2>
+    <div class="settings-panel" data-panel="appearance">
+      <section aria-labelledby="theme-label">
         <div class="settings-group">
           <div class="settings-row">
-            <span class="row-label"><strong id="theme-label">Theme</strong><small>Follow your system, or keep Flock light or dark on this browser.</small></span>
+            <span class="row-label"><strong id="theme-label">Theme</strong><small>Match your system or choose light or dark.</small></span>
             <div class="segmented" role="radiogroup" aria-labelledby="theme-label">
               <label><input type="radio" name="theme" value="system">System</label>
               <label><input type="radio" name="theme" value="light">Light</label>
@@ -64,28 +67,60 @@
         </div>
       </section>
     </div>
-    <div class="settings-panel" data-panel="bots" hidden>
-      <section aria-labelledby="bots-heading">
-        <h2 id="bots-heading">Bots</h2>
-        <div id="bots" class="settings-group"></div>
+    <div class="settings-panel" data-panel="connections" hidden>
+      <section aria-labelledby="execution-heading">
+        <h2 id="execution-heading">Models and execution</h2>
+        <div id="model-section" class="connection-provider" hidden>
+          <h3>ChatGPT</h3>
+          <div id="model" class="settings-group"></div>
+        </div>
+        <div class="connection-provider">
+          <h3>T3 Code</h3>
+          <div class="settings-group"><div id="connections"></div>
+            <div id="t3-connect-options" class="settings-row t3-connect-options" hidden>
+              <button id="t3-connect-local" type="button" class="button primary">Connect local T3</button>
+              <details id="t3-connect-by-url">
+                <summary>Use a connection URL</summary>
+                <form id="t3-form" class="rule-form">
+                  <label class="rule-target">T3 connection URL <input name="mcpUrl" type="url" required autocomplete="off" spellcheck="false" placeholder="Paste Copy MCP URL from T3 Code"></label>
+                  <button class="button">Connect</button>
+                </form>
+              </details>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section id="integrations-section" aria-labelledby="integrations-heading" hidden>
+        <h2 id="integrations-heading">External services</h2>
+        <div id="integrations" class="settings-group"></div>
+      </section>
+      <section id="tools-section" aria-labelledby="tools-heading" hidden>
+        <h2 id="tools-heading">Shared tools</h2>
+        <div id="tools" class="settings-group"></div>
       </section>
     </div>
-    <div class="settings-panel" data-panel="connections" hidden>
-      <section id="model-section" aria-labelledby="model-heading" hidden>
-        <h2 id="model-heading">Model</h2>
-        <div id="model" class="settings-group"></div>
+    <div class="settings-panel" data-panel="access" hidden>
+      <section aria-labelledby="access-heading">
+        <h2 id="access-heading">Flock sign-in</h2>
+        <div id="access" class="settings-group" aria-live="polite"></div>
+        <p class="settings-help">To share a specific Bot, open Sharing and connections in that Bot’s conversation.</p>
       </section>
-      <section aria-labelledby="connections-heading">
-        <h2 id="connections-heading">T3 connections</h2>
-        <div class="settings-group"><div id="connections"></div>
-          <form id="t3-form" class="settings-row rule-form" hidden>
-            <label>Environment ID <input name="environmentId" required autocomplete="off" spellcheck="false"></label>
-            <label class="rule-target">T3 MCP URL <input name="mcpUrl" type="url" required autocomplete="off" placeholder="https://…/mcp"></label>
-            <button class="button primary">Connect</button>
-          </form>
-        </div>
+    </div>
+    <div class="settings-panel" data-panel="system" hidden>
+      <section aria-labelledby="system-heading">
+        <h2 id="system-heading">Flock server</h2>
+        <div id="system" class="settings-group"></div>
       </section>
     </div>
   </main>
-</div></body>
+</div>
+<dialog class="installation-dialog" id="installation-editor" aria-labelledby="installation-editor-title">
+  <div class="installation-dialog-head">
+    <h2 id="installation-editor-title"></h2>
+    <button type="button" class="icon-button" id="installation-editor-close" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+  </div>
+  <div id="installation-editor-content"></div>
+  <p id="installation-editor-status" class="installation-feedback" role="status" hidden></p>
+</dialog>
+</body>
 </html>

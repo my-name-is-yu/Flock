@@ -23,10 +23,15 @@ class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def reply(self, value=None, code=200, **headers):
+    def reply(self, value=None, code=200, event_stream=False, **headers):
         body = json.dumps(value).encode() if value is not None else b""
+        content_type = "application/json"
+        if event_stream:
+            content_type = "text/event-stream"
+            unrelated = {"jsonrpc": "2.0", "id": str(value["id"]), "result": {}}
+            body = f"data: \n\ndata: {json.dumps(unrelated)}\n\ndata: {json.dumps(value)}\n\n".encode()
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         for key, item in headers.items():
             for header_value in item if isinstance(item, list) else [item]:
@@ -42,6 +47,12 @@ class Fixture(BaseHTTPRequestHandler):
         origin = self.server.origin
         if self.path == "/fixture/effects":
             self.reply(self.server.state.get("effects", {}))
+        elif self.path == "/fixture/routes":
+            self.reply(self.server.state.get("multiRoutedTargets", []))
+        elif self.path == "/.well-known/t3/environment":
+            self.reply({"environmentId": self.server.state.get("descriptorEnvironment",
+                         self.server.state.get("claimedEnvironment", "env-1")),
+                        "label": "Local T3 fixture", "serverVersion": "0.1.11"})
         elif self.path == "/fixture/stock":
             self.reply({key: self.server.state[key] for key in ("stockPin", "stockHead")} |
                        {key: self.server.state.get(key, {}) for key in ("stockLaunches", "stockPromptSends")})
@@ -81,11 +92,18 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["resource"] == [origin + "/mcp"] and args["grant_type"] == ["authorization_code"]
             assert args["code"] == ["fixture-code"] and args["redirect_uri"] == state["registered"]
             state["revoked"] = False
-            self.reply({"access_token": "fixture.signed-token", "token_type": "Bearer", "expires_in": 2592000,
+            self.reply({"access_token": state.get("accessToken", "fixture.signed-token"),
+                        "token_type": "Bearer", "expires_in": 2592000,
                         "scope": state.get("scope", "orchestration:read orchestration:operate")})
             return
         args = json.loads(raw)
         if self.path == "/fixture":
+            if args.pop("multiReset", False):
+                assert self.server.multi_environment
+                for key in tuple(state):
+                    if key.startswith("multi") and key not in ("multiProject", "multiCommit"):
+                        state.pop(key)
+                state.pop("effects", None)
             if args.get("advanceStockWorker"):
                 assert self.server.stock_thread
                 subprocess.run(["/usr/bin/git","-C",state["stockTree"],"checkout","--detach",state["stockHead"]],
@@ -134,7 +152,10 @@ class Fixture(BaseHTTPRequestHandler):
             state["registered"] = args["redirect_uris"]
             self.reply({"client_id": "fixture-client"}, code=201)
         elif self.path == "/mcp":
-            if self.headers.get("Authorization") != "Bearer fixture.signed-token" or state.get("revoked"):
+            if state.get("multiDisconnected"):
+                self.reply(code=503)
+                return
+            if self.headers.get("Authorization") != "Bearer " + state.get("accessToken", "fixture.signed-token") or state.get("revoked"):
                 challenge = ('Basic resource_metadata="https://wrong.test/", Negotiate YWJjZA==, '
                              'bEaReR realm="a, \\"b\\"", RESOURCE_METADATA \t= "' + origin +
                              '/protected,resource", Basic realm="next"')
@@ -168,7 +189,7 @@ class Fixture(BaseHTTPRequestHandler):
                         state.setdefault("effects", {}).setdefault("t3_thread_launch", []).append(launch)
                         envelope["error"] = {"code": -32602, "message":
                             "Unknown field: delegatedFrom" if mode == "unknown-delegated-from" else "Invalid params"}
-                        self.reply(envelope)
+                        self.reply(envelope, event_stream=mode == "unknown-delegated-from")
                         return
             content = self.tool(tool["name"], tool["arguments"])
             if (tool["name"] == "t3_queue" and tool["arguments"]["action"] == "cancel" and
@@ -193,6 +214,15 @@ class Fixture(BaseHTTPRequestHandler):
                 assert self.server.allow_launch_disconnect.wait(15), "crash harness did not kill the Runtime"
                 self.close_connection = True
                 return
+            if self.server.multi_environment and tool["name"] == "t3_thread_launch":
+                self.server.launch_accepted.set()
+                if state.get("multiDropLaunchReply"):
+                    self.close_connection = True
+                    return
+                if state.get("multiHoldLaunchReply"):
+                    assert self.server.allow_launch_disconnect.wait(15), "crash harness did not kill the Runtime"
+                    self.close_connection = True
+                    return
             self.reply(envelope)
         else:
             self.reply(code=404)
@@ -215,11 +245,33 @@ class Fixture(BaseHTTPRequestHandler):
                 (name == "t3_queue" and args["action"] == "cancel") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
-        assert "environmentId" not in args
+        target_tools = ("t3_project_list", "t3_project_read", "t3_thread_launch", "t3_thread_send",
+                        "t3_thread_wait", "t3_thread_read", "t3_thread_interrupt", "t3_thread_list",
+                        "t3_thread_answer", "t3_pending_request", "t3_queue")
+        expected_target = state.get("multiExpectedTarget")
+        if expected_target and name in target_tools:
+            assert args.get("environmentId") == expected_target
+        else:
+            assert "environmentId" not in args
         if self.server.stock_thread:
             return self.stock_tool(name, args)
+        if self.server.multi_environment:
+            return self.multi_environment_tool(name, args)
         if name == "t3_environment_read":
-            return {"environmentId": state.get("claimedEnvironment", "env-1"), "serverVersion": "0.1.11"}
+            return {"environmentId": state.get("claimedEnvironment", "env-1"),
+                    "label": "T3 fixture", "serverVersion": "0.1.11"}
+        if name == "t3_project_list":
+            assert args["limit"] == 100
+            if args["cursor"] == 0:
+                return {"projects": [
+                    {"id": "project", "title": "Release Pipeline", "archivedAt": None,
+                     "workspaceRoot": "/fixture/release"},
+                    {"id": "archived", "title": "Archived Release", "archivedAt": "2026-01-01T00:00:00Z",
+                     "workspaceRoot": "/fixture/archive"},
+                ], "nextCursor": 100}
+            assert args["cursor"] == 100
+            return {"projects": [{"id": "docs", "title": "Documentation",
+                                  "workspaceRoot": r"C:\Fixture\docs"}], "nextCursor": None}
         if name == "t3_project_read":
             if args["projectId"] == "slow-search-project":
                 time.sleep(4)
@@ -573,11 +625,15 @@ class Fixture(BaseHTTPRequestHandler):
                 rows = [row for row in rows if row["itemId"] == args["itemId"]]
         elif args["view"] == "messages":
             rows = [row for row in rows if row["type"] in ("user_message", "assistant_message")]
+        page_size = 20 if "beforePosition" in args and scenario == "session-read" else 2
+        return self.history_page(summary, recent, rows, args, page_size)
+
+    @staticmethod
+    def history_page(summary, recent, rows, args, page_size):
         lower = args.get("afterPosition", -1)
         upper = args.get("beforePosition", float("inf"))
         matches = [row for row in rows if lower < row["position"] < upper]
-        pagination_test_page_size = 20 if "beforePosition" in args and scenario == "session-read" else 2
-        limit = min(args.get("limit", 30), pagination_test_page_size)
+        limit = min(args.get("limit", 30), page_size)
         page = matches[-limit:] if "beforePosition" in args else matches[:limit]
         for row in page:
             text = row["text"].encode("utf-16-le")
@@ -594,10 +650,128 @@ class Fixture(BaseHTTPRequestHandler):
                 "nextPosition": page[-1]["position"] if page else None,
                 "earlierPosition": page[0]["position"] if "beforePosition" in args and len(matches) > limit else None}
 
+    def multi_environment_tool(self, name, args):
+        state = self.server.state
+        if "environmentId" in args:
+            state.setdefault("multiRoutedTargets", []).append(args["environmentId"])
+        env = state["claimedEnvironment"]
+        project = state["multiProject"]
+        thread, run = "shared-thread", "shared-run"
+        evidence = state.get("multiEvidence", "full")
+        final_run = "continued-run" if evidence == "restarted" else run
+        pre_check = "git -c flock.check=before rev-parse --verify HEAD"
+        post_check = "git -c flock.check=after rev-parse --verify HEAD"
+        summary = self.summary(thread) | {"projectId": project, "title": "Fixture verification"}
+        terminal = ("completed", "failed", "interrupted")
+        if name == "t3_environment_links":
+            return {"environmentId": env, "links": state.get("multiLinkedEnvironments", []),
+                    "notListed": "No matching linked environment is available."}
+        if name == "t3_environment_read":
+            return {"environmentId": env, "label": env, "serverVersion": "0.1.11"}
+        if name == "t3_project_read":
+            assert args["projectId"] == project
+            return {"id": project, "title": project}
+        if name == "t3_project_list":
+            return {"projects": [{"id": project, "title": project,
+                                  "workspaceRoot": f"/workspace/{project}"}], "nextCursor": None}
+        if name == "t3_thread_launch":
+            if state.get("multiForwardingUnavailable"):
+                return {"_tag": "OrchestratorMcpFailure", "code": "capability_denied",
+                        "message": "Linked environments is off on this machine, so no tool can act on another machine. Leave out environmentId to work here; the user can turn it on in Settings → Labs."}
+            assert args["projectId"] == project and "multiPrompt" not in state, "Run launched twice or in the wrong project"
+            prompt = args["message"]
+            assert prompt.endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
+            if not state.get("multiSingle"):
+                if state["multiCommit"]:
+                    assert args["workspaceStrategy"] == {"type": "worktree", "baseRef": state["multiCommit"],
+                                                         "startFromOrigin": False}
+                    assert pre_check in prompt and post_check in prompt and state["multiCommit"] in prompt
+                else:
+                    assert "workspaceStrategy" not in args and pre_check not in prompt and post_check not in prompt
+            state["multiPrompt"] = prompt
+            return {"threadId": thread, "runId": run, "projectId": project, "link": summary["link"]}
+        if name == "t3_thread_send":
+            assert "multiPrompt" in state and args["threadId"] == thread and args["mode"] == "queue"
+            assert args["clientRequestId"].startswith("flock-turn-")
+            state["multiFollowup"] = args["message"]
+            return {"threadId": thread, "runId": "follow-up-run", "delivery": "queued"}
+        if name == "t3_thread_list":
+            assert args["projectId"] == project and args["cursor"] == 0
+            threads = [summary] if "multiPrompt" in state and not state.get("multiHideLaunch") else []
+            return {"projectId": project, "threads": threads, "total": len(threads), "nextCursor": None}
+        assert "multiPrompt" in state and args["threadId"] == thread
+        status = state.get("multiStatus", "running")
+        if name == "t3_thread_wait":
+            requested_run = args["runId"]
+            assert requested_run in (run, "follow-up-run")
+            delegated = args["untilDelegatedWorkSettled"]
+            timed_out = status not in terminal or (delegated and state.get("multiHoldSettlement", False))
+            wait_run = "continued-run" if evidence == "restarted" and requested_run == run else requested_run
+            result = {"threadId": thread, "runId": wait_run, "status": status, "timedOut": timed_out}
+            if delegated and not timed_out:
+                result["resultRun"] = {"runId": wait_run, "status": status}
+            return result
+        if name == "t3_thread_interrupt":
+            assert status == "running" and args["runId"] == run
+            state["multiStatus"] = "interrupted"
+            return {"threadId": thread, "runId": run, "status": "interrupt_requested"}
+        assert name == "t3_thread_read", name
+        summary |= {"activeRunId": final_run if status not in terminal else None, "latestRunId": final_run,
+                    "pendingRequestCount": 0, "archived": False, "createdAt": "2026-11-21T01:00:00.000Z"}
+        recent = [{"runId": run, "ordinal": 1, "status": status, "startedAt": "2026-11-21T01:00:02.000Z"}]
+        rows = [self.item(thread, 1, run, "user_message", state["multiPrompt"], source="mcp")]
+        if final_run != run:
+            recent.append({"runId": final_run, "ordinal": 2, "status": status,
+                           "startedAt": "2026-11-21T01:00:03.000Z"})
+            rows.append(self.item(thread, 3, final_run, "user_message", "Continue after restart", source="server") |
+                        {"messageId": f"message:restart-continuation:{run}"})
+        if status in terminal:
+            expected = state["multiCommit"]
+            actual = state.get("multiActualCommit", expected)
+            if args["view"] == "activity":
+                def command(position, run_id, input, output, status="completed"):
+                    if env == "env-mini":
+                        input = f"/bin/zsh -lc '{input}'"
+                    rows.append(self.item(thread, position, run_id, "command_execution",
+                                          f"$ {input}\n{output}\n", status=status))
+
+                if expected:
+                    first, last = pre_check, post_check
+                    if evidence == "duplicate-pre":
+                        last = pre_check
+                    elif evidence in ("unmarked", "unmarked-missing-post"):
+                        first = last = "git rev-parse --verify HEAD"
+                    elif evidence == "reversed":
+                        first, last = last, first
+                    command(2, run, first, expected)
+                    if evidence not in ("missing-post", "unmarked-missing-post"):
+                        command(5, "unrelated-run" if evidence == "foreign-post" else final_run, last,
+                                actual + ("\n" + "x" * 600 if evidence == "truncated-post" else ""),
+                                status="failed" if evidence == "failed-post" else "completed")
+                    command(6 if evidence == "post-then-work" else 4, final_run, "ctest", "Checks ran")
+                    if evidence == "rechecked-mismatch":
+                        command(6, final_run, last, expected)
+                    if actual != expected:
+                        command(7, "unrelated-run", post_check, expected)
+                else:
+                    command(2, run, "ctest", "Checks ran")
+                if status == "failed":
+                    rows.append(self.item(thread, 8, final_run, "error", f"{env} tests failed", status="failed"))
+            if evidence != "missing-report":
+                report = "x" * 8193 if evidence == "truncated-report" else f"{env} verification {status}"
+                rows.append(self.item(thread, 9, "unrelated-run" if evidence == "foreign-report" else final_run,
+                                      "assistant_message", report))
+            if evidence == "empty-final-report":
+                rows.append(self.item(thread, 10, final_run, "assistant_message", ""))
+        rows.sort(key=lambda row: row["position"])
+        if "itemId" in args:
+            rows = [row for row in rows if row["itemId"] == args["itemId"]]
+        return self.history_page(summary, recent, rows, args, 2)
+
     def stock_tool(self, name, args):
         state = self.server.state
         if name == "t3_environment_read":
-            return {"environmentId": state.get("claimedEnvironment", "env-1")}
+            return {"environmentId": state.get("claimedEnvironment", "env-1"), "label": "T3 fixture"}
         if name == "t3_project_read":
             return {"id": "project", "workspaceRoot": state["stockRoot"]}
         if name == "t3_thread_launch":
@@ -756,6 +930,74 @@ def test_peer_recovery(server, runner, temp):
     assert server.state["launches"] == [action_id], "recovery resent the launch"
 
 
+def test_multi_environment(local, runner, temp):
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    with ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as mini:
+        mini.origin = f"http://127.0.0.1:{mini.server_port}"
+        mini.state = {}
+        mini.peer_recovery = mini.stock_thread = False
+        mini.multi_environment = True
+        for server, name in ((local, "local"), (mini, "mini")):
+            server.state.update(claimedEnvironment=f"env-{name}", multiProject=f"project-{name}", multiCommit=commit)
+            server.launch_accepted = threading.Event()
+            server.allow_launch_disconnect = threading.Event()
+        threading.Thread(target=mini.serve_forever, daemon=True).start()
+        command = [runner, local.origin, mini.origin, temp + "/creds", commit]
+        try:
+            subprocess.run(command + ["normal"], timeout=30, check=True)
+            local.launch_accepted.clear()
+            mini.launch_accepted.clear()
+            with subprocess.Popen(command + ["crash"]) as process:
+                try:
+                    deadline = time.monotonic() + 10
+                    while not (local.launch_accepted.is_set() and mini.launch_accepted.is_set()):
+                        assert process.poll() is None, f"Runtime exited before both launches were accepted: {process.returncode}"
+                        assert time.monotonic() < deadline, "One environment did not accept its Run"
+                        time.sleep(0.01)
+                    with sqlite3.connect(Path(temp) / "recovery.db") as db:
+                        actions = db.execute("""
+                            SELECT id,json_extract(data,'$.environmentId'),json_extract(data,'$.projectId'),phase
+                            FROM outbox WHERE json_extract(data,'$.tool')='delegate'
+                        """).fetchall()
+                    assert len(actions) == 2, actions
+                    for server in (local, mini):
+                        launch, = server.state["effects"]["t3_thread_launch"]
+                        expected = (launch["clientRequestId"], server.state["claimedEnvironment"], launch["projectId"])
+                        saved, = [action for action in actions if action[:3] == expected]
+                        assert saved[3] in ("started", "accepted")
+                        if server is mini:
+                            assert saved[3] == "started", "lost response unexpectedly confirmed before Flock died"
+                    process.kill()
+                    assert process.wait(timeout=5) == -signal.SIGKILL, "Runtime was not killed by SIGKILL"
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    mini.allow_launch_disconnect.set()
+            with sqlite3.connect(Path(temp) / "recovery.db") as db:
+                legacy_views = db.execute("""
+                    SELECT name,sql FROM sqlite_schema
+                    WHERE name IN ('project_execution_queue','project_slots') ORDER BY name
+                """).fetchall()
+                assert len(legacy_views) == 2
+                db.executescript("""
+                    DROP VIEW task_project_slots;
+                    DROP VIEW project_route_slots;
+                    DROP VIEW project_route_queue;
+                    UPDATE tasks SET data=json_remove(data,'$.runResults[0].deadline','$.runResults[1].deadline');
+                """)
+            subprocess.run(command + ["recover"], timeout=20, check=True)
+            with sqlite3.connect(Path(temp) / "recovery.db") as db:
+                assert db.execute("""
+                    SELECT name,sql FROM sqlite_schema
+                    WHERE name IN ('project_execution_queue','project_slots') ORDER BY name
+                """).fetchall() == legacy_views, "an older Runtime's views changed during migration"
+            subprocess.run(command + ["native-start"], timeout=30, check=True)
+            subprocess.run(command + ["native-resume"], timeout=30, check=True)
+            subprocess.run(command + ["native-unknown"], timeout=30, check=True)
+        finally:
+            mini.shutdown()
+
+
 def test_connection_setup(server, flock, temp):
     directory = Path(temp)
     state = directory / "flock"
@@ -807,6 +1049,12 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills), FLOCK_CODEX_SKILLS_DIR=str(codex_skills))
     env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
+    t3_home = directory / "t3-fixture-home"
+    env["T3CODE_HOME"] = str(t3_home)
+    runtime_path = t3_home / "userdata" / "server-runtime.json"
+    runtime_path.parent.mkdir(parents=True)
+    runtime_path.write_text(json.dumps({"version": 1, "pid": os.getpid(), "port": server.server_port,
+                                       "origin": server.origin, "serverVersion": "0.1.11"}))
     original = 'model = "fixture"\n\n[mcp_servers.unrelated]\ncommand = "/usr/bin/true"\n'
     codex_config.write_text(original)
     profile = state / "bots" / "reviewer"
@@ -819,10 +1067,18 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         port = choose_port.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
 
-    def connect(environment, flags, restart=False, expected_error=None, rewritten=True):
+    def approve(authorization):
+        request = urllib.request.Request(server.origin + "/fixture",
+            data=json.dumps({"authorization": authorization}).encode(),
+            headers={"Content-Type":"application/json"})
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+
+    def connect(environment, flags, restart=False, expected_error=None, rewritten=True, source="url"):
         server.state["claimedEnvironment"] = environment
-        with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
-                                         *flags], env=env, text=True,
+        target = {"url": ["connect", server.origin + "/mcp"], "local": ["connect"],
+                  "saved": ["reconnect", environment]}[source]
+        with subprocess.Popen(command + ["t3", *target, *flags], env=env, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
             try:
                 with selectors.DefaultSelector() as selector:
@@ -830,11 +1086,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                     assert selector.select(5), "T3 connect did not display the OAuth URL"
                     assert "authorize Flock" in process.stderr.readline(), "T3 connect failed before OAuth"
                 authorization = process.stderr.readline().strip()
-                request = urllib.request.Request(server.origin + "/fixture",
-                    data=json.dumps({"authorization": authorization}).encode(),
-                    headers={"Content-Type":"application/json"})
-                with urllib.request.urlopen(request, timeout=5):
-                    pass
+                approve(authorization)
                 output, errors = process.communicate(timeout=8)
                 if expected_error:
                     assert process.returncode != 0 and expected_error in errors, (output, errors)
@@ -844,7 +1096,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 if process.poll() is None:
                     process.kill()
         details = json.loads(output)
-        assert "mode" not in details and details["port"] == port
+        assert "mode" not in details and details["port"] == port and details["environmentId"] == environment
         has_claude = env["FLOCK_CLAUDE_CLI"] == str(claude)
         providers = ["codex", "claude"] if has_claude else ["codex"]
         assert details["configuredProviders"] == (providers if rewritten else [])
@@ -879,15 +1131,17 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     command = working_command
     codex_config.write_text(original)
 
+    system_settings = state / "system-settings.json"
+    system_settings.write_text(json.dumps({"port": port}))
+    system_settings.chmod(0o600)
     env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
-    old = connect("env-1", ["--port", str(port)], restart=True)
+    old = connect("env-1", [], restart=True, source="local")
+    system_settings.unlink()
     assert claude_config.read_bytes() == original_claude
     env["FLOCK_CLAUDE_CLI"] = str(claude)
     token = connect("env-2", [])
     assert token != old
-    rotated = connect("env-2", [])
-    assert rotated != token
-    token = rotated
+    assert connect("env-2", [], rewritten=False, source="saved") == token
     assert connect("env-3", [], rewritten=False) == token
     subprocess.run(command + ["t3", "disconnect", "env-3"], env=env, check=True,
                    timeout=5, stdout=subprocess.DEVNULL)
@@ -904,7 +1158,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         ("FIXTURE_CLAUDE_ALLOW_BEARER", "Bearer " + token),
     ]:
         env[setting] = value
-        connect("env-2", [], expected_error="Claude Code 2.1.327 or later is required")
+        connect("env-2", ["--port", str(port - 1)], expected_error="Claude Code 2.1.327 or later is required")
         del env[setting]
         assert {path.name: path.read_bytes() for path in credential_dir.glob("*.json")} == credentials
         assert codex_config.read_bytes() == previous_config and connector() == previous_connector
@@ -920,6 +1174,15 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     before_port_change = token
     token = connect("env-2", ["--port", str(port)], restart=True)
     assert token != before_port_change
+
+    system_settings.write_text(json.dumps({"port": port}))
+    system_settings.chmod(0o600)
+    configured = codex_config.read_bytes(), claude_config.read_bytes(), connector()
+    conflict = subprocess.run(command + ["t3", "connect", server.origin + "/mcp",
+                                        "--port", str(previous_port)],
+                              env=env, text=True, capture_output=True, timeout=5)
+    assert conflict.returncode != 0 and "Flock System settings select Web port" in conflict.stderr
+    assert (codex_config.read_bytes(), claude_config.read_bytes(), connector()) == configured
 
     with subprocess.Popen(command + ["run", "--no-web"], env=env, text=True,
                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as headless:
@@ -947,6 +1210,35 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         except urllib.error.HTTPError as error:
             return error.code
 
+    admin_credential = "Bearer fixture-local-owner-admin"
+    member_credential = "Bearer fixture-local-owner-member"
+    identities = directory / "web-identities.json"
+    identities.write_text(json.dumps([
+        {"person": "local-owner", "authorization": admin_credential, "adminRoot": True},
+        {"person": "local-owner", "authorization": member_credential},
+    ]))
+    identities.chmod(0o600)
+    env["FLOCK_WEB_IDENTITIES_FILE"] = str(identities)
+
+    def settings(path="", body=None, credential=admin_credential):
+        origin = f"http://127.0.0.1:{port}"
+        request = urllib.request.Request(origin + "/api/settings" + path,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Origin":origin, "Content-Type":"application/json", "X-Flock-Action":"1",
+                     "Authorization":credential})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.load(response)
+
+    def await_t3_settings(predicate):
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            _, value = settings()
+            if predicate(value):
+                return value
+            assert not value["t3Setup"]["error"], value["t3Setup"]
+            time.sleep(0.05)
+        raise AssertionError("Flock did not finish the Web T3 connection")
+
     with subprocess.Popen(command + ["run"], env=env, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
         try:
@@ -955,6 +1247,50 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 assert selector.select(8), "Flock did not listen on the saved port"
                 assert daemon.stdout.readline().rstrip().endswith(f":{port}")
             assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
+
+            server.state["claimedEnvironment"] = "env-local-web"
+            server.state["descriptorEnvironment"] = "env-wrong"
+            try:
+                settings("/t3-connect", {"source": "local"}, member_credential)
+            except urllib.error.HTTPError as error:
+                assert error.code == 403
+            else:
+                raise AssertionError("non-admin credential started Web T3 setup")
+            status, _ = settings("/t3-connect", {"source": "local"})
+            assert status == 202
+            pending = await_t3_settings(lambda value: value["t3Setup"]["authorizationUrl"])
+            approve(pending["t3Setup"]["authorizationUrl"])
+            failed = await_t3_settings(lambda value: not value["t3Setup"]["running"])
+            assert failed["t3Setup"]["error"]
+            assert all(row["environmentId"] != "env-local-web" for row in failed["t3"]["environments"])
+            del server.state["descriptorEnvironment"]
+
+            def connect_web(target):
+                assert settings("/t3-connect", target)[0] == 202
+                pending = await_t3_settings(lambda value: value["t3Setup"]["authorizationUrl"])
+                approve(pending["t3Setup"]["authorizationUrl"])
+                connected = await_t3_settings(lambda value: not value["t3Setup"]["running"])
+                assert not connected["t3Setup"]["error"]
+                return {row["environmentId"]: row["authorization"] for row in connected["t3"]["environments"]}
+
+            authorized = connect_web({"source": "local"})["env-local-web"]
+            assert authorized["label"] == "T3 fixture" and not authorized["expired"]
+            credential_file = next(file for file in credential_dir.glob("*.json")
+                                   if json.loads(file.read_text())["environmentId"] == "env-local-web")
+            expired = json.loads(credential_file.read_text())
+            expired["expiresAt"] = 1
+            credential_file.write_text(json.dumps(expired))
+            assert next(row["authorization"]["expired"] for row in settings()[1]["t3"]["environments"]
+                        if row["environmentId"] == "env-local-web")
+            assert not connect_web({"source": "saved", "environmentId": "env-local-web"})["env-local-web"]["expired"]
+            assert settings("/t3-disconnect", {"environmentId":"env-local-web"})[0] == 200
+            assert all(row["environmentId"] != "env-local-web" for row in settings()[1]["t3"]["environments"])
+            assert ping(token) == 200
+
+            server.state["claimedEnvironment"] = "env-from-url"
+            assert "env-from-url" in connect_web({"source": "url", "mcpUrl": server.origin + "/mcp"})
+            assert settings("/t3-disconnect", {"environmentId": "env-from-url"})[0] == 200
+
             subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
             assert ping(token) == 200 and endpoint in codex_config.read_text() and "flock" in json.loads(claude_config.read_text())["mcpServers"]
@@ -993,6 +1329,7 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     server.state = {}
     server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
     server.stock_thread = sys.argv[2:] == ["pinned-workspace"]
+    server.multi_environment = sys.argv[2:] == ["multi-environment"]
     if server.stock_thread:
         root = temp + "/project"
         good = temp + "/worker"
@@ -1017,6 +1354,9 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     try:
         if server.peer_recovery:
             test_peer_recovery(server, sys.argv[1], temp)
+            code = 0
+        elif server.multi_environment:
+            test_multi_environment(server, sys.argv[1], temp)
             code = 0
         elif sys.argv[2:] == ["connection-setup"]:
             test_connection_setup(server, sys.argv[1], temp)

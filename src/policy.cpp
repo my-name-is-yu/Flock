@@ -184,6 +184,7 @@ PolicyResult Policy::check(std::string_view bot, Action action, std::string_view
 bool Policy::forbidden(std::string_view bot, Action action, std::string_view target) const {
     if (!validBotId(bot) || target.empty()) return true;
     std::lock_guard lock(db_.mutex);
+    if (db_.botDeleted(bot)) return true;
     auto rows = db_.query("SELECT target FROM policy_rules WHERE kind='never' AND action=?",{actionName(action)});
     while (rows.next())
         if (targetMatches(rows.string(0),target)) return true;
@@ -217,6 +218,7 @@ PolicyResult Policy::check(const Person& actor, Action action, std::string_view 
     if (action == Action::rules_manage || action == Action::shared_memory_read || action == Action::shared_memory_write) return actor.adminRoot ? PolicyResult::allow : PolicyResult::deny;
     if (!validBotId(target)) return PolicyResult::deny;
     std::lock_guard lock(db_.mutex);
+    if (db_.botDeleted(target)) return PolicyResult::deny;
     if (actor.adminRoot || db_.query("SELECT 1 FROM bot_owners WHERE bot=? AND person=?",{target,actor.id}).next())
         return PolicyResult::allow;
     if ((action == Action::bot_view || action == Action::bot_talk || action == Action::bot_decide) &&
@@ -301,6 +303,7 @@ Json Policy::createOwnedBot(const Person& creator,
 void Policy::setOwner(const Person& creator, std::string_view bot) {
     std::lock_guard lock(db_.mutex);
     if (!validBotId(bot) || !allows(creator,Action::bot_create,bot)) throw DecisionDenied{};
+    if (db_.botDeleted(bot)) throw Conflict("This Bot ID has already been used");
     db_.sharedRedactor().requirePublic({creator.id,bot});
     if (db_.query("SELECT 1 FROM bot_creation_intents WHERE target=?",{bot}).next())
         throw Conflict("Bot creation is already in progress");
@@ -351,6 +354,7 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
     std::lock_guard lock(db_.mutex);
     if (auto completed = db_.query("SELECT id FROM bot_changes WHERE request_key=?",{requestKey}); completed.next())
         return completed.number(0);
+    if (db_.botDeleted(target)) throw Conflict("This Bot ID has already been used");
 
     std::string owner;
     if (create) {

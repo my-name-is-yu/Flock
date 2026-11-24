@@ -65,6 +65,7 @@ struct Resource {
     static Resource sessionRead(std::string_view environment, std::string_view thread);
 };
 struct SecretRef { std::string name; bool valid() const; };
+class SecretRedactor;
 
 struct BotChange {
     std::string operation, target, name, requestKey;
@@ -97,6 +98,7 @@ public:
     void executeSessionResource(std::string_view environment, const RunRef&, const Resource&,
                                 const std::function<bool()>& upstreamPermits,
                                 const std::function<void(Id ownerTask)>& execute) const;
+    SecretRedactor secretRedactor(std::string_view bot) const;
     Json redactSecrets(std::string_view bot, const Json& view) const;
     void requireWebIdentity();
     bool requiresIdentity() const;

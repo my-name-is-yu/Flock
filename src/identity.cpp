@@ -39,6 +39,7 @@ ConfiguredIdentities loadIdentities(Store& store, const std::filesystem::path& p
     }
     store.setRootPeople(std::move(roots));
     ConfiguredIdentities configured;
+    for (const auto& [person,admin] : identities) configured.users.push_back({person,admin});
     configured.resolveRoot = [identities=std::move(identities)](std::string_view person) -> std::optional<bool> {
         const auto found = identities.find(person);
         if (found == identities.end()) return std::nullopt;

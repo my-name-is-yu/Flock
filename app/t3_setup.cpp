@@ -161,11 +161,14 @@ ConfigEdit editCodex(std::string_view url, std::string_view token, const OwnsBea
     if (start != config.npos) {
         const auto finish = config.find(end,start + begin.size());
         if (finish == config.npos) throw Conflict("Incomplete Flock entry in Codex configuration");
-        if (url.empty()) {
+        if (url.empty() || owns) {
             const auto parsed = toml::parse(config);
             const auto header = parsed["mcp_servers"]["flock"]["http_headers"]["Authorization"]
                 .value_or(std::string{});
-            if (!matchesBearer(header,owns)) return edit;
+            if (!matchesBearer(header,owns)) {
+                if (url.empty()) return edit;
+                throw Conflict("The Codex MCP registration belongs to another Flock installation");
+            }
         }
         config.erase(start,finish + end.size() - start);
     }
@@ -266,9 +269,9 @@ T3SetupLock::T3SetupLock() {
 
 T3SetupLock::~T3SetupLock() { close(fd_); }
 
-Json configureT3Providers(std::string_view url,
-    const std::function<void(const InstallT3Provider&)>& connect) {
-    auto providers = Json::array();
+std::vector<std::string> configureT3Providers(std::string_view url,
+    const std::function<void(const InstallT3Provider&)>& connect, const OwnsBearer& owns) {
+    std::vector<std::string> providers;
     std::optional<ConfigEdit> codex;
     const auto claude = setting("FLOCK_CLAUDE_CLI","claude");
     std::optional<Json> previousClaude;
@@ -277,17 +280,17 @@ Json configureT3Providers(std::string_view url,
     try {
         connect([&](std::string_view token) {
             if (installed(setting("FLOCK_CODEX_CLI","codex"))) {
-                codex = editCodex(url,token,{});
-                providers.push_back("codex");
+                codex = editCodex(url,token,owns);
+                providers.emplace_back("codex");
             }
             const bool hasClaude = installed(claude);
             if (hasClaude) {
                 previousClaude = readClaudeServer();
-                if (previousClaude && !ownsClaudeServer(previousClaude,[](std::string_view bearer) {
-                    return bearer.starts_with("flock-t3-");
+                if (previousClaude && !ownsClaudeServer(previousClaude,[&](std::string_view bearer) {
+                    return owns ? owns(bearer) : bearer.starts_with("flock-t3-");
                 })) throw Conflict("Remove the existing Claude Code MCP server named flock before connecting");
                 if (previousClaude) requireClaudeStdin(claude);
-                providers.push_back("claude");
+                providers.emplace_back("claude");
             }
             if (codex) {
                 codex->apply();
