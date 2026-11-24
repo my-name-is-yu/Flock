@@ -977,7 +977,7 @@ function activityRow(tag, className, title, status, statusClass) {
 }
 function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
-  const title = [request, session.name].filter(Boolean).join(' · ');
+  const title = [session.name, request].filter(Boolean).join(' · ');
   const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
   row.title = [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · ');
   if (link) {

@@ -79,6 +79,11 @@ function fixtures() {
     activeSessions = request ? [{ taskId: 18, threadId: 'working', environmentId: 'local', state: 'running', request }] : [];
     document.dispatchEvent(new Event('visibilitychange'));
   };
+  window.showWorkingTargets = () => {
+    activeSessions = ['Local', 'Mini'].map((name) => ({ taskId: 19, threadId: `thread-${name.toLowerCase()}`,
+      environmentId: `env-${name.toLowerCase()}`, name, state: 'running', request: 'Compare release checks' }));
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   window.showSuggestion = () => {
     activeSessions = [];
     events.push({ id: 5, kind: 'conversation_reply', time: time + 1002, data: {
@@ -108,6 +113,15 @@ async function exercise() {
   check(sessionLabel(sessionRows()[0]) === 'Yesterday', 'An open tab did not refresh Session time at local midnight');
   window.returnAfterMidnight();
   check(sessionLabel(sessionRows()[0]) === 'Nov 20', 'Returning to the tab did not refresh the relative Session time');
+  window.showWorkingTargets();
+  const destinationRows = () => sessionRows().filter((row) => ['Local', 'Mini'].some((name) =>
+    row.querySelector('.activity-title')?.textContent.startsWith(`${name} · Compare release checks`)));
+  for (let attempt = 0; attempt < 20 && destinationRows().length !== 2; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  const destinations = destinationRows();
+  check(destinations.length === 2 && destinations.every((row) =>
+    ['Working', 'Working'].includes(sessionLabel(row))),
+    'Running destination Sessions did not show distinct visible names and live status');
   const rows = [...document.querySelectorAll('.event-message')];
   const [first, second, report] = rows.map(row => row.querySelector('.event-text'));
   const singleTime = rows.map(row => row.querySelector('time'));

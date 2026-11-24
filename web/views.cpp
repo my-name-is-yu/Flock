@@ -314,7 +314,10 @@ Json sessionGroup(const Json& task) {
                 return field(check,"environmentId") == field(*run,"environmentId") &&
                     field(check,"threadId") == thread && field(check,"runId") == field(*run,"runId");
             });
-            if (result != results.end()) copyFields(session,*result,{"name","commit"});
+            if (result != results.end()) {
+                copyFields(session,*result,{"name","commit"});
+                if (result->contains("status")) session["state"] = result->at("status");
+            }
         }
         if (const auto createdAt = field(*run,"sessionCreatedAt"); !createdAt.empty()) session["createdAt"] = createdAt;
         sessions.push_back(std::move(session));
@@ -353,7 +356,7 @@ Json activity(const Json& activeTasks, std::string_view bot) {
             }
             result["queued"].push_back(std::move(queued));
         }
-        if (task.contains("runTargets")) {
+        if (task.contains("runTargets") || task.contains("runResults")) {
             Json checks = Json::array();
             const auto& routes = task.contains("runResults") ? task.at("runResults") : task.at("runTargets");
             for (const auto& route : routes) {

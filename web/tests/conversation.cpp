@@ -446,6 +446,15 @@ void parallelVerificationInView(const std::filesystem::path& path) {
     const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","verify-both"},
         {"text","Verify the release on both machines."}},201);
     tick(runtime,3);
+    const auto activePage = browser.get("/api/view?bot=release");
+    const auto& activeSessions = activePage.at("activeSessions");
+    check(activeSessions.size() == 1 && activeSessions.front().at("environmentId") == "local-env" &&
+          activeSessions.front().at("state") == "running" && activeSessions.front().at("name") == "local-env",
+          "a running destination was missing from live Session activity");
+    const auto& visibleSessions = activePage.at("sessionTasks").front().at("sessions");
+    check(visibleSessions.size() == 1 && visibleSessions.front().at("state") == "running" &&
+          visibleSessions.front().at("name") == "local-env",
+          "the saved Session row lost its active destination state or name");
     t3.localFinished = true;
     runtime.tick();
     const auto saved = store.tasks("release").at(0);
