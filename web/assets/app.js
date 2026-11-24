@@ -135,9 +135,9 @@ const errors = {
   already_closed: 'This request was already answered or closed.',
   access_denied: 'You do not have permission to respond to this request.',
   bot_not_found: 'Bot not found.',
-  invalid_peer: 'Choose another Bot for this DM.',
-  peer_not_allowed: 'This Bot DM is unavailable.',
-  peer_not_found: 'This Bot DM is unavailable.',
+  invalid_peer: 'Choose another Bot.',
+  peer_not_allowed: 'This conversation between Bots isn’t available.',
+  peer_not_found: 'This conversation between Bots isn’t available.',
   peer_message_not_found: 'This message is unavailable.',
 };
 
@@ -870,7 +870,6 @@ function renderHeader() {
     scopeAvatar?.destroy();
     scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
     if (bot) elements['activity-scope-name'].textContent = bot.name;
-    // Accent tokens follow the open Bot, including its Bot-to-Bot DMs; the empty state keeps Flock purple.
     if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
     else document.documentElement.style.removeProperty('--bot-accent');
   }
@@ -1781,7 +1780,7 @@ function leavePeerConversation(updateHistory = true) {
 
 function peerThread(events, dm, keep) {
   if (!events.length) {
-    const title = dm.error ? 'DM unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
+    const title = dm.error ? 'Conversation unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
     return [keep('empty', [title, dm.error], () => {
       const empty = node('div', 'empty-state');
       empty.append(node('h2', null, title));
@@ -1937,7 +1936,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const dm = view.dm;
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
     if (!changed('timeline', dm.id, dm.peerId, dm.anchor, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
-    scroller.setAttribute('aria-label', 'Bot DM history');
+    scroller.setAttribute('aria-label', 'Conversation between Bots');
     updateTimelineRows(dm, (keep) => peerThread(events, dm, keep));
     moveScroll();
     if (dm.pendingViewMotion && elements.timeline.childElementCount > 0) {
@@ -2502,7 +2501,6 @@ function openNewBot(origin = elements['new-bot-button']) {
   botEditor.openCreate({ bots, origin });
 }
 
-// The header avatar is hidden in a Bot DM; the conversation menu stays visible there.
 function headerFocusTarget() {
   return elements['profile-identity'].hidden ? conversationActionsTrigger : elements['profile-avatar-button'];
 }
@@ -2819,10 +2817,11 @@ function renderDetail() {
   labelDetail(null);
   renderDetailNav([], null);
   if (detail.kind === 'peers') {
+    const botName = view.data.bot.name;
     const peers = botPeers(view.id).map(({ id }) => participant(id));
-    if (changed('detail', detail, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
+    if (changed('detail', detail, botName, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
       const active = document.activeElement?.dataset.peerChoice;
-      elements['detail-title'].textContent = 'Bot DMs';
+      elements['detail-title'].textContent = `${botName} talks with`;
       const list = node('ul', 'peer-picker-list');
       for (const bot of peers) {
         const item = node('li');
@@ -2832,7 +2831,7 @@ function renderDetail() {
         item.append(link);
         list.append(item);
       }
-      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', 'No Bot DMs available.')]);
+      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', `${botName} hasn’t talked with other Bots yet.`)]);
       if (active) [...list.querySelectorAll('a')].find((link) => link.dataset.peerChoice === active)?.focus();
     }
     return;
