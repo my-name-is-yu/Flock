@@ -149,14 +149,6 @@ CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
   PRIMARY KEY(host,repo,pr_number),
   FOREIGN KEY(host,repo,pr_number) REFERENCES git_pr_watches(host,repo,pr_number) ON DELETE CASCADE)
 )SQL");
-    // Replace the v7 views together so open connections never see half an upgrade.
-    if (!query("SELECT 1 FROM sqlite_schema WHERE type='view' AND name='task_admission'").next()) {
-        Transaction upgrade(db);
-        exec("DROP VIEW IF EXISTS project_slots");
-        exec("DROP VIEW IF EXISTS project_execution_queue");
-        initializeTaskAdmission();
-        upgrade.commit();
-    }
     exec("PRAGMA journal_mode=WAL");
     // Open the WAL now so a read-only peer can use a freshly initialized database.
     exec("PRAGMA user_version");
@@ -232,6 +224,7 @@ CREATE TABLE IF NOT EXISTS conversation_model_failures(
     initializeAttachmentsSchema();
     initializeCompactionSchema();
     initializeWorkflowSchema();
+    initializeTaskAdmission();
     initializeMemorySchema();
     initializeAutomationSchema();
     initializeGitSchema();

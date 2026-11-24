@@ -1451,37 +1451,6 @@ void correctingAnUnsentLaunchAdmitsFreshWorktreesTogether() {
           "Correcting an unsent launch to a fresh worktree did not release its project exclusion");
 }
 
-void version7AdmissionUpgradeKeepsExistingReservations() {
-    Fixture f;
-    f.model.script = [](const ModelInput& input) { return input.event.at("kind") == "result" ? complete() : work(); };
-    const auto saved = f.store->submit({"alpha","Saved version 7 work","e","p",newWorktreeConfig});
-    f.reach(saved,"running");
-    f.runtime.reset();
-    f.store.reset();
-    const auto file = f.directory/"state.db";
-    executeSql(file,R"SQL(
-DROP VIEW task_admission;
-CREATE VIEW project_execution_queue AS SELECT id FROM tasks;
-CREATE VIEW project_slots AS SELECT id,NULL AS blocker_id FROM project_execution_queue;
-UPDATE tasks SET data=json_remove(data,'$.isolatedWorkspace');
-)SQL");
-    f.restart();
-    const auto next = f.store->submit({"beta","New worktree after the upgrade","e","p",newWorktreeConfig});
-    check(f.task(saved).at("activeRun").at("runId") == "run-1" &&
-          f.task(next).at("blockedBy").at("id") == saved && f.logs(saved,"run_started") == 1,
-          "Opening version 7 lost the existing Run or inferred isolation from its current settings");
-    executeSql(file,R"SQL(
-CREATE TEMP TABLE format_check(valid INTEGER CHECK(valid=1));
-INSERT INTO format_check SELECT
-  user_version=7 AND NOT EXISTS (
-    SELECT 1 FROM sqlite_schema WHERE name IN ('project_execution_queue','project_slots'))
-FROM pragma_user_version();
-)SQL");
-    f.t3.finish("run-1");
-    f.reach(saved,"completed");
-    f.reach(next,"running");
-}
-
 void peerWorkAndRestart() {
     Fixture f;
     f.allowBeta();
@@ -3066,7 +3035,6 @@ int main() {
             {"isolated worktrees and shared checkout across restart",isolatedWorktreesAndSharedCheckoutAcrossRestart},
             {"widening a worktree reservation waits for active work",wideningAWorktreeReservationWaitsForAnActiveRun},
             {"correcting an unsent launch admits fresh worktrees together",correctingAnUnsentLaunchAdmitsFreshWorktreesTogether},
-            {"version 7 admission upgrade keeps existing reservations",version7AdmissionUpgradeKeepsExistingReservations},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Peer completion evidence follows the Session read policy",peerCompletionRespectsSessionReadPolicy},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
