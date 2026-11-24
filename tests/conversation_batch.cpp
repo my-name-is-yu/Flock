@@ -468,7 +468,7 @@ void rereadEarlierResult() {
     check(reread(true) == single && f.t3.searches == 1,"Batched result reread differed from the single-call path");
 }
 
-void gatedRead(std::string_view tool, bool allow, bool restart) {
+void gatedRead(std::string_view tool, bool batch, bool allow, bool restart) {
     Fixture f;
     const bool events = tool == "flock_session_events";
     const auto read = events ? sessionEvents(f) : call(std::string(tool),{{"docId",sharedDoc}});
@@ -476,17 +476,22 @@ void gatedRead(std::string_view tool, bool allow, bool restart) {
                                  {{"docId",sharedDoc},{"baseVersion",0},{"content","Shared playbook"}});
     f.requireApproval(events ? Resource::sessionRead("env","fixture-thread") :
         Resource{Action::shared_memory_read,sharedDoc});
-    f.receive({search,read});
+    f.receive(batch ? std::vector{search,read} : std::vector{read});
     f.runtime->runConversations();
     const auto pending = f.results("effect");
     const auto searches = f.t3.searches.load();
-    const auto operation = "turn/" + std::to_string(f.message) + "/1/1";
-    check(f.status() == "policy_waiting" && pending.at(0).at("result").at("ok") == true &&
-          pending.at(1).is_null() && f.t3.eventReads == 0 && f.model.turns.size() == 1 &&
-          f.query("SELECT operation FROM policy_approvals") == operation,"Gated read lost its approval or sibling result");
+    const std::size_t slot = batch ? 1 : 0;
+    const auto operation = "turn/" + std::to_string(f.message) + (batch ? "/1/1" : "/1");
+    check(f.status() == "policy_waiting" && pending.size() == slot + 1 && pending.at(slot).is_null() &&
+          f.t3.eventReads == 0 && f.model.turns.size() == 1 &&
+          f.query("SELECT operation FROM policy_approvals") == operation,"Gated read lost its approval or slot");
+    if (batch) check(pending.at(0).at("result").at("ok") == true,"Gated read blocked its sibling");
     f.decideApproval(allow);
     if (restart) {
-        if (events) Fixture::write(f.connect().get(),
+        if (!batch) {
+            // Before singleton reads used ToolBatch, approvals had no effect checkpoint.
+            Fixture::write(f.connect().get(),"UPDATE conversation_steps SET effect=NULL" + f.whereStep());
+        } else if (events) Fixture::write(f.connect().get(),
             R"SQL(UPDATE conversation_steps SET effect=json_set(effect,'$[1]',json('{"inFlight":true}')))SQL" +
             f.whereStep());
         f.restart();
@@ -494,19 +499,19 @@ void gatedRead(std::string_view tool, bool allow, bool restart) {
     bool approvalHeldDuringRead = false;
     if (events) f.t3.onEvents = [&] {
         approvalHeldDuringRead = f.query("SELECT status FROM policy_approvals") == "approved" &&
-            f.results("effect").at(1).value("inFlight",false);
+            f.results("effect").at(slot).value("inFlight",false);
     };
     f.runtime->runConversations();
     f.checkFinished(2);
     const auto results = f.results();
     check(f.t3.searches == searches && f.t3.eventReads == (events && allow ? 1 : 0) &&
           approvalHeldDuringRead == (events && allow) &&
-          results.at(0) == pending.at(0) && f.model.turns.back().at(1).at("result").at("ok") == allow &&
+          (!batch || results.at(0) == pending.at(0)) && f.model.turns.back().at(slot).at("result").at("ok") == allow &&
           f.query("SELECT status FROM policy_approvals") == (allow ? "used" : "denied"),
           "Read approval settlement changed a sibling, skipped the approved read, or read after denial");
 }
 
-void standaloneEventApprovalSurvivesFailedSave() {
+void singleEventReadRecoversFromFailedWrites() {
     Fixture f;
     const auto read = sessionEvents(f);
     f.requireApproval(Resource::sessionRead("env","fixture-thread"));
@@ -514,24 +519,39 @@ void standaloneEventApprovalSurvivesFailedSave() {
     f.runtime->runConversations();
     f.decideApproval(true);
     auto connection = f.connect();
+    const auto expectFailedWrite = [&] {
+        try { f.runtime->runConversations(); }
+        catch (const std::runtime_error& error) {
+            if (std::string_view(error.what()).find("fixture result save failed") != std::string_view::npos) return;
+            throw;
+        }
+        throw std::runtime_error("The approved read did not reach the failing result save");
+    };
     Fixture::write(connection.get(),R"SQL(
+CREATE TRIGGER fail_slot_save BEFORE UPDATE OF effect ON conversation_steps
+WHEN json_extract(NEW.effect,'$[0].result.ok') = 1
+BEGIN SELECT RAISE(ABORT,'fixture result save failed'); END;
+)SQL");
+    expectFailedWrite();
+    check(f.t3.eventReads == 1 && f.results("effect").at(0).value("inFlight",false) &&
+          f.query("SELECT status FROM policy_approvals") == "approved",
+          "The failed slot write consumed the approval before the result was saved");
+    Fixture::write(connection.get(),R"SQL(
+DROP TRIGGER fail_slot_save;
 CREATE TRIGGER fail_result_save BEFORE UPDATE OF result ON conversation_steps
 BEGIN SELECT RAISE(ABORT,'fixture result save failed'); END;
 )SQL");
-    bool saveFailed = false;
-    try { f.runtime->runConversations(); }
-    catch (const std::runtime_error& error) {
-        saveFailed = std::string_view(error.what()).find("fixture result save failed") != std::string_view::npos;
-    }
-    check(saveFailed && f.t3.eventReads == 1,"The approved read did not reach the failing result save");
-    check(f.query("SELECT status FROM policy_approvals") == "approved",
-          "The standalone event read consumed its approval before the result was saved");
+    f.restart();
+    expectFailedWrite();
+    const auto checkpoint = f.results("effect");
+    check(f.t3.eventReads == 2 && checkpoint.at(0).at("result").at("ok") == true &&
+          f.query("SELECT status FROM policy_approvals") == "used",
+          "The approved event read did not commit its result and approval together");
     Fixture::write(connection.get(),"DROP TRIGGER fail_result_save");
     f.restart();
     f.runtime->runConversations();
     f.checkFinished(2);
-    check(f.t3.eventReads == 2 && f.results().at(0).at("result").at("ok") == true &&
-          f.query("SELECT status FROM policy_approvals") == "used","The approved event read did not recover");
+    check(f.t3.eventReads == 2 && f.results() == checkpoint,"Restart repeated a read with a saved result");
 }
 
 void storeRemainsResponsiveDuringSessionEventRead() {
@@ -633,11 +653,13 @@ int main(int argc, char** argv) {
         conversationReadParity();
         rereadEarlierResult();
         for (const auto tool : {"flock_session_events","read_memory","memory_history"}) {
-            gatedRead(tool,false,false);
-            gatedRead(tool,true,false);
-            gatedRead(tool,true,true);
+            for (bool batch : {false,true}) {
+                gatedRead(tool,batch,false,false);
+                gatedRead(tool,batch,true,false);
+                gatedRead(tool,batch,true,true);
+            }
         }
-        standaloneEventApprovalSurvivesFailedSave();
+        singleEventReadRecoversFromFailedWrites();
         storeRemainsResponsiveDuringSessionEventRead();
         std::cout << "Conversation batch acceptance passed\n";
     } catch (const std::exception& error) {
