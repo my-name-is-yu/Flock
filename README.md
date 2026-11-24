@@ -16,6 +16,8 @@ ctest --test-dir build --output-on-failure
 
 ## Configure a Bot
 
+Edit the Bot's instructions under **Role** in its Web settings.
+
 The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.
 
 ```json
@@ -45,7 +47,7 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 }
 ```
 
-In the same directory, use `SOUL.md` for the Bot's role and decision criteria (also editable under **Role** in the Bot's settings in the Web UI) and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
+In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
 
 Optional `conversationEnvironments` entries map names used in requests such as “Run the measurement on the cloud Mac” to T3 environments with access to the same `projectId`. Each target environment needs its own T3 connection and execution permissions. Use a configured name or canonical ID. If an alias matches a canonical ID, that spelling selects the canonical ID. The Bot asks in the conversation when the destination is unclear.
 

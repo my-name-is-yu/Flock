@@ -163,6 +163,54 @@ void configuredScheduleLifecycle() {
     check(store.tasks().size() == 1,"automation for a removed Bot queued work");
 }
 
+void workspaceChangesResyncConfiguredSchedules() {
+    Sandbox temp;
+    const auto home = temp.path / "bots";
+    auto config = botConfig();
+    config["name"] = "Customer Infrastructure Release Reviewer";
+    config["avatar"] = {{"kind","icon"},{"icon","star"},{"color","#69c9ac"}};
+    config["cron"] = Json::array({
+        {{"id","daily"},{"schedule","0 0 * * *"},{"timezone","Etc/UTC"},{"request","Daily check"}},
+        {{"id","canceled"},{"schedule","0 0 * * *"},{"timezone","Etc/UTC"},{"request","Canceled check"}},
+    });
+    createBot(home / "release",config,"Review releases","");
+    Bots bots(home);
+    Store store(temp.path / "tasks.db");
+    const auto start = utc(2026,1,1,12,0);
+    const auto due = utc(2026,1,2,0,0);
+    const Person owner{"fixture",true};
+    std::vector<std::string> errors;
+    const auto report = [&](std::string_view, std::string_view error) { errors.emplace_back(error); };
+    const auto schedules = [&] { return store.automations(owner,"release").at("automations"); };
+    bots.syncSchedules(store,start,report);
+    for (const auto& schedule : schedules()) {
+        if (schedule.at("configId") == "canceled") store.cancelAutomation(owner,"release",schedule.at("id"));
+    }
+
+    rejects<Conflict>([&] {
+        bots.updateWorkspace(store,"release",{{"environmentId","new-environment"},{"projectId","has space"}},due + 1,report);
+    },"invalid workspace accepted");
+    check(bots.get("release").environmentId == config.at("environmentId").get_ref<const std::string&>(),
+          "invalid project partly changed the workspace");
+
+    const auto saved = bots.updateWorkspace(store,"release",{{"environmentId","new-environment"},{"projectId","new-project"}},due + 1,report);
+    check(saved.at("name") == config.at("name") && saved.at("avatar").at("icon") == "star" &&
+          saved.at("soul") == "Review releases" && errors.empty(),"workspace save changed an unrelated setting or failed to import schedules");
+    const auto moved = bots.get("release");
+    check(moved.environmentId == "new-environment" && moved.projectId == "new-project" &&
+          moved.settings.at("model") == config.at("model"),"workspace save failed to persist the new route or changed the model");
+    store.fireDueAutomations(due + 1);
+    const auto tasks = store.tasks("release");
+    check(tasks.size() == 1 && tasks.at(0).at("environmentId") == "new-environment" && tasks.at(0).at("projectId") == "new-project" &&
+          tasks.at(0).at("trigger").at("targetTime") == due,"workspace save lost the due time, kept the old route, or restored a canceled schedule");
+
+    const auto cleared = bots.updateWorkspace(store,"release",{{"projectId",""}},due + 1,report);
+    check(!cleared.contains("projectId") && cleared.at("environmentId") == "new-environment" && errors.size() == 1,
+          "clearing the project changed the environment or silently kept configured schedules active");
+    store.fireDueAutomations(due + 86400);
+    check(store.tasks("release").size() == 1,"a configured schedule fired after its destination was cleared");
+}
+
 void invalidEntriesPreserveDueSchedule() {
     Sandbox temp;
     const auto home = temp.path / "bots";
@@ -251,6 +299,7 @@ void configuredSchedules() {
     cronSyntaxAndTimeZones();
     cronIntakeAndRestart();
     configuredScheduleLifecycle();
+    workspaceChangesResyncConfiguredSchedules();
     invalidSessionSettingsPreserveDueTimes();
     invalidEntriesPreserveDueSchedule();
     malformedDuplicatesDeactivateSchedules();

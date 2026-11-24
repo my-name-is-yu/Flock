@@ -18,6 +18,8 @@ struct Bot {
 
 class Bots {
 public:
+    using ScheduleReporter = std::function<void(std::string_view,std::string_view)>;
+
     explicit Bots(std::filesystem::path directory);
     std::vector<std::string> ids() const;
     Bot get(std::string_view id) const;
@@ -31,14 +33,17 @@ public:
     Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt,
                 const Policy::PublishOwnedBot& publishOwned = {});
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
+    Json updateWorkspace(Store&, std::string_view id, const Json& workspace, Seconds now, const ScheduleReporter&);
     std::optional<AvatarImage> avatarImage(std::string_view id) const;
-    void syncSchedules(Store&, Seconds now, const std::function<void(std::string_view,std::string_view)>& report) const;
+    void syncSchedules(Store&, Seconds now, const ScheduleReporter&) const;
 private:
     std::filesystem::path directory_;
     mutable std::mutex mutex_;
+    std::mutex workspaceMutex_;
     std::filesystem::path path(std::string_view id) const;
     Json cardLocked(std::string_view id) const;
     Json cardFromDirectory(std::string_view id, const std::filesystem::path&) const;
+    void syncBotSchedules(Store&, std::string_view id, Seconds now, const ScheduleReporter&) const;
 };
 
 }

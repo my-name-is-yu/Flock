@@ -823,29 +823,14 @@ void botProfilesAndAvatars() {
           renamed.at("avatar").at("version") == uploaded.at("avatar").at("version"),
           "renaming Bot lost existing uploaded image");
 
-    const auto described = bots.updateProfile("scout",{{"name","Scout Renamed"},{"soul","Scouts new releases."}},std::nullopt);
+    const auto described = bots.updateProfile("scout",{{"soul"," \tScouts new releases.\n"}});
     check(described.at("soul") == "Scouts new releases." && bots.soul("scout") == "Scouts new releases." &&
+          described.at("name") == "Scout Renamed" &&
           described.at("avatar").at("version") == uploaded.at("avatar").at("version"),
-          "saving a Bot role did not write SOUL.md or changed its avatar");
-    const auto cleared = bots.updateProfile("scout",{{"name","Scout Renamed"},{"soul",""}},std::nullopt);
+          "role update failed to save the text or changed the name or avatar");
+    const auto cleared = bots.updateProfile("scout",{{"soul"," \n\t"}});
     check(cleared.at("soul") == "" && !std::filesystem::exists(temp.path / "bots" / "scout" / "SOUL.md"),
           "clearing a Bot role left SOUL.md behind");
-
-    const auto placed = bots.updateProfile("scout",{{"name","Scout Renamed"},{"environmentId","env-1"},{"projectId","project-1"}},std::nullopt);
-    const auto scoutConfig = [&] {
-        std::ifstream input(temp.path / "bots" / "scout" / "config.json");
-        return Json::parse(input);
-    };
-    check(placed.at("environmentId") == "env-1" && placed.at("projectId") == "project-1" &&
-          scoutConfig().at("environmentId") == "env-1" && scoutConfig().at("projectId") == "project-1",
-          "saving where a Bot works did not write its config");
-    bool rejectedProject = false;
-    try { bots.updateProfile("scout",{{"name","Scout Renamed"},{"projectId","has space"}},std::nullopt); }
-    catch (const Conflict&) { rejectedProject = true; }
-    check(rejectedProject && scoutConfig().at("projectId") == "project-1","a project ID with whitespace was saved");
-    const auto unplaced = bots.updateProfile("scout",{{"name","Scout Renamed"},{"environmentId",""},{"projectId",""}},std::nullopt);
-    check(!unplaced.contains("environmentId") && !unplaced.contains("projectId") && !scoutConfig().contains("projectId"),
-          "clearing where a Bot works left its IDs behind");
 
     // Replacing with GIF deletes old PNG file and updates version hash.
     const auto replaced = bots.updateProfile("scout",{

@@ -107,30 +107,24 @@ struct ParsedProfile {
 };
 
 ParsedProfile parseBotProfile(const Json& body, bool creating) {
+    if (!creating && body.contains("soul")) {
+        if (body.size() != 2) throw InputError("invalid_profile_update");
+        return {{{"soul",validatedBotSoul(body.at("soul"))}},std::nullopt};
+    }
+    if (const auto fields = creating ? 0 : botWorkspaceFieldCount(body); fields) {
+        if (body.size() != fields + 1) throw InputError("invalid_profile_update");
+        Json workspace = Json::object();
+        for (const auto* key : botWorkspaceFields) {
+            if (const auto value = body.find(key); value != body.end()) workspace[key] = validatedBotWorkspaceId(*value);
+        }
+        return {std::move(workspace),std::nullopt};
+    }
     Json profile = {{"name",validatedBotName(body)}};
     if (creating && body.contains("role")) {
         if (!body["role"].is_string() || !validBotRole(body["role"].get_ref<const std::string&>()))
             throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
-    for (const auto* key : {"environmentId","projectId"}) {
-        if (creating || !body.contains(key)) continue;
-        const auto& value = body[key];
-        if (!value.is_string() || value.get_ref<const std::string&>().size() > 256) throw InputError("invalid_workspace");
-        const auto& text = value.get_ref<const std::string&>();
-        const auto first = text.find_first_not_of(" \t\r\n");
-        profile[key] = first == std::string::npos ? std::string{} : text.substr(first,text.find_last_not_of(" \t\r\n") - first + 1);
-    }
-    if (!creating && body.contains("soul")) {
-        const auto& soul = body["soul"];
-        if (!soul.is_string()) throw InputError("invalid_soul");
-        const auto& text = soul.get_ref<const std::string&>();
-        if (text.size() > maxBotRoleBytes || text.find('\0') != std::string::npos) throw InputError("invalid_soul");
-        const auto first = text.find_first_not_of(" \t\r\n");
-        profile["soul"] = first == std::string::npos ? std::string{}
-            : text.substr(first,text.find_last_not_of(" \t\r\n") - first + 1);
-    }
-    // Updates may omit the avatar to rename without touching the stored appearance.
     if (!creating && !body.contains("avatar")) return {std::move(profile),std::nullopt};
     auto avatar = validatedAvatarStyle(body);
     std::optional<AvatarImage> image;
@@ -458,7 +452,7 @@ private:
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
                 auto parsed = parseBotProfile(body,false);
                 if (store_.policy().redactSecrets(botId,parsed.profile) != parsed.profile)
-                    return error(res,400,"invalid_bot_profile");
+                    return error(res,400,parsed.profile.contains("soul") ? "role_contains_secrets" : "invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
                 changes_.rescan();
                 return json(res,200,redactBot(botId,web::botSettings(saved)));

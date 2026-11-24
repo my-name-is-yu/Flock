@@ -4,6 +4,8 @@ import { actionLabel, approvalSummary } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
+import { createBotRoleCard } from '/bot-role.js';
+import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink } from '/board-inbox.js';
 import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
@@ -2346,16 +2348,18 @@ const settingsSections = {
 };
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
+let detailRole = null;
+let detailWorkspace = null;
 let detailOrigin = null;
 
 function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
   detailAvatar = null;
 }
-const roleSize = new ResizeObserver(([{ target: soul }]) => {
-  const lineHeight = parseFloat(getComputedStyle(soul).lineHeight);
-  soul.nextElementSibling.hidden = soul.scrollHeight <= Math.ceil(8 * lineHeight);
-});
+function releaseDetailRole() {
+  detailRole?.dispose();
+  detailRole = null;
+}
 let detailSectionTimer = 0;
 function clearDetailSectionTransition() {
   clearTimeout(detailSectionTimer);
@@ -2372,6 +2376,8 @@ function openDetail(selection) {
   if (!view?.data) return;
   decisions.close({ focus: false });
   clearDetailSectionTransition();
+  releaseDetailRole();
+  detailWorkspace = null;
   detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
   signatures.delete('detail');
   renderDetail();
@@ -2390,7 +2396,9 @@ elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
   clearDetailSectionTransition();
   releaseDetailAvatar();
-  roleSize.disconnect();
+  detail = null;
+  releaseDetailRole();
+  detailWorkspace = null;
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
@@ -2589,7 +2597,6 @@ function generalContent(bot) {
   }
   renderNameDisplay();
   hero.append(avatarButton, nameWrap, statusNote);
-  const workspace = workspaceCard(bot, statusNote);
   const rows = node('div', 'settings-card settings-rows');
   rows.append(bot.cron.length
     ? settingsRow('Recurring requests', String(bot.cron.length), () => selectSection('cron', true))
@@ -2600,192 +2607,24 @@ function generalContent(bot) {
   settings.append(node('span', 'settings-row-label', 'Sharing and connections'));
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
-  return [hero, workspace, roleCard(bot, statusNote), rows];
+  return [hero, workspaceCard(bot), roleCard(bot), rows];
 }
-let t3Environments = null;
-async function loadT3Environments() {
-  if (t3Environments) return t3Environments;
-  try {
-    const data = await api('settings');
-    t3Environments = data.t3?.environments ?? [];
-  } catch {
-    t3Environments = [];
-  }
-  return t3Environments;
+function workspaceCard(bot) {
+  detailWorkspace ??= createBotWorkspaceCard(async (workspace) => {
+    const saved = await api('bots/profile', { botId: bot.id, ...workspace });
+    if (view?.id === bot.id) void view.refresh();
+    return saved;
+  }, async () => (await api('settings')).t3?.environments ?? []);
+  return detailWorkspace.element;
 }
-function workspaceCard(bot, statusNote) {
-  const card = node('section', 'settings-card settings-workspace');
-  const header = node('div', 'settings-role-header');
-  const heading = node('h3', 'settings-card-label', 'Where it works');
-  heading.id = 'settings-workspace-label';
-  card.setAttribute('aria-labelledby', heading.id);
-  const edit = button('Edit', 'text-button settings-role-edit', beginEdit);
-  edit.setAttribute('aria-label', 'Edit where this Bot works');
-  header.append(heading, edit);
-  const configured = !!(bot.environmentId && bot.projectId);
-  card.classList.toggle('needs-setup', !configured);
-
-  function renderView() {
-    edit.hidden = false;
-    edit.textContent = configured ? 'Edit' : 'Set up';
-    if (!configured) {
-      card.replaceChildren(header, node('p', 'settings-workspace-missing',
-        `Choose a T3 project for ${bot.name} before it can start work.`));
-      return;
-    }
-    const facts = node('dl', 'settings-workspace-facts');
-    facts.append(node('dt', null, 'Project'), node('dd', null, bot.projectId),
-      node('dt', null, 'T3 environment'), node('dd', null, bot.environmentId));
-    card.replaceChildren(header, facts);
-  }
-  function field(label, name, value, listId) {
-    const wrapper = node('label', 'settings-workspace-field');
-    const input = node('input');
-    Object.assign(input, { name, value: value ?? '', required: true, autocomplete: 'off', spellcheck: false });
-    if (listId) input.setAttribute('list', listId);
-    wrapper.append(node('span', null, label), input);
-    return [wrapper, input];
-  }
-  function beginEdit() {
-    edit.hidden = true;
-    const form = node('form', 'settings-workspace-form');
-    const listId = 'settings-t3-environments';
-    const [environmentField, environment] = field('T3 environment ID', 'environmentId', bot.environmentId, listId);
-    const [projectField, project] = field('Project ID', 'projectId', bot.projectId);
-    const suggestions = node('datalist');
-    suggestions.id = listId;
-    void loadT3Environments().then((environments) => {
-      suggestions.replaceChildren(...environments.map((id) => Object.assign(node('option'), { value: id })));
-      if (!environment.value && environments.length === 1) environment.value = environments[0];
-    });
-    const hint = node('p', 'settings-workspace-hint', 'Copy both IDs from the project in T3.');
-    const actions = node('div', 'settings-role-actions');
-    const cancel = button('Cancel', 'dialog-button quiet', () => {
-      renderView();
-      edit.focus();
-    });
-    const save = button('Save', 'dialog-button primary');
-    save.type = 'submit';
-    actions.append(cancel, save);
-    form.append(environmentField, projectField, suggestions, hint, actions);
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      for (const control of [environment, project, save, cancel]) control.disabled = true;
-      statusNote.classList.remove('error');
-      statusNote.hidden = true;
-      try {
-        await api('bots/profile', { botId: bot.id, name: bot.name, environmentId: environment.value, projectId: project.value });
-        await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
-        if (detail?.kind === 'settings') {
-          detail = { ...detail, status: 'Saved where it works' };
-          signatures.delete('detail');
-          renderDetail();
-        }
-      } catch {
-        for (const control of [environment, project, save, cancel]) control.disabled = false;
-        statusNote.classList.add('error');
-        statusNote.textContent = 'Couldn’t save. Check both IDs and try again.';
-        statusNote.hidden = false;
-      }
-    });
-    form.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      event.stopPropagation();
-      cancel.click();
-    });
-    card.replaceChildren(header, form);
-    (environment.value ? project : environment).focus();
-  }
-  renderView();
-  return card;
-}
-function roleCard(bot, statusNote) {
-  const role = node('section', 'settings-card settings-role');
-  const header = node('div', 'settings-role-header');
-  const heading = node('h3', 'settings-card-label', 'Role');
-  heading.id = 'settings-role-label';
-  role.setAttribute('aria-labelledby', heading.id);
-  const edit = button('Edit', 'text-button settings-role-edit', beginEdit);
-  edit.setAttribute('aria-label', 'Edit role');
-  header.append(heading, edit);
-
-  function renderView() {
-    edit.hidden = false;
-    if (!bot.soul) {
-      role.replaceChildren(header, node('p', 'settings-soul-empty', 'Describe what this Bot does and how it decides.'));
-      return;
-    }
-    const soul = node('p', 'settings-soul', bot.soul);
-    soul.id = 'settings-role-text';
-    soul.dataset.folded = 'true';
-    const toggle = button('Show all', 'text-button settings-soul-toggle', () => {
-      const folded = soul.dataset.folded === 'true';
-      soul.dataset.folded = String(!folded);
-      toggle.textContent = folded ? 'Show less' : 'Show all';
-      toggle.setAttribute('aria-expanded', String(folded));
-    });
-    toggle.hidden = true;
-    toggle.setAttribute('aria-expanded', 'false');
-    toggle.setAttribute('aria-controls', soul.id);
-    role.replaceChildren(header, soul, toggle);
-    if (soul.isConnected) roleSize.observe(soul);
-  }
-  function beginEdit() {
-    edit.hidden = true;
-    const input = node('textarea', 'settings-role-input');
-    input.value = bot.soul ?? '';
-    input.rows = 8;
-    input.maxLength = 8192;
-    input.placeholder = 'For example: Reviews release branches, runs the checks, and reports what blocks shipping.';
-    input.setAttribute('aria-labelledby', heading.id);
-    const actions = node('div', 'settings-role-actions');
-    const cancel = button('Cancel', 'dialog-button quiet', () => {
-      renderView();
-      edit.focus();
-    });
-    const save = button('Save', 'dialog-button primary', async () => {
-      if (input.value.trim() === (bot.soul ?? '').trim()) {
-        renderView();
-        edit.focus();
-        return;
-      }
-      input.disabled = save.disabled = cancel.disabled = true;
-      statusNote.classList.remove('error');
-      statusNote.hidden = true;
-      try {
-        await api('bots/profile', { botId: bot.id, name: bot.name, soul: input.value });
-        await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
-        if (detail?.kind === 'settings') {
-          detail = { ...detail, status: 'Role updated' };
-          signatures.delete('detail');
-          renderDetail();
-        }
-      } catch (error) {
-        input.disabled = save.disabled = cancel.disabled = false;
-        statusNote.classList.add('error');
-        statusNote.textContent = error.message === 'invalid_bot_profile'
-          ? 'Remove passwords or keys from the role before saving.'
-          : 'Couldn’t save the role.';
-        statusNote.hidden = false;
-      }
-    });
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        cancel.click();
-      } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        save.click();
-      }
-    });
-    actions.append(cancel, save);
-    role.replaceChildren(header, input, actions);
-    input.focus();
-  }
-  renderView();
-  return role;
+function roleCard(bot) {
+  detailRole ??= createBotRoleCard(async (soul) => {
+    const saved = await api('bots/profile', { botId: bot.id, soul });
+    void refreshBots();
+    if (view?.id === bot.id) void view.refresh();
+    return saved.soul;
+  });
+  return detailRole.element;
 }
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
@@ -2920,11 +2759,10 @@ function labelDetail(label) {
 }
 function replaceDetail(render) {
   releaseDetailAvatar();
-  roleSize.disconnect();
-  const body = elements['detail-body'];
-  body.replaceChildren(...render());
-  const soul = body.querySelector('.settings-soul');
-  if (soul) roleSize.observe(soul);
+  const content = render();
+  if (detailRole && !content.includes(detailRole.element)) releaseDetailRole();
+  if (detailWorkspace && !content.includes(detailWorkspace.element)) detailWorkspace = null;
+  placeRows(elements['detail-body'], content);
   if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
 }
 function renderDetail() {
@@ -2935,7 +2773,10 @@ function renderDetail() {
     if (!sections.includes(detail.section)) detail.section = 'general';
     labelDetail(`${bot.name} settings`);
     renderDetailNav(sections, detail.section);
-    if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
+    const { soul, environmentId, projectId, ...settings } = bot;
+    if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
+    detailRole?.update(soul);
+    detailWorkspace?.update({ environmentId, projectId });
     return;
   }
   labelDetail(null);
