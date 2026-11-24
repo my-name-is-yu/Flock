@@ -56,6 +56,10 @@ For the project checkout, use `{"type":"root"}`. For a new worktree, use
 optionally set `branch`. To use an existing worktree, set `type` to
 `existing_worktree` and specify `worktreePath`.
 
+Tasks that explicitly request a fresh worktree and let T3 name its branch can
+run together in the same project. Project defaults, a configured branch, an
+existing workspace, and a selected Session retain the project reservation.
+
 If a task is waiting for a Session settings correction, update its Bot's
 `config.json` and reconcile the task to retry the unsent action.
 

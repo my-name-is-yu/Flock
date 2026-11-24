@@ -767,7 +767,8 @@ void stopSelectedTaskAndConsultation() {
     auto cb = callbacks();
     cb.sessionT3 = &t3;
     cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
-        return {std::string(bot),std::string(request),"env-1","origin-project",Json::object()};
+        return {std::string(bot),std::string(request),"env-1","origin-project",
+            {{"session",{{"workspaceStrategy",{{"type","worktree"},{"baseRef","main"}}}}}}};
     };
     const auto server = startWeb(store,0,cb);
     Mcp mcp(*server,token);
@@ -788,6 +789,12 @@ void stopSelectedTaskAndConsultation() {
           store.task(blocker).at("state") == "running" && model.consultant &&
           store.task(model.consultant).at("state") == "peer_waiting",
           "The task did not queue, or the consultation did not wait behind the occupied slot");
+    const auto sameThread = start("second-task","Work in the selected Session.");
+    tick(runtime,4);
+    check(store.task(sameThread).at("state") == "queued" && store.task(sameThread).at("blockedBy").at("id") == selected &&
+          std::ranges::count_if(t3.sends,[](const Command& command) { return command.tool == "start_in_session"; }) == 1,
+          "New-worktree settings bypassed the reservation for a selected Thread");
+    store.operate(localOwner,TaskTarget::from(store.task(sameThread),0),"cancel");
     const auto stopped = mcp.call("flock_stop",{{"bot","release"},{"threadId","thread"}}).at("structuredContent");
     tick(runtime,4);
     check(stopped.at("cancelled") == 1 && stopped.at("stoppedChildSessions") == 1 &&

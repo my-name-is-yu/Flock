@@ -155,6 +155,7 @@ struct Store::Impl {
     std::function<Seconds()> policyClock = unixTime;
     void openSchema();
     void initializeSchema();
+    void initializeTaskAdmission();
     bool botDeleted(std::string_view bot) const;
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
@@ -276,6 +277,7 @@ struct Store::Impl {
     Json sessionTask(Id) const;
     void addTaskDetails(Json&) const;
     Json queueBlocker(Id) const;
+    bool taskAdmitted(Id) const;
     void initializeWorkflowSchema();
     void initializeCompactionSchema();
     Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;

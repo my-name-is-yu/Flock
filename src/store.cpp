@@ -149,6 +149,14 @@ CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
   PRIMARY KEY(host,repo,pr_number),
   FOREIGN KEY(host,repo,pr_number) REFERENCES git_pr_watches(host,repo,pr_number) ON DELETE CASCADE)
 )SQL");
+    // Replace the v7 views together so open connections never see half an upgrade.
+    if (!query("SELECT 1 FROM sqlite_schema WHERE type='view' AND name='task_admission'").next()) {
+        Transaction upgrade(db);
+        exec("DROP VIEW IF EXISTS project_slots");
+        exec("DROP VIEW IF EXISTS project_execution_queue");
+        initializeTaskAdmission();
+        upgrade.commit();
+    }
     exec("PRAGMA journal_mode=WAL");
     // Open the WAL now so a read-only peer can use a freshly initialized database.
     exec("PRAGMA user_version");
@@ -203,34 +211,6 @@ CREATE TABLE IF NOT EXISTS peer_exchanges(
   recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
   sender_environment TEXT NOT NULL, sender_revision INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
-CREATE VIEW IF NOT EXISTS project_execution_queue AS
-WITH candidates AS (
-  SELECT task.id,task.state,task.data,task.project_id,task.environment_id
-  FROM tasks task
-  WHERE task.project_id<>'' AND task.state NOT IN ('completed','cancelled')
-)
-SELECT task.id,task.environment_id,task.project_id,task.state,
-       ROW_NUMBER() OVER (
-         PARTITION BY task.environment_id,task.project_id
-         ORDER BY COALESCE(sender.state,task.state)='queued',
-           COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
-                WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
-       ) AS position
-FROM candidates task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN candidates sender ON sender.id=peer.sender_task
-  AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
-  AND peer.phase<>'closed'
-WHERE COALESCE(peer.kind,'')<>'consult';
-CREATE VIEW IF NOT EXISTS project_slots AS
-WITH queue AS (
-  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
-  FROM project_execution_queue
-)
-SELECT q.id,CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
-             json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN q.head_id END AS blocker_id
-FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
 )SQL";
     if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
     initializePolicySchema();
@@ -261,6 +241,66 @@ CREATE TABLE IF NOT EXISTS conversation_model_failures(
          " WHERE kind IN ('run_started','report')");
     exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
          " WHERE kind='bot_message'");
+}
+
+void Store::Impl::initializeTaskAdmission() {
+    // A checkout that Flock cannot prove private reserves the project. An unresolved
+    // send or Run keeps its reservation ahead of a newly competing claim.
+    exec(R"SQL(
+CREATE VIEW IF NOT EXISTS task_admission AS
+WITH active AS (
+  SELECT t.id,t.state,t.environment_id,t.project_id,t.data,p.kind,
+         CASE WHEN p.phase<>'closed' THEN p.sender_task END AS sender_id,
+         json_extract(t.data,'$.workflowId') AS workflow_id,
+         json_extract(t.data,'$.activeRun') IS NOT NULL OR o.id IS NOT NULL AS unsettled
+  FROM tasks t
+  LEFT JOIN peer_exchanges p ON p.recipient_task=t.id
+  LEFT JOIN outbox o ON o.id=json_extract(t.data,'$.actionId') AND o.phase='started'
+  WHERE t.state NOT IN ('completed','cancelled')
+), claims AS (
+  SELECT task.id,task.environment_id,task.project_id,task.workflow_id,
+         COALESCE(json_extract(task.data,'$.isolatedWorkspace'),0)=1
+           AND json_type(task.data,'$.selectedSession') IS NULL AND task.workflow_id IS NULL AS isolated,
+         COALESCE(sender.state,task.state)='queued' AS queued,
+         COALESCE(sender.id,task.id) AS owner,
+         CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
+              WHEN task.state='peer_waiting' THEN 2 ELSE 1 END AS handoff_position,
+         task.unsettled
+  FROM active task
+  LEFT JOIN active sender ON sender.id=task.sender_id
+    AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
+  WHERE task.project_id<>'' AND task.kind IS NOT 'consult'
+), reservations AS (
+  SELECT *,MAX(unsettled) OVER (PARTITION BY owner) AS owner_unsettled
+  FROM claims
+), ranked AS (
+  SELECT *,ROW_NUMBER() OVER (
+    PARTITION BY environment_id,project_id ORDER BY owner_unsettled DESC,queued,owner,handoff_position,id
+  ) AS position
+  FROM reservations
+), heads AS (
+  SELECT *,FIRST_VALUE(id) OVER turn AS head_id,FIRST_VALUE(workflow_id) OVER turn AS head_workflow,
+         FIRST_VALUE(isolated) OVER turn AS head_isolated,
+         FIRST_VALUE(CASE WHEN NOT isolated THEN id END) OVER shared_turn AS shared_id,
+         FIRST_VALUE(CASE WHEN NOT isolated THEN position END) OVER shared_turn AS shared_position
+  FROM ranked
+  WINDOW turn AS (PARTITION BY environment_id,project_id ORDER BY position),
+         shared_turn AS (PARTITION BY environment_id,project_id ORDER BY isolated,position)
+), blockers AS (
+  SELECT id,CASE
+    WHEN id=head_id OR workflow_id=head_workflow THEN NULL
+    WHEN isolated AND head_isolated THEN CASE WHEN position>shared_position THEN shared_id END
+    ELSE head_id END AS blocker_id
+  FROM heads
+)
+SELECT t.id,b.blocker_id,
+  CASE WHEN t.kind='consult' OR (t.state='cancelling' AND NOT t.unsettled) THEN 1
+       WHEN t.state='queued' AND json_extract(t.data,'$.replanning')=1
+         AND json_extract(t.data,'$.pendingDestination.environmentId')<>t.environment_id THEN 1
+       WHEN t.project_id='' THEN t.state IN ('queued','cancelling') OR json_extract(t.data,'$.replanning')=1
+       ELSE b.blocker_id IS NULL END AS eligible
+FROM active t LEFT JOIN blockers b ON b.id=t.id
+)SQL");
 }
 Store::Impl::~Impl() { sqlite3_close(db); }
 void Store::Impl::exec(const char* sql, const Json& args) const { query(sql, args).next(); }
@@ -319,7 +359,7 @@ blockers AS (
   SELECT requested.id,owner.id AS owner_id,owner.bot_id,
          json_extract(owner.data,'$.request') AS request,owner.state
   FROM requested
-  CROSS JOIN project_slots slot ON slot.id=requested.id
+  CROSS JOIN task_admission slot ON slot.id=requested.id
   JOIN tasks owner ON owner.id=slot.blocker_id
 )
 )SQL";
@@ -352,6 +392,10 @@ Json Store::Impl::queueBlocker(Id id) const {
         "SELECT owner_id,bot_id,request,state FROM blockers";
     auto row = query(sql.c_str(), {id});
     return row.next() ? blockerJson(row) : Json(nullptr);
+}
+
+bool Store::Impl::taskAdmitted(Id id) const {
+    return query("SELECT 1 FROM task_admission WHERE id=? AND blocker_id IS NULL",{id}).next();
 }
 Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
     exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
@@ -592,6 +636,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
         {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
         {"activeRun", nullptr}, {"lastRun", nullptr}, {"question", nullptr}};
+    if (requestsPrivateWorktree(item.config)) data["isolatedWorkspace"] = true;
     if (sourceMessageId) data["sourceMessageId"] = sourceMessageId;
     if (!source.is_null()) {
         data["sourceTaskId"] = source.at("taskId");
@@ -723,6 +768,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
             if (reason != "settings" || (!action.is_null() && action["phase"] != "ready"))
                 throw Conflict("Session settings can only be corrected before an unsent action");
             task["config"]["session"] = normalizeSessionSettings(data["session"]);
+            if (field(action,"tool") == "delegate" && !requestsPrivateWorktree(task.at("config")))
+                task.erase("isolatedWorkspace");
         }
         if (field(task,"actionId").empty()) {
             if (!task["activeRun"].is_null()) next = "running";

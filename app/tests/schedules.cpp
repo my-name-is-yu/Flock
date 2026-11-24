@@ -37,6 +37,7 @@ void cronIntakeAndRestart() {
     Sandbox temp;
     const auto folder = temp.path / "bots" / "release";
     auto config = botConfig();
+    config["session"]["workspaceStrategy"] = {{"type","root"}};
     config["cron"] = Json::array({
         {{"id","spring"},{"schedule","30 2 8 3 *"},{"timezone","America/New_York"},{"request","Gap"}},
         {{"id","fall"},{"schedule","30 1 1 11 *"},{"timezone","America/New_York"},{"request","Overlap"}},
@@ -59,7 +60,9 @@ void cronIntakeAndRestart() {
         check(tasks.size() == 2,"both fall-back instants should submit exactly once");
         check(tasks[0]["trigger"]["targetTime"] == utc(2026,11,1,6,30) &&
               tasks[1]["trigger"]["targetTime"] == utc(2026,11,1,5,30),"fall offsets did not produce separate UTC instants");
-        check(tasks[0]["blockedBy"]["id"] == tasks[1]["id"],"cron must participate in the same project queue");
+        const auto& blocker = tasks[0].at("blockedBy");
+        check(blocker.is_object() && blocker.at("id") == tasks[1].at("id"),
+              "scheduled tasks using a shared checkout must queue");
     }
     {
         Store store(db);

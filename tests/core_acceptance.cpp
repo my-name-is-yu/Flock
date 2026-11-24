@@ -1353,6 +1353,117 @@ void taskPagesShowProjectOwners() {
           "the unfiltered task page lost the running owner's Session link or revision after restart");
 }
 
+const Json newWorktreeConfig = {{"session",{{"workspaceStrategy",
+    {{"type","worktree"},{"baseRef","origin/main"},{"startFromOrigin",true}}}}}};
+
+void isolatedWorktreesAndSharedCheckoutAcrossRestart() {
+    Fixture f;
+    f.model.script = [](const ModelInput& input) {
+        if (input.event.at("kind") == "conversation_turn") return converse(input,"start_task",0,Json::object());
+        return input.event.at("kind") == "result" ? complete() : work();
+    };
+    const auto first = f.store->submit({"alpha","First isolated patch","e","p",newWorktreeConfig});
+    f.t3.loseAcknowledgement = true;
+    f.wait(first,"unknown_delivery");
+    f.store->receive(localOwner,{"beta","","e","p",newWorktreeConfig},"isolated-patch","Second isolated patch");
+    f.runtime->runConversations();
+    const auto second = f.store->tasks("beta").at(0).at("id").get<Id>();
+    f.reach(second,"running");
+    check(f.t3.launches == 2 && f.t3.seen[0].config == newWorktreeConfig && f.t3.seen[1].config == newWorktreeConfig &&
+          f.task(second).at("activeRun").at("threadId") == "thread-2",
+          "Two explicit new worktrees did not start independently through normal task submission");
+
+    const auto root = f.store->submit({"alpha","Edit the project checkout","e","p",
+        {{"session",{{"workspaceStrategy",{{"type","root"}}}}}}});
+    const auto existing = f.store->submit({"beta","Resume in a reusable worktree","e","p",
+        {{"session",{{"workspaceStrategy",{{"type","existing_worktree"},{"worktreePath","/existing"}}}}}}});
+    f.t3.hasReconciledRun = false;
+    f.store->operate(localOwner,TaskTarget::from(f.task(first),0),"cancel");
+    f.restart();
+    f.runtime->tick();
+    check(f.task(first).at("state") == "cancelling" && f.task(root).at("blockedBy").at("id") == first &&
+          f.task(second).at("state") == "running" && f.t3.launches == 2 && f.t3.interrupts == 0,
+          "An unconfirmed stop released the shared reservation or interrupted independent work");
+    f.t3.hasReconciledRun = true;
+    f.now += 4;
+    f.runtime->tick();
+    f.runtime->tick();
+    check(f.t3.interruptedRuns.size() == 1 && f.t3.interruptedRuns.front().runId == "run-1",
+          "Recovered cancellation interrupted a different Run");
+    f.t3.finish("run-1","cancelled",false);
+    f.runtime->tick();
+    check(f.task(root).at("blockedBy").at("id") == first && f.task(first).at("state") == "cancelling",
+          "An unsettled delegated Run released the shared reservation");
+    f.t3.finish("run-1","cancelled");
+    f.reach(first,"cancelled");
+    check(f.task(root).at("blockedBy").at("id") == second,
+          "The shared checkout became available while another potentially overlapping task ran");
+    f.t3.finish("run-2");
+    f.reach(second,"completed");
+    f.reach(root,"running");
+    check(f.task(existing).at("blockedBy").at("id") == root && f.t3.launches == 3,
+          "The existing worktree overlapped an unverified shared checkout");
+    f.t3.finish("run-3");
+    f.reach(root,"completed");
+    f.reach(existing,"running");
+}
+
+void wideningAWorktreeReservationWaitsForAnActiveRun() {
+    Fixture f;
+    f.model.script = [](const ModelInput& input) { return input.event.at("kind") == "result" ? complete() : work(); };
+    const auto first = f.store->submit({"alpha","Correct the workspace","e","p",newWorktreeConfig});
+    f.t3.onPreflight = [] { throw Conflict("The configured base ref could not be resolved"); };
+    const auto wait = f.wait(first,"settings");
+    f.t3.onPreflight = {};
+    const auto second = f.store->submit({"beta","Continue the isolated patch","e","p",newWorktreeConfig});
+    f.reach(second,"running");
+    f.store->operate(localOwner,TaskTarget::from(f.task(first),wait),"reconcile",
+        {{"session",{{"workspaceStrategy",{{"type","root"}}}}}});
+    f.restart();
+    f.runtime->tick();
+    check(f.t3.launches == 1 && f.task(first).at("state") == "sending" && f.task(second).at("state") == "running",
+          "A corrected workspace started on a shared checkout before existing work settled");
+    f.t3.finish("run-1");
+    f.reach(first,"running");
+    check(f.task(second).at("activeRun").is_null() &&
+          f.t3.launches == 2 && f.t3.seen.back().config.at("session").at("workspaceStrategy").at("type") == "root",
+          "The corrected workspace did not resume its saved unsent action");
+    f.t3.finish("run-2");
+    f.reach(first,"completed");
+    f.reach(second,"completed");
+}
+
+void version7AdmissionUpgradeKeepsExistingReservations() {
+    Fixture f;
+    f.model.script = [](const ModelInput& input) { return input.event.at("kind") == "result" ? complete() : work(); };
+    const auto saved = f.store->submit({"alpha","Saved version 7 work","e","p",newWorktreeConfig});
+    f.reach(saved,"running");
+    f.runtime.reset();
+    f.store.reset();
+    const auto file = f.directory/"state.db";
+    executeSql(file,R"SQL(
+DROP VIEW task_admission;
+CREATE VIEW project_execution_queue AS SELECT id FROM tasks;
+CREATE VIEW project_slots AS SELECT id,NULL AS blocker_id FROM project_execution_queue;
+UPDATE tasks SET data=json_remove(data,'$.isolatedWorkspace');
+)SQL");
+    f.restart();
+    const auto next = f.store->submit({"beta","New worktree after the upgrade","e","p",newWorktreeConfig});
+    check(f.task(saved).at("activeRun").at("runId") == "run-1" &&
+          f.task(next).at("blockedBy").at("id") == saved && f.logs(saved,"run_started") == 1,
+          "Opening version 7 lost the existing Run or inferred isolation from its current settings");
+    executeSql(file,R"SQL(
+CREATE TEMP TABLE format_check(valid INTEGER CHECK(valid=1));
+INSERT INTO format_check SELECT
+  user_version=7 AND NOT EXISTS (
+    SELECT 1 FROM sqlite_schema WHERE name IN ('project_execution_queue','project_slots'))
+FROM pragma_user_version();
+)SQL");
+    f.t3.finish("run-1");
+    f.reach(saved,"completed");
+    f.reach(next,"running");
+}
+
 void peerWorkAndRestart() {
     Fixture f;
     f.allowBeta();
@@ -2934,6 +3045,9 @@ int main() {
             {"history reading restart",evidenceResume},{"prefill in Full mode",prefillInFull},
             {"redacted history pagination",redactedHistoryPagination},
             {"project owners on task pages",taskPagesShowProjectOwners},
+            {"isolated worktrees and shared checkout across restart",isolatedWorktreesAndSharedCheckoutAcrossRestart},
+            {"widening a worktree reservation waits for active work",wideningAWorktreeReservationWaitsForAnActiveRun},
+            {"version 7 admission upgrade keeps existing reservations",version7AdmissionUpgradeKeepsExistingReservations},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Peer completion evidence follows the Session read policy",peerCompletionRespectsSessionReadPolicy},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},

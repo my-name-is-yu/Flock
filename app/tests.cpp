@@ -63,7 +63,9 @@ void notesAndRoutingOnRestart() {
     const auto folder = temp.path / "bots";
     const auto db = temp.path / "tasks.db";
     createBot(folder / "first",botConfig(),"First version","First memory");
-    createBot(folder / "second",botConfig(),"Second version","Second-only memory");
+    auto sharedConfig = botConfig();
+    sharedConfig["session"]["workspaceStrategy"] = {{"type","root"}};
+    createBot(folder / "second",sharedConfig,"Second version","Second-only memory");
     const Bots bots(folder);
     const auto soul = [&](std::string_view bot) { return bots.soul(bot); };
     const auto seed = [&](std::string_view bot) { return bots.initialMemory(bot); };
@@ -80,8 +82,9 @@ void notesAndRoutingOnRestart() {
         waitId = store.task(firstId)["wait"]["id"];
         secondId = store.submit(bots.get("second").intake("Request for second Bot"));
         runtime.tick();
-        check(store.task(secondId)["blockedBy"]["id"] == firstId && t3.commands.empty(),
-            "same-project tasks must queue across Bots");
+        const auto blocker = store.task(secondId).at("blockedBy");
+        check(blocker.is_object() && blocker.at("id") == firstId && t3.commands.empty(),
+            "a shared checkout must queue behind an existing project reservation across Bots");
     }
     {
         Store store(db,seed);

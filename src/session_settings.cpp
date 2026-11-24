@@ -42,4 +42,15 @@ Json normalizeSessionSettings(const Json& session) {
     }
     return session;
 }
+
+bool requestsPrivateWorktree(const Json& config) {
+    const auto session = config.find("session");
+    if (session == config.end() || !session->is_object()) return false;
+    const auto workspace = session->find("workspaceStrategy");
+    if (workspace == session->end() || !workspace->is_object() || workspace->contains("branch") ||
+        workspace->value("type",Json()) != "worktree") return false;
+    try { normalizeSessionSettings(*session); }
+    catch (const Conflict&) { return false; }
+    return true;
+}
 }
