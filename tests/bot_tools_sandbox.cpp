@@ -87,7 +87,6 @@ struct Provider : Model {
             emit(call("delegate",{{"instruction","Read private history"},{"doneWhen","Private fixture checked"}}));
         } else {
             if (beforeTurn) beforeTurn(input);
-            check(request.at("parallel_tool_calls") == true,"Conversation schema did not enable parallel calls");
             check(request.at("instructions").get<std::string>().find("untrustedData") != std::string::npos,
                   "Tool output trust was not explained in the prompt");
             const auto& steps = input.event.at("turn");

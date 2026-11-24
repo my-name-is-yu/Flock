@@ -67,6 +67,7 @@ struct Credential {
     std::string mcpUrl, token, generation;
     Seconds expiresAt = 0;
     bool operate = false;
+    std::string label;
 };
 struct WorkspaceHead {
     std::string commit;

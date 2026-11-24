@@ -22,7 +22,7 @@ Json omitted(const Json& entry) {
     const auto& source = entry.at("result");
     const auto& tool = entry.at("tool").get_ref<const std::string&>();
     Json result{{"evidenceOmitted",true}};
-    for (const auto* key : {"ok","untrustedData","accessRevoked","unsupported","cursorStale","stale","applied","taskId","waitId"}) {
+    for (const auto* key : {"ok","notRun","untrustedData","accessRevoked","unsupported","cursorStale","stale","applied","taskId","waitId"}) {
         const auto value = source.find(key);
         if (value != source.end() && (value->is_boolean() || value->is_number_integer()))
             result[key] = *value;
@@ -32,9 +32,12 @@ Json omitted(const Json& entry) {
         if (!value.empty()) result[key] = bounded(value,128);
     }
     if (canRereadToolResult(tool)) result["resultRef"] = entry.at("_ref");
-    if (tool == "expand_context" && wireBytes(entry.at("args")) <= 4096)
-        return {{"tool",tool},{"args",entry.at("args")},{"result",std::move(result)}};
-    Json compact{{"tool",tool},{"args",Json::object()},{"result",std::move(result)}};
+    Json compact{{"tool",tool},{"step",entry.at("step")},{"callIndex",entry.at("callIndex")},{"result",std::move(result)}};
+    if (tool == "expand_context" && wireBytes(entry.at("args")) <= 4096) {
+        compact["args"] = entry.at("args");
+        return compact;
+    }
+    compact["args"] = Json::object();
     if (!entry.at("args").empty()) compact["argumentsOmitted"] = true;
     return compact;
 }
@@ -70,7 +73,9 @@ void projectToolHistory(Json& turn, const Json& redactionRevision) {
 
     auto projection = Json::array();
     std::size_t used = 2;
-    for (const auto& entry : turn) {
+    for (auto& entry : turn) {
+        entry["step"] = entry.at("_ref").at("step");
+        entry["callIndex"] = entry.at("_ref").at("callIndex");
         auto compact = omitted(entry);
         used += wireBytes(compact)+1;
         projection.push_back(std::move(compact));

@@ -17,9 +17,9 @@ void check(bool value, std::string_view label) {
     if (!value) throw std::runtime_error(std::string(label));
 }
 
-template<class F> void rejected(F&& action) {
+template<class Error = Conflict, class F> void rejected(F&& action) {
     try { action(); }
-    catch (const Conflict&) { return; }
+    catch (const Error&) { return; }
     throw std::runtime_error("Expected the decision to be rejected");
 }
 
@@ -193,8 +193,15 @@ void turns(const std::filesystem::path& path) {
     check(item.at("conversationEventId") == message && item.at("expiresAt") == 0 &&
           item.at("prompt").dump().find("Release candidate") != std::string::npos && actions==0,
           "approval was detached, lacked its preview, or ran early");
-    check(!store.inbox(member).at(0).at("canDecide").get<bool>(),"member received another person's decision controls");
-    rejected([&] { store.decideInbox(member,target(item),"always_allow"); });
+    check(item.at("canDecide")==true && item.at("canSaveRule")==false,
+          "the requester needs decision controls without global rule access");
+    const auto otherView = store.inbox(member).at(0);
+    check(otherView.at("canDecide")==false && otherView.at("canSaveRule")==false,
+          "member received another person's decision or rule controls");
+    rejected<DecisionDenied>([&] { store.decideInbox(member,target(item),"always_allow"); });
+    rejected<DecisionDenied>([&] { store.decideInbox(requester,target(item),"always_allow"); });
+    check(card()==item && policy.rules().empty() && store.decisionHistory(requester).empty(),
+          "a rejected global rule affected the pending approval");
     rejected([&] { store.decideInbox(Person{},target(item),"allow_once"); });
     now += 3601;
     check(card().at("status")=="pending","a person's approval expired");
@@ -223,7 +230,28 @@ void turns(const std::filesystem::path& path) {
     }
     send("New request after the denial");
     item = card();
-    store.decideInbox(localOwner,target(item),"always_allow");
+    const Person delegatedAdmin{"delegated-admin",true};
+    bool isAdmin = true;
+    policy.requireWebIdentity();
+    store.setWebIdentityResolver([&](std::string_view person) -> std::optional<bool> {
+        if (person == delegatedAdmin.id) return isAdmin;
+        if (person == localOwner.id) return true;
+        if (person == requester.id) return false;
+        return std::nullopt;
+    },true);
+    check(store.inbox(delegatedAdmin).at(0).at("canSaveRule")==true,
+          "an administrator could not save a global rule");
+    isAdmin = false;
+    check(store.inbox(delegatedAdmin).empty(),
+          "a demoted administrator retained access to the approval");
+    rejected<DecisionDenied>([&] { store.decideInbox(delegatedAdmin,target(item),"always_allow"); });
+    check(card()==item && policy.rules().size()==40,"a stale administrator changed the rule or card");
+    // Older host configuration can assign separate credentials with distinct
+    // roles to one person. Interactive authority comes from the credential.
+    store.setWebIdentityResolver([](std::string_view) -> std::optional<bool> { return false; });
+    check(store.inbox(delegatedAdmin).at(0).at("canSaveRule")==true,
+          "the queued role replaced the host administrator's interactive authority");
+    store.decideInbox(delegatedAdmin,target(item),"always_allow");
     runtime.runConversations();
     check(actions==2 && policy.rules().size()==40 && policy.check("release",Action::bot_rename,"fixture-0")==PolicyResult::ask,
           "Always allow did not run and replace the oldest Allow");
@@ -331,8 +359,16 @@ void scheduled(const std::filesystem::path& path) {
     check(store.inbox(requester).at(0).at("status")=="pending","approval expired early");
     ++now;
     rejected([&] { store.decideInbox(requester,target(item),"allow_once"); });
-    check(store.inbox(requester).at(0).at("status")=="expired","approval did not expire at 30 minutes");
-    store.decideInbox(requester,target(item),"allow_next_time");
+    const auto expired = store.inbox(requester).at(0);
+    check(expired.at("status")=="expired" && expired.at("canDecide")==false && expired.at("canSaveRule")==false,
+          "the expired approval showed actions to the requester");
+    rejected<DecisionDenied>([&] { store.decideInbox(requester,target(expired),"allow_next_time"); });
+    check(store.inbox(requester).at(0)==expired && policy.rules().empty(),
+          "the requester changed an expired approval or its global rule");
+    const auto adminView = store.inbox(localOwner).at(0);
+    check(adminView.at("canDecide")==true && adminView.at("canSaveRule")==true,
+          "the administrator could not act on the expired approval");
+    store.decideInbox(localOwner,target(expired),"allow_next_time");
     pump();
     check(adapter.sends==0 && model.outcome.dump().find("expired")!=std::string::npos,"expired action ran or the Bot was never told");
     store.operate(requester,TaskTarget::from(store.task(item.at("taskId")),0),"cancel");

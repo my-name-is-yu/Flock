@@ -30,8 +30,9 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
     std::lock_guard lock(p_->mutex);
     const auto scrub = p_->sharedRedactor();
     scrub.requirePublic({repo.host,repo.repo,event.eventId,event.action,sha});
-    const Json data{{"kind",event.kind},{"action",event.action},{"prNumbers",event.prNumbers},
+    Json data{{"kind",event.kind},{"action",event.action},{"prNumbers",event.prNumbers},
         {"headSha",sha},{"summary",bounded(scrub.text(event.summary),4000)},{"jobId",event.jobId}};
+    if (!event.requestedReviewer.empty()) data["requestedReviewer"] = bounded(scrub.text(event.requestedReviewer),100);
     Transaction transaction(p_->db);
     p_->exec("INSERT INTO git_webhook_events(host,event_id,repo,data,payload_digest) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
              {repo.host,event.eventId,repo.repo,data,digest.empty() ? Json(nullptr) : Json(digest)});
@@ -64,6 +65,12 @@ AND t.state NOT IN ('cancelled','cancelling')
         Policy(*this).allows(bot,Action::repository_read,repo.resource());
 }
 
+Id Store::Impl::latestGitWebhookId() const {
+    auto row = query("SELECT coalesce(max(id),0) FROM git_webhook_events");
+    row.next();
+    return row.number(0);
+}
+
 void Store::Impl::deliverGitWebhooks() {
     std::lock_guard lock(mutex);
     const auto version = dataVersion();
@@ -71,23 +78,29 @@ void Store::Impl::deliverGitWebhooks() {
     constexpr unsigned batchSize = 100;
     Transaction transaction(db);
     auto rows = query(R"SQL(
-WITH matches AS (
- SELECT e.id,e.host,e.event_id,e.repo,e.data,w.pr_number,w.task_id,w.bot_id,w.run,w.url,
+WITH watches AS (
+ SELECT w.host,w.repo,w.pr_number,w.task_id,w.bot_id,w.run,w.url,
+        w.event_cursor AS delivery_cursor,coalesce(o.event_cursor,w.event_cursor) AS attribution_cursor
+ FROM git_pr_watches w LEFT JOIN git_pr_watch_origins o USING(host,repo,pr_number)
+), matches AS (
+ SELECT e.id,e.host,e.event_id,e.repo,e.data,w.pr_number,w.task_id,w.bot_id,w.run,w.url,w.delivery_cursor,
         json_array_length(e.data,'$.prNumbers')>0 AS explicit_pr,
         count(*) OVER (PARTITION BY e.id) AS watch_count
- FROM git_webhook_events e JOIN git_pr_watches w ON w.host=e.host AND w.repo=e.repo AND e.id>w.event_cursor
+ FROM git_webhook_events e JOIN watches w ON w.host=e.host AND w.repo=e.repo AND e.id>w.attribution_cursor
  WHERE EXISTS (SELECT 1 FROM json_each(e.data,'$.prNumbers') p WHERE p.value=w.pr_number)
     OR (json_array_length(e.data,'$.prNumbers')=0 AND json_extract(e.data,'$.headSha') IN (
         (SELECT h.head_sha FROM git_pr_heads h
          WHERE (h.host,h.repo,h.pr_number)=(w.host,w.repo,w.pr_number)
-           AND h.event_cursor BETWEEN w.event_cursor AND e.id-1
+           AND h.event_cursor BETWEEN w.attribution_cursor AND e.id-1
          ORDER BY h.event_cursor DESC LIMIT 1),
         (SELECT CASE WHEN h.synchronized THEN h.head_sha END FROM git_pr_heads h
          WHERE (h.host,h.repo,h.pr_number)=(w.host,w.repo,w.pr_number) AND h.event_cursor>e.id
+           AND (h.synchronized OR h.head_sha<>json_extract(e.data,'$.headSha'))
          ORDER BY h.event_cursor LIMIT 1)))
 )
 SELECT id,host,event_id,repo,data,pr_number,task_id,bot_id,run,url FROM matches m
-WHERE (explicit_pr OR watch_count=1)
+WHERE id>delivery_cursor AND (explicit_pr OR watch_count=1)
+ AND NOT EXISTS (SELECT 1 FROM deleted_bots retired WHERE retired.bot=m.bot_id)
  AND NOT EXISTS (SELECT 1 FROM git_webhook_deliveries d
                  WHERE d.event=m.id AND (NOT m.explicit_pr OR d.pr_number=m.pr_number))
 ORDER BY id,pr_number LIMIT ?
@@ -111,11 +124,14 @@ ORDER BY id,pr_number LIMIT ?
         const auto task = load(taskId);
         event.erase("botId");
         event.erase("deliveryId");
+        const auto reviewer = field(event,"requestedReviewer");
+        event.erase("requestedReviewer");
         const auto kind = field(event,"kind");
         const auto action = field(event,"action");
         const auto scrub = sharedRedactor();
         event["summary"] = bounded(scrub.text(field(event,"summary")),4000);
-        const auto key = "webhook/" + std::to_string(delivery.get<Id>()) + "/" + pr.dump();
+        const auto key = "webhook/" + std::to_string(delivery.get<Id>()) + "/" + std::to_string(pr.get<Id>());
+        auto inboxKey = key;
         const auto url = field(event,"url");
         const auto prompt = field(event,"summary");
         std::string title;
@@ -123,7 +139,19 @@ ORDER BY id,pr_number LIMIT ?
         if (kind == "code_scan") title = "Code scanning result";
         if (kind == "pull_request" && (action == "review_requested" || action == "ready_for_review"))
             title = "Pull request awaiting review";
-        if (!title.empty()) gitInboxItem(task,key,url,title,prompt.empty() ? title : prompt);
+        if (kind == "pull_request" && action == "review_requested" && !reviewer.empty()) {
+            auto receipt = query(R"SQL(
+DELETE FROM git_review_receipts WHERE rowid=(
+ SELECT r.rowid FROM git_review_receipts r
+ LEFT JOIN pr_review_items i ON i.task_id=r.task_id AND i.git_key=r.inbox_key
+ WHERE r.task_id=? AND r.host=? AND r.repo=? AND r.pr_number=? AND r.reviewer=lower(?) AND r.after_event<?
+   AND (i.id IS NULL OR (i.status='pending' AND i.target_revision=?))
+ ORDER BY r.after_event,r.rowid LIMIT 1
+) RETURNING inbox_key
+)SQL",{taskId,event.at("host"),event.at("repo"),pr,reviewer,delivery,task.value("currentRevision",Id{0})});
+            if (receipt.next()) inboxKey = receipt.string(0);
+        }
+        if (!title.empty()) gitInboxItem(task,inboxKey,url,title,prompt.empty() ? title : prompt);
 
         const Json routing{{"environmentId",task.at("environmentId")},{"projectId",task.at("projectId")},
                            {"config",task.at("config")},{"gitEvent",event}};

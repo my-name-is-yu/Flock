@@ -77,9 +77,15 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
           "denied Inbox decision advanced the request");
     browser.client.set_default_headers({{"Authorization","Bearer reviewer"}});
     browser.post("/api/inbox/decide",answer);
-    check(browser.post("/api/inbox/decide",answer,409).at("error") == "already_closed" &&
-          browser.get("/api/inbox").at("items").empty() &&
-          browser.get("/api/inbox/history").at("decisions").at(0).at("decidedBy") == "reviewer",
-          "HTTP approval was applied twice or was missing in decision history");
+    const Json fromConversation = {{"botId",answer.at("botId")},{"taskId",answer.at("taskId")},
+        {"waitId",answer.at("waitId")},{"targetRevision",answer.at("targetRevision")},
+        {"targetGeneration",answer.at("targetGeneration")},{"operation","answer"},{"text","利用者向けのみ"}};
+    browser.post("/api/operations",fromConversation,409);
+    check(browser.post("/api/inbox/decide",answer,409).at("error") == "already_closed",
+          "the closed decision was still actionable");
+    const auto decisions = browser.get("/api/inbox/history").at("decisions");
+    check(browser.get("/api/inbox").at("items").empty() && decisions.size() == 1 &&
+          decisions.at(0).at("decidedBy") == "reviewer",
+          "answering the same wait through both HTTP routes did not leave exactly one decision");
 }
 }
