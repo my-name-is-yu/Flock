@@ -541,6 +541,8 @@ int runCli(Arguments& args) {
 }
 
 int main(int argc,char** argv) {
+    // ChatGPT's in-process TLS transport must not write session keys to disk.
+    unsetenv("SSLKEYLOGFILE");
     try {
         flockv0::app::Arguments args(argc,argv);
         return flockv0::app::runCli(args);

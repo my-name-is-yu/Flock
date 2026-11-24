@@ -1,6 +1,6 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "chatgpt.hpp"
 
 #include <iosfwd>
 #include <stop_token>
@@ -11,6 +11,7 @@ using CommitModelLogin = std::function<void(const std::function<void()>&)>;
 class ChatGPTModel final : public Model {
 public:
     explicit ChatGPTModel(std::filesystem::path directory);
+    ChatGPTModel(std::filesystem::path directory, chatgpt::HttpTransport, chatgpt::BrowserOpener = chatgpt::openBrowser);
     ModelTurn decide(const ModelInput&) override;
     Json login(bool printUrl, bool reconsent);
     Json loginWeb(bool reconsent, std::stop_token, bool switchAccount, const CommitModelLogin&);
@@ -20,8 +21,9 @@ public:
     Json models();
 private:
     std::filesystem::path directory_;
-    Json call(std::string_view operation, const Json& input = Json::object(), std::stop_token stop = {},
-              const CommitModelLogin& commit = {});
+    chatgpt::HttpTransport transport_;
+    chatgpt::BrowserOpener opener_;
+    std::string accessToken();
 };
 
 Json responseRequest(const ModelInput&);
