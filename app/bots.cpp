@@ -371,6 +371,8 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     }
 
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
+    for (const auto* key : {"environmentId","projectId"})
+        if (const auto value = config.find(key); value != config.end() && value->is_string()) item[key] = *value;
     if (config.contains("role") && config["role"].is_string() && validBotRole(config["role"].get_ref<const std::string&>()))
         item["role"] = config["role"];
     if (const auto stored = config.find("avatar"); stored != config.end() && stored->is_object()) {
@@ -542,6 +544,14 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
     const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
     const bool changeAvatar = profile.contains("avatar");
     config["name"] = name;
+    for (const auto* key : {"environmentId","projectId"}) {
+        const auto value = profile.find(key);
+        if (value == profile.end()) continue;
+        const auto& id = value->get_ref<const std::string&>();
+        if (id.empty()) config.erase(key);
+        else if (!plainId(id)) throw Conflict("Use canonical environmentId and projectId identifiers from T3");
+        else config[key] = id;
+    }
     if (changeAvatar)
         config["avatar"] = prepareAvatar(profile,botDir,existingAvatar,image);
 
