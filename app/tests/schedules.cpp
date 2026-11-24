@@ -196,6 +196,13 @@ void workspaceChangesResyncConfiguredSchedules() {
     },"invalid workspace accepted");
     check(bots.get("release").environmentId == config.at("environmentId").get_ref<const std::string&>(),
           "invalid project partly changed the workspace");
+    rejects<BotProfileError>([&] {
+        bots.updateWorkspace(store,"release",{{"environmentId",""}},due + 1,report);
+    },"workspace accepted a project with no environment");
+    const auto unchanged = bots.get("release");
+    check(unchanged.environmentId == config.at("environmentId").get_ref<const std::string&>() &&
+          unchanged.projectId == config.at("projectId").get_ref<const std::string&>() && errors.empty(),
+          "rejecting an orphaned project changed the workspace or reimported schedules");
 
     const auto saved = bots.updateWorkspace(store,"release",{{"environmentId","new-environment"},{"projectId","new-project"}},due + 1,report);
     check(saved.at("name") == config.at("name") && saved.at("avatar").at("icon") == "star" &&

@@ -652,6 +652,8 @@ Json Bots::updateWorkspace(Store& store, std::string_view id, const Json& worksp
             if (destination.empty()) config.erase(key);
             else config[key] = destination;
         }
+        if (config.contains("projectId") && !config.contains("environmentId"))
+            throw BotProfileError("invalid_workspace","A pinned T3 project needs its environmentId");
         const auto updated = profileText(config);
         const auto schedules = configuredSchedules(id,config,configErrors);
         bool published = false;
