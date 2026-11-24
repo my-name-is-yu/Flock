@@ -16,6 +16,10 @@ if(BUILD_TESTING)
   target_link_libraries(flock_t3_peer_recovery_tests PRIVATE flock_t3)
   add_test(NAME flock_t3_peer_recovery COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixture.py"
     $<TARGET_FILE:flock_t3_peer_recovery_tests> peer-recovery)
+  add_executable(flock_t3_multi_environment_tests multi_environment_tests.cpp)
+  target_link_libraries(flock_t3_multi_environment_tests PRIVATE flock_t3)
+  add_test(NAME flock_t3_multi_environment COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixture.py"
+    $<TARGET_FILE:flock_t3_multi_environment_tests> multi-environment)
   add_executable(flock_t3_pinned_workspace_tests pinned_workspace_tests.cpp)
   target_link_libraries(flock_t3_pinned_workspace_tests PRIVATE flock_t3)
   add_test(NAME flock_t3_pinned_workspace COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixture.py"

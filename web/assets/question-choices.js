@@ -7,7 +7,7 @@ export function questionReplyButton(open, dialog = false) {
   const reply = document.createElement('button');
   reply.type = 'button';
   reply.className = dialog ? 'dialog-button quiet' : 'text-button question-reply';
-  reply.textContent = 'Write a reply';
+  reply.textContent = 'Write an answer';
   reply.addEventListener('click', open);
   return reply;
 }

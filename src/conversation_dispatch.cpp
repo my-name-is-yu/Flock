@@ -28,6 +28,25 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     using enum CallOutcome;
     const auto& decision = calls.front();
     const auto& tool = decision.tool;
+    if (calls.size() == 1 && tool == "send_to_task" && decision.args.is_object() &&
+        decision.args.contains("taskId")) {
+        bool destinationTask = false;
+        try {
+            std::lock_guard lock(mutex);
+            Transaction transaction(db);
+            destinationTask = ownTask(conversation_storage::identifier(decision.args,"taskId",true),message)
+                                 .contains("runResults");
+            transaction.commit();
+        } catch (const ToolError&) {}
+        if (destinationTask)
+            return sendSessionMessage(message,step,decision,tool_batch::turnCallKey(message.id,step),
+                                      ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
+    }
+    if (calls.size() == 1 && tool == "cancel_task" && decision.args.is_object() &&
+        (decision.args.contains("destination") || decision.args.contains("environmentId") ||
+         decision.args.contains("projectId")))
+        return cancelDestinationRun(message,step,decision,tool_batch::turnCallKey(message.id,step),
+                                    decision.rejection.empty(),ctx.hasWebEvidence,ctx.shutdown);
     if (effectType == "array" || calls.size() > 1 || isBotTool(tool) ||
         tool_batch::conversationRead(tool) != tool_batch::ConversationRead::none) {
         const ToolContext tools{message.bot,message.id,settings,ctx.hasWebEvidence};
@@ -225,6 +244,7 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
     using enum CallOutcome;
     Json result;
     std::optional<WorkSession> selectedSession;
+    LinkedTaskDestinations linked;
     if (decision.tool == "start_task" && decision.args.is_object() &&
         !field(decision.args,"sessionRef").empty()) {
         try {
@@ -235,6 +255,8 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
             result = toolFailure("The selected T3 Session could not be verified. Search for it again.");
         }
     }
+    if (decision.tool == "start_task" && !selectedSession && result.is_null())
+        linked = discoverLinkedTaskDestinations(ctx.t3,message.bot);
     std::lock_guard lock(mutex);
     Transaction transaction(db);
     if (!authorizeTurn(message)) { transaction.commit(); return stop; }
@@ -245,7 +267,7 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
     }
     if (ctx.shutdown.stop_requested()) return stop;
     auto completed = applyLocalConversationCall(message,step,decision,key,ctx.clock(),ApprovalWait::pause,
-                                                selectedSession ? &*selectedSession : nullptr);
+                                                selectedSession ? &*selectedSession : nullptr,linked);
     if (completed) saveConversationCallResult(message,step,std::move(*completed));
     transaction.commit();
     return completed ? advance : waiting;
@@ -253,7 +275,7 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
 
 std::optional<Json> Store::Impl::applyLocalConversationCall(
     const Message& message, int step, const Decision& decision, std::string_view key, Seconds now,
-    ApprovalWait waitMode, const WorkSession* selectedSession) {
+    ApprovalWait waitMode, const WorkSession* selectedSession, const LinkedTaskDestinations& linked) {
     if (const auto resource = conversationCallResource(message,decision)) {
         const auto gate = approveAction(policyOrigin(message),*resource,key,
             Json::array({decision.tool,decision.args}),now,true,waitMode);
@@ -262,7 +284,7 @@ std::optional<Json> Store::Impl::applyLocalConversationCall(
     }
     exec("SAVEPOINT turn_tool");
     try {
-        auto result = applyTurnTool(message,step,decision,now,selectedSession);
+        auto result = applyTurnTool(message,step,decision,now,selectedSession,linked);
         exec("RELEASE turn_tool");
         return result;
     } catch (const StorageError&) {

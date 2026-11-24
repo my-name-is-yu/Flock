@@ -403,6 +403,106 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
           "the chosen destination did not receive the new Run");
 }
 
+void parallelVerificationInView(const std::filesystem::path& path) {
+    const std::string commit(40,'a');
+    struct VerifyModel : Model {
+        const std::string& commit;
+        explicit VerifyModel(const std::string& revision) : commit(revision) {}
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") != "conversation_turn")
+                return {{{"delegate",{{"instruction","Run the checks"}},"Verify both worktrees"}}};
+            if (input.event.at("turn").empty())
+                return {{{"start_task",{{"request","Verify the release"},{"doneWhen","Run the checks"},
+                    {"environments",{"local-env","mini"}},{"commit",commit}},"Use the two requested environments"}}};
+            return {{{"reply",{{"text","I saved the request."}},"Acknowledge the request"}}};
+        }
+    } model(commit);
+    struct VerifyT3 : FixedT3 {
+        const std::string& commit;
+        bool localFinished = false, miniFinished = false, miniReceipt = false;
+        explicit VerifyT3(const std::string& revision) : commit(revision) {}
+        Delivery send(const Command& command) override { return reconcile(command); }
+        Delivery reconcile(const Command& command) override {
+            if (command.environmentId == "mini-env" && !miniReceipt) return {Delivery::Kind::Unknown,{},{}};
+            return {Delivery::Kind::Accepted,{"verification-thread","verification-run","javascript:unexpected"},{}};
+        }
+        Observation observe(const std::string& environment,const Json&,const RunRef&) override {
+            if (environment == "mini-env" && !miniFinished) return {.kind = Observation::Kind::Unavailable};
+            if (environment == "local-env" && !localFinished) return {};
+            return {.kind = Observation::Kind::Finished, .status = environment == "mini-env" ? "failed" : "completed",
+                .report = "Checks returned from " + environment, .checkedCommit = commit};
+        }
+    } t3(commit);
+    Store store(path);
+    Seconds now = unixTime();
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{[&] { return now; }});
+    auto config = callbacks();
+    const auto configuredIntake = config.intake;
+    config.intake = [configuredIntake](std::string_view bot, std::string_view request) {
+        auto intake = configuredIntake(bot,request);
+        intake.config["conversationEnvironments"]["mini"] = {{"environmentId","mini-env"},{"projectId","mini-project"}};
+        return intake;
+    };
+    auto server = startWeb(store,0,std::move(config));
+    Browser browser(*server);
+    const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","verify-both"},
+        {"text","Verify the release on both machines."}},201);
+    tick(runtime,3);
+    const auto activePage = browser.get("/api/view?bot=release");
+    const auto& activeSessions = activePage.at("activeSessions");
+    check(activeSessions.size() == 1 && activeSessions.front().at("environmentId") == "local-env" &&
+          activeSessions.front().at("state") == "running" && activeSessions.front().at("name") == "local-env",
+          "a running destination was missing from live Session activity");
+    const auto& visibleSessions = activePage.at("sessionTasks").front().at("sessions");
+    check(visibleSessions.size() == 1 && visibleSessions.front().at("state") == "running" &&
+          visibleSessions.front().at("name") == "local-env",
+          "the saved Session row lost its active destination state or name");
+    t3.localFinished = true;
+    runtime.tick();
+    const auto saved = store.tasks("release").at(0);
+    const auto prior = store.task(saved.at("id")).at("runResults").at(1);
+    now = prior.at("deadline").get<Seconds>() + 1;
+    runtime.tick();
+    const auto overdue = browser.get("/api/view?bot=release").at("waits").at(0);
+    check(overdue.at("wait").at("reason") == "deadline" && overdue.at("wait").at("run").is_null(),
+          "an unconfirmed overdue launch must omit the missing Session link");
+    t3.miniReceipt = true;
+    now += 6;
+    tick(runtime,2);
+    const auto running = browser.get("/api/view?bot=release");
+    const auto recovered = running.at("waits").at(0).at("wait");
+    check(recovered.at("id") == overdue.at("wait").at("id") &&
+          recovered.at("run").at("link") == "https://app.t3.codes/threads/mini-env/verification-thread",
+          "recovering a Run must refresh its link on the original deadline");
+    const auto task = running.at("parallelTasks").at(0);
+    const auto& runs = task.at("runs");
+    check(runs.at(0).at("state") == "completed" && runs.at(0).at("commit") == commit &&
+          runs.at(1).at("state") == "confirmation_pending" &&
+          runs.at(1).at("link") == "https://app.t3.codes/threads/mini-env/verification-thread",
+          "the active request needs its successful result and the disconnected Session");
+    check(std::ranges::any_of(running.at("events"),[&](const Json& event) {
+        return event.at("id") == receipt.at("messageId") && event.at("taskId") == task.at("id");
+    }),"the verification status is not associated with the initial request");
+    t3.miniFinished = true;
+    runtime.tick();
+    const auto settled = browser.get("/api/view?bot=release");
+    check(settled.at("parallelTasks").empty(),"settled verification is still active");
+    unsigned reports = 0;
+    for (const auto& event : settled.at("events")) {
+        if (event.at("kind") != "report" || event.at("taskId") != task.at("id")) continue;
+        ++reports;
+        const auto& result = event.at("data");
+        const auto& run = result.at("run");
+        const bool mini = result.at("destination") == "mini";
+        check(result.at("status") == (mini ? "failed" : "completed") && result.at("commit") == commit &&
+              run.at("link") == std::string("https://app.t3.codes/threads/") +
+                  (mini ? "mini-env/" : "local-env/") + "verification-thread",
+              "the terminal report lost its destination, SHA or Session link");
+    }
+    check(reports == 2 && conversationCompletion(settled,task.at("id")).at("data").at("runOutcome") == "partial_failure",
+          "the conversation lost one of the results or their aggregate outcome");
+}
+
 void conversationEntry(const std::filesystem::path& path) {
     Store store(path);
     FixedModel model;
@@ -1580,6 +1680,7 @@ int main(int argc,char** argv) {
         inspectors(directory.path / "inspectors.db");
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
+        parallelVerificationInView(directory.path / "parallel-verification.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite",
             "確認手順の妥当性を確認してください。 Synthetic&ErnestCredential-221",true);

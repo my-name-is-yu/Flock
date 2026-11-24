@@ -13,6 +13,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <string_view>
 #include <unistd.h>
 #include <utility>
 
@@ -1737,6 +1738,76 @@ void rememberCloudProject(Fixture& f) {
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
 }
 
+void canonicalMoveKeepsProjectAndGateway() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}},
+                                             {"other-project","Other fixture",{}}};
+    const Json aliases = {{"cloud","staging"},
+                          {"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},
+                                            {"gatewayEnvironmentId","desktop"}}}};
+    auto initial = f.routing("Start this work","alpha","desktop","project");
+    initial.config["conversationEnvironments"] = aliases;
+    const auto moving = f.store->submit(initial);
+    f.reach(moving,"running");
+    check(f.task(moving).at("projectId") == "project","the task did not start in its conversation's default project");
+
+    const auto text = "Move this work to cloud";
+    f.script(text,{change(moving,{{"environment","cloud"}})});
+    auto intake = f.routing(text,"alpha","desktop","project");
+    intake.config["conversationEnvironments"] = aliases;
+    f.store->receive(localOwner,intake,"canonical-move",text);
+    f.runtime->runConversations();
+    check(f.task(moving)["pendingDestination"] ==
+          Json{{"environmentId","cloud"},{"projectId","cloud-project"},
+               {"gatewayEnvironmentId","desktop"},{"pinned",true}},
+          "a canonical move did not reserve its selected project and gateway together");
+
+    f.t3.finish("run-1","Old destination settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the moved task was not relaunched");
+    const auto task = f.task(moving);
+    const auto& command = f.t3.sent.back();
+    check(task.at("state") == "running" && task.at("environmentId") == "cloud" &&
+          task.at("projectId") == "cloud-project" &&
+          task.at("gatewayEnvironmentId") == "desktop" && command.environmentId == "cloud" &&
+          command.projectId == "cloud-project" && command.gatewayEnvironmentId == "desktop",
+          "the next T3 instruction lost the moved target, project, or gateway");
+}
+
+void nonDefaultProjectMoveKeepsCanonicalGateway() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}},
+                                              {"other-project","Other fixture",{}}};
+    const Json aliases = {{"cloud","staging"},
+                          {"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},
+                                            {"gatewayEnvironmentId","desktop"}}}};
+    auto initial = f.routing("Start this work","alpha","desktop","task-project");
+    initial.config["conversationEnvironments"] = aliases;
+    const auto moving = f.store->submit(initial);
+    f.reach(moving,"running");
+    check(f.task(moving).at("projectId") == "task-project",
+          "the task did not start in its non-default project");
+
+    const auto text = "Move this work to cloud";
+    f.script(text,{change(moving,{{"environment","cloud"}})});
+    auto intake = f.routing(text,"alpha","desktop","conversation-project");
+    intake.config["conversationEnvironments"] = aliases;
+    f.store->receive(localOwner,intake,"non-default-canonical-move",text);
+    f.runtime->runConversations();
+    check(f.task(moving)["pendingDestination"] ==
+          Json{{"environmentId","cloud"},{"projectId","cloud-project"},
+               {"gatewayEnvironmentId","desktop"},{"pinned",true}},
+          "the move from a non-default project did not reserve the registered route");
+
+    f.t3.finish("run-1","Old destination settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the moved task was not relaunched");
+    const auto& command = f.t3.sent.back();
+    check(command.environmentId == "cloud" && command.projectId == "cloud-project" &&
+          command.gatewayEnvironmentId == "desktop",
+          "the next T3 instruction silently fell back to the target ID as gateway");
+}
+
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
     rememberCloudProject(f);
@@ -1841,7 +1912,8 @@ void moveAsksForTheDestinationProjectAfterSettlement() {
     f.store->receive(localOwner,automatic,"select-cloud-project","Move the work to cloud");
     f.runtime->runConversations();
     check(f.task(moving)["pendingDestination"] ==
-          Json{{"environmentId","cloud"},{"projectId","cloud-project"},{"pinned",false}},
+          Json{{"environmentId","cloud"},{"projectId","cloud-project"},
+               {"gatewayEnvironmentId","cloud"},{"pinned",false}},
           "the unpinned Bot did not provisionally reserve its remembered project");
     f.t3.finish("run-2","Old Run still settling",false);
     f.tick(3);
@@ -2247,6 +2319,10 @@ void environmentsResolveByNameOrId() {
     auto routing = f.routing();
     auto& aliases = routing.config["conversationEnvironments"];
     aliases["cloud"] = "staging";
+    aliases["クラウドMac"] = { {"environmentId","cloud"},{"projectId","cloud-project"},
+                                {"gatewayEnvironmentId","desktop"} };
+    T3Connections connector(*f.store);
+    connector.connect("desktop",localOwner.id,48123);
     for (int i = 0; i < 15; ++i) aliases["alias" + std::to_string(i)] = "executor-" + std::to_string(i);
     aliases["z-final"] = "executor-final";
     constexpr auto text = "Run the benchmark on cloud, the archive on z-final, and the audit on mars";
@@ -2262,7 +2338,9 @@ void environmentsResolveByNameOrId() {
     const auto message = f.store->receive(localOwner,routing,"environments",text);
     f.runtime->runConversations();
     const auto tasks = f.store->tasks("alpha");
-    check(tasks.size() == 2 && f.task(tasks[1]["id"])["environmentId"] == "cloud" &&
+    const auto cloudTask = tasks.size() > 1 ? f.task(tasks[1]["id"]) : Json::object();
+    check(tasks.size() == 2 && cloudTask["environmentId"] == "cloud" &&
+          cloudTask["projectId"] == "cloud-project" && cloudTask.value("gatewayEnvironmentId","") == "desktop" &&
           f.task(tasks[0]["id"])["environmentId"] == "executor-final" &&
           f.lastTurn()[2]["result"]["ok"] == false && f.response(message)["actions"].size() == 2,
           "a canonical ID was shadowed by an alias, an alias was missed, or an unknown environment was accepted");
@@ -2332,8 +2410,13 @@ void existingSessionStartsNormalWork() {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "non-default-project-move") {
+            nonDefaultProjectMoveKeepsCanonicalGateway();
+            std::cout << "Non-default-project move acceptance passed with simulated T3\n";
+            return 0;
+        }
         durableInboxAndTargetedRevision();
         existingSessionStartsNormalWork();
         linkedResultStartsANewSession();
@@ -2377,6 +2460,8 @@ int main() {
         concurrentTasksShareModelBudget();
         cancellationReleasesOnlyAfterStopConfirmation();
         cloudDestinationWaitsForItsProject();
+        canonicalMoveKeepsProjectAndGateway();
+        nonDefaultProjectMoveKeepsCanonicalGateway();
         moveAsksForTheDestinationProjectAfterSettlement();
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();

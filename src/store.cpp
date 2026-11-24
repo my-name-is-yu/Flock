@@ -14,7 +14,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 7;
+constexpr Id schemaVersion = 8;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -88,10 +88,12 @@ std::string actionId() {
     return id;
 }
 Json runJson(const RunRef& run) {
-    return {{"threadId", run.threadId}, {"runId", run.runId}, {"link", run.link}};
+    Json result{{"threadId", run.threadId}, {"runId", run.runId}, {"link", run.link}};
+    if (!run.gatewayEnvironmentId.empty()) result["gatewayEnvironmentId"] = run.gatewayEnvironmentId;
+    return result;
 }
 RunRef runRef(const Json& data) {
-    return {field(data,"threadId"), field(data,"runId"), field(data,"link")};
+    return {field(data,"threadId"), field(data,"runId"), field(data,"link"), field(data,"gatewayEnvironmentId")};
 }
 
 Json questionTarget(const Json& task) {
@@ -142,6 +144,7 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
+    initializeProjectQueue();
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_review_receipts(
   inbox_key TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -329,7 +332,7 @@ blockers AS (
   SELECT requested.id,owner.id AS owner_id,owner.bot_id,
          json_extract(owner.data,'$.request') AS request,owner.state
   FROM requested
-  CROSS JOIN project_slots slot ON slot.id=requested.id
+  CROSS JOIN task_project_slots slot ON slot.id=requested.id
   JOIN tasks owner ON owner.id=slot.blocker_id
 )
 )SQL";
@@ -485,7 +488,7 @@ void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     clearWait(task, "superseded");
     data["reason"] = reason;
     data["eventId"] = task.value("eventId", Id{});
-    data["run"] = task["activeRun"];
+    if (!data.contains("run")) data["run"] = task["activeRun"];
     if (data["run"].is_null() && reason == "unknown_delivery") {
         const auto action = outbox(task);
         if (action.is_object() && action.contains("candidate") && !field(action["candidate"],"link").empty())
@@ -511,10 +514,11 @@ void Store::Impl::clearWait(Json& task, std::string_view resolution) {
     task["wait"] = nullptr;
     journal(task["id"], "wait_closed", data);
 }
-Json Store::Impl::outbox(const Json& task) const {
-    if (field(task, "actionId").empty()) return nullptr;
+Json Store::Impl::outbox(const Json& task, std::string_view actionId) const {
+    const auto id = actionId.empty() ? field(task,"actionId") : std::string(actionId);
+    if (id.empty()) return nullptr;
     auto row = query("SELECT data,phase,auth_generation FROM outbox WHERE id=? AND task_id=?",
-                     {task["actionId"], task["id"]});
+                     {id, task["id"]});
     if (!row.next()) return nullptr;
     auto result = row.json(0);
     result["phase"] = row.string(1);
@@ -644,11 +648,17 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
 
     const auto current = intake(task.at("botId").get_ref<const std::string&>(),
                                 task.at("request").get_ref<const std::string&>());
-    const auto& environment = task.at("environmentId");
+    const auto environment = field(task,"environmentId");
     const auto destinations = current.config.value("conversationEnvironments",Json::object());
-    if ((!current.projectId.empty() && environment == current.environmentId && task.at("projectId") != current.projectId) ||
-        (!current.environmentId.empty() && environment != current.environmentId &&
-         std::ranges::find(destinations,environment) == destinations.end()))
+    const auto project = field(task,"projectId");
+    const bool namedRoute = std::ranges::any_of(destinations,[&](const Json& alias) {
+        return conversationEnvironmentId(alias) == environment &&
+            (environment != current.environmentId || field(alias,"projectId") == project);
+    });
+    const bool settingsMatch = environment == current.environmentId
+        ? (current.projectId.empty() || project == current.projectId)
+        : current.environmentId.empty();
+    if (!settingsMatch && !namedRoute)
         throw Conflict("The project route changed. Cancel this task and submit a new request.");
     target["session"] = current.config.value("session",Json::object());
     return target;
@@ -688,8 +698,11 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         throw DecisionUnavailable{};
     }
     if (task.at("state") != "waiting") throw DecisionUnavailable{};
-    if (task.at("generation") != generation) throw RequestChanged{};
     const auto reason = field(wait,"reason");
+    const auto deadlineRun = reason == "deadline" ? field(wait,"runActionId") : std::string{};
+    const bool extendingVerificationDeadline = operation == "extend" && !deadlineRun.empty();
+    if (task.at("generation") != generation && !extendingVerificationDeadline)
+        throw RequestChanged{};
     const auto kind = inboxWaitKind(reason);
     if (expectedKind && kind != expectedKind) throw RequestChanged{};
     std::string next = "deciding";
@@ -738,9 +751,11 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     } else if (operation == "extend" && reason == "deadline") {
         if (!data.contains("deadline") || !data["deadline"].is_number_integer() ||
             data["deadline"].get<Seconds>() <= unixTime()) throw Conflict("The new deadline must be in the future");
-        task["deadline"] = data["deadline"];
+        auto& timed = deadlineRun.empty() ? task : destinationRun(task,deadlineRun);
+        if (!deadlineRun.empty() && !destinationRunOutstanding(timed)) throw RequestChanged{};
+        timed["deadline"] = data.at("deadline");
         next = "running";
-        journal(id, "deadline_extended", {{"deadline",task["deadline"]},{"waitId",waitId}});
+        journal(id,"deadline_extended",{{"deadline",timed.at("deadline")},{"waitId",waitId}});
     } else if (operation == "reconcile" && (reason == "unknown_delivery" || reason == "auth" || reason == "settings")) {
         if (data.contains("session")) {
             const auto action = outbox(task);
@@ -844,14 +859,14 @@ void Store::Impl::addTaskDetails(Json& result) const {
             {"intent",revisions.string(2)},{"doneWhen",revisions.string(3)},
             {"sourceMessageId",revisions.number(4)}});
     auto runs = query("SELECT runs.thread_id,runs.run_id,runs.link,runs.action_id,runs.environment_id,"
-                      "json_extract(outbox.data,'$.revisionId') FROM runs"
+                      "json_extract(outbox.data,'$.revisionId'),json_extract(outbox.data,'$.projectId') FROM runs"
                       " JOIN outbox ON runs.action_id=outbox.id WHERE runs.task_id=? ORDER BY outbox.rowid", {id});
     result["runs"] = Json::array();
     while (runs.next())
         result["runs"].push_back({{"threadId",runs.string(0)},{"runId",runs.string(1)},
                                   {"link",runs.string(2)},{"actionId",runs.string(3)},
                                   {"environmentId",runs.string(4)},{"revisionId",runs.number(5)},
-                                  {"ownerBotId",result.at("botId")}});
+                                  {"projectId",runs.string(6)},{"ownerBotId",result.at("botId")}});
 }
 
 Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {

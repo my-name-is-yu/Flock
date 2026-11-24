@@ -20,11 +20,11 @@ const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile-avatar', 'profile-avatar-button',
   'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
-  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-summary', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
-  'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
+  'bot-editor', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
   'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
@@ -80,6 +80,7 @@ const sessionEndLabels = {
 const stateLabels = {
   ...sessionEndLabels,
   queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for you',
+  confirmation_pending: 'Confirmation pending',
   cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
@@ -135,9 +136,9 @@ const errors = {
   already_closed: 'This request was already answered or closed.',
   access_denied: 'You do not have permission to respond to this request.',
   bot_not_found: 'Bot not found.',
-  invalid_peer: 'Choose another Bot for this DM.',
-  peer_not_allowed: 'This Bot DM is unavailable.',
-  peer_not_found: 'This Bot DM is unavailable.',
+  invalid_peer: 'Choose another Bot.',
+  peer_not_allowed: 'This conversation between Bots isn’t available.',
+  peer_not_found: 'This conversation between Bots isn’t available.',
   peer_message_not_found: 'This message is unavailable.',
 };
 
@@ -253,63 +254,6 @@ function setConnection(state) {
   elements.connection.dataset.state = state;
   elements['connection-text'].textContent = state === 'offline' ? 'Can’t reach Flock. Reconnecting…' : '';
   renderHeader();
-}
-let themeSwitchTimer = 0;
-function resolvedTheme(mode) {
-  return mode === 'system'
-    ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-    : mode;
-}
-function syncThemeIndicator(animate = false) {
-  const group = elements['theme-switch'];
-  const active = group?.querySelector('button[aria-pressed="true"]');
-  if (!group || !active || !active.offsetWidth) return;
-  const x = `${active.offsetLeft}px`;
-  const w = `${active.offsetWidth}px`;
-  const wasReady = group.classList.contains('seg-ready');
-  if (wasReady && group.style.getPropertyValue('--seg-x') === x && group.style.getPropertyValue('--seg-w') === w) {
-    return;
-  }
-  if (animate && wasReady && !reducedMotion.matches) {
-    if (!group.classList.contains('seg-animated')) {
-      group.classList.add('seg-animated');
-      void group.offsetWidth;
-    }
-  } else {
-    group.classList.remove('seg-animated');
-  }
-  group.style.setProperty('--seg-x', x);
-  group.style.setProperty('--seg-w', w);
-  group.classList.add('seg-ready');
-}
-function renderTheme(mode, animate = false) {
-  for (const option of elements['theme-switch'].querySelectorAll('button')) {
-    option.setAttribute('aria-pressed', option.dataset.themeMode === mode);
-  }
-  syncThemeIndicator(animate);
-}
-function setTheme(mode) {
-  const group = elements['theme-switch'];
-  const active = group.querySelector('button[aria-pressed="true"]');
-  const prevMode = active?.dataset.themeMode ?? 'system';
-  const prevResolved = resolvedTheme(prevMode);
-  const nextResolved = resolvedTheme(mode);
-  save('flock-theme', mode);
-  if (!reducedMotion.matches) {
-    if (group.classList.contains('seg-ready')) group.classList.add('seg-animated');
-    if (prevResolved !== nextResolved) {
-      const root = document.documentElement;
-      root.classList.add('theme-switching');
-      clearTimeout(themeSwitchTimer);
-      themeSwitchTimer = setTimeout(() => {
-        root.classList.remove('theme-switching');
-        themeSwitchTimer = 0;
-      }, 260);
-    }
-    void document.documentElement.offsetWidth;
-  }
-  renderTheme(mode, true);
-  document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
 }
 const mainElement = byId('main');
 const navBackdrop = byId('nav-backdrop');
@@ -684,15 +628,14 @@ function createSidebarEntry(botId) {
         toggle.setAttribute('aria-label', `${bot.name} menu`);
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
-      // A Bot blocked on the person says so in place of its last message, so the row reads at a glance.
-      const waiting = bot.presence === 'waiting';
-      const previewLabel = waiting ? 'Waiting for you' : bot.preview || '';
+      const showWaitingPreview = bot.presence === 'waiting' && !count;
+      const previewLabel = showWaitingPreview ? stateLabels.waiting : bot.preview || '';
       if (previewText.data !== previewLabel) previewText.data = previewLabel;
-      preview.classList.toggle('waiting', waiting);
-      if (waiting) preview.setAttribute('aria-hidden', 'true');
+      preview.classList.toggle('waiting', showWaitingPreview);
+      if (showWaitingPreview) preview.setAttribute('aria-hidden', 'true');
       else preview.removeAttribute('aria-hidden');
       const hasPresence = activePresence.has(bot.presence);
-      presenceDot.hidden = !waiting;
+      presenceDot.hidden = !showWaitingPreview;
       dots.hidden = !busyPresence.has(bot.presence);
       preview.hidden = !previewLabel && dots.hidden;
       pinPresence.hidden = !pinned || !hasPresence;
@@ -928,7 +871,6 @@ function renderHeader() {
     scopeAvatar?.destroy();
     scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
     if (bot) elements['activity-scope-name'].textContent = bot.name;
-    // Accent tokens follow the open Bot, including its Bot-to-Bot DMs; the empty state keeps Flock purple.
     if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
     else document.documentElement.style.removeProperty('--bot-accent');
   }
@@ -976,8 +918,9 @@ function activityRow(tag, className, title, status, statusClass) {
 }
 function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
-  const row = activityRow(link ? 'a' : 'div', 'session-row', request, status, tone);
-  row.title = Number.isFinite(startedAt) ? `${request} · Started ${fullTime.format(startedAt)}` : request;
+  const title = [session.name, request].filter(Boolean).join(' · ');
+  const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
+  row.title = [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · ');
   if (link) {
     row.href = link;
     row.target = '_blank';
@@ -1115,7 +1058,8 @@ function renderActivity() {
       if (activeKeys.has(identity)) continue;
       activeKeys.add(identity);
       live.push(sessionRow(run.request, run, stateLabels[run.state] ?? run.state,
-        run.state === 'waiting' ? 'waiting' : 'live', run.createdAt ? run.createdAt * 1000 : undefined));
+        ['waiting', 'confirmation_pending'].includes(run.state) ? 'waiting' : 'live',
+        run.createdAt ? run.createdAt * 1000 : undefined));
     }
     const ended = [];
     for (const task of groups.sort((a, b) => b.id - a.id)) {
@@ -1496,6 +1440,20 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
+function verificationLine(run, showLink) {
+  const status = Object.hasOwn(stateLabels, run.state) ? stateLabels[run.state] : run.state;
+  const line = node('p', 'event-reason', [run.name, status].filter(Boolean).join(' · '));
+  if (run.commit) line.append(' · ', node('code', null, run.commit));
+  if (showLink) {
+    const link = runIcon(run);
+    if (link) {
+      link.setAttribute('aria-label', `Open ${run.name} in T3`);
+      line.append(link);
+    }
+  }
+  return line;
+}
+
 function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
@@ -1618,21 +1576,23 @@ function eventCard(event, context, place, report) {
         bubble.append(link);
       }
     }
-    replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
+    replyTarget = ['Reply to this review', { kind: 'review', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
-      : data.report || 'The session submitted a report.';
+      : data.report || (data.destination ? 'No Session report is available.' : 'The session submitted a report.');
     text.textContent = copy;
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
     if (link) text.append(link);
     bubble.append(text);
     if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
-    if (typeof data.status === 'string' && data.status && data.status !== 'completed') {
+    if (data.destination) {
+      bubble.append(verificationLine({name: data.destination, state: data.status, commit: data.commit}, false));
+    } else if (typeof data.status === 'string' && data.status && data.status !== 'completed') {
       const status = Object.hasOwn(stateLabels, data.status) ? stateLabels[data.status] : data.status;
       bubble.append(node('p', 'event-reason', `Work ${status.toLowerCase()}`));
     }
-    if (data.evidenceStatus && data.detail) bubble.append(node('p', 'event-reason', data.detail));
+    if ((data.evidenceStatus || data.destination) && data.detail) bubble.append(node('p', 'event-reason', data.detail));
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
@@ -1680,6 +1640,12 @@ function eventCard(event, context, place, report) {
     else if (event.id === context.latestWebMessageId && data.status === 'received')
       extras.push(node('p', 'msg-note', 'Received'));
     if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
+    if (['request', 'conversation_message'].includes(event.kind)) {
+      for (const run of context.parallelTasks.get(event.taskId) ?? []) {
+        bubble.append(verificationLine(run, true));
+        if (run.detail) bubble.append(node('p', 'event-reason', run.detail));
+      }
+    }
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
       const owner = bots.find((item) => item.id === blocker.botId)?.name ?? blocker.botId;
@@ -1716,7 +1682,7 @@ function eventCard(event, context, place, report) {
     actions.append(control);
   }
   if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
+    const reply = iconButton('reply', 'Answer this question', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
     reply.disabled = decisions.busy(taskWaitDecision(view.id, pendingWait));
     actions.append(reply);
   }
@@ -1815,7 +1781,7 @@ function leavePeerConversation(updateHistory = true) {
 
 function peerThread(events, dm, keep) {
   if (!events.length) {
-    const title = dm.error ? 'DM unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
+    const title = dm.error ? 'Conversation unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
     return [keep('empty', [title, dm.error], () => {
       const empty = node('div', 'empty-state');
       empty.append(node('h2', null, title));
@@ -1971,7 +1937,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const dm = view.dm;
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
     if (!changed('timeline', dm.id, dm.peerId, dm.anchor, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
-    scroller.setAttribute('aria-label', 'Bot DM history');
+    scroller.setAttribute('aria-label', 'Conversation between Bots');
     updateTimelineRows(dm, (keep) => peerThread(events, dm, keep));
     moveScroll();
     if (dm.pendingViewMotion && elements.timeline.childElementCount > 0) {
@@ -1981,8 +1947,9 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     }
     return;
   }
-  if (changed('timeline', view?.id, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued, decisions.pendingKeys(), listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()),
+  if (changed('timeline', view?.id, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued,
+    decisions.pendingKeys(), listLoaded, data?.presence, data?.activeSessions, data?.parallelTasks, data?.sessionTasks,
+    data?.pausedConversations, bots, dayFormat.format(Date.now()),
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     const added = updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
@@ -2080,6 +2047,7 @@ function conversationRows(data, events, keep, source) {
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
+    parallelTasks: new Map((data?.parallelTasks ?? []).map((task) => [task.id, task.runs])),
     closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
   };
   const bot = timeline.bot;
@@ -2137,7 +2105,8 @@ function conversationRows(data, events, keep, source) {
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
     const waitDecision = wait && taskWaitDecision(view.id, wait);
     const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
-    const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
+    const request = ['request', 'conversation_message'].includes(event.kind);
+    const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
@@ -2146,6 +2115,7 @@ function conversationRows(data, events, keep, source) {
         waitDecision && decisions.busy(waitDecision),
         wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), paused,
         paused && decisions.busy(pausedDecision(view.id, paused)), blocker, blockedOwner,
+        request ? timeline.parallelTasks.get(event.taskId) : null,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
@@ -2190,7 +2160,6 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
 }
-const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
 const activeReply = (composer) => decisions.reviewReply() ?? composer.reply;
 const screenshotAnchor = (reply) => reply?.messageId ?? 0;
@@ -2288,6 +2257,35 @@ function fitMessage() {
   // Measuring the textarea briefly frees space and can clamp the timeline's scroll position.
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
 }
+
+function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
+  const answering = target?.kind === 'wait';
+  const reviewing = target?.kind === 'review';
+  const working = ['working', 'thinking'].includes(data.presence);
+  const fieldLabel = answering ? 'Write your answer' : reviewing ? 'Reply to this review' :
+    target ? 'Write a reply' : 'Message';
+  elements['decision-reply-context'].hidden = !inboxReply;
+  elements['reply-context'].hidden = !target || inboxReply;
+  elements['compose-label'].textContent = fieldLabel;
+  elements.message.placeholder = suggestion ? `${suggestion.text} (press Enter to use this suggestion)` :
+    target ? fieldLabel : working ? `Guide ${data.bot.name} while it works` : `Message ${data.bot.name}`;
+  const sendLabel = answering ? 'Send answer' : target ? 'Send reply' : 'Send message';
+  elements.send.setAttribute('aria-label', sendLabel);
+  elements.send.title = sendLabel;
+
+  const summaryId = inboxReply ? 'decision-reply-target' : 'reply-summary';
+  elements.message.setAttribute('aria-describedby', target ? `${summaryId} notice` : 'notice');
+  if (!target) return;
+
+  let summary = target.summary;
+  if (!summary && target.messageId) {
+    const source = events.get(target.messageId)?.data;
+    if (source) summary = answering ? waitText(source) : reviewing ? source.title : source.report ?? source.text;
+  }
+  elements[inboxReply ? 'decision-reply-label' : 'reply-label'].textContent = answering ? 'Answering' : 'Replying to';
+  elements[summaryId].textContent = summary || (answering ? waitLabel('user_question') : 'Earlier message');
+}
+
 function renderComposer() {
   const context = view;
   const readOnly = context?.data?.canDecide === false;
@@ -2298,7 +2296,6 @@ function renderComposer() {
   elements['view-only-notice'].hidden = !available || canDecide;
   const decision = canDecide ? decisions.composer() : null;
   const review = canDecide ? decisions.reviewReply() : null;
-  elements['decision-reply-context'].hidden = !decision && !review;
   if (!canDecide || !context.composer) {
     composition = null;
     elements['composer-ghost'].hidden = true;
@@ -2315,27 +2312,14 @@ function renderComposer() {
   const body = decision?.text ?? composer.textAt(screenshotAnchor(reply));
   const busy = !!decision?.busy || sendingMessages.has(composer);
   const closedReply = closedQuestion(context, reply);
-  const source = reply && context.events.get(reply.messageId)?.data;
-  const summary = reply?.summary ?? (source && (reply.kind === 'wait' ? waitText(source) : source.report ?? source.text));
-  if (decision || review) {
-    elements['decision-reply-label'].textContent = 'Replying to';
-    elements['decision-reply-target'].textContent = decision?.item.requestTitle ?? review.summary;
-  }
-  elements['reply-context'].hidden = !reply || !!review;
-  elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
-  elements['reply-question'].textContent = reply ? summary ?? 'Earlier message' : '';
-  elements['compose-label'].textContent = decision ? `Replying to ${decision.item.requestTitle}` :
-    review ? `Replying to ${review.summary}` : reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
-  const working = ['working', 'thinking'].includes(context.data.presence);
-  elements.message.placeholder = (decision || review) ? 'Ask a question or give direction' :
-    reply ? 'Write a reply' : working ? `Guide ${context.data.bot.name} while it works` : `Message ${context.data.bot.name}`;
   const suggestion = nextSuggestion(context);
+  const target = decision ? { kind: 'wait', summary: decision.item.prompt?.trim() } : reply;
+  renderComposerCopy(context, target, !!(decision || review), suggestion);
   const ghost = elements['composer-ghost'];
   ghost.hidden = !suggestion;
   ghost.firstElementChild.textContent = suggestion?.text ?? '';
   elements.message.classList.toggle('has-ghost', !!suggestion);
-  if (suggestion) elements.message.placeholder = `${suggestion.text} (press Enter to use this suggestion)`;
   if (!composition && elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
@@ -2349,9 +2333,6 @@ function renderComposer() {
   elements.send.disabled = busy || !!composition || closedReply || !!decision?.blocked || !!screenshots?.loading ||
     !body.trim() || byteLength(body) > (decision ? 8000 : composerLimit(reply));
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
-  const sendLabel = decision ? 'Send written answer' : reply ? 'Send reply' : 'Send message';
-  elements.send.setAttribute('aria-label', sendLabel);
-  elements.send.title = sendLabel;
   const screenshotError = !busy && !closedReply && screenshots?.error;
   elements.notice.textContent = notice?.isError ? notice.text :
     (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
@@ -2524,7 +2505,6 @@ function openNewBot(origin = elements['new-bot-button']) {
   botEditor.openCreate({ bots, origin });
 }
 
-// The header avatar is hidden in a Bot DM; the conversation menu stays visible there.
 function headerFocusTarget() {
   return elements['profile-identity'].hidden ? conversationActionsTrigger : elements['profile-avatar-button'];
 }
@@ -2721,7 +2701,7 @@ function localDateTime(timestamp) {
   const date = new Date(timestamp);
   return new Date(timestamp - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
-function waitContent(context, task) {
+function waitContent(context, task, deadlineDraft) {
   const wait = task.wait;
   const canDecide = context.data.canDecide === true;
   elements['detail-title'].textContent = waitLabel(wait.reason);
@@ -2736,7 +2716,10 @@ function waitContent(context, task) {
   const content = [request, reason];
   const actions = node('div', 'wait-actions');
   const primary = node('div', 'wait-primary');
-  const perform = (operation, fields) => void operate(context, task, operation, fields);
+  const perform = (operation, fields) => {
+    const current = context.data.waits.find(item => item.id === task.id && item.wait.id === wait.id);
+    if (current) void operate(context, current, operation, fields);
+  };
   const action = (label, operation) => button(label, 'dialog-button primary', () => perform(operation));
   const approveInT3 = canDecide && wait.reason === 't3_input';
   const runLink = linkToRun(wait.run, approveInT3 ? 'Approve in T3' : 'Open in T3');
@@ -2756,11 +2739,12 @@ function waitContent(context, task) {
   else if (wait.reason === 'model_failure') primary.append(action('Try again', 'retry'));
   else if (wait.reason === 'deadline') {
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
-      type: 'datetime-local', value: localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
+      type: 'datetime-local', value: deadlineDraft ?? localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
       const next = Math.floor(new Date(deadline).getTime() / 1000);
       if (next > Date.now() / 1000) perform('extend', { deadline: next });
       else showDetailError(errors.invalid_deadline);
     }, 'wait-deadline-form');
+    form.dataset.waitId = String(wait.id);
     submit.classList.add('primary');
     content.push(form);
     primary.append(submit);
@@ -2830,10 +2814,11 @@ function renderDetail() {
   labelDetail(null);
   renderDetailNav([], null);
   if (detail.kind === 'peers') {
+    const botName = view.data.bot.name;
     const peers = botPeers(view.id).map(({ id }) => participant(id));
-    if (changed('detail', detail, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
+    if (changed('detail', detail, botName, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
       const active = document.activeElement?.dataset.peerChoice;
-      elements['detail-title'].textContent = 'Bot DMs';
+      elements['detail-title'].textContent = `${botName} talks with`;
       const list = node('ul', 'peer-picker-list');
       for (const bot of peers) {
         const item = node('li');
@@ -2843,7 +2828,7 @@ function renderDetail() {
         item.append(link);
         list.append(item);
       }
-      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', 'No Bot DMs available.')]);
+      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', `${botName} hasn’t talked with other Bots yet.`)]);
       if (active) [...list.querySelectorAll('a')].find((link) => link.dataset.peerChoice === active)?.focus();
     }
     return;
@@ -2856,8 +2841,15 @@ function renderDetail() {
     }
     return;
   }
-  if (changed('detail', detail, task, waitLabel(task.wait.reason), waitText(task.wait)))
-    replaceDetail(() => waitContent(view, task));
+  const { generation, ...waitDetails } = task;
+  const waitGeneration = task.wait.reason === 'deadline' ? null : generation;
+  if (changed('detail', detail, waitDetails, waitGeneration, waitLabel(task.wait.reason), waitText(task.wait))) {
+    const input = elements['detail-body'].querySelector('#wait-deadline-form input');
+    const sameWait = input?.form?.dataset.waitId === String(task.wait.id);
+    const restoreFocus = sameWait && input === document.activeElement;
+    replaceDetail(() => waitContent(view, task, sameWait ? input.value : undefined));
+    if (restoreFocus) elements['detail-body'].querySelector('#wait-deadline-form input')?.focus();
+  }
   const item = taskWaitDecision(view.id, task);
   const busy = decisions.busy(item);
   for (const control of elements['detail-body'].querySelectorAll('button, input')) {
@@ -3195,18 +3187,6 @@ const decisions = mountBoardInbox({
   },
 });
 
-function reflectTheme() {
-  renderTheme(document.documentElement.dataset.theme ?? 'system');
-}
-reflectTheme();
-document.addEventListener('flock-theme', reflectTheme);
-if (typeof ResizeObserver !== 'undefined') {
-  new ResizeObserver(() => syncThemeIndicator(false)).observe(elements['theme-switch']);
-}
-elements['theme-switch'].addEventListener('click', (event) => {
-  const option = event.target.closest('button[data-theme-mode]');
-  if (option) setTheme(option.dataset.themeMode);
-});
 elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
