@@ -6,9 +6,52 @@
 
 namespace flockv0 {
 using conversation_storage::identifier;
+using conversation_storage::text;
 using conversation_storage::ToolError;
 
 namespace {
+struct SavedDestination {
+    Json run;
+    std::string actionId, name, environmentId, projectId, threadId, runId, status;
+};
+
+SavedDestination selectSavedDestination(const Json& task, const Json& args, bool allowOmitted) {
+    if (!task.contains("runResults") || !task.at("runResults").is_array())
+        throw ToolError("The destination is unavailable");
+    const bool hasName = args.contains("destination");
+    const bool hasEnvironment = args.contains("environmentId");
+    const bool hasProject = args.contains("projectId");
+    if (hasName && (hasEnvironment || hasProject))
+        throw ToolError("Select a destination either by friendly name or by environmentId and projectId, not both");
+    if (hasEnvironment != hasProject)
+        throw ToolError("Select a destination by both environmentId and projectId");
+    const auto name = text(args,"destination",256,false);
+    const auto environment = text(args,"environmentId",256,false);
+    const auto project = text(args,"projectId",256,false);
+    if ((hasName && name.empty()) || (hasEnvironment && (environment.empty() || project.empty())))
+        throw ToolError("Destination selectors must not be empty");
+
+    const Json* selected = nullptr;
+    if (!hasName && !hasEnvironment) {
+        if (!allowOmitted) throw ToolError("Select a destination by friendly name or environmentId and projectId");
+        if (task.at("runResults").size() != 1)
+            throw ToolError("Choose a destination by friendly name or environmentId and projectId");
+        selected = &task.at("runResults").front();
+    } else {
+        std::vector<const Json*> matches;
+        for (const auto& run : task.at("runResults")) {
+            const bool match = hasName ? run.value("name","") == name
+                : run.value("environmentId","") == environment && run.value("projectId","") == project;
+            if (match) matches.push_back(&run);
+        }
+        if (matches.size() != 1)
+            throw ToolError(matches.empty() ? "The destination is unavailable" : "The destination selector is ambiguous");
+        selected = matches.front();
+    }
+    return {*selected,field(*selected,"actionId"),field(*selected,"name"),field(*selected,"environmentId"),
+            field(*selected,"projectId"),field(*selected,"threadId"),field(*selected,"runId"),field(*selected,"status")};
+}
+
 struct SessionEffect {
     Id taskId, generation;
     Json run;
@@ -186,6 +229,8 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     command.ownerBotId = message.bot;
     std::string error;
     bool savedTaskTarget = false;
+    Id savedTaskId = 0, savedGeneration = 0;
+    std::string savedActionId;
     try {
         if (decision.tool == "send_to_task") {
             std::lock_guard lock(mutex);
@@ -193,26 +238,16 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             const auto task = ownTask(conversation_storage::identifier(decision.args,"taskId",true),message);
             if (conversation_storage::identifier(decision.args,"generation",true,0) != task.at("generation"))
                 throw ToolError("stale",{{"taskId",task.at("id")},{"current",taskState(task,message)}});
-            if (!task.contains("runResults")) throw ToolError("The destination is unavailable");
-            const auto name = conversation_storage::text(decision.args,"destination",256,false);
-            const auto environment = conversation_storage::text(decision.args,"environmentId",256,false);
-            const auto project = conversation_storage::text(decision.args,"projectId",256,false);
-            if (environment.empty() != project.empty()) throw ToolError("Select a destination by both environmentId and projectId");
-            std::vector<Json> matches;
-            for (const auto& run : task.at("runResults")) {
-                if ((!name.empty() && run.value("name","") == name) ||
-                    (!environment.empty() && run.value("environmentId","") == environment && run.value("projectId","") == project))
-                    matches.push_back(run);
-            }
-            if (name.empty() && environment.empty()) {
-                if (task.at("runResults").size() == 1) matches.push_back(task.at("runResults").front());
-                else throw ToolError("Choose a destination by friendly name, or by environmentId and projectId");
-            }
-            if (matches.size() != 1) throw ToolError(matches.empty() ? "The destination is unavailable" : "The destination selector is ambiguous");
-            command.environmentId = matches.front().value("environmentId","");
-            command.target.threadId = matches.front().value("threadId","");
+            if (terminal(task) || task.at("state") == "cancelling")
+                throw ToolError("The task is " + field(task,"state"),{{"taskId",task.at("id")}});
+            const auto selected = selectSavedDestination(task,decision.args,true);
+            command.environmentId = selected.environmentId;
+            command.target.threadId = selected.threadId;
             if (command.environmentId.empty() || command.target.threadId.empty()) throw ToolError("The destination Session is unavailable");
             savedTaskTarget = true;
+            savedTaskId = task.at("id");
+            savedGeneration = task.at("generation");
+            savedActionId = selected.actionId;
             command.instruction = conversation_storage::text(decision.args,"instruction",conversation_storage::messageSize,true);
             transaction.commit();
         } else {
@@ -293,9 +328,39 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             transaction.commit();
             return advance;
         }
-        const auto gate = approveAction(policyOrigin(message),resource,
-            key,
-            Json::array({decision.tool,decision.args,command.authGeneration}),policyClock());
+        auto origin = policyOrigin(message);
+        Json policyPayload{decision.tool,decision.args,command.authGeneration};
+        if (savedTaskTarget) {
+            try {
+                const auto task = ownTask(savedTaskId,message);
+                if (task.at("generation") != savedGeneration)
+                    throw ToolError("stale",{{"taskId",savedTaskId},{"current",taskState(task,message)}});
+                if (terminal(task) || task.at("state") == "cancelling")
+                    throw ToolError("The task is " + field(task,"state"),{{"taskId",savedTaskId}});
+                const auto selected = selectSavedDestination(task,decision.args,true);
+                if (selected.actionId != savedActionId || selected.environmentId != target.environmentId ||
+                    selected.threadId != target.threadId || selected.runId.empty())
+                    throw ToolError("The destination Session is unavailable");
+                const auto action = outbox(task,selected.actionId);
+                if (action.is_null() || !action.value("destinationAction",false) ||
+                    action.value("phase","") != "accepted" || action.value("stopRequested",false) ||
+                    field(action,"environmentId") != selected.environmentId ||
+                    field(action,"projectId") != selected.projectId)
+                    throw ToolError("The destination Session is unavailable");
+                if (!query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
+                            {selected.actionId,savedTaskId,selected.environmentId,selected.threadId,selected.runId}).next())
+                    throw ToolError("The destination Session is unavailable");
+                origin.task = savedTaskId;
+                origin.generation = savedGeneration;
+                origin.revision = task.value("currentRevision",Id{});
+                policyPayload.push_back(selected.actionId);
+            } catch (const ToolError& failure) {
+                save(toolFailure(failure.what()));
+                transaction.commit();
+                return advance;
+            }
+        }
+        const auto gate = approveAction(origin,resource,key,policyPayload,policyClock());
         if (gate != ApprovalGate::allow) {
             if (gate != ApprovalGate::waiting) save(toolFailure(approvalError(gate)));
             transaction.commit();
@@ -332,6 +397,107 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     saveReceipt(checkpoint->second.delivery);
     transaction.commit();
     sessionSendReceipts.erase(checkpoint);
+    return advance;
+}
+
+Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(
+    const conversation::Message& message, int step, const Decision& decision, std::string_view key,
+    bool offered, bool hasWebEvidence, std::stop_token shutdown) {
+    using enum CallOutcome;
+    if (shutdown.stop_requested()) return stop;
+    std::optional<SessionDispatchFileLock> dispatch;
+    try { dispatch.emplace(path,SessionDispatchFileLock::Mode::exclusive); }
+    catch (const std::exception& error) {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (authorizeTurn(message))
+            saveTurnResults(message.id,step,Json::array({toolFailure(error.what())}));
+        transaction.commit();
+        return advance;
+    }
+    std::lock_guard lock(mutex);
+    Transaction transaction(db);
+    if (!authorizeTurn(message)) { transaction.commit(); return stop; }
+    const auto save = [&](Json result) {
+        saveTurnResults(message.id,step,Json::array({redactor(message.bot).record(std::move(result))}));
+    };
+    const auto fail = [&](const ToolError& error) {
+        auto result = error.details;
+        result["ok"] = false;
+        result["error"] = error.what();
+        save(std::move(result));
+    };
+    auto existing = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
+                          {message.id,step});
+    if (!existing.next()) { transaction.commit(); return stop; }
+    if (!existing.string(0).empty()) {
+        save({{"ok",true},{"effect","stop_requested"},{"delivery","unknown"},
+              {"error","The saved stop request is still being reconciled in T3"}});
+        transaction.commit();
+        return advance;
+    }
+    if (!offered) save(toolFailure("The cancellation action was not offered"));
+    else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) save(webEvidenceActionDenied());
+    else try {
+        if (!decision.args.is_object()) throw ToolError("Tool arguments must be an object");
+        const auto taskId = identifier(decision.args,"taskId",true);
+        const auto generation = identifier(decision.args,"generation",true,0);
+        const auto task = ownTask(taskId,message);
+        if (generation != task.at("generation"))
+            throw ToolError("stale",{{"taskId",taskId},{"current",taskState(task,message)}});
+        const auto selected = selectSavedDestination(task,decision.args,false);
+        const auto action = outbox(task,selected.actionId);
+        if (action.is_null() || !action.value("destinationAction",false) ||
+            field(action,"environmentId") != selected.environmentId || field(action,"projectId") != selected.projectId)
+            throw ToolError("The destination is unavailable");
+        if (!destinationRunOutstanding(selected.run)) {
+            save({{"ok",true},{"effect","already_settled"},{"taskId",taskId},{"destination",selected.name}});
+        } else if (task.at("state") == "cancelling") {
+            throw ToolError("The whole task is already stopping",{{"taskId",taskId}});
+        } else if (terminal(task)) {
+            throw ToolError("The task is " + field(task,"state"),{{"taskId",taskId}});
+        } else if (action.value("stopRequested",false)) {
+            save({{"ok",true},{"effect","already_requested"},{"taskId",taskId},{"destination",selected.name}});
+        } else {
+            const auto phase = field(action,"phase");
+            if (phase != "ready" && phase != "started" && phase != "accepted")
+                throw ToolError("The destination is unavailable");
+            const bool exactRun = phase == "accepted" && !selected.threadId.empty() && !selected.runId.empty() &&
+                query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
+                      {selected.actionId,taskId,selected.environmentId,selected.threadId,selected.runId}).next();
+            if (phase == "accepted" && !exactRun) throw ToolError("The destination Session is unavailable");
+            if (exactRun) {
+                const Resource resource{Action::t3_send,
+                    Resource::sessionRead(selected.environmentId,selected.threadId).target};
+                auto origin = policyOrigin(message);
+                origin.task = taskId;
+                origin.generation = generation;
+                origin.revision = task.value("currentRevision",Id{});
+                const auto gate = approveAction(origin,resource,key,
+                    Json::array({decision.tool,decision.args,runJson(runRef(selected.run))}),policyClock());
+                if (gate != ApprovalGate::allow) {
+                    if (gate != ApprovalGate::waiting) fail(ToolError(std::string(approvalError(gate))));
+                    transaction.commit();
+                    return gate == ApprovalGate::waiting ? waiting : advance;
+                }
+            }
+            auto updated = action;
+            updated["stopRequested"] = true;
+            updated["stopOperation"] = key;
+            updated.erase("phase");
+            updated.erase("authGeneration");
+            exec("UPDATE outbox SET data=? WHERE id=? AND task_id=? AND phase=?",
+                 Json::array({updated,selected.actionId,taskId,phase}));
+            if (!sqlite3_changes(db)) throw ToolError("The destination changed before its stop request was saved");
+            exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL AND effect IS NULL",
+                 {Json{{"kind","destination_cancel"},{"taskId",taskId},{"generation",generation},
+                       {"actionId",selected.actionId},{"environmentId",selected.environmentId},
+                       {"projectId",selected.projectId},{"run",runJson(runRef(selected.run))}},message.id,step});
+            if (!sqlite3_changes(db)) throw ToolError("The stop request could not be saved");
+            save({{"ok",true},{"effect","stop_requested"},{"taskId",taskId},{"destination",selected.name}});
+        }
+    } catch (const ToolError& error) { fail(error); }
+    transaction.commit();
     return advance;
 }
 

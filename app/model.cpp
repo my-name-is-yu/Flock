@@ -372,10 +372,13 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         }
         else integer("waitId","The waitId of the open user_question.",true);
     } else if (name == "cancel_task") {
-        description = "Stop an active task.";
+        description = "Stop an active task. Omit the destination selector to stop the whole task, or select one saved destination to stop only its Run.";
         integer("taskId","The task to stop.",true);
         integer("generation","The task's generation from the latest task list or tool result.",true);
         fields["generation"]["minimum"] = 0;
+        text("destination","Saved friendly name of the destination Run to stop.",false);
+        text("environmentId","Saved destination environment ID; provide with projectId.",false);
+        text("projectId","Saved destination project ID; provide with environmentId.",false);
     } else if (name == "message_session") {
         description = "Queue a message in a T3 Session and wake this Bot once when its work ends or needs a person.";
         text("environmentId","Environment ID from flock_session_search.");

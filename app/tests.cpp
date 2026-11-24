@@ -394,6 +394,10 @@ void responseContract() {
           turnTool("start_task")["properties"]["commit"]["type"] == "string" &&
           turnTool("change_task")["required"] == Json::array({"reason","taskId","generation","revisionId","instruction"}) &&
           turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&
+          turnTool("cancel_task")["required"] == Json::array({"reason","taskId","generation"}) &&
+          turnTool("cancel_task")["properties"]["destination"]["type"] == "string" &&
+          turnTool("cancel_task")["properties"]["environmentId"]["type"] == "string" &&
+          turnTool("cancel_task")["properties"]["projectId"]["type"] == "string" &&
           turnTool("find_tasks")["required"] == Json::array({"reason"}) &&
           turnTool("find_tasks")["properties"]["taskId"]["type"] == "integer" &&
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&

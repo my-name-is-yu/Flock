@@ -845,7 +845,7 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
 
     bool deferDestinationDelivery(Json& task, Json& run, const Json& action, const Delivery& outcome,
                                   DeliveryOutcome delivery) {
-        const bool cancelling = task.at("state") == "cancelling";
+        const bool cancelling = task.at("state") == "cancelling" || action.value("stopRequested",false);
         const auto key = action.at("id");
         const auto phase = field(action,"phase");
         const auto detail = bounded(outcome.detail.empty() ? "T3 has not confirmed the assigned Run." : outcome.detail,2048);
@@ -902,11 +902,18 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
         const auto phase = field(action,"phase");
         const auto now = options.clock();
         const bool cancelling = task.at("state") == "cancelling";
-        if (cancelling && phase == "ready") {
+        const bool stopRequested = action.value("stopRequested",false);
+        const bool stopping = cancelling || stopRequested;
+        if (stopping && phase == "ready") {
             applyDelivery(id,action,{Delivery::Kind::NotAccepted,{},"Cancelled before dispatch",true});
             return;
         }
-        const bool unconfirmedRunNeedsDeadlineCheck = phase == "started" && !cancelling &&
+        if (stopRequested && phase == "started") {
+            destinationStatus(id,key,"confirmation_pending",
+                "T3 acceptance is unconfirmed; Flock will not retry this Run after the stop request.");
+            return;
+        }
+        const bool unconfirmedRunNeedsDeadlineCheck = phase == "started" && !stopping &&
             (!run.contains("deadline") || (task.at("wait").is_null() && now >= run.at("deadline").get<Seconds>()));
         if (unconfirmedRunNeedsDeadlineCheck)
             changeTask(id,[&](Json& current) {
@@ -917,7 +924,7 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             std::lock_guard lock(db.mutex);
             if (!db.projectRouteReady(id,key)) return;
         }
-        if (phase == "ready" || phase == "started") return deliver(task,std::move(action));
+        if ((phase == "ready" || phase == "started") && !stopRequested) return deliver(task,std::move(action));
         if (phase != "accepted") return;
         const auto cmd = command(task,action);
         const auto ref = runRef(run);
@@ -926,7 +933,7 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             changeTask(id,[&](Json& current) {
                 auto& saved = destinationRun(current,key);
                 if (!destinationRunOutstanding(saved)) return false;
-                if (current.at("state") != "cancelling" &&
+                if (!stopping &&
                     (observed.commitEvidenceUnavailable || observed.evidence == RunEvidence::Availability::ReportUnavailable) &&
                     saved.value("evidenceAttempts",std::size_t{}) + 1 < maxEvidenceReads) {
                     saved["evidenceAttempts"] = saved.value("evidenceAttempts",0) + 1;
@@ -944,7 +951,8 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
         changeTask(id,[&](Json& current) {
             auto& saved = destinationRun(current,key);
             if (!destinationRunOutstanding(saved)) return false;
-            const bool stopping = current.at("state") == "cancelling";
+            const auto savedAction = db.outbox(current,key);
+            const bool stopping = current.at("state") == "cancelling" || savedAction.value("stopRequested",false);
             bool changed = false;
             if (observed.kind == Kind::Unavailable)
                 changed = setDestinationStatus(saved,"confirmation_pending","Flock could not confirm the Run's status in T3.");
@@ -952,16 +960,21 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
                 changed = setDestinationStatus(saved,"confirmation_pending","Review the pending input or approval in this T3 Session.");
             else if (!stopping)
                 changed = setDestinationStatus(saved,observed.status == "queued" ? "queued" : "running",{});
-            return destinationDeadline(current,saved,now) || changed;
+            return (!stopping && destinationDeadline(current,saved,now)) || changed;
         });
-        if (!cancelling || observed.kind == Kind::Settling || observed.kind == Kind::Unavailable ||
+        if (!stopping || observed.kind == Kind::Settling || observed.kind == Kind::Unavailable ||
             now < run.value("stopRetryAt",Seconds{})) return;
         if (!changeTask(id,[&](Json& current) {
-            if (shutdown.stop_requested() || current.at("state") != "cancelling") return false;
+            const auto savedAction = db.outbox(current,key);
+            if (shutdown.stop_requested() ||
+                (current.at("state") != "cancelling" && !savedAction.value("stopRequested",false))) return false;
             destinationRun(current,key)["stopRetryAt"] = now + 5;
             return true;
         })) return;
-        try { t3.interrupt(cmd.environmentId,cmd.config,ref); }
+        try {
+            const SessionDispatchFileLock dispatch(db.path,SessionDispatchFileLock::Mode::shared);
+            t3.interrupt(cmd.environmentId,cmd.config,ref);
+        }
         catch (const std::exception&) {
             destinationStatus(id,key,"confirmation_pending","T3 did not confirm the stop request.");
         }
@@ -1099,6 +1112,14 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                                 cmd.tool == "answer_session_question"};
         }
         const bool destination = action.contains("destinationAction");
+        std::optional<SessionDispatchFileLock> dispatch;
+        if (destination) dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
+        if (destination) {
+            std::lock_guard lock(db.mutex);
+            const auto current = db.load(id);
+            const auto saved = db.outbox(current,cmd.actionId);
+            if (saved.is_object() && saved.value("stopRequested",false)) return;
+        }
         const auto operation = std::string(destination ? runOutboxOperation : "outbox/") + cmd.actionId;
         const auto refused = [&](ApprovalGate gate) {
             if (destination) return applyDelivery(id,action,{Delivery::Kind::NotAccepted,{},std::string(approvalError(gate)),true});
@@ -1124,7 +1145,6 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             applyDelivery(id,action,{Delivery::Kind::Auth,{},
                 "Connect this T3 environment in Flock settings before sending work.",true});
         };
-        std::optional<SessionDispatchFileLock> dispatch;
         if (firstSend) {
             if (disconnected()) return connectionUnavailable();
             if (!sessionActionAllowed(task)) return refused(ApprovalGate::denied);
@@ -1205,7 +1225,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 stopped->definitelyUnsent = true;
                 return applyDelivery(id,action,*stopped);
             }
-            if (options.requireT3Connection || sendsToSession || cmd.sessionOrigin)
+            if (!dispatch && (options.requireT3Connection || sendsToSession || cmd.sessionOrigin))
                 dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
             if (disconnected()) return connectionUnavailable();
             auto policyGate = ApprovalGate::allow;

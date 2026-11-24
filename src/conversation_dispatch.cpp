@@ -41,6 +41,11 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
             return sendSessionMessage(message,step,decision,tool_batch::turnCallKey(message.id,step),
                                       ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
     }
+    if (calls.size() == 1 && decision.tool == "cancel_task" && decision.args.is_object() &&
+        (decision.args.contains("destination") || decision.args.contains("environmentId") ||
+         decision.args.contains("projectId")))
+        return cancelDestinationRun(message,step,decision,tool_batch::turnCallKey(message.id,step),
+                                    decision.rejection.empty(),ctx.hasWebEvidence,ctx.shutdown);
     if (effectType == "array" || calls.size() > 1 || isBotTool(decision.tool)) {
         const ToolContext tools{message.bot,message.id,settings,ctx.hasWebEvidence};
         return runToolBatch(message,tools,step,calls,ctx) ? advance : stop;

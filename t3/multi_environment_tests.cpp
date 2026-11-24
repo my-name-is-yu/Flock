@@ -1,4 +1,5 @@
 #include "flock/board_inbox.hpp"
+#include "flock/policy.hpp"
 #include "internal.hpp"
 
 #include <atomic>
@@ -54,19 +55,33 @@ struct Script final : Model {
     Json startResult;
     Json sendResult;
     Json ambiguousResult;
+    Json conflictingResult;
+    Json cancelResult;
+    Json repeatCancelResult;
     Id followUpTask = 0;
     Id followUpGeneration = 0;
+    Id cancelTask = 0;
+    Id cancelGeneration = 0;
     bool parallel = true;
 
     ModelTurn decide(const ModelInput& input) override {
         const auto& kind = input.event.at("kind");
         if (kind == "conversation_turn") {
             const auto& text = input.event.value("text","");
-            if (input.event.at("turn").empty() && (text == "Send instruction to Mini" || text == "Send instruction without destination")) {
+            if (input.event.at("turn").empty() && (text == "Send instruction to Mini" ||
+                text == "Send instruction without destination" || text == "Send instruction with conflicting selectors")) {
                 Json args{{"taskId",followUpTask},{"generation",followUpGeneration},{"instruction","Check the Mini result"}};
                 if (text == "Send instruction to Mini") args["destination"] = "mini";
+                if (text == "Send instruction with conflicting selectors") {
+                    args["destination"] = "mini";
+                    args["environmentId"] = "env-local";
+                    args["projectId"] = "project-local";
+                }
                 return {{{"send_to_task",std::move(args),"Send to the selected destination"}}};
             }
+            if (input.event.at("turn").empty() && (text == "Stop Mini" || text == "Stop Mini again"))
+                return {{{"cancel_task",{{"taskId",cancelTask},{"generation",cancelGeneration},
+                           {"destination","mini"}},"Stop only Mini"}}};
             const auto& turn = input.event.at("turn");
             if (turn.empty() && input.event.value("text","") == request) {
                 Json args{{"request",request}};
@@ -79,6 +94,9 @@ struct Script final : Model {
             if (!turn.empty()) {
                 if (text == "Send instruction to Mini") sendResult = turn.back().at("result");
                 else if (text == "Send instruction without destination") ambiguousResult = turn.back().at("result");
+                else if (text == "Send instruction with conflicting selectors") conflictingResult = turn.back().at("result");
+                else if (text == "Stop Mini") cancelResult = turn.back().at("result");
+                else if (text == "Stop Mini again") repeatCancelResult = turn.back().at("result");
                 else startResult = turn.back().at("result");
             }
             return {{{"reply",{{"text","I have the fixture request."}},"End this turn"}}};
@@ -219,12 +237,25 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
         {"local",{{"environmentId",local.id()},{"projectId",local.project()}}},
         {"mini",{{"environmentId",mini.id()},{"projectId",mini.project()}}}
     }}}};
+    fixture.store.receive(localOwner,routing,"conflicting-follow-up-fixture","Send instruction with conflicting selectors");
+    fixture.runtime.runConversations();
+    check(!fixture.model.conflictingResult.value("ok",true) &&
+          fixture.model.conflictingResult.value("error","").find("either by friendly name") != std::string::npos &&
+          local.effects("t3_thread_send").empty() && mini.effects("t3_thread_send").empty(),
+          "contradictory selector forms must be rejected without contacting either destination");
     fixture.store.receive(localOwner,routing,"ambiguous-follow-up-fixture","Send instruction without destination");
     fixture.runtime.runConversations();
     check(!fixture.model.ambiguousResult.value("ok",true) &&
           fixture.model.ambiguousResult.value("error","").find("Choose a destination") != std::string::npos &&
           local.effects("t3_thread_send").empty() && mini.effects("t3_thread_send").empty(),
           "an omitted selector must be rejected as ambiguous without contacting either destination");
+    const auto miniTarget = Resource::sessionRead(mini.id(),threadId).target;
+    fixture.store.policy().changeNeverRule(localOwner,Action::t3_send,miniTarget,true);
+    fixture.store.receive(localOwner,routing,"policy-denied-follow-up-fixture","Send instruction to Mini");
+    fixture.runtime.runConversations();
+    check(!fixture.model.sendResult.value("ok",true) && mini.effects("t3_thread_send").empty(),
+          "saved-target follow-up must still obey the T3 send policy");
+    fixture.store.policy().changeNeverRule(localOwner,Action::t3_send,miniTarget,false);
     fixture.store.receive(localOwner,routing,"follow-up-fixture","Send instruction to Mini");
     fixture.runtime.runConversations();
     check(fixture.model.sendResult.value("ok",false),"send_to_task did not deliver the selected destination message: " + fixture.model.sendResult.dump());
@@ -236,6 +267,93 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
           fixture.store.tasks(bot).size() == 1 && task.at("id") == fixture.taskId &&
           Scenario::result(task,fixture.local) == original,
           "the instruction must go only to Mini without relaunching or changing Local's successful result");
+}
+
+void cancelOneDestination(const Endpoint& local, const Endpoint& mini, const std::filesystem::path& directory) {
+    Scenario fixture(local,mini,directory,{},"cancel-one-destination");
+    fixture.start();
+    fixture.awaitBothRunning();
+    fixture.mini.configure({{"multiDisconnected",true},{"multiHoldSettlement",true}});
+    fixture.model.cancelTask = fixture.taskId;
+    const Intake routing{bot,{},local.id(),local.project(),{{"conversationEnvironments",{
+        {"local",{{"environmentId",local.id()},{"projectId",local.project()}}},
+        {"mini",{{"environmentId",mini.id()},{"projectId",mini.project()}}}
+    }}}};
+    const auto miniTarget = Resource::sessionRead(mini.id(),threadId).target;
+    fixture.store.policy().changeNeverRule(localOwner,Action::t3_send,miniTarget,true);
+    fixture.model.cancelGeneration = fixture.task().at("generation");
+    fixture.store.receive(localOwner,routing,"cancel-mini-denied-fixture","Stop Mini");
+    fixture.runtime.runConversations();
+    check(!fixture.model.cancelResult.value("ok",true) && fixture.mini.effects("t3_thread_interrupt").empty(),
+          "selected cancellation must obey the saved Run's T3 policy");
+    fixture.store.policy().changeNeverRule(localOwner,Action::t3_send,miniTarget,false);
+    fixture.model.cancelGeneration = fixture.task().at("generation");
+    fixture.store.receive(localOwner,routing,"cancel-mini-fixture","Stop Mini");
+    fixture.runtime.runConversations();
+    check(fixture.model.cancelResult.value("ok",false) &&
+          fixture.model.cancelResult.value("effect","") == "stop_requested",
+          "selected cancellation should persist one destination stop intent");
+    fixture.local.configure({{"multiStatus","completed"}});
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.local).value("status","") == "completed" &&
+               Scenario::result(task,fixture.mini).value("status","") == "confirmation_pending";
+    },"Mini should retain stop uncertainty while Local continues to completion");
+    check(fixture.task().at("state") == "running" &&
+          Scenario::result(fixture.task(),fixture.mini).value("status","") == "confirmation_pending" &&
+          fixture.local.effects("t3_thread_interrupt").empty() && fixture.mini.effects("t3_thread_interrupt").empty() &&
+          fixture.store.tasks(bot).size() == 1,
+          "selected cancellation must preserve the sibling and original request while settlement is pending");
+    fixture.model.cancelGeneration = fixture.task().at("generation");
+    fixture.store.receive(localOwner,routing,"cancel-mini-repeat-fixture","Stop Mini again");
+    fixture.runtime.runConversations();
+    check(fixture.model.repeatCancelResult.value("ok",false) &&
+          fixture.model.repeatCancelResult.value("effect","") == "already_requested" &&
+          fixture.mini.effects("t3_thread_interrupt").empty(),
+          "repeating selected cancellation must be idempotent");
+    fixture.mini.configure({{"multiDisconnected",false},{"multiHoldSettlement",true}});
+    fixture.advanceUntil([&](const Json&) { return fixture.mini.effects("t3_thread_interrupt").size() == 1; },
+                         "Mini should be interrupted after reconnecting");
+    fixture.mini.configure({{"multiHoldSettlement",false}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "completed"; },
+                         "the parent should settle after Mini's stop is confirmed");
+    const auto task = fixture.task();
+    check(task.at("request") == request && Scenario::result(task,fixture.local).at("status") == "completed" &&
+          Scenario::result(task,fixture.mini).at("status") == "interrupted" && fixture.store.tasks(bot).size() == 1,
+          "one stopped destination must not recreate the request or erase its successful sibling");
+    const auto expected = Json::array({{{"threadId",threadId},{"runId",runId}}});
+    check(fixture.local.effects("t3_thread_interrupt").empty() &&
+          fixture.mini.effects("t3_thread_interrupt") == expected,
+          "selected cancellation must interrupt only Mini's exact Run");
+}
+
+void cancelUnknownAcceptance(const Endpoint& local, const Endpoint& mini, const std::filesystem::path& directory) {
+    Scenario fixture(local,mini,directory,{},"cancel-unknown-acceptance");
+    fixture.start(true,true);
+    fixture.advanceUntil([&](const Json& task) {
+        return Scenario::result(task,fixture.local).value("status","") == "running" &&
+               Scenario::result(task,fixture.mini).value("status","") == "confirmation_pending";
+    },"the held Mini launch reply should remain uncertain");
+    fixture.model.cancelTask = fixture.taskId;
+    fixture.model.cancelGeneration = fixture.task().at("generation");
+    const Intake routing{bot,{},local.id(),local.project(),{{"conversationEnvironments",{
+        {"local",{{"environmentId",local.id()},{"projectId",local.project()}}},
+        {"mini",{{"environmentId",mini.id()},{"projectId",mini.project()}}}
+    }}}};
+    fixture.store.receive(localOwner,routing,"cancel-unknown-mini-fixture","Stop Mini");
+    fixture.runtime.runConversations();
+    check(fixture.model.cancelResult.value("ok",false),"an uncertain saved destination must accept a local stop intent");
+    fixture.local.configure({{"multiStatus","completed"}});
+    for (int tick = 0; tick < 70; ++tick) {
+        ++fixture.now;
+        fixture.runtime.tickConcurrent();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const auto task = fixture.task();
+    check(Scenario::result(task,fixture.local).at("status") == "completed" &&
+          Scenario::result(task,fixture.mini).at("status") == "confirmation_pending" &&
+          task.at("state") == "running" && mini.effects("t3_thread_launch").size() == 1 &&
+          mini.effects("t3_thread_interrupt").empty() && fixture.store.tasks(bot).size() == 1,
+          "unknown acceptance must retain uncertainty and its slot without relaunching after cancellation");
 }
 
 void independentSlots(Scenario& fixture) {
@@ -533,6 +651,8 @@ int main(int argc, char** argv) {
             { Scenario fixture(local,mini,directory,commit,"stop"); stop(fixture); }
             ordinaryMulti(local,mini,directory);
             sendToOneDestination(local,mini,directory);
+            cancelOneDestination(local,mini,directory);
+            cancelUnknownAcceptance(local,mini,directory);
             single(local,mini,directory,commit,false);
             single(local,mini,directory,commit,true);
         } else {

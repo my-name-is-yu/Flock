@@ -376,6 +376,8 @@ struct Store::Impl {
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
                                    bool hasWebEvidence, T3&, std::stop_token);
+    CallOutcome cancelDestinationRun(const conversation::Message&, int step, const Decision&, std::string_view key,
+                                     bool offered, bool hasWebEvidence, std::stop_token);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&,
                           const PeerResolver&, std::stop_token);
     bool leaveSession(const conversation::Message&, int, const Decision&, T3&, std::stop_token);
