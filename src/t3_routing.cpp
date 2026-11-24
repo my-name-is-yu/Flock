@@ -197,6 +197,7 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
         const std::string canonicalId(name);
         bool canonical = false;
         std::string canonicalGateway;
+        std::string canonicalProject;
         for (const auto& alias : *aliases) {
             if (conversationEnvironmentId(alias) != name) continue;
             auto gateway = conversationGatewayEnvironmentId(alias);
@@ -204,10 +205,15 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
             if (canonical && gateway != canonicalGateway) return {};
             canonical = true;
             canonicalGateway = std::move(gateway);
+            auto project = field(alias,"projectId");
+            if (!project.empty()) {
+                if (!canonicalProject.empty() && project != canonicalProject) return {};
+                canonicalProject = std::move(project);
+            }
         }
         if (canonical) {
             if (canonicalGateway == canonicalId) canonicalGateway.clear();
-            return resolved(canonicalId,{},std::move(canonicalGateway));
+            return resolved(canonicalId,std::move(canonicalProject),std::move(canonicalGateway));
         }
         const auto selected = aliases->find(name);
         if (selected != aliases->end())
@@ -325,7 +331,8 @@ TaskChange Store::Impl::taskChange(const conversation::Message& message, const J
         change.route = taskRoute(message.bot,message.routing,environment,&task);
         if (change.route.environmentId.empty())
             throw ToolError("Unknown environment " + environment + "; use one of task.environments");
-        redactor(message.bot).requirePublic({change.route.environmentId,change.route.projectId});
+        redactor(message.bot).requirePublic({change.route.environmentId,change.route.projectId,
+                                             change.route.gatewayEnvironmentId});
     }
     return change;
 }

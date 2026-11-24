@@ -1737,6 +1737,42 @@ void rememberCloudProject(Fixture& f) {
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
 }
 
+void canonicalMoveKeepsProjectAndGateway() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}},
+                                             {"other-project","Other fixture",{}}};
+    const Json aliases = {{"cloud","staging"},
+                          {"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},
+                                            {"gatewayEnvironmentId","desktop"}}}};
+    auto initial = f.routing("Start this work","alpha","desktop","project");
+    initial.config["conversationEnvironments"] = aliases;
+    const auto moving = f.store->submit(initial);
+    f.reach(moving,"running");
+    check(f.task(moving).at("projectId") == "project","the task did not start in its conversation's default project");
+
+    const auto text = "Move this work to cloud";
+    f.script(text,{change(moving,{{"environment","cloud"}})});
+    auto intake = f.routing(text,"alpha","desktop","project");
+    intake.config["conversationEnvironments"] = aliases;
+    f.store->receive(localOwner,intake,"canonical-move",text);
+    f.runtime->runConversations();
+    check(f.task(moving)["pendingDestination"] ==
+          Json{{"environmentId","cloud"},{"projectId","cloud-project"},
+               {"gatewayEnvironmentId","desktop"},{"pinned",true}},
+          "a canonical move did not reserve its selected project and gateway together");
+
+    f.t3.finish("run-1","Old destination settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the moved task was not relaunched");
+    const auto task = f.task(moving);
+    const auto& command = f.t3.sent.back();
+    check(task.at("state") == "running" && task.at("environmentId") == "cloud" &&
+          task.at("projectId") == "cloud-project" &&
+          task.at("gatewayEnvironmentId") == "desktop" && command.environmentId == "cloud" &&
+          command.projectId == "cloud-project" && command.gatewayEnvironmentId == "desktop",
+          "the next T3 instruction lost the moved target, project, or gateway");
+}
+
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
     rememberCloudProject(f);
@@ -1841,7 +1877,8 @@ void moveAsksForTheDestinationProjectAfterSettlement() {
     f.store->receive(localOwner,automatic,"select-cloud-project","Move the work to cloud");
     f.runtime->runConversations();
     check(f.task(moving)["pendingDestination"] ==
-          Json{{"environmentId","cloud"},{"projectId","cloud-project"},{"pinned",false}},
+          Json{{"environmentId","cloud"},{"projectId","cloud-project"},
+               {"gatewayEnvironmentId","cloud"},{"pinned",false}},
           "the unpinned Bot did not provisionally reserve its remembered project");
     f.t3.finish("run-2","Old Run still settling",false);
     f.tick(3);
@@ -2383,6 +2420,7 @@ int main() {
         concurrentTasksShareModelBudget();
         cancellationReleasesOnlyAfterStopConfirmation();
         cloudDestinationWaitsForItsProject();
+        canonicalMoveKeepsProjectAndGateway();
         moveAsksForTheDestinationProjectAfterSettlement();
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();

@@ -663,22 +663,28 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
             if (peer && !peer->allowsReplan(id)) return false;
             const auto oldEnvironment = field(current,"environmentId");
             const auto oldProject = field(current,"projectId");
+            const auto oldGateway = field(current,"gatewayEnvironmentId").empty() ? oldEnvironment :
+                field(current,"gatewayEnvironmentId");
             const auto destination = PendingDestination::read(current);
-            const bool moving = destination && (destination->environmentId != oldEnvironment ||
-                (destination->pinned && destination->projectId != oldProject));
+            const bool moving = destination && (destination->route.environmentId != oldEnvironment ||
+                destination->route.gatewayEnvironmentId != oldGateway ||
+                (destination->pinned && destination->route.projectId != oldProject));
             const auto event = db.currentEvent(current);
             const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
             if (moving) {
-                current["environmentId"] = destination->environmentId;
-                current["projectId"] = destination->pinned ? destination->projectId : std::string{};
+                current["environmentId"] = destination->route.environmentId;
+                current["projectId"] = destination->pinned ? destination->route.projectId : std::string{};
+                if (destination->route.gatewayEnvironmentId == destination->route.environmentId)
+                    current.erase("gatewayEnvironmentId");
+                else current["gatewayEnvironmentId"] = destination->route.gatewayEnvironmentId;
                 current["newSessionRequired"] = true;
                 current.erase("selectedSession");
                 db.journal(id,"session_destination_changed",
-                    {{"from",oldEnvironment},{"to",destination->environmentId},{"fromProject",oldProject},
+                    {{"from",oldEnvironment},{"to",destination->route.environmentId},{"fromProject",oldProject},
                      {"toProject",current.at("projectId")},{"revisionId",revision(current)}});
             }
-            if (destination && (destination->pinned || destination->projectId.empty()))
+            if (destination && (destination->pinned || destination->route.projectId.empty()))
                 current.erase("pendingDestination");
             closeQuestion(current,"user_instruction");
             if (!preservePeerAnswer) {

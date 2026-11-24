@@ -87,7 +87,7 @@ struct StartDestinations {
 };
 struct TaskChange { std::string intent, doneWhen; TaskRoute route; };
 struct PendingDestination {
-    std::string environmentId, projectId;
+    TaskRoute route;
     bool pinned;
     static std::optional<PendingDestination> read(const Json& task);
     void write(Json& task) const;

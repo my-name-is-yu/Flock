@@ -6,11 +6,14 @@ namespace flockv0 {
 std::optional<PendingDestination> PendingDestination::read(const Json& task) {
     const auto saved = task.find("pendingDestination");
     if (saved == task.end()) return std::nullopt;
-    return PendingDestination{saved->at("environmentId"),saved->at("projectId"),saved->at("pinned")};
+    TaskRoute route{saved->at("environmentId"),saved->at("projectId"),field(*saved,"gatewayEnvironmentId")};
+    if (route.gatewayEnvironmentId.empty()) route.gatewayEnvironmentId = route.environmentId;
+    return PendingDestination{std::move(route),saved->at("pinned")};
 }
 
 void PendingDestination::write(Json& task) const {
-    task["pendingDestination"] = {{"environmentId",environmentId},{"projectId",projectId},{"pinned",pinned}};
+    task["pendingDestination"] = {{"environmentId",route.environmentId},{"projectId",route.projectId},
+                                  {"gatewayEnvironmentId",route.gatewayEnvironmentId},{"pinned",pinned}};
 }
 
 std::string Store::Impl::rememberedT3Project(std::string_view bot, std::string_view environment) const {
@@ -99,7 +102,7 @@ bool Store::Impl::applyProjectCatalog(Json& task, ProjectCatalog catalog) {
             "Move this task to another environment or retry after related work finishes."}});
         return true;
     }
-    auto selected = pending ? std::ranges::find(projects,pending->projectId,&T3Project::id) : projects.end();
+    auto selected = pending ? std::ranges::find(projects,pending->route.projectId,&T3Project::id) : projects.end();
     if (selected == projects.end()) selected = std::ranges::find(projects,remembered,&T3Project::id);
     if (selected == projects.end() && projects.size() == 1) selected = projects.begin();
     if (selected != projects.end()) {

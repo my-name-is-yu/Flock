@@ -672,10 +672,14 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
         const auto& environment = change->route.environmentId;
         const auto pendingRoute = PendingDestination::read(task);
-        const auto currentEnvironment = pendingRoute ? pendingRoute->environmentId : field(task,"environmentId");
-        const auto currentProject = pendingRoute ? pendingRoute->projectId : field(task,"projectId");
+        const auto currentEnvironment = pendingRoute ? pendingRoute->route.environmentId : field(task,"environmentId");
+        const auto currentProject = pendingRoute ? pendingRoute->route.projectId : field(task,"projectId");
+        const auto currentGateway = pendingRoute ? pendingRoute->route.gatewayEnvironmentId :
+            (field(task,"gatewayEnvironmentId").empty() ? currentEnvironment : field(task,"gatewayEnvironmentId"));
+        const auto gateway = change->route.gatewayEnvironmentId.empty() ? environment :
+            change->route.gatewayEnvironmentId;
         const bool destinationChanged = !environment.empty() && (environment != currentEnvironment ||
-            (!change->route.projectId.empty() && change->route.projectId != currentProject));
+            (!change->route.projectId.empty() && change->route.projectId != currentProject) || gateway != currentGateway);
         std::optional<PendingDestination> nextRoute;
         if (destinationChanged) {
             auto project = change->route.projectId;
@@ -685,7 +689,10 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
                 if (pinned) throw Conflict("This destination would make project queues wait for one another");
                 project.clear();
             }
-            nextRoute = PendingDestination{environment,std::move(project),pinned};
+            auto route = change->route;
+            route.projectId = std::move(project);
+            route.gatewayEnvironmentId = gateway;
+            nextRoute = PendingDestination{std::move(route),pinned};
         }
         const bool criteriaChanged = oldDone != done;
         const bool intentChanged = oldIntent != intent;
