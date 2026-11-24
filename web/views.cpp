@@ -126,7 +126,7 @@ Json settingsView(const Json& bot) {
 Json waitView(const Json& wait) {
     if (wait.is_null()) return nullptr;
     Json view = Json::object();
-    copyFields(view,wait,{"id","messageId","reason","decisionReason"});
+    copyFields(view,wait,{"id","messageId","reason"});
     const auto reason = field(wait,"reason");
     if (reason == "user_question" || reason == "t3_input") copyFields(view,wait,{"text"});
     if (reason == "user_question" && wait.contains("choices") && wait["choices"].is_array()) {
@@ -158,7 +158,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId","question"});
     else if (kind == "pr_review_requested") copyFields(details,data,{"itemId","title","text","prUrl"});
     else if (kind == "completed") {
-        copyFields(details,data,{"text","reason","doneWhen","revisionId"});
+        copyFields(details,data,{"text","revisionId"});
         if (data.contains("source")) {
             const auto& source = data.at("source");
             auto run = runView(source,field(source,"environmentId"));
