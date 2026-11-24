@@ -17,16 +17,21 @@ namespace flockv0::app {
 namespace {
 constexpr std::size_t maxConfigBytes = 128 * 1024;
 
-std::string readText(const std::filesystem::path& file, std::size_t limit, bool optional = false) {
+std::string readUpTo(const std::filesystem::path& file, std::size_t bytes, bool optional) {
     std::ifstream input(file,std::ios::binary);
     if (!input) {
         if (optional && !std::filesystem::exists(file)) return {};
         throw Conflict("Unable to read " + file.filename().string());
     }
-    std::string out(limit + 1,'\0');
+    std::string out(bytes,'\0');
     input.read(out.data(),static_cast<std::streamsize>(out.size()));
     if (input.bad()) throw Conflict("Unable to read " + file.filename().string());
     out.resize(static_cast<std::size_t>(input.gcount()));
+    return out;
+}
+
+std::string readText(const std::filesystem::path& file, std::size_t limit, bool optional = false) {
+    auto out = readUpTo(file,limit + 1,optional);
     if (out.size() > limit) {
         if (!optional) throw Conflict(file.filename().string() + " exceeds the configured size limit");
         out = bounded(out,limit);
@@ -543,9 +548,15 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
     const auto file = botDir / "config.json";
     auto config = readBotConfig(file);
     if (const auto soul = profile.find("soul"); soul != profile.end()) {
-        if (profile.size() != 1 || image) throw Conflict("Save the role separately from other settings");
+        const auto original = profile.find("originalSoul");
+        if (profile.size() != 2 || original == profile.end() || !original->is_string() || image)
+            throw Conflict("Save the role separately from other settings with its original text");
         const auto text = validatedBotSoul(*soul);
         const auto roleFile = botDir / "SOUL.md";
+        const auto& expected = original->get_ref<const std::string&>();
+        if (expected.size() > maxBotRoleBytes || expected.find('\0') != expected.npos ||
+            readUpTo(roleFile,maxBotRoleBytes + 1,true) != expected)
+            throw BotProfileError("role_changed","The Bot role changed or contains text the editor could not show");
         if (text.empty()) {
             std::error_code failure;
             std::filesystem::remove(roleFile,failure);

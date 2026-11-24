@@ -29,6 +29,7 @@ export function createBotRoleCard(saveRole) {
   const save = form.querySelector('button[type="submit"]');
   const feedback = element.querySelector('.settings-card-feedback');
   let text;
+  let originalSoul;
   let initialText;
 
   function measurePreview() {
@@ -68,7 +69,8 @@ export function createBotRoleCard(saveRole) {
     showFeedback('');
     edit.hidden = preview.hidden = toggle.hidden = true;
     form.hidden = false;
-    input.value = text;
+    originalSoul = text;
+    input.value = originalSoul;
     initialText = input.value;
     input.focus();
   });
@@ -97,12 +99,13 @@ export function createBotRoleCard(saveRole) {
     input.disabled = save.disabled = cancel.disabled = true;
     showFeedback('');
     try {
-      update(await saveRole(input.value));
+      update(await saveRole(input.value, originalSoul));
       finishEditing();
       showFeedback('Role updated');
     } catch (error) {
       const message = {
         invalid_soul: 'The role is too long. Shorten it and try again.',
+        role_changed: 'The role changed or contains hidden text. Your edits weren’t saved.',
         role_contains_secrets: 'Remove passwords or keys from the role before saving.',
       }[error.message] ?? 'Couldn’t save the role.';
       showFeedback(message, true);
