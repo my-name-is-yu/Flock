@@ -132,9 +132,13 @@ struct Command {
     std::string ownerBotId;
     std::string launchReceiptThreadId; // From the launch response, even if the Run ID was pending.
     std::optional<SessionOrigin> sessionOrigin;
+    bool localWorkflow = false;
+    // A pinned launch must call this synchronously before dispatching the first prompt.
+    // A false result prevents dispatch.
+    std::function<bool()> beginPinnedPrompt = {};
 };
 struct Delivery {
-    enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
+    enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted, Provisioned } kind = Kind::Unknown;
     RunRef run;
     std::string detail;
     bool definitelyUnsent = false;
@@ -205,6 +209,8 @@ public:
         return QueueCancelOutcome::Retry;
     }
     virtual std::string authGeneration(const std::string& environmentId, const Json& config) = 0;
+    // Workflow admission checks the saved endpoint without contacting T3.
+    virtual void requireLocalWorkflow(const std::string&) {}
     // Local/preflight checks only. Throw ModelError for a settings failure and report auth separately.
     virtual std::optional<Delivery> preflight(const Command&) { return std::nullopt; }
     virtual Delivery send(const Command&) = 0;

@@ -284,8 +284,8 @@ struct Store::Impl {
     Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;
     Json conversationHistory(const conversation::Message&, const Json& summaries, std::size_t expandedBytes) const;
     Json contextTool(std::string_view tool, const Json&, const conversation::Message&, int step);
-    Id startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing);
-    Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, const Json& routing, Seconds now);
+    Id startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing, T3&);
+    Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, const Json& routing, Seconds now, T3&);
     Json workflowStatus(Id id, std::string_view bot, Seconds now) const;
     void startVerification(const Json& task, Id reportId, const Json& report, const std::string& version);
     void stageStarted(Id task, Seconds now);
@@ -356,7 +356,7 @@ struct Store::Impl {
     CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&,
                                              std::string_view key, const ConversationCallContext&);
     std::optional<Json> applyLocalConversationCall(const conversation::Message&, int step, const Decision&,
-                                                   std::string_view key, Seconds now, ApprovalWait,
+                                                   std::string_view key, Seconds now, ApprovalWait, T3&,
                                                    const WorkSession* selectedSession = nullptr);
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
@@ -378,7 +378,7 @@ struct Store::Impl {
     Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images);
     Json gitConversationTool(GitHost*, const conversation::Message&, const Decision&, std::string_view key);
     bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
-    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now,
+    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now, T3&,
                        const WorkSession* selectedSession);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route,
                     const conversation::QuestionAnchor* question = nullptr);

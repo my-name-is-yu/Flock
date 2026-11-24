@@ -94,6 +94,11 @@ class Fixture(BaseHTTPRequestHandler):
                 assert self.server.stock_thread
                 subprocess.run(["/usr/bin/git","-C",state["stockTree"],"checkout","--detach",state["stockHead"]],
                                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
+            if args.get("resetStock"):
+                for key in ("effects", "stockLaunches", "stockPromptSends"):
+                    state.pop(key, None)
+                subprocess.run(["/usr/bin/git", "-C", state["stockTree"], "checkout", "--detach", state["stockPin"]],
+                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
             if "stockTrackedEdit" in args:
                 assert self.server.stock_thread
                 source = state["stockSource"]
@@ -616,59 +621,87 @@ class Fixture(BaseHTTPRequestHandler):
         if name == "t3_environment_read":
             return {"environmentId": state.get("claimedEnvironment", "env-1"), "label": "T3 fixture"}
         if name == "t3_project_read":
+            if state.get("stockProjectUnavailable"):
+                return {"_tag": "OrchestratorMcpFailure", "code": "project_not_found"}
             return {"id": "project", "workspaceRoot": state["stockRoot"]}
         if name == "t3_thread_launch":
-            assert args["projectId"] == "project" and "message" not in args
-            assert args["runtimeMode"] == "approval-required"
-            assert args["workspaceStrategy"] == {"type": "worktree", "baseRef": state["stockPin"],
-                                                 "startFromOrigin": False}
-            assert set(args) == {"projectId", "title", "clientRequestId", "runtimeMode", "workspaceStrategy"}
-            key = args["projectId"] + ":" + args["clientRequestId"]
+            assert args["projectId"] == "project"
+            action = args["clientRequestId"]
+            pinned = "message" not in args
+            if pinned:
+                assert args["runtimeMode"] == "approval-required"
+                assert args["workspaceStrategy"] == {"type": "worktree", "baseRef": state["stockPin"],
+                                                     "startFromOrigin": False}
+                assert set(args) == {"projectId", "title", "clientRequestId", "runtimeMode", "workspaceStrategy"}
+            else:
+                assert args["message"].endswith(f"[Flock action ID: {action}]")
+            key = args["projectId"] + ":" + action
             launches = state.setdefault("stockLaunches", {})
-            payload = {name: args[name] for name in sorted(args)}
             if key in launches:
-                assert launches[key]["payload"] == payload, "same-key launch retry changed its payload"
+                assert launches[key]["payload"] == args, "same-key launch retry changed its payload"
                 launches[key]["replays"] += 1
                 return launches[key]["response"]
-            response = {"projectId": "project", "threadId": args["clientRequestId"], "runId": None}
-            launches[key] = {"payload": payload, "response": response, "replays": 0}
+            response = {"projectId": "project", "threadId": "session-" + action,
+                        "runId": None if pinned else "implement-run"}
+            launches[key] = {"payload": args, "response": response, "replays": 0}
+            if pinned and state.get("stockLoseLaunchReceipt"):
+                return {}
             return response
+        thread = args["threadId"]
+        action = thread.removeprefix("session-")
+        launch = state["stockLaunches"]["project:" + action]
+        assert thread == launch["response"]["threadId"]
+        pinned = launch["response"]["runId"] is None
+        key = thread + ":" + action + ":start"
+        sent = state.get("stockPromptSends", {}).get(key)
+        held = pinned and sent and state.get("stockHoldPrompt")
+        run = "next-run" if pinned else "implement-run"
         if name == "t3_thread_send":
-            assert args["mode"] == "queue"
+            assert pinned and args["mode"] == "queue"
             assert set(args) == {"threadId", "message", "mode", "clientRequestId"}
-            thread = args["threadId"]
-            assert thread == "pinned-worker" and args["clientRequestId"] == "pinned-worker:start"
-            assert "Check fixture" in args["message"]
+            assert key == thread + ":" + args["clientRequestId"]
+            assert args["message"].endswith(f"[Flock action ID: {action}]")
             prompts = state.setdefault("stockPromptSends", {})
-            key = thread + ":" + args["clientRequestId"]
-            payload = {name: args[name] for name in sorted(args)}
             if key in prompts:
-                assert prompts[key]["payload"] == payload, "same-key first-prompt retry changed its payload"
+                assert prompts[key]["payload"] == args, "same-key first-prompt retry changed its payload"
                 prompts[key]["replays"] += 1
             else:
-                prompts[key] = {"payload": payload, "replays": 0}
-            return {"threadId": thread, "messageId": "sent-id", "runId": "next-run", "delivery": "started"}
+                prompts[key] = {"payload": args, "replays": 0}
+            if state.get("stockLosePromptReceipt"):
+                return {}
+            return {"threadId": thread, "messageId": "sent-id", "runId": run, "delivery": "started"}
         if name == "t3_thread_wait":
-            assert args["threadId"] == "pinned-worker" and args["runId"] == "next-run"
-            return {"threadId": "pinned-worker", "runId": "next-run", "status": "completed", "timedOut": False,
-                    "resultRun": {"runId": "next-run", "status": "completed"}}
+            assert args["runId"] == run and (sent or not pinned)
+            settling = pinned and state.get("stockUnsettled") and args["untilDelegatedWorkSettled"]
+            status = "queued" if held else "completed"
+            return {"threadId": thread, "runId": run, "status": status, "timedOut": bool(settling or held),
+                    "resultRun": {"runId": run, "status": status}}
         if name == "t3_queue":
-            assert args["action"] == "list" and args["threadId"] == "pinned-worker"
-            return {"items": [], "nextCursor": None}
+            assert pinned and args["action"] == "list"
+            items = [{"queuedRunId": run, "text": sent["payload"]["message"], "truncated": False}] if held else []
+            return {"items": items, "nextCursor": None}
         assert name == "t3_thread_read"
-        thread = args["threadId"]
-        sent = state.get("stockPromptSends", {}).get(thread + ":" + thread + ":start")
+        path = state["stockWrongTree" if action == "wrong-worker" else "stockTree"] if pinned else None
+        if pinned and state.get("stockMissingWorktree"):
+            path += ".missing"
+        if pinned and state.get("stockProvisioning"):
+            path = None
         summary = self.summary(thread) | {
-            "activeRunId": None, "latestRunId": "next-run" if sent else None,
+            "activeRunId": None, "latestRunId": run if (sent and not held) or not pinned else None,
             "archived": False, "projectId": "project", "pendingRequestCount": 0,
-            "worktreePath": state["stockWrongTree" if thread == "wrong-worker" else "stockTree"],
+            "worktreePath": path,
         }
         rows = []
-        if sent:
+        if (sent and not held) or not pinned:
+            prompt = sent["payload"]["message"] if pinned else launch["payload"]["message"]
+            report = {"artifactVersion": state["stockPin"]}
+            if pinned:
+                report["verdict"] = "pass"
+            report = json.dumps(report) if state.get("stockWorkflow") else "Pinned report"
             rows = [
-                self.item(thread, 1, "next-run", "user_message", sent["payload"]["message"], source="mcp") |
+                self.item(thread, 1, run, "user_message", prompt, source="mcp") |
                 {"textTruncated": False, "nextTextOffset": None},
-                self.item(thread, 2, "next-run", "assistant_message", "Pinned report") |
+                self.item(thread, 2, run, "assistant_message", report) |
                 {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"},
             ]
             rows = [row for row in rows

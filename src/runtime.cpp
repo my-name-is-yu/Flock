@@ -654,6 +654,9 @@ struct Runtime::Impl {
             std::lock_guard lock(db.mutex);
             action = db.outbox(task);
         }
+        if (!action.is_null() && action["phase"] == "started" && action.value("pinnedPromptUnsent",false))
+            return applyDelivery(task.at("id"),action,
+                {Delivery::Kind::NotAccepted,{},"The first verification prompt was not sent",true});
         if (!task["activeRun"].is_null() || (!action.is_null() && action["phase"] == "started")) {
             const auto saved = task.value("runStop",Json(nullptr));
             if (!saved.is_object() || saved.at("intent") != intent || saved.at("run") != task["activeRun"]) {
@@ -708,6 +711,7 @@ struct Runtime::Impl {
         c.candidate = runRef(action.value("candidate",Json::object()));
         c.candidateQuestionId = field(action,"candidateQuestionId");
         c.launchReceiptThreadId = field(action,"launchReceiptThreadId");
+        c.localWorkflow = task.contains("workflowId");
         if (c.tool == "delegate" && task.contains("sessionOrigin")) {
             const auto& origin = task.at("sessionOrigin");
             c.sessionOrigin = SessionOrigin{{field(origin,"environmentId"),field(origin,"threadId")},field(origin,"title")};
@@ -763,6 +767,18 @@ struct Runtime::Impl {
             outcome.detail = scrub.text(outcome.detail);
             const bool cancelling = task["state"] == "cancelling";
             const bool reply = action["tool"] == "answer_session_question";
+            if (outcome.kind == Delivery::Kind::Provisioned && !outcome.run.threadId.empty() && outcome.run.runId.empty()) {
+                db.exec("UPDATE outbox SET data=json_set(data,'$.launchReceiptThreadId',?) WHERE id=? AND phase='started'"
+                        " AND json_extract(data,'$.pinnedPromptUnsent')=1 AND json_type(data,'$.launchReceiptThreadId') IS NULL",
+                        {outcome.run.threadId,action["id"]});
+                if (!sqlite3_changes(db.db)) return false;
+                db.journal(id,"session_provisioned",{{"actionId",action["id"]},{"thread",runJson(outcome.run)}});
+                if (!cancelling) {
+                    db.clearWait(task,"session_provisioned");
+                    task["state"] = "sending";
+                }
+                return true;
+            }
             DeliveryOutcome delivery = DeliveryOutcome::Unknown;
             if (outcome.kind == Delivery::Kind::Accepted) {
                 if (reply || (hasRun(outcome.run) && assignedRunMatches(task,action,outcome.run)))
@@ -901,6 +917,9 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             });
         };
         const bool firstSend = action["phase"] == "ready";
+        const bool pinnedLaunch = cmd.tool == "delegate" && !field(task,"inputArtifactVersion").empty();
+        // Provisioning can retry an empty launch with the same T3 key until its receipt is saved.
+        const bool provisioning = pinnedLaunch && action.value("pinnedPromptUnsent",false);
         const auto disconnected = [&] {
             return options.requireT3Connection && !db.t3EnvironmentConnected(cmd.environmentId);
         };
@@ -1012,6 +1031,7 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                 auto payload = action;
                 payload.erase("phase");
                 payload.erase("authGeneration");
+                if (pinnedLaunch) payload["pinnedPromptUnsent"] = true;
                 db.exec("UPDATE outbox SET phase='started',auth_generation=?,data=?"
                         " WHERE id=? AND phase='ready'",{cmd.authGeneration,payload,action["id"]});
                 if (!sqlite3_changes(db.db)) return false;
@@ -1024,10 +1044,34 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                 return;
             }
         } else if (action["phase"] != "started") return;
+        else if (provisioning) {
+            if (options.requireT3Connection || cmd.sessionOrigin)
+                dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
+            if (disconnected()) return applyDelivery(id,action,{Delivery::Kind::Auth,{},
+                "Connect this T3 environment in Flock settings before sending work."});
+        }
+        if (pinnedLaunch && (firstSend || provisioning)) {
+            cmd.beginPinnedPrompt = [&] {
+                return changeTask(id,[&](Json& current) {
+                    if (shutdown.stop_requested() || terminal(current) || current["state"] == "cancelling" ||
+                        current.value("replanning",false) || current["actionId"] != action["id"] ||
+                        !sessionActionAllowed(current) || policy.forbidden(cmd.ownerBotId,resource->action,resource->target))
+                        return false;
+                    // After this commit, recovery may only look for the exact prompt in the saved Thread.
+                    db.exec("UPDATE outbox SET data=json_remove(data,'$.pinnedPromptUnsent')"
+                            " WHERE id=? AND phase='started' AND json_extract(data,'$.pinnedPromptUnsent')=1"
+                            " AND json_extract(data,'$.launchReceiptThreadId')=?",
+                            {action["id"],cmd.launchReceiptThreadId});
+                    if (!sqlite3_changes(db.db)) return false;
+                    db.journal(id,"pinned_prompt_started",{{"actionId",action["id"]}});
+                    return true;
+                });
+            };
+        }
         try {
-            if (firstSend) outcome = !sessionActionAllowed(task) ||
-                                     (resource && policy.forbidden(cmd.ownerBotId,resource->action,resource->target)) ||
-                                     (usesExistingSession && policy.forbidden(cmd.ownerBotId,Action::environment_launch,cmd.environmentId))
+            if (firstSend || provisioning) outcome = !sessionActionAllowed(task) ||
+                (resource && policy.forbidden(cmd.ownerBotId,resource->action,resource->target)) ||
+                (usesExistingSession && policy.forbidden(cmd.ownerBotId,Action::environment_launch,cmd.environmentId))
                 ? Delivery{Delivery::Kind::NotAccepted,{},"Session action denied by installation policy.",true}
                 : t3.send(cmd);
             else outcome = t3.reconcile(cmd);

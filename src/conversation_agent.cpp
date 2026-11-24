@@ -396,7 +396,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
-                                Seconds now, const WorkSession* selectedSession) {
+                                     Seconds now, T3& t3, const WorkSession* selectedSession) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -422,7 +422,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (tool == "compact_conversation" || tool == "expand_context" || tool == "continue_fresh_session")
             return contextTool(tool,args,message,step);
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "stop_workflow")
-            return workflowTool(tool,args,bot,message.id,routing,now);
+            return workflowTool(tool,args,bot,message.id,routing,now,t3);
         const auto actor = turnActor(message);
         auto result = botSettingsTool(bot,actor,message.id,routing,decision);
         if (result.is_null()) result = memory(bot,actor,tool,args,now,true);
@@ -502,6 +502,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                 auto destination = taskEnvironment(bot,routing,change->environment,&task);
                 if (destination.empty())
                     throw ToolError("Unknown environment " + change->environment + "; use one of task.environments");
+                if (task.contains("workflowId") && destination != field(task,"environmentId"))
+                    t3.requireLocalWorkflow(destination);
                 change->environment = std::move(destination);
             }
         }

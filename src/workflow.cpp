@@ -122,7 +122,7 @@ Json Store::workflows(std::string_view bot, Id before, unsigned limit) const {
     return result;
 }
 
-Id Store::Impl::startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing) {
+Id Store::Impl::startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing, T3& t3) {
     for (const auto& arg : args.items())
         if (arg.key()!="request" && arg.key()!="verificationCriteria" && arg.key()!="softDeadlineSeconds")
             throw Conflict("Workflow supports implementation and independent verification. Use a T3 Session for custom stages.");
@@ -134,6 +134,7 @@ Id Store::Impl::startWorkflow(Id message, const Json& args, std::string_view bot
     if (deadline>31536000) throw Conflict("Invalid soft deadline");
     const auto environment = taskEnvironment(bot,routing);
     if (environment.empty()) throw Conflict("Choose a connected T3 environment for this workflow");
+    t3.requireLocalWorkflow(environment);
     const auto scrub = redactor(bot);
     scrub.requirePublic({bot,routing,environment});
     const auto safeRequest = scrub.text(request);
@@ -151,9 +152,9 @@ Id Store::Impl::startWorkflow(Id message, const Json& args, std::string_view bot
 }
 
 Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::string_view bot,
-                              Id message, const Json& routing, Seconds now) {
+                              Id message, const Json& routing, Seconds now, T3& t3) {
     if (tool=="start_workflow") {
-        const auto id = startWorkflow(message,args,bot,routing);
+        const auto id = startWorkflow(message,args,bot,routing,t3);
         auto status = workflowStatus(id,bot,now);
         status["effect"] = "started";
         return status;

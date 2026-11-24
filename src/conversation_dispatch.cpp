@@ -269,7 +269,7 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
         return advance;
     }
     if (ctx.shutdown.stop_requested()) return stop;
-    auto completed = applyLocalConversationCall(message,step,decision,key,ctx.clock(),ApprovalWait::pause,
+    auto completed = applyLocalConversationCall(message,step,decision,key,ctx.clock(),ApprovalWait::pause,ctx.t3,
                                                 selectedSession ? &*selectedSession : nullptr);
     if (completed) saveConversationCallResult(message,step,std::move(*completed));
     transaction.commit();
@@ -278,7 +278,7 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
 
 std::optional<Json> Store::Impl::applyLocalConversationCall(
     const Message& message, int step, const Decision& decision, std::string_view key, Seconds now,
-    ApprovalWait waitMode, const WorkSession* selectedSession) {
+    ApprovalWait waitMode, T3& t3, const WorkSession* selectedSession) {
     if (const auto resource = conversationCallResource(message,decision)) {
         const auto gate = approveAction(policyOrigin(message),*resource,key,
             Json::array({decision.tool,decision.args}),now,true,waitMode);
@@ -287,7 +287,7 @@ std::optional<Json> Store::Impl::applyLocalConversationCall(
     }
     exec("SAVEPOINT turn_tool");
     try {
-        auto result = applyTurnTool(message,step,decision,now,selectedSession);
+        auto result = applyTurnTool(message,step,decision,now,t3,selectedSession);
         exec("RELEASE turn_tool");
         return result;
     } catch (const StorageError&) {

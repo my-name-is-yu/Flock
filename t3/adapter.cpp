@@ -6,7 +6,6 @@
 #include <charconv>
 #include <chrono>
 #include <set>
-#include <thread>
 
 namespace flockv0 {
 namespace t3detail {
@@ -527,6 +526,8 @@ void queuedMatches(Client& client, Scan& scan, const std::string& thread,
 Delivery reconcileWork(Client& client, const Command& command) {
     const bool launch = command.tool == "delegate";
     const auto& destination = launch ? command.launchReceiptThreadId : command.target.threadId;
+    const bool pinnedPrompt = launch && !destination.empty() &&
+        command.config.value("session",Json::object()).value("workspaceStrategy",Json::object()).contains("expectedCommit");
     const auto& hint = command.candidate.threadId;
     if (!destination.empty() && !hint.empty() && hint != destination)
         return result(Outcome::Unknown, "The supplied Thread is outside the saved action destination");
@@ -543,7 +544,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
         const auto& thread = head.at("thread");
         if (str(thread, "projectId") != command.projectId ||
             (launch && (str(thread, "createdBy") != "agent" || str(thread, "creationSource") != "mcp"))) continue;
-        if (command.tool == "start_in_session") {
+        if (command.tool == "start_in_session" || pinnedPrompt) {
             std::set<std::string> queued;
             queuedMatches(client,scan,threadId,expected,queued);
             for (const auto& run : queued)
@@ -562,8 +563,8 @@ Delivery reconcileWork(Client& client, const Command& command) {
                 if (exact && !runId.empty() && (launch || runId != command.target.runId))
                     matches[{threadId, runId}] = {threadId, runId, str(thread, "link")};
             }
-            // This is a launch, so only its initial local user message could have created the Thread.
-            return !launch && matches.size() < 2;
+            // An ordinary launch's prompt created the Thread. A provisioned Thread receives a separate send.
+            return (!launch || pinnedPrompt) && matches.size() < 2;
         });
         if (matches.size() > 1) break;
     }
@@ -636,9 +637,14 @@ std::optional<RunEvidence> pinnedEvidenceProblem(Client& client, const Json& con
     problem.availability = RunEvidence::Availability::ReportUnavailable;
     problem.detail = "Could not verify the pinned worktree";
     if (!gitCommit(pin) || !loopbackGitHost(origin)) return problem;
-    const auto head = threadHead(client,source.threadId);
-    const auto& thread = head.at("thread");
-    const auto actual = workspaceHead(client,str(thread,"projectId"),thread);
+    std::optional<WorkspaceHead> actual;
+    try {
+        const auto head = threadHead(client,source.threadId);
+        const auto& thread = head.at("thread");
+        actual = workspaceHead(client,str(thread,"projectId"),thread);
+    } catch (const Failure&) {
+        return problem;
+    }
     if (!actual) return problem;
     if (actual->clean && actual->commit == pin) return {};
     problem.availability = RunEvidence::Availability::Available;
@@ -740,36 +746,56 @@ Json launchThread(Client& client, Json args, std::string& warning) {
     }
 }
 
-Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin, std::string& warning) {
-    auto prompt = str(args,"message");
-    args.erase("message");
-    const auto launched = launchThread(client,std::move(args),warning);
-    const auto threadId = str(launched,"threadId");
-    if (threadId.empty() || str(launched,"projectId") != command.projectId ||
-        !member(launched,"runId").is_null()) invalidResponse();
+Delivery launchPinned(Client& client, const Command& command, LaunchArguments launch, std::string& warning, bool& invoked) {
+    if (!command.beginPinnedPrompt)
+        return {Outcome::Settings,{},"Pinned work requires a saved first-prompt action",true};
 
-    const auto until = Clock::now() + std::chrono::seconds(8);
-    while (Clock::now() < until) {
-        const auto head = threadHead(client,threadId);
-        const auto& thread = head.at("thread");
-        if (str(thread,"projectId") != command.projectId || str(thread,"createdBy") != "agent" ||
-            str(thread,"creationSource") != "mcp" || boolean(thread,"archived")) invalidResponse();
-        if (!member(thread,"latestRunId").is_null() || !member(thread,"activeRunId").is_null())
-            return result(Outcome::Unknown,"The provisioned Session already has a Run. Check its saved action in T3.");
-        if (member(thread,"worktreePath").is_null()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            continue;
-        }
-        const auto workspace = workspaceHead(client,command.projectId,thread);
-        if (!workspace || !workspace->clean || workspace->commit != pin)
-            return {Outcome::NotAccepted,{},"The provisioned worktree does not match the saved commit",true};
-        const auto sent = client.call("t3_thread_send",{{"threadId",threadId},{"mode","queue"},
-            {"message",std::move(prompt)},{"clientRequestId",command.actionId+":start"}});
-        if (str(sent,"threadId") != threadId || str(sent,"runId").empty() ||
-            (str(sent,"delivery") != "started" && str(sent,"delivery") != "queued")) invalidResponse();
-        return result(Outcome::Accepted,{}, {threadId,str(sent,"runId"),str(launched,"link")});
+    const auto& threadId = command.launchReceiptThreadId;
+    if (threadId.empty()) {
+        launch.parameters.erase("message");
+        invoked = true;
+        const auto receipt = launchThread(client,std::move(launch.parameters),warning);
+        const auto id = str(receipt,"threadId");
+        if (id.empty() || str(receipt,"projectId") != command.projectId ||
+            !member(receipt,"runId").is_null()) invalidResponse();
+        return result(Outcome::Provisioned,{}, {id,{},str(receipt,"link")});
     }
-    return result(Outcome::Unknown,"The pinned worktree is still being provisioned");
+
+    const auto head = threadHead(client,threadId);
+    const auto& thread = head.at("thread");
+    if (str(thread,"projectId") != command.projectId || str(thread,"createdBy") != "agent" ||
+        str(thread,"creationSource") != "mcp" || boolean(thread,"archived"))
+        return {Outcome::Settings,{},"The provisioned T3 Session moved projects or is unavailable",true};
+    const auto idle = [](const Json& info) {
+        return member(info,"latestRunId").is_null() && member(info,"activeRunId").is_null() &&
+               position(member(info,"pendingRequestCount")) == 0;
+    };
+    if (!idle(thread))
+        return {Outcome::Settings,{},"The provisioned T3 Session already has work",true};
+    if (member(thread,"worktreePath").is_null())
+        return result(Outcome::Unknown,"The pinned worktree is still being provisioned");
+    const auto workspace = workspaceHead(client,command.projectId,thread);
+    if (!workspace || !workspace->clean || workspace->commit != launch.pin)
+        return {Outcome::NotAccepted,{},"The provisioned worktree does not match the saved commit",true};
+    const auto queue = client.call("t3_queue",{{"action","list"},{"threadId",threadId},{"limit",1}});
+    const auto current = threadHead(client,threadId).at("thread");
+    if (!array(queue,"items").empty() || !idle(current) || boolean(current,"archived") ||
+        str(current,"projectId") != command.projectId || current.at("worktreePath") != thread.at("worktreePath"))
+        return {Outcome::Settings,{},"The provisioned T3 Session changed before starting verification",true};
+    if (!command.beginPinnedPrompt())
+        return result(Outcome::Unknown,"The first verification prompt was not dispatched");
+
+    invoked = true;
+    const auto sent = client.call("t3_thread_send",{{"threadId",threadId},{"mode","queue"},
+        {"message",str(launch.parameters,"message")},{"clientRequestId",command.actionId+":start"}});
+    if (str(sent,"threadId") != threadId || str(sent,"runId").empty() ||
+        (str(sent,"delivery") != "started" && str(sent,"delivery") != "queued")) invalidResponse();
+    return result(Outcome::Accepted,{}, {threadId,str(sent,"runId"),str(current,"link")});
+}
+
+void requireLocalWorkflowOrigin(std::string_view origin) {
+    if (!loopbackGitHost(origin))
+        throw Failure(Failure::Kind::Settings,"Commit verification requires a local T3 environment and project");
 }
 
 class Adapter final : public T3 {
@@ -780,6 +806,11 @@ public:
         return credential(environmentId, config).generation;
     }
 
+    void requireLocalWorkflow(const std::string& environmentId) override {
+        const auto connection = loadCredential(directory_,environmentId);
+        requireLocalWorkflowOrigin(checkedUrl(connection.mcpUrl).origin);
+    }
+
     std::optional<Delivery> preflight(const Command& command) override {
         try {
             verifyCommand(command);
@@ -788,8 +819,7 @@ public:
             auto connection = credential(command.environmentId, command.config);
             requireOperate(connection);
             if (launch) {
-                if (!pin.empty() && !loopbackGitHost(checkedUrl(connection.mcpUrl).origin))
-                    return result(Outcome::Settings,"Pinned worktrees require a local T3 environment");
+                if (command.localWorkflow || !pin.empty()) requireLocalWorkflowOrigin(checkedUrl(connection.mcpUrl).origin);
                 Client client(std::move(connection));
                 const auto project = client.call("t3_project_read",{{"projectId",command.projectId}});
                 if (str(project,"id") != command.projectId)
@@ -803,17 +833,20 @@ public:
 
     Delivery send(const Command& command) override {
         bool invoked = false;
+        bool pinned = false;
         std::string launchWarning;
         try {
             verifyCommand(command);
             const bool launch = command.tool == "delegate";
             const bool selected = command.tool == "start_in_session";
             auto launchArguments = launch ? launchArgs(command) : LaunchArguments{};
+            pinned = !launchArguments.pin.empty();
             auto connection = credential(command.environmentId, command.config);
             if (command.authGeneration.empty() || connection.generation != command.authGeneration)
                 return {Outcome::Auth, {}, "The T3 sign-in changed before Flock sent this action", true};
             requireOperate(connection);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
+            if (command.localWorkflow || pinned) requireLocalWorkflowOrigin(origin);
             Client client(std::move(connection));
             if (command.tool == "answer_session_question") return answer(client, command, invoked);
             if (command.tool == "message_session") {
@@ -831,16 +864,13 @@ public:
             }
             Json reply;
             if (launch) {
-                if (command.sessionOrigin) {
+                if (command.sessionOrigin || command.localWorkflow || pinned) {
                     const auto environment = client.call("t3_environment_read",Json::object());
                     if (str(environment,"environmentId") != command.environmentId)
                         return {Outcome::Settings,{}, "The OAuth endpoint belongs to a different T3 environment",true};
                 }
-                if (!launchArguments.pin.empty()) {
-                    if (!loopbackGitHost(origin))
-                        return {Outcome::Settings,{},"Pinned worktrees require a local T3 environment",true};
-                    invoked = true;
-                    auto delivery = launchPinned(client,command,std::move(launchArguments.parameters),launchArguments.pin,launchWarning);
+                if (pinned) {
+                    auto delivery = launchPinned(client,command,std::move(launchArguments),launchWarning,invoked);
                     delivery.launchWarning = std::move(launchWarning);
                     useLocalThreadLink(delivery.run,command.environmentId,origin);
                     return delivery;
@@ -886,7 +916,8 @@ public:
                 return delivery;
             }
             auto refused = failureDelivery(failure);
-            refused.definitelyUnsent = !invoked;
+            // A transient read failure can retry the saved provision-only action automatically.
+            refused.definitelyUnsent = !invoked && (!pinned || refused.kind != Outcome::Unknown);
             return refused;
         }
     }
@@ -966,9 +997,7 @@ public:
                     observed.status = str(later, "status");
                 }
                 auto problem = pinnedEvidenceProblem(client,config,source,observed.status,origin);
-                if (problem && problem->availability == RunEvidence::Availability::ReportUnavailable)
-                    return state(Observed::Unavailable,std::move(problem->detail));
-                if (problem) observed.status = "failed";
+                if (problem && problem->availability == RunEvidence::Availability::Available) observed.status = "failed";
                 auto evidence = problem ? std::move(*problem) : readTerminalEvidence(client,source,observed.status);
                 observed.evidence = evidence.availability;
                 observed.report = std::move(evidence.report);
