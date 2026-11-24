@@ -6,7 +6,7 @@ import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
-import { mountBoardInbox, pullRequestLink } from '/board-inbox.js';
+import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
 import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
@@ -154,7 +154,6 @@ const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
 const composerDrafts = createComposerDraftStore();
 const screenshotDrafts = new WeakMap();
 const sendingMessages = new Set();
-const pendingWaits = new Map();
 const notices = new Map();
 const signatures = new Map();
 const readingPositions = new Map();
@@ -1221,33 +1220,24 @@ async function copyMessage(control, text) {
     }, 1600);
   } catch { if (view) setNotice(view, 'Could not copy the text.', true); }
 }
-const questionKey = (task) => JSON.stringify([task.id, task.wait.id, task.currentRevision ?? 0, task.generation]);
-
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
   const choices = task.wait.choices;
+  const item = taskWaitDecision(context.id, task);
+  const busy = decisions.busy(item);
   if (hasQuestionChoices(choices)) {
-    const key = questionKey(task);
-    const selections = context.questionChoices ??= new Map();
+    const { key, text, stale } = decisions.choice(item);
     actions.append(questionChoiceForm({
-      key, prompt: target.summary, choices, dialog, answer: selections.get(key), busy: pendingWaits.has(task.wait.id),
-      select(answer) {
-        selections.set(key, answer);
-        for (const form of document.querySelectorAll('.question-choice-form')) {
-          if (form.dataset.questionKey === key) updateQuestionChoiceForm(form, answer, pendingWaits.has(task.wait.id));
-        }
-      },
-      submit(answer) {
-        const current = view === context && context.data?.waits.find((item) => item.wait.id === task.wait.id);
-        if (current && questionKey(current) === key) void operate(context, current, 'answer', { text: answer });
-      },
+      key, prompt: target.summary, choices, dialog, answer: text, busy: busy || stale,
+      select: (answer) => decisions.selectChoice(item, answer),
+      submit: (answer) => void operate(context, task, 'answer', { text: answer }),
     }));
   }
   const reply = questionReplyButton(() => {
     if (view?.id === context.id) beginReply(target);
   }, dialog);
-  reply.disabled = pendingWaits.has(task.wait.id);
+  reply.disabled = busy;
   actions.append(reply);
   return actions;
 }
@@ -1256,15 +1246,19 @@ function readOnlyChoices(choices) {
   for (const choice of choices) options.append(node('li', null, choice));
   return options;
 }
+function pausedDecision(botId, turn) {
+  return { botId, itemKind: 'conversation_model_budget', itemId: turn.replyToMessageId, waitId: turn.messageId,
+    taskId: 0, targetRevision: 0, targetGeneration: turn.messageId };
+}
 function pausedActions(turn) {
+  const context = view;
+  const item = pausedDecision(context.id, turn);
   const actions = node('div', 'event-actions');
-  const waitMessageId = turn.messageId;
-  const key = `message/${waitMessageId}`;
-  const approve = button('Approve one more model call', 'button', () => void submitOperation(view, key, {
-    itemKind: 'conversation_model_budget', itemId: turn.replyToMessageId, waitId: waitMessageId,
-    taskId: 0, targetRevision: 0, targetGeneration: waitMessageId, decision: 'approve',
-  }));
-  approve.disabled = pendingWaits.has(key);
+  const approve = button('Approve one more model call', 'button', () => {
+    const current = context.data?.pausedConversations?.find((entry) => entry.messageId === item.waitId);
+    void submitConversationDecision(context, item, current && pausedDecision(context.id, current), 'approve');
+  });
+  approve.disabled = decisions.busy(item);
   actions.append(approve);
   return actions;
 }
@@ -1747,7 +1741,7 @@ function eventCard(event, context, place, report) {
   }
   if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
     const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
-    reply.disabled = pendingWaits.has(pendingWait.wait.id);
+    reply.disabled = decisions.busy(taskWaitDecision(view.id, pendingWait));
     actions.append(reply);
   }
 
@@ -2011,8 +2005,9 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     }
     return;
   }
-  if (changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.parallelTasks, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()),
+  if (changed('timeline', view?.id, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued,
+    decisions.pendingKeys(), listLoaded, data?.presence, data?.activeSessions, data?.parallelTasks, data?.sessionTasks,
+    data?.pausedConversations, bots, dayFormat.format(Date.now()),
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     const added = updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
@@ -2156,7 +2151,7 @@ function conversationRows(data, events, keep, source) {
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const approval = replacements.get(event.id);
     if (approval) {
-      rows.push(keep(`event-${event.id}`, ['approval', approval], () => {
+      rows.push(keep(`event-${event.id}`, ['approval', approval, decisions.busy(approval)], () => {
         const card = decisions.inlinePolicyCard(approval);
         card.id = `event-${event.id}`;
         card.tabIndex = -1;
@@ -2166,6 +2161,7 @@ function conversationRows(data, events, keep, source) {
       return;
     }
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
+    const waitDecision = wait && taskWaitDecision(view.id, wait);
     const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
     const request = ['request', 'conversation_message'].includes(event.kind);
     const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
@@ -2174,7 +2170,9 @@ function conversationRows(data, events, keep, source) {
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
         place.groupStart, place.taskStart, place.afterQuestion, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
-        wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
+        waitDecision && decisions.busy(waitDecision),
+        wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), paused,
+        paused && decisions.busy(pausedDecision(view.id, paused)), blocker, blockedOwner,
         request ? timeline.parallelTasks.get(event.taskId) : null,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
@@ -2184,7 +2182,7 @@ function conversationRows(data, events, keep, source) {
     rows.push(row);
     for (const item of approvals) {
       if (!anchoredToWait.has(item.itemId) && item.conversationEventId === event.id)
-        rows.push(keep(`policy-${item.itemId}`, item, () => decisions.inlinePolicyCard(item)));
+        rows.push(keep(`policy-${item.itemId}`, [item, decisions.busy(item)], () => decisions.inlinePolicyCard(item)));
     }
     previous = event;
   });
@@ -2295,7 +2293,7 @@ const closedQuestion = (context, reply) => reply?.kind === 'wait' &&
 let composition = null;
 function scheduleNoticeFade(context, notice) {
   const bot = context.id;
-  if (!notice || notice.isError || notice.timer || sendingMessages.has(context.composer) || [...pendingWaits.values()].includes(bot)) return;
+  if (!notice || notice.isError || notice.timer || sendingMessages.has(context.composer) || decisions.pendingForBot(bot)) return;
   notice.timer = setTimeout(() => {
     notice.timer = null;
     if (notices.get(bot) !== notice || !showingComposer(bot)) return;
@@ -2903,12 +2901,16 @@ function renderDetail() {
     replaceDetail(() => waitContent(view, task, sameWait ? input.value : undefined));
     if (restoreFocus) elements['detail-body'].querySelector('#wait-deadline-form input')?.focus();
   }
-  const busy = pendingWaits.has(task.wait.id);
+  const item = taskWaitDecision(view.id, task);
+  const busy = decisions.busy(item);
   for (const control of elements['detail-body'].querySelectorAll('button, input')) {
     if (!control.closest('.question-choice-form')) control.disabled = busy;
   }
   const choiceForm = elements['detail-body'].querySelector('.question-choice-form');
-  if (choiceForm) updateQuestionChoiceForm(choiceForm, view.questionChoices?.get(questionKey(task)), busy);
+  if (choiceForm) {
+    const { text, stale } = decisions.choice(item);
+    updateQuestionChoiceForm(choiceForm, text, busy || stale);
+  }
 }
 function render(scroll, liveAfterId) {
   decisions.setContext(view?.dm ? null : view?.id, sidebarViewer);
@@ -2938,10 +2940,6 @@ function mergeLatest(context, latest) {
   if (!context.data) context.sessionsBefore = latest.sessionsBefore;
   mergeSessionTasks(context, latest.sessionTasks);
   context.data = latest;
-  if (context.questionChoices?.size) {
-    const current = new Set(latest.waits.map(questionKey));
-    for (const key of context.questionChoices.keys()) if (!current.has(key)) context.questionChoices.delete(key);
-  }
   const composer = context.composer = latest.canDecide === true ? composerDrafts(context.id, latest.composerPerson) : null;
   if (!composer) return;
   if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text &&
@@ -3109,32 +3107,35 @@ async function loadSessions() {
   }
 }
 
-async function operate(context, task, operation, fields = {}) {
-  const waitId = task.wait.id;
-  await submitOperation(context, waitId, { taskId: task.id, waitId, operation,
-    targetRevision: task.currentRevision ?? 0, targetGeneration: task.generation, ...fields });
+function operate(context, task, operation, data) {
+  const current = context.data?.waits.find((entry) => entry.id === task.id && entry.wait.id === task.wait.id);
+  return submitConversationDecision(context, taskWaitDecision(context.id, task),
+    current && taskWaitDecision(context.id, current), operation, data);
 }
-async function submitOperation(context, key, payload) {
-  if (context?.data?.canDecide !== true || pendingWaits.has(key)) return;
-  const isOpen = () => !payload.itemKind && view === context && detail?.waitId === payload.waitId;
-  pendingWaits.set(key, context.id);
-  setNotice(context, 'Submitting action…');
-  if (view?.id === context.id) render();
-  let failed = false;
-  try {
-    await api(payload.itemKind ? 'inbox/decide' : 'operations', { botId: context.id, ...payload });
-    setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
-    if (isOpen()) closeDetail();
-  } catch (error) {
-    const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
-    setNotice(context, message, true);
-    if (isOpen()) showDetailError(message);
-    failed = true;
-  } finally {
-    if ((failed || !liveUpdates.live) && view?.id === context.id) await Promise.all([view.refresh(), refreshBots()]);
-    pendingWaits.delete(key);
-    if (view?.id === context.id) render();
-  }
+function submitConversationDecision(context, item, active, operation, data) {
+  if (view !== context || context.dm || context.data?.canDecide !== true ||
+      (responseViewers.get(context.data) ?? null) !== sidebarViewer || !active) return;
+  const selection = detail;
+  const isOpen = () => !item.itemKind && view === context && detail === selection &&
+    detail?.taskId === item.taskId && detail?.waitId === item.waitId;
+  return decisions.submitConversation(item, operation, data, {
+    active: { ...active, canDecide: true },
+    start: () => setNotice(context, 'Submitting action…'),
+    finish(error, refreshInbox) {
+      if (error) {
+        const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
+        setNotice(context, message, true);
+        if (isOpen()) showDetailError(message);
+      } else {
+        setNotice(context, operation === 'answer' ? 'Answer received.' : 'Action received.');
+        if (isOpen()) closeDetail();
+      }
+      if (view?.id === context.id) {
+        return Promise.all([view.refresh(), error || !liveUpdates.live ? refreshBots() : refreshInbox()]);
+      }
+      return refreshInbox();
+    },
+  });
 }
 async function submit(event) {
   event.preventDefault();
@@ -3211,6 +3212,9 @@ const decisions = mountBoardInbox({
   api,
   sourceAction: cardSourceAction,
   onRefreshError: retrySync,
+  refreshConversation(item) {
+    if (view && (view.id === item.botId || view.id === item.conversationBotId)) return view.refresh();
+  },
   canCompose: () => !!view?.composer && !view.dm && responseViewers.get(view.data) === sidebarViewer,
   canDismiss: () => !menu && !conversationActions.open && !workspace.classList.contains('nav-open'),
   focusComposer() {
@@ -3224,13 +3228,13 @@ const decisions = mountBoardInbox({
     renderActivity();
     renderComposer();
     renderTimeline();
+    renderDetail();
     scheduleReadCheck();
   },
   onAccepted(item, { decision, error }) {
     if (!view || (view.id !== item.botId && view.id !== item.conversationBotId)) return;
     const name = bots.find((bot) => bot.id === item.botId)?.name ?? 'The Bot';
     setNotice(view, error ?? decisionConfirmations[decision]?.(name) ?? 'Response sent.', !!error);
-    void view.refresh();
   },
 });
 

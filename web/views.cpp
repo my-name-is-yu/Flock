@@ -18,6 +18,7 @@ std::string field(const Json& object, std::string_view key) {
 namespace {
 constexpr unsigned conversationSize = 36;
 constexpr unsigned sessionsSize = 6;
+constexpr auto hostedSessionBase = "https://app.t3.codes/threads";
 
 void copyFields(Json& output, const Json& source, std::initializer_list<const char*> keys) {
     if (!source.is_object()) return;
@@ -36,13 +37,12 @@ void copyTrigger(Json& output, const Json& source) {
                 "firedAt","timezone","label","source"});
 }
 
-// The hosted T3 route percent-encodes each ID separately. The Store supplies the owning environment.
-std::string threadSegment(std::string_view id) {
+std::string threadSegment(std::string_view id, std::string_view punctuation = "-_.~") {
     constexpr std::string_view hex = "0123456789ABCDEF";
     std::string segment;
     for (const unsigned char c : id) {
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-            c == '-' || c == '_' || c == '.' || c == '~')
+            punctuation.find(c) != punctuation.npos)
             segment += static_cast<char>(c);
         else {
             segment += '%';
@@ -70,16 +70,27 @@ bool localThreadLink(std::string_view url, std::string_view path) {
     return false;
 }
 
+std::string sessionPath(std::string_view environment, std::string_view thread,
+                        std::string_view punctuation = "-_.~") {
+    if (environment.empty() || thread.empty() || environment == "." || environment == ".." || thread == "." || thread == "..")
+        return {};
+    return "/" + threadSegment(environment,punctuation) + "/" + threadSegment(thread,punctuation);
+}
+
+std::string hostedSessionPath(std::string_view environment, std::string_view thread) {
+    // T3 Code's hosted links also escape dots and tildes.
+    return sessionPath(environment,thread,"-_");
+}
+
 Json runView(const Json& run, std::string_view environment) {
     const auto actualEnvironment = field(run,"environmentId");
     if (!actualEnvironment.empty()) environment = actualEnvironment;
     const auto thread = field(run,"threadId");
-    if (environment.empty() || thread.empty() || environment == "." || environment == ".." || thread == "." || thread == "..")
-        return nullptr;
-    const auto path = "/" + threadSegment(environment) + "/" + threadSegment(thread);
+    const auto loopbackPath = sessionPath(environment,thread);
+    if (loopbackPath.empty()) return nullptr;
     const auto saved = field(run,"link");
     return {{"threadId",thread},{"runId",field(run,"runId")},{"environmentId",environment},
-            {"link",localThreadLink(saved,path) ? saved : "https://app.t3.codes/threads" + path}};
+            {"link",localThreadLink(saved,loopbackPath) ? saved : hostedSessionBase + hostedSessionPath(environment,thread)}};
 }
 
 Json avatarView(const Json& source, std::string_view botId) {
@@ -387,6 +398,15 @@ Json activity(const Json& activeTasks, std::string_view bot) {
     return result;
 }
 } // namespace
+
+std::string externalSessionLink(const Json& run) {
+    const auto environment = field(run,"environmentId");
+    const auto thread = field(run,"threadId");
+    const auto hosted = hostedSessionPath(environment,thread);
+    if (hosted.empty()) return {};
+    const auto saved = field(run,"link");
+    return saved == hostedSessionBase + hosted ? saved : std::string{};
+}
 
 Json botSettings(const Json& bot) {
     return settingsView(bot);

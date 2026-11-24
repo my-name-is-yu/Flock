@@ -8,7 +8,7 @@
 #include "flock/board_inbox.hpp"
 #include "flock/base64.hpp"
 #include "channel_routes.hpp"
-#include "session_mcp_routes.hpp"
+#include "mcp_routes.hpp"
 
 #include <httplib.h>
 
@@ -237,7 +237,7 @@ public:
         web::boardInboxRoutes(server_,store_,callbacks_);
         web::gitRoutes(server_,store_,callbacks_);
         web::channelRoutes(server_,store_,callbacks_);
-        web::sessionMcpRoutes(server_,store_,callbacks_);
+        web::mcpRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             const auto actor = web::person(callbacks_,req);
             setViewer(res,callbacks_,actor);
@@ -406,7 +406,7 @@ private:
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
-        if (req.path == "/mcp/flock") {
+        if (req.path == web::sessionMcpPath || req.path == web::externalMcpPath) {
             if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
             else if (req.method != "POST" && req.method != "GET" && req.method != "DELETE") {
                 res.set_header("Allow","POST");
