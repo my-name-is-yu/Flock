@@ -167,7 +167,7 @@ void configuredScheduleLifecycle() {
     check(store.tasks().size() == 1,"automation for a removed Bot queued work");
 }
 
-void workspaceChangesResyncConfiguredSchedules() {
+void runSettingsChangesResyncConfiguredSchedules() {
     Sandbox temp;
     const auto home = temp.path / "bots";
     auto config = botConfig();
@@ -192,34 +192,108 @@ void workspaceChangesResyncConfiguredSchedules() {
     }
 
     rejects<Conflict>([&] {
-        bots.updateWorkspace(store,"release",{{"environmentId","new-environment"},{"projectId","has space"}},due + 1,report);
+        bots.updateRunSettings(store,"release",{{"environmentId","new-environment"},{"projectId","has space"}},due + 1,report);
     },"invalid workspace accepted");
     check(bots.get("release").environmentId == config.at("environmentId").get_ref<const std::string&>(),
           "invalid project partly changed the workspace");
     rejects<BotProfileError>([&] {
-        bots.updateWorkspace(store,"release",{{"environmentId",""}},due + 1,report);
+        bots.updateRunSettings(store,"release",{{"environmentId",""}},due + 1,report);
     },"workspace accepted a project with no environment");
     const auto unchanged = bots.get("release");
     check(unchanged.environmentId == config.at("environmentId").get_ref<const std::string&>() &&
           unchanged.projectId == config.at("projectId").get_ref<const std::string&>() && errors.empty(),
           "rejecting an orphaned project changed the workspace or reimported schedules");
 
-    const auto saved = bots.updateWorkspace(store,"release",{{"environmentId","new-environment"},{"projectId","new-project"}},due + 1,report);
+    const auto saved = bots.updateRunSettings(store,"release",{{"environmentId","new-environment"},{"projectId","new-project"}},due + 1,report);
     check(saved.at("name") == config.at("name") && saved.at("avatar").at("icon") == "star" &&
           saved.at("soul") == "Review releases" && errors.empty(),"workspace save changed an unrelated setting or failed to import schedules");
     const auto moved = bots.get("release");
     check(moved.environmentId == "new-environment" && moved.projectId == "new-project" &&
           moved.settings.at("model") == config.at("model"),"workspace save failed to persist the new route or changed the model");
+    const auto model = bots.updateRunSettings(store,"release",{{"model"," next-model "}},due + 1,report);
+    check(model.at("model") == "next-model" && model.at("projectId") == "new-project",
+          "model-only save did not preserve the project");
     store.fireDueAutomations(due + 1);
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && tasks.at(0).at("environmentId") == "new-environment" && tasks.at(0).at("projectId") == "new-project" &&
           tasks.at(0).at("trigger").at("targetTime") == due,"workspace save lost the due time, kept the old route, or restored a canceled schedule");
+    const auto settings = store.task(tasks.at(0).at("id")).at("config");
+    check(settings.at("model") == "next-model" && settings.at("modelProvider") == "chatgpt",
+          "the scheduled task did not use the saved model and provider");
 
-    const auto cleared = bots.updateWorkspace(store,"release",{{"projectId",""}},due + 1,report);
-    check(!cleared.contains("projectId") && cleared.at("environmentId") == "new-environment" && errors.size() == 1,
-          "clearing the project changed the environment or silently kept configured schedules active");
+    const auto cleared = bots.updateRunSettings(store,"release",{{"model",""}},due + 1,report);
+    std::ifstream savedConfig(home / "release" / "config.json");
+    const auto stored = Json::parse(savedConfig);
+    check(!cleared.contains("model") && !stored.contains("model") && !stored.contains("modelProvider") &&
+          cleared.at("environmentId") == "new-environment" && cleared.at("projectId") == "new-project" && errors.size() == 1,
+          "clearing the model left configuration behind or changed the destination");
     store.fireDueAutomations(due + 86400);
+    check(store.tasks("release").size() == 1,"a configured schedule fired after its model was cleared");
+    bots.updateRunSettings(store,"release",{{"model","next-model"}},due + 86400,report);
+
+    const auto unplaced = bots.updateRunSettings(store,"release",{{"projectId",""}},due + 86400,report);
+    check(!unplaced.contains("projectId") && unplaced.at("environmentId") == "new-environment" && errors.size() == 2,
+          "clearing the project changed the environment or silently kept configured schedules active");
+    store.fireDueAutomations(due + 2 * 86400);
     check(store.tasks("release").size() == 1,"a configured schedule fired after its destination was cleared");
+}
+
+void automationFiringsUseCurrentPlannerModel() {
+    Sandbox temp;
+    const auto home = temp.path / "bots";
+    const auto folder = home / "release";
+    createBot(folder,botConfig("previous-model"),"","");
+    Bots bots(home);
+    Store store(temp.path / "tasks.db",{},[&](std::string_view id,std::string_view request) {
+        return bots.get(id).intake(request);
+    });
+    const Person owner{"fixture",true};
+    const auto firstDue = utc(2026,1,2,0,0);
+    const auto nextDue = utc(2026,1,3,0,0);
+    auto saved = bots.get("release").intake("");
+    saved.environmentId = "saved-environment";
+    saved.projectId = "saved-project";
+    saved.config["modelProvider"] = "saved-provider";
+    saved.config["runTimeoutSeconds"] = 135;
+    const auto schedule = store.createAutomation(owner,saved,{{"kind","schedule"},{"cron","0 0 * * *"},
+        {"timezone","Etc/UTC"},{"request","Daily check"}},firstDue - 60);
+    const auto trigger = store.createAutomation(owner,saved,{{"kind","trigger"},{"source","deploy"},
+        {"eventFilter",{{"branch","main"}}},{"request","Deploy check"}},firstDue - 60);
+
+    store.fireDueAutomations(firstDue);
+    const auto previousTask = store.tasks("release").at(0).at("id").get<Id>();
+    const auto report = [](std::string_view,std::string_view error) { throw std::runtime_error(std::string(error)); };
+    bots.updateRunSettings(store,"release",{{"model","current-model"},{"environmentId","current-environment"},
+        {"projectId","current-project"}},firstDue,report);
+
+    store.fireDueAutomations(nextDue);
+    const auto recurring = store.tasks("release").at(0);
+    check(recurring.at("trigger").at("triggerId") == schedule.at("id") &&
+          recurring.at("trigger").at("targetTime") == nextDue,"model change lost the next scheduled occurrence");
+    const auto webhook = store.receiveWebhook(owner,"deploy","event-1",{{"branch","main"}},nextDue);
+    check(webhook.at("tasks").size() == 1 && webhook.at("tasks").at(0).at("triggerId") == trigger.at("id"),
+          "model change lost the matched webhook firing");
+
+    auto currentConfig = saved.config;
+    currentConfig["model"] = "current-model";
+    currentConfig["modelProvider"] = "chatgpt";
+    const auto checkTask = [&](Id id,const Json& expected) {
+        const auto task = store.task(id);
+        check(task.at("config") == expected && task.at("environmentId") == saved.environmentId &&
+              task.at("projectId") == saved.projectId,"automation task used the wrong planner model or lost its saved route");
+    };
+    checkTask(recurring.at("id").get<Id>(),currentConfig);
+    checkTask(webhook.at("tasks").at(0).at("taskId").get<Id>(),currentConfig);
+    auto previousConfig = currentConfig;
+    previousConfig["model"] = "previous-model";
+    checkTask(previousTask,previousConfig);
+
+    write(folder / "config.json","invalid");
+    store.fireDueAutomations(utc(2026,1,4,0,0));
+    const auto fallback = store.tasks("release").at(0);
+    check(fallback.at("trigger").at("targetTime") == utc(2026,1,4,0,0),
+          "unreadable Bot settings prevented the saved automation from firing");
+    checkTask(fallback.at("id").get<Id>(),saved.config);
 }
 
 void failedScheduleSyncLeavesWorkspaceUnchanged() {
@@ -246,7 +320,7 @@ BEGIN SELECT RAISE(ABORT,'schedule write rejected'); END;
 )SQL",nullptr,nullptr,nullptr) == SQLITE_OK,"could not reject the schedule route write");
 
     rejects<std::runtime_error>([&] {
-        bots.updateWorkspace(store,"release",{{"projectId","next-project"}},due,report);
+        bots.updateRunSettings(store,"release",{{"projectId","next-project"}},due,report);
     },"workspace save succeeded after the schedule write failed");
     store.fireDueAutomations(due);
     const auto tasks = store.tasks("release");
@@ -343,7 +417,8 @@ void configuredSchedules() {
     cronSyntaxAndTimeZones();
     cronIntakeAndRestart();
     configuredScheduleLifecycle();
-    workspaceChangesResyncConfiguredSchedules();
+    runSettingsChangesResyncConfiguredSchedules();
+    automationFiringsUseCurrentPlannerModel();
     failedScheduleSyncLeavesWorkspaceUnchanged();
     invalidSessionSettingsPreserveDueTimes();
     invalidEntriesPreserveDueSchedule();

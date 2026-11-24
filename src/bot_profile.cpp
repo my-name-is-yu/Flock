@@ -79,8 +79,8 @@ std::string validatedBotSoul(const Json& soul) {
     throw BotProfileError("invalid_soul","Bot role must be text up to 8 KB without NUL characters");
 }
 
-std::size_t botWorkspaceFieldCount(const Json& profile) {
-    return std::ranges::count_if(botWorkspaceFields,[&](const char* key) { return profile.contains(key); });
+std::size_t botRunSettingCount(const Json& profile) {
+    return std::ranges::count_if(botRunSettingFields,[&](const char* key) { return profile.contains(key); });
 }
 
 bool validPlainId(std::string_view id) {
@@ -88,12 +88,13 @@ bool validPlainId(std::string_view id) {
         std::ranges::none_of(id,[](unsigned char ch) { return ch <= 32 || ch == 127; });
 }
 
-std::string validatedBotWorkspaceId(const Json& value) {
+std::string validatedBotRunSetting(std::string_view key, const Json& value) {
     if (value.is_string()) {
         const auto& text = value.get_ref<const std::string&>();
         const auto id = trimProfileText(text);
         if (text.empty() || (text.size() <= 256 && validPlainId(id))) return std::string(id);
     }
+    if (key == "model") throw BotProfileError("invalid_model","Choose a model from the list");
     throw BotProfileError("invalid_workspace","Use the environment and project IDs shown in T3");
 }
 

@@ -2646,7 +2646,8 @@ function workspaceCard(bot) {
     const saved = await api('bots/profile', { botId: bot.id, ...workspace });
     if (view?.id === bot.id) void view.refresh();
     return saved;
-  }, async () => (await api('settings')).t3?.environments ?? []);
+  }, async () => (await api('settings')).t3?.environments ?? [],
+  async () => (await api(botQuery('settings/models', bot.id))).models);
   return detailWorkspace.element;
 }
 function roleCard(bot) {
@@ -2811,11 +2812,11 @@ function renderDetail() {
     if (!sections.includes(detail.section)) detail.section = 'general';
     labelDetail(`${bot.name} settings`);
     renderDetailNav(sections, detail.section);
-    const { soul, environmentId, projectId, ...settings } = bot;
+    const { soul, environmentId, projectId, model, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
     const canEdit = bot.canDelete === true;
     detailRole?.update(soul, canEdit);
-    detailWorkspace?.update({ environmentId, projectId }, canEdit);
+    detailWorkspace?.update({ environmentId, projectId, model }, canEdit);
     return;
   }
   labelDetail(null);

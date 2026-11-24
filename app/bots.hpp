@@ -33,7 +33,7 @@ public:
     Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt,
                 const Policy::PublishOwnedBot& publishOwned = {});
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
-    Json updateWorkspace(Store&, std::string_view id, const Json& workspace, Seconds now, const ScheduleReporter&);
+    Json updateRunSettings(Store&, std::string_view id, const Json& settings, Seconds now, const ScheduleReporter&);
     std::optional<AvatarImage> avatarImage(std::string_view id) const;
     void syncSchedules(Store&, Seconds now, const ScheduleReporter&) const;
 private:

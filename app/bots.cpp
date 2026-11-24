@@ -432,9 +432,14 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     }
 
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
-    for (const auto* key : botWorkspaceFields)
+    for (const std::string_view key : botRunSettingFields) {
+        if (key == "model") {
+            const auto provider = config.find("modelProvider");
+            if (provider == config.end() || *provider != "chatgpt") continue;
+        }
         if (const auto value = config.find(key); value != config.end() && value->is_string() &&
             validPlainId(value->get_ref<const std::string&>())) item[key] = *value;
+    }
     if (config.contains("role") && config["role"].is_string() && validBotRole(config["role"].get_ref<const std::string&>()))
         item["role"] = config["role"];
     if (const auto stored = config.find("avatar"); stored != config.end() && stored->is_object()) {
@@ -596,7 +601,7 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image,
 
 Json Bots::updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
-    if (botWorkspaceFieldCount(profile)) throw Conflict("Save where the Bot works separately from its profile");
+    if (botRunSettingCount(profile)) throw Conflict("Save how the Bot runs separately from its profile");
 
     std::lock_guard lock(mutex_);
     const auto botDir = path(id);
@@ -637,20 +642,25 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
     return cardLocked(id);
 }
 
-Json Bots::updateWorkspace(Store& store, std::string_view id, const Json& workspace, Seconds now,
-                           const ScheduleReporter& report) {
-    if (!workspace.is_object() || workspace.empty() || workspace.size() != botWorkspaceFieldCount(workspace))
-        throw BotProfileError("invalid_profile_update","Save where the Bot works separately from its profile");
+Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& settings, Seconds now,
+                             const ScheduleReporter& report) {
+    if (!settings.is_object() || settings.empty() || settings.size() != botRunSettingCount(settings))
+        throw BotProfileError("invalid_profile_update","Save how the Bot runs separately from its profile");
     std::vector<std::string> configErrors;
     const auto importErrors = store.syncSchedules(id,now,[&](const auto& commit) {
         std::lock_guard lock(mutex_);
         const auto file = path(id) / "config.json";
         const auto original = readText(file,maxConfigBytes);
         auto config = parseBotConfig(original);
-        for (const auto& [key,value] : workspace.items()) {
-            const auto destination = validatedBotWorkspaceId(value);
-            if (destination.empty()) config.erase(key);
-            else config[key] = destination;
+        for (const auto& [key,value] : settings.items()) {
+            auto setting = validatedBotRunSetting(key,value);
+            if (setting.empty()) {
+                config.erase(key);
+                if (key == "model") config.erase("modelProvider");
+            } else {
+                config[key] = std::move(setting);
+                if (key == "model") config["modelProvider"] = "chatgpt";
+            }
         }
         if (config.contains("projectId") && !config.contains("environmentId"))
             throw BotProfileError("invalid_workspace","A pinned T3 project needs its environmentId");

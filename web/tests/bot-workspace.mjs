@@ -9,13 +9,21 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
   const body = document.querySelector('main');
   const patches = [];
+  const choices = [{ slug: 'next-model', displayName: 'Next model' }];
+  let catalogCalls = 0;
+  let saved = { environmentId: 'new-environment', model: 'new-saved-model' };
   const card = createBotWorkspaceCard(async (patch) => {
     patches.push(patch);
     if (patches.length === 1) throw new Error('invalid_workspace');
-    return { environmentId: 'new-environment', ...patch };
-  }, async () => [{ environmentId: 'suggested-environment', authorization: null }]);
+    saved = { ...saved, ...patch };
+    return saved;
+  }, async () => [{ environmentId: 'suggested-environment', authorization: null }], async () => {
+    if (++catalogCalls === 1) throw new Error('models_unavailable');
+    return choices;
+  });
   const edit = card.element.querySelector('.settings-card-edit');
   const form = card.element.querySelector('form');
+  const model = form.elements.model;
   const environment = form.elements.environmentId;
   const project = form.elements.projectId;
   const save = form.querySelector('button[type="submit"]');
@@ -28,15 +36,33 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   card.update({}, true);
   edit.click();
   await settle();
-  check(environment.value === 'suggested-environment', 'Single connected environment did not prefill');
+  check(!environment.value && form.querySelector('datalist option').value === 'suggested-environment',
+    'The connected environment should be suggested without pinning it');
+  check(!form.querySelector('#settings-model-feedback').hidden, 'A catalog failure did not show feedback');
   cancel.click();
 
-  card.update({ environmentId: 'original-environment', projectId: 'original-project' });
   edit.click();
+  await settle();
+  check(catalogCalls === 2 && Array.from(model.options).some((option) => option.value === 'next-model'),
+    'Reopening did not load the catalog after a connection failure');
+  environment.value = 'suggested-environment';
+  project.value = 'initial-project';
+  save.click();
+  await settle();
+  check(patches.length === 0 && !form.hidden && model.validity.valueMissing,
+    'Bot setup submitted without a model');
+  cancel.click();
+
+  card.update({ environmentId: 'original-environment', projectId: 'original-project', model: 'unlisted-model' });
+  edit.click();
+  await settle();
+  check(catalogCalls === 3 && model.value === 'unlisted-model' &&
+    Array.from(model.options).some((option) => option.value === 'next-model'),
+    'Reopening did not retry the catalog or preserve the saved model outside the catalog');
   project.value = 'draft-project';
   project.focus();
   placeRows(body, [document.createElement('header'), card.element]);
-  card.update({ environmentId: 'new-environment', projectId: 'original-project' });
+  card.update({ environmentId: 'new-environment', projectId: 'original-project', model: 'new-saved-model' });
   check(!form.hidden && project.value === 'draft-project' && document.activeElement === project,
     'A settings refresh replaced the draft or moved focus');
 
@@ -54,8 +80,47 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   check(patches.length === 2 && patches.every((patch) => JSON.stringify(patch) === '{"projectId":"draft-project"}'),
     'Save sent an unchanged field or did not trim the draft');
   const facts = card.element.querySelectorAll('dd');
-  check(form.hidden && facts[0].textContent === 'new-environment' && facts[1].textContent === 'draft-project',
-    'Save did not show the current workspace');
+  check(form.hidden && facts[0].textContent === 'new-saved-model' && facts[1].textContent === 'new-environment' &&
+    facts[2].textContent === 'draft-project', 'Save did not show the current settings');
+
+  edit.click();
+  await settle();
+  model.value = 'next-model';
+  model.focus();
+  placeRows(body, [document.createElement('header'), card.element]);
+  card.update({ ...saved, model: 'external-model' });
+  check(model.value === 'next-model' && document.activeElement === model,
+    'A settings refresh replaced the model draft or moved focus');
+  save.click();
+  await settle();
+  check(JSON.stringify(patches[2]) === '{"model":"next-model"}' && facts[0].textContent === 'Next model',
+    'Model-only save sent location fields or did not show the model name');
+
+  edit.click();
+  await settle();
+  project.value = '';
+  save.click();
+  await settle();
+  check(!form.hidden && project.validity.valueMissing && patches.length === 3,
+    'Clearing an existing project could disable configured schedules');
+  cancel.click();
+
+  saved = { model: 'personal-model' };
+  card.update(saved);
+  edit.click();
+  await settle();
+  model.value = 'next-model';
+  project.value = 'project-without-environment';
+  save.click();
+  await settle();
+  check(!form.hidden && !environment.validity.valid && patches.length === 3,
+    'A project without an environment was submitted');
+  project.value = '';
+  project.dispatchEvent(new Event('input'));
+  save.click();
+  await settle();
+  check(JSON.stringify(patches[3]) === '{"model":"next-model"}' && form.hidden && !facts[0].parentElement.hidden &&
+    facts[0].textContent === 'Next model', 'An unpinned Bot could not save and display a model by itself');
 }
 
 const directory = mkdtempSync(join(tmpdir(), 'flock-bot-workspace-'));

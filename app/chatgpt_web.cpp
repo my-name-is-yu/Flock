@@ -7,6 +7,7 @@ ChatGPTWeb::ChatGPTWeb(ChatGPTModel& model, SettingsAccess& access) : model_(mod
 
 void ChatGPTWeb::configure(WebCallbacks& callbacks) {
     callbacks.modelStatus = [this] { return status(); };
+    callbacks.modelCatalog = [this] { return model_.models(); };
     callbacks.modelLogin = [this](const Person& actor, bool reconsent) { return signIn(actor,reconsent,false); };
     callbacks.modelSwitch = [this](const Person& actor) { return signIn(actor,false,true); };
     callbacks.modelLogout = [this] { return signOut(); };
