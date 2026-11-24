@@ -1703,7 +1703,7 @@ function eventCard(event, context, place, report) {
     actions.append(control);
   }
   if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
+    const reply = iconButton('reply', 'Answer this question', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
     reply.disabled = pendingWaits.has(pendingWait.wait.id);
     actions.append(reply);
   }
@@ -2169,7 +2169,7 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
 }
-const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
+const replyLabels = { wait: 'Answering', message: 'Replying to', result: 'Replying to' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
 const activeReply = (composer) => decisions.reviewReply() ?? composer.reply;
 const screenshotAnchor = (reply) => reply?.messageId ?? 0;
@@ -2296,19 +2296,20 @@ function renderComposer() {
   const closedReply = closedQuestion(context, reply);
   const source = reply && context.events.get(reply.messageId)?.data;
   const summary = reply?.summary ?? (source && (reply.kind === 'wait' ? waitText(source) : source.report ?? source.text));
+  const decisionTarget = decision ? decision.item.prompt || decision.item.requestTitle : review?.summary;
   if (decision || review) {
-    elements['decision-reply-label'].textContent = 'Replying to';
-    elements['decision-reply-target'].textContent = decision?.item.requestTitle ?? review.summary;
+    elements['decision-reply-label'].textContent = decision ? 'Answering' : 'Replying to';
+    elements['decision-reply-target'].textContent = decisionTarget;
   }
   elements['reply-context'].hidden = !reply || !!review;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
   elements['reply-question'].textContent = reply ? summary ?? 'Earlier message' : '';
-  elements['compose-label'].textContent = decision ? `Replying to ${decision.item.requestTitle}` :
-    review ? `Replying to ${review.summary}` : reply ? replyLabels[reply.kind] : 'Message';
+  elements['compose-label'].textContent = decision ? `Answering ${decisionTarget}` :
+    review ? `Replying to ${decisionTarget}` : reply ? `${replyLabels[reply.kind]} ${elements['reply-question'].textContent}` : 'Message';
   elements['cancel-reply'].disabled = busy;
   const working = ['working', 'thinking'].includes(context.data.presence);
-  elements.message.placeholder = (decision || review) ? 'Ask a question or give direction' :
-    reply ? 'Write a reply' : working ? `Guide ${context.data.bot.name} while it works` : `Message ${context.data.bot.name}`;
+  elements.message.placeholder = decision ? 'Write your answer' : review ? 'Reply to this review' :
+    reply?.kind === 'wait' ? 'Write your answer' : reply ? 'Write a reply' : working ? `Guide ${context.data.bot.name} while it works` : `Message ${context.data.bot.name}`;
   const suggestion = nextSuggestion(context);
   const ghost = elements['composer-ghost'];
   ghost.hidden = !suggestion;
