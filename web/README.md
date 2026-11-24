@@ -128,6 +128,12 @@ can view and talk to their Bot and answer its Decision Inbox items. With Web
 identities configured, the owner manages members in Bot settings.
 
 `GET /api/bot-settings?bot=ID` returns settings visible to that person.
+`GET /api/settings/models?bot=ID` returns `{models: [{slug, displayName}]}`
+for the Bot owner and installation roots. An unavailable catalog returns
+`503` with `{"error":"models_unavailable"}`.
+`POST /api/bots/profile` accepts `botId` and any of `environmentId`,
+`projectId`, or `model` in one request. Omitted fields are preserved and an
+empty string clears the supplied field. Name, avatar, and role are saved separately.
 `POST /api/bot-settings/members` takes `botId`, `person` and boolean `add`.
 `POST /api/bot-settings/secret` accepts `botId`, `requestId` and `value`.
 Mutations use the usual same-origin JSON headers. Fulfilled secret values

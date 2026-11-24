@@ -17,11 +17,6 @@ namespace flockv0::app {
 namespace {
 constexpr std::size_t maxConfigBytes = 128 * 1024;
 
-bool plainId(std::string_view id) {
-    return !id.empty() && id.size() <= 256 &&
-        std::none_of(id.begin(),id.end(),[](unsigned char ch) { return ch <= 32 || ch == 127; });
-}
-
 std::string readText(const std::filesystem::path& file, std::size_t limit, bool optional = false) {
     std::ifstream input(file,std::ios::binary);
     if (!input) {
@@ -256,15 +251,15 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     bot.name = config.contains("name") ? validatedString(config,"name") : bot.id;
     if (config.contains("environmentId")) bot.environmentId = validatedString(config,"environmentId");
     if (config.contains("projectId")) bot.projectId = validatedString(config,"projectId");
-    if ((!bot.environmentId.empty() && !plainId(bot.environmentId)) ||
-        (!bot.projectId.empty() && !plainId(bot.projectId)))
+    if ((!bot.environmentId.empty() && !validPlainId(bot.environmentId)) ||
+        (!bot.projectId.empty() && !validPlainId(bot.projectId)))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
     bot.settings = {{"botDisplayName",bot.name},{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
     for (const auto key : {"services","mcpServers"}) {
         if (!config.contains(key)) continue;
         if (!config[key].is_array()) throw Conflict("Connection names must be an array");
         for (const auto& name : config[key])
-            if (!name.is_string() || !plainId(name.get<std::string>())) throw Conflict("Invalid connection name");
+            if (!name.is_string() || !validPlainId(name.get_ref<const std::string&>())) throw Conflict("Invalid connection name");
         bot.settings[key] = config[key];
     }
     if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
@@ -275,7 +270,7 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
         auto& saved = bot.settings["conversationEnvironments"] = Json::object();
         for (auto alias = destinations.begin(); alias != destinations.end(); ++alias) {
             const auto environment = validatedString(destinations,alias.key().c_str());
-            if (alias.key().empty() || alias.key().size() > 80 || !plainId(environment))
+            if (alias.key().empty() || alias.key().size() > 80 || !validPlainId(environment))
                 throw Conflict("Use short conversation environment names and canonical T3 environment IDs");
             saved[alias.key()] = environment;
         }
@@ -371,8 +366,14 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     }
 
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
-    for (const auto* key : {"environmentId","projectId","model"})
-        if (const auto value = config.find(key); value != config.end() && value->is_string()) item[key] = *value;
+    for (const std::string_view key : botRunSettingFields) {
+        if (key == "model") {
+            const auto provider = config.find("modelProvider");
+            if (provider == config.end() || *provider != "chatgpt") continue;
+        }
+        if (const auto value = config.find(key); value != config.end() && value->is_string() &&
+            validPlainId(value->get_ref<const std::string&>())) item[key] = *value;
+    }
     if (config.contains("role") && config["role"].is_string() && validBotRole(config["role"].get_ref<const std::string&>()))
         item["role"] = config["role"];
     if (const auto stored = config.find("avatar"); stored != config.end() && stored->is_object()) {
@@ -534,49 +535,64 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image,
 
 Json Bots::updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
-    const auto name = validatedBotName(profile);
+    if (botRunSettingCount(profile)) throw Conflict("Save how the Bot runs separately from its profile");
 
     std::lock_guard lock(mutex_);
     const auto botDir = path(id);
     const auto file = botDir / "config.json";
     auto config = readBotConfig(file);
+    if (const auto soul = profile.find("soul"); soul != profile.end()) {
+        if (profile.size() != 1 || image) throw Conflict("Save the role separately from other settings");
+        const auto text = validatedBotSoul(*soul);
+        const auto roleFile = botDir / "SOUL.md";
+        if (text.empty()) {
+            std::error_code failure;
+            std::filesystem::remove(roleFile,failure);
+            if (failure) throw Conflict("Unable to clear the Bot role");
+        } else {
+            writeAtomic(roleFile,text);
+        }
+        return cardFromDirectory(id,botDir);
+    }
 
     const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
     const bool changeAvatar = profile.contains("avatar");
-    config["name"] = name;
-    for (const auto* key : {"environmentId","projectId"}) {
-        const auto value = profile.find(key);
-        if (value == profile.end()) continue;
-        const auto& id = value->get_ref<const std::string&>();
-        if (id.empty()) config.erase(key);
-        else if (!plainId(id)) throw Conflict("Use canonical environmentId and projectId identifiers from T3");
-        else config[key] = id;
-    }
-    if (const auto model = profile.find("model"); model != profile.end()) {
-        const auto& slug = model->get_ref<const std::string&>();
-        if (slug.empty()) {
-            config.erase("modelProvider");
-            config.erase("model");
-        } else if (!plainId(slug)) throw Conflict("Choose a model from the list");
-        else {
-            config["modelProvider"] = "chatgpt";
-            config["model"] = slug;
-        }
-    }
+    config["name"] = validatedBotName(profile);
     if (changeAvatar)
         config["avatar"] = prepareAvatar(profile,botDir,existingAvatar,image);
 
     const auto previousFile = changeAvatar ? storedAvatarFile(existingAvatar) : std::string{};
     saveProfile(botDir,config,changeAvatar && image ? &*image : nullptr,previousFile);
-    if (const auto soul = profile.find("soul"); soul != profile.end()) {
-        const auto& text = soul->get_ref<const std::string&>();
-        if (text.empty()) std::filesystem::remove(botDir / "SOUL.md");
-        else writeAtomic(botDir / "SOUL.md",text);
-    }
     if (!previousFile.empty() && previousFile != storedAvatarFile(config.at("avatar")) && isAvatarFile(botDir / previousFile)) {
         std::error_code ignore;
         std::filesystem::remove(botDir / previousFile,ignore);
     }
+    return cardLocked(id);
+}
+
+Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& settings, Seconds now,
+                             const ScheduleReporter& report) {
+    if (!settings.is_object() || settings.empty() || settings.size() != botRunSettingCount(settings))
+        throw BotProfileError("invalid_profile_update","Save how the Bot runs separately from its profile");
+    std::lock_guard settingsLock(runSettingsMutex_);
+    {
+        std::lock_guard lock(mutex_);
+        const auto file = path(id) / "config.json";
+        auto config = readBotConfig(file);
+        for (const auto& [key,value] : settings.items()) {
+            auto setting = validatedBotRunSetting(key,value);
+            if (setting.empty()) {
+                config.erase(key);
+                if (key == "model") config.erase("modelProvider");
+            } else {
+                config[key] = std::move(setting);
+                if (key == "model") config["modelProvider"] = "chatgpt";
+            }
+        }
+        writeAtomic(file,profileText(config));
+    }
+    syncBotSchedules(store,id,now,report);
+    std::lock_guard lock(mutex_);
     return cardLocked(id);
 }
 
@@ -597,49 +613,50 @@ std::optional<AvatarImage> Bots::avatarImage(std::string_view id) const {
     }
 }
 
-void Bots::syncSchedules(Store& store, Seconds now,
-                         const std::function<void(std::string_view,std::string_view)>& report) const {
-    const auto botIds = ids();
-    for (const auto& id : botIds) {
-        std::vector<ConfiguredSchedule> schedules;
-        std::vector<std::string> errors;
-        try {
-            const auto config = readBotConfig(path(id) / "config.json");
-            const auto cron = config.value("cron",Json::array());
-            if (!cron.is_array()) throw Conflict("cron must be an array");
-            if (!cron.empty()) {
-                const auto bot = configuredBot(id,config,&errors);
-                if (bot.environmentId.empty() || bot.projectId.empty())
-                    throw Conflict("Configured schedules need a T3 environment and project");
-                std::map<std::string_view,std::size_t> counts;
-                for (const auto& entry : cron) {
-                    const auto key = entry.find("id");
-                    if (key == entry.end() || !key->is_string()) continue;
-                    const auto& scheduleId = key->get_ref<const std::string&>();
-                    if (validBotId(scheduleId)) ++counts[scheduleId];
-                }
-                for (std::size_t i = 0; i < cron.size(); ++i) {
-                    const auto& entry = cron[i];
-                    try {
-                        const auto scheduleId = validatedString(entry,"id");
-                        if (validBotId(scheduleId) && counts.at(scheduleId) > 1)
-                            throw Conflict("Duplicate configured schedule ID");
-                        schedules.push_back({scheduleId,validatedString(entry,"schedule"),
-                            validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
-                    } catch (const Conflict& error) {
-                        errors.push_back("cron entry " + std::to_string(i + 1) + ": " + error.what());
-                    }
+void Bots::syncBotSchedules(Store& store, std::string_view id, Seconds now, const ScheduleReporter& report) const {
+    std::vector<ConfiguredSchedule> schedules;
+    std::vector<std::string> errors;
+    try {
+        const auto config = readBotConfig(path(id) / "config.json");
+        const auto cron = config.value("cron",Json::array());
+        if (!cron.is_array()) throw Conflict("cron must be an array");
+        if (!cron.empty()) {
+            const auto bot = configuredBot(id,config,&errors);
+            if (bot.environmentId.empty() || bot.projectId.empty())
+                throw Conflict("Configured schedules need a T3 environment and project");
+            std::map<std::string_view,std::size_t> counts;
+            for (const auto& entry : cron) {
+                const auto key = entry.find("id");
+                if (key == entry.end() || !key->is_string()) continue;
+                const auto& scheduleId = key->get_ref<const std::string&>();
+                if (validBotId(scheduleId)) ++counts[scheduleId];
+            }
+            for (std::size_t i = 0; i < cron.size(); ++i) {
+                const auto& entry = cron[i];
+                try {
+                    const auto scheduleId = validatedString(entry,"id");
+                    if (validBotId(scheduleId) && counts.at(scheduleId) > 1)
+                        throw Conflict("Duplicate configured schedule ID");
+                    schedules.push_back({scheduleId,validatedString(entry,"schedule"),
+                        validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
+                } catch (const Conflict& error) {
+                    errors.push_back("cron entry " + std::to_string(i + 1) + ": " + error.what());
                 }
             }
-        } catch (const Conflict& error) {
-            errors.emplace_back(error.what());
-        } catch (const Json::exception& error) {
-            errors.emplace_back(error.what());
         }
-        for (const auto& error : store.syncSchedules(id,schedules,now))
-            report(id,"cron schedule " + error.id + ": " + error.message);
-        for (const auto& error : errors) report(id,error);
+    } catch (const Conflict& error) {
+        errors.emplace_back(error.what());
+    } catch (const Json::exception& error) {
+        errors.emplace_back(error.what());
     }
+    for (const auto& error : store.syncSchedules(id,schedules,now))
+        report(id,"cron schedule " + error.id + ": " + error.message);
+    for (const auto& error : errors) report(id,error);
+}
+
+void Bots::syncSchedules(Store& store, Seconds now, const ScheduleReporter& report) const {
+    const auto botIds = ids();
+    for (const auto& id : botIds) syncBotSchedules(store,id,now,report);
     store.pruneAutomations(botIds);
 }
 }

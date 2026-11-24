@@ -33,6 +33,13 @@ bool validHexColor(std::string_view color) {
     return (color.size() == 4 || color.size() == 7) && color.front() == '#' &&
         std::all_of(color.begin() + 1,color.end(),[](unsigned char ch) { return std::isxdigit(ch); });
 }
+
+std::string_view trimProfileText(std::string_view text) {
+    constexpr std::string_view whitespace = " \t\r\n";
+    const auto first = text.find_first_not_of(whitespace);
+    if (first == text.npos) return {};
+    return text.substr(first,text.find_last_not_of(whitespace) - first + 1);
+}
 }
 
 AvatarImage::AvatarImage(std::string bytes)
@@ -54,16 +61,41 @@ std::string validatedBotName(const Json& profile) {
     const auto found = profile.find("name");
     if (found == profile.end() || !found->is_string())
         throw BotProfileError("invalid_name","Bot name must be a string");
-    const std::string_view raw = found->get_ref<const std::string&>();
-    const auto first = raw.find_first_not_of(" \t\r\n");
-    const auto name = first == raw.npos ? std::string_view{}
-        : raw.substr(first,raw.find_last_not_of(" \t\r\n") - first + 1);
+    const auto name = trimProfileText(found->get_ref<const std::string&>());
     if (name.empty() || name.size() > 128 ||
         std::ranges::count_if(name,[](unsigned char ch) { return (ch & 0xc0) != 0x80; }) > 32)
         throw BotProfileError("invalid_name","Bot name must be 1 to 32 characters");
     if (std::ranges::any_of(name,[](unsigned char ch) { return ch < 32 || ch == 127; }))
         throw BotProfileError("invalid_name","Bot name contains invalid characters");
     return std::string(name);
+}
+
+std::string validatedBotSoul(const Json& soul) {
+    if (soul.is_string()) {
+        const auto& text = soul.get_ref<const std::string&>();
+        if (text.size() <= maxBotRoleBytes && text.find('\0') == text.npos)
+            return std::string(trimProfileText(text));
+    }
+    throw BotProfileError("invalid_soul","Bot role must be text up to 8 KB without NUL characters");
+}
+
+std::size_t botRunSettingCount(const Json& profile) {
+    return std::ranges::count_if(botRunSettingFields,[&](const char* key) { return profile.contains(key); });
+}
+
+bool validPlainId(std::string_view id) {
+    return !id.empty() && id.size() <= 256 &&
+        std::ranges::none_of(id,[](unsigned char ch) { return ch <= 32 || ch == 127; });
+}
+
+std::string validatedBotRunSetting(std::string_view key, const Json& value) {
+    if (value.is_string()) {
+        const auto& text = value.get_ref<const std::string&>();
+        const auto id = trimProfileText(text);
+        if (text.empty() || (text.size() <= 256 && validPlainId(id))) return std::string(id);
+    }
+    if (key == "model") throw BotProfileError("invalid_model","Choose a model from the list");
+    throw BotProfileError("invalid_workspace","Use the environment and project IDs shown in T3");
 }
 
 bool validBotRole(std::string_view role) {

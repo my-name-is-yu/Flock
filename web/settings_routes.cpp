@@ -52,7 +52,11 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                                         : Json(nullptr)}});
     });
     server.Get("/api/settings/models",[&](const httplib::Request& req, httplib::Response& res) {
-        person(callbacks,req);
+        const auto bot = req.get_param_value("bot");
+        if (req.get_param_value_count("bot") != 1 || !validBotId(bot))
+            return reply(res,400,{{"error","invalid_bot"}});
+        if (!store.policy().allows(person(callbacks,req),Action::bot_settings,bot))
+            return reply(res,403,{{"error","access_denied"}});
         if (!callbacks.modelCatalog) return reply(res,503,{{"error","models_unavailable"}});
         try { reply(res,200,{{"models",callbacks.modelCatalog()}}); }
         catch (const std::exception&) { reply(res,503,{{"error","models_unavailable"}}); }

@@ -1235,6 +1235,20 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     };
     cb.updateBot = [&](std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image) {
         auto& card = profiles.at(std::string(botId));
+        if (profile.contains("soul")) {
+            check(profile.size() == 1 && !image,"role update forwarded other settings");
+            card["soul"] = profile.at("soul");
+            return card;
+        }
+        if (botRunSettingCount(profile)) {
+            check(!image,"run settings update carried an image");
+            for (const auto& [key, value] : profile.items()) {
+                check(key == "environmentId" || key == "projectId" || key == "model","run settings update forwarded other settings");
+                if (value == "") card.erase(key);
+                else card[key] = value;
+            }
+            return card;
+        }
         if (!profile.contains("avatar")) {
             card["name"] = profile.at("name");
             return card;
@@ -1324,6 +1338,56 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == originalUrl,
           "name-only update changed the avatar");
 
+    const auto roleOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul"," \tCheck releases.\r\n"}},200);
+    check(roleOnly.at("soul") == "Check releases." && roleOnly.at("name") == "Scout Name" &&
+          roleOnly.at("avatar").at("imageUrl") == originalUrl,"role-only update lost profile settings");
+    const auto mixed = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Stale Name"},{"soul","Other role"}},400);
+    check(mixed.at("error") == "invalid_profile_update","role and name were accepted in the same request");
+    for (const Json& invalid : Json::array({nullptr,std::string("a\0b",3),std::string(maxBotRoleBytes + 1,'x')})) {
+        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul",invalid}},400);
+        check(rejected.at("error") == "invalid_soul","invalid role was accepted");
+    }
+    const auto secret = store.policy().requestSecret("bot-1",{"fixture-role-token"});
+    store.policy().submitSecret(localOwner,"bot-1",secret,privateValue);
+    const auto credentials = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul","Use " + std::string(privateValue)}},400);
+    check(credentials.at("error") == "role_contains_secrets","role update accepted a stored secret");
+    const auto nameAfterRole = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Latest"}},200);
+    check(nameAfterRole.at("soul") == "Check releases.","rename or rejected role update changed the role");
+
+    const auto workspace = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"environmentId"," env-1 "},{"projectId","project-1"},{"model"," first-model "},
+    },200);
+    check(workspace.at("name") == "Scout Latest" && workspace.at("soul") == "Check releases." &&
+          workspace.at("avatar").at("imageUrl") == originalUrl && workspace.at("environmentId") == "env-1" &&
+          workspace.at("projectId") == "project-1" && workspace.at("model") == "first-model",
+          "run settings update lost another setting or failed to return the model and destination");
+    for (const auto& extra : {"name","soul","avatar","role","modelProvider"}) {
+        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model","next-model"},{extra,"stale"}},400);
+        check(rejected.at("error") == "invalid_profile_update","model update accepted an unrelated field");
+    }
+    for (const Json& invalid : Json::array({42," \t\n","has space",std::string("a\0b",3),std::string(257,'x')})) {
+        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"projectId",invalid}},400);
+        check(rejected.at("error") == "invalid_workspace","invalid project ID was accepted");
+        const auto badModel = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model",invalid}},400);
+        check(badModel.at("error") == "invalid_model","invalid model was accepted");
+    }
+    const auto partial = browser.post("/api/bots/profile",{{"botId","bot-1"},{"environmentId","env-2"}},200);
+    check(partial.at("environmentId") == "env-2" && partial.at("projectId") == "project-1" &&
+          partial.at("model") == "first-model","partial update replaced the project or model");
+    const auto modelOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model","next-model"}},200);
+    check(modelOnly.at("model") == "next-model" && modelOnly.at("projectId") == "project-1",
+          "model-only update lost the workspace");
+    check(browser.get("/api/view?bot=bot-1").at("bot").at("model") == "next-model","Bot settings view lost its model");
+    const auto clearedModel = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model",""}},200);
+    check(!clearedModel.contains("model") && clearedModel.at("projectId") == "project-1",
+          "clearing the model lost the workspace");
+    const auto clearedProject = browser.post("/api/bots/profile",{{"botId","bot-1"},{"projectId",""}},200);
+    check(!clearedProject.contains("projectId") && clearedProject.at("environmentId") == "env-2",
+          "explicitly clearing a project also cleared the environment");
+
+    const auto cleared = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul"," \t\n"}},200);
+    check(cleared.at("soul") == "" && cleared.at("name") == "Scout Latest","clearing the role changed the name");
+
     // Replace with GIF updates version and content-type.
     const auto replaced = browser.post("/api/bots/profile",{
         {"botId","bot-1"},
@@ -1397,6 +1461,13 @@ void settingsEndpoints(const std::filesystem::path& path) {
     };
     std::atomic<bool> unavailable = false;
     std::atomic<unsigned> statusCalls = 0;
+    std::atomic<unsigned> catalogCalls = 0;
+    const auto catalog = Json::array({{{"slug","test-model"},{"displayName","Test model"}}});
+    cb.modelCatalog = [&] {
+        ++catalogCalls;
+        if (unavailable) throw std::runtime_error("private credential detail");
+        return catalog;
+    };
     std::atomic<bool> reconsentRequested = false;
     cb.modelLogin = [&](bool reconsent) { return reconsent && !reconsentRequested.exchange(true); };
     cb.modelStatus = [&] {
@@ -1413,6 +1484,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
     const auto file = path.parent_path()/"identities.json";
     const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
                                        {{"authorization","Bearer fixture-alice"},{"person","alice"}},
+                                       {{"authorization","Bearer fixture-bot-owner"},{"person","bot-owner"}},
                                        {{"authorization","Bearer fixture-root"},{"person","another-root"},{"adminRoot",true}}});
     std::ofstream(file) << accounts;
     std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
@@ -1425,7 +1497,13 @@ void settingsEndpoints(const std::filesystem::path& path) {
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
     Browser::checked(browser.client.Get("/api/bot-settings?bot=release"),401);
+    const auto modelsRoute = "/api/settings/models?bot=release";
+    check(Browser::checked(browser.client.Get(modelsRoute),401) == Json{{"error","identity_required"}} && !catalogCalls,
+          "unauthenticated request reached the model provider");
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    check(browser.get(modelsRoute) == Json{{"models",catalog}},"root could not fetch the model catalog");
+    check(Browser::checked(browser.client.Get("/api/settings/models"),400) == Json{{"error","invalid_bot"}},
+          "model catalog accepted a missing Bot ID");
     check(browser.get("/api/view?bot=release").at("composerPerson")=="owner","composer identity did not match owner");
     Browser::checked(browser.client.Get("/api/bot-settings?bot=release&bot=triage"),400);
     auto crossOrigin = browser.headers();
@@ -1452,6 +1530,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
     unavailable = true;
     check(browser.get("/api/settings").at("model") == Json{{"unavailable",true}},
           "A failed credential check exposed details or broke the rest of settings");
+    check(Browser::checked(browser.client.Get(modelsRoute),503) == Json{{"error","models_unavailable"}},
+          "model catalog failure leaked provider details or used the wrong error");
     unavailable = false;
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
@@ -1467,6 +1547,13 @@ void settingsEndpoints(const std::filesystem::path& path) {
     check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false &&
           sharedSettings.at("model").is_null() && statusCalls.load() == beforeSharedRead,
           "Shared member lost read-only settings or gained access to model status");
+    check(Browser::checked(browser.client.Get(modelsRoute),403) == Json{{"error","access_denied"}} && catalogCalls == 2,
+          "shared member reached the model provider");
+    store.policy().setOwner(Person{"bot-owner"},"triage");
+    Browser botOwner(*server);
+    botOwner.client.set_default_headers({{"Authorization","Bearer fixture-bot-owner"}});
+    check(botOwner.get("/api/settings/models?bot=triage") == Json{{"models",catalog}},
+          "Bot owner needed installation access to fetch the model catalog");
     browser.post("/api/settings/mode",{{"mode","full"}},403);
     browser.post("/api/settings/rule",removal,403);
     browser.post("/api/settings/model-login",{{"reconsent",true}},403);
