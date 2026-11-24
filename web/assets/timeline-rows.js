@@ -17,11 +17,15 @@ export function createTimelineRows(container, scrollRegion) {
     const focusedRow = focused?.closest('[data-timeline-key]');
     const action = focused?.dataset.timelineAction;
     const next = new Map();
+    const added = [];
     const rows = draw((key, inputs, render) => {
       const version = JSON.stringify(inputs);
       const previous = sameScope ? current.get(key) : null;
       const entry = previous?.version === version ? previous : { version, row: render() };
-      if (entry !== previous) entry.row.dataset.timelineKey = key;
+      if (entry !== previous) {
+        entry.row.dataset.timelineKey = key;
+        added.push(entry.row);
+      }
       next.set(key, entry);
       return entry.row;
     });
@@ -37,5 +41,6 @@ export function createTimelineRows(container, scrollRegion) {
       target.focus({ preventScroll: true });
       if (document.activeElement !== target) scrollRegion.focus({ preventScroll: true });
     }
+    return added;
   };
 }

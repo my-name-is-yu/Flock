@@ -161,9 +161,11 @@ void SecretRedactor::requirePublic(const Json& metadata) const {
 }
 
 bool SecretRedactor::containsProtected(const Json& value) const {
-    return !values_.empty() && anyJsonText(value,[&](std::string_view text) {
-        return std::ranges::any_of(values_,[&](const auto& secret) { return text.find(secret) != text.npos; });
-    });
+    return !empty() && anyJsonText(value,[&](std::string_view text) { return containsProtectedText(text); });
+}
+
+bool SecretRedactor::containsProtectedText(std::string_view text) const {
+    return std::ranges::any_of(values_,[&](const auto& secret) { return text.find(secret) != text.npos; });
 }
 
 static SecretRedactor readRedactor(Statement rows, const SecretStore& secrets, std::vector<std::string> values) {
@@ -202,7 +204,11 @@ SecretRedactor Store::Impl::sharedRedactor() const {
     return readRedactor(query("SELECT file FROM protected_inputs WHERE status='fulfilled'"),secrets,gitCredentials);
 }
 
+SecretRedactor Policy::secretRedactor(std::string_view bot) const {
+    return db_.redactor(bot);
+}
+
 Json Policy::redactSecrets(std::string_view bot, const Json& data) const {
-    return db_.redactor(bot).record(data,SecretRedactor::Fields::external);
+    return secretRedactor(bot).record(data,SecretRedactor::Fields::external);
 }
 }

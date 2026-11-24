@@ -41,7 +41,7 @@ async function exercise(mountBoardInbox) {
     prompt: 'Which examples, and how many?', choices: ['Quickstart', { options: ['1', '2'] }] };
 
   const approval = { ...question, itemKind: 'policy_approval', itemId: 10, status: 'pending',
-    action: 'repository.pr', target: 'team/guide' };
+    action: 'repository.pr', target: 'team/guide', canSaveRule: false };
   const calls = [];
   const sources = [];
   const outcomes = [];
@@ -255,6 +255,42 @@ async function exercise(mountBoardInbox) {
   board.setContext('release', 'approver');
   await board.refresh();
   const inline = board.inlinePolicyCard(approval);
+  const approvalActions = (card) => [...card.querySelectorAll('.board-inbox-actions button')].map(
+    (control) => [control.value, control.textContent],
+  );
+  const expectApprovalActions = (entry, expected) => {
+    for (const card of [board.inlinePolicyCard(entry), item]) {
+      check(JSON.stringify(approvalActions(card)) === JSON.stringify(expected),
+        'The inline card and Needs you must show the same authorized approval options');
+    }
+  };
+  board.open(trigger);
+  expectApprovalActions(approval, [['allow_once', 'Allow once'], ['deny', 'Deny']]);
+  const adminApproval = { ...approval, canSaveRule: true };
+  questions = [adminApproval];
+  await board.refresh();
+  expectApprovalActions(adminApproval, [['allow_once', 'Allow once'], ['always_allow', 'Allow for this Flock'], ['deny', 'Deny']]);
+  const staleAdminCard = board.inlinePolicyCard(adminApproval);
+  conversation.append(staleAdminCard);
+  const expired = { ...approval, status: 'expired', canDecide: false };
+  questions = [expired];
+  await board.refresh();
+  check(approvalActions(board.inlinePolicyCard(expired)).length === 0 && board.itemsFor('release').length === 1,
+    'A requester must still see a read-only expired inline card');
+  check(board.count('release') === 0 && trigger.hidden && layer.hidden,
+    'An expired approval must leave the requester’s Needs you queue');
+  const adminExpired = { ...adminApproval, status: 'expired' };
+  questions = [adminExpired];
+  await board.refresh();
+  board.open(trigger);
+  expectApprovalActions(adminExpired, [['allow_next_time', 'Allow next time for this Flock']]);
+  questions = [approval];
+  await board.refresh();
+  const beforeRule = submissions().length;
+  staleAdminCard.querySelector('button[value=always_allow]').click();
+  check(submissions().length === beforeRule, 'A stale admin card could still send a rule decision after permission changed');
+  staleAdminCard.remove();
+  board.close();
   conversation.append(inline);
   const allowOnce = inline.querySelector('button[value=allow_once]');
   const beforeApproval = outcomes.length;
@@ -280,12 +316,12 @@ function liveFixture() {
     requestTitle: 'Prepare the release', prTitle: 'Release notes', prompt: 'Review these notes.' };
   const approval = { ...decision, itemKind: 'policy_approval', itemId: 2, taskId: 2, waitId: 2,
     action: 'repository.pr', target: 'team/guide', requestTitle: 'repository.pr · team/guide',
-    prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true, status: 'pending' };
+    prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true, canSaveRule: false, status: 'pending' };
   const wait = {id: 2, reason: 'policy_approval', text: approval.requestTitle};
   const stopWait = { id: 9, reason: 'model_failure', text: 'The last attempt failed.' };
   const stopTask = { id: 3, currentRevision: 5, generation: 7, request: 'Check the release', wait: stopWait };
   const fixture = window.inboxFixture = { bot, decision, review, reads: 0, approvalReady: false, updated: false, failed: false,
-    showStop: false, canDecide: true, stopRequests: [] };
+    showStop: false, canDecide: true, stopRequests: [], answers: [] };
   window.EventSource = class extends EventTarget {
     constructor(path) {
       super();
@@ -296,9 +332,14 @@ function liveFixture() {
   };
   window.fetch = async (path, init) => {
     const headers = { 'X-Flock-Viewer': '"viewer"' };
-    if (path === '/api/operations') {
-      fixture.stopRequests.push(JSON.parse(init.body));
-      return new Promise(resolve => { fixture.finishStop = (status, body) => resolve(Response.json(body, { status })); });
+    if (path === '/api/operations' || path === '/api/inbox/decide') {
+      const target = JSON.parse(init.body);
+      if (target.operation === 'cancel') {
+        fixture.stopRequests.push(target);
+        return new Promise(resolve => { fixture.finishStop = (status, body) => resolve(Response.json(body, { status })); });
+      }
+      fixture.answers.push([path, target]);
+      return new Promise(resolve => { fixture.finishAnswer = (status, body) => resolve(Response.json(body, { status })); });
     }
     if (path === '/api/bots') return Response.json([bot], { headers });
     if (path.startsWith('/api/view?')) {
@@ -316,6 +357,12 @@ function liveFixture() {
         waits.push(stopTask);
         events.push({ id: 6, taskId: stopTask.id, time: 3, kind: 'waiting', data: stopWait });
       }
+      if (fixture.question) {
+        const { taskId, waitId, targetRevision, targetGeneration, request, prompt, choices } = fixture.question;
+        const wait = { id: waitId, reason: 'user_question', messageId: 7, text: prompt, choices };
+        waits.push({ id: taskId, currentRevision: targetRevision, generation: targetGeneration, request, wait });
+        events.push({ id: wait.messageId, taskId, time: 4, kind: 'waiting', data: wait });
+      }
       return Response.json({ bot, events, olderBefore: 0, presence: 'idle', sessionTasks: [],
         waits, historyCursor: 0, sessionCursor: 0, canDecide: fixture.canDecide, composerPerson: 'viewer' }, { headers });
     }
@@ -325,6 +372,7 @@ function liveFixture() {
         fixture.failed = true;
         return Response.json({ error: 'server_error' }, { status: 503 });
       }
+      if (fixture.question) return Response.json({ items: [fixture.question] });
       const items = fixture.approvalReady ? [decision, review, approval] : [decision, review];
       return Response.json({ items: fixture.updated ? [] : items });
     }
@@ -393,12 +441,14 @@ async function exerciseLiveRetry() {
   const approvalCard = () => document.querySelector('#event-4.policy-inline-card');
   await waitFor(approvalCard, 'A late Inbox response did not replace the first waiting event with its approval');
   if (document.querySelectorAll('.policy-inline-card').length !== 1 || !approvalCard().textContent.includes('Pull request: 42') ||
+      approvalCard().querySelector('button[value=always_allow]') ||
       ![...approvalCard().querySelectorAll('button')].some(button => button.textContent === 'Allow once'))
     throw new Error('The approval card duplicated the request or displayed the wrong action');
   const review = [...document.querySelectorAll('#wait-list .wait-row')].find(row => row.textContent.includes('Approval needed'));
   if (!review) throw new Error('The approval disappeared from Needs you');
   review.click();
   if (panel.hidden || !panel.textContent.includes('Pull request: 42') || !panel.textContent.includes('State: closed') ||
+      panel.querySelector('button[value=always_allow]') ||
       ![...panel.querySelectorAll('button')].some(button => button.textContent === 'Allow once'))
     throw new Error('The wait did not open the exact approval with its requested change');
   fixture.updated = true;
@@ -453,6 +503,75 @@ async function exerciseLiveRetry() {
     throw new Error('The stop was submitted twice or lost its exact target');
   fixture.finishStop(409, { error: 'request_changed' });
   await waitFor(() => confirmStop() && !confirmStop().disabled, 'A failed stop left the confirmation disabled');
+  document.getElementById('close-detail').click();
+  fixture.showStop = false;
+
+  const first = fixture.question = { botId: 'release', taskId: 4, waitId: 10, itemId: 10,
+    itemKind: 'user_question', targetRevision: 6, targetGeneration: 8, canDecide: true,
+    requestTitle: 'Draft notes', request: 'Draft notes', prompt: 'Which branch?', choices: ['main', 'stable'] };
+  const timelineForm = () => document.querySelector('#event-7 .question-choice-form');
+  const inboxForm = () => panel.querySelector('.question-choice-form');
+  const confirm = (form) => form.querySelector('button');
+  const chosen = (form) => form.querySelector('input:checked')?.value;
+  const closeInbox = () => document.getElementById('decision-close').click();
+  const updateQuestion = () => stream.dispatchEvent(new MessageEvent('change', { data: '{"list":true,"bot":"release"}' }));
+
+  updateQuestion();
+  await waitFor(() => timelineForm() && !trigger.hidden, 'The shared question did not reach both views');
+  timelineForm().querySelector('input[value=stable]').click();
+  trigger.click();
+  if (chosen(inboxForm()) !== 'stable') throw new Error('The Inbox lost the choice from the conversation');
+  const draft = document.getElementById('message');
+  draft.value = 'Use the maintenance branch.';
+  draft.dispatchEvent(new Event('input', { bubbles: true }));
+  closeInbox();
+
+  confirm(timelineForm()).click();
+  const [path, payload] = fixture.answers[0];
+  if (path !== '/api/operations' || payload.text !== 'stable' || payload.operation !== 'answer' ||
+      !['botId', 'taskId', 'waitId', 'targetRevision', 'targetGeneration'].every(field => payload[field] === first[field]))
+    throw new Error('The conversation answer lost the exact wait target');
+  trigger.click();
+  if (!confirm(inboxForm()).disabled || !draft.readOnly || chosen(inboxForm()) !== 'stable')
+    throw new Error('The Inbox did not share the pending conversation answer');
+  confirm(inboxForm()).click();
+  if (fixture.answers.length !== 1) throw new Error('Both views submitted the same pending wait');
+  fixture.finishAnswer(200, { accepted: false });
+  await waitFor(() => !confirm(inboxForm()).disabled && !draft.readOnly, 'An unconfirmed answer could not be retried');
+  if (chosen(inboxForm()) !== 'stable' || draft.value !== 'Use the maintenance branch.')
+    throw new Error('An unconfirmed answer discarded the drafts');
+
+  const previousForm = timelineForm();
+  confirm(inboxForm()).click();
+  const [retryPath, retry] = fixture.answers[1];
+  if (retryPath !== '/api/inbox/decide' || retry.data.text !== 'stable' || retry.decision !== 'answer' ||
+      !['botId', 'taskId', 'itemKind', 'itemId', 'waitId', 'targetRevision', 'targetGeneration'].every(field => retry[field] === first[field]))
+    throw new Error('The Inbox retry changed the decision or its exact target');
+  closeInbox();
+  if (!confirm(timelineForm()).disabled) throw new Error('The conversation did not share the pending Inbox answer');
+  fixture.question = { ...first, targetRevision: 7, targetGeneration: 9, prompt: 'Which branch for the new request?' };
+  fixture.finishAnswer(409, { error: 'request_changed' });
+  trigger.click();
+  await waitFor(() => inboxForm()?.textContent && panel.textContent.includes(fixture.question.prompt),
+    'The Inbox never refreshed the revised question');
+  if (chosen(inboxForm()) || !confirm(inboxForm()).disabled || !document.getElementById('send').disabled ||
+      draft.value !== 'Use the maintenance branch.')
+    throw new Error('The revised question reused a stale selection or lost the written draft');
+  closeInbox();
+  await waitFor(() => timelineForm()?.querySelector('legend').textContent === fixture.question.prompt,
+    'The conversation did not catch up to the revised question');
+  if (chosen(timelineForm()) || !confirm(timelineForm()).disabled)
+    throw new Error('The conversation reused a selection from a previous revision');
+  previousForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  if (fixture.answers.length !== 2) throw new Error('The conversation submitted an older wait target');
+  timelineForm().querySelector('input[value=main]').click();
+  confirm(timelineForm()).click();
+  const [, final] = fixture.answers[2];
+  if (final.text !== 'main' || final.targetRevision !== 7 || final.targetGeneration !== 9)
+    throw new Error('The new decision did not use the revised target and choice');
+  fixture.question = null;
+  fixture.finishAnswer(200, { accepted: true });
+  await waitFor(() => !timelineForm() && trigger.hidden, 'Acceptance did not clear both decision entry points');
 }
 
 const assets = new URL('../assets/', import.meta.url);

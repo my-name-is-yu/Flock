@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -52,12 +53,13 @@ bool curlReady() {
 }
 
 std::optional<std::string> percentDecode(std::string_view source) {
-    if (!curlReady()) return std::nullopt;
+    if (source.empty()) return std::string{};
+    if (source.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) || !curlReady())
+        return std::nullopt;
     std::unique_ptr<CURL,decltype(&curl_easy_cleanup)> curl(curl_easy_init(),curl_easy_cleanup);
     if (!curl) return std::nullopt;
-    const std::string input(source);
     int length = 0;
-    auto* decoded = curl_easy_unescape(curl.get(),input.c_str(),0,&length);
+    auto* decoded = curl_easy_unescape(curl.get(),source.data(),static_cast<int>(source.size()),&length);
     if (!decoded) return std::nullopt;
     std::string result(decoded,static_cast<std::size_t>(length));
     curl_free(decoded);
@@ -72,11 +74,11 @@ std::optional<std::string> formPercentDecode(std::string_view source) {
 }
 
 template <typename Decode>
-bool sensitiveAfterDecoding(std::string_view source, const SensitiveText& sensitive, Decode decode) {
+bool requiresUrlRedactionAfterDecoding(std::string_view source, const SensitiveText& sensitive, Decode decode) {
     constexpr unsigned maxPercentDecodeLayers = 4;
     std::string current(source);
     for (unsigned layer = 0; layer <= maxPercentDecodeLayers; ++layer) {
-        if (sensitive(current)) return true;
+        if (sensitive && sensitive(current)) return true;
         const auto decoded = decode(current);
         if (!decoded) return true;
         if (*decoded == current) return false;
@@ -88,12 +90,12 @@ bool sensitiveAfterDecoding(std::string_view source, const SensitiveText& sensit
 
 bool sensitiveUrl(std::string_view source, const SensitiveText& sensitive) {
     if (source.empty()) return false;
-    if (sensitiveAfterDecoding(source,sensitive,percentDecode)) return true;
+    if (requiresUrlRedactionAfterDecoding(source,sensitive,percentDecode)) return true;
     const auto query = source.find('?');
     const auto fragment = source.find('#');
     if (query == source.npos || (fragment != source.npos && fragment < query)) return false;
     const auto end = fragment == source.npos ? source.size() : fragment;
-    return sensitiveAfterDecoding(source.substr(query + 1,end - query - 1),sensitive,formPercentDecode);
+    return requiresUrlRedactionAfterDecoding(source.substr(query + 1,end - query - 1),sensitive,formPercentDecode);
 }
 
 bool safeUrl(std::string_view source) {
@@ -386,10 +388,9 @@ std::string convert(std::string_view source, Target target, const SensitiveText&
     auto* document = cmark_parse_document(bytes,source.size(),CMARK_OPT_DEFAULT);
     if (!document) return escape(source,target);
     std::unique_ptr<cmark_node,decltype(&cmark_node_free)> root(document,cmark_node_free);
-    if (target == Target::html && sensitive) {
-        if (sensitive(render(root.get(),Target::html_text,0)) || hasSensitiveUrl(root.get(),sensitive))
-            return "<p>[redacted]</p>";
-    }
+    if (target == Target::html &&
+        ((sensitive && sensitive(render(root.get(),Target::html_text,0))) || hasSensitiveUrl(root.get(),sensitive)))
+        return "<p>[redacted]</p>";
     const auto rendered = render(root.get(),target,0);
     if (rendered.empty() && hasNonWhitespace(source)) return escape(source,target);
     return rendered;
