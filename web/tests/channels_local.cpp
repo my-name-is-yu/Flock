@@ -70,9 +70,11 @@ void channelEndpoints(const std::filesystem::path& database) {
     };
     const auto identities = database.parent_path() / "channel-identities.json";
     std::ofstream(identities) << Json::array({{{"authorization","Bearer fixture-owner"},{"person",owner.id},{"adminRoot",true}},
+                                            {{"authorization","Bearer fixture-owner-member"},{"person",owner.id}},
                                             {{"authorization","Bearer fixture-sender"},{"person",sender.id}}});
     std::filesystem::permissions(identities,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     configureWebIdentities(store,identities,cb);
+    check(cb.resolveIdentity(owner.id) == false,"The fixture owner must have a conservative queued role");
     check(!store.policy().allows(Person{owner.id},Action::bot_decide,"release"),"Machine owner unexpectedly has permission to decide for the Bot");
     const std::string sessionCredential(32,'s');
     const auto config = database.parent_path() / "session-bridge.json";
@@ -183,5 +185,16 @@ void channelEndpoints(const std::filesystem::path& database) {
     reviewBrowser.post("/api/channels/local-connections/disconnect",{{"id",id}});
     Browser::checked(sessionBridge.Post(endpoint,bridgeIdentity,request.dump(),"application/json"),403);
     check(reviewBrowser.get("/api/channels/local-connections")[0]["status"] == "disconnected","Local decision endpoints");
+    event["externalMessageId"] = "queued-before-revocation";
+    Browser::checked(sessionBridge.Post(slack,credential,event.dump(),"application/json"),201);
+    const auto sentBeforeRevocation = transport->replies.size();
+    store.setWebIdentityResolver([&](std::string_view person) -> std::optional<bool> {
+        if (person == owner.id) return true;
+        return std::nullopt;
+    });
+    runtime.runConversations();
+    check(transport->replies.size() == sentBeforeRevocation,"Revoked sender's queued channel reply was delivered");
+    event["externalMessageId"] = "new-after-revocation";
+    Browser::checked(sessionBridge.Post(slack,credential,event.dump(),"application/json"),403);
 }
 }

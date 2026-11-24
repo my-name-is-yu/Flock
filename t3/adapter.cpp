@@ -1158,6 +1158,40 @@ public:
         }
     }
 
+    std::vector<T3Project> projects(std::string_view environment) override {
+        Client client(loadCredential(directory_,std::string(environment)),
+                      std::chrono::steady_clock::now()+std::chrono::seconds(5));
+        std::vector<T3Project> projects;
+        std::set<std::string> seen;
+        Id cursor = 0;
+        for (;;) {
+            const auto page = client.call("t3_project_list",{{"cursor",cursor},{"limit",100}});
+            for (const auto& project : array(page,"projects")) {
+                auto id = str(project,"id");
+                auto title = str(project,"title");
+                if (id.empty() || id.size() > 1024 || title.empty() || !seen.insert(id).second) invalidResponse();
+                const auto archived = project.find("archivedAt");
+                if (archived != project.end() && !archived->is_null()) {
+                    if (!archived->is_string()) invalidResponse();
+                    continue;
+                }
+                auto root = str(project,"workspaceRoot");
+                if (root.empty()) invalidResponse();
+                if (const auto end = root.find_last_not_of("/\\"); end != root.npos) {
+                    root.resize(end+1);
+                    if (const auto separator = root.find_last_of("/\\"); separator != root.npos)
+                        root.erase(0,separator+1);
+                }
+                projects.push_back({std::move(id),std::move(title),std::move(root)});
+            }
+            const auto& next = member(page,"nextCursor");
+            if (next.is_null()) return projects;
+            const auto offset = position(next);
+            if (offset <= cursor) invalidResponse();
+            cursor = offset;
+        }
+    }
+
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages,
                                                   SessionReadDeadline deadline) override {
         return t3detail::sessionMetadata(directory_,target,includeMessages,deadline);

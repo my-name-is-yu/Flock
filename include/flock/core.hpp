@@ -25,6 +25,7 @@ std::string bounded(std::string_view text, std::size_t bytes);
 std::string actionId();
 
 struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
+struct BotBusy : Conflict { BotBusy() : Conflict("Bot has unfinished work") {} };
 
 // Initial allowance from an intake's saved config. Each approval adds one attempt.
 Id modelCallLimit(const Json& config);
@@ -50,6 +51,7 @@ struct Decision {
 struct ModelTurn {
     std::vector<Decision> calls;
     Json usage = Json::object();
+    std::map<std::size_t,std::string> rejections{}; // Adapter validation errors by zero-based call index.
 };
 struct ModelImage {
     Id messageId;
@@ -65,11 +67,16 @@ struct ModelInput {
     bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
 };
+enum class ModelErrorCode { inference_failed, invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
 struct ModelError : std::runtime_error {
-    ModelError(std::string message, bool retryable, Json measurements = Json::object())
-        : std::runtime_error(std::move(message)), transient(retryable), usage(std::move(measurements)) {}
+    ModelError(std::string message, bool retryable, Json measurements = Json::object(),
+               ModelErrorCode failureCode = ModelErrorCode::inference_failed)
+        : std::runtime_error(std::move(message)), transient(retryable), usage(std::move(measurements)), code(failureCode) {}
+    ModelError(std::string message, ModelErrorCode failureCode)
+        : ModelError(std::move(message),false,Json::object(),failureCode) {}
     bool transient;
     Json usage;
+    ModelErrorCode code;
 };
 class Model {
 public:
@@ -186,6 +193,10 @@ struct SessionCounts {
     Id messages = 0, runs = 0;
 };
 
+struct T3Project {
+    std::string id, title, directory;
+};
+
 class T3 {
 public:
     virtual ~T3() = default;
@@ -208,6 +219,7 @@ public:
     }
     virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
+    virtual std::vector<T3Project> projects(std::string_view) { return {}; }
     virtual std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
         std::string_view, std::string_view, Id, SessionReadDeadline) { return {}; }
     virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
@@ -253,6 +265,8 @@ public:
     Store& operator=(const Store&) = delete;
 
     Policy policy();
+    bool botDeleted(std::string_view bot) const;
+    void deleteBot(const Person&, std::string_view bot);
     Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
     Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
     Json automations(const Person&, std::string_view bot, Id before = 0) const;
@@ -310,6 +324,13 @@ public:
     bool hasPeerExchange(std::string_view bot, std::string_view peer) const;
     // A change hint for readers, covering writes on this connection and other connections.
     std::pair<std::int64_t,std::int64_t> changeStamp() const;
+    struct BotViewStamp {
+        std::pair<Id,Id> database;
+        std::size_t gitCredentialCount;
+        bool operator==(const BotViewStamp&) const = default;
+    };
+    // No reusable version when the view can depend on live channel permissions or vault files.
+    std::optional<BotViewStamp> botViewStamp() const;
     struct ConversationChanges {
         Id through;
         std::map<std::string,std::vector<Id>> messages;
@@ -322,7 +343,7 @@ public:
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
     void setRootPeople(std::vector<std::string> ids);
-    void setWebIdentityResolver(WebIdentityResolver);
+    void setWebIdentityResolver(WebIdentityResolver, bool liveInteractiveRoles = false);
     void setWebOrigin(std::string origin);
     void connectLocalMachine(std::string id, std::shared_ptr<LocalMachine>);
     Json localConnections(const Person&) const;
@@ -342,7 +363,9 @@ private:
     friend class Runtime;
     friend class Policy;
     friend class T3Connections;
+    friend class ExternalMcp;
     friend class SessionParticipation;
+    friend class SettingsAccess;
 };
 
 struct BotTools;
@@ -361,6 +384,7 @@ struct RuntimeOptions {
     // confirm publication by request key or release any unpublished reservation.
     ReconcileBotCreation reconcileBotCreation = {};
     IntakeResolver intake = {};
+    bool requireT3Connection = false;
 };
 class Runtime {
 public:

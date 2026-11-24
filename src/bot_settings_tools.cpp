@@ -28,19 +28,30 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     Policy policy(*this);
     const auto& config = routing.at("config");
     const auto environment = field(routing,"environmentId");
-    auto id = args.contains("environmentId") ? argument(args,"environmentId") : environment;
+    const auto name = args.contains("environmentId") ? argument(args,"environmentId") : std::string{};
+    std::string id;
+    {
+        std::lock_guard lock(mutex);
+        id = taskEnvironment(bot,routing,name);
+    }
     auto failure = [&](std::string reason) -> Json {return {{"ready",false},{"reason",reason},{"settingsLink","/settings"}};};
-    if (!environments(routing).contains(id) || field(routing,"projectId").empty()) return failure("Configure the environment and project");
+    if (id.empty()) return failure("Choose a connected T3 environment");
     if (policy.forbidden(bot,Action::environment_launch,id)) return failure("Environment launch denied by installation policy");
     Command command;
     command.ownerBotId = bot;
     command.environmentId = id;
-    command.projectId = field(routing,"projectId");
+    if (id == environment) command.projectId = field(routing,"projectId");
     command.config = config;
     command.actionId = actionId();
     command.tool = "delegate";
     command.instruction = "Check environment readiness";
     try {
+        if (command.projectId.empty()) {
+            if (!policy.allows(bot,Action::environment_inspect,id) || !t3EnvironmentConnected(id))
+                return failure("Check the T3 connection and environment permissions");
+            if (t3.projects(id).empty()) return failure("Add or unarchive a project in the T3 environment");
+            return {{"ready",true}};
+        }
         if (t3.authGeneration(id,config).empty() || t3.preflight(command)) return failure("Check T3 sign-in, project and connection permissions");
     } catch (...) { return failure("Check T3 sign-in and environment settings"); }
     return {{"ready",true}};
@@ -71,7 +82,9 @@ Json Store::Impl::botSettingsTool(std::string_view bot, const Person& actor, Id 
     if (tool == "list_connections") {
         Json result{{"environments",Json::array()},{"services",config.value("services",Json::array())},
                     {"mcpServers",config.value("mcpServers",Json::array())}};
-        for (const auto& id : environments(routing)) {
+        auto ids = environments(routing);
+        if (field(routing,"environmentId").empty()) ids.merge(registeredT3Environments(bot));
+        for (const auto& id : ids) {
             Json entry{{"environmentId",id}};
             if (policy.allows(bot,Action::environment_inspect,id))
                 entry["runTimeoutSeconds"] = environmentTimeout(bot,id,config);
@@ -82,7 +95,8 @@ Json Store::Impl::botSettingsTool(std::string_view bot, const Person& actor, Id 
     if (tool == "update_bot_settings") {
         if (!policy.allows(actor,Action::bot_settings,bot)) throw AccessDenied("Bot settings access denied");
         const auto id = argument(args,"environmentId");
-        if (!environments(routing).contains(id) || policy.forbidden(bot,Action::environment_configure,id)) throw Conflict("Environment configure access required");
+        if (taskEnvironment(bot,routing,id) != id || policy.forbidden(bot,Action::environment_configure,id))
+            throw Conflict("Environment configure access required");
         if (!args.contains("runTimeoutSeconds") || !args.at("runTimeoutSeconds").is_number_integer()) throw Conflict("Integer timeout required");
         const auto timeout = args.at("runTimeoutSeconds").get<Id>();
         if (timeout<1 || timeout>2147483647) throw Conflict("Invalid timeout");

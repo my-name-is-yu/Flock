@@ -38,10 +38,17 @@ TOOL_RESULTS = {
 class Fixture(BaseHTTPRequestHandler):
     calls = []
 
-    def send_json(self, status, data=None, session=None):
+    def send_json(self, status, data=None, session=None, stream=False):
         payload = json.dumps(data).encode() if data is not None else b""
+        content_type = "application/json"
+        if stream:
+            content_type = "text/event-stream; charset=utf-8"
+            unrelated = {"jsonrpc": "2.0", "id": data["id"] + 1, "result": {}}
+            frames = [f": keepalive\r\ndata: {json.dumps(unrelated)}\r\n\r\n"]
+            frames.extend(f"data: {line}\r\n" for line in json.dumps(data, indent=2).splitlines())
+            payload = ("".join(frames) + "\r\n").encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         if session:
             self.send_header("Mcp-Session-Id", session)
@@ -73,7 +80,7 @@ class Fixture(BaseHTTPRequestHandler):
                 result["result"] = {"tools": [
                     {"name": "extension", "annotations": {"readOnlyHint": True}},
                 ], "nextCursor": "session-bound"}
-            self.send_json(200, result)
+            self.send_json(200, result, stream=cursor is None)
         elif method == "tools/call" and name in TOOL_RESULTS:
             result["result"] = TOOL_RESULTS[name]
             self.send_json(200, result)

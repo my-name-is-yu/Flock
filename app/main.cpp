@@ -1,9 +1,15 @@
-#include "bot_tools.hpp"
 #include "bots.hpp"
 #include "demo.hpp"
+#include "chatgpt_web.hpp"
 #include "model.hpp"
 #include "git_github.hpp"
+#include "settings_access.hpp"
+#include "settings_connections.hpp"
+#include "settings_system.hpp"
+#include "t3_connection_setup.hpp"
 #include "t3_setup.hpp"
+#include "flock/board_inbox.hpp"
+#include "flock/external_mcp.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/identity.hpp"
 
@@ -11,13 +17,11 @@
 #include "flock/web.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
-#include <mutex>
 #include <thread>
 
 namespace flockv0::app {
@@ -40,8 +44,11 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   extend TASK WAIT REVISION GENERATION NEW_UNIX_DEADLINE
   reconcile TASK WAIT REVISION GENERATION [--thread ID] [--run ID] [--question ID]
   cancel TASK [WAIT REVISION GENERATION]
-  t3 connect ENVIRONMENT MCP_URL [--port PORT]
+  t3 connect [MCP_URL] [--port PORT]
+  t3 reconnect ENVIRONMENT [--port PORT]
   t3 disconnect ENVIRONMENT
+  external-mcp connect PERSON BOT [BOT ...]
+  external-mcp disconnect CONNECTION_ID
   model login [--print-url] [--reconsent]
   model status
   model models
@@ -99,6 +106,13 @@ Store openStore(const std::filesystem::path& home) {
     return Store(home / "flock.sqlite3");
 }
 
+Json activeBotCards(const Store& store, Json cards) {
+    cards.erase(std::remove_if(cards.begin(),cards.end(),[&](const Json& card) {
+        return store.botDeleted(card.at("id").get_ref<const std::string&>());
+    }),cards.end());
+    return cards;
+}
+
 void print(const Json& value) {
     std::cout << value.dump(2,' ',false,Json::error_handler_t::replace) << '\n';
 }
@@ -134,76 +148,66 @@ int modelCommand(Arguments& args, const std::filesystem::path& home) {
     return 0;
 }
 
-Json connectT3(const std::filesystem::path& home, const std::string& environment,
-               const std::string& url, unsigned port, const std::function<void(const std::string&)>& authorize,
-               std::stop_token stop = {}) {
-    const T3SetupLock setup;
-    // Provider registration runs inside the connection transaction. Use its own Store
-    // so the daemon's reads do not wait on the transaction's Store mutex.
-    auto store = openStore(home);
-    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE")) {
-        if (!loadIdentities(store,identities).resolvePerson(localOwner.id))
-            throw Conflict("Configure a Web identity for local-owner before connecting T3");
-    } else if (store.policy().requiresIdentity()) throw Conflict("Set FLOCK_WEB_IDENTITIES_FILE before connecting T3");
-    T3Connections connections(store);
-    const auto previous = connections.settings(localOwner.id);
-    const auto savedPort = previous ? previous->port : 0;
-    if (!port) port = savedPort ? savedPort : 4173;
-    const auto providers = configureT3Providers("http://127.0.0.1:" + std::to_string(port) + "/mcp/flock",
-        [&](const InstallT3Provider& install) {
-            loginT3(home / "credentials" / "t3",environment,url,authorize,true,[&](const std::function<void()>& saveCredential) {
-                const auto refreshProviders = t3ProvidersNeedRefresh([&](std::string_view token) {
-                    return connections.ownsBearer(token);
-                });
-                connections.connect(environment,localOwner.id,port,[&](std::string_view token) {
-                    if (!token.empty()) install(token);
-                    saveCredential();
-                },refreshProviders);
-            },stop);
-        });
-    return {{"port",port},{"portChanged",savedPort != port},{"configuredProviders",providers}};
-}
-
-void disconnectT3(Store& store, const std::optional<std::string>& environment) {
-    const T3SetupLock setup;
-    T3Connections connections(store);
-    const bool cleanup = environment ? connections.disconnect(*environment) : connections.providerCleanupPending();
-    if (cleanup) {
-        removeT3Providers([&](std::string_view token) { return connections.ownsBearer(token); });
-        connections.providerRemoved();
-    }
-}
-
 int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const auto action = args.pop("T3 command");
-    if (action != "connect" && action != "disconnect") throw Conflict("Unknown T3 command");
-    const auto environment = args.pop("canonical environment ID");
+    if (action != "connect" && action != "reconnect" && action != "disconnect") throw Conflict("Unknown T3 command");
     if (action == "disconnect") {
+        const auto environment = args.pop("canonical environment ID");
         args.end();
         auto store = openStore(home);
         disconnectT3(store,environment);
         print({{"environmentId",environment},{"connected",false}});
         return 0;
     }
-    const auto url = args.pop("T3 MCP URL");
+    using Source = T3ConnectRequest::Source;
+    T3ConnectRequest request{Source::Local,{}};
+    if (action == "reconnect") request = {Source::Saved,args.pop("canonical environment ID")};
+    else if (!args.peek().empty() && !args.peek().starts_with("--")) {
+        request = {Source::Url,args.pop("T3 connection URL")};
+        validateT3McpUrl(request.value);
+    }
     unsigned port = 0;
     while (!args.empty()) {
         const auto flag = args.pop("T3 connection option");
         if (flag == "--port") port = static_cast<unsigned>(number(args,"port",1,65535));
         else throw Conflict("Unknown T3 connection option: " + flag);
     }
-    const auto result = connectT3(home,environment,url,port,[](const std::string& authorization) {
+    const auto result = connectT3(home,request,port,[](const std::string& authorization) {
         std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
     });
-    if (result.at("portChanged").get<bool>())
-        std::cerr << "T3 skills use Flock Web port " << result.at("port").get<unsigned>()
+    if (result.portChanged)
+        std::cerr << "T3 skills use Flock Web port " << result.port
                   << ". Restart 'flock run' if it is already running.\n";
-    try { syncT3Skills(bots.skillCards()); }
+    try { syncT3Skills(activeBotCards(openStore(home),bots.skillCards())); }
     catch (const std::exception& error) {
         std::cerr << "Could not export T3 skills: " << error.what() << '\n';
     }
-    print({{"environmentId",environment},{"connected",true},
-           {"port",result.at("port")},{"configuredProviders",result.at("configuredProviders")}});
+    print({{"environmentId",result.environmentId},{"connected",true},
+           {"port",result.port},{"configuredProviders",result.configuredProviders}});
+    return 0;
+}
+
+int externalMcpCommand(Arguments& args, const std::filesystem::path& home, const Bots& bots) {
+    const auto action = args.pop("external MCP command");
+    if (action == "connect") {
+        const auto person = args.pop("Flock person");
+        std::vector<std::string> allowedBots;
+        do {
+            const auto bot = args.pop("Bot ID");
+            bots.get(bot);
+            allowedBots.emplace_back(bot);
+        } while (!args.empty());
+        auto store = openStore(home);
+        const SettingsAccess access(store,home,std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
+        const auto credential = ExternalMcp(store).connect(person,allowedBots);
+        print({{"connectionId",credential.connectionId},{"bearerToken",credential.bearerToken}});
+    } else if (action == "disconnect") {
+        const auto id = args.pop("external MCP connection ID");
+        args.end();
+        auto store = openStore(home);
+        ExternalMcp(store).disconnect(id);
+        print({{"connectionId",id},{"connected",false}});
+    } else throw Conflict("Unknown external MCP command");
     return 0;
 }
 
@@ -213,6 +217,7 @@ void requestStop(int) { stopRequested = 1; }
 void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     bool fixed = false, web = true;
     std::optional<unsigned> port;
+    std::optional<std::string> sessionRead;
     RuntimeOptions options;
     while (!args.empty()) {
         const auto option = args.pop("run option");
@@ -220,77 +225,43 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         else if (option == "--no-web") web = false;
         else if (option == "--port") port = static_cast<unsigned>(number(args,"port",0,65535));
         else if (option == "--session-read") {
-            options.sessionRead = args.pop("session read mode");
-            if (options.sessionRead != "off" && options.sessionRead != "on_demand" && options.sessionRead != "prefill")
+            sessionRead = args.pop("session read mode");
+            if (*sessionRead != "off" && *sessionRead != "on_demand" && *sessionRead != "prefill")
                 throw Conflict("Session read mode must be off, on_demand or prefill");
         } else throw Conflict("Unknown run option: " + option);
     }
     Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); });
+    SettingsSystem system(home,port,sessionRead);
+    SettingsConnections connections(home);
+    SettingsAccess access(store,home,std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
+    const auto identities = access.identities();
+    options.sessionRead = system.sessionRead();
     const auto savedPort = T3Connections(store).port();
     if (savedPort && !web)
         std::cerr << "Warning: T3 skills cannot reach Flock in headless mode. Start 'flock run' with Web enabled.\n";
-    if (savedPort && web && port && *port != savedPort)
-        throw Conflict("T3 skills use the saved Web port " + std::to_string(savedPort) +
-                       ". Omit --port or change the saved port with 'flock t3 connect'.");
-    if (const auto* token = std::getenv("FLOCK_GITHUB_TOKEN"); token && *token) {
+    if (const auto token = connections.githubToken(); !token.empty()) {
         options.gitHost = makeGitHubHost(token);
         store.protectGitCredential(token);
     }
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
-    std::function<Json()> modelStatus;
-    std::function<bool(bool)> modelLogin;
-    struct SignIn {
-        std::mutex mutex;
-        bool running = false;
-        unsigned attempts = 0;
-        std::string error;
-        std::jthread worker;
-    } signIn;
+    std::optional<ChatGPTWeb> chatgptWeb;
     if (fixed) {
         model = makeDemoModel();
         t3 = makeDemoT3();
-        modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
     } else {
         auto chatgpt = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
-        modelStatus = [model = chatgpt.get(),&signIn] {
-            unsigned attempts;
-            {
-                std::lock_guard lock(signIn.mutex);
-                if (signIn.running) return Json{{"signingIn",true}};
-                attempts = signIn.attempts;
-            }
-            Json status;
-            try { status = model->webStatus(); }
-            catch (const std::exception&) { status = {{"unavailable",true}}; }
-            std::lock_guard lock(signIn.mutex);
-            if (signIn.running) return Json{{"signingIn",true}};
-            if (signIn.attempts != attempts) status = {{"unavailable",true}};
-            if (!signIn.error.empty()) status["signInError"] = signIn.error;
-            return status;
-        };
-        modelLogin = [&signIn,directory = home / "credentials" / "chatgpt"](bool reconsent) {
-            std::lock_guard lock(signIn.mutex);
-            if (signIn.running) return false;
-            signIn.worker = std::jthread([&signIn,directory,reconsent](std::stop_token stop) {
-                std::string error;
-                try { ChatGPTModel(directory).loginWeb(reconsent,stop); }
-                catch (const ModelError& failure) { error = failure.what(); }
-                catch (const std::exception&) { error = "Could not sign in to ChatGPT."; }
-                std::lock_guard lock(signIn.mutex);
-                signIn.running = false;
-                signIn.error = std::move(error);
-            });
-            signIn.running = true;
-            ++signIn.attempts;
-            signIn.error.clear();
-            return true;
-        };
+        chatgptWeb.emplace(*chatgpt,access);
         model = std::move(chatgpt);
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
-    options.botTools = loadBotTools(home);
-    options.peers = [&](std::string_view botId) { return bots.peers(botId); };
+    options.requireT3Connection = !fixed;
+    options.botTools = connections.loadTools();
+    options.peers = [&](std::string_view botId) {
+        auto peers = bots.peers(botId);
+        std::erase_if(peers,[&](const PeerBot& peer) { return store.botDeleted(peer.intake.botId); });
+        return peers;
+    };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
     const IntakeResolver intake = [&](std::string_view botId, std::string_view request) {
@@ -298,8 +269,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     };
     options.intake = intake;
     const Runtime::SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
-    const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
-    auto identities = identityFile ? loadIdentities(store,identityFile) : ConfiguredIdentities{};
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
     options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store,*model,*t3,soul,options);
@@ -314,7 +283,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         std::lock_guard lock(skillMutex);
         if (providersChanged) exportedBots = nullptr;
         try {
-            auto descriptions = bots.skillCards();
+            auto descriptions = activeBotCards(store,bots.skillCards());
             if (descriptions != exportedBots) {
                 syncT3Skills(descriptions);
                 exportedBots = std::move(descriptions);
@@ -325,7 +294,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     };
     if (web) syncSkills();
     WebCallbacks callbacks{
-        [&] { return bots.cards(); },
+        [&] { return activeBotCards(store,bots.cards()); },
         intake,
         [&](const Person& creator,const Json& profile,const std::optional<AvatarImage>& image) {
             auto created = store.policy().createOwnedBot(creator,[&](const auto& publishOwned) {
@@ -345,61 +314,51 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         options.clock,
     };
     callbacks.resolveIdentity = identities.resolveRoot;
-    if (identityFile) callbacks.configuredPerson = identities.resolvePerson;
-    const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
-    if (bridges) configureChannelBridges(store,bridges,callbacks);
+    callbacks.configuredPerson = identities.resolvePerson;
+    callbacks.identityRequired = [&access] { return access.enabled(); };
+    connections.configureChannels(store,callbacks);
     callbacks.sessionT3 = t3.get();
-    callbacks.modelStatus = modelStatus;
-    callbacks.modelLogin = modelLogin;
-    std::atomic<unsigned> webPort = 0;
-    struct T3Setup {
-        std::mutex mutex;
-        bool running = false;
-        std::string requester, authorizationUrl, error;
-        std::jthread worker;
-    } t3Setup;
-    callbacks.t3Disconnect = [&](const std::optional<std::string>& environment) { disconnectT3(store,environment); };
-    if (!fixed) {
-        callbacks.t3Setup = [&t3Setup](const Person& actor) {
-            std::lock_guard lock(t3Setup.mutex);
-            const bool ownsAttempt = actor.id == t3Setup.requester;
-            return Json{{"running",t3Setup.running},
-                        {"authorizationUrl",ownsAttempt ? t3Setup.authorizationUrl : std::string{}},
-                        {"error",ownsAttempt ? t3Setup.error : std::string{}}};
-        };
-        callbacks.t3Connect = [&](const Person& actor, const std::string& environment, const std::string& mcpUrl) {
-            validateT3ConnectTarget(environment,mcpUrl);
-            const auto port = webPort.load();
-            if (!port) return false;
-            std::lock_guard lock(t3Setup.mutex);
-            if (t3Setup.running) return false;
-            t3Setup.worker = std::jthread([&,port,environment,mcpUrl](std::stop_token stop) {
-                std::string error;
-                try {
-                    connectT3(home,environment,mcpUrl,port,[&](const std::string& url) {
-                        std::lock_guard lock(t3Setup.mutex);
-                        t3Setup.authorizationUrl = url;
-                    },stop);
-                    syncSkills(true);
-                } catch (const Conflict& failure) { error = failure.what(); }
-                catch (const std::exception&) { error = "Could not complete the T3 connection."; }
-                std::lock_guard lock(t3Setup.mutex);
-                t3Setup.running = false;
-                t3Setup.authorizationUrl.clear();
-                t3Setup.error = std::move(error);
-            });
-            t3Setup.running = true;
-            t3Setup.requester = actor.id;
-            t3Setup.authorizationUrl.clear();
-            t3Setup.error.clear();
-            return true;
-        };
-    }
+    if (chatgptWeb) chatgptWeb->configure(callbacks);
+    else callbacks.modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
+    callbacks.installationSettings = [&](const Person& actor) {
+        auto availableConnections = connections.view();
+        availableConnections.at("channels")["canManageHost"] = actor == localOwner;
+        return Json{{"access",access.view(actor)},{"system",system.view(T3Connections(store).port())},
+                    {"connections",std::move(availableConnections)}};
+    };
+    callbacks.changeInstallationSettings = [&](const Person& actor, std::string_view section, const Json& args) {
+        if (section == "access") return access.change(actor,args);
+        if (section == "system") return system.change(args,T3Connections(store).port());
+        if (section == "channels" && actor != localOwner) {
+            const auto action = args.value("action","");
+            if (action == "saveMachine" || action == "removeMachine" ||
+                (action == "options" && args.contains("sessionCredential"))) throw DecisionDenied{};
+        }
+        return connections.change(section,args);
+    };
+    callbacks.botChannels = [&](std::string_view bot) { return connections.botChannels(bot); };
+    callbacks.changeBotChannel = [&](std::string_view bot, const Json& args) {
+        return connections.changeBotChannel(bot,args,store);
+    };
+    T3WebSetup t3Setup(home,[&] { syncSkills(true); });
+    t3Setup.configure(callbacks,store,!fixed);
     std::unique_ptr<WebServer> server;
     if (web) {
-        if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;
-        server = startWeb(store,port.value_or(savedPort),std::move(callbacks));
-        webPort.store(server->port());
+        callbacks.githubWebhookSecret = connections.githubWebhookSecret();
+        const auto firstPort = system.startupPort(savedPort);
+        const auto onBound = [&](unsigned boundPort) {
+            rebindT3Port(store,boundPort);
+            system.listenerStarted(boundPort);
+            t3Setup.listeningOn(boundPort);
+        };
+        try {
+            server = startWeb(store,firstPort,callbacks,onBound);
+        } catch (const std::exception&) {
+            const auto recovery = system.recoveryPort(savedPort);
+            if (!recovery || *recovery == firstPort) throw;
+            std::cerr << "Could not apply the saved Web port. Starting Flock on its previous port.\n";
+            server = startWeb(store,*recovery,std::move(callbacks),onBound);
+        }
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }
     std::signal(SIGINT,requestStop);
@@ -504,9 +463,12 @@ int runCli(Arguments& args) {
     if (command == "model") return modelCommand(args,home);
     Bots bots(home / "bots");
     if (command == "t3") return t3Command(args,home,bots);
+    if (command == "external-mcp") return externalMcpCommand(args,home,bots);
     if (command == "bots") {
         args.end();
-        print(bots.cards());
+        auto cards = bots.cards();
+        if (std::filesystem::exists(home / "flock.sqlite3")) cards = activeBotCards(openStore(home),std::move(cards));
+        print(cards);
     } else if (command == "run") daemon(args,home,bots);
     else if (command == "rules") rulesCommand(home,args);
     else if (command == "mode") {
@@ -547,6 +509,8 @@ int runCli(Arguments& args) {
 }
 
 int main(int argc,char** argv) {
+    // ChatGPT's in-process TLS transport must not write session keys to disk.
+    unsetenv("SSLKEYLOGFILE");
     try {
         flockv0::app::Arguments args(argc,argv);
         return flockv0::app::runCli(args);

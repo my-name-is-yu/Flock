@@ -189,14 +189,16 @@ Json Store::workflows(std::string_view bot, Id before, unsigned limit) const {
 }
 
 Id Store::Impl::startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing) {
-    const auto environment = conversation_storage::text(routing,"environmentId",1024,true);
-    const auto project = conversation_storage::text(routing,"projectId",1024,true);
+    const auto environment = taskEnvironment(bot,routing);
+    if (environment.empty()) throw Conflict("Choose a connected T3 environment for this workflow");
+    auto destination = routing;
+    destination["environmentId"] = environment;
     const auto scrub = redactor(bot);
-    scrub.requirePublic({bot,environment,project,routing.at("config")});
+    scrub.requirePublic({bot,destination});
     const auto safe = scrub.record(args,SecretRedactor::Fields::external);
     const auto stages = stageDefinitions(safe);
     exec("INSERT INTO workflows(bot_id,routing,request,message_id) VALUES(?,?,?,?)",
-         {bot,routing,safe.at("request"),message});
+         {bot,destination,safe.at("request"),message});
     const auto id = last();
     for (auto stage : stages) {
         stage.erase("dependsOn");
@@ -331,7 +333,7 @@ void Store::Impl::materializeWorkflowStages() {
         exec(R"SQL(UPDATE workflow_dependencies AS d SET report_id=p.result_id,artifact_version=p.output
             FROM workflow_stages p WHERE p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
             AND d.workflow_id=? AND d.stage_id=?)SQL",{id,stage});
-        const auto taskId = startConversationTask(routing,bot,request,"",ready.number(4),nullptr,false);
+        const auto taskId = startConversationTask(routing,bot,request,field(routing,"environmentId"),ready.number(4),nullptr,false);
         auto task = load(taskId);
         task["workflowId"] = id;
         task["stageId"] = spec.at("stageId");

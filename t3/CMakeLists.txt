@@ -1,7 +1,7 @@
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
-add_library(flock_t3 mcp.cpp oauth.cpp adapter.cpp session_read.cpp pinned_workspace.cpp)
+add_library(flock_t3 mcp.cpp oauth.cpp discovery.cpp adapter.cpp session_read.cpp pinned_workspace.cpp)
 target_link_libraries(flock_t3 PUBLIC flock_core PRIVATE CURL::libcurl OpenSSL::Crypto)
 target_compile_options(flock_t3 PRIVATE -Wall -Wextra -Wpedantic)
 
