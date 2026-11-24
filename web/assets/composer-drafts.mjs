@@ -1,4 +1,4 @@
-const kinds = new Set(['wait', 'message', 'result']);
+const kinds = new Set(['wait', 'message', 'result', 'review']);
 const replyTarget = (reply) => kinds.has(reply?.kind) && Number.isSafeInteger(reply.messageId) && reply.messageId > 0;
 
 export function createComposerDraftStore(storage = () => sessionStorage) {

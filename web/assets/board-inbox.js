@@ -1,4 +1,4 @@
-import { hasQuestionChoices, questionChoiceForm, updateQuestionChoiceForm } from './question-choices.js';
+import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
 import { actionLabel, approvalSummary } from './action-labels.mjs';
 
 const labels = {
@@ -473,7 +473,7 @@ export function mountBoardInbox({
     const item = current();
     const id = item?.conversationEventId;
     if (item?.itemKind !== 'pr_review' || !item.canDecide || !canCompose() || !Number.isSafeInteger(id) || id <= 0) return null;
-    return { kind: 'message', messageId: id, summary: item.requestTitle };
+    return { kind: 'review', messageId: id, summary: item.prTitle };
   }
 
   function reviewDraft(item, targetHost) {
@@ -516,7 +516,7 @@ export function mountBoardInbox({
       });
       group.append(form);
     }
-    const write = button('Write an answer', 'text-button question-reply', () => {
+    const write = questionReplyButton(() => {
       if (!canCompose()) return;
       focusComposer();
     });
