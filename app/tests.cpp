@@ -390,7 +390,7 @@ void responseContract() {
           turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
           turnTool("start_task")["properties"]["environments"]["minItems"] == 1 &&
-          turnTool("start_task")["properties"]["environments"]["maxItems"] == 16 &&
+          !turnTool("start_task")["properties"]["environments"].contains("maxItems") &&
           turnTool("start_task")["properties"]["commit"]["type"] == "string" &&
           turnTool("change_task")["required"] == Json::array({"reason","taskId","generation","revisionId","instruction"}) &&
           turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&

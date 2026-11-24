@@ -244,7 +244,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
             throw ToolError("Start work across T3 environments from a Flock conversation");
         if (!environment.empty() || !sessionRef.empty() || selectedSession || resume)
             throw ToolError("Choose either multiple environments or a single destination for this request");
-        if (!environments->is_array() || environments->empty() || environments->size() > 16)
+        if (!environments->is_array() || environments->empty())
             throw ToolError("Choose one or more names or IDs from task.environments");
         std::set<std::pair<std::string,std::string>> selected;
         for (const auto& choice : *environments) {

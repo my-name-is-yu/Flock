@@ -272,8 +272,8 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
     if (config.contains("conversationEnvironments")) {
         const auto& destinations = config["conversationEnvironments"];
-        if (!destinations.is_object() || destinations.size() > 16)
-            throw Conflict("conversationEnvironments must map up to 16 names to T3 destinations");
+        if (!destinations.is_object())
+            throw Conflict("conversationEnvironments must map names to T3 destinations");
         auto& saved = bot.settings["conversationEnvironments"] = Json::object();
         for (auto alias = destinations.begin(); alias != destinations.end(); ++alias) {
             const auto environment = alias->is_object() ? validatedString(*alias,"environmentId")

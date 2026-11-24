@@ -319,9 +319,9 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         text("request","The work to do, written for the Bot that will own the task. Include everything it needs.");
         text("doneWhen","Acceptance criteria the user stated or clearly implied. Omit when none were given.",false);
         text("environment","A name or environmentId from task.environments. For a linked destination, use its full listed name so Flock preserves the selected gateway. Omit to use the default.",false);
-        fields["environments"] = {{"type","array"},{"minItems",1},{"maxItems",16},
+        fields["environments"] = {{"type","array"},{"minItems",1},
             {"items",textParameter("A name or environmentId from task.environments. Use the full listed name for a linked destination; its name identifies the gateway as well as the target.")},
-            {"description","Run one task on each selected T3 environment. Current safety bound: 16 destinations per task."}};
+            {"description","Run one task on each selected T3 environment."}};
         text("commit","Optional full Git commit SHA when this task is specifically verifying one commit.",false);
         text("sessionRef","Opaque reference from flock_session_search for the existing Session the user wants to continue in. "
                           "Omit environment, environments, and resume when using it.",false);

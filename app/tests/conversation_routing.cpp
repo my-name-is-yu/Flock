@@ -7,12 +7,16 @@ namespace {
 struct RoutingModel final : Model {
     Decision action;
     Json receipt;
+    Json offeredEnvironments = Json::array();
 
     ModelTurn decide(const ModelInput& input) override {
         if (input.event.at("kind") != "conversation_turn")
             return {{{"delegate",{{"instruction","Verify the release"},{"doneWhen","Report the result"}},"Verify the release."}}};
         const auto& turn = input.event.at("turn");
-        if (turn.empty()) return {{action}};
+        if (turn.empty()) {
+            offeredEnvironments = input.task.value("environments",Json::array());
+            return {{action}};
+        }
         receipt = turn.back().at("result");
         return {{{"reply",{{"text","I recorded the result."}},"Finish the conversation."}}};
     }
@@ -131,6 +135,51 @@ void genericDestinationCounts() {
           "ordinary multi-destination work must persist all routes without a SHA policy");
 }
 
+void manyConfiguredDestinations() {
+    Sandbox temp;
+    auto config = botConfig();
+    Json aliases = Json::object();
+    Json selected = Json::array();
+    Json expected = Json::array();
+    for (int i = 0; i < 17; ++i) {
+        const auto suffix = std::to_string(i);
+        const auto alias = "destination-" + suffix;
+        const auto environment = "environment-" + suffix;
+        const auto project = "project-" + suffix;
+        aliases[alias] = {{"environmentId",environment},{"projectId",project}};
+        selected.push_back(alias);
+        expected.push_back({{"name",alias},{"environmentId",environment},{"projectId",project}});
+    }
+    config["conversationEnvironments"] = std::move(aliases);
+    const auto folder = temp.path / "bots";
+    createBot(folder / "release",config,"Verify revisions.","");
+    const auto intake = Bots(folder).get("release").intake("");
+    check(intake.config.at("conversationEnvironments").size() >= 17,
+          "Bot registration must retain more than 16 configured destinations");
+
+    RoutingModel model;
+    RoutingT3 t3;
+    Store store(temp.path / "state.db");
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    model.action = {"start_task",{{"request","Verify on every destination"},{"environments",selected}},
+                    "Use all selected destinations."};
+    store.receive(localOwner,intake,"seventeen-destinations","Verify on all 17 destinations");
+    runtime.runConversations();
+    bool allOptionsOffered = model.offeredEnvironments.size() >= 17;
+    for (const auto& alias : selected) {
+        bool offered = false;
+        for (const auto& choice : model.offeredEnvironments)
+            offered |= choice.value("name","") == alias.get<std::string>();
+        allOptionsOffered &= offered;
+    }
+    check(allOptionsOffered,"all 17 configured destinations must be offered as choices to one request");
+    const auto tasks = store.tasks();
+    check(tasks.size() == 1,"one request across 17 destinations must create one task");
+    const auto task = store.task(tasks.front().at("id"));
+    check(task.at("runTargets") == expected && t3.commands.empty(),
+          "one request must save all 17 selected destinations without dropping or dispatching any early");
+}
+
 void destinationWithoutSessionIsUnavailable() {
     Sandbox temp;
     auto intake = pinnedBot(temp);
@@ -223,6 +272,7 @@ void missingChatGPTSignInIsActionable() {
 void pinnedConversationDestinations() {
     parallelDestinations();
     genericDestinationCounts();
+    manyConfiguredDestinations();
     destinationWithoutSessionIsUnavailable();
     moveWithProject("mini","mini-project");
     moveWithProject("mini-legacy","remembered-project");
