@@ -1222,7 +1222,6 @@ function pausedActions(turn) {
   actions.append(approve);
   return actions;
 }
-// The latest reply's first suggestion, offered in an empty composer as the likely next message.
 function nextSuggestion(context) {
   const composer = context?.composer;
   if (context?.data?.canDecide !== true || context.dm || context.source || !composer) return null;

@@ -76,7 +76,6 @@ export function approvalSummary(preview, { action, target } = {}) {
   const [operation, fields] = Array.isArray(value) && value.length === 2 && typeof value[0] === 'string'
     ? value : [null, value];
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return preview.trim();
-  // An environment approval can also gate work in an existing Session. Its target and operation still matter.
   const startsNewSession = action === 'environment.launch' && operation === null && fields.tool === 'delegate';
   const lines = operation ? [operation.replaceAll('_', ' ')] : [];
   if (startsNewSession && typeof fields.instruction === 'string') lines.push(...instructionLines(fields.instruction));
