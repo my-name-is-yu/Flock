@@ -65,12 +65,12 @@ bool validDecision(InboxKind kind, std::string_view decision) {
 }
 }
 
-std::optional<InboxKind> inboxWaitKind(std::string_view reason) {
-    if (reason == "user_question") return user_question;
-    if (reason == "budget") return extra_run;
-    if (reason == "deadline") return deadline;
-    if (reason == "model_budget") return model_budget;
-    if (reason == "unknown_delivery") return unknown_delivery;
+std::optional<InboxKind> inboxWaitKind(WaitReason reason) {
+    if (reason == WaitReason::user_question) return user_question;
+    if (reason == WaitReason::budget) return extra_run;
+    if (reason == WaitReason::deadline) return deadline;
+    if (reason == WaitReason::model_budget) return model_budget;
+    if (reason == WaitReason::unknown_delivery) return unknown_delivery;
     return {};
 }
 
@@ -175,16 +175,14 @@ ORDER BY w.id DESC
                                {id});
         while (waits.next()) {
             const auto task = waits.json(2);
-            const auto wait = waits.json(4);
-            const auto reason = field(wait, "reason");
+            const auto waitId = waits.number(3);
+            const auto wait = from_json(waitId, waits.string(4));
+            const auto reason = wait.reason();
             const auto kind = inboxWaitKind(reason);
             if (!kind || !p_->waitIsActionable(task)) continue;
-            const auto waitId = waits.number(3);
             const auto taskId = waits.number(0);
-            Json view{{"requestTitle", taskTitle(task)},
-                      {"request", task.at("request")},
-                      {"prompt", field(wait, "text")},
-                      {"choices", *kind == user_question ? wait.value("choices", Json::array()) : Json::array()}};
+            Json view{
+                {"requestTitle", taskTitle(task)}, {"request", task.at("request")}, {"prompt", wait.text}, {"choices", wait.choices()}};
             if (const auto allowance = p_->waitAllowance(taskId, reason); allowance) view["allowance"] = allowance;
             add({id, *kind, waitId, waitId, taskId, task.value("currentRevision", Id{0}), waits.number(1)}, std::move(view),
                 p_->waitAnchor(taskId, waitId));

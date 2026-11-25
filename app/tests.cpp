@@ -902,7 +902,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
               "The demo Session reported that it completed the requested work.",
           "task history lost the reason for completion");
     Command followUp;
-    followUp.tool = "follow_up";
+    followUp.tool = CommandTool::follow_up;
     followUp.actionId = "persisted-demo-action";
     followUp.target = {runs[0]["threadId"], runs[0]["runId"], ""};
     const auto sent = t3->send(followUp);

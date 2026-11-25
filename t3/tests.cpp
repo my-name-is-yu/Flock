@@ -272,7 +272,7 @@ int main(int argc, char** argv) {
               "Project discovery did not page through live projects or exclude archived projects");
         Command launch;
         launch.actionId = "flock-action-0123";
-        launch.tool = "delegate";
+        launch.tool = CommandTool::delegate;
         launch.environmentId = "env-1";
         launch.projectId = "project";
         launch.instruction = "  preserve instruction whitespace and content  ";
@@ -311,7 +311,7 @@ int main(int argc, char** argv) {
         fixture({{"duplicate", true}});
         check(restarted->reconcile(other).kind == Delivery::Kind::Accepted && effects("t3_thread_list").size() == launchLists,
               "a launch receipt scopes reconciliation to its Thread even when other Threads match");
-        other.candidate.threadId = "duplicate";
+        other.candidate = RunRef{"duplicate", {}, {}, {}};
         check(restarted->reconcile(other).kind == Delivery::Kind::Unknown && effects("t3_thread_list").size() == launchLists,
               "a manual hint cannot override the Thread in the launch receipt");
         fixture({{"duplicate", false}});
@@ -319,7 +319,7 @@ int main(int argc, char** argv) {
         other.instruction += "x";
         check(adapter->reconcile(other).kind == Delivery::Kind::Unknown, "marker requires identical instruction");
         other = launch;
-        other.candidate = {"thread", "wrong", {}};
+        other.candidate = RunRef{"thread", "wrong", {}, {}};
         check(adapter->reconcile(other).kind == Delivery::Kind::Unknown, "manual candidate does not override identity");
         fixture({{"duplicate", true}});
         check(adapter->reconcile(launch).kind == Delivery::Kind::Unknown, "multiple matching threads are ambiguous");
@@ -346,7 +346,7 @@ int main(int argc, char** argv) {
                   options.at(1).at("label") == "　blue　" && options.at(1).at("value") == "blue",
               "question retains the display labels and answer values for both options");
         Command answer = launch;
-        answer.tool = "answer_session_question";
+        answer.tool = CommandTool::answer_session_question;
         answer.target = run;
         answer.questionId = "request";
         answer.answers = {{"color", "missing option"}, {"message", ""}, {"tag", ""}};
@@ -473,7 +473,7 @@ int main(int argc, char** argv) {
 
         Command follow = launch;
         follow.actionId = "flock-action-01234";
-        follow.tool = "follow_up";
+        follow.tool = CommandTool::follow_up;
         follow.target = run;
         follow.instruction = std::string(700, 'x') + "\n\n[Flock action ID: " + follow.actionId + "]";
         for (const auto* scenario : {"manual-active", "server-input-result"}) {
@@ -493,7 +493,7 @@ int main(int argc, char** argv) {
         check(followUps.at(0).at("message") == follow.instruction, "T3 receives all of the follow-up instruction");
 
         Command selected = launch;
-        selected.tool = "start_in_session";
+        selected.tool = CommandTool::start_in_session;
         selected.actionId = "flock-selected-idle";
         selected.target = {"human-selected", {}, {}};
         selected.instruction = "Add regression tests";

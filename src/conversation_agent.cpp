@@ -85,13 +85,12 @@ std::string modelFailureReply(ModelErrorCode code, bool ja) {
     return ja ? "このメッセージを処理できませんでした。もう一度送ってください。" : "I couldn't process this message. Please send it again.";
 }
 
-Json waitView(const Json& wait) {
-    if (!wait.is_object()) return nullptr;
-    Json view = {{"waitId", wait.value("id", Id{0})}, {"reason", field(wait, "reason")}, {"text", bounded(field(wait, "text"), 1000)}};
-    if (const auto choices = wait.find("choices"); choices != wait.end() && choices->is_array()) {
+Json waitView(const Wait& wait) {
+    Json view = {{"waitId", wait.id}, {"reason", waitReasonName(wait.reason())}, {"text", bounded(wait.text, 1000)}};
+    if (wait.reason() == WaitReason::user_question) {
         auto& list = view["choices"] = Json::array();
-        for (const auto& choice : *choices)
-            if (choice.is_string() && list.size() < 12) list.push_back(bounded(choice.get<std::string>(), 200));
+        for (const auto& choice : wait.choices().first(std::min(wait.choices().size(), std::size_t{12})))
+            list.push_back(bounded(choice, 200));
     }
     return view;
 }
@@ -150,24 +149,23 @@ WHERE target.id=? AND q.id<=target.id AND q.kind='waiting' AND json_extract(q.da
     return message;
 }
 
-const char* Store::Impl::questionAnswerError(const Json& task, const Message& message) const {
-    const auto& wait = task.at("wait");
-    if (task.at("state") != "waiting" || !wait.is_object()) return "That question is no longer open";
-    if (field(wait, "reason") != "user_question") return "Only user_question waits can be answered; approvals use their own controls";
-    const auto asked = integer(wait, "messageId");
+const char* Store::Impl::questionAnswerError(const Json& task, const Message& message, const std::optional<Wait>& wait) const {
+    if (task.at("state") != "waiting" || !wait) return "That question is no longer open";
+    if (wait->reason() != WaitReason::user_question) return "Only user_question waits can be answered; approvals use their own controls";
+    const auto asked = waitAnchor(task.at("id"), wait->id);
     if (asked >= message.id) return "That question opened after this message was sent, so this message cannot answer it";
     if (message.replyTo && (!message.question || message.question->messageId != asked))
         return "This message replies to something else, so it can only answer the question it replies to";
-    if (!asked || wait.value("run", Json(nullptr)) != task.value("activeRun", Json(nullptr)) ||
-        integer(wait, "eventId") != task.value("eventId", Id{0}))
+    if (!asked || wait->run != taskWaitRun(task) || wait->eventId != task.value("eventId", Id{0}))
         return "That question is no longer current";
     if (replanReady(task)) return "The task is replanning, so this question will close. Its Bot asks again if it still needs to know";
     return nullptr;
 }
 
 Json Store::Impl::taskState(const Json& task, const Message& message, bool fullContract) const {
-    auto wait = waitView(task.at("wait"));
-    if (wait.is_object()) wait["answerable"] = !questionAnswerError(task, message);
+    const auto waiting = currentWait(task.at("id"));
+    auto wait = waiting ? waitView(*waiting) : Json(nullptr);
+    if (waiting) wait["answerable"] = !questionAnswerError(task, message, waiting);
     Json view = {{"generation", task.at("generation")},
                  {"revisionId", task.value("currentRevision", Id{0})},
                  {"state", task.at("state")},
@@ -405,17 +403,14 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
             replyTo = {{"messageId", message.replyTo}};
             if (kind == "waiting") {
                 const auto task = load(taskId);
-                const auto& current = task.at("wait");
-                replyTo.update(
-                    {{"kind", "task_question"},
-                     {"taskId", taskId},
-                     {"waitId", integer(data, "id")},
-                     {"reason", field(data, "reason")},
-                     {"text", bounded(field(data, "text"), 1000)},
-                     {"revisionId", task.value("currentRevision", Id{0})},
-                     {"generation", task.at("generation")},
-                     {"current", current.is_object() && integer(current, "id") == integer(data, "id") && waitIsActionable(task)}});
-                if (const auto question = waitView(data); question.contains("choices")) replyTo["choices"] = question.at("choices");
+                const auto current = currentWait(taskId);
+                const auto asked = decodeWaitingEntry(message.replyTo, data);
+                replyTo.update(waitView(asked));
+                replyTo.update({{"kind", "task_question"},
+                                {"taskId", taskId},
+                                {"revisionId", task.value("currentRevision", Id{0})},
+                                {"generation", task.at("generation")},
+                                {"current", current && current->id == asked.id && waitIsActionable(task)}});
                 addTask(taskId);
             } else if (kind == "report" || kind == "completed" || kind == "cancelled") {
                 replyTo.update(
@@ -625,9 +620,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto waitId = identifier(args, "waitId", true);
         const auto task = ownTask(taskId, message);
         const auto answer = text(args, "text", 8000, true);
-        if (integer(task.at("wait"), "id") != waitId)
+        const auto wait = currentWait(taskId);
+        if (!wait || wait->id != waitId)
             throw ToolError("That question is no longer open", {{"taskId", task.at("id")}, {"current", taskState(task, message)}});
-        if (const auto error = questionAnswerError(task, message))
+        if (const auto error = questionAnswerError(task, message, wait))
             throw ToolError(error, {{"taskId", task.at("id")}, {"current", taskState(task, message)}});
         const TaskTarget target{bot, task.at("id"), waitId, identifier(args, "revisionId", true, 0),
                                 identifier(args, "generation", true, 0)};

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "flock/wait.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <chrono>
@@ -44,8 +46,6 @@ struct Intake {
     Json config = Json::object();
 };
 using IntakeResolver = std::function<Intake(std::string_view botId, std::string_view request)>;
-// Prepare a reconciliation from a Store::task snapshot and the current Bot configuration.
-Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake);
 
 struct BotNotes {
     std::string soul, memory;
@@ -112,10 +112,6 @@ public:
     virtual ModelTurn decide(const ModelInput&) = 0;
 };
 
-struct RunRef {
-    std::string threadId, runId, link;
-    std::string gatewayEnvironmentId;
-};
 struct Question {
     std::string requestId;
     Json fields = Json::array();
@@ -154,17 +150,25 @@ struct SessionOrigin {
     SessionTarget target;
     std::string title;
 };
-struct Command {
-    std::string actionId, tool, environmentId, projectId, instruction, authGeneration;
-    Json config = Json::object(), answers = Json::object();
+enum class CommandTool { none, delegate, start_in_session, follow_up, answer_session_question, message_session };
+std::string_view commandToolName(CommandTool);
+std::optional<CommandTool> commandToolFromName(std::string_view);
+
+struct CommandPayload {
+    std::string actionId, environmentId, projectId, instruction;
+    CommandTool tool = CommandTool::none;
+    Json answers = Json::object();
     RunRef target;
     std::string questionId;
-    RunRef candidate; // User-specified reconciliation hint. T3 must verify ownership.
+    std::optional<RunRef> candidate;
     std::string candidateQuestionId;
-    std::string ownerBotId;
     std::string launchReceiptThreadId; // From the launch response, even if the Run ID was pending.
-    std::optional<SessionOrigin> sessionOrigin;
     std::string gatewayEnvironmentId;
+};
+struct Command : CommandPayload {
+    Json config = Json::object();
+    std::string authGeneration{}, ownerBotId{};
+    std::optional<SessionOrigin> sessionOrigin{};
 };
 struct Delivery {
     enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
@@ -365,7 +369,13 @@ public:
     Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
     Json compactions(std::string_view bot, Id before = 0, unsigned limit = 50) const;
     Json workflows(std::string_view bot, Id before = 0, unsigned limit = 20) const;
-    Json activeTasks(std::string_view botId) const;
+    struct ActiveTask {
+        Json task;
+        std::optional<Wait> wait;
+    };
+    std::vector<ActiveTask> activeTasks(std::string_view botId) const;
+    static Wait waitingEvent(const Json& event);
+    Json reconciliationData(Id task, Id waitId, Json target, const IntakeResolver&) const;
     // Distinct active state and replanning combinations, grouped by Bot ID.
     Json activeTaskStatesByBot() const;
     Json sessionTasks(std::string_view botId, Id before, unsigned limit) const;

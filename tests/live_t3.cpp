@@ -18,17 +18,18 @@ public:
     std::string authGeneration(const std::string& env, const Json& config) override { return inner.authGeneration(env, config); }
     std::optional<Delivery> preflight(const Command& cmd) override { return inner.preflight(cmd); }
     Delivery send(const Command& cmd) override {
-        if ("before:" + cmd.tool == tool) {
-            std::cout << "Stopped before external send for " << cmd.tool << " " << cmd.actionId << std::endl;
+        const std::string name(commandToolName(cmd.tool));
+        if ("before:" + name == tool) {
+            std::cout << "Stopped before external send for " << name << " " << cmd.actionId << std::endl;
             std::_Exit(86);
         }
         auto result = inner.send(cmd);
-        if ("defer:" + cmd.tool == tool && result.kind == Delivery::Kind::Accepted) {
+        if ("defer:" + name == tool && result.kind == Delivery::Kind::Accepted) {
             result.kind = Delivery::Kind::Unknown;
             result.run.runId.clear();
         }
-        if (cmd.tool == tool && (result.kind == Delivery::Kind::Accepted || result.kind == Delivery::Kind::Unknown)) {
-            std::cout << "Stopped after external send for " << cmd.tool << " " << cmd.actionId << std::endl;
+        if (name == tool && (result.kind == Delivery::Kind::Accepted || result.kind == Delivery::Kind::Unknown)) {
+            std::cout << "Stopped after external send for " << name << " " << cmd.actionId << std::endl;
             std::_Exit(86);
         }
         return result;

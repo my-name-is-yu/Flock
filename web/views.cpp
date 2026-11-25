@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <charconv>
 #include <iterator>
+#include <ranges>
 #include <set>
 
 namespace flockv0::web {
@@ -78,17 +79,19 @@ std::string hostedSessionPath(std::string_view environment, std::string_view thr
     return sessionPath(environment, thread, "-_");
 }
 
+Json runView(std::string_view environment, std::string_view thread, std::string_view run, const std::string& saved) {
+    const auto loopbackPath = sessionPath(environment, thread);
+    if (loopbackPath.empty()) return nullptr;
+    return {{"threadId", thread},
+            {"runId", run},
+            {"environmentId", environment},
+            {"link", localThreadLink(saved, loopbackPath) ? saved : hostedSessionBase + hostedSessionPath(environment, thread)}};
+}
+
 Json runView(const Json& run, std::string_view environment) {
     const auto actualEnvironment = field(run, "environmentId");
     if (!actualEnvironment.empty()) environment = actualEnvironment;
-    const auto thread = field(run, "threadId");
-    const auto loopbackPath = sessionPath(environment, thread);
-    if (loopbackPath.empty()) return nullptr;
-    const auto saved = field(run, "link");
-    return {{"threadId", thread},
-            {"runId", field(run, "runId")},
-            {"environmentId", environment},
-            {"link", localThreadLink(saved, loopbackPath) ? saved : hostedSessionBase + hostedSessionPath(environment, thread)}};
+    return runView(environment, field(run, "threadId"), field(run, "runId"), field(run, "link"));
 }
 
 Json avatarView(const Json& source, std::string_view botId) {
@@ -118,18 +121,13 @@ Json botSummary(const Json& bot) {
     return summary;
 }
 
-// Adapter errors are useful in the CLI but can include connection settings. Publish the reason code.
-Json waitView(const Json& wait) {
-    if (wait.is_null()) return nullptr;
-    Json view = Json::object();
-    copyFields(view, wait, {"id", "messageId", "reason", "allowance"});
-    const auto reason = field(wait, "reason");
-    if (reason == "user_question" || reason == "t3_input") copyFields(view, wait, {"text"});
-    if (reason == "user_question" && wait.contains("choices") && wait["choices"].is_array()) {
-        auto& choices = view["choices"] = Json::array();
-        for (const auto& choice : wait["choices"])
-            if (choice.is_string()) choices.push_back(choice);
-    }
+Json waitView(const Wait& wait) {
+    const auto reason = wait.reason();
+    Json view = {{"id", wait.id}, {"reason", waitReasonName(reason)}};
+    if (wait.messageId) view["messageId"] = *wait.messageId;
+    if (wait.allowance) view["allowance"] = *wait.allowance;
+    if (reason == WaitReason::user_question || reason == WaitReason::t3_input) view["text"] = wait.text;
+    if (reason == WaitReason::user_question) view["choices"] = wait.choices();
     return view;
 }
 
@@ -146,7 +144,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     const auto& data = event.at("data");
     Json details = Json::object();
     if (kind == "waiting")
-        details = waitView(data);
+        details = data;
     else if (kind == "request") {
         copyFields(details, data, {"text", "source", "messageId"});
         copyTrigger(details, data);
@@ -231,9 +229,10 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
     for (auto event = events.rbegin(); event != events.rend(); ++event) {
         const auto kind = field(*event, "kind");
         const auto& data = event->at("data");
+        const auto wait = kind == "waiting" ? std::optional{Store::waitingEvent(*event)} : std::nullopt;
         const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" || kind == "pr_review_requested" ||
-                              (kind == "waiting" && (field(data, "reason") == "user_question" || field(data, "reason") == "model_failure"));
-        auto text = kind == "report" ? field(data, "report") : field(data, "text");
+                              (wait && (wait->reason() == WaitReason::user_question || wait->reason() == WaitReason::model_failure));
+        auto text = wait ? wait->text : field(data, kind == "report" ? "report" : "text");
         if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage")) text = field(data.at("forwardedMessage"), "text");
         if (incoming) {
             if (!latestIncoming) latestIncoming = event->at("id").get<Id>();
@@ -277,20 +276,24 @@ Json verificationRun(const Json& source) {
     return run;
 }
 
-Json currentWait(const Json& task) {
+Json currentWait(const Json& task, const Wait& wait) {
     auto result = taskSummary(task);
-    const auto& wait = task.at("wait");
     const auto env = field(task, "environmentId");
     auto& view = result["wait"] = waitView(wait);
-    copyFields(result, wait, {"deadline"});
-    const Json* run = &wait.at("run");
-    if (const auto action = field(wait, "runActionId"); !action.empty()) {
-        const auto& results = task.at("runResults");
-        const auto saved = std::ranges::find_if(results, [&](const Json& item) { return field(item, "actionId") == action; });
-        if (saved != results.end()) run = &*saved;
+    auto& run = view["run"];
+    if (wait.run) {
+        const auto& saved = wait.run->run;
+        const auto environment = wait.run->environmentId && !wait.run->environmentId->empty() ? *wait.run->environmentId : env;
+        run = runView(environment, saved.threadId, saved.runId, saved.link);
     }
-    view["run"] = runView(*run, env);
-    if (view["run"].is_null()) view["run"] = runView(task.at("lastRun"), env);
+    if (const auto* verification = wait.verification()) {
+        result["deadline"] = verification->deadline;
+        const auto& results = task.at("runResults");
+        const auto saved =
+            std::ranges::find_if(results, [&](const Json& item) { return field(item, "actionId") == verification->actionId; });
+        if (saved != results.end()) run = runView(*saved, env);
+    }
+    if (run.is_null()) run = runView(task.at("lastRun"), env);
     return result;
 }
 
@@ -327,10 +330,10 @@ Json sessionGroup(const Json& task) {
     return group;
 }
 
-std::string_view botPresence(const Json& activeTasks) {
+std::string_view botPresence(const auto& tasks) {
     constexpr std::string_view priority[] = {"idle", "queued", "peer_waiting", "waiting", "thinking", "working", "stopping"};
     std::size_t highest = 0;
-    for (const auto& task : activeTasks) {
+    for (const auto& task : tasks) {
         auto presence = displayState(task);
         if (presence == "running")
             presence = "working";
@@ -342,15 +345,15 @@ std::string_view botPresence(const Json& activeTasks) {
     return priority[highest];
 }
 
-Json activity(const Json& activeTasks, std::string_view bot) {
-    Json result = {{"presence", botPresence(activeTasks)},
+Json activity(const std::vector<Store::ActiveTask>& activeTasks, std::string_view bot) {
+    Json result = {{"presence", botPresence(activeTasks | std::views::transform(&Store::ActiveTask::task))},
                    {"waits", Json::array()},
                    {"queued", Json::array()},
                    {"activeSessions", Json::array()},
                    {"parallelTasks", Json::array()}};
-    for (const auto& task : activeTasks) {
+    for (const auto& [task, wait] : activeTasks) {
         const auto state = field(task, "state");
-        if (state == "waiting") result["waits"].push_back(currentWait(task));
+        if (state == "waiting" && wait) result["waits"].push_back(currentWait(task, *wait));
         const auto& blocker = task.at("blockedBy");
         if (state == "queued" && !blocker.is_null()) {
             auto queued = taskSummary(task);
@@ -429,6 +432,8 @@ Json botList(Store& store, const Json& bots) {
 Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
     auto events = store.conversation(bot, before, conversationSize + 1, Store::ConversationEvents::all, viewer);
     const auto redactor = store.policy().secretRedactor(bot);
+    for (auto& event : events)
+        if (field(event, "kind") == "waiting") event["data"] = waitView(Store::waitingEvent(event));
     events = redactor.record(std::move(events), SecretRedactor::Fields::external);
     markdown::SensitiveText sensitive;
     if (!redactor.empty()) sensitive = [&](std::string_view text) { return redactor.containsProtectedText(text); };

@@ -71,7 +71,7 @@ class DemoT3 final : public T3 {
     std::string authGeneration(const std::string&, const Json&) override { return "fixed-demo"; }
 
     RunRef run(const Command& command) {
-        const auto thread = command.tool == "follow_up" ? command.target.threadId : "demo-thread-" + command.actionId;
+        const auto thread = command.tool == CommandTool::follow_up ? command.target.threadId : "demo-thread-" + command.actionId;
         return {thread, "demo-run-" + command.actionId, ""};
     }
 

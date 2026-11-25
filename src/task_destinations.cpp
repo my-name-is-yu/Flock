@@ -53,26 +53,24 @@ ProjectCatalog Store::Impl::readProjectCatalog(T3& t3, std::string_view bot, std
 }
 
 namespace {
-Json projectQuestion(const std::vector<T3Project>& projects, const SecretRedactor& scrub) {
+ProjectQuestionWait projectQuestion(const std::vector<T3Project>& projects, const SecretRedactor& scrub) {
     std::map<std::string, std::size_t> titles;
     std::vector<std::string> names;
     for (const auto& project : projects) {
         names.push_back(bounded(scrub.text(project.title), 140));
         ++titles[names.back()];
     }
-    Json labels = Json::array(), choices = Json::object();
+    ProjectQuestionWait question;
     for (std::size_t index = 0; index < projects.size(); ++index) {
         const auto& project = projects[index];
         auto label = names[index];
         if (titles.at(label) > 1 && !project.directory.empty()) label += " (" + bounded(scrub.text(project.directory), 40) + ")";
         const auto base = label;
-        for (int suffix = 2; choices.contains(label); ++suffix) label = base + " #" + std::to_string(suffix);
-        labels.push_back(label);
-        choices[label] = project.id;
+        for (int suffix = 2; question.projects.contains(label); ++suffix) label = base + " #" + std::to_string(suffix);
+        question.choices.push_back(label);
+        question.projects.emplace(label, project.id);
     }
-    return {{"text", "Which T3 project should this Bot use in this environment?"},
-            {"choices", std::move(labels)},
-            {"projectChoices", std::move(choices)}};
+    return question;
 }
 }
 
@@ -82,7 +80,7 @@ bool Store::Impl::applyProjectCatalog(Json& task, ProjectCatalog catalog) {
     const auto pending = PendingDestination::read(task);
     task.erase("pendingDestination");
     if (const auto* problem = std::get_if<std::string>(&catalog)) {
-        wait(task, "settings", {{"text", *problem}});
+        wait(task, SimpleWaitReason::settings, *problem);
         return true;
     }
     auto& projects = std::get<std::vector<T3Project>>(catalog);
@@ -90,7 +88,7 @@ bool Store::Impl::applyProjectCatalog(Json& task, ProjectCatalog catalog) {
     if (!remembered.empty() && std::ranges::find(projects, remembered, &T3Project::id) == projects.end())
         exec("DELETE FROM bot_t3_projects WHERE bot_id=? AND environment_id=? AND project_id=?", {bot, environment, remembered});
     if (projects.empty()) {
-        wait(task, "settings", {{"text", "Add or unarchive a project in this T3 environment, then try again."}});
+        wait(task, SimpleWaitReason::settings, "Add or unarchive a project in this T3 environment, then try again.");
         return true;
     }
     const auto id = task.at("id").get<Id>();
@@ -98,9 +96,9 @@ bool Store::Impl::applyProjectCatalog(Json& task, ProjectCatalog catalog) {
     if (peer && peer->recipient == id && peer->kind == "work")
         std::erase_if(projects, [&](const T3Project& project) { return peerWorkRouteWouldCycle(peer->sender, environment, project.id); });
     if (projects.empty()) {
-        wait(task, "settings",
-             {{"text", "Each project in this environment would make project queues wait for one another. "
-                       "Move this task to another environment or retry after related work finishes."}});
+        wait(task, SimpleWaitReason::settings,
+             "Each project in this environment would make project queues wait for one another. "
+             "Move this task to another environment or retry after related work finishes.");
         return true;
     }
     auto selected = pending ? std::ranges::find(projects, pending->route.projectId, &T3Project::id) : projects.end();
@@ -115,7 +113,7 @@ bool Store::Impl::applyProjectCatalog(Json& task, ProjectCatalog catalog) {
         return true;
     }
     if (projectQuestionOpen(bot, environment)) return false;
-    wait(task, "user_question", projectQuestion(projects, redactor(bot)));
+    wait(task, projectQuestion(projects, redactor(bot)), "Which T3 project should this Bot use in this environment?");
     return true;
 }
 }

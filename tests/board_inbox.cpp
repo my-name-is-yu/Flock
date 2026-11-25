@@ -59,8 +59,9 @@ struct Database {
     }
     void pause(Id task, std::string_view reason) {
         const auto id = std::to_string(task);
-        exec("INSERT INTO waits(task_id,data) VALUES(" + id + ",json_object('reason','" + std::string(reason) +
-             "','text','Fixture approval'))");
+        Json wait{{"reason", reason}, {"text", "Fixture approval"}, {"eventId", 0}, {"run", nullptr}};
+        if (reason == "budget") wait.update({{"attempted", "follow_up"}, {"decisionReason", ""}, {"usage", Json::object()}});
+        exec("INSERT INTO waits(task_id,data) VALUES(" + id + ",'" + wait.dump() + "')");
         exec("UPDATE tasks SET state='waiting',generation=generation+1 WHERE id=" + id);
     }
 };
@@ -255,8 +256,6 @@ void exercise(const std::filesystem::path& path) {
     check(readerQuestion.at("canDecide").get<bool>() && readerQuestion.at("conversationEventId") == waitAnchor &&
               readerQuestion.at("waitId") != waitAnchor && row(store.conversation("report"), "id", waitAnchor).at("kind") == "waiting",
           "member did not get answer controls");
-    db.exec("UPDATE tasks SET data=json_set(data,'$.wait',json((SELECT data FROM journal WHERE id=" + waitAnchor.dump() +
-            "))) WHERE id=" + std::to_string(question));
     db.exec(R"SQL(
 WITH RECURSIVE newer(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM newer WHERE n<129)
 INSERT INTO journal(task_id,time,kind,data)
@@ -265,10 +264,13 @@ SELECT )SQL" +
     check(store.task(question).at("wait").at("messageId") == waitAnchor, "task detail lost the wait anchor after 129 newer events");
     check(row(store.inbox(reader), "itemKind", "user_question") == readerQuestion,
           "Inbox disagreed with task detail about the wait anchor");
+    const auto active = store.activeTasks("report");
+    const auto activeQuestion = std::ranges::find_if(active, [&](const Store::ActiveTask& task) { return task.task.at("id") == question; });
     check(store.task(question).at("wait") == report.at("wait") &&
-              row(store.tasks("report"), "id", question).at("wait") == report.at("wait") &&
-              row(store.activeTasks("report"), "id", question).at("wait") == report.at("wait"),
-          "task views disagreed about the open wait payload");
+              row(store.tasks("report"), "id", question).at("wait") == report.at("wait") && activeQuestion != active.end() &&
+              activeQuestion->wait && activeQuestion->wait->id == report.at("wait").at("id").get<Id>() &&
+              activeQuestion->wait->messageId == waitAnchor.get<Id>() && activeQuestion->wait->reason() == WaitReason::user_question,
+          "task views disagreed about the open wait");
     db.exec("DELETE FROM journal WHERE kind='fixture_activity' AND task_id=" + std::to_string(question));
     check(!row(inbox, "itemKind", "model_budget").contains("conversationEventId"),
           "inbox invented an anchor for an item without a visible source");

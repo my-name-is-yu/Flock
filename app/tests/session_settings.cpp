@@ -84,7 +84,7 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
     check(store.task(id).at("wait") == waiting.at("wait"), "invalid corrections cleared the settings wait");
 
     createBot(folder / "release", config, "", "");
-    store.operate(owner, target, "reconcile", reconciliationData(waiting, waitId, Json::object(), intake));
+    store.operate(owner, target, "reconcile", store.reconciliationData(id, waitId, Json::object(), intake));
     for (int i = 0; i < 2; ++i) runtime.tick();
     const auto resumed = store.task(id);
     check(resumed.at("state") == "running", "corrected task state was " + resumed.at("state").dump());
@@ -100,7 +100,7 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
           "T3 did not receive the configured Session overrides");
 
     Command direct;
-    direct.tool = "delegate";
+    direct.tool = CommandTool::delegate;
     direct.actionId = "fixture-direct-launch";
     direct.environmentId = "env-1";
     direct.projectId = "project";

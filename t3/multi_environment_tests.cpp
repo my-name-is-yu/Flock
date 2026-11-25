@@ -7,7 +7,6 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
-#include <sqlite3.h>
 #include <thread>
 #include <vector>
 
@@ -839,19 +838,6 @@ void single(const Endpoint& local, const Endpoint& mini, const std::filesystem::
         fixture.start(false);
         fixture.advanceUntil([](const Json& task) { return task.at("state") == "running"; }, "single Run did not start");
         taskId = fixture.taskId;
-    }
-    {
-        const auto path = directory.parent_path() / (name + ".db");
-        sqlite3* connection = nullptr;
-        const auto opened = sqlite3_open_v2(path.c_str(), &connection, SQLITE_OPEN_READWRITE, nullptr);
-        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> database(connection, sqlite3_close);
-        check(opened == SQLITE_OK, "could not open the fixture database");
-        const auto saved = sqlite3_exec(database.get(), R"SQL(
-UPDATE outbox SET data=json_remove(data,'$.projectId');
-UPDATE tasks SET data=json_remove(data,'$.activeRun.projectId');
-)SQL",
-                                        nullptr, nullptr, nullptr);
-        check(saved == SQLITE_OK, "could not prepare a legacy single Run");
     }
     Scenario fixture(local, mini, directory, commit, name);
     fixture.taskId = taskId;

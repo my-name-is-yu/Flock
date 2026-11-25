@@ -29,12 +29,10 @@ bool destinationRunOutstanding(const Json& run) {
     return status == "queued" || status == "running" || status == "confirmation_pending";
 }
 
-bool destinationStopRequested(const Json& action, const RunRef& run) {
-    if (!action.is_object() || !action.value("stopRequested", false)) return false;
-    const auto runId = field(action, "stopRunId");
-    const auto threadId = field(action, "stopThreadId");
-    // Older stops referred to the outbox's original Run. Promotion clears that stop.
-    return (runId.empty() && threadId.empty()) || (runId == run.runId && threadId == run.threadId);
+bool destinationStopRequested(const std::optional<Outbox>& action, const RunRef& run) {
+    if (!action || !action->stop) return false;
+    const auto& requested = action->stop->run;
+    return !requested || (requested->runId == run.runId && requested->threadId == run.threadId);
 }
 
 bool Store::Impl::advanceDestinationSessionMessageRun(Json& task, Json& run) {
@@ -68,10 +66,9 @@ ORDER BY w.rowid LIMIT 1)SQL",
     if (!link.empty()) run["link"] = link;
     run["status"] = delivery == "queued" ? "queued" : "running";
     auto action = outbox(task, field(run, "actionId"));
-    if (action.value("stopRequested", false)) {
-        for (const auto* key : {"stopRequested", "stopOperation", "stopRunId", "stopThreadId", "stopPolicy", "stopPolicyOrigin"})
-            action.erase(key);
-        exec("UPDATE outbox SET data=? WHERE id=?", {action, field(run, "actionId")});
+    if (action && action->stop) {
+        action->stop.reset();
+        saveOutbox(*action);
     }
     for (const auto* key : {"commit", "report", "detail", "evidenceStatus", "sessionCreatedAt"}) run.erase(key);
     run.erase("retryAt");
@@ -110,7 +107,9 @@ bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observati
     run.erase("retryAt");
     run.erase("stopRetryAt");
     run.erase("evidenceAttempts");
-    if (field(task.at("wait"), "runActionId") == field(run, "actionId")) {
+    const auto wait = currentWait(task.at("id"));
+    const auto* deadline = wait ? wait->verification() : nullptr;
+    if (deadline && deadline->actionId == field(run, "actionId")) {
         clearWait(task, "run_finished");
         task["state"] = "running";
     }

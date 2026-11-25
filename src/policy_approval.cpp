@@ -148,7 +148,8 @@ void Store::Impl::releasePolicyTask(Id approval, std::string_view resolution) {
     auto row = query("SELECT task,wait_id,resume_state FROM policy_approvals WHERE id=? AND wait_id<>0", {approval});
     if (!row.next()) return;
     auto task = load(row.number(0));
-    if (task.at("state") != "waiting" || integer(task.at("wait"), "id") != row.number(1)) return;
+    const auto wait = currentWait(row.number(0));
+    if (task.at("state") != "waiting" || !wait || wait->id != row.number(1)) return;
     clearWait(task, resolution);
     task["state"] = row.string(2);
     save(task);
@@ -267,10 +268,10 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
             auto task = load(origin.task);
             if (task.at("state") != "waiting") {
                 const auto resume = field(task, "state");
-                wait(task, "policy_approval", {{"text", std::string(action) + " · " + resource.target}, {"approvalId", card}});
+                const auto waitId = wait(task, PolicyApprovalWait{card}, std::string(action) + " · " + resource.target);
                 save(task);
                 exec("UPDATE policy_approvals SET wait_id=?,resume_state=?,generation=?,card_generation=? WHERE id=?",
-                     {task.at("wait").at("id"), resume, task.at("generation"), task.at("generation"), card});
+                     {waitId, resume, task.at("generation"), task.at("generation"), card});
             }
         }
         journal(origin.task, "policy_approval", {{"itemId", card}, {"status", "pending"}});

@@ -2,10 +2,12 @@
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
 #include "workspace_internal.hpp"
+#include "wait_storage.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/git_host.hpp"
 #include "flock/channels.hpp"
 #include "flock/memory_automation.hpp"
+#include "flock/outbox.hpp"
 #include <map>
 #include <mutex>
 #include <set>
@@ -60,7 +62,7 @@ std::string configuredT3Project(const Json& routing, std::string_view environmen
 inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 inline constexpr std::string_view runStopOperation = "run-stop/";
 bool terminal(const Json&);
-Json questionTarget(const Json&);
+Json questionTarget(const Json&, Id waitId = 0);
 std::string actionId();
 std::string taskIntent(const Json& task);
 std::string effectiveDoneWhen(const Json& task);
@@ -68,7 +70,7 @@ Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 Json& destinationRun(Json& task, std::string_view action);
 bool destinationRunOutstanding(const Json& run);
-bool destinationStopRequested(const Json& action, const RunRef&);
+bool destinationStopRequested(const std::optional<Outbox>& action, const RunRef&);
 void setReportEvidence(Json&, const RunEvidence&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
@@ -165,12 +167,6 @@ public:
     SessionDispatchFileLock& operator=(const SessionDispatchFileLock&) = delete;
 private:
     int fd_;
-};
-
-struct SessionMemory {
-    Id version;
-    std::string section;
-    std::size_t excerptBytes;
 };
 
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
@@ -365,7 +361,7 @@ struct Store::Impl {
     std::map<std::pair<Id, int>, std::map<std::size_t, ToolCallResult>> unpersistedToolResults;
     ModelBudget messageModelBudget(Id messageId) const;
     ModelBudget taskModelBudget(Id taskId) const;
-    Id waitAllowance(Id taskId, std::string_view reason) const;
+    Id waitAllowance(Id taskId, WaitReason reason) const;
     Id reserveModelCall(const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Id takeReservedConversationCall(Id messageId);
     Id takeReservedTaskCall(Id event);
@@ -438,7 +434,7 @@ struct Store::Impl {
     bool authorizeTurn(const conversation::Message&);
     Person turnActor(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
-    const char* questionAnswerError(const Json& task, const conversation::Message&) const;
+    const char* questionAnswerError(const Json& task, const conversation::Message&, const std::optional<Wait>&) const;
     Json taskState(const Json& task, const conversation::Message&, bool fullContract = false) const;
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
     Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
@@ -490,15 +486,23 @@ struct Store::Impl {
     Id journal(Id, std::string_view kind, const Json&);
     Id event(Json&, std::string_view key, Json data);
     Json currentEvent(const Json&) const;
-    void wait(Json&, std::string_view reason, Json data = Json::object());
+    Id wait(Json&, Wait);
+    Id wait(Json&, WaitDetails, std::string text, std::optional<WaitRun> run = {});
+    std::optional<Wait> currentWait(Id task) const;
+    std::optional<Wait> projectedWait(Id task, const Statement&, int col) const;
     void clearWait(Json&, std::string_view resolution);
     bool recordDestinationReport(Json& task, Json& run, const Observation&);
     void consumeEvent(const Json&);
-    Json outbox(const Json&, std::string_view actionId = {}) const;
+    std::optional<Outbox> outbox(const Json&, std::string_view actionId = {}) const;
+    void insertOutbox(Id task, const Outbox&);
+    bool saveOutbox(const Outbox&, std::optional<OutboxPhase> expected = {});
+    bool setOutboxPhase(std::string_view id, OutboxPhase, std::optional<OutboxPhase> expected = {});
+    bool startOutbox(const Outbox&, std::string_view authGeneration);
+    bool prepareOutbox(const Outbox&);
     void unlockQuestion(Json&, std::string_view reason);
 };
 
-std::optional<InboxKind> inboxWaitKind(std::string_view reason);
+std::optional<InboxKind> inboxWaitKind(WaitReason reason);
 
 class Transaction {
 public:

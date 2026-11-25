@@ -435,8 +435,8 @@ void operate(const std::filesystem::path& home, const Bots& bots, const std::str
     args.end();
 
     if (operation == "reconcile") {
-        details = reconciliationData(status, target.waitId, std::move(details),
-                                     [&](std::string_view id, std::string_view request) { return bots.get(id).intake(request); });
+        details = store.reconciliationData(task, target.waitId, std::move(details),
+                                           [&](std::string_view id, std::string_view request) { return bots.get(id).intake(request); });
     }
     store.operate(localOwner, target, operation, details);
     print(store.task(task));

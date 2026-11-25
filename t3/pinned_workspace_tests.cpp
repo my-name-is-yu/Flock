@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
         const auto generation = adapter->authGeneration(environment, Json::object());
         Command command;
         command.actionId = "pinned-worker";
-        command.tool = "delegate";
+        command.tool = CommandTool::delegate;
         command.environmentId = environment;
         command.projectId = "project";
         command.authGeneration = generation;

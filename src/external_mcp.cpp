@@ -165,19 +165,16 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
     const auto publicText = [&](std::string_view text) { return redactConnectionTokens(scrub.text(text)); };
     Json data{{"taskId", taskId},    {"bot", owner.bot},  {"status", task.at("state")},
               {"question", nullptr}, {"result", nullptr}, {"sessionRun", nullptr}};
-    const auto& wait = task.at("wait");
-    if (wait.is_object()) {
-        const auto reason = field(wait, "reason");
-        data["waitReason"] = reason;
-        if (task.at("state") == "waiting" && reason == "user_question" && db.waitIsActionable(task)) {
+    if (const auto wait = db.currentWait(taskId)) {
+        data["waitReason"] = waitReasonName(wait->reason());
+        if (task.at("state") == "waiting" && wait->reason() == WaitReason::user_question && db.waitIsActionable(task)) {
             auto choices = Json::array();
-            for (const auto& choice : wait.value("choices", Json::array()))
-                if (choice.is_string()) choices.push_back(publicText(choice.get_ref<const std::string&>()));
-            const auto target = TaskTarget::from(task, wait.at("id"));
+            for (const auto& choice : wait->choices()) choices.push_back(publicText(choice));
+            const auto target = TaskTarget::from(task, wait->id);
             data["question"] = {{"waitId", target.waitId},
                                 {"targetRevision", target.revision},
                                 {"targetGeneration", target.generation},
-                                {"text", publicText(field(wait, "text"))},
+                                {"text", publicText(wait->text)},
                                 {"choices", std::move(choices)}};
         }
     }
