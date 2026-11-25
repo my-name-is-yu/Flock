@@ -637,6 +637,8 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
 
 void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route,
                              const conversation::QuestionAnchor* question) {
+    const auto receipt = sessionSendReceipts.find(message.id);
+    if (receipt != sessionSendReceipts.end()) persistSessionSendReceipt(message.id,receipt->second);
     if (route == "session_access" || route == "access" || route == "channel_access") {
         auto pending = query(R"SQL(
 SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
@@ -705,10 +707,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
     exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
     std::erase_if(unpersistedToolResults,[&](const auto& entry) { return entry.first.first == message.id; });
-    if (const auto receipt = sessionSendReceipts.find(message.id); receipt != sessionSendReceipts.end()) {
-        recordSessionSendRun(message.id,receipt->second);
-        sessionSendReceipts.erase(receipt);
-    }
+    if (receipt != sessionSendReceipts.end()) sessionSendReceipts.erase(receipt);
 }
 
 void Store::Impl::pauseTurn(const Message& message) {

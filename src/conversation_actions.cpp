@@ -241,6 +241,32 @@ AND json_extract(data,'$.run.threadId')=? LIMIT 1)SQL",
         save(task);
 }
 
+void Store::Impl::saveSessionSendResult(std::string_view bot, Id message, int step, Json result) {
+    const bool unknown = field(result,"delivery") == "unknown";
+    const auto results = Json::array({redactor(bot).record(std::move(result))});
+    exec(R"SQL(
+UPDATE conversation_steps
+SET result=?,effect=CASE WHEN ? AND json_extract(effect,'$.taskId') IS NOT NULL THEN effect END
+WHERE message_id=? AND step=? AND result IS NULL
+)SQL",{results,unknown ? 1 : 0,message,step});
+}
+
+void Store::Impl::persistSessionSendReceipt(Id message, const SessionSendReceipt& receipt) {
+    const auto& target = receipt.target;
+    const auto& delivery = receipt.delivery;
+    recordSessionSendRun(message,receipt);
+    Json result;
+    if (acceptedSessionSend(target,delivery)) {
+        result = {{"ok",true},{"delivery",delivery.delivery},{"environmentId",target.environmentId},
+                  {"threadId",target.threadId}};
+    } else {
+        result = toolFailure(delivery.detail.empty() ? "Could not confirm delivery to T3" : delivery.detail);
+        if (!delivery.definitelyUnsent && (delivery.kind == Delivery::Kind::Unknown || delivery.kind == Delivery::Kind::Accepted))
+            result["delivery"] = "unknown";
+    }
+    saveSessionSendResult(receipt.bot,message,receipt.step,std::move(result));
+}
+
 Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     const conversation::Message& message, int step, const Decision& decision, std::string_view key,
     bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
@@ -302,16 +328,6 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     } catch (const ToolError& failure) { error = failure.what(); }
     const SessionTarget target{command.environmentId,command.target.threadId,command.gatewayEnvironmentId};
     const Resource resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target};
-    const auto saveReceipt = [&](const Delivery& receipt) {
-        if (acceptedSessionSend(target,receipt)) {
-            save({{"ok",true},{"delivery",receipt.delivery},{"environmentId",target.environmentId},{"threadId",target.threadId}});
-        } else {
-            auto result = toolFailure(receipt.detail.empty() ? "Could not confirm delivery to T3" : receipt.detail);
-            if (!receipt.definitelyUnsent && (receipt.kind == Delivery::Kind::Unknown || receipt.kind == Delivery::Kind::Accepted))
-                result["delivery"] = "unknown";
-            save(std::move(result));
-        }
-    };
     constexpr auto stopped = "This Bot's participation in the Session has stopped";
     {
         std::lock_guard lock(mutex);
@@ -321,9 +337,13 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         if (!row.next()) return stop;
         if (!row.string(0).empty()) {
             if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end()) {
-                recordSessionSendRun(id,receipt->second);
-                saveReceipt(receipt->second.delivery);
-            } else save({{"ok",false},{"delivery","unknown"},{"error","Flock restarted while sending this. Check the Session before sending again."}});
+                persistSessionSendReceipt(id,receipt->second);
+            } else if (field(row.json(0),"sendState") == "prepared") {
+                save({{"ok",false},{"delivery","not_accepted"},{"error","The T3 Session message was not sent."}});
+            } else {
+                saveSessionSendResult(message.bot,id,step,{{"ok",false},{"delivery","unknown"},
+                    {"error","Flock restarted while sending this. Check the Session before sending again."}});
+            }
         } else if (sessionParticipationStopped(message.bot,target,id)) {
             save(toolFailure(stopped));
         } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
@@ -452,11 +472,10 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     std::lock_guard lock(mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
     const auto checkpoint = sessionSendReceipts.insert_or_assign(
-        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt),
+        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt),step,
                               savedTaskTarget ? savedTaskId : 0,savedActionId}).first;
     Transaction transaction(db);
-    recordSessionSendRun(id,checkpoint->second);
-    saveReceipt(checkpoint->second.delivery);
+    persistSessionSendReceipt(id,checkpoint->second);
     transaction.commit();
     sessionSendReceipts.erase(checkpoint);
     return advance;

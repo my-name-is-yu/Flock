@@ -353,11 +353,14 @@ struct Store::Impl {
         SessionTarget target;
         std::string title;
         Delivery delivery;
+        int step;
         Id taskId = 0;
         std::string actionId;
     };
     std::map<Id,SessionSendReceipt> sessionSendReceipts;
     void recordSessionSendRun(Id, const SessionSendReceipt&);
+    void saveSessionSendResult(std::string_view bot, Id message, int step, Json result);
+    void persistSessionSendReceipt(Id message, const SessionSendReceipt&);
     bool advanceDestinationSessionMessageRun(Json&, Json&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,

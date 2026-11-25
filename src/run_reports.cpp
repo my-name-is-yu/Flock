@@ -107,7 +107,7 @@ bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observati
     if (advanceDestinationSessionMessageRun(task,run)) return false;
     auto pendingSends = query(R"SQL(
 SELECT json_extract(effect,'$.actionId') FROM conversation_steps
-WHERE result IS NULL AND json_extract(effect,'$.kind')='message_session'
+WHERE json_extract(effect,'$.kind')='message_session'
   AND json_extract(effect,'$.taskId')=?
 )SQL",{task.at("id")});
     bool waitingForSend = false;

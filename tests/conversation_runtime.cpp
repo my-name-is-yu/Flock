@@ -2764,6 +2764,69 @@ void terminalAccessRoutesSettleOnlyPreparedSessionSends() {
     }
 }
 
+void savedFollowupHoldsSlotUntilItsReceiptAndRunSettle() {
+    for (const bool losesReceipt : {false,true}) {
+        Fixture f;
+        f.t3.waitForSessionRuns = true;
+        const auto taskId = oneLinkedDestinationTask(f,"receipt-parent","Start linked work");
+        f.advanceUntil([&] {
+            const auto task = f.task(taskId);
+            return task.contains("runResults") && destinationRunFor(task,"cloud").value("status","") == "running";
+        },"the destination Run did not start");
+        const auto originalRun = destinationRunFor(f.task(taskId),"cloud").at("runId").get<std::string>();
+        const auto queuedId = oneLinkedDestinationTask(f,"receipt-sibling","Queue behind linked work");
+
+        const Person member{"receipt-member",false};
+        f.store->policy().setMember(localOwner,"alpha",member.id,true);
+        sqlite3* writer = nullptr;
+        check(sqlite3_open((f.dir/"state.db").c_str(),&writer) == SQLITE_OK,"could not open the receipt fixture database");
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writerGuard(writer,sqlite3_close);
+        bool locked = false;
+        f.t3.loseNextSend = losesReceipt;
+        if (!losesReceipt) f.t3.beforeSend = [&](const Command& command) {
+            if (command.tool == "message_session")
+                locked = sqlite3_exec(writer,"BEGIN IMMEDIATE; DELETE FROM bot_members "
+                                      "WHERE bot='alpha' AND person='receipt-member'",nullptr,nullptr,nullptr) == SQLITE_OK;
+        };
+        constexpr auto instruction = "Send a follow-up in the saved destination";
+        f.script(instruction,{sendCloudFollowup(taskId)});
+        const auto receipt = f.store->receive(member,f.routing(),"receipt-followup",instruction);
+        bool contended = false;
+        try { f.runtime->runConversations(); }
+        catch (const std::exception& error) {
+            if (!locked || std::string_view(error.what()).find("database is locked") == std::string_view::npos) throw;
+            contended = true;
+        }
+        if (!losesReceipt) {
+            check(locked && contended,"the accepted send did not lose its first receipt write to contention");
+            check(sqlite3_exec(writer,"COMMIT",nullptr,nullptr,nullptr) == SQLITE_OK,"could not commit access revocation");
+            f.t3.beforeSend = {};
+            f.runtime->runConversations();
+            check(f.response(receipt).value("route","") == "access","the pending turn did not close on revoked access");
+        }
+        check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == "message_session",
+              "the saved follow-up did not reach T3 exactly once");
+        const auto followup = f.t3.delivered(f.t3.sent.back().actionId);
+        f.t3.finish(originalRun,"The original destination Run finished");
+        if (losesReceipt) {
+            f.advanceUntil([&] {
+                const auto run = destinationRunFor(f.task(taskId),"cloud");
+                return run.value("status","") == "confirmation_pending";
+            },"an ambiguous T3 receipt did not leave the destination pending");
+            check(f.task(taskId).at("state") == "running" && f.task(queuedId).at("state") == "queued",
+                  "an ambiguous receipt let the task release its project slot");
+        } else {
+            f.advanceUntil([&] {
+                return destinationRunFor(f.task(taskId),"cloud").value("runId","") == followup.runId;
+            },"the access-closed turn did not record its accepted follow-up");
+            check(f.task(queuedId).at("state") == "queued","the queued task started before the known follow-up settled");
+            f.t3.finish(followup.runId,"The accepted follow-up finished");
+            f.reach(taskId,"completed");
+            f.reach(queuedId,"running");
+        }
+    }
+}
+
 void recoveredStopApprovalBelongsToTheStopRequester() {
     Fixture f;
     T3Connections(*f.store).connect("desktop",localOwner.id,48123);
@@ -3753,6 +3816,7 @@ int main(int argc, char** argv) {
         preparedSavedSessionSendSettlesAfterAccessLoss();
         uncertainSavedSessionSendRemainsHeldAfterAccessLoss();
         terminalAccessRoutesSettleOnlyPreparedSessionSends();
+        savedFollowupHoldsSlotUntilItsReceiptAndRunSettle();
         recoveredStopApprovalBelongsToTheStopRequester();
         recoveredDestinationStopHonorsPolicy();
         startedRunOutboxApprovalIsStale();
