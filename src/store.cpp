@@ -1023,6 +1023,7 @@ ORDER BY page.id DESC)SQL",
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
+        if (event.at("kind") == "memory_remembered") p_->projectMemoryNotice(bot,event.at("data"));
         if (rows.number(5))
             event["data"].update(p_->channelContext(rows.number(0),bot,nullptr,viewer));
         result.push_back(std::move(event));

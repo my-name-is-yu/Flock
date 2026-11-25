@@ -202,6 +202,13 @@ If the Bot's local configuration enables `shareMemoryWithSessions`, T3 Sessions
 receive notes from the Bot's memory. Anyone with read access to the Session
 can see the notes in its history.
 
+When you tell a Bot you manage about a lasting preference, correction,
+convention, or decision, it can update its private memory. The memory review
+sees only your direct message and the Bot's existing private memory.
+**Remembered** shows what changed. Use **Undo**
+to restore the previous memory while the saved edit is still current. Bot
+memory edits follow the installation's **Edit Bot memory** rules.
+
 Model input starts with the Bot's role, private memory, and earlier conversation
 history. Flock puts the current event and tool results near the end to lengthen
 the prefix shared by requests for the same Bot.

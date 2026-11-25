@@ -238,6 +238,12 @@ struct Store::Impl {
     std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
     Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&,
                 Seconds now, bool fromBot = false);
+    bool canReviewPreference(const conversation::Message&);
+    bool preferenceReviewPending(Id message, int step) const;
+    std::optional<ModelInput> preferenceReviewInput(const conversation::Message&, std::vector<std::string>,
+                                                    std::string feedback, Seconds now);
+    Json rememberPreference(const conversation::Message&, int step, const Json&, Seconds now);
+    void projectMemoryNotice(std::string_view bot, Json& data) const;
     Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
     Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
     std::vector<ScheduleImportError> stageConfiguredSchedules(

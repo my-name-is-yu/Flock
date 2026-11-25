@@ -298,6 +298,8 @@ void downstreamApproval(const std::filesystem::path& path) {
     auto policy = store.policy();
     policy.setMode(localOwner,"supervised");
     policy.changeRule(localOwner,RuleKind::ask,Action::shared_memory_write,"shared-playbook",true);
+    policy.changeRule(localOwner,RuleKind::ask,Action::private_memory_write,"release",true);
+    policy.setMember(localOwner,"release",member.id,true);
     FixtureModel model;
     Adapter adapter;
     Runtime runtime(store,model,adapter,[](auto) { return std::string{}; });
@@ -316,6 +318,17 @@ void downstreamApproval(const std::filesystem::path& path) {
     approve("playbook",{"apply_memory_edit",{{"docId","shared-playbook"},{"baseVersion",0},{"content","Verify staging"}},"Edit"});
     check(store.memory(localOwner,"release","read_memory",{{"docId","shared-playbook"}}).at("content")=="Verify staging",
           "Approved shared memory edit did not persist");
+
+    const Decision privateEdit{"apply_memory_edit",{{"baseVersion",0},{"content","Use Markdown"}},"Edit"};
+    model.action = privateEdit;
+    store.receive(member,intake,"member-edit","Remember to use Markdown");
+    runtime.runConversations();
+    check(store.inbox(localOwner).empty(),"An ineligible private memory edit requested approval");
+    check(model.outcome.at(0).at("result")==Json{{"ok",false},{"error","Memory access denied"}},
+          "The shared member's private memory edit was not denied");
+    approve("private-edit",privateEdit);
+    check(store.memory(localOwner,"release","read_memory",Json::object()).at("content")=="Use Markdown",
+          "Approved private memory edit did not persist");
 }
 
 void scheduled(const std::filesystem::path& path) {

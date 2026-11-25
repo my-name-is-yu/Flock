@@ -1,4 +1,4 @@
-#include "storage.hpp"
+#include "conversation_storage.hpp"
 
 #include <algorithm>
 
@@ -161,10 +161,12 @@ Json Store::memory(const Person& actor, std::string_view bot, std::string_view o
 Json Store::Impl::memory(std::string_view bot, const Person& actor, std::string_view operation, const Json& args,
                          Seconds now, bool fromBot) {
     const bool reading = operation == "read_memory" || operation == "memory_history";
+    const bool remembering = fromBot && operation == "remember_preference";
     if (!reading && operation != "propose_memory_edit" && operation != "apply_memory_edit" &&
-        operation != "revert_memory_edit" && !(!fromBot && operation == "reject_memory_edit")) return nullptr;
+        operation != "revert_memory_edit" && !remembering && !(!fromBot && operation == "reject_memory_edit")) return nullptr;
     if (!validBotId(bot) || !args.is_object()) throw Conflict("Invalid memory arguments");
     const bool shared = args.contains("docId");
+    if (remembering && shared) throw Conflict("Automatic saves use private memory");
     const auto id = shared ? field(args,"docId") : "memory";
     const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
     auto access = Policy(*this);
@@ -268,6 +270,7 @@ FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 2
 
     updated = scrub.text(updated);
     if (updated.size() > memoryBytes) throw Conflict("Redacted memory content exceeds 8,192 bytes");
+    if (remembering && updated == content) return {{"version",version},{"unchanged",true}};
     const auto summary = diffSummary(content,updated);
     if (!doc) createMemory(key,{},id,{},now);
     if (operation == "propose_memory_edit") {
@@ -291,5 +294,62 @@ VALUES(?,?,?,?,?,?,?,?,?)
     if (operation == "apply_memory_edit" && proposal)
         exec("UPDATE memory_proposals SET status='applied',decided_by=?,decided_at=? WHERE id=?",{author,now,proposal});
     return {{"docKey",key},{"revisionId",revision},{"version",version+1},{"diffSummary",summary}};
+}
+
+bool Store::Impl::canReviewPreference(const conversation::Message& message) {
+    using enum conversation::PrincipalSource;
+    return (message.principalSource == trusted || message.principalSource == web) &&
+        !message.routing.contains("sessionWake") && !message.routing.contains("sessionInvitation") &&
+        Policy(*this).allows(turnActor(message),Action::bot_settings,message.bot);
+}
+
+bool Store::Impl::preferenceReviewPending(Id id, int step) const {
+    return step == 2 && query(R"SQL(
+SELECT 1 FROM conversation_steps WHERE message_id=? AND step=1 AND json_array_length(decision)=1
+AND json_extract(decision,'$[0].tool')='review_preference' AND json_extract(result,'$[0].ok')=1
+)SQL",{id}).next();
+}
+
+std::optional<ModelInput> Store::Impl::preferenceReviewInput(
+    const conversation::Message& message, std::vector<std::string> tools, std::string feedback, Seconds now) {
+    if (!canReviewPreference(message)) return std::nullopt;
+    try {
+        const auto current = memory(message.bot,turnActor(message),"read_memory",Json::object(),now);
+        return ModelInput{
+            .task = Json::object(),
+            .event = {{"kind","private_memory_review"},{"text",message.text},{"baseVersion",current.at("version")}},
+            .history = Json::array(),.notes = {{},field(current,"content")},.tools = std::move(tools),
+            .feedback = std::move(feedback),.config = message.routing.at("config")};
+    } catch (const Conflict&) {
+        return std::nullopt;
+    }
+}
+
+Json Store::Impl::rememberPreference(const conversation::Message& message, int step, const Json& args, Seconds now) {
+    const auto quote = conversation_storage::text(args,"sourceQuote",conversation_storage::messageSize,true);
+    const auto summary = conversation_storage::text(args,"summary",240,true);
+    if (!preferenceReviewPending(message.id,step) || !canReviewPreference(message) ||
+        message.text.find(quote) == std::string::npos)
+        throw Conflict("Use only words stated by the person in their current message");
+    auto result = memory(message.bot,turnActor(message),"remember_preference",args,now,true);
+    if (!result.value("unchanged",false)) {
+        const Json notice{{"text",redactor(message.bot).text(summary)},{"revisionId",result.at("revisionId")},
+                          {"version",result.at("version")},{"replyToMessageId",message.id}};
+        exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'memory_remembered',?,?)",
+             {now,notice,message.bot});
+    }
+    result["ok"] = true;
+    return result;
+}
+
+void Store::Impl::projectMemoryNotice(std::string_view bot, Json& data) const {
+    auto state = query(R"SQL(
+SELECT d.version=?1, undo.id IS NOT NULL FROM memory_documents d
+LEFT JOIN memory_revisions undo ON undo.doc_key=d.doc_key AND undo.version=?1+1 AND undo.reverted_from=?2
+WHERE d.doc_key=?3
+)SQL",{data.at("version"),data.at("revisionId"),privateKey(bot)});
+    if (!state.next()) return;
+    data["canUndo"] = state.number(0) != 0;
+    data["undone"] = state.number(1) != 0;
 }
 }
