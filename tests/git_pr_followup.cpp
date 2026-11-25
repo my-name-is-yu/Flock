@@ -124,7 +124,7 @@ struct Fixture {
         } else
             task = store.submit(request, person ? &testRequester : nullptr);
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(store.task(task).at("state") == "completed" && host->createCalls == 1, "Could not open fixture PR");
+        check(store.task(task).task.state == TaskState::completed && host->createCalls == 1, "Could not open fixture PR");
     }
 
     void ask(std::string_view requestId, std::string_view text) {
@@ -146,7 +146,7 @@ void keepsWorkInOriginatingSession() {
     f.model.openPullRequest = false;
     const auto other = f.store.submit(intake("owner", "other-project"), &testRequester);
     for (int i = 0; i < 8; ++i) f.runtime.tick();
-    check(f.store.task(other).at("state") == "completed", "Unrelated Session did not run");
+    check(f.store.task(other).task.state == TaskState::completed, "Unrelated Session did not run");
     const auto firstFailure = failure("failed-job");
     f.notify(firstFailure);
     const auto& sends = f.sessions.sessionSends;

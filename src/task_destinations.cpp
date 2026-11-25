@@ -3,21 +3,6 @@
 #include <algorithm>
 
 namespace flockv0 {
-std::optional<PendingDestination> PendingDestination::read(const Json& task) {
-    const auto saved = task.find("pendingDestination");
-    if (saved == task.end()) return std::nullopt;
-    TaskRoute route{saved->at("environmentId"), saved->at("projectId"), field(*saved, "gatewayEnvironmentId")};
-    if (route.gatewayEnvironmentId.empty()) route.gatewayEnvironmentId = route.environmentId;
-    return PendingDestination{std::move(route), saved->at("pinned")};
-}
-
-void PendingDestination::write(Json& task) const {
-    task["pendingDestination"] = {{"environmentId", route.environmentId},
-                                  {"projectId", route.projectId},
-                                  {"gatewayEnvironmentId", route.gatewayEnvironmentId},
-                                  {"pinned", pinned}};
-}
-
 std::string Store::Impl::rememberedT3Project(std::string_view bot, std::string_view environment) const {
     auto row = query("SELECT project_id FROM bot_t3_projects WHERE bot_id=? AND environment_id=?", {bot, environment});
     return row.next() ? row.string(0) : std::string{};
@@ -74,11 +59,10 @@ ProjectQuestionWait projectQuestion(const std::vector<T3Project>& projects, cons
 }
 }
 
-bool Store::Impl::applyProjectCatalog(Json& task, ProjectCatalog catalog) {
-    const auto bot = field(task, "botId");
-    const auto environment = field(task, "environmentId");
-    const auto pending = PendingDestination::read(task);
-    task.erase("pendingDestination");
+bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
+    const auto& bot = task.botId;
+    const auto& environment = task.environmentId;
+    const auto pending = std::exchange(task.pendingDestination, std::nullopt);
     if (const auto* problem = std::get_if<std::string>(&catalog)) {
         wait(task, SimpleWaitReason::settings, *problem);
         return true;
@@ -91,7 +75,7 @@ bool Store::Impl::applyProjectCatalog(Json& task, ProjectCatalog catalog) {
         wait(task, SimpleWaitReason::settings, "Add or unarchive a project in this T3 environment, then try again.");
         return true;
     }
-    const auto id = task.at("id").get<Id>();
+    const auto id = task.id;
     const auto peer = peerExchange(id);
     if (peer && peer->recipient == id && peer->kind == "work")
         std::erase_if(projects, [&](const T3Project& project) { return peerWorkRouteWouldCycle(peer->sender, environment, project.id); });
@@ -105,9 +89,9 @@ bool Store::Impl::applyProjectCatalog(Json& task, ProjectCatalog catalog) {
     if (selected == projects.end()) selected = std::ranges::find(projects, remembered, &T3Project::id);
     if (selected == projects.end() && projects.size() == 1) selected = projects.begin();
     if (selected != projects.end()) {
-        task["projectId"] = selected->id;
-        if (task.contains("runTargets"))
-            for (auto& target : task["runTargets"])
+        task.projectId = selected->id;
+        if (task.rest.contains("runTargets"))
+            for (auto& target : task.rest["runTargets"])
                 if (field(target, "environmentId") == environment && field(target, "projectId").empty()) target["projectId"] = selected->id;
         rememberT3Project(bot, environment, selected->id);
         return true;

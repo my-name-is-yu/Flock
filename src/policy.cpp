@@ -459,7 +459,7 @@ void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destinati
         Transaction tx(db_.db);
         if (!upstream || !ref.valid() || !identifier(destination) || !identifier(operation)) throw Conflict("Secret access denied");
         const auto entry = db_.load(task);
-        const auto bot = field(entry, "botId");
+        const auto& bot = entry.botId;
         if (db_.botPaused(bot) || forbidden(bot, Action::secret_use, ref.name)) throw Conflict("Secret access denied");
         const auto seen = db_.query("SELECT 1 FROM secret_destinations WHERE destination=?", {destination}).next();
         const auto key = "secret/" + Json::array({task, operation}).dump();

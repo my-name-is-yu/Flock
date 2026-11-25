@@ -201,8 +201,9 @@ void roundTrip() {
               "The submission byte budget was not enforced or reported");
         first.submitWithoutReceipt(ask);
         const auto tasks = store.tasks();
-        check(tasks.size() == 1 && tasks.front().at("request") == ask.at("text"), "The lost receipt did not leave exactly one Task");
-        taskId = tasks.front().at("id");
+        check(tasks.size() == 1 && tasks.front().task.request == ask.at("text").get<std::string>(),
+              "The lost receipt did not leave exactly one Task");
+        taskId = tasks.front().task.id;
     }
 
     Store store(database);
@@ -407,12 +408,12 @@ void replannedTaskDropsPriorRun() {
     check(mcp.success(statusTool, task).at("sessionLink") == releaseLink, "The initial Run was not active");
     store.receive(localOwner, cb.intake("release", ""), "revise-scope", "Include internal changes too");
     runtime.runConversations();
-    check(store.task(model.taskId).value("replanning", false) && mcp.success(statusTool, task).at("sessionLink").is_null(),
+    check(store.task(model.taskId).task.rest.value("replanning", false) && mcp.success(statusTool, task).at("sessionLink").is_null(),
           "The old Run was still linked during replanning");
     t3.observations["thread-release"] = {.kind = Observation::Kind::Finished, .status = "stopped", .report = "Stopped"};
     tick(runtime, 2);
-    const auto current = store.task(model.taskId);
-    check(!current.value("replanning", false) && current.at("lastRun").at("revisionId") != current.at("currentRevision") &&
+    const auto current = store.task(model.taskId).task;
+    check(!current.rest.value("replanning", false) && current.rest.at("lastRun").at("revisionId") != current.currentRevision.value() &&
               mcp.success(statusTool, task).at("sessionLink").is_null(),
           "A settled Run for the old revision was linked");
 }
@@ -426,7 +427,10 @@ void hostedSessionLinks() {
     check(web::externalSessionLink(hostedSession).empty(), "A noncanonical hosted link was accepted");
 
     const Json loopbackSession{{"environmentId", "build.prod"}, {"threadId", "loopback~nightly"}, {"link", loopbackUrl}};
-    const auto tasks = Json::array({{{"activeRun", nullptr}, {"runs", Json::array({loopbackSession, hostedSession})}}});
+    TaskView task;
+    task.task.rest["activeRun"] = nullptr;
+    task.runs = Json::array({loopbackSession, hostedSession});
+    const std::vector tasks{std::move(task)};
     TestDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     const auto view = web::botView(store, {{"id", "release"}}, &tasks);

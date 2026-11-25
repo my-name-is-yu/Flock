@@ -139,7 +139,7 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     runtime.runConversations();
     check(model.origin == origin && model.result.value("ok", false), "Session origin was not saved before starting the task");
     const Id taskId = model.result.at("taskId");
-    check(store.task(taskId).at("sessionOrigin") == origin, "The task omitted its originating Session");
+    check(store.task(taskId).task.rest.at("sessionOrigin") == origin, "The task omitted its originating Session");
 
     const auto launches = [&] { return effects("t3_thread_launch"); };
     const auto before = launches().size();
@@ -159,10 +159,10 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     check(attempts.size() == before + 2 && attempts.at(before).at("delegatedFrom") == origin &&
               !attempts.at(before + 1).contains("delegatedFrom"),
           "The approved Session-origin task sent the wrong launch");
-    const auto task = store.task(taskId);
-    const auto thread = task.at("activeRun").at("threadId");
+    const auto task = store.task(taskId).task;
+    const auto thread = task.rest.at("activeRun").at("threadId");
     check(
-        task.contains("launchWarning") &&
+        task.rest.contains("launchWarning") &&
             std::ranges::any_of(store.history(taskId), [](const Json& entry) { return entry.at("kind") == "session_lineage_unavailable"; }),
         "A launch fallback was not recorded on the task and in its journal");
 

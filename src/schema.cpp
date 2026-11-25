@@ -3,7 +3,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 11;
+constexpr Id schemaVersion = 12;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(

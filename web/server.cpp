@@ -658,7 +658,7 @@ private:
         return data;
     }
 
-    Json readBotView(const Person& person, const std::string& id, const Json& bot, const Json* changedSessionTasks) {
+    Json readBotView(const Person& person, const std::string& id, const Json& bot, const std::vector<TaskView>* changedSessionTasks) {
         auto policy = store_.policy();
         if (const auto cached = changes_.cachedBotView(person, id, bot)) {
             // Workflow deadlines advance without a write. Session deltas belong to the request's cursor.
@@ -781,7 +781,7 @@ private:
             const auto wait = bodyId(body, "waitId");
             auto data = operationData(body, operation);
             const auto task = store_.task(id);
-            if (web::field(task, "botId") != bot) return error(res, 404, "task_not_found");
+            if (task.task.botId != bot) return error(res, 404, "task_not_found");
             if (operation == "reconcile") data = store_.reconciliationData(id, wait, std::move(data), callbacks_.intake);
             store_.operate(actor, {bot, id, wait, bodyId(body, "targetRevision", 0), bodyId(body, "targetGeneration", 0)}, operation, data);
             json(res, 200, {{"accepted", true}});

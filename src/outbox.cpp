@@ -291,10 +291,10 @@ Outbox from_json(std::string_view id, std::string_view phase, std::string_view a
     return outbox;
 }
 
-std::optional<Outbox> Store::Impl::outbox(const Json& task, std::string_view actionId) const {
-    const auto id = actionId.empty() ? field(task, "actionId") : std::string(actionId);
+std::optional<Outbox> Store::Impl::outbox(const TaskData& task, std::string_view actionId) const {
+    const auto id = actionId.empty() ? field(task.rest, "actionId") : std::string(actionId);
     if (id.empty()) return std::nullopt;
-    auto row = query("SELECT data,phase,auth_generation FROM outbox WHERE id=? AND task_id=?", {id, task["id"]});
+    auto row = query("SELECT data,phase,auth_generation FROM outbox WHERE id=? AND task_id=?", {id, task.id});
     if (!row.next()) return std::nullopt;
     return from_json(id, row.string(1), row.string(2), row.string(0));
 }

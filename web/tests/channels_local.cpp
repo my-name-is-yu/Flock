@@ -136,7 +136,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     event["externalMessageId"] = "prepare-local";
     store.receiveChannel(ChannelKind::slack, "Bearer fixture-channel", event, cb.intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
-    model.local = store.activeTasks("release").at(0).task.at("activeRun");
+    model.local = store.activeTasks("release").at(0).task.rest.at("activeRun");
     check(model.local.is_object(), "Fixture Session did not start");
     const auto localFile = std::filesystem::canonical(database.parent_path()) / "session-local.txt";
     std::ofstream(localFile) << "Approved only for this Session";

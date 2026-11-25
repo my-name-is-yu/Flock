@@ -616,7 +616,7 @@ ORDER BY t.id
     while (children.next()) cancellations.emplace_back(children.number(0), children.number(1));
     for (const auto& [taskId, participation] : cancellations) {
         auto task = load(taskId);
-        if (!terminal(task) && task.at("state") != "cancelling") requestCancellation(task, {participation, cutoff});
+        if (!terminal(task) && task.state != TaskState::cancelling) requestCancellation(task, {participation, cutoff});
     }
     auto selected = query((stopCascade + R"SQL(
 SELECT t.id,m.id,p.person_id,p.environment_id,p.thread_id
@@ -717,12 +717,12 @@ WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
                                  {item.target.environmentId, item.target.threadId, item.run, item.participant});
                 if (run.next()) {
                     auto task = load(run.number(0));
-                    const auto& active = task.at("activeRun");
+                    const auto& active = task.rest.at("activeRun");
                     if (!terminal(task) && active.is_object() && field(active, "runId") == item.run &&
                         field(active, "threadId") == item.target.threadId && field(active, "environmentId") == item.target.environmentId) {
                         // Queue cancellation confirms this Run never started.
-                        task["activeRun"] = nullptr;
-                        if (task.at("state") == "cancelling")
+                        task.rest["activeRun"] = nullptr;
+                        if (task.state == TaskState::cancelling)
                             save(task);
                         else
                             requestCancellation(task);

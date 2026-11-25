@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "task_storage.hpp"
 
 #include <algorithm>
 #include <array>
@@ -146,7 +147,7 @@ AND (?='' OR c.scope_key=?)
 AND t.state IN ('running','waiting')
 AND json_extract(t.data,'$.activeRun.threadId')=r.thread_id
 AND json_extract(t.data,'$.activeRun.runId')=r.run_id
-AND json_extract(t.data,'$.environmentId')=r.environment_id LIMIT 2
+AND t.environment_id=r.environment_id LIMIT 2
 )SQL",
                          {bot, thread, run, scope, scope});
     if (!session.next()) throw Conflict("This Bot does not own that active Session");
@@ -202,7 +203,7 @@ AND c.machine_id=? AND c.machine_owner=? AND c.status='approved'
 AND t.state IN ('running','waiting')
 AND json_extract(t.data,'$.activeRun.threadId')=r.thread_id
 AND json_extract(t.data,'$.activeRun.runId')=r.run_id
-AND json_extract(t.data,'$.environmentId')=r.environment_id
+AND t.environment_id=r.environment_id
 )SQL",
                                 {environment, authenticatedRun.threadId, authenticatedRun.runId, machineId, owner});
     if (!connection.next() || !p_->permitsLocalMachineOwner(owner, connection.string(0)))
@@ -240,7 +241,7 @@ void Store::decideLocalConnection(const Person& actor, Id id, bool approve) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
     auto row = p_->query(R"SQL(
-SELECT c.bot_id,c.machine_id,c.machine_owner,c.status,t.state,t.data,c.thread_id,c.environment_id
+SELECT c.bot_id,c.machine_id,c.machine_owner,c.status,c.thread_id,c.environment_id,t.data,t.id,t.state,t.generation
 FROM local_machine_connections c JOIN tasks t ON t.id=c.task_id WHERE c.id=?
 )SQL",
                          {id});
@@ -249,11 +250,11 @@ FROM local_machine_connections c JOIN tasks t ON t.id=c.task_id WHERE c.id=?
     if (row.string(3) != "pending") throw Conflict("Local connection is no longer pending");
     if (approve) {
         const auto machine = p_->localMachines.find(row.string(1));
-        const auto task = row.json(5);
-        const auto active = task.at("activeRun");
+        const auto task = decodeTaskRow(row, 6);
+        const auto& active = task.rest.at("activeRun");
         if (machine == p_->localMachines.end() || machine->second->owner() != actor.id ||
-            (row.string(4) != "running" && row.string(4) != "waiting") || field(active, "threadId") != row.string(6) ||
-            field(active, "runId").empty() || field(task, "environmentId") != row.string(7))
+            (task.state != TaskState::running && task.state != TaskState::waiting) || field(active, "threadId") != row.string(4) ||
+            field(active, "runId").empty() || task.environmentId != row.string(5))
             throw Conflict("Session or machine is no longer active");
     }
     p_->exec("UPDATE local_machine_connections SET status=?,decided_by=?,decided_at=? WHERE id=?",

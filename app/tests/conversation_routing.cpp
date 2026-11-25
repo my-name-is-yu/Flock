@@ -78,10 +78,10 @@ void parallelDestinations() {
     runtime.runConversations();
     const auto tasks = store.tasks();
     check(tasks.size() == 1 && t3.commands.empty(), "one conversation request must save exactly one task before dispatch");
-    const auto task = store.task(tasks.front().at("id"));
+    const auto& task = tasks.front().task;
     const Json expected = Json::array({{{"name", "mini"}, {"environmentId", "mini-env"}, {"projectId", "mini-project"}},
                                        {{"name", "local"}, {"environmentId", "env-canonical"}, {"projectId", "project-canonical"}}});
-    check(task.at("runTargets") == expected && task.at("requestedCommit") == std::string(40, 'a'),
+    check(task.rest.at("runTargets") == expected && task.rest.at("requestedCommit") == std::string(40, 'a'),
           "the task must pin the selected canonical routes and normalized SHA");
 
     model.action.args["environments"] = {"local", "env-canonical"};
@@ -92,16 +92,17 @@ void parallelDestinations() {
     model.action.args = {{"request", "Verify on the Mini"}, {"environment", "mini"}, {"commit", std::string(40, 'a')}};
     store.receive(localOwner, intake, "single-verification", "Verify on the Mini");
     runtime.runConversations();
-    const auto singleNamed = store.task(model.receipt.at("taskId"));
-    check(model.receipt.value("ok", false) && singleNamed.at("projectId") == "mini-project" &&
-              singleNamed.at("requestedCommit") == std::string(40, 'a') && singleNamed.at("runTargets").size() == 1 &&
-              singleNamed.at("runTargets").at(0).at("environmentId") == "mini-env",
+    const auto singleNamed = store.task(model.receipt.at("taskId")).task;
+    check(model.receipt.value("ok", false) && singleNamed.projectId == "mini-project" &&
+              singleNamed.rest.at("requestedCommit") == std::string(40, 'a') && singleNamed.rest.at("runTargets").size() == 1 &&
+              singleNamed.rest.at("runTargets").at(0).at("environmentId") == "mini-env",
           "a single named destination must retain optional verification and its saved route");
     model.action.args = {{"request", "Verify on the Mini"}, {"environments", Json::array({"mini"})}};
     store.receive(localOwner, intake, "single-array", "Verify on the Mini");
     runtime.runConversations();
-    const auto singleArray = store.task(model.receipt.at("taskId"));
-    check(singleArray.at("runTargets").size() == 1 && singleArray.at("runTargets").at(0) == singleNamed.at("runTargets").at(0),
+    const auto singleArray = store.task(model.receipt.at("taskId")).task;
+    check(singleArray.rest.at("runTargets").size() == 1 &&
+              singleArray.rest.at("runTargets").at(0) == singleNamed.rest.at("runTargets").at(0),
           "a one-item environments list must route like a named single destination");
     model.action.args = {
         {"request", "Resume the cancelled task"}, {"resume", true}, {"sourceResultMessageId", 1}, {"commit", std::string(40, 'a')}};
@@ -123,8 +124,8 @@ void genericDestinationCounts() {
     runtime.runConversations();
     auto tasks = store.tasks();
     check(tasks.size() == 1, "one destination must create one conversation task");
-    const auto single = store.task(tasks.front().at("id"));
-    check(single.at("runTargets").size() == 1 && !single.contains("requestedCommit"),
+    const auto& single = tasks.front().task;
+    check(single.rest.at("runTargets").size() == 1 && !single.rest.contains("requestedCommit"),
           "ordinary one-destination work must not require commit verification");
 
     model.action.args = {{"request", "Run on all three"}, {"environments", {"mini", "local", "cloud"}}};
@@ -132,8 +133,8 @@ void genericDestinationCounts() {
     runtime.runConversations();
     tasks = store.tasks();
     check(tasks.size() == 2, "three destinations must remain one additional conversation task");
-    const auto multi = store.task(tasks.front().at("id"));
-    check(multi.at("runTargets").size() == 3 && !multi.contains("requestedCommit"),
+    const auto& multi = tasks.front().task;
+    check(multi.rest.at("runTargets").size() == 3 && !multi.rest.contains("requestedCommit"),
           "ordinary multi-destination work must persist all routes without a SHA policy");
 }
 
@@ -175,8 +176,8 @@ void manyConfiguredDestinations() {
     check(allOptionsOffered, "all 17 configured destinations must be offered as choices to one request");
     const auto tasks = store.tasks();
     check(tasks.size() == 1, "one request across 17 destinations must create one task");
-    const auto task = store.task(tasks.front().at("id"));
-    check(task.at("runTargets") == expected && t3.commands.empty(),
+    const auto& task = tasks.front().task;
+    check(task.rest.at("runTargets") == expected && t3.commands.empty(),
           "one request must save all 17 selected destinations without dropping or dispatching any early");
 }
 
@@ -187,22 +188,22 @@ void destinationWithoutSessionIsUnavailable() {
     const auto database = temp.path / "state.db";
     Store store(database);
     const auto id = store.submit(intake);
-    auto task = store.task(id);
-    task["state"] = "running";
-    task["runResults"] = Json::array({{{"name", "mini"},
-                                       {"environmentId", "mini-env"},
-                                       {"projectId", "mini-project"},
-                                       {"actionId", "saved-action"},
-                                       {"status", "running"}}});
-    task.erase("runTargets");
+    const auto generation = store.task(id).task.generation;
+    const auto runResults = Json::array({{{"name", "mini"},
+                                          {"environmentId", "mini-env"},
+                                          {"projectId", "mini-project"},
+                                          {"actionId", "saved-action"},
+                                          {"status", "running"}}});
     sqlite3* raw = nullptr;
     const auto opened = sqlite3_open(database.c_str(), &raw);
     const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
     check(opened == SQLITE_OK, "could not reopen the task database");
     sqlite3_stmt* rawStatement = nullptr;
-    const auto prepared = sqlite3_prepare_v2(db.get(), "UPDATE tasks SET data=? WHERE id=?", -1, &rawStatement, nullptr);
+    const auto prepared =
+        sqlite3_prepare_v2(db.get(), "UPDATE tasks SET data=json_set(json_remove(data,'$.runTargets'),'$.runResults',json(?)) WHERE id=?",
+                           -1, &rawStatement, nullptr);
     const std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(rawStatement, sqlite3_finalize);
-    const auto serialized = task.dump();
+    const auto serialized = runResults.dump();
     check(prepared == SQLITE_OK && sqlite3_bind_text(statement.get(), 1, serialized.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK &&
               sqlite3_bind_int64(statement.get(), 2, id) == SQLITE_OK && sqlite3_step(statement.get()) == SQLITE_DONE,
           "could not persist the destination Run fixture");
@@ -211,7 +212,7 @@ void destinationWithoutSessionIsUnavailable() {
     RoutingT3 t3;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     model.action = {"send_to_task",
-                    {{"taskId", id}, {"generation", task.at("generation")}, {"instruction", "Continue the Mini work"}},
+                    {{"taskId", id}, {"generation", generation}, {"instruction", "Continue the Mini work"}},
                     "Continue this destination only."};
     store.receive(localOwner, intake, "destination-follow-up", "Continue the Mini work");
     runtime.runConversations();
@@ -240,11 +241,11 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
     RoutingT3 t3;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     const auto id = store.submit(intake);
-    const auto task = store.task(id);
+    const auto task = store.task(id).task;
     model.action = {"change_task",
                     {{"taskId", id},
-                     {"generation", task.at("generation")},
-                     {"revisionId", task.value("currentRevision", Id{0})},
+                     {"generation", task.generation},
+                     {"revisionId", task.currentRevision.value_or(0)},
                      {"instruction", "Move verification to the Mini"},
                      {"environment", alias}},
                     "Use the requested Mini destination."};

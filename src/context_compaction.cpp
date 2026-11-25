@@ -134,15 +134,15 @@ ORDER BY entry.id DESC LIMIT 24
 Json Store::Impl::contextTool(std::string_view tool, const Json& args, const conversation::Message& message, int step) {
     if (tool == "continue_fresh_session") {
         auto task = ownTask(identifier(args, "taskId", true), message);
-        if (terminal(task) || task.at("state") == "cancelling") throw Conflict("Task is closed or stopping");
+        if (terminal(task) || task.state == TaskState::cancelling) throw Conflict("Task is closed or stopping");
         const auto instruction = args.contains("instruction")
                                      ? conversation_storage::text(args, "instruction", limits::session_prompt::maxDecisionTextBytes, true)
                                      : "Continue with the same completion criteria.";
-        task["newSessionRequired"] = true;
-        task["freshContextRequested"] = true;
-        task["replanning"] = true;
+        task.rest["newSessionRequired"] = true;
+        task.rest["freshContextRequested"] = true;
+        task.rest["replanning"] = true;
         acceptInstruction(task, message.id, step, instruction, nullptr, nullptr);
-        return {{"ok", true}, {"freshContext", true}, {"taskId", task.at("id")}, {"effect", "replanning"}};
+        return {{"ok", true}, {"freshContext", true}, {"taskId", task.id}, {"effect", "replanning"}};
     }
 
     const auto& bot = message.bot;

@@ -192,7 +192,7 @@ std::string Store::Impl::taskEnvironment(std::string_view bot, const Json& routi
     return taskRoute(bot, routing, name).environmentId;
 }
 
-TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std::string_view name, const Json* movingTask,
+TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std::string_view name, const TaskData* movingTask,
                                  const LinkedTaskDestinations* linked) {
     using conversation_storage::ToolError;
     const auto configured = field(routing, "environmentId");
@@ -201,8 +201,8 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
         if (route.projectId.empty() && movingTask) {
             route.projectId = namedT3Project(routing.at("config"), route.environmentId, name);
             if (route.projectId.empty()) {
-                if (route.environmentId == field(*movingTask, "environmentId"))
-                    route.projectId = field(*movingTask, "projectId");
+                if (route.environmentId == movingTask->environmentId)
+                    route.projectId = movingTask->projectId;
                 else if (route.environmentId == configured)
                     route.projectId = field(routing, "projectId");
             }
@@ -217,8 +217,8 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
     if (name.empty())
         return resolved(
             {defaultT3Environment(bot, configured, field(routing.value("sessionOrigin", Json::object()), "environmentId")), {}, {}});
-    if (movingTask && name == field(*movingTask, "environmentId")) {
-        const auto route = resolved({std::string(name), {}, field(*movingTask, "gatewayEnvironmentId")});
+    if (movingTask && name == movingTask->environmentId) {
+        const auto route = resolved({std::string(name), {}, movingTask->gatewayEnvironmentId.value_or("")});
         return connected(route) ? route : TaskRoute{};
     }
     // The Bot's default ID is the direct route offered by change_task.
@@ -227,8 +227,7 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
     if (name == configured)
         route = TaskRoute{std::string(name), {}, {}};
     else {
-        if (movingTask && movingTask->at("projectId") != routing.at("projectId"))
-            route = configuredTaskRoute(movingTask->at("config"), name);
+        if (movingTask && movingTask->projectId != field(routing, "projectId")) route = configuredTaskRoute(movingTask->config, name);
         if (!route) route = configuredTaskRoute(routing.at("config"), name);
         if (!route && configured.empty() && registeredT3Environments(bot).contains(std::string(name)))
             route = TaskRoute{std::string(name), {}, {}};
@@ -332,7 +331,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
     return destinations;
 }
 
-TaskChange Store::Impl::taskChange(const conversation::Message& message, const Json& args, const Json& task,
+TaskChange Store::Impl::taskChange(const conversation::Message& message, const Json& args, const TaskData& task,
                                    const LinkedTaskDestinations& linked) {
     using conversation_storage::text;
     using conversation_storage::ToolError;

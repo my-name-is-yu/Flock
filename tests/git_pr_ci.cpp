@@ -174,7 +174,7 @@ void runner() {
         task = store.submit(intake());
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(store.task(task).at("state") == "completed" && host->createCalls == 1,
+        check(store.task(task).task.state == TaskState::completed && host->createCalls == 1,
               "Session-to-PR flow did not complete: " + store.history(task).dump());
         other = store.submit(intake("other", "other-project"));
         check(script.results.at("session-pr").at("prNumber") == 1, "task did not receive the PR number");
@@ -312,7 +312,7 @@ void pausedGitNotifications() {
         task = store.submit(intake());
         Runtime runtime(store, script, sessions, {}, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(store.task(task).at("state") == "completed" && host->createCalls == 1,
+        check(store.task(task).task.state == TaskState::completed && host->createCalls == 1,
               "Git notification fixture did not finish its watched request");
         store.setBotPaused(localOwner, "owner", true);
         check(store.receiveGitWebhook({hostName, "paused-delivery", repoName, "comment", "created", {1}, sha, "Paused", 0}),
@@ -345,8 +345,8 @@ void reviewAfterTaskProgress() {
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     const auto task = store.submit(intake());
-    for (int i = 0; i < 4 && store.task(task).value("currentRevision", Id{0}) == 0; ++i) runtime.tick();
-    check(store.task(task).value("currentRevision", Id{0}) > 0, "task has no initial revision");
+    for (int i = 0; i < 4 && store.task(task).task.currentRevision.value_or(0) == 0; ++i) runtime.tick();
+    check(store.task(task).task.currentRevision.value_or(0) > 0, "task has no initial revision");
 
     auto args = openArgs();
     args["taskId"] = task;
@@ -411,8 +411,8 @@ void reconciliationAfterTaskRevision() {
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     const auto task = store.submit(intake());
-    for (int i = 0; i < 4 && store.task(task).value("currentRevision", Id{0}) == 0; ++i) runtime.tick();
-    const auto before = store.task(task);
+    for (int i = 0; i < 4 && store.task(task).task.currentRevision.value_or(0) == 0; ++i) runtime.tick();
+    const auto before = taskJson(store.task(task));
     check(before.value("currentRevision", Id{0}) > 0, "task has no initial revision");
 
     auto args = openArgs();
@@ -433,13 +433,13 @@ void reconciliationAfterTaskRevision() {
                                  {"revisionId", before.at("currentRevision")},
                                  {"instruction", "Update the success criteria"},
                                  {"doneWhen", "Verify the new completion criteria"}});
-    check(changed.at("ok") == true && store.task(task).at("replanning") == true, "fixture did not revise the active task");
+    check(changed.at("ok") == true && store.task(task).task.rest.at("replanning") == true, "fixture did not revise the active task");
     check(invoke(store, runtime, script, "retry-after-replan", "git_open_pr", args).at("status") == "ambiguous",
           "fixture did not keep the PR creation unresolved");
     const auto latest = store.inbox(localOwner, "owner").at(0);
     check(latest.at("itemId") == initial.at("itemId") && latest.at("targetRevision") != initial.at("targetRevision") &&
-              latest.at("targetRevision") == store.task(task).at("currentRevision") &&
-              latest.at("targetGeneration") == store.task(task).at("generation") && latest.at("candidates") == initial.at("candidates"),
+              latest.at("targetRevision") == store.task(task).task.currentRevision.value() &&
+              latest.at("targetGeneration") == store.task(task).task.generation && latest.at("candidates") == initial.at("candidates"),
           "Reconciliation lost its current target or verified candidates");
     try {
         store.decideInbox(localOwner, target(initial), "reject_pr");
@@ -750,8 +750,9 @@ void taskMutationAttempts() {
                 "git_update_pr", {{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", states.at(previous.size() - 1)}}, {}};
         return {"git_manage_issue", {{"host", hostName}, {"repo", repoName}, {"action", "create"}, {"title", "Follow-up"}}, {}};
     };
-    for (int i = 0; i < 14 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
-    check(store.task(task).at("state") == "completed" && host->prStateUpdates == states && host->prs.at(0).state == FakeHost::State::closed,
+    for (int i = 0; i < 14 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    check(store.task(task).task.state == TaskState::completed && host->prStateUpdates == states &&
+              host->prs.at(0).state == FakeHost::State::closed,
           "separate decisions on one event did not all update the PR");
 }
 
@@ -820,10 +821,10 @@ void taskMutationRestart(bool protectTitleOnRestart) {
     Store store(path);
     if (protectTitleOnRestart) store.protectGitCredential(title);
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 5 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
+    for (int i = 0; i < 5 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
     std::ifstream log(effects);
     const std::string actions((std::istreambuf_iterator<char>(log)), {});
-    check(store.task(task).at("state") == "completed" && calls == 1 && actions == "closed\n",
+    check(store.task(task).task.state == TaskState::completed && calls == 1 && actions == "closed\n",
           "restart repeated inference or dispatched the saved Git mutation twice");
 }
 
@@ -883,8 +884,8 @@ void taskReadRecovery() {
         return {"git_read_result", {{"host", hostName}, {"readId", saved}}, {}};
     };
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 8 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
-    check(store.task(task).at("state") == "completed" && phase == 3 && host->logCalls == 5,
+    for (int i = 0; i < 8 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    check(store.task(task).task.state == TaskState::completed && phase == 3 && host->logCalls == 5,
           "recovery did not use saved snapshots through both access checks");
 }
 
@@ -914,8 +915,8 @@ void approvedTaskReadProjects() {
                       {card.at("botId"), InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
                        card.at("targetRevision"), card.at("targetGeneration")},
                       "allow_once");
-    for (int i = 0; i < 8 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
-    check(phase == 2 && host->hostCalls == 1 && store.task(task).at("state") == "completed",
+    for (int i = 0; i < 8 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    check(phase == 2 && host->hostCalls == 1 && store.task(task).task.state == TaskState::completed,
           "Approved Git read did not settle through the task");
 }
 
@@ -938,8 +939,8 @@ void discoveryReplayRevocation() {
     };
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     const auto task = store.submit(intake());
-    for (int i = 0; i < 10 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
-    check(phase == 2 && store.task(task).at("state") == "completed", "Discovery replay was not exercised");
+    for (int i = 0; i < 10 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    check(phase == 2 && store.task(task).task.state == TaskState::completed, "Discovery replay was not exercised");
 }
 
 void boundedTaskReadAndForeignReference(bool comments) {
@@ -988,11 +989,12 @@ void boundedTaskReadAndForeignReference(bool comments) {
         return {"complete", {{"report", "Checked the Git read"}}, {}};
     };
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 10 && store.task(first).at("state") != "completed"; ++i) runtime.tick();
-    check(store.task(first).at("state") == "completed", "bounded read did not reach the task");
+    for (int i = 0; i < 10 && store.task(first).task.state != TaskState::completed; ++i) runtime.tick();
+    check(store.task(first).task.state == TaskState::completed, "bounded read did not reach the task");
     const auto other = store.submit(intake("owner", "other-project"));
-    for (int i = 0; i < 10 && store.task(other).at("state") != "completed"; ++i) runtime.tick();
-    check(store.task(other).at("state") == "completed" && host->hostCalls == 1, "task-scoped Git lookup reached the wrong repository read");
+    for (int i = 0; i < 10 && store.task(other).task.state != TaskState::completed; ++i) runtime.tick();
+    check(store.task(other).task.state == TaskState::completed && host->hostCalls == 1,
+          "task-scoped Git lookup reached the wrong repository read");
 }
 
 void redaction() {
@@ -1045,8 +1047,8 @@ void notificationCannotControlASession() {
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     const auto task = store.submit(intake());
-    for (int i = 0; i < 8 && store.task(task).at("state") != "running"; ++i) runtime.tick();
-    check(store.task(task).at("state") == "running", "Session did not start");
+    for (int i = 0; i < 8 && store.task(task).task.state != TaskState::running; ++i) runtime.tick();
+    check(store.task(task).task.state == TaskState::running, "Session did not start");
     auto args = openArgs();
     args["taskId"] = task;
     check(invoke(store, runtime, script, "create-watch", "git_open_pr", args).at("ok") == true, "Could not create watch");
@@ -1057,7 +1059,7 @@ void notificationCannotControlASession() {
         if (steps.empty()) {
             check(std::ranges::find(input.tools, "message_session") == input.tools.end(), "Session write was offered in a notification");
             return Decision{"message_session",
-                            {{"taskId", task}, {"generation", store.task(task).at("generation")}, {"text", "Act on the webhook"}},
+                            {{"taskId", task}, {"generation", store.task(task).task.generation}, {"text", "Act on the webhook"}},
                             {}};
         }
         result = steps.at(0).at("result");

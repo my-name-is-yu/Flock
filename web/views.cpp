@@ -252,18 +252,21 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
     row["latestIncomingEventId"] = latestIncoming;
 }
 
-std::string displayState(const Json& task) {
-    const auto state = field(task, "state");
-    if (state == "cancelling" || ((state != "cancelled" && state != "completed") && task.value("replanning", false))) return "stopping";
-    if (state == "running" && task.value("queuedInT3", false)) return "queued";
-    return state;
+std::string_view displayState(TaskState state, bool replanning = false, bool queuedInT3 = false) {
+    if (state == TaskState::cancelling || ((state != TaskState::cancelled && state != TaskState::completed) && replanning))
+        return "stopping";
+    if (state == TaskState::running && queuedInT3) return "queued";
+    return taskStateName(state);
 }
 
-Json taskSummary(const Json& task) {
-    Json result = {{"state", displayState(task)}};
-    copyFields(
-        result, task,
-        {"id", "request", "deadline", "currentRevision", "generation", "createdAt", "workflowId", "stageId", "inputArtifactVersion"});
+std::string_view displayState(const TaskData& task) {
+    return displayState(task.state, task.rest.value("replanning", false), task.rest.value("queuedInT3", false));
+}
+
+Json taskSummary(const TaskData& task) {
+    Json result = {{"state", displayState(task)}, {"id", task.id}, {"request", task.request}, {"generation", task.generation}};
+    if (task.currentRevision) result["currentRevision"] = *task.currentRevision;
+    copyFields(result, task.rest, {"deadline", "createdAt", "workflowId", "stageId", "inputArtifactVersion"});
     return result;
 }
 
@@ -276,9 +279,9 @@ Json verificationRun(const Json& source) {
     return run;
 }
 
-Json currentWait(const Json& task, const Wait& wait) {
+Json currentWait(const TaskData& task, const Wait& wait) {
     auto result = taskSummary(task);
-    const auto env = field(task, "environmentId");
+    const auto& env = task.environmentId;
     auto& view = result["wait"] = waitView(wait);
     auto& run = view["run"];
     if (wait.run) {
@@ -288,20 +291,21 @@ Json currentWait(const Json& task, const Wait& wait) {
     }
     if (const auto* verification = wait.verification()) {
         result["deadline"] = verification->deadline;
-        const auto& results = task.at("runResults");
+        const auto& results = task.rest.at("runResults");
         const auto saved =
             std::ranges::find_if(results, [&](const Json& item) { return field(item, "actionId") == verification->actionId; });
         if (saved != results.end()) run = runView(*saved, env);
     }
-    if (run.is_null()) run = runView(task.at("lastRun"), env);
+    if (run.is_null()) run = runView(task.rest.at("lastRun"), env);
     return result;
 }
 
-Json sessionGroup(const Json& task) {
+Json sessionGroup(const TaskView& view) {
+    const auto& task = view.task;
     auto sessions = Json::array();
-    const auto env = field(task, "environmentId");
-    const auto& activeRun = task.at("activeRun");
-    const auto& runs = task.at("runs");
+    const auto& env = task.environmentId;
+    const auto& activeRun = task.rest.at("activeRun");
+    const auto& runs = view.runs;
     std::set<std::pair<std::string, std::string>> seen;
     for (auto run = runs.rbegin(); run != runs.rend(); ++run) {
         auto session = runView(*run, env);
@@ -311,8 +315,8 @@ Json sessionGroup(const Json& task) {
         const bool active = field(*run, "runId") == field(activeRun, "runId") && thread == field(activeRun, "threadId") &&
                             field(session, "environmentId") == env;
         session["state"] = active ? displayState(task) : run->value("status", "ended");
-        if (task.contains("runResults")) {
-            const auto& results = task.at("runResults");
+        if (task.rest.contains("runResults")) {
+            const auto& results = task.rest.at("runResults");
             const auto result = std::ranges::find_if(results, [&](const Json& check) {
                 return field(check, "environmentId") == field(*run, "environmentId") && field(check, "threadId") == thread &&
                        field(check, "runId") == field(*run, "runId");
@@ -330,11 +334,10 @@ Json sessionGroup(const Json& task) {
     return group;
 }
 
-std::string_view botPresence(const auto& tasks) {
+std::string_view botPresence(const auto& states) {
     constexpr std::string_view priority[] = {"idle", "queued", "peer_waiting", "waiting", "thinking", "working", "stopping"};
     std::size_t highest = 0;
-    for (const auto& task : tasks) {
-        auto presence = displayState(task);
+    for (auto presence : states) {
         if (presence == "running")
             presence = "working";
         else if (presence == "deciding" || presence == "sending")
@@ -346,48 +349,46 @@ std::string_view botPresence(const auto& tasks) {
 }
 
 Json activity(const std::vector<Store::ActiveTask>& activeTasks, std::string_view bot) {
-    Json result = {{"presence", botPresence(activeTasks | std::views::transform(&Store::ActiveTask::task))},
+    const auto states = activeTasks | std::views::transform([](const auto& active) { return displayState(active.task); });
+    Json result = {{"presence", botPresence(states)},
                    {"waits", Json::array()},
                    {"queued", Json::array()},
                    {"activeSessions", Json::array()},
                    {"parallelTasks", Json::array()}};
-    for (const auto& [task, wait] : activeTasks) {
-        const auto state = field(task, "state");
-        if (state == "waiting" && wait) result["waits"].push_back(currentWait(task, *wait));
-        const auto& blocker = task.at("blockedBy");
-        if (state == "queued" && !blocker.is_null()) {
+    for (const auto& [task, wait, blocker] : activeTasks) {
+        if (task.state == TaskState::waiting && wait) result["waits"].push_back(currentWait(task, *wait));
+        if (task.state == TaskState::queued && blocker) {
             auto queued = taskSummary(task);
             queued["blockedBy"] = Json::object();
-            if (field(blocker, "botId") == bot) {
-                queued["blockedBy"] = taskSummary(blocker);
-                copyFields(queued["blockedBy"], blocker, {"botId"});
-            }
+            if (blocker->botId == bot)
+                queued["blockedBy"] = {
+                    {"id", blocker->id}, {"botId", blocker->botId}, {"request", blocker->request}, {"state", displayState(blocker->state)}};
             result["queued"].push_back(std::move(queued));
         }
-        if (task.contains("runTargets") || task.contains("runResults")) {
+        if (task.rest.contains("runTargets") || task.rest.contains("runResults")) {
             Json checks = Json::array();
-            const auto& routes = task.contains("runResults") ? task.at("runResults") : task.at("runTargets");
+            const auto& routes = task.rest.contains("runResults") ? task.rest.at("runResults") : task.rest.at("runTargets");
             for (const auto& route : routes) {
                 auto run = verificationRun(route);
                 const bool activeRun = run["state"] == "running" || run["state"] == "confirmation_pending" || run["state"] == "queued";
-                if (activeRun && state == "cancelling" && run["state"] != "confirmation_pending") run["state"] = "stopping";
+                if (activeRun && task.state == TaskState::cancelling && run["state"] != "confirmation_pending") run["state"] = "stopping";
                 if (activeRun && !field(run, "threadId").empty()) {
                     auto active = run;
-                    active["taskId"] = task.at("id");
-                    active["request"] = task.at("request");
-                    copyFields(active, task, {"createdAt"});
+                    active["taskId"] = task.id;
+                    active["request"] = task.request;
+                    copyFields(active, task.rest, {"createdAt"});
                     result["activeSessions"].push_back(std::move(active));
                 }
                 checks.push_back(std::move(run));
             }
-            result["parallelTasks"].push_back({{"id", task.at("id")}, {"runs", std::move(checks)}});
+            result["parallelTasks"].push_back({{"id", task.id}, {"runs", std::move(checks)}});
         }
-        auto active = runView(task.at("activeRun"), field(task, "environmentId"));
+        auto active = runView(task.rest.at("activeRun"), task.environmentId);
         if (!active.is_null()) {
-            active["taskId"] = task.at("id");
-            active["request"] = task.at("request");
+            active["taskId"] = task.id;
+            active["request"] = task.request;
             active["state"] = displayState(task);
-            copyFields(active, task, {"createdAt"});
+            copyFields(active, task.rest, {"createdAt"});
             result["activeSessions"].push_back(std::move(active));
         }
     }
@@ -423,7 +424,13 @@ Json botList(Store& store, const Json& bots) {
         // Keep the full text until the response redacts protected values.
         if (const auto soul = field(bot, "soul"); !soul.empty()) row["about"] = soul;
         conversationSummary(row, store, id);
-        row["presence"] = botPresence(statesByBot.value(id, Json::array()));
+        const auto states = statesByBot.find(id);
+        if (states == statesByBot.end()) {
+            row["presence"] = "idle";
+        } else {
+            row["presence"] = botPresence(
+                states->second | std::views::transform([](const TaskPresence& task) { return displayState(task.state, task.replanning); }));
+        }
         result.push_back(std::move(row));
     }
     return result;
@@ -482,13 +489,13 @@ Json sessions(Store& store, std::string_view bot, Id before) {
     return result;
 }
 
-Json sessionGroups(const Json& tasks) {
+Json sessionGroups(const std::vector<TaskView>& tasks) {
     auto groups = Json::array();
     for (const auto& task : tasks) groups.push_back(sessionGroup(task));
     return groups;
 }
 
-Json botView(Store& store, const Json& bot, const Json* changedSessionTasks, std::string_view viewer) {
+Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changedSessionTasks, std::string_view viewer) {
     const auto id = field(bot, "id");
     auto result = conversation(store, id, 0, viewer);
     const auto activeTasks = store.activeTasks(id);

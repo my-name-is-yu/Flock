@@ -1,5 +1,6 @@
 #include "conversation_storage.hpp"
 #include "flock/limits.hpp"
+#include "task_storage.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -77,13 +78,13 @@ WITH RECURSIVE ancestry(id) AS (
   SELECT p.sender_task FROM peer_exchanges p JOIN ancestry a ON a.id=p.recipient_task
   WHERE p.sender_task<a.id
 )
-SELECT t.id,t.data FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1
+SELECT t.data,t.id,t.state,t.generation FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1
 )SQL",
                           {taskId});
     if (!ancestor.next()) throw Conflict("The originating task is missing");
-    const auto root = ancestor.json(1);
-    if (const auto source = root.value("sourceMessageId", Id{0}); source) return messageModelBudget(source);
-    return {"task/" + std::to_string(ancestor.number(0)), initialModelCallLimit(root.at("config"))};
+    const auto root = decodeTaskRow(ancestor);
+    if (const auto source = root.rest.value("sourceMessageId", Id{0}); source) return messageModelBudget(source);
+    return {"task/" + std::to_string(root.id), initialModelCallLimit(root.config)};
 }
 
 Id Store::Impl::reserveModelCall(const ModelBudget& budget, std::string_view purpose, Id messageId, Id taskId, Id eventId) {
@@ -154,7 +155,7 @@ WHERE w.resolution IS NULL AND w.task_id<>? AND json_extract(w.data,'$.reason')=
         auto task = load(id);
         if (!waitIsActionable(task)) continue;
         clearWait(task, "approve");
-        task["state"] = "deciding";
+        task.state = TaskState::deciding;
         save(task);
     }
 

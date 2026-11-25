@@ -91,7 +91,7 @@ int runSmoke() {
 }
 
 int profile(Store& store, T3& t3, Id id, std::string_view mode) {
-    const auto task = store.task(id);
+    const auto task = taskJson(store.task(id));
     if (task.at("activeRun").is_null()) throw Conflict("Profile fixture is not assigned to an active Run");
     std::size_t count = 0, bytes = 0, largest = 0;
     unsigned modelCalls = 0;
@@ -100,7 +100,7 @@ int profile(Store& store, T3& t3, Id id, std::string_view mode) {
         Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
         for (int i = 0; i < 5; ++i) runtime.tick();
         modelCalls = model.calls;
-        if (modelCalls || store.task(id).at("state") != "running")
+        if (modelCalls || store.task(id).task.state != TaskState::running)
             throw Conflict("The benchmark Run did not remain in ordinary monitoring");
     } else if (mode == "read") {
         ReadRequest req;
@@ -170,15 +170,15 @@ int main(int argc, char** argv) {
         } else if (operation == "show" && argc == 4) {
             Store store(argv[2]);
             const auto id = std::stoll(argv[3]);
-            std::cout << Json{{"task", store.task(id)}, {"history", store.history(id, 0, 200)}}.dump(2) << '\n';
+            std::cout << Json{{"task", taskJson(store.task(id))}, {"history", store.history(id, 0, 200)}}.dump(2) << '\n';
         } else if (operation == "operate" && (argc == 6 || argc == 7)) {
             Store store(argv[2]);
-            store.operate(localOwner, TaskTarget::from(store.task(std::stoll(argv[3])), std::stoll(argv[4])), argv[5],
+            store.operate(localOwner, TaskTarget::from(store.task(std::stoll(argv[3])).task, std::stoll(argv[4])), argv[5],
                           argc == 7 ? Json::parse(argv[6]) : Json::object());
         } else if (operation == "inspect" && argc == 5) {
             Store store(argv[2]);
             auto t3 = makeT3Mcp(argv[3]);
-            const auto task = store.task(std::stoll(argv[4]));
+            const auto task = taskJson(store.task(std::stoll(argv[4])));
             const auto& saved = task.at("activeRun").is_null() ? task.at("lastRun") : task.at("activeRun");
             const RunRef ref{saved.at("threadId"), saved.at("runId"), saved.at("link")};
             const auto seen = t3->observe(task.at("environmentId"), task.at("config"), ref);

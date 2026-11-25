@@ -908,21 +908,22 @@ void stopSelectedTaskAndConsultation() {
     const auto start = [&](const char* key, const char* text) -> Id {
         mcp.call("flock_ask", {{"bot", "release"}, {"threadId", "thread"}, {"requestId", key}, {"text", text}}).at("structuredContent");
         runtime.runConversations();
-        return store.tasks("release").front().at("id");
+        return store.tasks("release").front().task.id;
     };
     const auto selected = start("queued-task", "Work in the selected Session.");
     const auto sender = start("consult", "Consult a peer.");
     tick(runtime, 4);
-    check(store.task(selected).at("activeRun").at("runId") == "queued-task" && store.task(blocker).at("state") == "running" &&
-              model.consultant && store.task(model.consultant).at("state") == "peer_waiting",
+    check(store.task(selected).task.rest.at("activeRun").at("runId") == "queued-task" &&
+              store.task(blocker).task.state == TaskState::running && model.consultant &&
+              store.task(model.consultant).task.state == TaskState::peer_waiting,
           "The task did not queue, or the consultation did not wait behind the occupied slot");
     const auto stopped = mcp.call("flock_stop", {{"bot", "release"}, {"threadId", "thread"}}).at("structuredContent");
     tick(runtime, 4);
     check(stopped.at("cancelled") == 1 && stopped.at("stoppedChildSessions") == 1 &&
               t3.cancellations == std::vector<std::string>{"queued-task"} && t3.interrupts.empty() &&
-              store.task(selected).at("state") == "cancelled" && store.task(sender).at("state") == "cancelled" &&
-              store.task(model.consultant).at("state") == "cancelled" && model.consultantCalls == 1 &&
-              store.task(blocker).at("state") == "running",
+              store.task(selected).task.state == TaskState::cancelled && store.task(sender).task.state == TaskState::cancelled &&
+              store.task(model.consultant).task.state == TaskState::cancelled && model.consultantCalls == 1 &&
+              store.task(blocker).task.state == TaskState::running,
           "Stop left queued work or consultation runnable, or touched an unrelated Run");
 }
 
@@ -1359,11 +1360,11 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
     const auto child = start("release", "lineage-parent", "matching-child");
     tick(*runtime, 3);
     const auto launching = db->task(child);
-    check(launching.at("state") == "running" && launching.at("activeRun").at("threadId") == "lineage-child-1",
-          "Child launch did not assign a Run in its own Session: " + launching.at("wait").dump());
+    check(launching.task.state == TaskState::running && launching.task.rest.at("activeRun").at("threadId") == "lineage-child-1",
+          "Child launch did not assign a Run in its own Session: " + taskJson(launching).at("wait").dump());
     const auto beforeLaunch = start("release", "lineage-parent", "peer-before-child", "Ask a peer first.");
     tick(*runtime, 4);
-    check(model.peer && db->task(model.peer).at("state") == "peer_waiting",
+    check(model.peer && db->task(model.peer).task.state == TaskState::peer_waiting,
           "The peer needed by the other child task did not reach its question");
     const auto otherOrigin = start("release", "lineage-unrelated", "unrelated-origin");
     const auto otherBot = start("triage", "lineage-parent", "unrelated-bot");
@@ -1373,8 +1374,8 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
               stopped.at("content").at(0).at("text").get<std::string>().find("2 child Sessions.") != std::string::npos &&
               Mcp(*server, token).call("flock_stop", stop) == stopped,
           "Stop did not report the exact child cancellation once");
-    check(db->task(child).at("state") == "cancelling" && db->task(otherOrigin).at("state") == "queued" &&
-              db->task(otherBot).at("state") == "queued" && interrupts().empty(),
+    check(db->task(child).task.state == TaskState::cancelling && db->task(otherOrigin).task.state == TaskState::queued &&
+              db->task(otherBot).task.state == TaskState::queued && interrupts().empty(),
           "Stop targeted unrelated tasks or failed to durably admit the cancellation");
 
     // Restart before the cancellation worker ever sees the stopped task.
@@ -1384,9 +1385,9 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
     server = startWeb(*db, 0, cb);
     runtime = std::make_unique<Runtime>(*db, model, *t3, soul, options);
     tick(*runtime, 3);
-    check(db->task(child).at("state") == "cancelled" && db->task(beforeLaunch).at("state") == "cancelled" &&
-              db->task(model.peer).at("state") == "waiting" && db->task(otherOrigin).at("state") != "cancelled" &&
-              db->task(otherOrigin).at("state") != "cancelling" && db->task(otherBot).at("state") == "queued" &&
+    check(db->task(child).task.state == TaskState::cancelled && db->task(beforeLaunch).task.state == TaskState::cancelled &&
+              db->task(model.peer).task.state == TaskState::waiting && db->task(otherOrigin).task.state != TaskState::cancelled &&
+              db->task(otherOrigin).task.state != TaskState::cancelling && db->task(otherBot).task.state == TaskState::queued &&
               interrupts() == Json::array({{{"threadId", "lineage-child-1"}, {"runId", "root"}}}) &&
               Mcp(*server, token).call("flock_stop", stop) == stopped,
           "Restart did not settle precisely the child's Run, or the origin Session was interrupted");

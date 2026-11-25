@@ -510,8 +510,8 @@ void taskUpdates(const std::filesystem::path& database) {
     model.decideNext = std::move(taskModel);
     const auto receipt = store.receiveChannel(channel, "fixture-auth", original, intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
-    const Id taskId = store.activeTasks("release").at(0).task.at("id");
-    const auto active = store.task(taskId).at("activeRun");
+    const Id taskId = store.activeTasks("release").at(0).task.id;
+    const auto active = store.task(taskId).task.rest.at("activeRun");
     check(active.is_object(), "Channel task did not start a Session");
     t3.observeRun = [](const RunRef&) {
         Observation observed;
@@ -548,19 +548,19 @@ void taskUpdates(const std::filesystem::path& database) {
     model.decideNext = [&](const ModelInput& input) -> Decision {
         check(input.task.at("tasks").empty() && input.history.empty(), "Another thread received private task context");
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return {"cancel_task", {{"taskId", taskId}, {"generation", store.task(taskId).at("generation")}}, {}};
+        if (steps.empty()) return {"cancel_task", {{"taskId", taskId}, {"generation", store.task(taskId).task.generation}}, {}};
         check(steps.at(0).at("result").at("ok") == false, "Another thread could address a private task by ID");
         return reply("No task in this thread.");
     };
     store.receiveChannel(channel, "fixture-auth", event("other-thread", "ask", "What is the release target?"), intake);
     runtime.runConversations();
-    check(store.task(taskId).at("state") == "waiting", "Another thread cancelled a private task");
+    check(store.task(taskId).task.state == TaskState::waiting, "Another thread cancelled a private task");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
         if (input.event.at("kind") == "result")
             return {"complete", {{"report", "Private release completed."}}, "The Session confirmed the release"};
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return answerQuestion(store.task(taskId), "Preview");
+        if (steps.empty()) return answerQuestion(taskJson(store.task(taskId)), "Preview");
         check(steps.at(0).at("result").at("ok") == true, "Originating thread could not answer its question");
         return reply("Answer received.");
     };
@@ -570,7 +570,7 @@ void taskUpdates(const std::filesystem::path& database) {
     check(store.decisionHistory(root).at(0).at("decidedBy") == owner.id, "Channel decision lost the verified sender");
     t3.observeRun = [](const RunRef&) { return finished(); };
     for (int i = 0; i < 5; ++i) runtime.tick();
-    check(store.task(taskId).at("state") == "completed" && transport->effects.size() == 8 &&
+    check(store.task(taskId).task.state == TaskState::completed && transport->effects.size() == 8 &&
               transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
               transport->effects.back().at("payload").at("text") == "Private release completed.",
           "Task completion was not delivered to the originating thread");
@@ -745,14 +745,14 @@ void taskQuestionChoices(const std::filesystem::path& database) {
                                  return route;
                              });
         for (int i = 0; i < 8; ++i) runtime.tick();
-        const auto task = store.task(store.activeTasks("release").at(0).task.at("id"));
+        const auto task = taskJson(store.task(store.activeTasks("release").at(0).task.id));
         check(task.at("state") == "waiting" && transport->effects.back().at("payload").at("suggestions") == Json::array({"Yes", "No"}),
               "The task question was not posted");
         return std::pair{task, transport->effects.back().at("externalMessageId")};
     };
     const auto [first, firstPost] = start("first");
     const auto [second, secondPost] = start("second");
-    check(first.at("id") != second.at("id") && firstPost != secondPost && store.task(first.at("id")).at("state") == "waiting",
+    check(first.at("id") != second.at("id") && firstPost != secondPost && store.task(first.at("id")).task.state == TaskState::waiting,
           "Both questions must be open at the same time");
     auto answer = event("choice-thread", "answer-first", "Yes");
     answer["replyToExternalMessageId"] = firstPost;
@@ -774,7 +774,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     };
     const auto receipt = store.receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
-    check(recordedChoice(first, receipt) && store.task(second.at("id")).at("wait") == second.at("wait"),
+    check(recordedChoice(first, receipt) && taskJson(store.task(second.at("id"))).at("wait") == second.at("wait"),
           "Only the selected question should receive the exact choice");
     check(store.receiveChannel(channel, "fixture-auth", answer, intake) == receipt, "Choice replay changed the receipt");
     answer["replyToExternalMessageId"] = secondPost;
@@ -798,7 +798,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     };
     const auto followed = store.receiveChannel(channel, "fixture-auth", followup, intake);
     runtime.runConversations();
-    check(recordedChoice(second, followed) && store.task(second.at("id")).at("wait").is_null(),
+    check(recordedChoice(second, followed) && taskJson(store.task(second.at("id"))).at("wait").is_null(),
           "Reply to a Bot clarification could not answer its original question");
 }
 
@@ -816,7 +816,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         route.projectId += std::to_string(++project);
         const auto task = store.submit(route);
         for (int i = 0; i < 3; ++i) runtime.tick();
-        auto run = store.task(task).at("activeRun");
+        auto run = store.task(task).task.rest.at("activeRun");
         check(run.is_object(), "Fixture Session did not start");
         return run;
     };
@@ -862,7 +862,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     };
     for (int i = 0; i < 5; ++i) runtime.tick();
     for (const auto& row : store.activeTasks("release")) {
-        const auto active = store.task(row.task.at("id")).at("activeRun");
+        const auto& active = row.task.rest.at("activeRun");
         if (active.is_object() && active.at("threadId") == originalRun.at("threadId")) a = active;
     }
     check(a.at("runId") != originalRun.at("runId"), "Fixture did not start a follow-up Run in Session A");

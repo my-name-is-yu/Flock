@@ -74,13 +74,13 @@ int main(int argc, char** argv) {
             if (bot == "release") return std::vector<PeerBot>{{"Verifier", {"verifier", "", "env-1", "project"}}};
             return std::vector<PeerBot>{};
         };
-        const Id source = store.tasks("release").at(0).at("id");
+        const Id source = store.tasks("release").at(0).task.id;
         const auto originalRecipients = store.tasks("verifier");
         if (phase == "recover") {
-            check(store.task(source).at("state") == "peer_waiting" && originalRecipients.size() == 1,
+            check(store.task(source).task.state == TaskState::peer_waiting && originalRecipients.size() == 1,
                   "the original Bot exchange did not survive the crash");
             const auto& pending = originalRecipients.at(0);
-            check(pending.at("state") == "sending" && pending.at("runs").empty(),
+            check(pending.task.state == TaskState::sending && pending.runs.empty(),
                   "the accepted launch must still be unconfirmed when recovery starts");
         }
         Runtime runtime(store, model, *adapter, {}, options);
@@ -88,11 +88,11 @@ int main(int argc, char** argv) {
         check(phase == "recover", "T3 sent back a response before the Runtime was killed");
 
         const auto recipients = store.tasks("verifier");
-        check(recipients.size() == 1 && originalRecipients.size() == 1 && recipients.at(0).at("id") == originalRecipients.at(0).at("id"),
+        check(recipients.size() == 1 && originalRecipients.size() == 1 && recipients.at(0).task.id == originalRecipients.at(0).task.id,
               "recovery created a different recipient task");
         const auto& verifier = recipients.at(0);
-        check(verifier.at("state") == "completed", "the recovered Verifier task did not finish");
-        const auto& runs = verifier.at("runs");
+        check(verifier.task.state == TaskState::completed, "the recovered Verifier task did not finish");
+        const auto& runs = verifier.runs;
         check(runs.size() == 1 && runs.at(0).at("threadId") == "thread" && runs.at(0).at("runId") == "root",
               "Verifier did not adopt the one original Run");
         check(eventTexts(store.conversation("verifier"), "report", "report") == std::vector<std::string>{"root report"},
@@ -100,7 +100,7 @@ int main(int argc, char** argv) {
         const auto releaseHistory = store.conversation("release");
         check(eventTexts(releaseHistory, "bot_message", "text") == std::vector<std::string>{"Verify the fixture", "root report"} &&
                   eventTexts(releaseHistory, "completed", "text") == std::vector<std::string>{"root report"} &&
-                  store.task(source).at("state") == "completed" && model.received == 1,
+                  store.task(source).task.state == TaskState::completed && model.received == 1,
               "Release did not consume exactly one result");
         return 0;
     } catch (const std::exception& error) {

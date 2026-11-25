@@ -1,4 +1,5 @@
 #include "conversation_storage.hpp"
+#include "task_storage.hpp"
 
 #include <openssl/evp.h>
 
@@ -61,20 +62,13 @@ PolicyOrigin Store::Impl::policyOrigin(const conversation::Message& message) {
     return origin;
 }
 
-PolicyOrigin Store::Impl::taskPolicyOrigin(const Json& task) {
-    const auto id = integer(task, "id");
-    auto source = integer(task, "criteriaSourceMessageId");
-    if (!source) source = integer(task, "sourceMessageId");
-    for (const auto& instruction : task.value("pendingInstructions", Json::array()))
+PolicyOrigin Store::Impl::taskPolicyOrigin(const TaskData& task) {
+    const auto id = task.id;
+    auto source = integer(task.rest, "criteriaSourceMessageId");
+    if (!source) source = integer(task.rest, "sourceMessageId");
+    for (const auto& instruction : task.rest.value("pendingInstructions", Json::array()))
         source = std::max(source, integer(instruction, "messageId"));
-    PolicyOrigin origin{field(task, "botId"),
-                        field(task, "channelScope"),
-                        {},
-                        source,
-                        0,
-                        id,
-                        integer(task, "currentRevision"),
-                        integer(task, "generation"),
+    PolicyOrigin origin{task.botId, field(task.rest, "channelScope"), {}, source, 0, id, task.currentRevision.value_or(0), task.generation,
                         !source};
     if (!source) origin.scope = "task/" + std::to_string(id);
     if (source) {
@@ -84,11 +78,11 @@ PolicyOrigin Store::Impl::taskPolicyOrigin(const Json& task) {
         origin.requester = fromMessage.requester;
         origin.background = fromMessage.background;
         if (message.bot != origin.bot && !origin.requester.empty()) origin.scope = "task/" + std::to_string(id);
-    } else if (const auto requester = field(task, "requester"); !requester.empty()) {
+    } else if (const auto requester = field(task.rest, "requester"); !requester.empty()) {
         origin.requester = requester;
         origin.background = false;
         origin.scope = "task/" + std::to_string(id);
-    } else if (task.contains("trigger")) {
+    } else if (task.rest.contains("trigger")) {
         auto owner = query("SELECT person FROM bot_owners WHERE bot=?", {origin.bot});
         origin.requester = owner.next() ? owner.string(0) : localOwner.id;
     } else {
@@ -149,11 +143,11 @@ void Store::Impl::releasePolicyTask(Id approval, std::string_view resolution) {
     if (!row.next()) return;
     auto task = load(row.number(0));
     const auto wait = currentWait(row.number(0));
-    if (task.at("state") != "waiting" || !wait || wait->id != row.number(1)) return;
+    if (task.state != TaskState::waiting || !wait || wait->id != row.number(1)) return;
     clearWait(task, resolution);
-    task["state"] = row.string(2);
+    task.state = decodeTaskState(task.id, row.string(2));
     save(task);
-    exec("UPDATE policy_approvals SET generation=? WHERE id=?", {task.at("generation"), approval});
+    exec("UPDATE policy_approvals SET generation=? WHERE id=?", {task.generation, approval});
 }
 
 void Store::Impl::settlePolicyApprovals(std::optional<Seconds> now) {
@@ -266,12 +260,12 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
     if (origin.task) {
         if (!origin.turn && (operation.starts_with("outbox/") || operation.starts_with("git/"))) {
             auto task = load(origin.task);
-            if (task.at("state") != "waiting") {
-                const auto resume = field(task, "state");
+            if (task.state != TaskState::waiting) {
+                const auto resume = taskStateName(task.state);
                 const auto waitId = wait(task, PolicyApprovalWait{card}, std::string(action) + " · " + resource.target);
                 save(task);
                 exec("UPDATE policy_approvals SET wait_id=?,resume_state=?,generation=?,card_generation=? WHERE id=?",
-                     {waitId, resume, task.at("generation"), task.at("generation"), card});
+                     {waitId, resume, task.generation, task.generation, card});
             }
         }
         journal(origin.task, "policy_approval", {{"itemId", card}, {"status", "pending"}});

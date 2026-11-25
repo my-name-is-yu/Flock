@@ -1,6 +1,6 @@
 #pragma once
 
-#include "flock/wait.hpp"
+#include "flock/task.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -296,7 +296,7 @@ struct BotChange;
 struct TaskTarget {
     std::string botId;
     Id taskId, waitId, revision, generation;
-    static TaskTarget from(const Json& task, Id waitId);
+    static TaskTarget from(const TaskData& task, Id waitId);
 };
 using ApplyBotChange = std::function<void(const BotChange&)>;
 using ReconcileBotCreation = std::function<bool(const BotChange&)>;
@@ -360,25 +360,26 @@ public:
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
     void operate(const Person&, const TaskTarget&, std::string_view operation, const Json& data = Json::object());
-    Json task(Id taskId) const;
+    TaskView task(Id taskId) const;
     bool hasTask(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
-    Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
+    std::vector<TaskView> tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
     Json compactions(std::string_view bot, Id before = 0, unsigned limit = 50) const;
     Json workflows(std::string_view bot, Id before = 0, unsigned limit = 20) const;
     struct ActiveTask {
-        Json task;
+        TaskData task;
         std::optional<Wait> wait;
+        std::optional<TaskBlocker> blockedBy;
     };
     std::vector<ActiveTask> activeTasks(std::string_view botId) const;
     static Wait waitingEvent(const Json& event);
     Json reconciliationData(Id task, Id waitId, Json target, const IntakeResolver&) const;
     // Distinct active state and replanning combinations, grouped by Bot ID.
-    Json activeTaskStatesByBot() const;
-    Json sessionTasks(std::string_view botId, Id before, unsigned limit) const;
+    std::map<std::string, std::vector<TaskPresence>> activeTaskStatesByBot() const;
+    std::vector<TaskView> sessionTasks(std::string_view botId, Id before, unsigned limit) const;
     // Journal position and tasks with a Run start or settled report since that position.
     // On the initial read only the position is needed, before loading the first page.
-    std::pair<Id, Json> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
+    std::pair<Id, std::vector<TaskView>> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     enum class ConversationEvents { all, incoming };

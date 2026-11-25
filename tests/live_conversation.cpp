@@ -102,10 +102,10 @@ struct Scene {
     }
     void reach(Id id, std::string_view expected) {
         constexpr int tickLimit = 20;
-        auto state = store.task(id).at("state").get<std::string>();
+        auto state = std::string(taskStateName(store.task(id).task.state));
         for (int tick = 0; tick < tickLimit && state != expected; ++tick) {
             runtime.tick();
-            state = store.task(id).at("state").get<std::string>();
+            state = std::string(taskStateName(store.task(id).task.state));
         }
         check(state == expected, "fixture task " + std::to_string(id) + " expected state " + std::string(expected) + " after at most " +
                                      std::to_string(tickLimit) + " ticks, got " + state);
@@ -116,7 +116,7 @@ struct Scene {
         if (asksQuestion) model.questions.emplace(id, std::move(question));
         reach(id, asksQuestion ? "waiting" : "running");
         if (asksQuestion) {
-            const auto wait = store.task(id).at("wait");
+            const auto wait = taskJson(store.task(id)).at("wait");
             const auto& expected = model.questions.at(id);
             check(wait.at("reason") == "user_question" && wait.at("text") == expected.at("question") &&
                       wait.at("choices") == expected.at("choices"),
@@ -126,7 +126,7 @@ struct Scene {
     }
     Tasks snapshot() const {
         Tasks tasks;
-        for (auto& task : store.tasks("", 0, 200)) {
+        for (auto& task : taskJson(store.tasks("", 0, 200))) {
             const auto id = task.at("id").get<Id>();
             tasks.emplace(id, std::move(task));
         }
@@ -287,7 +287,7 @@ const std::vector<std::pair<std::string, Scenario>> scenarios{
          s.task("Inventory test fixtures", "inventory");
          const auto id = s.task("Prepare the release label", "label",
                                 {{"question", "Which label should I use?"}, {"choices", {"Cancel this task", "Status"}}});
-         const auto wait = s.store.task(id).at("wait");
+         const auto wait = taskJson(s.store.task(id)).at("wait");
          const auto turn = s.send("Cancel this task", wait.at("messageId").get<Id>());
          checkActions(s, turn, {{"answer_task_question", id, "answered"}});
          const auto events = checkEvents(s, turn, id, {"user_answer", "wait_closed", "inbox_decision"});
@@ -344,7 +344,7 @@ const std::vector<std::pair<std::string, Scenario>> scenarios{
      [](Scene& s) {
          s.task("Inventory test fixtures", "inventory");
          const auto id = s.task("Compare three rollout plans", "plans");
-         s.t3.finish(s.store.task(id).at("activeRun").at("runId").get<std::string>(),
+         s.t3.finish(s.store.task(id).task.rest.at("activeRun").at("runId").get<std::string>(),
                      "1. Use rollout_global for a big bang release\n"
                      "2. Use rollout_canary for 5% of users for a day, then everyone\n"
                      "3. Use rollout_team to enable one team at a time");

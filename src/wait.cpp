@@ -82,8 +82,8 @@ Json waitRunJson(const std::optional<WaitRun>& run) {
     return result;
 }
 
-std::optional<WaitRun> taskWaitRun(const Json& task) {
-    const auto& run = task.at("activeRun");
+std::optional<WaitRun> taskWaitRun(const TaskData& task) {
+    const auto& run = task.rest.at("activeRun");
     if (run.is_null()) return std::nullopt;
     const auto revision = run.at("revisionId");
     return WaitRun{
