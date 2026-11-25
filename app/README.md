@@ -80,7 +80,8 @@ through 2199.
 Flock imports `MEMORY.md` on the first private memory access. SQLite supplies
 private memory for conversation and task decisions from then on. Bots can save
 lasting preferences and corrections from a Bot owner's or an administrator's
-direct messages, including messages sent with `flock message`. Automatic saves
+direct messages, including messages sent with `flock message`. A separate
+review sees only that message and the existing private memory. Automatic saves
 update matching entries and follow the `memory.write` installation rules for
 the Bot ID. Use the conversation or Web API to edit memory explicitly. Shared
 playbooks use an explicit document ID and the applicable `shared_memory` rules.

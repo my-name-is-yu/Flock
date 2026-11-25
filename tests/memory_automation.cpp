@@ -234,7 +234,7 @@ void proactiveMemory(const std::filesystem::path& db) {
     Adapter adapter;
     Runtime runtime(store,model,adapter,{});
     const auto send = [&](std::string_view key, std::string_view message, Decision edit) {
-        model.choices = {{"read_memory",Json::object(),"Read current preferences"},std::move(edit),reply()};
+        model.choices = {{"review_preference",Json::object(),"Review a lasting preference"},std::move(edit),reply()};
         store.receive(localOwner,alpha,key,message);
         runtime.runConversations();
     };
@@ -256,6 +256,10 @@ void proactiveMemory(const std::filesystem::path& db) {
     send("same-preference",preference,remember(1,preferred,"Keep release notes under one page.",preference));
     check(model.choices.empty() && notices().size() == 1 && memory().at("version") == 1,
           "An unchanged preference created another revision or notice");
+
+    send("skip-preference","What is the release date?",{"skip_preference",Json::object(),"No lasting preference"});
+    check(model.choices.empty() && notices().size() == 1 && memory().at("version") == 1,
+          "Skipping an unrelated message changed memory or interrupted the reply");
 
     send("unrelated","What is the release date?",remember(1,corrected,correction,correction));
     check(model.choices.empty() && lastResult(model.inputs.back()).at("ok") == false && memory().at("content") == preferred &&
@@ -573,6 +577,7 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
           "The task model lost webhook provenance or received protected metadata");
     const auto& input = model.inputs.front();
     check(input.task.at("trigger").at("event").at("text") == payloadText &&
+          std::ranges::find(input.tools,"review_preference") == input.tools.end() &&
           std::ranges::find(input.tools,"remember_preference") == input.tools.end() &&
           store.memory(owner,alpha.botId,"memory_history",Json::object()).at("revisions").empty(),
           "A webhook payload can be used as a preference source");

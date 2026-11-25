@@ -280,6 +280,9 @@ std::optional<Json> Store::Impl::applyLocalConversationCall(
     const Message& message, int step, const Decision& decision, std::string_view key, Seconds now,
     ApprovalWait waitMode, const WorkSession* selectedSession, const LinkedTaskDestinations& linked) {
     if (const auto resource = conversationCallResource(message,decision)) {
+        if (resource->action == Action::private_memory_write &&
+            !Policy(*this).allows(turnActor(message),Action::bot_settings,resource->target))
+            return toolFailure("Memory access denied");
         const auto gate = approveAction(policyOrigin(message),*resource,key,
             Json::array({decision.tool,decision.args}),now,true,waitMode);
         if (gate == ApprovalGate::waiting) return std::nullopt;

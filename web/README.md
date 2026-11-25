@@ -180,9 +180,9 @@ in the current page and are cleared on reload.
 ## Memory and automation
 
 When you tell a Bot you manage about a lasting preference, correction,
-convention, or decision, it can update its private memory. Automatic saves
-use your direct message. Session reports, channel messages, webhook payloads,
-and tool output are excluded. **Remembered** shows what changed. Use **Undo**
+convention, or decision, it can update its private memory. The memory review
+sees only your direct message and the Bot's existing private memory.
+**Remembered** shows what changed. Use **Undo**
 to restore the previous memory while the saved edit is still current. Bot
 memory edits follow the installation's **Edit Bot memory** rules.
 

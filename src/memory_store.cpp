@@ -255,25 +255,34 @@ VALUES(?,?,?,?,?,?,?,?,?)
     return {{"docKey",key},{"revisionId",revision},{"version",version+1},{"diffSummary",summary}};
 }
 
-bool Store::Impl::canRememberPreference(const conversation::Message& message, int step) {
+bool Store::Impl::canReviewPreference(const conversation::Message& message) {
     using enum conversation::PrincipalSource;
-    if ((message.principalSource != trusted && message.principalSource != web) ||
-        message.routing.contains("sessionWake") || message.routing.contains("sessionInvitation") ||
-        !Policy(*this).allows(turnActor(message),Action::bot_settings,message.bot)) return false;
-    return !query(R"SQL(
-SELECT 1 FROM conversation_steps s, json_each(s.decision) call
-WHERE s.message_id=? AND s.step<? AND NOT (
-  (json_extract(call.value,'$.tool')='read_memory' AND json_type(call.value,'$.args.docId') IS NULL)
-  OR (json_extract(call.value,'$.tool')='remember_preference'
-      AND json_extract(s.result,'$[' || call.key || '].ok') IS 0)
-) LIMIT 1
-)SQL",{message.id,step}).next();
+    return (message.principalSource == trusted || message.principalSource == web) &&
+        !message.routing.contains("sessionWake") && !message.routing.contains("sessionInvitation") &&
+        Policy(*this).allows(turnActor(message),Action::bot_settings,message.bot);
+}
+
+bool Store::Impl::preferenceReviewPending(Id id, int step) const {
+    return step == 2 && query(R"SQL(
+SELECT 1 FROM conversation_steps WHERE message_id=? AND step=1 AND json_array_length(decision)=1
+AND json_extract(decision,'$[0].tool')='review_preference' AND json_extract(result,'$[0].ok')=1
+)SQL",{id}).next();
+}
+
+ModelInput Store::Impl::preferenceReviewInput(const conversation::Message& message, std::vector<std::string> tools,
+                                             std::string feedback, Seconds now) {
+    const auto current = memory(message.bot,turnActor(message),"read_memory",Json::object(),now);
+    return {.task = Json::object(),
+            .event = {{"kind","private_memory_review"},{"text",message.text},{"baseVersion",current.at("version")}},
+            .history = Json::array(),.notes = {{},field(current,"content")},.tools = std::move(tools),
+            .feedback = std::move(feedback),.config = message.routing.at("config")};
 }
 
 Json Store::Impl::rememberPreference(const conversation::Message& message, int step, const Json& args, Seconds now) {
     const auto quote = conversation_storage::text(args,"sourceQuote",conversation_storage::messageSize,true);
     const auto summary = conversation_storage::text(args,"summary",240,true);
-    if (!canRememberPreference(message,step) || message.text.find(quote) == std::string::npos)
+    if (!preferenceReviewPending(message.id,step) || !canReviewPreference(message) ||
+        message.text.find(quote) == std::string::npos)
         throw Conflict("Use only words stated by the person in their current message");
     auto result = memory(message.bot,turnActor(message),"remember_preference",args,now,true);
     if (!result.value("unchanged",false)) {

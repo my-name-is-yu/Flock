@@ -1126,7 +1126,7 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     db->receive(localOwner,cb.intake("triage",""),"web-after-leave","Send another update");
     runtime->runConversations();
     auto sharedTools = model.ask.webTools;
-    check(std::erase(sharedTools,"remember_preference") == 1 && sharedTools == model.ask.sessionTools,
+    check(std::erase(sharedTools,"review_preference") == 1 && sharedTools == model.ask.sessionTools,
           "A Session ask should receive the Web Bot's tools except automatic memory");
     check(participationState(database,"triage") == "left" && effects().at("t3_thread_send").size() == 4 &&
           model.ask.send.at("error") == "This Bot's participation in the Session has stopped",
