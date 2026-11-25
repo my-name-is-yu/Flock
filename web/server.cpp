@@ -189,10 +189,6 @@ bool hasSingleHeaderValue(const Request& req, const std::string& name, std::stri
     return req.get_header_value_count(name) == 1 && req.get_header_value(name) == value;
 }
 
-bool isSameOriginRequest(const Request& req, const std::string& host) {
-    return hasSingleHeaderValue(req, "Origin", "http://" + host);
-}
-
 bool isLocalApprovalNavigation(const Request& req) {
     if (req.method != "GET" || req.has_header("Origin")) return false;
     if (req.get_header_value("Sec-Fetch-Mode") != "navigate" || req.get_header_value("Sec-Fetch-Dest") != "document") return false;
@@ -453,12 +449,12 @@ private:
         const bool readOnlyMethod = req.method == "GET" || req.method == "HEAD";
         if (readOnlyMethod && web::artifactPreview(req.path)) return HandlerResult::Unhandled;
 
-        const bool hasOrigin = req.has_header("Origin");
-        const bool sameOrigin = isSameOriginRequest(req, host);
-        if (hasOrigin && !sameOrigin) return reject(403, "invalid_origin");
+        const auto originCount = req.get_header_value_count("Origin");
+        const bool isSameOriginRequest = originCount == 1 && req.get_header_value("Origin") == "http://" + host;
+        if (originCount != 0 && !isSameOriginRequest) return reject(403, "invalid_origin");
         if (!isAllowedFetchSite(req)) return reject(403, "invalid_origin");
 
-        const bool hasBrowserOriginHeaders = hasOrigin || req.has_header("Sec-Fetch-Site");
+        const bool hasBrowserOriginHeaders = originCount != 0 || req.has_header("Sec-Fetch-Site");
         const bool post = req.method == "POST";
         if (req.path == web::sessionMcpPath || req.path == web::externalMcpPath) {
             if (hasBrowserOriginHeaders) return reject(403, "invalid_origin");
@@ -484,7 +480,7 @@ private:
         const bool deletingSchedule = req.method == "DELETE" && req.path == "/api/schedules";
         if (!post && !deletingSchedule) return reject(405, "method_not_allowed");
         const bool isMachineWebhook = !hasBrowserOriginHeaders && req.path.starts_with("/api/webhooks/");
-        if (!sameOrigin && !isMachineWebhook) return reject(403, "invalid_origin");
+        if (!isSameOriginRequest && !isMachineWebhook) return reject(403, "invalid_origin");
         if (!hasSingleHeaderValue(req, "X-Flock-Action", "1")) return reject(403, "invalid_origin");
         if (deletingSchedule) return HandlerResult::Unhandled;
 
