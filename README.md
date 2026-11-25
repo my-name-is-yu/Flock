@@ -158,8 +158,7 @@ ownership apply in both modes.
 
 Targets match exactly or with a `*` glob. **Never** applies in both modes.
 Supervised evaluates **Ask first** ahead of **Allow**, then uses the defaults
-above. The installation can have up to 20 Allow rules and 20 Ask-first rules.
-When a card adds a 21st Allow rule, Flock replaces the oldest Allow rule.
+above. Flock keeps each rule until an installation administrator removes it.
 
 ```sh
 flock mode

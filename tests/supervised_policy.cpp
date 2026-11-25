@@ -224,10 +224,12 @@ void turns(const std::filesystem::path& path) {
     check(actions==1 && store.inbox(requester).empty(),"denied operation retried within the same request");
     model.retry = false;
 
-    for (auto kind : {RuleKind::allow,RuleKind::ask}) {
-        for (int i=0;i<20;++i) policy.changeRule(localOwner,kind,Action::bot_rename,"fixture-" + std::to_string(i),true);
-        rejected([&] { policy.changeRule(localOwner,kind,Action::bot_rename,"one-too-many",true); });
-    }
+    constexpr int rulesPerKind = 32;
+    for (auto kind : {RuleKind::allow,RuleKind::ask})
+        for (int i=0;i<rulesPerKind;++i)
+            policy.changeRule(localOwner,kind,Action::bot_rename,"fixture-" + std::to_string(i),true);
+    const auto existingRules = policy.rules();
+    check(existingRules.size()==2*rulesPerKind,"Adding many rules did not keep every Allow and Ask-first rule");
     send("New request after the denial");
     item = card();
     const Person delegatedAdmin{"delegated-admin",true};
@@ -245,7 +247,7 @@ void turns(const std::filesystem::path& path) {
     check(store.inbox(delegatedAdmin).empty(),
           "a demoted administrator retained access to the approval");
     rejected<DecisionDenied>([&] { store.decideInbox(delegatedAdmin,target(item),"always_allow"); });
-    check(card()==item && policy.rules().size()==40,"a stale administrator changed the rule or card");
+    check(card()==item && policy.rules()==existingRules,"a stale administrator changed the rule or card");
     // Older host configuration can assign separate credentials with distinct
     // roles to one person. Interactive authority comes from the credential.
     store.setWebIdentityResolver([](std::string_view) -> std::optional<bool> { return false; });
@@ -253,15 +255,11 @@ void turns(const std::filesystem::path& path) {
           "the queued role replaced the host administrator's interactive authority");
     store.decideInbox(delegatedAdmin,target(item),"always_allow");
     runtime.runConversations();
-    check(actions==2 && policy.rules().size()==40 && policy.check("release",Action::bot_rename,"fixture-0")==PolicyResult::ask,
-          "Always allow did not run and replace the oldest Allow");
-    policy.changeRule(localOwner,RuleKind::ask,Action::bot_rename,"fixture-0",false);
-    policy.changeRule(localOwner,RuleKind::ask,Action::bot_rename,"fixture-1",false);
-    check(policy.check("release",Action::bot_rename,"fixture-0")==PolicyResult::ask &&
-          policy.allows("release",Action::bot_rename,"fixture-1"),"replacement removed an Allow newer than the oldest");
+    check(actions==2 && policy.rules().size()==existingRules.size()+1,"Always allow did not run and add one rule");
     send("Use the saved rule");
     check(actions==3 && store.inbox(requester).empty(),"saved exact rule did not allow the next action");
     policy.changeRule(localOwner,RuleKind::allow,Action::bot_rename,"target",false);
+    check(policy.rules()==existingRules,"Saving a rule from a card changed an existing rule");
 
     send("Pending change before Never");
     item = card();

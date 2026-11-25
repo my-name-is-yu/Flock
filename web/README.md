@@ -97,7 +97,8 @@ Use **Appearance** to set the theme for the current browser. Use **Permissions**
 to set the installation's permission mode and rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
-[category defaults](../README.md#installation-policy).
+[category defaults](../README.md#installation-policy). Rules added here or
+from an approval card stay in the list until an administrator removes them.
 
 Installation administrators manage ChatGPT, T3, and other integrations in
 **Connections**. Local discovery and URL connections both use T3 OAuth.

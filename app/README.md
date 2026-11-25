@@ -143,8 +143,8 @@ confirm actions that require policy approval.
 Use `flock rules list` and `flock rules add|remove allow|ask|never ACTION TARGET`
 to manage installation rules. Quote glob targets, such as `'demo-*'` for
 `environment.launch`. Never wins in both modes. Supervised checks Ask first
-before Allow and caps each of those rule kinds at 20. A rule saved from a
-card replaces the oldest Allow at capacity.
+before Allow. Rules added from the CLI, Web settings, or an approval card stay
+saved until they are removed.
 
 See the [installation policy table](../README.md#installation-policy) for
 which actions ask. The requester and installation roots can decide cards.
