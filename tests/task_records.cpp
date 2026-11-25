@@ -1,4 +1,5 @@
 #include "../src/task_storage.hpp"
+#include "../src/journal.hpp"
 #include "../src/storage.hpp"
 
 #include "flock/record_decode_error.hpp"
@@ -305,6 +306,34 @@ void executionDecodeErrors() {
     rejects(invalid.dump(), "cancelledInstructions.0.conflicting", "expected a boolean");
 }
 
+void journalRunReportRoundTrips() {
+    const auto assigned = storedExecution().at("pendingRunReport").at("report");
+    const auto wholeRun = decodeRunReport(id, assigned);
+    check(encodeRunReport(wholeRun) == assigned && reportSourceRun(wholeRun).assignment && !wholeRun.stopRequested,
+          "Assigned Run report changed its journal representation");
+    auto destination = assigned;
+    destination.update({{"destination", "Build"},
+                        {"projectId", "project"},
+                        {"commit", "checked"},
+                        {"requestedCommit", "requested"},
+                        {"stopRequested", false},
+                        {"status", "cancelled"},
+                        {"revisionId", 5}});
+    for (const auto* key : {"environmentId", "ownerBotId", "projectId", "revisionId"}) destination["run"].erase(key);
+    const auto fanOut = decodeRunReport(id, destination);
+    check(encodeRunReport(fanOut) == destination && !reportSourceRun(fanOut).assignment && fanOut.stopRequested == false,
+          "Destination Run report lost its shape or explicit stop flag");
+    destination["run"]["unexpected"] = "ignored before typing";
+    try {
+        (void)decodeRunReport(id, destination);
+    } catch (const RecordDecodeError& error) {
+        const std::string_view message = error.what();
+        check(message.find("run.unexpected") != message.npos, "Run report error did not identify the malformed field");
+        return;
+    }
+    throw std::runtime_error("Run report accepted an unknown Run field");
+}
+
 void questionAndCheckpointRoundTrip() {
     const Json decision{{"generation", generation},
                         {"eventId", 15},
@@ -349,6 +378,7 @@ int main() {
         destinationRoundTrips();
         decodeErrors();
         executionDecodeErrors();
+        journalRunReportRoundTrips();
         questionAndCheckpointRoundTrip();
         return 0;
     } catch (const std::exception& error) {

@@ -223,7 +223,8 @@ Wait readWaitPayload(const RecordDecoder& decoder, const Json& data, WaitDetails
     Wait wait{std::move(details), decoder.get<std::string>(data, "text")};
     wait.eventId = decoder.get<Id>(data, "eventId");
     wait.actionId = decoder.optional<std::string>(data, "actionId");
-    wait.run = decodeWaitRun(decoder.require(data, "run"), decoder.nested("run"));
+    const auto& run = decoder.require(data, "run");
+    if (!run.is_null()) wait.run = decoder.nested("run").decodeClosed(run, decodeWaitRun);
     return wait;
 }
 }
@@ -247,14 +248,17 @@ Wait decodeWaitRow(const Statement& row, int col) {
 Wait decodeWaitingEntry(Id entry, const Json& data) {
     const auto row = std::to_string(entry);
     const RecordDecoder decoder("journal", row);
-    const auto reason = readWaitReason(decoder, decoder.get<std::string>(data, "reason"));
-    auto details = reason == WaitReason::user_question && data.contains("projectChoices") ? WaitDetails{readProjectQuestion(decoder, data)}
-                                                                                          : readWaitDetails(decoder, data, reason);
-    auto wait = readWaitPayload(decoder, data, std::move(details));
-    wait.id = decoder.get<Id>(data, "id");
-    wait.messageId = decoder.optional<Id>(data, "messageId");
-    wait.allowance = decoder.optional<Id>(data, "allowance");
-    return wait;
+    return decoder.decodeClosed(data, [](const Json& payload, const RecordDecoder& fields) {
+        const auto reason = readWaitReason(fields, fields.get<std::string>(payload, "reason"));
+        auto details = reason == WaitReason::user_question && payload.contains("projectChoices")
+                           ? WaitDetails{readProjectQuestion(fields, payload)}
+                           : readWaitDetails(fields, payload, reason);
+        auto wait = readWaitPayload(fields, payload, std::move(details));
+        wait.id = fields.get<Id>(payload, "id");
+        wait.messageId = fields.optional<Id>(payload, "messageId");
+        wait.allowance = fields.optional<Id>(payload, "allowance");
+        return wait;
+    });
 }
 
 Wait Store::waitingEvent(const Json& event) {

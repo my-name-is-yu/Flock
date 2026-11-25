@@ -125,6 +125,10 @@ inline RunAssignment decodeRunAssignment(const Json& data, const RecordDecoder& 
     return {row.get<std::string>(data, "ownerBotId"), row.get<std::string>(data, "projectId"), row.nullable<Id>(data, "revisionId")};
 }
 
+inline AssignedRun decodeAssignedRun(const Json& data, const RecordDecoder& row) {
+    return {decodeRunRef(data, row), row.get<std::string>(data, "environmentId"), decodeRunAssignment(data, row)};
+}
+
 inline std::optional<RunAssignment> decodeOptionalRunAssignment(const Json& data, const RecordDecoder& row) {
     if (!data.contains("ownerBotId") && !data.contains("projectId") && !data.contains("revisionId")) return std::nullopt;
     return decodeRunAssignment(data, row);

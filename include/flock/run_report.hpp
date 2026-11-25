@@ -9,6 +9,7 @@ struct RunEvidence {
     std::string report, itemId, detail;
     bool truncated = false;
     std::string sessionCreatedAt{};
+    bool operator==(const RunEvidence&) const = default;
 };
 
 struct SettledRunReport {

@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
+#include "journal.hpp"
 #include "task_storage.hpp"
 
 #include <algorithm>
@@ -45,9 +46,7 @@ WHERE w.task_id=? AND w.action_id=?
   AND w.environment=? AND w.thread=? AND w.gateway_environment=?
   AND NOT EXISTS (
     SELECT 1 FROM journal j WHERE j.task_id=? AND j.kind='report'
-      AND json_extract(j.data,'$.environmentId')=w.environment
-      AND json_extract(j.data,'$.run.runId')=w.run
-      AND json_extract(j.data,'$.run.threadId')=w.thread)
+      AND j.run_environment_id=w.environment AND j.run_id=w.run AND j.run_thread_id=w.thread)
 ORDER BY w.rowid LIMIT 1)SQL",
                          {task.id, run.actionId, run.environmentId, run.ref.threadId, run.ref.gatewayEnvironmentId, task.id});
     if (!pending.next()) return false;
@@ -84,23 +83,23 @@ bool Store::Impl::recordDestinationReport(TaskData& task, DestinationRun& run, c
         status = "failed";
         if (detail.empty()) detail = "The Run did not verify the requested commit.";
     }
-    Json data = {{"kind", "result"},
-                 {"run", runJson(ref)},
-                 {"environmentId", run.environmentId},
-                 {"projectId", run.assignment.projectId},
-                 {"destination", run.name},
-                 {"status", status},
-                 {"commit", observed.checkedCommit},
-                 {"revisionId", task.currentRevision ? Json(*task.currentRevision) : Json(nullptr)},
-                 {"resultRunId", observed.resultRunId.empty() ? ref.runId : observed.resultRunId}};
-    if (task.requestedCommit) data["requestedCommit"] = *task.requestedCommit;
+    std::optional<bool> stopRequested;
     if (status == "interrupted" || status == "cancelled") {
         const auto action = outbox(task, run.actionId);
-        data["stopRequested"] = task.state == TaskState::cancelling || destinationStopRequested(action, ref);
+        stopRequested = task.state == TaskState::cancelling || destinationStopRequested(action, ref);
     }
-    auto evidence = boundedReportEvidence(
-        {observed.evidence, observed.report, observed.itemId, std::move(detail), observed.truncated, observed.sessionCreatedAt});
-    setReportEvidence(data, evidence);
+    const RunReportEntry entry{
+        ref,
+        run.environmentId,
+        observed.resultRunId.empty() ? ref.runId : observed.resultRunId,
+        status,
+        task.currentRevision,
+        boundedReportEvidence(
+            {observed.evidence, observed.report, observed.itemId, std::move(detail), observed.truncated, observed.sessionCreatedAt}),
+        stopRequested,
+        DestinationRunReportDetails{run.name, run.assignment.projectId, observed.checkedCommit, task.requestedCommit}};
+    auto evidence = entry.evidence;
+    const auto revision = task.currentRevision ? Json(*task.currentRevision) : Json(nullptr);
     run.status = destinationRunStatusFromName(std::move(status));
     if (run.report) {
         if (evidence.availability == RunEvidence::Availability::Available) evidence.availability = run.report->evidence;
@@ -118,11 +117,10 @@ bool Store::Impl::recordDestinationReport(TaskData& task, DestinationRun& run, c
         clearWait(task, "run_finished");
         task.state = TaskState::running;
     }
-    auto priorReport = query("SELECT 1 FROM journal WHERE task_id=? AND kind='report' "
-                             "AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run.runId')=? "
-                             "AND json_extract(data,'$.run.threadId')=? AND json_extract(data,'$.revisionId') IS ? LIMIT 1",
-                             {task.id, run.environmentId, ref.runId, ref.threadId, data.at("revisionId")});
-    if (!priorReport.next()) journal(task.id, "report", data);
+    auto priorReport = query("SELECT 1 FROM journal WHERE task_id=? AND kind='report'"
+                             " AND run_environment_id=? AND run_thread_id=? AND run_id=? AND revision_id IS ? LIMIT 1",
+                             {task.id, run.environmentId, ref.threadId, ref.runId, revision});
+    if (!priorReport.next()) journal(task.id, entry);
     if (advanceDestinationSessionMessageRun(task, run)) return false;
     auto pendingSends = query(R"SQL(
 SELECT json_extract(effect,'$.actionId') FROM conversation_steps
@@ -155,10 +153,8 @@ WHERE json_extract(effect,'$.kind')='message_session'
     task.state = TaskState::completed;
     auto summary = std::to_string(count) + " of " + std::to_string(runs.size()) + " T3 Runs completed";
     if (task.requestedCommit) summary += " with a verified commit";
-    Json completion = {{"text", std::move(summary) + "."},
-                       {"runOutcome", runOutcomeName(outcome)},
-                       {"doneWhen", task.doneWhen},
-                       {"revisionId", data.at("revisionId")}};
+    Json completion = {
+        {"text", std::move(summary) + "."}, {"runOutcome", runOutcomeName(outcome)}, {"doneWhen", task.doneWhen}, {"revisionId", revision}};
     if (task.requestedCommit) completion["requestedCommit"] = *task.requestedCommit;
     journal(task.id, "completed", std::move(completion));
     return true;

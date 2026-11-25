@@ -1,6 +1,7 @@
 #include "task_storage.hpp"
 #include "task_context_storage.hpp"
 #include "task_interaction_storage.hpp"
+#include "journal.hpp"
 #include "storage.hpp"
 #include "record_decode.hpp"
 #include "outbox_storage.hpp"
@@ -39,6 +40,7 @@ constexpr std::array runOutcomes{
     std::pair{RunOutcome::partial_failure, std::string_view{"partial_failure"}},
     std::pair{RunOutcome::failed, std::string_view{"failed"}},
 };
+}
 
 RunEvidence::Availability decodeReportAvailability(const Json& data, const RecordDecoder& row) {
     const auto status = row.optional<std::string>(data, "evidenceStatus");
@@ -48,6 +50,7 @@ RunEvidence::Availability decodeReportAvailability(const Json& data, const Recor
     return *availability;
 }
 
+namespace {
 RunTarget decodeRunTarget(const Json& data, const RecordDecoder& row) {
     return {row.get<std::string>(data, "name"),
             {row.get<std::string>(data, "environmentId"), row.get<std::string>(data, "projectId"),
@@ -78,10 +81,6 @@ DestinationRun decodeDestinationRun(const Json& data, const RecordDecoder& row) 
     return run;
 }
 
-AssignedRun decodeAssignedRun(const Json& data, const RecordDecoder& row) {
-    return {decodeRunRef(data, row), row.get<std::string>(data, "environmentId"), decodeRunAssignment(data, row)};
-}
-
 std::optional<AssignedRun> decodeNullableRun(const Json& data, const RecordDecoder& row, std::string_view key) {
     const auto& value = row.require(data, key);
     if (value.is_null()) return std::nullopt;
@@ -95,23 +94,8 @@ RunStop decodeRunStop(const Json& data, const RecordDecoder& row) {
             row.optional<Seconds>(data, "reconcileAt")};
 }
 
-SettledRunReport decodeSettledRunReport(const Json& data, const RecordDecoder& row) {
-    if (row.get<std::string>(data, "kind") != "result") row.fail("kind", "expected a Run result");
-    auto run = row.nested("run").decodeClosed(row.require(data, "run"), decodeAssignedRun);
-    if (row.get<std::string>(data, "environmentId") != run.environmentId) row.fail("environmentId", "does not match the assigned Run");
-    if (row.nullable<Id>(data, "revisionId") != run.assignment.revisionId) row.fail("revisionId", "does not match the assigned Run");
-    RunEvidence evidence{.availability = decodeReportAvailability(data, row),
-                         .report = row.get<std::string>(data, "report"),
-                         .itemId = row.get<std::string>(data, "itemId"),
-                         .detail = row.get<std::string>(data, "detail"),
-                         .truncated = row.get<bool>(data, "truncated"),
-                         .sessionCreatedAt = row.optional<std::string>(data, "sessionCreatedAt").value_or("")};
-    return {std::move(run), row.get<std::string>(data, "resultRunId"), row.get<std::string>(data, "status"), std::move(evidence),
-            row.optional<bool>(data, "stopRequested").value_or(false)};
-}
-
 PendingRunReport decodePendingRunReport(const Json& data, const RecordDecoder& row) {
-    return {row.nested("report").decodeClosed(row.require(data, "report"), decodeSettledRunReport), row.get<Seconds>(data, "retryAt"),
+    return {decodeSettledRunReport(row.require(data, "report"), row.nested("report")), row.get<Seconds>(data, "retryAt"),
             row.get<int>(data, "attempts")};
 }
 
@@ -230,13 +214,7 @@ Json runStopJson(const RunStop& stop) {
 }
 
 Json settledRunReportJson(const SettledRunReport& report) {
-    const auto& revision = report.run.assignment.revisionId;
-    Json data{
-        {"kind", "result"},        {"run", assignedRunJson(report.run)},        {"resultRunId", report.resultRunId},
-        {"status", report.status}, {"environmentId", report.run.environmentId}, {"revisionId", revision ? Json(*revision) : Json(nullptr)}};
-    if (report.stopRequested) data["stopRequested"] = true;
-    setReportEvidence(data, boundedReportEvidence(report.evidence));
-    return data;
+    return encodeRunReport(runReportEntry(report));
 }
 
 SessionOrigin decodeSessionOrigin(const Json& data, const RecordDecoder& row) {
@@ -750,8 +728,7 @@ GROUP BY bot_id,state,replanning)SQL");
 TaskView Store::Impl::sessionTask(Id id) const {
     auto view = taskDetails(id, false);
     auto reports = query(R"SQL(
-SELECT coalesce(nullif(json_extract(data,'$.run.environmentId'),''),json_extract(data,'$.environmentId')),
-       json_extract(data,'$.run.threadId'),json_extract(data,'$.run.runId'),json_extract(data,'$.status'),
+SELECT run_environment_id,run_thread_id,run_id,run_status,
        json_extract(data,'$.sessionCreatedAt')
 FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
 )SQL",

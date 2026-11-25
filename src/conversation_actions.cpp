@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "journal.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 #include "commit_check.hpp"
@@ -209,10 +210,7 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
     std::lock_guard lock(mutex);
     Transaction transaction(db);
     if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step}).next()) return stop;
-    if (outcome.value("ok", false)) {
-        Json entry = {{"messageId", id}, {"step", step}, {"run", outcome.value("run", run)}};
-        journal(effect->taskId, "interrupt_requested", entry);
-    }
+    if (outcome.value("ok", false)) journalInterrupt(effect->taskId, {id, step, effect->run});
     saveTurnResults(id, step, Json::array({outcome}));
     transaction.commit();
     return advance;
@@ -241,8 +239,7 @@ bool Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& rec
     auto& run = destinationRun(task, receipt.actionId);
     auto report = query(R"SQL(
 SELECT 1 FROM journal WHERE task_id=? AND kind='report'
-AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run.runId')=?
-AND json_extract(data,'$.run.threadId')=? LIMIT 1)SQL",
+AND run_environment_id=? AND run_id=? AND run_thread_id=? LIMIT 1)SQL",
                         {receipt.taskId, run.environmentId, run.ref.runId, run.ref.threadId});
     if ((!run.outstanding() || report.next()) && advanceDestinationSessionMessageRun(task, run)) save(task);
     return true;
