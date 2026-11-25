@@ -102,8 +102,8 @@ Json questionTarget(const Json& task) {
         {"eventId",task.at("eventId")},{"run",task.at("activeRun")},{"requestId",field(task.at("question"),"requestId")}};
 }
 
-Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, IntakeResolver intake)
-    : path(std::move(file)), memorySeed(std::move(seed)), automationIntake(std::move(intake)) {
+Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelResolver model)
+    : path(std::move(file)), memorySeed(std::move(seed)), automationModel(std::move(model)) {
     if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
     const int rc = sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
     try {
@@ -432,6 +432,7 @@ void Store::Impl::peerMessage(const PeerExchange& exchange, const Json& message)
 void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
     const Id id = task["id"];
     const auto peer = peerExchange(id);
+    const bool undispatched = task["state"] == "queued" || isUndispatchedNotesWait(task);
     if (!task.value("pendingInstructions",Json::array()).empty())
         task["cancelledInstructions"] = task.at("pendingInstructions");
     clearWait(task,"cancel");
@@ -439,7 +440,7 @@ void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
     journal(id,"cancel_requested",stop.participation
         ? Json{{"sessionParticipationId",stop.participation},{"sessionStopId",stop.cutoff}}
         : Json::object());
-    if (task["state"] == "queued" && !peer) {
+    if (undispatched && !peer) {
         for (const auto* key : {"replanning","pendingDestination","pendingInstructions"})
             task.erase(key);
         task["state"] = "cancelled";
@@ -539,8 +540,8 @@ std::string effectiveDoneWhen(const Json& task) {
     return task.value("requestedDoneWhen",field(task,"doneWhen"));
 }
 
-Store::Store(std::filesystem::path db, MemorySeed seed, IntakeResolver automationIntake)
-    : p_(std::make_unique<Impl>(std::move(db),std::move(seed),std::move(automationIntake))) {}
+Store::Store(std::filesystem::path db, MemorySeed seed, AutomationModelResolver automationModel)
+    : p_(std::make_unique<Impl>(std::move(db),std::move(seed),std::move(automationModel))) {}
 Store::~Store() = default;
 const std::filesystem::path& Store::path() const { return p_->path; }
 
@@ -744,7 +745,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         const auto attempt = reserveExtraModelCall(taskModelBudget(task),"task_decision",0,id,eventId);
         exec("UPDATE events SET reserved_attempt=? WHERE id=? AND task_id=?",{attempt,eventId,id});
         journal(id,"model_budget_granted",{{"waitId",waitId},{"attemptId",attempt}});
-    } else if (operation == "retry" && reason == "model_failure") {
+    } else if (operation == "retry" && (reason == "model_failure" || isUndispatchedNotesWait(task))) {
+        if (reason == "bot_notes_unavailable") next = "queued";
         exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task["eventId"]});
         task.erase("feedback");
         journal(id, "model_retry", {{"waitId",waitId}});

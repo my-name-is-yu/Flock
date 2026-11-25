@@ -155,7 +155,7 @@ struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
     const MemorySeed memorySeed;
-    const IntakeResolver automationIntake;
+    const AutomationModelResolver automationModel;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     class SessionEvidence;
@@ -283,7 +283,7 @@ struct Store::Impl {
     bool permitsWorkSession(Id sourceMessageId, const WorkSession&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
-    explicit Impl(std::filesystem::path path, MemorySeed, IntakeResolver);
+    explicit Impl(std::filesystem::path path, MemorySeed, AutomationModelResolver);
     ~Impl();
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
@@ -417,6 +417,8 @@ struct Store::Impl {
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
     void initializeProjectQueue();
+    bool automationBeforeDispatch(Id task) const;
+    bool isUndispatchedNotesWait(const Json& task) const;
     bool projectRouteReady(Id task, std::string_view action) const;
     std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;
     void rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project);

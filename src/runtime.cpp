@@ -1407,19 +1407,27 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         if (canSend && (!task.contains("selectedSession") || hasSettledRun(task))) tools.push_back("send_bot_message");
         return tools;
     }
-    void recordFailure(Json& task, const Json& event, std::string_view detail, bool transient) {
+    enum class FailureCause { Model, BotNotes };
+
+    void recordFailure(Json& task, const Json& event, std::string_view detail, bool transient,
+                       FailureCause cause = FailureCause::Model) {
         const auto attempts = event["failures"].get<int>() + 1;
         const auto why = bounded(db.redactor(field(task,"botId")).text(std::string(detail)),2048);
         db.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?",
                 {attempts, transient ? options.clock() + (1 << (attempts - 1)) : 0,event["id"]});
         db.journal(task["id"],"model_failure",{{"eventId",event["id"]},{"attempt",attempts},{"text",why}});
         task["feedback"] = why;
-        if (attempts >= 3) db.wait(task,"model_failure",{{"text",why}});
+        if (attempts >= 3) {
+            const auto reason = cause == FailureCause::BotNotes && db.automationBeforeDispatch(task.at("id"))
+                ? "bot_notes_unavailable" : "model_failure";
+            db.wait(task,reason,{{"text",why}});
+        }
     }
 
-    void failure(const Json& task, const Json& event, std::string_view detail, bool transient) {
+    void failure(const Json& task, const Json& event, std::string_view detail, bool transient,
+                 FailureCause cause = FailureCause::Model) {
         change(task,[&](Json& current) {
-            recordFailure(current,event,detail,transient);
+            recordFailure(current,event,detail,transient,cause);
             return true;
         });
     }
@@ -2515,6 +2523,8 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             } catch (const Conflict& error) {
                 rejectDecision(task,event,*decision,error.what());
             }
+        } catch (const BotNotesUnavailable& e) {
+            failure(task,event,e.what(),false,FailureCause::BotNotes);
         } catch (const ModelError& e) {
             failure(task,event,e.what(),e.transient);
         } catch (const StorageError&) {
