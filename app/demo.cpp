@@ -18,22 +18,22 @@ class DemoModel final : public Model {
                     : tool == "read_result" ? "The demo result records successful completion of simulated work. "
                                               "It contains no implementation details."
                     : "I queued your request.";
-                return {{{"reply",{{"text",text}},"The fixed demo reports what it did."}}};
+                return {{{"reply",{{"text",text}}, {}}}};
             }
             const auto& reply = in.event.at("replyTo");
             if (reply.is_object() && reply.value("kind","") == "task_question" && reply.value("current",false)) {
                 return {{{"answer_task_question",{{"taskId",reply["taskId"]},{"waitId",reply["waitId"]},
                     {"revisionId",reply["revisionId"]},{"generation",reply["generation"]},
-                    {"text",in.event.value("text","")}},"The user replied to the demo question."}}};
+                    {"text",in.event.value("text","")}}, {}}}};
             }
             if (reply.is_object() && reply.value("kind","") == "result")
-                return {{{"read_result",{{"messageId",reply["messageId"]}},"The user asked about a demo result."}}};
+                return {{{"read_result",{{"messageId",reply["messageId"]}}, {}}}};
             if (reply.is_object() && reply.value("kind","") == "bot_message") {
                 const auto source = reply.value("inReplyTo",Json::object()).value("replyToMessageId",Json(nullptr));
                 if (!source.is_null())
-                    return {{{"read_result",{{"messageId",source}},"The user followed up on an explained demo result."}}};
+                    return {{{"read_result",{{"messageId",source}}, {}}}};
             }
-            return {{{"start_task",{{"request",in.event.value("text","")}},"Fixed demo intake."}}};
+            return {{{"start_task",{{"request",in.event.value("text","")}}, {}}}};
         }
         if (event == "result" && in.task.contains("userInstructions")) {
             const bool follow = std::ranges::find(in.tools,"follow_up") != in.tools.end();

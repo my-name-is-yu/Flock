@@ -885,8 +885,8 @@ constexpr auto renewal = "When will the signing certificate be renewed?";
 constexpr auto notes = "Prepare release notes.";
 constexpr auto checksums = "Check artifact checksums in the backup environment.";
 
-Json chatGPTToolCall(std::string_view name, Json arguments, std::string_view reason) {
-    arguments["reason"] = reason;
+Json chatGPTToolCall(std::string_view name, Json arguments, std::string_view reason = {}) {
+    if (!reason.empty()) arguments["reason"] = reason;
     return {{"type","function_call"},{"namespace","flock"},{"status","completed"},
             {"name",name},{"arguments",arguments.dump()}};
 }
@@ -901,27 +901,25 @@ Json chatGPTConversationTool(const Json& task, const Json& event) {
         if (last.at("tool") == "read_result") {
             check(result.at("text") == signingReport,"read_result did not return the saved report");
             if (text == whyBlocked)
-                return chatGPTToolCall("reply",{{"text","The release is blocked by the expired signing certificate."}},
-                    "The report identifies the expired certificate.");
+                return chatGPTToolCall("reply",{{"text","The release is blocked by the expired signing certificate."}});
             check(text == renewal,"unexpected follow-up after reading the report");
-            return chatGPTToolCall("reply",{{"text","What is the planned certificate renewal date?"}},
-                "The report only gives the expiration date.");
+            return chatGPTToolCall("reply",{{"text","What is the planned certificate renewal date?"}});
         }
-        return chatGPTToolCall("reply",{{"text","I queued your request."}},"Confirm the new task.");
+        return chatGPTToolCall("reply",{{"text","I queued your request."}});
     }
     if (text == blockers || text == consultation || text == notes)
-        return chatGPTToolCall("start_task",{{"request",text}},"Start the requested work.");
+        return chatGPTToolCall("start_task",{{"request",text}});
     if (text == checksums) {
         check(std::ranges::any_of(task.at("environments"),[](const Json& env) { return env.at("name") == "backup"; }),
               "the backup destination was missing from the production request");
-        return chatGPTToolCall("start_task",{{"request",text},{"environment","backup"}},"Use the requested destination.");
+        return chatGPTToolCall("start_task",{{"request",text},{"environment","backup"}});
     }
     if (text == whyBlocked || text == renewal) {
         const auto& tasks = task.at("tasks");
         const auto source = std::ranges::find_if(tasks,[](const Json& item) { return item.at("request") == blockers; });
         check(source != tasks.end() && source->at("latestResult").at("excerpt") == signingReport,
               "the saved report was missing from the conversation context");
-        return chatGPTToolCall("read_result",{{"messageId",source->at("latestResult").at("messageId")}},"Read the saved report.");
+        return chatGPTToolCall("read_result",{{"messageId",source->at("latestResult").at("messageId")}});
     }
     check(text == "それ止めて","unexpected composer message: " + text);
     std::vector<std::string> active;
@@ -930,7 +928,7 @@ Json chatGPTConversationTool(const Json& task, const Json& event) {
     auto sorted = active;
     std::ranges::sort(sorted);
     check(sorted == std::vector<std::string>{checksums,notes},"expected both running tasks in the stop request context");
-    return chatGPTToolCall("reply",{{"text","どの作業を停止しますか？"},{"suggestions",active}},"Two tasks are running.");
+    return chatGPTToolCall("reply",{{"text","どの作業を停止しますか？"},{"suggestions",active}});
 }
 
 Json chatGPTOutput(const Json& task, const Json& event) {
