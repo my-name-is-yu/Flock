@@ -25,7 +25,7 @@ void classification() {
     };
     expect(parallel_read,{"read_result","find_tasks","flock_session_search","read_tool_result","workflow_status",
         "expand_context","list_secrets","list_connections","check_environment_readiness","list_schedules",
-        "workspace_read_file","workspace_search","workspace_command_status","web_search","web_fetch",
+        "workspace_read_file","workspace_search","web_search","web_fetch",
         "mcp_discover","mcp_read_resource","skill_list","skill_read","inspect_attachment","git_find_repos"});
     expect(gated_read,{"flock_session_events","read_channel_attachment","read_memory","memory_history",
         "mcp_call_tool","git_repo_info","git_pr_status","git_commit_status","git_read_ci_logs"});
@@ -35,7 +35,7 @@ void classification() {
         "continue_fresh_session","request_secret_input","update_bot_settings","request_bot_change","propose_memory_edit",
         "apply_memory_edit","revert_memory_edit","create_schedule","remove_schedule","create_reminder","create_trigger",
         "channel_edit_message","channel_react","channel_send_attachment","publish_artifact","request_local_machine_connection",
-        "workspace_write_file","workspace_run_command","workspace_stop_command","git_open_pr","git_update_pr",
+        "workspace_write_file","git_open_pr","git_update_pr",
         "git_request_review","git_submit_review","git_comment","unknown_tool"});
     expect(terminal,{"reply"});
 
@@ -48,7 +48,7 @@ void classification() {
 
 void batchAdmission() {
     for (const auto& tool : botToolNames())
-        check(batchable(tool) == (tool != "workspace_run_command"), "Incorrect Bot batch admission for " + tool);
+        check(batchable(tool), "Incorrect Bot batch admission for " + tool);
     for (const auto tool : {"flock_session_search","check_environment_readiness","flock_session_events","find_tasks",
                             "read_result","workflow_status","list_schedules","list_secrets","list_connections",
                             "read_tool_result","read_memory","memory_history"}) {
@@ -90,12 +90,6 @@ void waves() {
         call("workspace_write_file",{{"path","other"}})
     }) == Waves{{0,4,6},{1,2},{3},{5,7},{8}},
           "Each workspace call must follow every earlier conflict and use the earliest eligible wave");
-    check(waveSlots({
-        call("workspace_command_status",{{"commandId",1}}),
-        call("workspace_stop_command",{{"commandId",1}}),
-        call("workspace_command_status",{{"commandId",2}}),
-        call("workspace_command_status",{{"commandId",1}})
-    }) == Waves{{0,2},{1},{3}}, "Command control must preserve conflict order");
     check(waveSlots({
         call("mcp_discover",{{"server","a"}}),
         call("mcp_call_tool",{{"server","a"}}),

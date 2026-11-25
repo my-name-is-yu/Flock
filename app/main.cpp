@@ -233,7 +233,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const IntakeResolver intake = [&](std::string_view botId, std::string_view request) {
         return bots.get(botId).intake(request);
     };
-    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); },intake);
+    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); },
+                [&](std::string_view id) { return bots.plannerModel(id); });
     SettingsSystem system(home,port,sessionRead);
     SettingsConnections connections(home);
     SettingsAccess access(store,home,std::getenv("FLOCK_WEB_IDENTITIES_FILE"));

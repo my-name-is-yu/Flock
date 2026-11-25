@@ -23,6 +23,7 @@ public:
     explicit Bots(std::filesystem::path directory);
     std::vector<std::string> ids() const;
     Bot get(std::string_view id) const;
+    std::optional<Store::PlannerModel> plannerModel(std::string_view id) const;
     std::string soul(std::string_view id) const;
     std::string initialMemory(std::string_view id) const;
     std::vector<PeerBot> peers(std::string_view id) const;
@@ -40,7 +41,9 @@ public:
 private:
     std::filesystem::path directory_;
     mutable std::mutex mutex_;
+    std::optional<Bot> tryGet(std::string_view id) const;
     std::filesystem::path path(std::string_view id) const;
+    std::string readOptionalNotes(std::string_view id, std::string_view filename, std::size_t limit) const;
     Json cardLocked(std::string_view id) const;
     Json cardFromDirectory(std::string_view id, const std::filesystem::path&) const;
     void syncBotSchedules(Store&, std::string_view id, Seconds now, const ScheduleReporter&) const;

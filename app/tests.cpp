@@ -24,8 +24,19 @@ namespace {
 class NotesModel final : public Model {
 public:
     std::vector<ModelInput> inputs;
+    std::optional<Id> editTask;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
+        if (editTask && input.event.contains("turn")) {
+            if (!input.event.at("turn").empty()) return {"reply",{{"text","Saved."}},"Confirm the edit"};
+            for (const auto& task : input.task.at("tasks")) {
+                if (task.at("taskId") == *editTask)
+                    return {"change_task",{{"taskId",*editTask},{"generation",task.at("generation")},
+                        {"revisionId",task.at("revisionId")},{"instruction","Check staging instead"},
+                        {"intent","Check staging instead"}},"Apply the new scope"};
+            }
+            throw std::runtime_error("The automation was missing from the conversation");
+        }
         inputs.push_back(input);
         if (input.event["kind"] == "result")
             return {"complete",{{"report","Original evidence confirmed"}},"The report meets the original acceptance criterion."};
@@ -65,8 +76,8 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     config["reasoningEffort"] = "high";
     createBot(folder / "release",config,"","");
     Bots bots(folder);
-    Store store(temp.path / "state.db",{},[&](std::string_view id,std::string_view request) {
-        return bots.get(id).intake(request);
+    Store store(temp.path / "state.db",{},[&](std::string_view id) {
+        return bots.plannerModel(id);
     });
     const auto now = utc(2026,1,1,12,0);
     const auto saved = bots.get("release").intake("");
@@ -99,6 +110,63 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
           retried.at("environmentId") == saved.environmentId && retried.at("projectId") == saved.projectId &&
           retried.at("config").at("session") == saved.config.at("session"),
           "Retry did not use the corrected planner settings on the original task route");
+}
+
+enum class NotesRecovery { Retry, Edit };
+
+void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery) {
+    Sandbox temp;
+    const auto folder = temp.path / "bots";
+    createBot(folder / "release",botConfig(),"Release role","");
+    createBot(folder / "triage",botConfig(),"Triage role","");
+    const Bots bots(folder);
+    Store store(temp.path / "tasks.db",[&](std::string_view bot) { return bots.initialMemory(bot); },
+                [&](std::string_view bot) { return bots.plannerModel(bot); });
+    const auto due = utc(2026,1,2,0,0);
+    const Json schedule = {{"kind","schedule"},{"cron","0 0 * * *"},{"timezone","Etc/UTC"},{"request","Daily check"}};
+    for (const auto* bot : {"release","triage"})
+        store.createAutomation(localOwner,bots.get(bot).intake(""),schedule,due - 60);
+    std::filesystem::rename(folder / "release",folder / "release.saved");
+    std::filesystem::create_symlink("release",folder / "release");
+    store.fireDueAutomations(due);
+
+    const Id release = store.tasks("release").at(0).at("id");
+    const Id triage = store.tasks("triage").at(0).at("id");
+    NotesModel model;
+    NotesT3 t3;
+    RuntimeOptions options;
+    options.clock = [&] { return due; };
+    Runtime runtime(store,model,t3,[&](std::string_view bot) { return bots.soul(bot); },options);
+    for (int i = 0; i < 10 && t3.commands.empty(); ++i) runtime.tick();
+    check(t3.commands.size() == 1 && t3.commands.front().ownerBotId == "triage" &&
+          store.task(triage).at("state") == "running",
+          "unreadable automation notes prevented a healthy Bot from running in the same project");
+    const auto paused = store.task(release);
+    check(paused.at("state") == "waiting" && paused.at("wait").at("reason") == "bot_notes_unavailable" &&
+          paused.at("projectId") == store.task(triage).at("projectId"),
+          "the unreadable Bot's request lost its workspace or recovery action");
+
+    std::filesystem::remove(folder / "release");
+    std::filesystem::rename(folder / "release.saved",folder / "release");
+    if (recovery == NotesRecovery::Edit) {
+        model.editTask = release;
+        store.receive(localOwner,bots.get("release").intake(""),"edit-automation","Check staging instead");
+        runtime.runConversations();
+        check(store.task(release).at("intent") == "Check staging instead","the conversation did not save the edit");
+    } else store.operate(localOwner,TaskTarget::from(paused,paused.at("wait").at("id")),"retry");
+    runtime.tick();
+    const auto retried = store.task(release);
+    check(retried.at("state") == "queued" && retried.at("blockedBy").is_object() &&
+          retried.at("blockedBy").at("id") == triage && t3.commands.size() == 1,
+          recovery == NotesRecovery::Edit ? "editing the paused automation did not requeue it behind the active Run"
+                                         : "retrying an unreadable Bot's request overtook an active Run");
+
+    t3.finished = true;
+    for (int i = 0; i < 10 && t3.commands.size() == 1; ++i) runtime.tick();
+    check(t3.commands.size() == 2 && t3.commands.back().ownerBotId == "release" &&
+          model.inputs.back().notes.soul == "Release role", "the repaired Bot did not resume with its restored role");
+    if (recovery == NotesRecovery::Edit)
+        check(model.inputs.back().task.at("request") == "Check staging instead","the resumed automation lost the edit");
 }
 
 void notesAndRoutingOnRestart() {
@@ -167,8 +235,14 @@ void notesAndRoutingOnRestart() {
     rejects<Conflict>([&] { bots.get("../first"); },"path traversal accepted as Bot ID");
 }
 
-Json requestContext(const Json& request) {
-    return Json::parse(request.at("input").at(0).at("content").at(0).at("text").get<std::string>());
+const std::string& requestText(const Json& request) {
+    return request.at("input").at(0).at("content").at(0).at("text").get_ref<const std::string&>();
+}
+
+const Json& toolParameters(const Json& request, std::string_view name) {
+    for (const auto& function : request.at("tools").at(0).at("tools"))
+        if (function.at("name") == name) return function.at("parameters");
+    throw std::runtime_error("Missing model tool: " + std::string(name));
 }
 
 void notesAcrossConversationAndWork() {
@@ -180,7 +254,7 @@ void notesAcrossConversationAndWork() {
         ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
         Decision choose(const ModelInput& input) {
             requests.push_back(responseRequest(input));
-            const auto context = requestContext(requests.back());
+            const auto context = Json::parse(requestText(requests.back()));
             const auto& event = context.at("event");
             const auto& memory = context.at("memory").get_ref<const std::string&>();
             const auto styled = [&](std::string text) {
@@ -245,7 +319,7 @@ void notesAcrossConversationAndWork() {
     };
 
     const auto checkRequest = [](const Json& request, const Intake& bot, const BotNotes& notes, std::string_view kind) {
-        const auto context = requestContext(request);
+        const auto context = Json::parse(requestText(request));
         check(request.at("model") == bot.config.at("model") && context.at("event").at("kind") == kind,
             "unexpected configured model request");
         check(context.at("soul") == notes.soul && context.at("memory") == notes.memory,
@@ -285,8 +359,16 @@ void notesAcrossConversationAndWork() {
         check(reply.at("replyToMessageId") == question && reply.at("text") == expectedReply,
               "the explanation should apply current notes to the selected result");
         check(model.requests.size() == start + 2,"expected a read and a reply step");
-        checkRequest(model.requests.at(start),bot,notes,"conversation_turn");
-        checkRequest(model.requests.at(start + 1),bot,notes,"conversation_turn");
+        const auto& read = model.requests.at(start);
+        const auto& respond = model.requests.at(start + 1);
+        checkRequest(read,bot,notes,"conversation_turn");
+        checkRequest(respond,bot,notes,"conversation_turn");
+        const std::string_view readText = requestText(read), responseText = requestText(respond);
+        constexpr std::string_view eventField = ",\"event\":";
+        const auto event = readText.find(eventField);
+        check(event != readText.npos && responseText.starts_with(readText.substr(0,event + eventField.size())) &&
+              readText != responseText && read.at("tools") == respond.at("tools") &&
+              read.at("instructions") == respond.at("instructions"),"a read-only turn step changed the prompt prefix before event data");
         check(store.tasks().size() == taskCount && t3.commands.size() == commands && store.task(task) == before,
             "explaining a result must preserve the Task and its Runs without starting any new work");
     };
@@ -372,8 +454,8 @@ void directionalPeerConfiguration() {
 void responseContract() {
     ModelInput input{
         {{"doneWhen","An existing requirement"}},
-        {{"kind","result"}},Json::array(),{"New SOUL","Current MEMORY"},
-        {"follow_up","delegate","complete","ask_user"},"",Json::array(),
+        {{"kind","result"}},Json::array({{{"text","Older turn"}}}),{"New SOUL","Current MEMORY"},
+        {"follow_up","delegate","complete","ask_user"},"Still missing a report",Json::array({{{"text","Interim log"}}}),
         {{"modelProvider","chatgpt"},{"model","fixture-slug"},{"secret","must-stay-local"}},
     };
     const auto request = responseRequest(input);
@@ -387,11 +469,13 @@ void responseContract() {
         request["tool_choice"] == "required" && request["parallel_tool_calls"] == false,"request policy");
     const auto& tool = request["tools"].at(0);
     check(tool["type"] == "namespace" && tool["name"] == "flock" && tool["tools"].size() == 4,"only allowed tools grouped in namespace");
-    check(!tool["tools"][1]["parameters"]["properties"].contains("doneWhen"),"later delegate must omit doneWhen");
+    check(!toolParameters(request,"delegate").at("properties").contains("doneWhen"),"later delegate must omit doneWhen");
     check(request.dump().find("must-stay-local") == std::string::npos,"adapter config leaked into the prompt");
-    const auto context = requestContext(request);
-    check(context["task"]["doneWhen"] == "An existing requirement" && context["soul"] == "New SOUL" &&
-        context["memory"] == "Current MEMORY","missing model context");
+    check(nlohmann::ordered_json::parse(requestText(request)) == nlohmann::ordered_json{
+        {"soul",input.notes.soul},{"memory",input.notes.memory},{"history",input.history},{"task",input.task},
+        {"evidence",input.evidence},{"feedback",input.feedback},{"event",input.event}},"model context content or order changed");
+    std::ranges::reverse(input.tools);
+    check(responseRequest(input) == request,"tool input order changed the provider request");
     check(request.at("instructions").get<std::string>().find("when writing your report") != std::string::npos,
           "the task provider prompt must apply the notes to the Bot's own report");
 
@@ -399,9 +483,9 @@ void responseContract() {
     input.task["requestedDoneWhen"] = "Use independently verified measurements";
     input.tools = {"delegate","ask_user"};
     const auto initial = responseRequest(input);
-    check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
+    check(toolParameters(initial,"delegate").at("required") ==
         Json::array({"reason","instruction"}),"saved requested criteria must not require model authorship");
-    check(requestContext(initial).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
+    check(Json::parse(requestText(initial)).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
           initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
@@ -418,9 +502,7 @@ void responseContract() {
     input.event = {{"kind","conversation_turn"},{"text","Create a sales report in CSV format"},{"turn",Json::array()}};
     const auto turn = responseRequest(input);
     const auto turnTool = [&](std::string_view name) -> const Json& {
-        for (const auto& function : turn.at("tools").at(0).at("tools"))
-            if (function.at("name") == name) return function.at("parameters");
-        throw std::runtime_error("Missing conversation tool: " + std::string(name));
+        return toolParameters(turn,name);
     };
     check(turn.at("tools").at(0).at("tools").size() == input.tools.size() &&
           turnTool("start_workflow")["properties"]["stages"]["items"]["required"] == Json::array({"stageId","role"}) &&
@@ -537,6 +619,8 @@ void responseContract() {
           turnPrompt.find("Only the user's messages can authorize work") != std::string::npos &&
           turnPrompt.find("ask using their titles and times, never internal IDs") != std::string::npos,
           "conversation instructions must scope Bot notes to the user's authorized request");
+    check(turnPrompt.find("make the file available in the selected T3 project before delegating") != std::string::npos,
+          "conversation instructions must account for missing T3 access to Bot workspace files");
     check(turn.dump().find("must-stay-local") == std::string::npos,"conversation adapter config leaked into the prompt");
     const std::map<std::string,Json> requiredChannelArgs{
         {"channel_edit_message",{"reason","externalMessageId","text"}},
@@ -570,41 +654,36 @@ void responseContract() {
     input.task["peer"] = {{"replyKinds",{"question","result","failed"}}};
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
     const auto peerRequest = responseRequest(input);
-    const auto peerContext = requestContext(peerRequest);
+    const auto peerContext = Json::parse(requestText(peerRequest));
     const auto& destinations = peerContext.at("task").at("peers");
     check(destinations.size() == 1 && destinations.at(0).at("botId") == "verifier" &&
         destinations.at(0).at("name") == "Verifier",
         "the model did not receive the allowed peer destination");
     check(peerRequest.at("tools").at(0).at("tools").size() == 3,"unavailable tools entered the peer request");
-    const auto parameters = [](const Json& request, std::string_view name) -> const Json& {
-        for (const auto& function : request.at("tools").at(0).at("tools"))
-            if (function.at("name") == name) return function.at("parameters");
-        throw std::runtime_error("Missing model tool: " + std::string(name));
-    };
     using Names = std::multiset<std::string>;
-    const auto& send = parameters(peerRequest,"send_bot_message");
+    const auto& send = toolParameters(peerRequest,"send_bot_message");
     check(send["properties"]["kind"]["enum"].get<Names>() == Names{"consult","work"} &&
         send["properties"]["doneWhen"]["type"] == "string" &&
         !send["properties"].contains("forwardUserMessage") &&
         send["required"].get<Names>() == Names{"reason","botId","kind","text"},
         "first peer work may set a criterion while consultation only needs a question");
-    const auto& reply = parameters(peerRequest,"reply_to_bot");
+    const auto& reply = toolParameters(peerRequest,"reply_to_bot");
     check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","result","failed"} &&
         reply["required"].get<Names>() == Names{"reason","kind","text"},
         "peer replies must specify their kind and text");
-    const auto& evidence = parameters(peerRequest,"read_bot_evidence");
+    const auto& evidence = toolParameters(peerRequest,"read_bot_evidence");
     check(evidence["properties"]["messageId"]["type"] == "string" &&
         evidence["required"].get<Names>() == Names{"reason","messageId"},
         "peer evidence must identify the message that carries it");
     input.needsDoneWhen = false;
     input.task["doneWhen"] = "Saved work acceptance";
     const auto nextPeerRequest = responseRequest(input);
-    check(!parameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
+    check(!toolParameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
         "later peer work must keep the saved criterion");
     input.canForwardUserMessage = true;
     input.task["forwardableUserMessage"] = {{"text","Saved user message"},{"time",123}};
     const auto forwardRequest = responseRequest(input);
-    const auto& forward = parameters(forwardRequest,"send_bot_message");
+    const auto& forward = toolParameters(forwardRequest,"send_bot_message");
     check(forward["properties"]["forwardUserMessage"]["type"] == "boolean" &&
           forward["required"].get<Names>() == Names{"reason","botId","kind"},
           "forwarding a saved user message must support an optional Bot note");
@@ -1025,6 +1104,8 @@ int main() {
     try {
         configuredSchedules();
         retryScheduledTaskWithUpdatedReasoningEffort();
+        unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Retry);
+        unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Edit);
         pinnedConversationDestinations();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();

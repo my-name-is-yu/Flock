@@ -4,19 +4,19 @@ const streamTimeout = 6000;
 export function coalescedRefresh(refresh) {
   let last = Promise.resolve();
   let pending;
-  return (scroll, liveGeneration = null) => {
-    if (!pending) {
-      pending = { liveGeneration };
+  return (scroll, animationGeneration = null) => {
+    if (pending) {
+      pending.animationGeneration = pending.animationGeneration === animationGeneration ? animationGeneration : null;
+      pending.scroll ??= scroll;
+    } else {
+      pending = { scroll, animationGeneration };
       const run = () => {
-        const { scroll, liveGeneration } = pending;
+        const { scroll, animationGeneration } = pending;
         pending = null;
-        return refresh(scroll, liveGeneration);
+        return refresh(scroll, animationGeneration);
       };
       last = last.then(run, run);
     }
-    // If a catch-up joins this refresh, or visibility changed, render it statically.
-    if (pending.liveGeneration !== liveGeneration) pending.liveGeneration = null;
-    pending.scroll ??= scroll;
     return last;
   };
 }

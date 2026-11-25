@@ -96,19 +96,25 @@ void expectFailure(const HttpTransport& transport, bool transient, std::string_v
 void checkStream() {
     auto transport = eventStream({"\xef\xbb\xbf: heartbeat\r","\n\r\n",
         "data: {\"type\":\"response.completed\",\r\n",
-        "data: \"response\":{\"output\":[{\"text\":\"\xe7", "\xb5\x82\"}],\"usage\":{\"input_tokens\":6}}}\r\n",
+        "data: \"response\":{\"output\":[{\"text\":\"\xe7", "\xb5\x82\"}],\"usage\":{\"input_tokens\":6,"
+        "\"input_tokens_details\":{\"cached_tokens\":4,\"other\":3}}}}\r\n",
         "\r\n", "this invalid tail should never be read: \xff"});
     const auto result = infer(transport,"fixture","{}");
     check(result.at("output").at(0).at("text") == "終" &&
-          tokenUsage(result.at("usage")) == Json{{"input_tokens",6}}, "SSE output or usage was lost");
+          tokenUsage(result.at("usage")) == Json{{"input_tokens",6},{"input_tokens_details",{{"cached_tokens",4}}}},
+          "SSE output or cached usage was lost");
 
     expectFailure(eventStream({"data: {invalid}\n\n"}),false,"Invalid JSON");
     expectFailure(eventStream({"\xff"}),false,"Invalid UTF-8");
     expectFailure(eventStream({"\xe3\x81"}),false,"Invalid UTF-8");
     expectFailure(eventStream({"data: {}\n"}),true,"ended before");
     expectFailure(eventStream({"data: {\"type\":\"response.incomplete\","
-                               "\"response\":{\"usage\":{\"output_tokens\":2}}}\n\n"}),
-                  false,"incomplete response",{{"output_tokens",2}});
+                               "\"response\":{\"usage\":{\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"}),
+                  false,"incomplete response",{{"output_tokens",2},{"input_tokens_details",{{"cached_tokens",0}}}});
+    expectFailure(eventStream({"data: {\"type\":\"response.completed\","
+                               "\"response\":{\"usage\":{\"input_tokens_details\":{\"cached_tokens\":4}}}}\n\n"}),
+                  false,"Invalid ChatGPT completion",{{"input_tokens_details",{{"cached_tokens",4}}}});
+    check(tokenUsage({{"input_tokens_details",{{"cached_tokens",-1}}}}).empty(),"negative cached usage was accepted");
     expectFailure(eventStream({"data: {\"type\":\"error\",\"code\":\"server_error\"}\n\n"}),
                   true,"request fixture-request");
     expectFailure([](const auto&) { return HttpResponse{200,"text/plain",{}, {}}; },
