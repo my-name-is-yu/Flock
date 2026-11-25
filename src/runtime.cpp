@@ -491,6 +491,8 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
                     {"resultRunId",observed.resultRunId.empty() ? run.runId : observed.resultRunId},
                     {"status",observed.status},{"environmentId",task["environmentId"]},
                     {"revisionId",task.at("lastRun").at("revisionId")}};
+                if (observed.status == "interrupted" && (state == "cancelling" || replanning))
+                    data["stopRequested"] = true;
                 setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,observed.detail,
                     observed.truncated,observed.sessionCreatedAt});
                 db.exec("INSERT OR IGNORE INTO t3_events VALUES(?,?,'result',?)",{task["environmentId"],run.threadId,run.runId});

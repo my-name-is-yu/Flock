@@ -618,6 +618,7 @@ void deadlineApprovalAndCancel() {
     check(f.t3.interrupts == 1 && f.task(id)["state"] == "cancelling" && f.task(queued)["state"] == "queued",
           "cancel released project before confirmation");
     f.restart();
+    const auto cursor = f.store->notificationEventsSince(localOwner,{"alpha"},std::nullopt,{});
     f.t3.finish("run-1","interrupted",false);
     f.runtime->tick();
     check(f.task(id)["state"] == "cancelling" && f.t3.interrupts == 1,"cancel ignored delegated work");
@@ -625,6 +626,8 @@ void deadlineApprovalAndCancel() {
     f.reach(id,"cancelled");
     f.wait(queued,"user_question");
     check(f.t3.launches == 1 && f.logs(id,"report") == 1,"cancel re-delivered work");
+    check(f.store->notificationEventsSince(localOwner,{"alpha"},cursor.through,cursor.scope).events.empty(),
+          "a cancelled request emitted a failure alert for its interrupted Run");
 }
 
 void budgetAndStaleWaits() {
