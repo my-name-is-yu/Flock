@@ -7,8 +7,8 @@ Web UI share a SQLite database.
 ## Build
 
 Use a C++20 compiler, CMake 3.24+, and development libraries for SQLite
-3.35+, libcurl 7.85+, OpenSSL Crypto, libpng 1.6+, and libjpeg. Test builds
-require Python 3.10+. Some tests also use Node.js, Chromium, or the OpenSSL CLI.
+3.35+, libcurl 7.85+, and OpenSSL Crypto. Test builds require Python 3.10+.
+Some tests also use Node.js, Chromium, or the OpenSSL CLI.
 
 ```sh
 cmake -S . -B build

@@ -1,77 +1,12 @@
 #include "storage.hpp"
 #include "flock/message_attachments.hpp"
+#include "image_headers.hpp"
 
-#include <csetjmp>
-#include <jpeglib.h>
-#include <png.h>
 #include <set>
 
 namespace flockv0 {
 namespace {
 using namespace message_attachments;
-
-using ImageSize = std::pair<unsigned, unsigned>;
-
-bool supportedImageSize(unsigned width, unsigned height) {
-    return width && height && width <= maxImageEdge && height <= maxImageEdge && width <= maxImagePixels / height;
-}
-
-struct PngImage {
-    png_image image{};
-    PngImage() { image.version = PNG_IMAGE_VERSION; }
-    ~PngImage() { png_image_free(&image); }
-};
-
-ImageSize pngSize(std::string_view bytes) {
-    PngImage reader;
-    auto& image = reader.image;
-    if (!png_image_begin_read_from_memory(&image, bytes.data(), bytes.size()) || !supportedImageSize(image.width, image.height)) return {};
-    image.format = PNG_FORMAT_RGBA;
-    std::vector<unsigned char> pixels(PNG_IMAGE_SIZE(image));
-    if (!png_image_finish_read(&image, nullptr, pixels.data(), 0, nullptr) || image.warning_or_error) return {};
-    return {image.width, image.height};
-}
-
-struct JpegErrors {
-    jpeg_error_mgr manager{};
-    std::jmp_buf jump;
-};
-
-void failJpeg(j_common_ptr codec) {
-    std::longjmp(reinterpret_cast<JpegErrors*>(codec->err)->jump, 1);
-}
-
-void checkJpegMessage(j_common_ptr codec, int level) {
-    if (level < 0) failJpeg(codec);
-}
-
-struct JpegImage {
-    jpeg_decompress_struct codec{};
-    JpegErrors errors;
-    JpegImage() {
-        codec.err = jpeg_std_error(&errors.manager);
-        errors.manager.error_exit = failJpeg;
-        errors.manager.emit_message = checkJpegMessage;
-    }
-    ~JpegImage() { jpeg_destroy_decompress(&codec); }
-};
-
-ImageSize jpegSize(std::string_view bytes) {
-    const auto reader = std::make_unique<JpegImage>();
-    auto& codec = reader->codec;
-    if (setjmp(reader->errors.jump)) return {};
-    jpeg_create_decompress(&codec);
-    jpeg_mem_src(&codec, reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size());
-    if (jpeg_read_header(&codec, TRUE) != JPEG_HEADER_OK || !supportedImageSize(codec.image_width, codec.image_height) ||
-        !jpeg_start_decompress(&codec))
-        return {};
-    const auto row =
-        codec.mem->alloc_sarray(reinterpret_cast<j_common_ptr>(&codec), JPOOL_IMAGE, codec.output_width * codec.output_components, 1);
-    while (codec.output_scanline < codec.output_height)
-        if (jpeg_read_scanlines(&codec, row, 1) != 1) return {};
-    if (!jpeg_finish_decompress(&codec)) return {};
-    return {codec.image_width, codec.image_height};
-}
 
 std::uint32_t littleEndian(std::string_view data, std::size_t offset, unsigned size) {
     std::uint32_t value = 0;
@@ -108,8 +43,8 @@ Json metadata(const Json& value) {
     const auto bytes = decodeAttachment(encoded->get_ref<const std::string&>(), isImage ? maxImageBytes : maxAudioBytes);
     const std::string_view data(bytes);
     Json result{{"name", name}, {"mimeType", mime}, {"sizeBytes", data.size()}};
-    const bool png = mime == "image/png" && data.starts_with("\x89PNG\r\n\x1a\n");
-    const bool jpeg = mime == "image/jpeg" && data.starts_with("\xff\xd8\xff");
+    const bool png = mime == "image/png" && data.starts_with(pngSignature);
+    const bool jpeg = mime == "image/jpeg" && data.starts_with(jpegSignature);
     const bool wav = mime == "audio/wav" && data.size() >= 44 && data.starts_with("RIFF") && data.substr(8, 4) == "WAVE";
     const bool mp3 = mime == "audio/mpeg" && data.size() >= 4 &&
                      (data.starts_with("ID3") || (static_cast<unsigned char>(data[0]) == 0xff && (data[1] & 0xe0) == 0xe0));
@@ -163,9 +98,9 @@ Json Store::Impl::inspectAttachment(std::string_view bot, Id throughMessage, con
         attachment = row.json(1);
     }
     const auto bytes = decodeAttachment(attachment.at("dataBase64").get_ref<const std::string&>(), maxImageBytes);
-    const auto [width, height] = view.at("mimeType") == "image/png" ? pngSize(bytes) : jpegSize(bytes);
-    if (width == 0 || height == 0) throw Conflict("Attachment image is corrupt or exceeds the pixel limit");
-    view.update({{"width", width}, {"height", height}});
+    const auto size = view.at("mimeType") == "image/png" ? pngHeaderSize(bytes) : jpegHeaderSize(bytes);
+    if (!size) throw Conflict("Attachment image is corrupt or exceeds the pixel limit");
+    view.update({{"width", size->width}, {"height", size->height}});
     return view;
 }
 

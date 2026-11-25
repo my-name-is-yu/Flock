@@ -8,8 +8,6 @@ include(FetchContent)
 find_package(SQLite3 3.35 REQUIRED)
 find_package(CURL 7.85 REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-find_package(PNG 1.6 REQUIRED)
-find_package(JPEG REQUIRED)
 find_package(nlohmann_json 3.12 QUIET)
 if(NOT nlohmann_json_FOUND)
   FetchContent_Declare(nlohmann_json
@@ -46,7 +44,7 @@ add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent
                        src/bot_settings_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/external_mcp.cpp src/skill_export.cpp
                        src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
-                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/base64.cpp
+                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/image_headers.cpp src/base64.cpp
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp src/git_followup.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
@@ -56,7 +54,7 @@ else()
   target_link_libraries(flock_core PUBLIC SQLite::SQLite3)
 endif()
 target_sources(flock_core PRIVATE src/session_question.cpp src/session_settings.cpp)
-target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl PNG::PNG JPEG::JPEG OpenSSL::Crypto cmark)
+target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl OpenSSL::Crypto cmark)
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
@@ -143,6 +141,10 @@ if(BUILD_TESTING)
   add_executable(flock_markdown_tests tests/markdown.cpp)
   target_link_libraries(flock_markdown_tests PRIVATE flock_core)
   add_test(NAME flock_markdown COMMAND flock_markdown_tests)
+  add_executable(flock_image_headers tests/image_headers.cpp)
+  target_link_libraries(flock_image_headers PRIVATE flock_core)
+  target_compile_options(flock_image_headers PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_image_headers COMMAND flock_image_headers)
   add_executable(flock_conversation_runtime tests/conversation_runtime.cpp)
   target_link_libraries(flock_conversation_runtime PRIVATE flock_core)
   add_test(NAME flock_conversation_runtime COMMAND flock_conversation_runtime)
