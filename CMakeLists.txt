@@ -95,6 +95,10 @@ if(BUILD_TESTING)
     flock_replay_model("automation_${entry}_historical" verify-automation-routing "--historical=${entry}"
       "An unreadable Bot profile blocked another Bot's automation delivery")
   endforeach()
+  flock_replay_model(automation_notes_historical verify-automation-routing --historical=notes
+    "An unreadable Bot's notes wait held the shared project slot")
+  flock_replay_model(automation_notes_retry_historical verify-automation-routing --historical=notes-retry
+    "A retried notes wait overtook work already active in the shared project")
 
   add_executable(flock_workflow_context tests/workflow_context.cpp)
   target_link_libraries(flock_workflow_context PRIVATE flock_core)

@@ -100,6 +100,86 @@ def delivery_failure(_before, after):
     return None
 
 
+class Phase(Enum):
+    QUEUED = auto()
+    DECIDING = auto()
+    NOTES_WAIT = auto()
+    MODEL_FAILURE_WAIT = auto()
+    DISPATCH_UNCONFIRMED = auto()
+    RUNNING = auto()
+    MODEL_FAILURE_WITH_RUN = auto()
+    SETTLED = auto()
+
+
+@dataclass(frozen=True)
+class Project:
+    affected: Phase = Phase.QUEUED
+    healthy: Phase = Phase.QUEUED
+    notes_readable: bool = True
+
+
+def project_owner(state):
+    candidates = [(phase == Phase.QUEUED, order, bot)
+                  for order, (bot, phase) in enumerate(((Bot.AFFECTED, state.affected), (Bot.HEALTHY, state.healthy)))
+                  if phase not in (Phase.NOTES_WAIT, Phase.SETTLED)]
+    return min(candidates)[2] if candidates else None
+
+
+def project_steps(state, historical):
+    if state.notes_readable:
+        yield "The older Bot's notes become unreadable", replace(state, notes_readable=False)
+    else:
+        yield "The older Bot's notes become readable again", replace(state, notes_readable=True)
+    if state.affected == Phase.NOTES_WAIT:
+        if historical == "notes-retry":
+            yield "Retry the older task directly into planning", replace(state, affected=Phase.DECIDING)
+        else:
+            yield "Retry the older task through the project queue", replace(state, affected=Phase.QUEUED)
+
+    owner = project_owner(state)
+    if owner is None:
+        return
+    field = owner.name.lower()
+    phase = getattr(state, field)
+    if phase == Phase.DECIDING and owner == Bot.AFFECTED and not state.notes_readable:
+        if historical == "notes":
+            yield "Repeated notes failures put the older task in an ordinary model failure wait", replace(
+                state, affected=Phase.MODEL_FAILURE_WAIT)
+        else:
+            yield "Repeated notes failures put the older task in the pre-dispatch notes wait", replace(
+                state, affected=Phase.NOTES_WAIT)
+        return
+    if phase == Phase.RUNNING and owner == Bot.AFFECTED and not state.notes_readable:
+        yield "Notes fail while the older task is answering an active Run's question", replace(
+            state, affected=Phase.MODEL_FAILURE_WITH_RUN)
+    if phase == Phase.MODEL_FAILURE_WITH_RUN and state.notes_readable:
+        yield "Retry the active Run's question without releasing its slot", replace(state, affected=Phase.RUNNING)
+    transition = {
+        Phase.QUEUED: ("Start planning", Phase.DECIDING),
+        Phase.DECIDING: ("Send work without confirmed acceptance", Phase.DISPATCH_UNCONFIRMED),
+        Phase.DISPATCH_UNCONFIRMED: ("Confirm a Run", Phase.RUNNING),
+        Phase.RUNNING: ("Settle the Run", Phase.SETTLED),
+    }.get(phase)
+    if transition:
+        action, next_phase = transition
+        yield f"{action} for the {field} Bot", replace(state, **{field: next_phase})
+
+
+def project_failure(before, after):
+    owner = project_owner(after)
+    if after.affected in (Phase.NOTES_WAIT, Phase.MODEL_FAILURE_WAIT):
+        expected = None if after.healthy == Phase.SETTLED else Bot.HEALTHY
+        if owner != expected:
+            return "An unreadable Bot's notes wait held the shared project slot"
+    if before.affected == Phase.NOTES_WAIT and after.affected in (Phase.QUEUED, Phase.DECIDING):
+        if before.healthy in (Phase.DECIDING, Phase.DISPATCH_UNCONFIRMED, Phase.RUNNING) and owner != Bot.HEALTHY:
+            return "A retried notes wait overtook work already active in the shared project"
+    if before.affected in (Phase.DISPATCH_UNCONFIRMED, Phase.RUNNING, Phase.MODEL_FAILURE_WITH_RUN):
+        if after.affected != Phase.SETTLED and owner != Bot.AFFECTED:
+            return "A notes failure parked a task with an active or unconfirmed dispatch"
+    return None
+
+
 def explore(name, initial, steps, failure):
     queue = deque([(initial, ())])
     seen = {initial}
@@ -120,7 +200,7 @@ def explore(name, initial, steps, failure):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--historical", choices=("workspace", "scheduler", "webhook"))
+    parser.add_argument("--historical", choices=("workspace", "scheduler", "webhook", "notes", "notes-retry"))
     historical = parser.parse_args().historical
     if historical in (None, "workspace"):
         if result := explore("workspace save", Workspace(), lambda state: workspace_steps(state, bool(historical)),
@@ -132,6 +212,9 @@ def main():
         if result := explore(kind, Delivery(), lambda state: delivery_steps(state, bool(historical), kind == "scheduler"),
                              delivery_failure):
             return result
+    if historical in (None, "notes", "notes-retry"):
+        return explore("shared project notes recovery", Project(), lambda state: project_steps(state, historical),
+                       project_failure)
     return 0
 
 
