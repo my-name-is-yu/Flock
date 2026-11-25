@@ -2284,7 +2284,7 @@ void savedDestinationFollowupsRemainTaskWork() {
                    "the task did not settle after all destination follow-ups completed");
 }
 
-void savedDestinationFollowupStopTargetsOnlyItsRun() {
+void savedDestinationFollowupStopTargetsOnlyItsRun(const std::string& stopStatus = "interrupted") {
     Fixture f;
     f.requireT3Connection = true;
     f.restart();
@@ -2340,22 +2340,22 @@ void savedDestinationFollowupStopTargetsOnlyItsRun() {
 
     const auto cursor = f.store->notificationEventsSince(localOwner,{"alpha"},std::nullopt,{});
     const auto otherRun = destinationRunFor(f.task(id),"other").at("runId").get<std::string>();
-    f.t3.finish(followupRun.runId,"Stopped by request",true,"interrupted");
-    f.t3.finish(otherRun,"Unexpectedly interrupted",true,"interrupted");
-    f.advanceUntil([&] { return f.task(id).at("state") == "completed"; },"the interrupted Runs did not settle");
+    f.t3.finish(followupRun.runId,"Stopped by request",true,stopStatus);
+    f.t3.finish(otherRun,"Unexpectedly stopped",true,stopStatus);
+    f.advanceUntil([&] { return f.task(id).at("state") == "completed"; },"the stopped Runs did not settle");
     const auto alerts = f.store->notificationEventsSince(localOwner,{"alpha"},cursor.through,cursor.scope);
     const auto history = f.store->history(id,cursor.through,100);
     const auto hasFailureAlert = [&](const std::string& runId) {
         const auto report = std::ranges::find_if(history,[&](const Json& event) {
             return event.at("kind") == "report" && event.at("data").at("run").at("runId") == runId;
         });
-        check(report != history.end(),"the interrupted Run did not record a report");
+        check(report != history.end(),"the stopped Run did not record a report");
         return std::ranges::any_of(alerts.events,[&](const Json& event) {
             return event.at("id") == report->at("id") && event.at("kind") == "failure";
         });
     };
     check(!hasFailureAlert(followupRun.runId) && hasFailureAlert(otherRun),
-          "only the sibling Run's unexpected interruption should send a failure notification");
+          "only the sibling Run's unexpected stop should send a failure notification");
 }
 
 Id oneLinkedDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
@@ -2711,13 +2711,28 @@ void destinationFollowupValidatesAndRedactsSourceReport() {
     constexpr auto followupText = "Continue using the valid report";
     f.script(followupText,{sendDestinationWithSource(task,reportId,"other","other-project",followupText)});
     f.receive("valid-source-report",followupText);
-    const auto approvals = f.store->inbox(localOwner);
+    auto approvals = f.store->inbox(localOwner);
     check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" &&
           approvals.front().at("prompt").get<std::string>().find("stable result") != std::string::npos &&
           approvals.front().at("prompt").get<std::string>().find(secret) == std::string::npos &&
           approvals.front().at("prompt").get<std::string>().find("[redacted]") != std::string::npos &&
           f.t3.sent.size() == sentBefore,
           "the approved preview omitted valid source context or exposed its synthetic secret");
+    const auto firstCard = approvals.front().at("itemId").get<Id>();
+    sqlite3* writer = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&writer) == SQLITE_OK,"could not open the saved approval fixture");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(writer,sqlite3_close);
+    const auto legacy = "BEGIN IMMEDIATE; UPDATE policy_approvals SET status='approved',"
+        "operation=replace(operation,'/rendered-session-message','') WHERE id=" + std::to_string(firstCard) +
+        "; UPDATE conversation_turns SET status='running' WHERE message_id=(SELECT turn FROM policy_approvals WHERE id=" +
+        std::to_string(firstCard) + "); COMMIT";
+    check(sqlite3_exec(db.get(),legacy.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
+          "could not simulate the previously approved operation");
+    f.restart();
+    f.runtime->runConversations();
+    approvals = f.store->inbox(localOwner);
+    check(f.t3.sent.size() == sentBefore && approvals.size() == 1 && approvals.front().at("itemId") != firstCard,
+          "newly rendered report context reused a previously approved send");
     f.store->decideInbox(localOwner,{approvals.front().at("botId"),InboxKind::policy_approval,
         approvals.front().at("itemId"),approvals.front().at("waitId"),approvals.front().at("taskId"),
         approvals.front().at("targetRevision"),approvals.front().at("targetGeneration")},"allow_once");
@@ -2741,6 +2756,52 @@ void stopDestinationByName(Fixture& f, Id id, std::string_view key, std::string_
             {"destination",found->at("name")}},"Stop the selected destination"};
     }});
     f.receive(key,text);
+}
+
+void acceptedLegacyDestinationStopSurvivesRestart() {
+    Fixture f;
+    const auto id = oneLinkedDestinationTask(f,"legacy-stop-parent","Start linked work before upgrading");
+    f.advanceUntil([&] { return f.t3.sent.size() == 1; },"the linked Run did not start");
+    const auto run = destinationRunFor(f.task(id),"cloud").at("runId").get<std::string>();
+    stopDestinationByName(f,id,"legacy-stop-target","Stop the linked Run before upgrading");
+
+    sqlite3* writer = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&writer) == SQLITE_OK,"could not open the legacy stop fixture");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(writer,sqlite3_close);
+    check(sqlite3_exec(db.get(),"UPDATE outbox SET data=json_remove(data,'$.stopRunId','$.stopThreadId') "
+          "WHERE phase='accepted' AND json_extract(data,'$.stopRequested')=1",nullptr,nullptr,nullptr) == SQLITE_OK &&
+          sqlite3_changes(db.get()) == 1,"could not persist the legacy stop shape");
+    f.restart();
+    f.advanceUntil([&] { return f.t3.interruptedOnlyVia("cloud",run,"desktop"); },
+                   "the saved stop lost its originally assigned Run on restart");
+    f.t3.finish(run,"The saved stop settled",true,"cancelled");
+    f.reach(id,"completed");
+    check(f.event(id,"report").at("stopRequested") == true,"the saved stop was recorded as an unexpected cancellation");
+}
+
+void ordinarySessionApprovalKeepsItsPayload() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.sessions[{"desktop","session-approved"}] =
+        {"Existing Session","Project","project","running","2026-11-25T00:00:00Z","2026-11-25T00:00:00Z",{},false};
+    f.store->policy().setMode(localOwner,"supervised");
+    const Json args{{"environmentId","desktop"},{"threadId","session-approved"},{"text","Share the result"}};
+    f.script("Send the result",{[&](const ModelInput&) {
+        return Decision{"message_session",args,"Send the approved message"};
+    }});
+    f.receive("approved-session-message","Send the result");
+    const auto approvals = f.store->inbox(localOwner);
+    check(approvals.size() == 1 && f.t3.sent.empty() &&
+          Json::parse(approvals.front().at("prompt").get<std::string>()) ==
+              Json::array({"message_session",args,f.t3.login}),
+          "the ordinary send approval changed its original payload");
+    f.restart();
+    const auto& card = approvals.front();
+    f.store->decideInbox(localOwner,{card.at("botId"),InboxKind::policy_approval,card.at("itemId"),card.at("waitId"),
+        card.at("taskId"),card.at("targetRevision"),card.at("targetGeneration")},"allow_once");
+    f.runtime->runConversations();
+    check(f.t3.sent.size() == 1 && f.t3.sent.front().tool == "message_session",
+          "the ordinary send approval did not survive restart");
 }
 
 Json destinationResult(const Json& task, std::string_view environment) {
@@ -3276,11 +3337,14 @@ void queuedDestinationStopsReleaseSlots() {
         const auto follower = oneLinkedDestinationTask(f,"after-queued","Run after the queued cancellation");
         const auto sentBeforeStop = f.t3.sent.size();
         stopDestinationByName(f,destination,"stop-behind-slot","Stop the queued cloud destination");
+        const auto cursor = f.store->notificationEventsSince(localOwner,{"alpha"},std::nullopt,{});
         f.tick();
         check(f.t3.sent.size() == sentBeforeStop && f.t3.interrupted.empty() &&
               destinationResult(f.task(destination),"cloud").at("status") == "cancelled" &&
               destinationResult(f.task(destination),"other").at("status") == "running",
               "a ready queued stop dispatched T3 or failed to settle locally");
+        check(f.store->notificationEventsSince(localOwner,{"alpha"},cursor.through,cursor.scope).events.empty(),
+              "an unsent cancelled destination emitted a failure notification");
         f.t3.finish("run-1","Project slot released");
         f.reach(blocker,"completed");
         f.advanceUntil([&] { return f.t3.sent.size() == sentBeforeStop + 1; },
@@ -4227,6 +4291,9 @@ int main(int argc, char** argv) {
         destinationFollowupValidatesAndRedactsSourceReport();
         savedDestinationFollowupsRemainTaskWork();
         savedDestinationFollowupStopTargetsOnlyItsRun();
+        savedDestinationFollowupStopTargetsOnlyItsRun("cancelled");
+        acceptedLegacyDestinationStopSurvivesRestart();
+        ordinarySessionApprovalKeepsItsPayload();
         lateSavedDestinationReceiptKeepsTaskAndSlot();
         pinnedDestinationFollowupKeepsVerificationContract();
         preparedSavedSessionSendSettlesAfterAccessLoss();
