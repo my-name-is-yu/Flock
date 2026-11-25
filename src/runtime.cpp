@@ -947,10 +947,7 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
         const auto now = options.clock();
         const bool cancelling = task.at("state") == "cancelling";
         const auto ref = runRef(run);
-        const auto stopRunId = field(action,"stopRunId");
-        const bool stopRequested = action.value("stopRequested",false) &&
-            (stopRunId.empty() ? phase == "ready" || phase == "started" :
-             stopRunId == ref.runId && field(action,"stopThreadId") == ref.threadId);
+        const bool stopRequested = destinationStopRequested(action,ref);
         const bool stopping = cancelling || stopRequested;
         if (stopping && phase == "ready") {
             applyDelivery(id,action,{Delivery::Kind::NotAccepted,{},"Cancelled before dispatch",true});
@@ -1017,9 +1014,7 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             if (!destinationRunOutstanding(saved) || field(saved,"threadId") != ref.threadId ||
                 field(saved,"runId") != ref.runId) return false;
             const auto savedAction = db.outbox(current,key);
-            const bool stopping = current.at("state") == "cancelling" ||
-                (savedAction.value("stopRequested",false) && field(savedAction,"stopRunId") == ref.runId &&
-                 field(savedAction,"stopThreadId") == ref.threadId);
+            const bool stopping = current.at("state") == "cancelling" || destinationStopRequested(savedAction,ref);
             bool changed = false;
             if (observed.kind == Kind::Unavailable)
                 changed = setDestinationStatus(saved,"confirmation_pending","Flock could not confirm the Run's status in T3.");
@@ -1034,10 +1029,8 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
         if (!changeTask(id,[&](Json& current) {
             const auto savedAction = db.outbox(current,key);
             const auto& saved = destinationRun(current,key);
-            const bool stopStillTargetsRun = savedAction.value("stopRequested",false) &&
-                field(savedAction,"stopRunId") == ref.runId && field(savedAction,"stopThreadId") == ref.threadId;
             if (shutdown.stop_requested() ||
-                (current.at("state") != "cancelling" && !stopStillTargetsRun) ||
+                (current.at("state") != "cancelling" && !destinationStopRequested(savedAction,ref)) ||
                 field(saved,"threadId") != ref.threadId || field(saved,"runId") != ref.runId) return false;
             destinationRun(current,key)["stopRetryAt"] = now + 5;
             return true;

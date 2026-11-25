@@ -283,6 +283,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     const bool savedTaskTarget = decision.tool == "send_to_task";
     Id savedTaskId = 0, savedGeneration = 0;
     std::string savedActionId;
+    bool includesSavedContent = false;
     std::optional<GitPrFollowup> followup;
     SessionTarget target;
     Resource resource{Action::t3_send,{}};
@@ -353,6 +354,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             }
             const auto name = redactor(message.bot).text(message.routing.at("config").value("botDisplayName",message.bot));
             command.instruction = name + ": " + command.instruction;
+            includesSavedContent = !source.is_null() || !expectedCommit.empty();
             if (!source.is_null())
                 command.instruction += "\n\n(reference only):\n" + bounded(field(source,"text"),8192);
             if (!expectedCommit.empty())
@@ -410,7 +412,8 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             return advance;
         }
         auto origin = policyOrigin(message);
-        Json policyPayload{decision.tool,decision.args,command.authGeneration,command.instruction};
+        auto approvalOperation = std::string(key);
+        Json policyPayload{decision.tool,decision.args,command.authGeneration};
         if (fixesPullRequest) {
             const auto current = availableFollowup();
             if (!current) {
@@ -446,13 +449,17 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
                 origin.generation = savedGeneration;
                 origin.revision = task.value("currentRevision",Id{});
                 policyPayload.push_back(selected.actionId);
+                if (includesSavedContent) {
+                    approvalOperation += "/rendered-session-message";
+                    policyPayload.push_back(command.instruction);
+                }
             } catch (const ToolError& failure) {
                 save(toolFailure(failure.what()));
                 transaction.commit();
                 return advance;
             }
         }
-        const auto gate = approveAction(origin,resource,key,policyPayload,policyClock());
+        const auto gate = approveAction(origin,resource,approvalOperation,policyPayload,policyClock());
         if (gate != ApprovalGate::allow) {
             if (gate != ApprovalGate::waiting) save(toolFailure(approvalError(gate)));
             transaction.commit();

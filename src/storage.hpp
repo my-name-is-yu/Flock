@@ -65,6 +65,7 @@ Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 Json& destinationRun(Json& task, std::string_view action);
 bool destinationRunOutstanding(const Json& run);
+bool destinationStopRequested(const Json& action, const RunRef&);
 void setReportEvidence(Json&, const RunEvidence&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
