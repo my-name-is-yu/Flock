@@ -1,5 +1,6 @@
 #include "internal.hpp"
 #include "flock/detail/json_rpc.hpp"
+#include "flock/detail/traffic_recording.hpp"
 
 #include <curl/curl.h>
 
@@ -64,14 +65,7 @@ bool rejectsDelegatedFrom(std::string_view message) {
            message == "delegatedFrom is not supported" || message.find("[\"delegatedFrom\"] is unexpected") != message.npos;
 }
 
-Json rpcResponse(const HttpResponse& response, unsigned id) {
-    const auto type = response.headers.find("content-type");
-    const std::string_view contentType = type == response.headers.end() ? std::string_view{} : type->second;
-    auto message = detail::decodeRpcResponse(response.body, contentType, id, [](std::string_view frame) {
-        // T3 ignores SSE events whose data fields are empty.
-        if (frame.find_first_not_of('\n') == frame.npos) return Json();
-        return parse(frame);
-    });
+Json rpcResult(Json message) {
     if (str(message, "jsonrpc") != "2.0") invalidResponse();
     if (message.contains("error")) {
         const auto& error = message["error"];
@@ -265,7 +259,17 @@ HttpResponse Client::request(std::string_view method, const std::string& body, l
 Json Client::rpc(std::string_view method, const Json& arguments) {
     const auto id = ++nextId_;
     const auto body = Json{{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", arguments}}.dump();
-    return rpcResponse(request("POST", body), id);
+    const auto response = request("POST", body);
+    const auto type = response.headers.find("content-type");
+    const std::string_view contentType = type == response.headers.end() ? std::string_view{} : type->second;
+    auto message = detail::decodeRpcResponse(response.body, contentType, id, [](std::string_view frame) {
+        // T3 ignores SSE events whose data fields are empty.
+        if (frame.find_first_not_of('\n') == frame.npos) return Json();
+        return parse(frame);
+    });
+    if (auto* capture = recording::Capture::configured(recording::Provider::T3))
+        record(*capture, id, method, arguments, message, contentType, response.status);
+    return rpcResult(std::move(message));
 }
 
 // T3 v0.1.11 uses a shared invalid_request code for several distinct outcomes.

@@ -1,4 +1,5 @@
 #include "chatgpt.hpp"
+#include "chatgpt_recording.hpp"
 #include "flock/bot_profile.hpp"
 
 #include <curl/curl.h>
@@ -17,10 +18,6 @@ namespace flockv0::app::chatgpt {
 namespace {
 constexpr std::size_t maxResponse = 4 * 1024 * 1024;
 constexpr std::string_view responsesApi = "ChatGPT Responses API";
-constexpr std::string_view rejectedImageCodes[]{"invalid_image",     "invalid_image_format", "invalid_base64_image",
-                                                "image_parse_error", "invalid_image_mode",   "unsupported_image_media_type",
-                                                "image_too_large",   "image_too_small",      "image_file_too_large",
-                                                "empty_image_file"};
 
 bool success(long status) {
     return status >= 200 && status < 300;
@@ -152,6 +149,8 @@ private:
 
 class ResponseStream {
 public:
+    explicit ResponseStream(ResponseRecording* recording) : recording_(recording) {}
+
     bool read(std::string_view chunk, const HttpResponse& response) {
         if (!eventStream(response.contentType)) throw ModelError("ChatGPT did not return the expected response stream", false);
         for (const auto c : chunk) {
@@ -163,7 +162,7 @@ public:
             }
             afterCr_ = c == '\r';
             if (c == '\r' || c == '\n') {
-                if (!line(response.requestId)) return false;
+                if (!line(response)) return false;
                 line_.clear();
             } else {
                 line_.push_back(c);
@@ -178,7 +177,7 @@ public:
         return std::move(completed_);
     }
 private:
-    bool line(std::string_view requestId) {
+    bool line(const HttpResponse& response) {
         std::string_view current(line_);
         if (firstLine_) {
             firstLine_ = false;
@@ -206,6 +205,7 @@ private:
         const auto event = Json::parse(data_, nullptr, false);
         data_.clear();
         if (event.is_discarded()) throw ModelError("Invalid JSON in ChatGPT response stream", false);
+        if (recording_) recording_->event(event, response);
         const auto type = stringField(event, "type");
         if (type.empty()) throw ModelError("Invalid ChatGPT response event", false);
         const auto& result = field(event, "response");
@@ -218,10 +218,11 @@ private:
         const auto& usage = responseUsage.is_null() ? field(event, "usage") : responseUsage;
         if (type == "response.incomplete") throw Failure("ChatGPT returned an incomplete response", false, {}, usage);
         if (type == "response.failed" || type == "error")
-            throw remoteFailure(responsesApi, 0, result.is_null() ? event : result, requestId, usage);
+            throw remoteFailure(responsesApi, 0, result.is_null() ? event : result, response.requestId, usage);
         return true;
     }
 
+    ResponseRecording* recording_;
     Utf8 utf8_;
     std::string line_, data_;
     bool firstLine_ = true, afterCr_ = false;
@@ -395,8 +396,11 @@ Json models(const HttpTransport& transport, const std::string& token) {
     return result;
 }
 
-Json infer(const HttpTransport& transport, const std::string& token, std::string body) {
-    ResponseStream stream;
+Json infer(const HttpTransport& transport, const std::string& token, std::string body, const Json* flockRequest) {
+    std::optional<ResponseRecording> recorder;
+    if (flockRequest)
+        if (auto* capture = recording::Capture::configured(recording::Provider::ChatGPT)) recorder.emplace(*capture, *flockRequest);
+    ResponseStream stream(recorder ? &*recorder : nullptr);
     const auto response =
         transport({.url = std::string(resource) + "/responses",
                    .body = std::move(body),
@@ -405,6 +409,7 @@ Json infer(const HttpTransport& transport, const std::string& token, std::string
                    .accept = "text/event-stream",
                    .timeout = std::chrono::seconds(90),
                    .onData = [&](std::string_view data, const HttpResponse& headers) { return stream.read(data, headers); }});
+    if (recorder && !success(response.status)) recorder->httpError(response);
     checkApi(response, responsesApi);
     if (!eventStream(response.contentType)) throw ModelError("ChatGPT did not return the expected response stream", false);
     return stream.take();

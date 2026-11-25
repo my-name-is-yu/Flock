@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <future>
 #include <iostream>
@@ -186,6 +187,134 @@ void checkUnsupportedReasoningEffort() {
     }
 }
 
+std::vector<Json> readRecordings(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    check(file.is_open(), "could not open ChatGPT recordings");
+    std::vector<Json> records;
+    for (std::string line; std::getline(file, line);) records.push_back(Json::parse(line));
+    check(file.eof() && !file.bad(), "could not read ChatGPT recordings");
+    return records;
+}
+
+HttpTransport replayResponse(const Json& exchange, const Json& expectedRequest) {
+    return [&exchange, &expectedRequest](const HttpRequest& request) {
+        check(request.url == std::string(resource) + "/responses" && request.accept == "text/event-stream" && request.onData &&
+                  Json::parse(request.body) == expectedRequest,
+              "recorded response did not match the Responses request");
+        HttpResponse response{exchange.at("status").get<long>(), exchange.at("contentType").get<std::string>(), "fixture-request", {}};
+        if (exchange.contains("body")) {
+            response.body = exchange.at("body").get<std::string>();
+            return response;
+        }
+        for (const auto& event : exchange.at("events")) {
+            const auto frame = "data: " + event.dump() + "\r\n\r\n";
+            for (std::size_t offset = 0; offset < frame.size(); offset += 13)
+                if (!request.onData(std::string_view(frame).substr(offset, 13), response)) return response;
+        }
+        return response;
+    };
+}
+
+Json batchRequest(const Json& recording) {
+    ModelInput input{};
+    input.config = {{"modelProvider", "chatgpt"}, {"model", recording.at("modelSlug")}};
+    input.event = {{"kind", "conversation_turn"}};
+    input.tools = {"flock_session_search", "check_environment_readiness"};
+    return app::responseRequest(input);
+}
+
+void checkRecordedBatch(const Json& exchange, const Json& request, const Json* captureRequest = nullptr) {
+    const auto response = infer(replayResponse(exchange, request), "fixture-auth", request.dump(), captureRequest);
+    const auto calls = app::responseDecision(response.at("output"), request);
+    check(calls.calls.size() == 2 && calls.rejections.empty() && calls.calls[0].tool == "flock_session_search" &&
+              calls.calls[0].args.at("limit") == 2 && calls.calls[1].tool == "check_environment_readiness",
+          "recording changed the order or validation of the two model calls");
+    check(tokenUsage(response.at("usage")) ==
+              Json{{"input_tokens", 6}, {"output_tokens", 2}, {"total_tokens", 8}, {"input_tokens_details", {{"cached_tokens", 4}}}},
+          "recording lost ChatGPT usage fields");
+}
+
+void checkRecordedError(const Json& exchange, const Json& request, const Json* captureRequest = nullptr) {
+    try {
+        infer(replayResponse(exchange, request), "fixture-auth", request.dump(), captureRequest);
+    } catch (const Failure& error) {
+        check(error.code == ModelErrorCode::image_rejected && error.providerCode == "invalid_image" && !error.transient,
+              "recording changed the HTTP error's classification");
+        return;
+    }
+    throw std::runtime_error("recorded HTTP error was accepted");
+}
+
+void checkRecordings(const std::filesystem::path& recordingFile) {
+    const auto records = readRecordings(recordingFile);
+    check(records.size() == 2, "expected a streamed response and an HTTP error recording");
+    for (const auto& record : records)
+        check(record.at("schema") == 1 && (record.at("source") == "fixture" || record.at("source") == "real") &&
+                  record.at("captureCommit").get_ref<const std::string&>().size() == 40,
+              "invalid ChatGPT recording metadata");
+    const auto batch = batchRequest(records[0]);
+    const auto errorRequest = batchRequest(records[1]);
+    checkRecordedBatch(records[0].at("exchange"), batch);
+    checkRecordedError(records[1].at("exchange"), errorRequest);
+
+    const app::test::Sandbox sandbox;
+    const auto capturedFile = sandbox.path / "capture.jsonl";
+    check(setenv("FLOCK_RECORD_CHATGPT", capturedFile.c_str(), 1) == 0 &&
+              setenv("FLOCK_RECORD_COMMIT", records[0].at("captureCommit").get_ref<const std::string&>().c_str(), 1) == 0,
+          "could not enable ChatGPT capture");
+    constexpr auto privateText = "private-person@example.test /Users/private-person/work";
+    auto privateRequest = batch;
+    privateRequest["input"][0]["content"][0]["text"] = privateText;
+    auto stream = records[0].at("exchange");
+    stream["events"][0]["response"]["id"] = "private-response";
+    const auto firstEvent =
+        std::ranges::find_if(stream["events"], [](const Json& event) { return event.value("type", "") == "response.output_item.added"; });
+    check(firstEvent != stream["events"].end(), "recording needs an item lifecycle event");
+    const auto firstId = firstEvent->at("item").at("id");
+    const auto firstCallId = firstEvent->at("item").at("call_id");
+    for (auto& event : stream["events"]) {
+        if (event.contains("item_id") && event.at("item_id") == firstId) event["item_id"] = "private-item";
+        if (event.contains("item") && event.at("item").at("id") == firstId) {
+            event["item"]["id"] = "private-item";
+            event["item"]["call_id"] = "private-call";
+        }
+    }
+    auto& finalResponse = stream["events"].back()["response"];
+    finalResponse["id"] = "private-response";
+    finalResponse["metadata"] = {{"authorization", "Bearer fixture-auth"}, {"path", privateText}};
+    auto& firstCall = finalResponse["output"][0];
+    firstCall["id"] = "private-item";
+    check(firstCall.at("call_id") == firstCallId, "fixture changed call identifiers across event types");
+    firstCall["call_id"] = "private-call";
+    firstCall["arguments"] = Json{{"query", privateText}, {"cursor", "private-cursor"}, {"limit", 2}, {"fromTime", nullptr}}.dump();
+    checkRecordedBatch(stream, privateRequest, &privateRequest);
+    auto error = records[1].at("exchange");
+    error["body"] = Json{{"error", {{"code", "invalid_image"}, {"message", privateText}}}}.dump();
+    checkRecordedError(error, errorRequest, &errorRequest);
+    const Json failure{{"type", "response.failed"}, {"response", {{"error", {{"code", "invalid_image"}, {"message", privateText}}}}}};
+    checkRecordedError({{"status", 200}, {"contentType", "text/event-stream"}, {"events", Json::array({failure})}}, batch, &batch);
+
+    const auto captured = readRecordings(capturedFile);
+    check(captured.size() == 3 && std::ranges::all_of(captured, [](const auto& record) { return record.at("source") == "real"; }),
+          "capture did not produce both stream outcomes and the HTTP error");
+    const auto capturedText = Json(captured).dump();
+    const std::string_view privatePieces[]{privateText,      "private-person", "private-response", "private-item", "private-call",
+                                           "private-cursor", "fixture-auth",   "fixture-request",  "authorization"};
+    for (const auto secret : privatePieces) check(capturedText.find(secret) == capturedText.npos, "capture retained private data");
+    const auto& events = captured[0].at("exchange").at("events");
+    const auto& completed = events.back().at("response");
+    const auto& call = completed.at("output").front();
+    const auto args = Json::parse(call.at("arguments").get_ref<const std::string&>());
+    const auto& firstItem = events.at(static_cast<std::size_t>(firstEvent - stream.at("events").begin())).at("item");
+    check(events.size() == stream.at("events").size() && completed.at("id") == events.front().at("response").at("id") &&
+              call.at("id") == firstItem.at("id") && call.at("call_id") == firstItem.at("call_id") && args.at("fromTime").is_null() &&
+              !args.contains("toTime") && args.at("cursor").is_string(),
+          "capture lost event order, ID correspondence, or null versus missing");
+    checkRecordedBatch(captured[0].at("exchange"), batch);
+    checkRecordedError(captured[1].at("exchange"), errorRequest);
+    checkRecordedError(captured[2].at("exchange"), batch);
+}
+
 void checkInspectedImageRequest() {
     const app::test::Sandbox credentials;
     std::filesystem::permissions(credentials.path, std::filesystem::perms::owner_all);
@@ -269,7 +398,11 @@ int main(int argc, char** argv) {
             checkTlsStream(argv[2], argv[3]);
             return 0;
         }
-        check(argc == 1, "expected --tls URL CA-file or no arguments");
+        if (argc == 3 && std::string_view(argv[1]) == "--recordings") {
+            checkRecordings(argv[2]);
+            return 0;
+        }
+        check(argc == 1, "expected --tls URL CA-file, --recordings FILE, or no arguments");
         checkTlsDisconnect();
         checkStream();
         checkProviderErrors();

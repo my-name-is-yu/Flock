@@ -46,7 +46,11 @@ Failure remoteFailure(std::string_view site, long status, const Json&, std::stri
 bool validAccessToken(std::string_view);
 
 HttpResponse httpRequest(const HttpRequest&);
-Json infer(const HttpTransport&, const std::string& token, std::string body);
+Json infer(const HttpTransport&, const std::string& token, std::string body, const Json* request = nullptr);
+inline constexpr std::string_view rejectedImageCodes[]{"invalid_image",     "invalid_image_format", "invalid_base64_image",
+                                                       "image_parse_error", "invalid_image_mode",   "unsupported_image_media_type",
+                                                       "image_too_large",   "image_too_small",      "image_file_too_large",
+                                                       "empty_image_file"};
 Json models(const HttpTransport&, const std::string& token);
 
 std::string formEncode(const Form&);

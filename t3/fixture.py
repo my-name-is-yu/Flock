@@ -19,6 +19,9 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+SERVER_VERSION = "0.1.11"
+
+
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -52,7 +55,7 @@ class Fixture(BaseHTTPRequestHandler):
         elif self.path == "/.well-known/t3/environment":
             self.reply({"environmentId": self.server.state.get("descriptorEnvironment",
                          self.server.state.get("claimedEnvironment", "env-1")),
-                        "label": "Local T3 fixture", "serverVersion": "0.1.11"})
+                        "label": "Local T3 fixture", "serverVersion": SERVER_VERSION})
         elif self.path == "/fixture/stock":
             self.reply({key: self.server.state[key] for key in ("stockPin", "stockHead")} |
                        {key: self.server.state.get(key, {}) for key in ("stockLaunches", "stockPromptSends")})
@@ -78,10 +81,13 @@ class Fixture(BaseHTTPRequestHandler):
         assert self.headers["Mcp-Session-Id"] == "fixture-session"
         self.reply(code=204)
 
+    def read_body(self):
+        return self.rfile.read(int(self.headers["Content-Length"]))
+
     def do_POST(self):
         origin = self.server.origin
         state = self.server.state
-        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        raw = self.read_body()
         if self.path == "/token":
             if state.get("oauthFailure") == "token":
                 self.reply({"error": "invalid_grant"}, code=400)
@@ -164,7 +170,7 @@ class Fixture(BaseHTTPRequestHandler):
             envelope = {"jsonrpc": "2.0", "id": args.get("id")}
             if args["method"] == "initialize":
                 assert args["params"]["protocolVersion"] == "2025-06-18"
-                envelope["result"] = {"protocolVersion": "2025-06-18"}
+                envelope["result"] = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "T3", "version": SERVER_VERSION}}
                 self.reply(envelope, Mcp_Session_Id="fixture-session")
                 return
             assert self.headers["Mcp-Session-Id"] == "fixture-session"
@@ -259,7 +265,7 @@ class Fixture(BaseHTTPRequestHandler):
             return self.multi_environment_tool(name, args)
         if name == "t3_environment_read":
             return {"environmentId": state.get("claimedEnvironment", "env-1"),
-                    "label": "T3 fixture", "serverVersion": "0.1.11"}
+                    "label": "T3 fixture", "serverVersion": SERVER_VERSION}
         if name == "t3_project_list":
             assert args["limit"] == 100
             if args["cursor"] == 0:
@@ -1334,6 +1340,10 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
             daemon.terminate()
             daemon.wait(timeout=8)
 
+
+if sys.argv[2:3] == ["recording-contract"]:
+    from recording_contract import verify
+    sys.exit(verify(Fixture, sys.argv[1], Path(sys.argv[3])))
 
 with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
     server.origin = f"http://127.0.0.1:{server.server_port}"

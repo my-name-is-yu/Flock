@@ -8,7 +8,7 @@ if(NOT TARGET tomlplusplus::tomlplusplus)
   FetchContent_MakeAvailable(tomlplusplus)
 endif()
 
-add_library(flock_app_support STATIC bots.cpp model.cpp chatgpt.cpp chatgpt_browser.cpp chatgpt_http.cpp chatgpt_oauth.cpp
+add_library(flock_app_support STATIC bots.cpp model.cpp chatgpt.cpp chatgpt_browser.cpp chatgpt_http.cpp chatgpt_oauth.cpp chatgpt_recording.cpp
                              bot_tools.cpp git_github.cpp t3_setup.cpp settings_file.cpp)
 target_include_directories(flock_app_support PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(flock_app_support PUBLIC flock_core
@@ -33,6 +33,8 @@ if(BUILD_TESTING)
   target_link_libraries(flock_app_chatgpt_transport PRIVATE flock_app_support)
   target_compile_options(flock_app_chatgpt_transport PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_app_chatgpt_transport COMMAND flock_app_chatgpt_transport)
+  add_test(NAME flock_app_chatgpt_recordings COMMAND flock_app_chatgpt_transport --recordings
+    "${PROJECT_SOURCE_DIR}/tests/recordings/chatgpt.jsonl")
   add_executable(flock_app_chatgpt_oauth tests/chatgpt_oauth.cpp chatgpt_web.cpp settings_access.cpp)
   target_link_libraries(flock_app_chatgpt_oauth PRIVATE flock_app_support flock_web CURL::libcurl OpenSSL::Crypto)
   target_compile_options(flock_app_chatgpt_oauth PRIVATE -Wall -Wextra -Wpedantic)
