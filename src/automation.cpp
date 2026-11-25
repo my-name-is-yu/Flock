@@ -358,17 +358,13 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
 }
 
 Json Store::Impl::automationRoute(std::string_view bot, Json routing) const {
-    if (!automationIntake) return routing;
-    try {
-        const auto current = automationIntake(bot,{}).config;
-        const auto model = field(current,"model");
-        const auto provider = field(current,"modelProvider");
-        if (!model.empty() && !provider.empty()) {
-            routing.at("config")["model"] = model;
-            routing.at("config")["modelProvider"] = provider;
-        }
-    } catch (const Conflict&) {
-        // Keep the saved model when the Bot configuration is temporarily unavailable.
+    if (!automationModel) return routing;
+    if (auto current = automationModel(bot)) {
+        auto& config = routing.at("config");
+        config["model"] = std::move(current->model);
+        config["modelProvider"] = std::move(current->provider);
+        if (current->reasoningEffort) config["reasoningEffort"] = std::move(*current->reasoningEffort);
+        else config.erase("reasoningEffort");
     }
     return routing;
 }

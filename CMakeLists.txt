@@ -39,15 +39,6 @@ function(flock_fetch_cmark)
 endfunction()
 flock_fetch_cmark()
 
-add_executable(flock_workspace_supervisor src/workspace_supervisor.cpp)
-target_compile_options(flock_workspace_supervisor PRIVATE -Wall -Wextra -Wpedantic)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  find_path(LIBSECCOMP_INCLUDE_DIR seccomp.h REQUIRED)
-  find_library(LIBSECCOMP_LIBRARY NAMES seccomp REQUIRED)
-  target_include_directories(flock_workspace_supervisor PRIVATE ${LIBSECCOMP_INCLUDE_DIR})
-  target_link_libraries(flock_workspace_supervisor PRIVATE ${LIBSECCOMP_LIBRARY})
-endif()
-
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
@@ -66,12 +57,45 @@ else()
 endif()
 target_sources(flock_core PRIVATE src/session_question.cpp src/session_settings.cpp)
 target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl PNG::PNG JPEG::JPEG OpenSSL::Crypto cmark)
-add_dependencies(flock_core flock_workspace_supervisor)
-target_compile_definitions(flock_core PRIVATE FLOCK_WORKSPACE_SUPERVISOR="$<TARGET_FILE:flock_workspace_supervisor>")
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
+  find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+  function(flock_verify_model name skill)
+    set(model "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py")
+    add_test(NAME "flock_verify_${name}" COMMAND "${Python3_EXECUTABLE}" "${model}")
+  endfunction()
+  function(flock_replay_model name skill variant expected)
+    add_test(NAME "flock_verify_${name}" COMMAND "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/scripts/verify-model-replay.py"
+      "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py" "${variant}" "${expected}")
+  endfunction()
+  flock_verify_model(reply_motion verify-reply-motion)
+  flock_replay_model(reply_motion_historical verify-reply-motion --historical
+    "A catch-up refresh animated a reply")
+  flock_replay_model(reply_motion_ignored_catch_up verify-reply-motion --ignore-catch-up
+    "A catch-up refresh animated a reply")
+  flock_verify_model(change_feed verify-change-feed)
+  flock_replay_model(change_feed_historical verify-change-feed --historical
+    "The Bot view recovered, but the history invalidation was lost")
+  flock_verify_model(run_settlement verify-run-settlement)
+  flock_replay_model(run_settlement_historical verify-run-settlement --historical
+    "Flock released the Run while its delegated work was active")
+  flock_verify_model(automation_routing verify-automation-routing)
+  flock_replay_model(automation_workspace_historical verify-automation-routing --historical=workspace
+    "A configured occurrence used the old workspace after the new workspace was published")
+  foreach(entry scheduler webhook)
+    flock_replay_model("automation_${entry}_historical" verify-automation-routing "--historical=${entry}"
+      "An unreadable Bot profile blocked another Bot's automation delivery")
+  endforeach()
+  flock_replay_model(automation_notes_historical verify-automation-routing --historical=notes
+    "An unreadable Bot's notes wait held the shared project slot")
+  flock_replay_model(automation_notes_retry_historical verify-automation-routing --historical=notes-retry
+    "A retried notes wait overtook work already active in the shared project")
+  flock_replay_model(automation_notes_edit_historical verify-automation-routing --historical=notes-edit
+    "An edited automation stayed outside the queue after the project became idle")
+
   add_executable(flock_workflow_context tests/workflow_context.cpp)
   target_link_libraries(flock_workflow_context PRIVATE flock_core)
   target_compile_options(flock_workflow_context PRIVATE -Wall -Wextra -Wpedantic)
@@ -130,7 +154,6 @@ add_subdirectory(web)
 target_link_libraries(flock PRIVATE flock_web flock_t3)
 
 if(BUILD_TESTING)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME flock_t3_connection_setup COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock> connection-setup)
   set_tests_properties(flock_t3_connection_setup PROPERTIES TIMEOUT 45)
@@ -151,13 +174,12 @@ if(BUILD_TESTING)
   target_link_libraries(flock_git_bot_deletion PRIVATE flock_core)
   target_compile_options(flock_git_bot_deletion PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_git_bot_deletion COMMAND flock_git_bot_deletion)
-  add_executable(flock_bot_tools_sandbox tests/bot_tools_sandbox.cpp)
-  target_include_directories(flock_bot_tools_sandbox PRIVATE app)
-  target_link_libraries(flock_bot_tools_sandbox PRIVATE flock_app_support)
-  target_compile_options(flock_bot_tools_sandbox PRIVATE -Wall -Wextra -Wpedantic)
-  add_test(NAME flock_bot_tools_sandbox COMMAND flock_bot_tools_sandbox)
-  add_test(NAME flock_tool_history_projection COMMAND flock_bot_tools_sandbox --tool-history)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_executable(flock_bot_tools tests/bot_tools.cpp)
+  target_include_directories(flock_bot_tools PRIVATE app)
+  target_link_libraries(flock_bot_tools PRIVATE flock_app_support)
+  target_compile_options(flock_bot_tools PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_bot_tools COMMAND flock_bot_tools)
+  add_test(NAME flock_tool_history_projection COMMAND flock_bot_tools --tool-history)
   add_test(NAME flock_bot_tools_mcp COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot_tools_mcp.py" $<TARGET_FILE:flock_bot_tools_sandbox>)
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot_tools_mcp.py" $<TARGET_FILE:flock_bot_tools>)
 endif()

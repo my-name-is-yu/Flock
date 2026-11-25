@@ -1,4 +1,7 @@
 #include "../chatgpt.hpp"
+#include "../model.hpp"
+#include "fixtures.hpp"
+#include "flock/base64.hpp"
 
 #include <arpa/inet.h>
 #include <poll.h>
@@ -96,19 +99,25 @@ void expectFailure(const HttpTransport& transport, bool transient, std::string_v
 void checkStream() {
     auto transport = eventStream({"\xef\xbb\xbf: heartbeat\r","\n\r\n",
         "data: {\"type\":\"response.completed\",\r\n",
-        "data: \"response\":{\"output\":[{\"text\":\"\xe7", "\xb5\x82\"}],\"usage\":{\"input_tokens\":6}}}\r\n",
+        "data: \"response\":{\"output\":[{\"text\":\"\xe7", "\xb5\x82\"}],\"usage\":{\"input_tokens\":6,"
+        "\"input_tokens_details\":{\"cached_tokens\":4,\"other\":3}}}}\r\n",
         "\r\n", "this invalid tail should never be read: \xff"});
     const auto result = infer(transport,"fixture","{}");
     check(result.at("output").at(0).at("text") == "終" &&
-          tokenUsage(result.at("usage")) == Json{{"input_tokens",6}}, "SSE output or usage was lost");
+          tokenUsage(result.at("usage")) == Json{{"input_tokens",6},{"input_tokens_details",{{"cached_tokens",4}}}},
+          "SSE output or cached usage was lost");
 
     expectFailure(eventStream({"data: {invalid}\n\n"}),false,"Invalid JSON");
     expectFailure(eventStream({"\xff"}),false,"Invalid UTF-8");
     expectFailure(eventStream({"\xe3\x81"}),false,"Invalid UTF-8");
     expectFailure(eventStream({"data: {}\n"}),true,"ended before");
     expectFailure(eventStream({"data: {\"type\":\"response.incomplete\","
-                               "\"response\":{\"usage\":{\"output_tokens\":2}}}\n\n"}),
-                  false,"incomplete response",{{"output_tokens",2}});
+                               "\"response\":{\"usage\":{\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"}),
+                  false,"incomplete response",{{"output_tokens",2},{"input_tokens_details",{{"cached_tokens",0}}}});
+    expectFailure(eventStream({"data: {\"type\":\"response.completed\","
+                               "\"response\":{\"usage\":{\"input_tokens_details\":{\"cached_tokens\":4}}}}\n\n"}),
+                  false,"Invalid ChatGPT completion",{{"input_tokens_details",{{"cached_tokens",4}}}});
+    check(tokenUsage({{"input_tokens_details",{{"cached_tokens",-1}}}}).empty(),"negative cached usage was accepted");
     expectFailure(eventStream({"data: {\"type\":\"error\",\"code\":\"server_error\"}\n\n"}),
                   true,"request fixture-request");
     expectFailure([](const auto&) { return HttpResponse{200,"text/plain",{}, {}}; },
@@ -134,14 +143,82 @@ void checkCatalog() {
         check(request.url == std::string(resource) + "/models" && request.authorization == "Bearer fixture" &&
               request.body.empty() && !request.onData, "unexpected model catalog request");
         return HttpResponse{200,"application/json",{},R"({"models":[
-            {"slug":"a","visibility":"list","display_name":"A"},
+            {"slug":"a","visibility":"list","display_name":"A","supported_reasoning_levels":[
+                {"effort":"low","description":"More responsive"},{"effort":"ultra"},{"effort":"low"},{"effort":4}]},
             {"slug":"b","visibility":"list"},
             {"slug":"c","visibility":"hidden"},
+            {"slug":"d","visibility":"list","supported_reasoning_levels":[]},
             {"visibility":"list"}
         ]})"};
     },"fixture");
-    check(catalog == Json::array({{{"slug","a"},{"displayName","A"}},{{"slug","b"},{"displayName","b"}}}),
-          "model catalog filter changed");
+    check(catalog == Json::array({
+        {{"slug","a"},{"displayName","A"},{"reasoningEfforts",{"low","ultra"}}},
+        {{"slug","b"},{"displayName","b"}},
+        {{"slug","d"},{"displayName","d"},{"reasoningEfforts",Json::array()}},
+    }),"model catalog lost the distinction between advertised efforts and missing metadata");
+}
+
+void checkUnsupportedReasoningEffort() {
+    try {
+        infer([](const HttpRequest&) {
+            return HttpResponse{400,"application/json",{},R"({"error":{"code":"unsupported_value",
+                "param":"reasoning.effort","message":"private provider detail"}})"};
+        },"fixture",R"({"reasoning":{"effort":"low"}})");
+        throw std::runtime_error("Unsupported effort was accepted");
+    } catch (const ModelError& error) {
+        const std::string_view message = error.what();
+        check(error.code == ModelErrorCode::unsupported_reasoning_effort && !error.transient &&
+              message.find("Model default") != message.npos && message.find("private provider detail") == message.npos,
+              "Unsupported effort did not give a safe, actionable error");
+    }
+}
+
+void checkInspectedImageRequest() {
+    const app::test::Sandbox credentials;
+    std::filesystem::permissions(credentials.path,std::filesystem::perms::owner_all);
+    const auto profile = credentials.path / "profile.json";
+    const Json token{{"subject","fixture"},{"accessToken","fixture"},{"refreshToken","fixture-refresh"},
+        {"granted",Json::array({directScope})},{"expiresAt",nowMillis() + 3'600'000}};
+    app::test::write(profile,token.dump());
+    std::filesystem::permissions(profile,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+
+    ModelInput input{};
+    input.config = {{"modelProvider","chatgpt"},{"model","fixture"}};
+    input.event = {{"kind","conversation_turn"}};
+    input.tools = {"reply"};
+    for (std::size_t index = 0; index < 4; ++index) {
+        const auto bytes = std::string(2 * 1024 * 1024,static_cast<char>('a' + index));
+        input.images.push_back({1,std::to_string(index + 1),"image/png",encodeBase64(bytes)});
+    }
+
+    unsigned requests = 0;
+    app::ChatGPTModel model(credentials.path,[&](const HttpRequest& request) {
+        ++requests;
+        check(request.url == std::string(resource) + "/responses" && request.authorization == "Bearer fixture",
+              "inspected images did not reach the authenticated Responses endpoint");
+        const auto body = Json::parse(request.body);
+        const auto& content = body.at("input").at(0).at("content");
+        std::size_t imageIndex = 0;
+        constexpr std::string_view prefix = "data:image/png;base64,";
+        for (const auto& part : content) {
+            if (part.at("type") != "input_image") continue;
+            const std::string_view url = part.at("image_url").get_ref<const std::string&>();
+            check(imageIndex < input.images.size() && url.starts_with(prefix) &&
+                  url.substr(prefix.size()) == input.images[imageIndex].dataBase64,
+                  "an inspected image was duplicated, reordered, or altered");
+            ++imageIndex;
+        }
+        check(imageIndex == input.images.size(),"the Responses request lost an inspected image");
+        const Json reply{{"type","function_call"},{"name","reply"},{"namespace","flock"},{"status","completed"},
+            {"arguments",Json{{"text","Reviewed the images"},{"reason","All four images were present"}}.dump()}};
+        const Json event{{"type","response.completed"},{"response",{{"output",Json::array({reply})}}}};
+        const HttpResponse response{200,"text/event-stream","fixture-request",{}};
+        request.onData("data: " + event.dump() + "\n\n",response);
+        return response;
+    });
+    const auto turn = model.decide(input);
+    check(requests == 1 && turn.calls.size() == 1 && turn.calls.front().tool == "reply",
+          "four admitted images did not complete in one Responses request");
 }
 
 void checkTlsStream(const char* url, const char* caFile) {
@@ -175,6 +252,8 @@ int main(int argc, char** argv) {
         checkStream();
         checkProviderErrors();
         checkCatalog();
+        checkInspectedImageRequest();
+        checkUnsupportedReasoningEffort();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

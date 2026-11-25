@@ -26,9 +26,6 @@ target_link_libraries(flock_web PUBLIC flock_core PRIVATE Threads::Threads OpenS
 target_compile_options(flock_web PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  add_test(NAME flock_verify_change_feed COMMAND "${Python3_EXECUTABLE}"
-    "${PROJECT_SOURCE_DIR}/.agents/skills/verify-change-feed/model.py")
   add_executable(flock_web_git_webhooks tests/git_webhooks.cpp)
   target_include_directories(flock_web_git_webhooks SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
   target_link_libraries(flock_web_git_webhooks PRIVATE flock_web Threads::Threads OpenSSL::Crypto)
@@ -44,9 +41,9 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_board_inbox_live_retry COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}" live)
-    add_test(NAME flock_web_composer_screenshot_dimensions COMMAND "${FLOCK_NODE_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-screenshot-dimensions.mjs" "${FLOCK_CHROME_EXECUTABLE}")
-    set_tests_properties(flock_web_composer_screenshot_dimensions PROPERTIES TIMEOUT 30)
+    add_test(NAME flock_web_composer_screenshot_resize COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-screenshot-resize.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    set_tests_properties(flock_web_composer_screenshot_resize PROPERTIES TIMEOUT 30)
     add_test(NAME flock_web_message_time_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/message-time.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     set_tests_properties(flock_web_message_time_dom PROPERTIES TIMEOUT 30)

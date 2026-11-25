@@ -1,4 +1,5 @@
 #include "chatgpt.hpp"
+#include "flock/bot_profile.hpp"
 
 #include <curl/curl.h>
 #include <sys/socket.h>
@@ -206,7 +207,8 @@ private:
         if (type.empty()) throw ModelError("Invalid ChatGPT response event",false);
         const auto& result = field(event,"response");
         if (type == "response.completed") {
-            if (!field(result,"output").is_array()) throw ModelError("Invalid ChatGPT completion",false);
+            if (!field(result,"output").is_array())
+                throw Failure("Invalid ChatGPT completion",false,{},field(result,"usage"));
             completed_ = result;
             return false;
         }
@@ -225,9 +227,9 @@ private:
     Json completed_ = nullptr;
 };
 
-void checkApi(const HttpResponse& response) {
+void checkApi(const HttpResponse& response, std::string_view site) {
     if (!success(response.status))
-        throw remoteFailure(responsesApi,response.status,Json::parse(response.body,nullptr,false),response.requestId);
+        throw remoteFailure(site,response.status,Json::parse(response.body,nullptr,false),response.requestId);
 }
 }
 
@@ -243,16 +245,21 @@ std::string stringField(const Json& object, std::string_view name) {
 }
 
 Json tokenUsage(const Json& usage) {
+    const auto isTokenCount = [](const Json& count) {
+        return count.is_number_integer() && count.get<long double>() >= 0;
+    };
     auto result = Json::object();
     for (const auto* key : {"input_tokens","output_tokens","total_tokens"}) {
         const auto& count = field(usage,key);
-        if (count.is_number_integer() && count.get<long double>() >= 0) result[key] = count;
+        if (isTokenCount(count)) result[key] = count;
     }
+    const auto& cached = field(field(usage,"input_tokens_details"),"cached_tokens");
+    if (isTokenCount(cached)) result["input_tokens_details"] = {{"cached_tokens",cached}};
     return result;
 }
 
-Failure::Failure(std::string message, bool transient, std::string code, Json usage)
-    : ModelError(std::move(message),transient,tokenUsage(usage)), providerCode(std::move(code)) {}
+Failure::Failure(std::string message, bool transient, std::string providerCode, Json usage, ModelErrorCode code)
+    : ModelError(std::move(message),transient,tokenUsage(usage),code), providerCode(std::move(providerCode)) {}
 
 Failure remoteFailure(std::string_view site, long status, const Json& value, std::string_view requestId, Json usage) {
     const auto& error = field(value,"error");
@@ -279,6 +286,10 @@ Failure remoteFailure(std::string_view site, long status, const Json& value, std
         message += " — check Flock's ChatGPT connection and granted plan permissions";
     const bool transient = !limit && (status == 429 || status == 408 || (status >= 500 && status <= 599) ||
         code == "server_error" || code == "rate_limit_exceeded" || code == "service_unavailable");
+    if (!transient && !limit && site == responsesApi && (status == 0 || status == 400 || status == 422) &&
+        (parameter == "reasoning.effort" || parameter == "reasoning"))
+        return Failure("This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.",
+                       false,code,std::move(usage),ModelErrorCode::unsupported_reasoning_effort);
     return Failure(std::move(message),transient,code,std::move(usage));
 }
 
@@ -354,7 +365,7 @@ HttpResponse httpRequest(const HttpRequest& request) {
 Json models(const HttpTransport& transport, const std::string& token) {
     const auto response = transport({.url = std::string(resource) + "/models", .body = {},
                                      .authorization = "Bearer " + token, .contentType = {}, .accept = "application/json"});
-    checkApi(response);
+    checkApi(response,"ChatGPT model catalog");
     const auto data = Json::parse(response.body,nullptr,false);
     const auto& catalog = field(data,"models");
     if (!catalog.is_array()) throw ModelError("ChatGPT did not return a model catalog",true);
@@ -363,7 +374,17 @@ Json models(const HttpTransport& transport, const std::string& token) {
         const auto& slug = field(model,"slug");
         if (field(model,"visibility") != "list" || !slug.is_string()) continue;
         const auto& displayName = field(model,"display_name");
-        result.push_back({{"slug",slug},{"displayName",displayName.is_null() ? slug : displayName}});
+        Json entry = {{"slug",slug},{"displayName",displayName.is_string() ? displayName : slug}};
+        if (const auto& supported = field(model,"supported_reasoning_levels"); supported.is_array()) {
+            auto levels = Json::array();
+            for (const auto& level : supported) {
+                const auto effort = stringField(level,"effort");
+                if (validReasoningEffort(effort) && std::find(levels.begin(),levels.end(),effort) == levels.end())
+                    levels.push_back(effort);
+            }
+            entry["reasoningEfforts"] = std::move(levels);
+        }
+        result.push_back(std::move(entry));
     }
     return result;
 }
@@ -374,7 +395,7 @@ Json infer(const HttpTransport& transport, const std::string& token, std::string
         .authorization = "Bearer " + token, .contentType = "application/json", .accept = "text/event-stream",
         .timeout = std::chrono::seconds(90),
         .onData = [&](std::string_view data, const HttpResponse& headers) { return stream.read(data,headers); }});
-    checkApi(response);
+    checkApi(response,responsesApi);
     if (!eventStream(response.contentType))
         throw ModelError("ChatGPT did not return the expected response stream",false);
     return stream.take();

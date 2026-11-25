@@ -154,6 +154,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     } else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
     else if (kind == "cancelled") copyFields(details,data,{"request"});
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId","question"});
+    else if (kind == "memory_remembered") copyFields(details,data,{"text","revisionId","version","canUndo","undone"});
     else if (kind == "pr_review_requested") copyFields(details,data,{"itemId","title","text","prUrl"});
     else if (kind == "completed") {
         copyFields(details,data,{"text","revisionId","runOutcome","requestedCommit"});
@@ -397,7 +398,7 @@ Json botSettings(const Json& bot) {
     auto view = botSummary(bot);
     view["soul"] = field(bot,"soul");
     view["fixPullRequests"] = bot.value("fixPullRequests",true);
-    copyFields(view,bot,{"environmentId","projectId","model"});
+    copyFields(view,bot,{"environmentId","projectId","model","reasoningEffort"});
     return view;
 }
 

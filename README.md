@@ -2,7 +2,7 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
-Flock reopens databases with the current schema version (8). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
+Flock reopens databases with the current schema version (9). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
 
 ## Build
 
@@ -22,6 +22,10 @@ build concurrency.
 ## Configure a Bot
 
 Edit the Bot's instructions under **Role** in its Web settings.
+Under **How it runs**, choose its **Model** and **Reasoning effort**. Lower effort
+can reduce response time and reasoning tokens. **Model default** uses the model’s own setting.
+
+Bots can read, write, and search files in their own workspaces. They delegate commands, scripts, builds, and tests to T3 Sessions. Make any files the work needs available in the selected T3 project.
 
 The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.
 
@@ -44,6 +48,8 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 ```
 
 In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
+
+Bots can remember lasting preferences, corrections, conventions, and decisions from messages sent directly by a Bot owner or installation administrator. The conversation shows what changed and offers **Undo** while that edit is current. You can also ask a Bot to remember something explicitly.
 
 Flock uses the sole connected T3 environment when the Bot starts work. It uses the sole active project, or asks which project to use and remembers the choice for that Bot and environment. You can pin a destination with `environmentId` and `projectId` in the Bot configuration. Optional `conversationEnvironments` entries name other connected environments for requests such as “Run the measurement on the cloud Mac.” Each environment has its own project selection.
 
@@ -94,12 +100,16 @@ build/app/flock run
 
 In ChatGPT, authorize Flock to use your plan and check that `model status` shows `planUsage: true`. Open the Web UI at the URL printed by the CLI, choose **Flock settings → Connections → Connect local T3**, and approve Operate access in T3. For a T3 server on another machine, use **Use a connection URL** and paste its MCP URL. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
 
+Flock puts the Bot's role and memory first in model input so ChatGPT can reuse the shared beginning of requests. Flock records [cached token counts](app/README.md#model-call-allowance) when ChatGPT reports them.
+
 In a T3 Session, ask for a Bot by name or select `/skill:flock-<bot>` or
 `$flock-<bot>` in the provider's skill menu. The Bot replies in the same Session.
 Open **Flock settings** to see the connected environments and saved loopback port. Use `--port PORT` to change the port.
 See [Ask a Bot from a T3 Session](web/README.md#ask-a-bot-from-a-t3-session) for connection details.
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.
+
+Attach screenshots by choosing PNG or JPEG files or by pasting them into the message box. The browser resizes larger screenshots before sending them.
 
 To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock message release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 
@@ -151,14 +161,14 @@ ownership apply in both modes.
 | Channel posts outside the asking conversation, published artifacts, and email sends | Ask |
 | T3 Session launch or a send outside the originating Thread | Ask |
 | Bot creation or rename, schedule, reminder, or trigger changes | Ask |
+| Bot private memory edits (`memory.write`, targeted by Bot ID) | Allow |
 | Distinct destructive operations or secret use at a new destination | Ask |
 | MCP tool calls | Allow when discovery returns `annotations.readOnlyHint: true` for the tool. Hints apply to the configured server and exact tool for two minutes. Ask otherwise |
-| Reads, workspace work, and replies, reactions, edits, and attachments in the originating conversation | Allow |
+| Reads, workspace file access, and replies, reactions, edits, and attachments in the originating conversation | Allow |
 
 Targets match exactly or with a `*` glob. **Never** applies in both modes.
 Supervised evaluates **Ask first** ahead of **Allow**, then uses the defaults
-above. The installation can have up to 20 Allow rules and 20 Ask-first rules.
-When a card adds a 21st Allow rule, Flock replaces the oldest Allow rule.
+above. Flock keeps each rule until an installation administrator removes it.
 
 ```sh
 flock mode
@@ -321,31 +331,3 @@ credential from `sessionBridgeCredentialEnv`, held by the bridge. C++ adapters
 can use `Store::runLocalMachineOperation` with the same authenticated Run.
 The host opens paths without following symlinks. Reusable execution
 environments are configured through Bot settings.
-
-## Bot workspace commands
-
-`workspace_run_command` keeps the existing single-command `argv` form and also
-accepts a structured pipeline on macOS and Linux:
-
-```json
-{"pipeline":[["cat","allowed.txt"],["wc","-c"]]}
-```
-
-Pass argv arrays, not shell text: metacharacters are literal argument data.
-Pipelines contain 1–4 stages using only system `/bin` or `/usr/bin` executables
-named `cat`, `cut`, `echo`, `grep`, `head`, `printf`, `sleep`, `sort`, `tail`,
-`tee`, `tr`, `uniq`, `wc`, or `yes`. Scripts, shells, interpreters, workspace
-executables, and other helpers are rejected before launch; use a T3 Session
-for them, builds, and tests. This allowlist is a partial supported subset, not
-a security boundary; the platform sandbox remains the security boundary.
-
-Commands use noninteractive stdin, one active command per Bot, a shared
-10-second wall limit, and a combined 8 KiB stdout/stderr capture. Each pipeline
-payload stage receives a CPU limit of `max(1, floor(5/N))` seconds, with core
-dumps disabled, a 1 MiB file-size limit, and 64 open files. Linux builds
-require libseccomp and `/usr/bin/bwrap` with the requested seccomp filtering
-support; filtering errors fail closed. macOS keeps its fork-denying sandbox.
-An outcome that cannot be confirmed after restart or supervisor failure is
-`unknown_after_restart` and is never replayed automatically.
-These are per-process limits; they do not guarantee a strict aggregate CPU
-ceiling for trusted Bubblewrap monitor overhead.

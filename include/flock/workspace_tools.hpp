@@ -7,7 +7,6 @@
 namespace flockv0 {
 
 inline constexpr std::size_t maxToolCalls = 8;
-inline constexpr std::size_t workspaceOutputLimit = 8192;
 
 const std::vector<std::string>& botToolNames();
 bool isBotTool(std::string_view);

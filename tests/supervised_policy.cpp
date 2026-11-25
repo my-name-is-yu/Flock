@@ -71,7 +71,7 @@ void rules(const std::filesystem::path& path) {
         for (const auto action : asks)
             check(policy.check("release",action,"target") == (policy.mode()=="full" ? PolicyResult::allow : PolicyResult::ask),
                   actionName(action));
-        for (const auto action : {Action::repository_read,Action::workspace_read,Action::workspace_write,Action::workspace_exec,
+        for (const auto action : {Action::repository_read,Action::workspace_read,Action::workspace_write,
             Action::web_search,Action::web_fetch,Action::skill_list,Action::skill_read,Action::mcp_discover,
             Action::mcp_read_resource,Action::session_read,Action::attachment_inspect,Action::shared_memory_read})
             check(policy.allows("release",action,"target"),actionName(action));
@@ -224,10 +224,12 @@ void turns(const std::filesystem::path& path) {
     check(actions==1 && store.inbox(requester).empty(),"denied operation retried within the same request");
     model.retry = false;
 
-    for (auto kind : {RuleKind::allow,RuleKind::ask}) {
-        for (int i=0;i<20;++i) policy.changeRule(localOwner,kind,Action::bot_rename,"fixture-" + std::to_string(i),true);
-        rejected([&] { policy.changeRule(localOwner,kind,Action::bot_rename,"one-too-many",true); });
-    }
+    constexpr int rulesPerKind = 32;
+    for (auto kind : {RuleKind::allow,RuleKind::ask})
+        for (int i=0;i<rulesPerKind;++i)
+            policy.changeRule(localOwner,kind,Action::bot_rename,"fixture-" + std::to_string(i),true);
+    const auto existingRules = policy.rules();
+    check(existingRules.size()==2*rulesPerKind,"Adding many rules did not keep every Allow and Ask-first rule");
     send("New request after the denial");
     item = card();
     const Person delegatedAdmin{"delegated-admin",true};
@@ -245,7 +247,7 @@ void turns(const std::filesystem::path& path) {
     check(store.inbox(delegatedAdmin).empty(),
           "a demoted administrator retained access to the approval");
     rejected<DecisionDenied>([&] { store.decideInbox(delegatedAdmin,target(item),"always_allow"); });
-    check(card()==item && policy.rules().size()==40,"a stale administrator changed the rule or card");
+    check(card()==item && policy.rules()==existingRules,"a stale administrator changed the rule or card");
     // Older host configuration can assign separate credentials with distinct
     // roles to one person. Interactive authority comes from the credential.
     store.setWebIdentityResolver([](std::string_view) -> std::optional<bool> { return false; });
@@ -253,15 +255,11 @@ void turns(const std::filesystem::path& path) {
           "the queued role replaced the host administrator's interactive authority");
     store.decideInbox(delegatedAdmin,target(item),"always_allow");
     runtime.runConversations();
-    check(actions==2 && policy.rules().size()==40 && policy.check("release",Action::bot_rename,"fixture-0")==PolicyResult::ask,
-          "Always allow did not run and replace the oldest Allow");
-    policy.changeRule(localOwner,RuleKind::ask,Action::bot_rename,"fixture-0",false);
-    policy.changeRule(localOwner,RuleKind::ask,Action::bot_rename,"fixture-1",false);
-    check(policy.check("release",Action::bot_rename,"fixture-0")==PolicyResult::ask &&
-          policy.allows("release",Action::bot_rename,"fixture-1"),"replacement removed an Allow newer than the oldest");
+    check(actions==2 && policy.rules().size()==existingRules.size()+1,"Always allow did not run and add one rule");
     send("Use the saved rule");
     check(actions==3 && store.inbox(requester).empty(),"saved exact rule did not allow the next action");
     policy.changeRule(localOwner,RuleKind::allow,Action::bot_rename,"target",false);
+    check(policy.rules()==existingRules,"Saving a rule from a card changed an existing rule");
 
     send("Pending change before Never");
     item = card();
@@ -290,6 +288,8 @@ void downstreamApproval(const std::filesystem::path& path) {
     auto policy = store.policy();
     policy.setMode(localOwner,"supervised");
     policy.changeRule(localOwner,RuleKind::ask,Action::shared_memory_write,"shared-playbook",true);
+    policy.changeRule(localOwner,RuleKind::ask,Action::private_memory_write,"release",true);
+    policy.setMember(localOwner,"release",member.id,true);
     FixtureModel model;
     Adapter adapter;
     Runtime runtime(store,model,adapter,[](auto) { return std::string{}; });
@@ -308,6 +308,17 @@ void downstreamApproval(const std::filesystem::path& path) {
     approve("playbook",{"apply_memory_edit",{{"docId","shared-playbook"},{"baseVersion",0},{"content","Verify staging"}},"Edit"});
     check(store.memory(localOwner,"release","read_memory",{{"docId","shared-playbook"}}).at("content")=="Verify staging",
           "Approved shared memory edit did not persist");
+
+    const Decision privateEdit{"apply_memory_edit",{{"baseVersion",0},{"content","Use Markdown"}},"Edit"};
+    model.action = privateEdit;
+    store.receive(member,intake,"member-edit","Remember to use Markdown");
+    runtime.runConversations();
+    check(store.inbox(localOwner).empty(),"An ineligible private memory edit requested approval");
+    check(model.outcome.at(0).at("result")==Json{{"ok",false},{"error","Memory access denied"}},
+          "The shared member's private memory edit was not denied");
+    approve("private-edit",privateEdit);
+    check(store.memory(localOwner,"release","read_memory",Json::object()).at("content")=="Use Markdown",
+          "Approved private memory edit did not persist");
 }
 
 void scheduled(const std::filesystem::path& path) {

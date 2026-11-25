@@ -9,7 +9,7 @@ import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
-import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
+import { screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
@@ -96,6 +96,7 @@ const waitLabels = {
   model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
   model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
     'I couldn’t choose my next step after several attempts. Try again to continue.'],
+  bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s role and memory, then try again.'],
   t3_input: ['Action in T3', 'Open the Session in T3 to approve or answer.'],
   deadline: ['Deadline extension', 'This request reached its deadline. You can set a new one.'],
   unknown_delivery: ['Message to T3 unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Check again asks T3 without resending anything.'],
@@ -105,6 +106,7 @@ const waitLabels = {
 // Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
 const pendingActionLabels = {
   budget: 'Approve one more run…', model_budget: 'Approve another model call…', model_failure: 'Try again…',
+  bot_notes_unavailable: 'Try again…',
   deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
 };
 const closedLabels = {
@@ -234,7 +236,7 @@ async function api(path, body, { method = body ? 'POST' : 'GET', signal } = {}) 
     method, headers, credentials: 'same-origin', signal, body: body ? JSON.stringify(body) : undefined,
   });
   const data = await response.json();
-  if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status });
+  if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status, data });
   const viewer = response.headers.get('X-Flock-Viewer');
   if (viewer !== null) responseViewers.set(data, viewer);
   return data;
@@ -384,8 +386,8 @@ function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fro
   const context = view;
   if (context) {
     context.pageRead = Promise.resolve();
-    context.refresh = coalescedRefresh((scroll, liveGeneration) =>
-      readTimeline(context, () => refreshView(context, scroll, liveGeneration)));
+    context.refresh = coalescedRefresh((scroll, animationGeneration) =>
+      readTimeline(context, () => refreshView(context, scroll, animationGeneration)));
     void context.refresh(context.data ? undefined : 'bottom');
     if (context.dm) {
       context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
@@ -1451,10 +1453,50 @@ function verificationLine(run, showLink) {
   return line;
 }
 
+function memoryNotice(event, canUndo, context) {
+  const { data } = event;
+  const note = node('article', 'system-note memory-notice');
+  note.id = `event-${event.id}`;
+  note.tabIndex = -1;
+  note.append(node('strong', null, data.undone ? 'Memory undone' : 'Remembered'), ' · ', data.text);
+  if (!canUndo) return note;
+
+  const status = node('span', 'memory-notice-status');
+  status.setAttribute('role', 'status');
+  const undo = button('Undo', 'text-button', async () => {
+    if (undo.getAttribute('aria-disabled') === 'true') return;
+    undo.setAttribute('aria-disabled', 'true');
+    status.textContent = 'Undoing…';
+    try {
+      await api('memory/revert', { botId: context.id, revisionId: data.revisionId, baseVersion: data.version });
+    } catch (error) {
+      if (error.status === 409) {
+        status.textContent = 'Memory has changed.';
+        if (context === view) void context.refresh();
+      } else {
+        status.textContent = 'Could not undo. Try again.';
+        undo.removeAttribute('aria-disabled');
+      }
+      return;
+    }
+    const current = context.events.get(event.id);
+    if (current) context.events.set(event.id, { ...current, data: { ...current.data, canUndo: false, undone: true } });
+    if (context === view) {
+      renderTimeline();
+      void context.refresh();
+    }
+  });
+  undo.dataset.timelineAction = 'undo-memory';
+  note.append(undo, status);
+  return note;
+}
+
 function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
+  if (event.kind === 'memory_remembered')
+    return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
     const name = `T3 Session “${session.title || session.threadId}”`;
@@ -2111,6 +2153,7 @@ function conversationRows(data, events, keep, source) {
         wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), paused,
         paused && decisions.busy(pausedDecision(view.id, paused)), blocker, blockedOwner,
         request ? timeline.parallelTasks.get(event.taskId) : null,
+        event.kind === 'memory_remembered' && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
@@ -2679,7 +2722,7 @@ function workspaceCard(bot) {
     if (view?.id === bot.id) void view.refresh();
     return saved;
   }, async () => (await api('settings')).t3?.environments ?? [],
-  async () => (await api(botQuery('settings/models', bot.id))).models);
+  () => api(botQuery('settings/models', bot.id)));
   return detailWorkspace.element;
 }
 function roleCard(bot) {
@@ -2757,7 +2800,7 @@ function waitContent(context, task, deadlineDraft) {
     primary.append(questionActions(context, task, { dialog: true }));
   } else if (wait.reason === 'budget') primary.append(action('Approve one more run', 'approve'));
   else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
-  else if (wait.reason === 'model_failure') primary.append(action('Try again', 'retry'));
+  else if (['model_failure', 'bot_notes_unavailable'].includes(wait.reason)) primary.append(action('Try again', 'retry'));
   else if (wait.reason === 'deadline') {
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
       type: 'datetime-local', value: deadlineDraft ?? localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
@@ -2826,11 +2869,11 @@ function renderDetail() {
     const bot = view.data.bot;
     labelDetail(`${bot.name} settings`);
     renderDetailNav(settingsTabs, detail.section);
-    const { soul, environmentId, projectId, model, ...settings } = bot;
+    const { soul, environmentId, projectId, model, reasoningEffort, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
     const canEdit = bot.canDelete === true;
     detailRole?.update(soul, canEdit);
-    detailWorkspace?.update({ environmentId, projectId, model }, canEdit);
+    detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort }, canEdit);
     return;
   }
   labelDetail(null);
@@ -2958,11 +3001,11 @@ async function refreshPeerConversation(context, scroll) {
   }
   renderTimeline(scroll);
 }
-async function refreshView(context, scroll, liveGeneration) {
+async function refreshView(context, scroll, animationGeneration) {
   const isCurrent = () => context === view &&
-    (liveGeneration == null || (liveGeneration === visibilityGeneration && !document.hidden));
+    (animationGeneration == null || (animationGeneration === visibilityGeneration && !document.hidden));
   if (!isCurrent()) return;
-  const liveAfterId = liveGeneration == null ? undefined : context.newestEvent;
+  const liveAfterId = animationGeneration == null ? undefined : context.newestEvent;
   try {
     const params = new URLSearchParams({ bot: context.id });
     const eventHistory = eventHistoryForRefresh(context);
@@ -3151,8 +3194,7 @@ async function submit(event) {
       if (attachments.length) delete screenshots.pending;
       else composer.settleSend(payload, false);
     }
-    const message = error instanceof ScreenshotError ? error.message : errors[error.message];
-    setNotice(context, message ?? 'Flock could not confirm receipt. You can resend the same message.', true);
+    setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
     sendingMessages.delete(composer);

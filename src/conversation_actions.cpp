@@ -755,7 +755,10 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
     if (conflicting) {
         task["replanning"] = true;
         releaseModelCall(takeReservedTaskCall(task.value("eventId",Id{0})));
-        if (task.at("state") == "waiting" && waitIsActionable(task)) {
+        if (isUndispatchedNotesWait(task)) {
+            clearWait(task,"request_changed");
+            task["state"] = "queued";
+        } else if (task.at("state") == "waiting" && waitIsActionable(task)) {
             auto data = task.at("wait");
             if (!data.is_object()) throw DecisionUnavailable{};
             for (const auto* key : {"id","messageId","target"}) data.erase(key);

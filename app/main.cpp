@@ -233,7 +233,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const IntakeResolver intake = [&](std::string_view botId, std::string_view request) {
         return bots.get(botId).intake(request);
     };
-    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); },intake);
+    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); },
+                [&](std::string_view id) { return bots.plannerModel(id); });
     SettingsSystem system(home,port,sessionRead);
     SettingsConnections connections(home);
     SettingsAccess access(store,home,std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
@@ -304,13 +305,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             syncSkills();
             return created;
         },
-        [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
-            auto updated = botRunSettingCount(profile)
-                ? bots.updateRunSettings(store,botId,profile,options.clock(),reportSchedule)
-                : bots.updateProfile(botId,profile,image);
-            syncSkills();
-            return updated;
-        },
+        {},
         [&](std::string_view botId) { return bots.avatarImage(botId); },
         options.peers,
         identities.authenticate,
@@ -326,6 +321,19 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         callbacks.modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
         callbacks.modelCatalog = [] { return Json::array({{{"slug","demo"},{"displayName","Demo"}}}); };
     }
+    callbacks.updateBot = [&, modelCatalog = callbacks.modelCatalog](
+        std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
+        auto catalog = Json::array();
+        if (!profile.value("reasoningEffort","").empty()) {
+            try { catalog = modelCatalog(); }
+            catch (const ModelError&) {}
+        }
+        auto updated = botRunSettingCount(profile)
+            ? bots.updateRunSettings(store,botId,profile,options.clock(),reportSchedule,catalog)
+            : bots.updateProfile(botId,profile,image);
+        syncSkills();
+        return updated;
+    };
     callbacks.installationSettings = [&](const Person& actor) {
         auto availableConnections = connections.view();
         availableConnections.at("channels")["canManageHost"] = actor == localOwner;
