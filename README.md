@@ -22,6 +22,8 @@ build concurrency.
 ## Configure a Bot
 
 Edit the Bot's instructions under **Role** in its Web settings.
+Under **How it runs**, choose its **Model** and **Reasoning effort**. Lower effort
+can reduce response time and reasoning tokens. **Model default** uses the model’s own setting.
 
 Bots can read, write, and search files in their own workspaces. They delegate commands, scripts, builds, and tests to T3 Sessions. Make any files the work needs available in the selected T3 project.
 

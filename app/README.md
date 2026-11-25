@@ -13,8 +13,8 @@ Flock selects its state directory with `--home DIRECTORY`, then `FLOCK_HOME`,
 then `~/.config/flock`. Set up each Bot in `bots/<botId>/` under that directory.
 Place its role and decision criteria in `SOUL.md` and its task-independent
 starting notes in `MEMORY.md`. Each decision reads the current `SOUL.md` and
-the latest private memory in SQLite. Intake records the selected model and
-Session settings for each task.
+the latest private memory in SQLite. Intake records the selected model,
+reasoning effort, and Session settings for each task.
 
 Example `bots/release/config.json`
 
@@ -23,6 +23,7 @@ Example `bots/release/config.json`
   "name": "Release",
   "modelProvider": "chatgpt",
   "model": "MODEL_SLUG_FROM_FLOCK_MODEL_MODELS",
+  "reasoningEffort": "low",
   "environmentId": "CANONICAL_T3_ENVIRONMENT_ID",
   "projectId": "CANONICAL_T3_PROJECT_ID",
   "allowedBots": ["verifier"],
@@ -102,6 +103,11 @@ Approve the two Flock connections in your browser. For ChatGPT sign-in, grant
 permission to use the eligible ChatGPT plan and check for `planUsage: true` in
 `flock model status`. Copy a slug from `flock model models` into each Bot
 configuration. Use `flock model login --reconsent` if plan usage is missing.
+`reasoningEffort` sets the effort for this Bot's ChatGPT decisions. Omit it to use
+the model default. `flock model models` shows `reasoningEfforts` when ChatGPT
+lists the supported levels. Otherwise Flock offers `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, and `max`. If ChatGPT rejects the chosen effort,
+select another level or **Model default** in Bot settings.
 For T3, approve Operate access. `flock t3 connect` discovers the running local
 T3 server. To connect another machine, pass its MCP URL as the argument. When
 authorization expires, use `flock t3 reconnect ENVIRONMENT` to approve again.
