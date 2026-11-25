@@ -138,9 +138,9 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
         const auto instruction = args.contains("instruction")
                                      ? conversation_storage::text(args, "instruction", limits::session_prompt::maxDecisionTextBytes, true)
                                      : "Continue with the same completion criteria.";
-        task.rest["newSessionRequired"] = true;
-        task.rest["freshContextRequested"] = true;
-        task.rest["replanning"] = true;
+        task.newSessionRequired = true;
+        task.freshContextRequested = true;
+        task.replanning = true;
         acceptInstruction(task, message.id, step, instruction, nullptr, nullptr);
         return {{"ok", true}, {"freshContext", true}, {"taskId", task.id}, {"effect", "replanning"}};
     }

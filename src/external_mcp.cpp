@@ -2,6 +2,7 @@
 #include "flock/limits.hpp"
 #include "connector_credentials.hpp"
 #include "storage.hpp"
+#include "task_storage.hpp"
 
 #include <algorithm>
 
@@ -16,14 +17,10 @@ std::string redactConnectionTokens(std::string text) {
 }
 
 Json currentRun(const TaskData& task) {
-    if (task.state == TaskState::cancelled || task.rest.value("replanning", false) || task.rest.value("newSessionRequired", false))
-        return nullptr;
-    const auto& active = task.rest.at("activeRun");
-    const auto& run = active.is_null() ? task.rest.at("lastRun") : active;
-    if (run.is_null() || run.at("environmentId") != task.environmentId ||
-        run.value("revisionId", Json(nullptr)) != (task.currentRevision ? Json(*task.currentRevision) : Json(nullptr)))
-        return nullptr;
-    return run;
+    if (task.state == TaskState::cancelled || task.replanning || task.newSessionRequired) return nullptr;
+    const auto& run = task.activeRun ? task.activeRun : task.lastRun;
+    if (!run || run->environmentId != task.environmentId || run->assignment.revisionId != task.currentRevision) return nullptr;
+    return assignedRunJson(run);
 }
 }
 

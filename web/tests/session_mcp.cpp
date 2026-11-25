@@ -913,9 +913,8 @@ void stopSelectedTaskAndConsultation() {
     const auto selected = start("queued-task", "Work in the selected Session.");
     const auto sender = start("consult", "Consult a peer.");
     tick(runtime, 4);
-    check(store.task(selected).task.rest.at("activeRun").at("runId") == "queued-task" &&
-              store.task(blocker).task.state == TaskState::running && model.consultant &&
-              store.task(model.consultant).task.state == TaskState::peer_waiting,
+    check(store.task(selected).task.activeRun.value().ref.runId == "queued-task" && store.task(blocker).task.state == TaskState::running &&
+              model.consultant && store.task(model.consultant).task.state == TaskState::peer_waiting,
           "The task did not queue, or the consultation did not wait behind the occupied slot");
     const auto stopped = mcp.call("flock_stop", {{"bot", "release"}, {"threadId", "thread"}}).at("structuredContent");
     tick(runtime, 4);
@@ -1360,7 +1359,7 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
     const auto child = start("release", "lineage-parent", "matching-child");
     tick(*runtime, 3);
     const auto launching = db->task(child);
-    check(launching.task.state == TaskState::running && launching.task.rest.at("activeRun").at("threadId") == "lineage-child-1",
+    check(launching.task.state == TaskState::running && launching.task.activeRun.value().ref.threadId == "lineage-child-1",
           "Child launch did not assign a Run in its own Session: " + taskJson(launching).at("wait").dump());
     const auto beforeLaunch = start("release", "lineage-parent", "peer-before-child", "Ask a peer first.");
     tick(*runtime, 4);

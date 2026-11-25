@@ -511,8 +511,7 @@ void taskUpdates(const std::filesystem::path& database) {
     const auto receipt = store.receiveChannel(channel, "fixture-auth", original, intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
     const Id taskId = store.activeTasks("release").at(0).task.id;
-    const auto active = store.task(taskId).task.rest.at("activeRun");
-    check(active.is_object(), "Channel task did not start a Session");
+    check(store.task(taskId).task.activeRun.has_value(), "Channel task did not start a Session");
     t3.observeRun = [](const RunRef&) {
         Observation observed;
         observed.kind = Observation::Kind::Question;
@@ -816,23 +815,20 @@ void local(const std::filesystem::path& database, const std::string& path) {
         route.projectId += std::to_string(++project);
         const auto task = store.submit(route);
         for (int i = 0; i < 3; ++i) runtime.tick();
-        auto run = store.task(task).task.rest.at("activeRun");
-        check(run.is_object(), "Fixture Session did not start");
-        return run;
+        auto run = store.task(task).task.activeRun;
+        check(run.has_value(), "Fixture Session did not start");
+        return std::move(run->ref);
     };
     auto a = session("release");
     const auto b = session("release"), peer = session("peer");
-    const auto args = [&](const Json& run) {
-        return Json{{"threadId", run.at("threadId")}, {"runId", run.at("runId")}, {"machineId", "laptop"}};
-    };
-    const auto request = [&](const Json& run) {
+    const auto args = [](const RunRef& run) { return Json{{"threadId", run.threadId}, {"runId", run.runId}, {"machineId", "laptop"}}; };
+    const auto request = [&](const RunRef& run) {
         auto data = args(run);
         data["rules"] = Json::array({{{"operation", "read_file"}, {"path", path}}});
         return Decision{"request_local_machine_connection", data, {}};
     };
-    const auto operation = [&](const Json& run, std::string_view op, const std::string& file) {
-        const RunRef ref{run.at("threadId"), run.at("runId"), ""};
-        return store.runLocalMachineOperation("env", ref, "laptop", op, file);
+    const auto operation = [&](const RunRef& run, std::string_view op, const std::string& file) {
+        return store.runLocalMachineOperation("env", run, "laptop", op, file);
     };
     unsigned count = 0;
     const auto turn = [&](auto bot, const Decision& action, bool success) {
@@ -855,17 +851,16 @@ void local(const std::filesystem::path& database, const std::string& path) {
     rejects([&] { store.decideLocalConnection(root, id, true); });
     rejects([&] { operation(a, "read_file", path); });
     const auto originalRun = a;
-    const auto originalRunId = originalRun.at("runId").get<std::string>();
-    t3.observeRun = [&](const RunRef& run) { return run.runId == originalRunId ? finished() : Observation{}; };
+    t3.observeRun = [&](const RunRef& run) { return run.runId == originalRun.runId ? finished() : Observation{}; };
     model.decideNext = [](const ModelInput&) {
         return Decision{"follow_up", {{"instruction", "Continue in this Session"}}, "The work needs one more Run"};
     };
     for (int i = 0; i < 5; ++i) runtime.tick();
     for (const auto& row : store.activeTasks("release")) {
-        const auto& active = row.task.rest.at("activeRun");
-        if (active.is_object() && active.at("threadId") == originalRun.at("threadId")) a = active;
+        const auto& active = row.task.activeRun;
+        if (active && active->ref.threadId == originalRun.threadId) a = active->ref;
     }
-    check(a.at("runId") != originalRun.at("runId"), "Fixture did not start a follow-up Run in Session A");
+    check(a.runId != originalRun.runId, "Fixture did not start a follow-up Run in Session A");
     store.decideLocalConnection(owner, id, true);
     rejects([&] { operation(originalRun, "read_file", path); });
     check(operation(a, "read_file", path).at("text") == "fixture text", "Wrong machine data");

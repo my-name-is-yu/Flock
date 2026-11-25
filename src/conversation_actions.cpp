@@ -2,6 +2,9 @@
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 #include "commit_check.hpp"
+#include "outbox_storage.hpp"
+#include "record_decode.hpp"
+#include "task_storage.hpp"
 
 #include <algorithm>
 #include <set>
@@ -69,7 +72,7 @@ SavedDestination selectSavedDestination(const TaskData& task, const Json& args, 
 
 struct SessionEffect {
     Id taskId, generation;
-    Json run;
+    AssignedRun run;
     Command command;
 
     Json checkpoint() const {
@@ -79,7 +82,7 @@ struct SessionEffect {
                        {"ownerBotId", command.ownerBotId},
                        {"projectId", command.projectId},
                        {"config", command.config},
-                       {"run", run},
+                       {"run", assignedRunJson(run)},
                        {"actionId", command.actionId}};
         return effect;
     }
@@ -109,21 +112,21 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
         saveTurnResults(id, step, Json::array({redactor(message.bot).record(std::move(failure))}));
     };
     const auto& args = decision.args;
-    const auto admit = [&](Id taskId, Id expected, const Json& expectedRun) {
+    const auto admit = [&](Id taskId, Id expected, const AssignedRun* expectedRun) {
         const auto task = ownTask(taskId, message);
-        const auto& run = task.rest.at("activeRun");
-        if (expected != task.generation || (!expectedRun.is_null() && run != expectedRun))
+        const auto& run = task.activeRun;
+        if (expected != task.generation || (expectedRun && run != *expectedRun))
             throw ToolError(
                 "stale",
                 {{"applied", 0}, {"taskId", taskId}, {"expected", {{"generation", expected}}}, {"current", taskState(task, message)}});
         if (terminal(task) || task.state == TaskState::cancelling)
             throw ToolError("The task is " + std::string(taskStateName(task.state)), {{"taskId", taskId}});
-        if (task.rest.value("replanning", false) || task.rest.value("runStop", Json(nullptr)).is_object())
+        if (task.replanning || task.runStop)
             throw ToolError("The task is stopping or replanning", {{"taskId", taskId}, {"current", taskState(task, message)}});
         if (task.rest.contains("runTargets") || task.rest.contains("runResults"))
             throw ToolError("Session actions are not available for tasks with destination Runs; use cancel_task to stop the whole task",
                             {{"taskId", taskId}});
-        if (field(run, "threadId").empty() || field(run, "runId").empty())
+        if (!run || run->ref.threadId.empty() || run->ref.runId.empty())
             throw ToolError("The task has no running Session. Use send_to_task to pass it on at the next safe point",
                             {{"taskId", taskId}, {"current", taskState(task, message)}});
         return task;
@@ -157,14 +160,14 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
                 const auto taskId = identifier(args, "taskId", true);
                 const auto expected = identifier(args, "generation", true, 0);
                 const auto task = admit(taskId, expected, nullptr);
-                const auto& run = task.rest.at("activeRun");
+                const auto& run = *task.activeRun;
                 Command command;
                 command.actionId = "flock-turn-" + std::to_string(id) + "-" + std::to_string(step);
                 command.ownerBotId = message.bot;
-                command.environmentId = run.at("environmentId");
-                command.projectId = run.value("projectId", task.projectId);
+                command.environmentId = run.environmentId;
+                command.projectId = run.assignment.projectId;
                 command.config = task.config;
-                command.target = runRef(run);
+                command.target = run.ref;
                 effect.emplace(SessionEffect{taskId, expected, run, std::move(command)});
             } catch (const ToolError& error) {
                 fail(error);
@@ -173,6 +176,8 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
         transaction.commit();
     }
     if (!effect) return advance;
+    const auto checkpoint = effect->checkpoint();
+    const auto& run = checkpoint.at("run");
 
     {
         std::lock_guard lock(mutex);
@@ -183,7 +188,7 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
             return stop;
         }
         try {
-            admit(effect->taskId, effect->generation, effect->run);
+            admit(effect->taskId, effect->generation, &effect->run);
         } catch (const ToolError& error) {
             fail(error);
             transaction.commit();
@@ -195,7 +200,7 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
         origin.task = effect->taskId;
         origin.generation = effect->generation;
         origin.revision = ownTask(effect->taskId, message).currentRevision.value_or(0);
-        const auto gate = approveAction(origin, resource, key, Json::array({decision.tool, args, effect->run}), policyClock());
+        const auto gate = approveAction(origin, resource, key, Json::array({decision.tool, args, run}), policyClock());
         if (gate != ApprovalGate::allow) {
             if (gate != ApprovalGate::waiting) fail(ToolError(std::string(approvalError(gate))));
             transaction.commit();
@@ -203,7 +208,7 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
         }
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",
-             {effect->checkpoint(), id, step});
+             {checkpoint, id, step});
         if (!sqlite3_changes(db)) return stop;
         transaction.commit();
     }
@@ -223,7 +228,7 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
     Transaction transaction(db);
     if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step}).next()) return stop;
     if (outcome.value("ok", false)) {
-        Json entry = {{"messageId", id}, {"step", step}, {"run", outcome.value("run", effect->run)}};
+        Json entry = {{"messageId", id}, {"step", step}, {"run", outcome.value("run", run)}};
         journal(effect->taskId, "interrupt_requested", entry);
     }
     saveTurnResults(id, step, Json::array({outcome}));
@@ -914,32 +919,29 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
 
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute& destination,
                                       Id messageId, const Json& source, bool resume, const WorkSession* selectedSession) {
-    if (selectedSession) redactor(bot).requirePublic(selectedSession->threadId);
+    if (selectedSession) redactor(bot).requirePublic(selectedSession->target.threadId);
     const auto id = submit({std::string(bot), std::string(request), destination.environmentId, destination.projectId, routing.at("config")},
                            messageId, source);
     auto task = load(id);
     if (!destination.gatewayEnvironmentId.empty() && destination.gatewayEnvironmentId != destination.environmentId)
         task.gatewayEnvironmentId = destination.gatewayEnvironmentId;
-    if (routing.contains("sessionOrigin"))
-        task.rest["sessionOrigin"] = routing.at("sessionOrigin");
+    if (const auto origin = routing.find("sessionOrigin"); origin != routing.end())
+        task.sessionOrigin = decodeSessionOrigin(*origin, {"messages", std::to_string(messageId), "routing.sessionOrigin"});
     else if (resume) {
         auto parent = query(R"SQL(
-SELECT json_extract(t.data,'$.sessionOrigin') FROM tasks t
+SELECT t.id,json_extract(t.data,'$.sessionOrigin') FROM tasks t
 JOIN messages m ON m.id=json_extract(t.data,'$.sourceMessageId')
 JOIN messages request ON request.id=? AND request.person_id=m.person_id
 LEFT JOIN channel_messages channel ON channel.message_id=request.id
 WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND channel.message_id IS NULL
 )SQL",
                             {messageId, source.at("taskId"), bot});
-        if (parent.next()) task.rest["sessionOrigin"] = parent.json(0);
+        if (parent.next()) task.sessionOrigin = decodeSessionOrigin(parent.json(1), {"tasks", parent.string(0), "sessionOrigin"});
     }
-    if (task.rest.contains("sessionOrigin"))
-        task.rest["sessionOrigin"]["title"] = redactor(bot).text(field(task.rest.at("sessionOrigin"), "title"));
+    if (task.sessionOrigin) task.sessionOrigin->title = redactor(bot).text(task.sessionOrigin->title);
     if (selectedSession)
-        task.rest["selectedSession"] = {
-            {"environmentId", destination.environmentId}, {"projectId", destination.projectId}, {"threadId", selectedSession->threadId}};
-    if (selectedSession && !destination.gatewayEnvironmentId.empty() && destination.gatewayEnvironmentId != destination.environmentId)
-        task.rest["selectedSession"]["gatewayEnvironmentId"] = destination.gatewayEnvironmentId;
+        task.selectedSession = WorkSession{
+            {destination.environmentId, selectedSession->target.threadId, task.gatewayEnvironmentId.value_or("")}, destination.projectId};
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId, bot});
     task.rest["sourceMessageCoversFullRequest"] = source.is_null() && message.next() && message.string(0) == request;
@@ -948,9 +950,9 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
         const auto prior = load(priorId);
         const auto criteria = effectiveDoneWhen(prior);
         if (!criteria.empty()) task.rest["requestedDoneWhen"] = criteria;
-        const auto pending = prior.rest.value("cancelledInstructions", Json::array());
+        const auto& pending = prior.cancelledInstructions;
         std::set<std::pair<Id, int>> pendingIds;
-        for (const auto& item : pending) pendingIds.emplace(item.at("messageId").get<Id>(), item.at("step").get<int>());
+        for (const auto& item : pending) pendingIds.emplace(item.messageId, item.step);
 
         // Excerpt only earlier deliveries. Pending directions follow them in acceptance order.
         auto rows = query("SELECT data FROM journal WHERE task_id=? AND kind='instruction_accepted'"
@@ -969,18 +971,14 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
         std::reverse(delivered.begin(), delivered.end());
         task.intent = prior.intent;
         task.rest["restartContext"] = {{"taskId", priorId}, {"deliveredInstructions", std::move(delivered)}};
-        for (const auto& item : pending) {
-            Json entry = {{"messageId", item.at("messageId")},
-                          {"step", item.at("step")},
-                          {"text", item.at("text")},
-                          {"revisionId", nullptr},
-                          {"conflicting", false}};
-            if (item.contains("source")) {
-                const auto& source = item.at("source");
-                entry["source"] = source;
+        for (auto item : pending) {
+            item.revisionId.reset();
+            item.conflicting = false;
+            const auto entry = instructionJson(item);
+            if (item.source) {
                 auto& refs = task.rest["sourceResultRefs"];
-                if (std::ranges::none_of(refs, [&](const Json& ref) { return ref.at("messageId") == source.at("messageId"); }))
-                    refs.push_back(source);
+                if (std::ranges::none_of(refs, [&](const Json& ref) { return ref.at("messageId") == item.source->messageId; }))
+                    refs.push_back(entry.at("source"));
             }
             task.rest["pendingInstructions"].push_back(entry);
             journal(id, "instruction_accepted", entry);
@@ -993,7 +991,7 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
 bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, const Json& source,
                                     const TaskChange* change) {
     Id revision = task.currentRevision.value_or(0);
-    bool conflicting = task.rest.value("replanning", false);
+    bool conflicting = task.replanning;
     if (change) {
         const auto oldIntent = task.intent;
         const auto oldDone = effectiveDoneWhen(task);
@@ -1055,8 +1053,8 @@ bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std:
             references.push_back(source);
     }
     if (conflicting) {
-        task.rest["replanning"] = true;
-        releaseModelCall(takeReservedTaskCall(task.rest.value("eventId", Id{0})));
+        task.replanning = true;
+        releaseModelCall(takeReservedTaskCall(task.eventId));
         if (isUndispatchedNotesWait(task)) {
             clearWait(task, "request_changed");
             task.state = TaskState::queued;

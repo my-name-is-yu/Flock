@@ -433,7 +433,7 @@ void reconciliationAfterTaskRevision() {
                                  {"revisionId", before.at("currentRevision")},
                                  {"instruction", "Update the success criteria"},
                                  {"doneWhen", "Verify the new completion criteria"}});
-    check(changed.at("ok") == true && store.task(task).task.rest.at("replanning") == true, "fixture did not revise the active task");
+    check(changed.at("ok") == true && store.task(task).task.replanning, "fixture did not revise the active task");
     check(invoke(store, runtime, script, "retry-after-replan", "git_open_pr", args).at("status") == "ambiguous",
           "fixture did not keep the PR creation unresolved");
     const auto latest = store.inbox(localOwner, "owner").at(0);

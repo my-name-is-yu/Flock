@@ -35,7 +35,7 @@ OutboxSourceRun readSourceRun(const Json& data, const RecordDecoder& row) {
             .link = row.optional<std::string>(data, "link"),
             .itemId = row.optional<std::string>(data, "itemId"),
             .status = row.optional<std::string>(data, "status"),
-            .assignment = decodeRunAssignment(data, row)};
+            .assignment = decodeOptionalRunAssignment(data, row)};
 }
 
 Json sourceRunJson(const OutboxSourceRun& run) {
@@ -45,7 +45,7 @@ Json sourceRunJson(const OutboxSourceRun& run) {
     writeOptional(data, "link", run.link);
     writeOptional(data, "itemId", run.itemId);
     writeOptional(data, "status", run.status);
-    encodeRunAssignment(data, run.assignment);
+    if (run.assignment) encodeRunAssignment(data, *run.assignment);
     return data;
 }
 
@@ -71,16 +71,6 @@ OutboxInstruction readInstruction(const Json& data, const RecordDecoder& row) {
                            .source = std::nullopt};
     if (const auto source = data.find("source"); source != data.end()) item.source = readSource(*source, row.nested("source"));
     return item;
-}
-
-Json instructionJson(const OutboxInstruction& item) {
-    Json data = {{"messageId", item.messageId},
-                 {"step", item.step},
-                 {"text", item.text},
-                 {"revisionId", nullableId(item.revisionId)},
-                 {"conflicting", item.conflicting}};
-    if (item.source) data["source"] = sourceJson(*item.source);
-    return data;
 }
 
 template <class T> std::vector<T> readArray(const Json& data, const RecordDecoder& row, T (*decode)(const Json&, const RecordDecoder&)) {
@@ -196,9 +186,19 @@ Json sourceJson(const OutboxSource& source) {
     return data;
 }
 
-std::vector<OutboxInstruction> taskInstructions(const Json& data, Id task) {
+Json instructionJson(const OutboxInstruction& item) {
+    Json data = {{"messageId", item.messageId},
+                 {"step", item.step},
+                 {"text", item.text},
+                 {"revisionId", nullableId(item.revisionId)},
+                 {"conflicting", item.conflicting}};
+    if (item.source) data["source"] = sourceJson(*item.source);
+    return data;
+}
+
+std::vector<OutboxInstruction> taskInstructions(const Json& data, Id task, std::string_view key) {
     const auto id = std::to_string(task);
-    return readArray(data, {"tasks", id, "pendingInstructions"}, readInstruction);
+    return readArray(data, {"tasks", id, std::string(key)}, readInstruction);
 }
 
 std::vector<OutboxSource> taskResultReferences(const Json& data, Id task) {
@@ -292,7 +292,7 @@ Outbox from_json(std::string_view id, std::string_view phase, std::string_view a
 }
 
 std::optional<Outbox> Store::Impl::outbox(const TaskData& task, std::string_view actionId) const {
-    const auto id = actionId.empty() ? field(task.rest, "actionId") : std::string(actionId);
+    const auto id = actionId.empty() ? task.actionId : std::string(actionId);
     if (id.empty()) return std::nullopt;
     auto row = query("SELECT data,phase,auth_generation FROM outbox WHERE id=? AND task_id=?", {id, task.id});
     if (!row.next()) return std::nullopt;

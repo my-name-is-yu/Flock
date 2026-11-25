@@ -864,7 +864,7 @@ void cancelledRunWaitsForDelegatedWork(Scenario& fixture) {
     fixture.advanceUntil(
         [](const TaskView& task) {
             return task.task.state == TaskState::cancelled ||
-                   task.task.rest.value("cancellationDetail", "") == "Waiting for the remaining work on this request to finish";
+                   task.task.cancellationDetail == "Waiting for the remaining work on this request to finish";
         },
         "Flock did not observe the cancelled parent Run");
     check(fixture.task().task.state == TaskState::cancelling && fixture.store.task(next).blockedBy.value().id == fixture.taskId,

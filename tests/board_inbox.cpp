@@ -216,7 +216,7 @@ void exercise(const std::filesystem::path& path) {
     db.pause(budget, "budget");
     db.pause(model, "model_budget");
     db.pause(hidden, "model_budget");
-    const auto due = store.task(deadlineTask).task.rest.at("deadline").get<Id>();
+    const auto due = store.task(deadlineTask).task.deadline;
     check(due > now, "fixture did not launch the Run with a deadline");
     now = due;
     for (int step = 0; step < 4 && taskJson(store.task(deadlineTask)).at("wait").is_null(); ++step) runtime.tick();
@@ -386,7 +386,7 @@ SELECT )SQL" +
               store.task(unknown).task.state == TaskState::sending && sessions.reconciles == 0,
           "reconciliation did not commit the canonical delivery intent");
     store.decideInbox(alice, pending(store, deadline), "extend", {{"deadline", due + 3600}});
-    check(store.task(deadlineTask).task.rest.at("deadline") == due + 3600, "deadline extension did not resume the run");
+    check(store.task(deadlineTask).task.deadline == due + 3600, "deadline extension did not resume the run");
     store.decideInbox(alice, pending(store, model_budget, "review"), "approve");
     check(store.task(model).task.state == TaskState::deciding &&
               db.exec("SELECT count(*) FROM events e JOIN model_attempts a ON a.id=e.reserved_attempt WHERE a.task_id=" +

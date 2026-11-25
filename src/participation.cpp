@@ -717,11 +717,11 @@ WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
                                  {item.target.environmentId, item.target.threadId, item.run, item.participant});
                 if (run.next()) {
                     auto task = load(run.number(0));
-                    const auto& active = task.rest.at("activeRun");
-                    if (!terminal(task) && active.is_object() && field(active, "runId") == item.run &&
-                        field(active, "threadId") == item.target.threadId && field(active, "environmentId") == item.target.environmentId) {
+                    const auto& active = task.activeRun;
+                    if (!terminal(task) && active && active->ref.runId == item.run && active->ref.threadId == item.target.threadId &&
+                        active->environmentId == item.target.environmentId) {
                         // Queue cancellation confirms this Run never started.
-                        task.rest["activeRun"] = nullptr;
+                        task.activeRun.reset();
                         if (task.state == TaskState::cancelling)
                             save(task);
                         else

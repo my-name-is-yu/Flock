@@ -101,16 +101,18 @@ inline RunRef decodeRunRef(const Json& data, const RecordDecoder& row) {
             row.optional<std::string>(data, "gatewayEnvironmentId").value_or("")};
 }
 
-inline std::optional<RunAssignment> decodeRunAssignment(const Json& data, const RecordDecoder& row) {
-    if (!data.contains("ownerBotId") && !data.contains("projectId") && !data.contains("revisionId")) return std::nullopt;
-    return RunAssignment{row.get<std::string>(data, "ownerBotId"), row.get<std::string>(data, "projectId"),
-                         row.nullable<Id>(data, "revisionId")};
+inline RunAssignment decodeRunAssignment(const Json& data, const RecordDecoder& row) {
+    return {row.get<std::string>(data, "ownerBotId"), row.get<std::string>(data, "projectId"), row.nullable<Id>(data, "revisionId")};
 }
 
-inline void encodeRunAssignment(Json& data, const std::optional<RunAssignment>& assignment) {
-    if (!assignment) return;
-    data["ownerBotId"] = assignment->ownerBotId;
-    data["projectId"] = assignment->projectId;
-    data["revisionId"] = assignment->revisionId ? Json(*assignment->revisionId) : Json(nullptr);
+inline std::optional<RunAssignment> decodeOptionalRunAssignment(const Json& data, const RecordDecoder& row) {
+    if (!data.contains("ownerBotId") && !data.contains("projectId") && !data.contains("revisionId")) return std::nullopt;
+    return decodeRunAssignment(data, row);
+}
+
+inline void encodeRunAssignment(Json& data, const RunAssignment& assignment) {
+    data["ownerBotId"] = assignment.ownerBotId;
+    data["projectId"] = assignment.projectId;
+    data["revisionId"] = assignment.revisionId ? Json(*assignment.revisionId) : Json(nullptr);
 }
 }
