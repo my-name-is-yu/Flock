@@ -20,7 +20,7 @@
     </header>
     <p id="status" role="status"></p>
     <div class="settings-panel" data-panel="appearance">
-      <section aria-labelledby="theme-label">
+      <section aria-label="Browser preferences">
         <div class="settings-group">
           <div class="settings-row">
             <span class="row-label"><strong id="theme-label">Theme</strong><small>Match your system or choose light or dark.</small></span>
@@ -29,6 +29,10 @@
               <label><input type="radio" name="theme" value="light">Light</label>
               <label><input type="radio" name="theme" value="dark">Dark</label>
             </div>
+          </div>
+          <div class="settings-row">
+            <span class="row-label"><strong id="notifications-label">Notifications</strong><small id="notifications-help">Works while a Flock tab is open.</small><small id="notifications-status" role="status" hidden></small></span>
+            <button class="button" id="notifications-toggle" type="button" aria-describedby="notifications-label notifications-help" hidden>Turn on</button>
           </div>
         </div>
       </section>

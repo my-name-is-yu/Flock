@@ -229,7 +229,7 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
         const auto kind = field(*event,"kind");
         const auto& data = event->at("data");
         const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" || kind == "pr_review_requested" ||
-            (kind == "waiting" && field(data,"reason") == "user_question");
+            (kind == "waiting" && (field(data,"reason") == "user_question" || field(data,"reason") == "model_failure"));
         auto text = kind == "report" ? field(data,"report") : field(data,"text");
         if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage"))
             text = field(data.at("forwardedMessage"),"text");

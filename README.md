@@ -109,6 +109,7 @@ Flock puts the Bot's role and memory first in model input so ChatGPT can reuse t
 In a T3 Session, ask for a Bot by name or select `/skill:flock-<bot>` or
 `$flock-<bot>` in the provider's skill menu. The Bot replies in the same Session.
 Open **Flock settings** to see the connected environments and saved loopback port. Use `--port PORT` to change the port.
+Under **Appearance → Notifications**, turn on desktop alerts for Bot replies, requests that need you, and work that fails while Flock is open.
 See [Ask a Bot from a T3 Session](web/README.md#ask-a-bot-from-a-t3-session) for connection details.
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.

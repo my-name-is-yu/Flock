@@ -128,6 +128,7 @@ mode and rules in **Flock settings**.
 The foreground process prints the local Web URL. Use `flock run --no-web`
 for headless operation. T3 skills require the Web listener on the port saved by
 `flock t3 connect`. Send a Bot message from the Web conversation or from the CLI.
+With **Flock settings → Appearance → Notifications** on, a CLI request can produce a desktop alert while a Flock tab is open.
 
 ```sh
 build/app/flock message release "Check the upcoming release"

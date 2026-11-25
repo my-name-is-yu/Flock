@@ -587,6 +587,75 @@ ORDER BY 1,2
     return changes;
 }
 
+Store::NotificationEvents Store::notificationEventsSince(const Person& viewer, const std::vector<std::string>& bots,
+    std::optional<Id> after, const std::map<std::string,Id>& previousScope) const {
+    NotificationEvents result{after.value_or(0),Json::array(),{},false};
+    std::lock_guard lock(p_->mutex);
+    Transaction snapshot(p_->db,Transaction::Mode::read);
+    const Policy policy(*p_);
+    std::map<std::string,Id> established, newlyVisible;
+    for (const auto& bot : bots) {
+        if (!policy.allows(viewer,Action::bot_view,bot)) continue;
+        const auto previous = previousScope.find(bot);
+        if (after && previous != previousScope.end()) {
+            result.scope.emplace(bot,previous->second);
+            established.emplace(bot,std::max(*after,previous->second));
+        } else {
+            result.scope.emplace(bot,0);
+            newlyVisible.emplace(bot,result.through);
+        }
+    }
+    constexpr Id pageSize = 100;
+    static const std::string notificationEvents = R"SQL(
+WITH visible_bots AS (SELECT key AS bot,value AS after FROM json_each(?1)),
+events(id,bot,kind) AS (
+SELECT j.id,b.bot,
+       CASE WHEN json_extract(j.data,'$.route')='error' THEN 'failure' ELSE 'reply' END
+FROM visible_bots b JOIN journal j ON j.conversation_bot_id=b.bot AND j.id>b.after
+WHERE j.kind='conversation_reply' AND json_extract(j.data,'$.route') IS NOT 'model_budget'
+UNION ALL
+SELECT j.id,b.bot,'failure'
+FROM visible_bots b JOIN tasks t ON t.bot_id=b.bot JOIN journal j ON j.task_id=t.id AND j.id>b.after
+WHERE j.conversation_bot_id IS NULL AND (
+  (j.kind='report' AND (
+    json_extract(j.data,'$.status') IN ('failed','rolled_back')
+    OR (json_extract(j.data,'$.status')='interrupted' AND json_extract(j.data,'$.stopRequested') IS NOT 1
+        AND NOT EXISTS (
+          SELECT 1 FROM journal stop
+          WHERE stop.task_id=j.task_id AND stop.id<j.id AND stop.kind='interrupt_requested'
+            AND (json_extract(stop.data,'$.run.environmentId'),json_extract(stop.data,'$.run.threadId'),
+                 json_extract(stop.data,'$.run.runId'),json_extract(stop.data,'$.run.gatewayEnvironmentId'))
+            IS (json_extract(j.data,'$.environmentId'),json_extract(j.data,'$.run.threadId'),
+                json_extract(j.data,'$.run.runId'),json_extract(j.data,'$.run.gatewayEnvironmentId'))
+        ))
+  ))
+  OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='model_failure')
+  OR (j.kind='completed' AND json_extract(j.data,'$.workflowOutcome')='failed')
+)
+)
+)SQL";
+    // The global page cursor advances only over events delivered for already visible Bots.
+    if (!newlyVisible.empty()) {
+        static const auto baselines = notificationEvents + " SELECT bot,max(id) FROM events GROUP BY bot";
+        auto rows = p_->query(baselines.c_str(),Json::array({newlyVisible}));
+        while (rows.next()) {
+            result.scope.at(rows.string(0)) = rows.number(1);
+            if (!after) result.through = std::max(result.through,rows.number(1));
+        }
+    }
+    static const auto page = notificationEvents + " SELECT id,bot,kind FROM events ORDER BY id LIMIT ?2";
+    auto rows = p_->query(page.c_str(),Json::array({established,pageSize + 1}));
+    while (rows.next()) {
+        if (result.events.size() == pageSize) {
+            result.more = true;
+            break;
+        }
+        result.through = rows.number(0);
+        result.events.push_back({{"id",result.through},{"botId",rows.string(1)},{"kind",rows.string(2)}});
+    }
+    return result;
+}
+
 std::optional<Store::BotViewStamp> Store::botViewStamp() const {
     std::lock_guard lock(p_->mutex);
     if (!p_->channels.empty() || p_->query("SELECT 1 FROM protected_inputs WHERE status='fulfilled' LIMIT 1").next())
@@ -975,7 +1044,7 @@ WITH visible AS NOT MATERIALIZED (
   SELECT id,task_id,conversation_bot_id FROM journal
   WHERE id<=?2
     AND (?3=0 OR kind IN ('conversation_reply','report','completed','pr_review_requested')
-         OR (kind='waiting' AND json_extract(data,'$.reason')='user_question'))
+         OR (kind='waiting' AND json_extract(data,'$.reason') IN ('user_question','model_failure')))
     AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','conversation_budget_approved','session_participation_stop'))
       OR (conversation_bot_id IS NULL
         AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')

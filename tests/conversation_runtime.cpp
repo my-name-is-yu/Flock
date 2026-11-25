@@ -2397,6 +2397,13 @@ void interruptLeavesTheTaskOpen() {
           f.lastTurn()[0]["result"]["effect"] == "interrupt_requested" && f.event(id,"interrupt_requested").is_object() &&
           f.event(id,"cancel_requested").is_null() && f.task(id)["state"] != "cancelling" &&
           f.response(message)["status"] == "stopping","an interrupt request cancelled the task or missed the Run");
+    const auto cursor = f.store->notificationEventsSince(localOwner,{"alpha"},std::nullopt,{});
+    f.t3.finish(run,"Interrupted");
+    f.t3.observations.at(run).status = "interrupted";
+    f.reach(id,"deciding");
+    check(f.event(id,"report").at("status") == "interrupted" &&
+          f.store->notificationEventsSince(localOwner,{"alpha"},cursor.through,cursor.scope).events.empty(),
+          "the explicitly interrupted Run emitted a failure alert");
 }
 
 void interruptNoOpsDoNotAcknowledgeARequest() {
