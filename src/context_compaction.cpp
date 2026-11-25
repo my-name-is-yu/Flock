@@ -89,7 +89,7 @@ Json Store::Impl::conversationHistory(const conversation::Message& message, cons
         remaining -= summary.dump().size();
     }
     auto rows = query(R"SQL(
-SELECT entry.id,entry.task_id,entry.kind,entry.data,entry.text FROM compactable_messages entry
+SELECT entry.id,entry.task_id,entry.kind,entry.data,entry.text,entry.wait_id FROM compactable_messages entry
 LEFT JOIN channel_messages source ON source.message_id=entry.source_message_id
 WHERE entry.bot_id=? AND entry.id>?
   AND (entry.kind NOT IN ('conversation_message','conversation_reply') OR entry.source_message_id<?)
@@ -115,10 +115,8 @@ ORDER BY entry.id DESC LIMIT 24
         if (kind == "conversation_reply") {
             for (const auto* key : {"actions", "suggestions"})
                 if (data.contains(key)) entry[key] = scrub.record(data.at(key));
-        } else if (kind == "waiting")
-            entry["waitId"] = rows.json(3).at("id");
-        else if (kind == "user_answer")
-            entry["waitId"] = conversation_storage::integer(rows.json(3), "waitId");
+        } else if (!rows.null(5))
+            entry["waitId"] = rows.number(5);
         const std::size_t limit = user ? 4000 : reply ? 1500 : 700;
         const auto bytes = entry.dump().size() + (history.empty() && summary.is_null() ? 0 : 1);
         if (bytes > remaining) break;

@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
+#include "journal.hpp"
 #include "task_storage.hpp"
 #include "task_interaction_storage.hpp"
 #include "task_context_storage.hpp"
@@ -135,7 +136,7 @@ void Store::Impl::exec(const char* sql, const Json& args) const {
 }
 Id Store::Impl::waitAnchor(Id task, Id wait) const {
     auto row = query("SELECT id FROM journal WHERE task_id=? AND kind='waiting' AND conversation_bot_id IS NULL"
-                     " AND json_extract(data,'$.id')=? ORDER BY id DESC LIMIT 1",
+                     " AND wait_id=? ORDER BY id DESC LIMIT 1",
                      {task, wait});
     return row.next() ? row.number(0) : 0;
 }
@@ -149,7 +150,8 @@ Id Store::Impl::waitAllowance(Id task, WaitReason reason) const {
 Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
     exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
     const auto entry = last();
-    queueChannelTaskUpdate(id, entry, kind, data);
+    if (kind == "completed") queueChannelTaskUpdate(id, entry, field(data, "text"));
+    if (kind == "cancelled") queueChannelTaskUpdate(id, entry, "The task was cancelled.");
     return entry;
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
@@ -294,15 +296,11 @@ Id Store::Impl::wait(TaskData& task, Wait waiting) {
             waiting.run = WaitRun{*action->command.candidate};
     }
     waiting.actionId = task.actionId;
-    auto data = encodeWaitData(waiting);
-    exec("INSERT INTO waits(task_id,reason,data) VALUES(?,?,?)", {task.id, storedWaitReason(waiting), data});
-    const auto id = last();
-    data["reason"] = waitReasonName(waiting.reason());
-    data["id"] = id;
-    if (waiting.allowance) data["allowance"] = *waiting.allowance;
-    journal(task.id, "waiting", data);
+    exec("INSERT INTO waits(task_id,reason,data) VALUES(?,?,?)", {task.id, storedWaitReason(waiting), encodeWaitData(waiting)});
+    waiting.id = last();
+    journal(task.id, waiting);
     task.state = TaskState::waiting;
-    return id;
+    return waiting.id;
 }
 
 void Store::Impl::clearWait(TaskData& task, std::string_view resolution) {
@@ -398,23 +396,19 @@ SELECT j.id,b.bot,'failure'
 FROM visible_bots b JOIN tasks t ON t.bot_id=b.bot JOIN journal j ON j.task_id=t.id AND j.id>b.after
 WHERE j.conversation_bot_id IS NULL AND (
   (j.kind='report' AND (
-    json_extract(j.data,'$.status') IN ('failed','rolled_back')
-    OR ((json_extract(j.data,'$.status')='interrupted' OR (
-           json_extract(j.data,'$.status')='cancelled'
-           AND json_extract(j.data,'$.stopRequested')=0
-           AND length(json_extract(j.data,'$.run.runId'))>0
-           AND length(json_extract(j.data,'$.run.threadId'))>0
-        )) AND json_extract(j.data,'$.stopRequested') IS NOT 1
+    j.run_status IN ('failed','rolled_back')
+    OR ((j.run_status='interrupted' OR (
+           j.run_status='cancelled' AND j.stop_requested=0
+           AND length(j.run_id)>0 AND length(j.run_thread_id)>0
+        )) AND j.stop_requested IS NOT 1
         AND NOT EXISTS (
           SELECT 1 FROM journal stop
           WHERE stop.task_id=j.task_id AND stop.id<j.id AND stop.kind='interrupt_requested'
-            AND (json_extract(stop.data,'$.run.environmentId'),json_extract(stop.data,'$.run.threadId'),
-                 json_extract(stop.data,'$.run.runId'),json_extract(stop.data,'$.run.gatewayEnvironmentId'))
-            IS (json_extract(j.data,'$.environmentId'),json_extract(j.data,'$.run.threadId'),
-                json_extract(j.data,'$.run.runId'),json_extract(j.data,'$.run.gatewayEnvironmentId'))
+            AND (stop.run_environment_id,stop.run_thread_id,stop.run_id,stop.run_gateway_id)
+            IS (j.run_environment_id,j.run_thread_id,j.run_id,j.run_gateway_id)
         ))
   ))
-  OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='model_failure')
+  OR (j.kind='waiting' AND j.wait_reason='model_failure')
   OR (j.kind='completed' AND json_extract(j.data,'$.workflowOutcome')='failed')
 )
 )
@@ -580,7 +574,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         const auto answer = field(data, "text");
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > limits::messages::maxWaitAnswerBytes)
             throw Conflict("A nonempty answer (up to " + std::to_string(limits::messages::maxWaitAnswerBytes) + " bytes) is required");
-        auto answerKind = "user_answer";
+        const UserAnswerEntry entry{answer, waitId, sourceMessage ? std::optional{sourceMessage} : std::nullopt};
         if (const auto* question = std::get_if<ProjectQuestionWait>(&wait->details)) {
             const auto choice = question->projects.find(answer);
             if (choice == question->projects.end()) throw Conflict("Choose one of the listed T3 projects");
@@ -591,7 +585,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
             task.projectId = project;
             rememberT3Project(bot, environment, project);
             next = TaskState::queued;
-            answerKind = "project_selected";
+            journal(id, "project_selected", encodeUserAnswer(entry));
         } else {
             auto updated = currentEvent(task);
             updated["userAnswer"] = answer;
@@ -599,10 +593,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
             for (const auto* metadata : {"id", "failures", "retryAt", "evidence", "consumed"}) updated.erase(metadata);
             consumeEvent(task);
             event(task, "answer/" + std::to_string(waitId), updated);
+            journal(id, entry);
         }
-        Json entry = {{"text", answer}, {"waitId", waitId}, {"conversation", sourceMessage != 0}};
-        if (sourceMessage) entry["messageId"] = sourceMessage;
-        journal(id, answerKind, entry);
     } else if (operation == "approve" && reason == WaitReason::budget) {
         task.allowance.remaining += initialWorkAllowance;
         journal(id, "budget_granted", {{"waitId", waitId}, {"remaining", task.allowance.remaining}});
@@ -713,12 +705,12 @@ WITH visible AS NOT MATERIALIZED (
   SELECT id,task_id,conversation_bot_id FROM journal
   WHERE id<=?2
     AND (?3=0 OR kind IN ('conversation_reply','report','completed','pr_review_requested')
-         OR (kind='waiting' AND json_extract(data,'$.reason') IN ('user_question','model_failure')))
+         OR (kind='waiting' AND wait_reason IN ('user_question','model_failure')))
     AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','conversation_budget_approved','session_participation_stop'))
       OR (conversation_bot_id IS NULL
         AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')
-        AND (kind!='user_answer' OR json_extract(data,'$.conversation') IS NOT 1)
+        AND (kind!='user_answer' OR user_answer_conversation IS NOT 1)
         AND (kind!='bot_message' OR (json_extract(data,'$.initiator') IS NOT 'user'
           AND json_extract(data,'$.recipient') IS NOT 'user'))))
 ), bot_page AS (
@@ -734,7 +726,7 @@ WITH visible AS NOT MATERIALIZED (
   UNION ALL SELECT id FROM bot_page
   ORDER BY id DESC LIMIT ?4
 ), page AS (
-  SELECT j.id,j.task_id,j.time,j.kind,
+  SELECT j.id,j.task_id,j.time,j.kind,j.wait_id,
     CASE WHEN j.kind='cancelled' AND t.id IS NOT NULL
          THEN json_set(j.data,'$.request',t.request) ELSE j.data END AS data
   FROM page_ids ids JOIN journal j ON j.id=ids.id
@@ -762,7 +754,7 @@ SELECT page.id,page.task_id,page.time,page.kind,
 FROM page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN conversation_input_status input ON input.message_id=m.id
 LEFT JOIN waits w ON page.kind='user_answer'
-  AND w.id=json_extract(page.data,'$.waitId') AND w.task_id=page.task_id
+  AND w.id=page.wait_id AND w.task_id=page.task_id
 LEFT JOIN channel_messages channel ON page.kind='conversation_message' AND channel.message_id=m.id
 ORDER BY page.id DESC)SQL",
                           {bot, through, events == ConversationEvents::incoming ? 1 : 0, std::clamp(limit, 1u, 200u)});

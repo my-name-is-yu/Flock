@@ -3,7 +3,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 14;
+constexpr Id schemaVersion = 15;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -31,10 +31,19 @@ CREATE INDEX tasks_bot ON tasks(bot_id,id DESC);
 CREATE TABLE journal(
   id INTEGER PRIMARY KEY, task_id INTEGER REFERENCES tasks(id),
   time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, conversation_bot_id TEXT,
+  wait_id INTEGER, wait_reason TEXT, user_answer_conversation INTEGER CHECK(user_answer_conversation IN (0,1)),
+  task_question_message_id INTEGER REFERENCES journal(id),
+  action_id TEXT, run_environment_id TEXT, run_thread_id TEXT, run_id TEXT, run_gateway_id TEXT,
+  result_run_id TEXT, run_status TEXT, revision_id INTEGER, stop_requested INTEGER CHECK(stop_requested IN (0,1)),
   CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
 CREATE INDEX journal_task ON journal(task_id,id);
-CREATE INDEX journal_wait_anchor ON journal(task_id,json_extract(data,'$.id'),id)
+CREATE INDEX journal_wait_anchor ON journal(task_id,wait_id,id)
   WHERE kind='waiting' AND conversation_bot_id IS NULL;
+CREATE INDEX journal_sent_action ON journal(task_id,action_id,id) WHERE kind='send_started';
+CREATE INDEX journal_report_run ON journal(task_id,run_environment_id,run_thread_id,run_id,revision_id)
+  WHERE kind='report';
+CREATE INDEX journal_report_result ON journal(task_id,run_environment_id,run_thread_id,result_run_id,id)
+  WHERE kind='report';
 CREATE TABLE events(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   dedupe TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
@@ -272,7 +281,7 @@ CREATE TABLE conversation_expansion_cursors(
         FOREIGN KEY(query_message_id,query_step) REFERENCES conversation_steps(message_id,step),
         UNIQUE(bot_id,message_id,byte_offset,redaction_revision,end_message_id,query_message_id,query_step));
 CREATE VIEW compactable_messages AS
-        SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id) bot_id,j.kind,j.task_id,j.data,
+        SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id) bot_id,j.kind,j.task_id,j.data,j.wait_id,
           CASE j.kind
             WHEN 'conversation_message' THEN j.id
             WHEN 'conversation_reply' THEN json_extract(j.data,'$.replyToMessageId')
@@ -287,8 +296,8 @@ CREATE VIEW compactable_messages AS
         WHERE (j.conversation_bot_id IS NOT NULL AND j.kind IN ('conversation_message','conversation_reply'))
           OR (j.conversation_bot_id IS NULL AND (
             j.kind IN ('completed','cancelled','report')
-            OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='user_question')
-            OR (j.kind='user_answer' AND json_extract(j.data,'$.conversation') IS NOT 1)));
+            OR (j.kind='waiting' AND j.wait_reason='user_question')
+            OR (j.kind='user_answer' AND j.user_answer_conversation IS NOT 1)));
 
 CREATE TABLE workflows(
         id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,routing TEXT NOT NULL,request TEXT NOT NULL,

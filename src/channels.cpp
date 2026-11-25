@@ -384,17 +384,12 @@ ON CONFLICT(reply_id) DO NOTHING)SQL",
           Json{{"text", data.at("text")}, {"suggestions", data.value("suggestions", Json::array())}}, source});
 }
 
-void Store::Impl::queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json& data) {
-    const bool question = kind == "waiting" && field(data, "reason") == "user_question";
-    if (!question && kind != "completed" && kind != "cancelled") return;
+void Store::Impl::queueChannelTaskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions) {
+    if (text.empty()) return;
     auto source = query("SELECT message_id,t.bot_id FROM channel_tasks c JOIN tasks t ON t.id=c.task_id WHERE t.id=?", {task});
     if (!source.next()) return;
     const auto scrub = redactor(source.string(1));
-    const auto text = kind == "cancelled" ? "The task was cancelled." : field(data, "text");
-    if (text.empty()) return;
-    queueChannelReply(
-        source.number(0), entry,
-        scrub.payload({{"text", bounded(text, 8000)}, {"suggestions", question ? data.value("choices", Json::array()) : Json::array()}}));
+    queueChannelReply(source.number(0), entry, scrub.payload({{"text", bounded(text, 8000)}, {"suggestions", Json(suggestions)}}));
 }
 
 void Store::Impl::channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies) {

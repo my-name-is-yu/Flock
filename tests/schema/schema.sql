@@ -26,11 +26,16 @@ VALUES
     ('index', 'journal_peer_message', 'journal', 'CREATE INDEX journal_peer_message ON journal(task_id,json_extract(data,''$.exchangeId''),id) WHERE kind=''bot_message'''),
     ('index', 'journal_pr_review_anchor', 'journal', 'CREATE UNIQUE INDEX journal_pr_review_anchor ON journal(task_id,json_extract(data,''$.itemId''))
     WHERE kind=''pr_review_requested'''),
+    ('index', 'journal_report_result', 'journal', 'CREATE INDEX journal_report_result ON journal(task_id,run_environment_id,run_thread_id,result_run_id,id)
+  WHERE kind=''report'''),
+    ('index', 'journal_report_run', 'journal', 'CREATE INDEX journal_report_run ON journal(task_id,run_environment_id,run_thread_id,run_id,revision_id)
+  WHERE kind=''report'''),
+    ('index', 'journal_sent_action', 'journal', 'CREATE INDEX journal_sent_action ON journal(task_id,action_id,id) WHERE kind=''send_started'''),
     ('index', 'journal_session_changes', 'journal', 'CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN (''run_started'',''report'')'),
     ('index', 'journal_task', 'journal', 'CREATE INDEX journal_task ON journal(task_id,id)'),
     ('index', 'journal_task_results', 'journal', 'CREATE INDEX journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN (''completed'',''report'',''cancelled'')'),
-    ('index', 'journal_wait_anchor', 'journal', 'CREATE INDEX journal_wait_anchor ON journal(task_id,json_extract(data,''$.id''),id)
+    ('index', 'journal_wait_anchor', 'journal', 'CREATE INDEX journal_wait_anchor ON journal(task_id,wait_id,id)
   WHERE kind=''waiting'' AND conversation_bot_id IS NULL'),
     ('index', 'local_machine_open_request', 'local_machine_connections', 'CREATE UNIQUE INDEX local_machine_open_request
       ON local_machine_connections(bot_id,task_id,environment_id,thread_id,machine_id)
@@ -265,6 +270,10 @@ VALUES
     ('table', 'journal', 'journal', 'CREATE TABLE journal(
   id INTEGER PRIMARY KEY, task_id INTEGER REFERENCES tasks(id),
   time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, conversation_bot_id TEXT,
+  wait_id INTEGER, wait_reason TEXT, user_answer_conversation INTEGER CHECK(user_answer_conversation IN (0,1)),
+  task_question_message_id INTEGER REFERENCES journal(id),
+  action_id TEXT, run_environment_id TEXT, run_thread_id TEXT, run_id TEXT, run_gateway_id TEXT,
+  result_run_id TEXT, run_status TEXT, revision_id INTEGER, stop_requested INTEGER CHECK(stop_requested IN (0,1)),
   CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL))'),
     ('table', 'local_machine_connections', 'local_machine_connections', 'CREATE TABLE local_machine_connections(
       id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -467,7 +476,7 @@ WHERE task.project_id<>'''' AND task.trigger_data IS NOT NULL AND task.active_ru
       SELECT t.id AS task_id,c.message_id,c.scope_key FROM tasks t JOIN channel_messages c
       ON c.message_id=t.source_message_id'),
     ('view', 'compactable_messages', 'compactable_messages', 'CREATE VIEW compactable_messages AS
-        SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id) bot_id,j.kind,j.task_id,j.data,
+        SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id) bot_id,j.kind,j.task_id,j.data,j.wait_id,
           CASE j.kind
             WHEN ''conversation_message'' THEN j.id
             WHEN ''conversation_reply'' THEN json_extract(j.data,''$.replyToMessageId'')
@@ -482,8 +491,8 @@ WHERE task.project_id<>'''' AND task.trigger_data IS NOT NULL AND task.active_ru
         WHERE (j.conversation_bot_id IS NOT NULL AND j.kind IN (''conversation_message'',''conversation_reply''))
           OR (j.conversation_bot_id IS NULL AND (
             j.kind IN (''completed'',''cancelled'',''report'')
-            OR (j.kind=''waiting'' AND json_extract(j.data,''$.reason'')=''user_question'')
-            OR (j.kind=''user_answer'' AND json_extract(j.data,''$.conversation'') IS NOT 1)))'),
+            OR (j.kind=''waiting'' AND j.wait_reason=''user_question'')
+            OR (j.kind=''user_answer'' AND j.user_answer_conversation IS NOT 1)))'),
     ('view', 'conversation_input_status', 'conversation_input_status', 'CREATE VIEW conversation_input_status AS
 SELECT t.message_id,
   CASE t.status WHEN ''paused'' THEN ''needs_you''

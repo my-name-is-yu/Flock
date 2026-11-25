@@ -145,8 +145,8 @@ Json ExternalMcp::completionRun(const OwnedTask& owner, const Json& completion) 
 
     auto row = store_.p_->query(R"SQL(
 SELECT json_extract(j.data,'$.run.link') FROM journal j JOIN tasks t ON t.id=j.task_id
-WHERE j.task_id=? AND t.bot_id=? AND j.kind='report' AND json_extract(j.data,'$.environmentId')=?
-  AND json_extract(j.data,'$.run.threadId')=? AND json_extract(j.data,'$.resultRunId')=?
+WHERE j.task_id=? AND t.bot_id=? AND j.kind='report' AND j.run_environment_id=?
+  AND j.run_thread_id=? AND j.result_run_id=?
 ORDER BY j.id DESC LIMIT 1
 )SQL",
                                 {dependency->at("taskId"), peerBot, environment, thread, resultRunId});

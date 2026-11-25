@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
+#include "journal.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "task_storage.hpp"
@@ -139,11 +140,11 @@ LEFT JOIN channel_messages source ON source.message_id=original.id
 JOIN journal q ON q.id=CASE
   WHEN target.kind='waiting' THEN target.id
   WHEN target.kind='conversation_reply' AND original.bot_id=? AND (?='' OR source.scope_key=?)
-    THEN json_extract(target.data,'$.taskQuestionMessageId')
+    THEN target.task_question_message_id
 END
 JOIN tasks t ON t.id=q.task_id
 LEFT JOIN channel_tasks c ON c.task_id=t.id
-WHERE target.id=? AND q.id<=target.id AND q.kind='waiting' AND json_extract(q.data,'$.reason')='user_question'
+WHERE target.id=? AND q.id<=target.id AND q.kind='waiting' AND q.wait_reason='user_question'
   AND t.bot_id=? AND (?='' OR c.scope_key=?)
 )SQL",
                         {message.bot, message.channelScope, message.channelScope, message.replyTo, message.bot, message.channelScope,
@@ -242,23 +243,21 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
     const auto state = decodeTaskState(taskId, row.string(1));
     const auto kind = row.string(2);
     const auto data = row.json(3);
-    Json provenance = nullptr;
-    if (kind == "report") {
-        provenance = {{"environmentId", field(data, "environmentId")},
-                      {"threadId", data.contains("run") ? field(data["run"], "threadId") : ""},
-                      {"runId", field(data, "resultRunId")},
-                      {"itemId", field(data, "itemId")}};
-    } else if (data.contains("source"))
-        provenance = data.at("source");
+    const auto report = kind == "report" ? std::optional{decodeRunReport(messageId, data)} : std::nullopt;
+    const auto provenance = report ? Json{{"environmentId", report->environmentId},
+                                          {"threadId", report->run.threadId},
+                                          {"runId", report->resultRunId},
+                                          {"itemId", report->evidence.itemId}}
+                                   : data.value("source", Json(nullptr));
     Json result = {{"taskId", taskId},
                    {"messageId", messageId},
-                   {"revisionId", integer(data, "revisionId")},
-                   {"text", field(data, kind == "report" ? "report" : "text")},
+                   {"revisionId", report ? report->revisionId.value_or(0) : integer(data, "revisionId")},
+                   {"text", report ? report->evidence.report : field(data, "text")},
                    {"kind", kind},
                    {"taskState", taskStateName(state)},
                    {"request", row.string(4)},
                    {"currentRevision", row.number(5)},
-                   {"truncated", data.value("truncated", false)}};
+                   {"truncated", report ? report->evidence.truncated : data.value("truncated", false)}};
     if (!provenance.is_null()) result["run"] = provenance;
     return redactor(message.bot).record(std::move(result));
 }
@@ -345,10 +344,14 @@ ORDER BY id DESC LIMIT 1
 )SQL",
                          {taskId});
         if (!row.next()) return nullptr;
+        const auto messageId = row.number(0);
         const auto kind = row.string(1);
         const auto data = row.json(2);
-        Json result = {{"messageId", row.number(0)}, {"kind", kind}, {"revisionId", integer(data, "revisionId")}};
-        if (row.number(0) > boundary) result["excerpt"] = bounded(scrub.text(field(data, kind == "report" ? "report" : "text")), 600);
+        const auto report = kind == "report" ? std::optional{decodeRunReport(messageId, data)} : std::nullopt;
+        Json result = {{"messageId", messageId},
+                       {"kind", kind},
+                       {"revisionId", report ? report->revisionId.value_or(0) : integer(data, "revisionId")}};
+        if (messageId > boundary) result["excerpt"] = bounded(scrub.text(report ? report->evidence.report : field(data, "text")), 600);
         return result;
     };
     const auto addTask = [&](Id taskId) {
@@ -413,8 +416,8 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                                 {"current", current && current->id == asked.id && waitIsActionable(task)}});
                 addTask(taskId);
             } else if (kind == "report" || kind == "completed" || kind == "cancelled") {
-                replyTo.update(
-                    {{"kind", "result"}, {"taskId", taskId}, {"text", bounded(field(data, kind == "report" ? "report" : "text"), 2000)}});
+                const auto text = kind == "report" ? decodeRunReport(message.replyTo, data).evidence.report : field(data, "text");
+                replyTo.update({{"kind", "result"}, {"taskId", taskId}, {"text", bounded(text, 2000)}});
                 addTask(taskId);
             } else if (kind == "pr_review_requested") {
                 replyTo.update({{"kind", "pr_review"},
@@ -774,8 +777,9 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
     const Json linked = message.principalSource == PrincipalSource::gitWebhook ? message.routing.at("gitEvent").at("taskId")
                         : touched.size() == 1                                  ? Json(*touched.begin())
                                                                                : Json(nullptr);
-    exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
-         {linked, unixTime(), message.bot});
+    exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id,task_question_message_id)"
+         " VALUES(?,?,'conversation_reply','{}',?,?)",
+         {linked, unixTime(), message.bot, question ? Json(question->messageId) : Json(nullptr)});
     const auto reply = last();
     Json data = {{"messageId", reply},
                  {"replyToMessageId", message.id},

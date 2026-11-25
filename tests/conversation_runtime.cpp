@@ -2670,8 +2670,9 @@ void reviseReportReference(Fixture& f, Id message, Id revision) {
     sqlite3* raw = nullptr;
     check(sqlite3_open(f.store->path().c_str(), &raw) == SQLITE_OK, "could not open the task database");
     const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
-    const auto sql =
-        "UPDATE journal SET data=json_set(data,'$.revisionId'," + std::to_string(revision) + ") WHERE id=" + std::to_string(message);
+    const auto revisionValue = std::to_string(revision);
+    const auto sql = "UPDATE journal SET revision_id=" + revisionValue + ",data=json_set(data,'$.revisionId'," + revisionValue +
+                     ") WHERE id=" + std::to_string(message);
     check(sqlite3_exec(db.get(), sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK, "could not revise the fixture report provenance");
 }
 

@@ -135,6 +135,11 @@ struct PolicyOrigin {
     bool background = false;
 };
 struct SessionStopResult;
+enum class JournalKind;
+struct UserAnswerEntry;
+struct SendStartedEntry;
+struct RunReportEntry;
+struct ConversationInterruptEntry;
 enum class SessionExit { removed, left };
 struct SessionStop {
     Id participation = 0, cutoff = 0;
@@ -196,7 +201,7 @@ struct Store::Impl {
     Json localMachineTool(std::string_view bot, std::string_view scope, const Decision&);
     std::optional<Resource> channelToolPolicy(Id, std::string_view tool);
     void queueChannelReply(Id source, Id reply, const Json&);
-    void queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json&);
+    void queueChannelTaskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions = {});
     bool channelDeliveryDue() const;
     void deliverChannels(std::stop_token = {});
     void dropPausedBotDeliveries(std::string_view bot);
@@ -470,6 +475,13 @@ struct Store::Impl {
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(TaskData&, SessionStop stop = {});
     Id journal(Id, std::string_view kind, const Json&);
+    Id journal(Id, const Wait&);
+    Id journal(Id, const UserAnswerEntry&);
+    Id journal(Id, const SendStartedEntry&);
+    Id journal(Id, const RunReportEntry&);
+    Id journalRunSettled(Id, const SettledRunReport&);
+    Id journalInterrupt(Id, const RunStop&);
+    Id journalInterrupt(Id, const ConversationInterruptEntry&);
     Id event(TaskData&, std::string_view key, Json data);
     Json currentEvent(const TaskData&) const;
     Id wait(TaskData&, Wait);
@@ -486,6 +498,10 @@ struct Store::Impl {
     bool startOutbox(const Outbox&, std::string_view authGeneration);
     bool prepareOutbox(const Outbox&);
     void unlockQuestion(TaskData&, std::string_view reason);
+private:
+    struct JournalKeys;
+    Id writeJournal(Id, JournalKind, const Json&, const JournalKeys&);
+    Id writeRunReportJournal(Id, JournalKind, const RunReportEntry&);
 };
 
 std::optional<InboxKind> inboxWaitKind(WaitReason reason);

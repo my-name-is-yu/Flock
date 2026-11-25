@@ -83,16 +83,20 @@ void roundTrips() {
     roundTrip(PolicyApprovalWait{26}, policy);
 }
 
-void rejects(std::string_view reason, const Json& record, std::string_view key, std::string_view issue) {
+void rejectsRecord(const auto& decode, std::string context, std::string_view key, std::string_view issue) {
     try {
-        decodeWait(47, reason, record.dump());
+        decode();
     } catch (const RecordDecodeError& error) {
         const std::string_view message(error.what());
-        check(message.find("waits row 47, key " + std::string(key) + ":") != std::string_view::npos && message.find(issue) != message.npos,
+        check(message.find(context + ", key " + std::string(key) + ":") != message.npos && message.find(issue) != message.npos,
               "decode failure lost its wait row, key or cause");
         return;
     }
     throw std::runtime_error("invalid Wait decoded");
+}
+
+void rejects(std::string_view reason, const Json& record, std::string_view key, std::string_view issue) {
+    rejectsRecord([&] { decodeWait(47, reason, record.dump()); }, "waits row 47", key, issue);
 }
 
 void decodeErrors() {
@@ -117,6 +121,15 @@ void decodeErrors() {
     rejects("project_question", modelQuestion, "projectChoices", "missing required key");
     modelQuestion["projectChoices"] = Json::object();
     rejects("user_question", modelQuestion, "projectChoices", "unknown key");
+
+    auto entry = stored("settings");
+    entry["id"] = 47;
+    entry["choices"] = Json::array();
+    const auto decodeEntry = [&] { decodeWaitingEntry(101, entry); };
+    rejectsRecord(decodeEntry, "journal row 101", "choices", "unknown key");
+    entry.erase("choices");
+    entry["id"] = "47";
+    rejectsRecord(decodeEntry, "journal row 101", "id", "expected an integer");
 }
 }
 

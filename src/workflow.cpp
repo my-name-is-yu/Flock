@@ -1,6 +1,6 @@
 #include "conversation_storage.hpp"
+#include "journal.hpp"
 #include "outbox_storage.hpp"
-#include "record_decode.hpp"
 #include "task_storage.hpp"
 
 #include <set>
@@ -150,10 +150,10 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
         JOIN journal j ON j.id=e.report_id ORDER BY j.id)SQL",
                           {id, id});
     while (evidence.next()) {
-        const auto report = evidence.json(5);
-        Json item = {{"stageId", evidence.string(0)},   {"taskId", evidence.number(1)}, {"artifactVersion", evidence.string(2)},
-                     {"messageId", evidence.number(4)}, {"runRef", report.at("run")},   {"resultRunId", report.at("resultRunId")},
-                     {"itemId", report.at("itemId")}};
+        const auto report = decodeRunReport(evidence.number(4), evidence.json(5));
+        Json item = {{"stageId", evidence.string(0)},   {"taskId", evidence.number(1)},       {"artifactVersion", evidence.string(2)},
+                     {"messageId", evidence.number(4)}, {"runRef", runReportRunJson(report)}, {"resultRunId", report.resultRunId},
+                     {"itemId", report.evidence.itemId}};
         if (!evidence.string(3).empty()) item["verdict"] = evidence.string(3);
         auto& records = result[item.contains("verdict") ? "verdicts" : "artifacts"];
         records.push_back(std::move(item));
@@ -310,15 +310,15 @@ void Store::Impl::materializeWorkflowStages() {
             JOIN journal j ON j.id=p.result_id WHERE d.workflow_id=? AND d.stage_id=? ORDER BY d.rowid)SQL",
                              {id, stage});
         while (parents.next()) {
-            const auto report = parents.json(4);
+            const auto report = decodeRunReport(parents.number(2), parents.json(4));
             if (parents.string(0) == inputFrom) input = parents.string(1);
             OutboxSource source{.taskId = parents.number(3),
                                 .messageId = parents.number(2),
-                                .text = bounded(scrub.text(field(report, "report")), 2000),
+                                .text = bounded(scrub.text(report.evidence.report), 2000),
                                 .stageId = parents.string(0),
                                 .artifactVersion = parents.string(1),
-                                .resultRunId = field(report, "resultRunId"),
-                                .run = decodeOutboxSourceRun(report.at("run"), {"journal", parents.string(2), "run"})};
+                                .resultRunId = report.resultRunId,
+                                .run = reportSourceRun(report)};
             redactSource(source, scrub);
             sources.push_back(std::move(source));
         }
@@ -388,11 +388,13 @@ bool Store::Impl::settleStageReport(TaskData& task) {
     if (!row.next()) throw Conflict("Missing workflow stage assignment");
     const auto role = field(row.json(0), "role");
     const auto pin = row.string(1);
-    const auto report = row.json(2);
-    const auto status = field(report, "status");
-    const auto result = Json::parse(field(report, "report"), nullptr, false);
+    const auto report = decodeRunReport(reportId, row.json(2));
+    const auto& status = report.status;
+    const auto& evidence = report.evidence;
+    const auto result = Json::parse(evidence.report, nullptr, false);
     const auto version = field(result, "artifactVersion");
-    bool ok = status == "completed" && !report.value("truncated", false) && field(report, "evidenceStatus") != "report_unavailable";
+    const bool reportUnavailable = evidence.availability == RunEvidence::Availability::ReportUnavailable;
+    bool ok = status == "completed" && !evidence.truncated && !reportUnavailable;
     std::string output;
     if (role == "verify") {
         const auto verdict = field(result, "verdict");
@@ -415,9 +417,10 @@ bool Store::Impl::settleStageReport(TaskData& task) {
          {ok ? "completed" : "failed", output, reportId, id, stage});
     consumeEvent(task);
     task.state = TaskState::completed;
-    const auto text = field(report, "evidenceStatus") == "report_unavailable" ? field(report, "detail") : field(report, "report");
-    Json completion = {
-        {"text", ok ? text : "Workflow stage failed: " + text}, {"revisionId", task.currentRevision.value()}, {"source", report.at("run")}};
+    const auto& text = reportUnavailable ? evidence.detail : evidence.report;
+    Json completion = {{"text", ok ? text : "Workflow stage failed: " + text},
+                       {"revisionId", task.currentRevision.value()},
+                       {"source", runReportRunJson(report)}};
     if (status == "completed" || status == "cancelled") completion["workflowOutcome"] = ok ? "completed" : "failed";
     journal(task.id, "completed", std::move(completion));
     return true;
