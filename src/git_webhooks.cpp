@@ -13,6 +13,18 @@ bool identifier(std::string_view word) {
            word.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == word.npos;
 }
 
+bool isLowerHex(std::string_view value) {
+    return value.find_first_not_of("0123456789abcdef") == value.npos;
+}
+
+bool hasValidWebhookTarget(const GitWebhook& event) {
+    const auto& sha = event.headSha;
+    if (event.prNumbers.empty() && sha.empty()) return false;
+    if (event.prNumbers.size() > 100) return false;
+    if (!sha.empty() && ((sha.size() != 40 && sha.size() != 64) || !isLowerHex(sha))) return false;
+    return std::ranges::all_of(event.prNumbers, [](Id number) { return number > 0; });
+}
+
 std::string_view followupType(GitFollowup followup) {
     switch (followup) {
     case GitFollowup::failedCheck: return "failed_check";
@@ -28,11 +40,10 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
     const auto repo = GitRepository::parse(event.host, event.repo);
     const auto& sha = event.headSha;
     const auto& digest = event.payloadDigest;
-    if ((!digest.empty() && (digest.size() != 64 || digest.find_first_not_of("0123456789abcdef") != digest.npos)) ||
-        !webhookKind(event.kind) || !identifier(event.eventId) || !identifier(event.action) || event.prNumbers.size() > 100 ||
-        event.jobId < 0 || event.feedbackId < 0 ||
-        (!sha.empty() && ((sha.size() != 40 && sha.size() != 64) || sha.find_first_not_of("0123456789abcdef") != sha.npos)) ||
-        std::ranges::any_of(event.prNumbers, [](Id number) { return number <= 0; }) || (event.prNumbers.empty() && sha.empty()))
+    const bool validDigest = digest.empty() || (digest.size() == 64 && isLowerHex(digest));
+    const bool validEventIdentity = webhookKind(event.kind) && identifier(event.eventId) && identifier(event.action);
+    const bool validRelatedIds = event.jobId >= 0 && event.feedbackId >= 0;
+    if (!validDigest || !validEventIdentity || !validRelatedIds || !hasValidWebhookTarget(event))
         throw std::invalid_argument("Invalid Git webhook event");
     std::lock_guard lock(p_->mutex);
     const auto scrub = p_->sharedRedactor();

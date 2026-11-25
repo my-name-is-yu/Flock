@@ -91,6 +91,7 @@ enum class ModelErrorCode {
     inference_failed,
     authentication_required,
     unsupported_reasoning_effort,
+    image_rejected,
     invalid_tool_count,
     invalid_tool_output,
     unavailable_tool,

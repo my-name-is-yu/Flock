@@ -88,15 +88,6 @@ print(json.dumps(result))
 `));
 }
 
-function prepareStoreWithoutDeletedBots() {
-  cli('rules', 'list');
-  sqlite(`
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as db:
-    db.execute('DROP TABLE deleted_bots')
-`);
-}
-
 const deleteBot = (botId, options) => api('bots/delete', { body: { botId }, ...options });
 const botIds = (bots) => bots.map((bot) => bot.id).sort();
 
@@ -115,7 +106,6 @@ try {
     cron: [{ id: 'yearly', schedule: `0 0 1 ${futureScheduleMonth} *`, timezone: 'Etc/UTC', request: 'Check the next release' }],
   });
   writeFileSync(configPath, releaseConfig);
-  prepareStoreWithoutDeletedBots();
   await start();
   const [scheduleStatus, nextRun] = configuredSchedule();
   assert.equal(scheduleStatus, 'active');

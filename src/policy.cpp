@@ -141,41 +141,6 @@ Policy Store::policy() {
     return Policy(*p_);
 }
 
-void Store::Impl::initializePolicySchema() {
-    const char* schema = R"SQL(
-CREATE TABLE IF NOT EXISTS web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
-CREATE TABLE IF NOT EXISTS policy_settings(id INTEGER PRIMARY KEY CHECK(id=1),mode TEXT NOT NULL CHECK(mode IN ('full','supervised')), revision INTEGER NOT NULL);
-INSERT OR IGNORE INTO policy_settings VALUES(1,'full',0);
-CREATE TABLE IF NOT EXISTS policy_rules(id INTEGER PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('allow','ask','never')),
- action TEXT NOT NULL,target TEXT NOT NULL,created_at INTEGER NOT NULL,exact INTEGER NOT NULL,UNIQUE(kind,action,target));
-CREATE TABLE IF NOT EXISTS policy_approvals(
- id INTEGER PRIMARY KEY, operation TEXT NOT NULL UNIQUE, bot TEXT NOT NULL,
- action TEXT NOT NULL,target TEXT NOT NULL,fingerprint TEXT NOT NULL,preview TEXT NOT NULL,
- scope TEXT NOT NULL, requester TEXT NOT NULL, anchor INTEGER NOT NULL, turn INTEGER NOT NULL,
- task INTEGER NOT NULL, revision INTEGER NOT NULL,generation INTEGER NOT NULL,
- created_at INTEGER NOT NULL,expires_at INTEGER,mode_revision INTEGER NOT NULL,
- status TEXT NOT NULL DEFAULT 'pending', resume TEXT,
- wait_id INTEGER NOT NULL DEFAULT 0, card_generation INTEGER NOT NULL, resume_state TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS policy_pending ON policy_approvals(status,bot);
-CREATE INDEX IF NOT EXISTS policy_denied ON policy_approvals(bot,scope,action,target,status);
-CREATE TABLE IF NOT EXISTS secret_destinations(destination TEXT PRIMARY KEY);
-CREATE TABLE IF NOT EXISTS bot_owners(bot TEXT PRIMARY KEY,person TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS bot_members(bot TEXT NOT NULL,person TEXT NOT NULL,PRIMARY KEY(bot,person));
-CREATE TABLE IF NOT EXISTS policy_journal(id INTEGER PRIMARY KEY,time INTEGER,actor TEXT,bot TEXT,action TEXT,details TEXT);
-CREATE TABLE IF NOT EXISTS protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEXT NOT NULL UNIQUE,
- status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));
-CREATE UNIQUE INDEX IF NOT EXISTS pending_secret ON protected_inputs(bot,name) WHERE status='pending';
-CREATE UNIQUE INDEX IF NOT EXISTS fulfilled_secret ON protected_inputs(name) WHERE status='fulfilled';
-CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target TEXT,name TEXT,
- request_key TEXT UNIQUE NOT NULL,source_message_id INTEGER REFERENCES messages(id));
-CREATE TABLE IF NOT EXISTS bot_creation_intents(
- request_key TEXT PRIMARY KEY,target TEXT UNIQUE NOT NULL,person TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
-)SQL";
-    if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) throw StorageError(db);
-}
-
 PolicyResult Policy::check(std::string_view bot, Action action, std::string_view target) const {
     return check(bot, Resource{action, std::string(target)});
 }

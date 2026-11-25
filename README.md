@@ -7,16 +7,16 @@ Web UI share a SQLite database.
 ## Build
 
 Use a C++20 compiler, CMake 3.24+, and development libraries for SQLite
-3.35+, libcurl 7.85+, OpenSSL Crypto, libpng 1.6+, and libjpeg. Test builds
-require Python 3.10+. Some tests also use Node.js, Chromium, or the OpenSSL CLI.
+3.35+, libcurl 7.85+, and OpenSSL Crypto.
 
 ```sh
-cmake -S . -B build
-cmake --build build -j
+cmake --preset release
+cmake --build --preset release -j
 ```
 
-Run `./scripts/verify.sh` to configure a fresh build with tests, build it, and
-run CTest.
+Install with `cmake --install build/release`. Run `./scripts/verify.sh` for the
+full test suite. It requires Python 3.10+, Node.js, Chrome or Chromium, and the
+OpenSSL CLI.
 
 C++ formatting uses clang-format 21: run `./scripts/format.sh` to apply it.
 `git config blame.ignoreRevsFile .git-blame-ignore-revs` skips the formatting
@@ -24,7 +24,7 @@ commit in blame.
 
 ## Get your first Bot reply
 
-1. Start Flock with `build/app/flock run` and open the printed Web URL.
+1. Start Flock with `build/release/app/flock run` and open the printed Web URL.
    Flock keeps its state in `--home DIRECTORY`, `FLOCK_HOME`, or
    `~/.config/flock`. A database from a build with another schema version
    is refused, so use a new state directory.
@@ -39,5 +39,5 @@ commit in blame.
    the Bot's conversation.
 
 To try the conversation flow without connecting accounts, run
-`build/app/flock --home "$(mktemp -d)" run --fixed`, create a Bot, and
+`build/release/app/flock --home "$(mktemp -d)" run --fixed`, create a Bot, and
 choose **Demo** as its model.

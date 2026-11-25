@@ -57,52 +57,6 @@ std::string redactT3Tokens(std::string value) {
     return connector_credentials::redact(std::move(value), tokenPrefix, "[T3 connection token]");
 }
 
-void Store::Impl::initializeParticipationSchema() {
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS session_participations(
- id INTEGER PRIMARY KEY,
- bot_id TEXT NOT NULL, environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, person_id TEXT NOT NULL,
- state TEXT NOT NULL CHECK(state IN ('active','removed','left')),
- stopped_through INTEGER NOT NULL DEFAULT 0,
- UNIQUE(bot_id,environment_id,thread_id))
-)SQL");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS session_asks(
- person_id TEXT NOT NULL, request_id TEXT NOT NULL,
- participation_id INTEGER NOT NULL REFERENCES session_participations(id),
- request_digest TEXT NOT NULL, message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
- PRIMARY KEY(person_id,request_id))
-)SQL");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS session_invitations(
- source_message_id INTEGER NOT NULL, step INTEGER NOT NULL,
- inviter_participation_id INTEGER NOT NULL REFERENCES session_participations(id),
- participation_id INTEGER NOT NULL REFERENCES session_participations(id),
- depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),
- message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
- PRIMARY KEY(source_message_id,step),
- FOREIGN KEY(source_message_id,step) REFERENCES conversation_steps(message_id,step))
-)SQL");
-    exec("CREATE INDEX IF NOT EXISTS session_invitations_inviter ON session_invitations(inviter_participation_id)");
-    exec("CREATE INDEX IF NOT EXISTS session_message_waits_participation ON session_message_waits(bot,environment,thread)");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS session_queue_cancellations(
- participation_id INTEGER NOT NULL REFERENCES session_participations(id), run TEXT NOT NULL,
- stop_id INTEGER NOT NULL REFERENCES journal(id),
- state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','cancelled','started','unavailable')),
- retry_at INTEGER NOT NULL DEFAULT 0,
- PRIMARY KEY(participation_id,run))
-)SQL");
-    exec("CREATE INDEX IF NOT EXISTS session_queue_cancellations_due "
-         "ON session_queue_cancellations(retry_at) WHERE state='pending'");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS t3_connector(
- singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
- token_digest TEXT NOT NULL, port INTEGER NOT NULL)
-)SQL");
-    exec("CREATE TABLE IF NOT EXISTS t3_connected_environments(environment_id TEXT PRIMARY KEY)");
-}
-
 std::string T3Connections::connect(std::string_view environment, std::string_view person, unsigned port,
                                    const std::function<void(std::string_view)>& install, bool refreshProviders) {
     if (!validId(environment) || !validId(person) || port == 0 || port > 65535) throw Conflict("Invalid T3 connection");

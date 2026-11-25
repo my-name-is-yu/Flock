@@ -296,34 +296,11 @@ struct Fixture {
     Seconds now = unixTime();
     bool requireT3Connection = false;
 
-    explicit Fixture(Store::MemorySeed seed = {}, bool legacySessionWaits = false) : memorySeed(std::move(seed)) {
+    explicit Fixture(Store::MemorySeed seed = {}) : memorySeed(std::move(seed)) {
         char path[] = "/tmp/flock-conversation-runtime-XXXXXX";
         const auto* created = mkdtemp(path);
         if (!created) throw std::runtime_error("cannot create a test directory");
         dir = created;
-        if (legacySessionWaits) {
-            restart();
-            runtime.reset();
-            store.reset();
-            sqlite3* database = nullptr;
-            if (sqlite3_open((dir / "state.db").c_str(), &database) != SQLITE_OK)
-                throw std::runtime_error("cannot create the legacy Session wait database");
-            const auto* schema = R"SQL(PRAGMA foreign_keys=OFF;
-DROP TABLE session_message_waits;
-CREATE TABLE session_message_waits(
-  message_id INTEGER NOT NULL REFERENCES messages(id),bot TEXT NOT NULL,
-  environment TEXT NOT NULL,thread TEXT NOT NULL,run TEXT NOT NULL,title TEXT NOT NULL,
-  gateway_environment TEXT NOT NULL DEFAULT '',notified INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(message_id,environment,thread,run)))SQL";
-            char* error = nullptr;
-            if (sqlite3_exec(database, schema, nullptr, nullptr, &error) != SQLITE_OK) {
-                const std::string detail = error ? error : sqlite3_errmsg(database);
-                sqlite3_free(error);
-                sqlite3_close(database);
-                throw std::runtime_error(detail);
-            }
-            sqlite3_close(database);
-        }
         restart();
     }
     ~Fixture() {
@@ -2214,7 +2191,7 @@ Step sendCloudFollowup(Id id) {
 }
 
 void savedDestinationFollowupsRemainTaskWork() {
-    Fixture f({}, true);
+    Fixture f;
     f.requireT3Connection = true;
     f.restart();
     f.t3.waitForSessionRuns = true;

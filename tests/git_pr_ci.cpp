@@ -226,6 +226,33 @@ void runner() {
     }
 }
 
+void invalidWebhookMetadata() {
+    Directory directory;
+    Store store(directory.path / "state.db");
+    const GitWebhook valid{hostName, "metadata", repoName, "ci", "completed", {1}, sha, "Finished"};
+    const auto rejects = [&](std::string_view name, auto change) {
+        auto event = valid;
+        change(event);
+        bool invalid = false;
+        try {
+            store.receiveGitWebhook(event);
+        } catch (const std::invalid_argument&) {
+            invalid = true;
+        }
+        check(invalid, "Accepted webhook with " + std::string(name));
+    };
+    rejects("an invalid digest", [](auto& event) { event.payloadDigest = std::string(64, 'g'); });
+    rejects("an unknown kind", [](auto& event) { event.kind = "other"; });
+    rejects("a negative job ID", [](auto& event) { event.jobId = -1; });
+    rejects("an invalid head SHA", [](auto& event) { event.headSha = std::string(40, 'g'); });
+    rejects("an invalid PR number", [](auto& event) { event.prNumbers = {0}; });
+    rejects("no PR number or head SHA", [](auto& event) {
+        event.prNumbers.clear();
+        event.headSha.clear();
+    });
+    check(store.receiveGitWebhook(valid), "Rejected valid webhook metadata");
+}
+
 void webhookHeadPeriods() {
     Directory directory;
     Store store(directory.path / "state.db");
@@ -1138,6 +1165,7 @@ int main() {
         freshPrReviewSchema();
         schemas();
         runner();
+        invalidWebhookMetadata();
         webhookHeadPeriods();
         pausedGitNotifications();
         reviewAfterTaskProgress();

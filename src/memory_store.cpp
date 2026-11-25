@@ -58,31 +58,6 @@ Json revisionView(const Statement& row) {
 }
 }
 
-void Store::Impl::initializeMemorySchema() {
-    if (sqlite3_exec(db, R"SQL(
-CREATE TABLE IF NOT EXISTS memory_documents(
-  doc_key TEXT PRIMARY KEY, scope_kind TEXT NOT NULL, owner_bot TEXT, doc_id TEXT NOT NULL,
-  content TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-  CHECK((scope_kind='private' AND owner_bot IS NOT NULL) OR (scope_kind='shared' AND owner_bot IS NULL)));
-CREATE TABLE IF NOT EXISTS memory_revisions(
-  id INTEGER PRIMARY KEY, doc_key TEXT NOT NULL REFERENCES memory_documents(doc_key),
-  version INTEGER NOT NULL, base_version INTEGER NOT NULL, author TEXT NOT NULL,
-  diff_summary TEXT NOT NULL, previous_content TEXT NOT NULL, new_content TEXT NOT NULL,
-  reverted_from INTEGER REFERENCES memory_revisions(id), created_at INTEGER NOT NULL,
-  UNIQUE(doc_key,version));
-CREATE INDEX IF NOT EXISTS memory_revisions_document ON memory_revisions(doc_key,id DESC);
-CREATE TABLE IF NOT EXISTS memory_proposals(
-  id INTEGER PRIMARY KEY, doc_key TEXT NOT NULL REFERENCES memory_documents(doc_key),
-  base_version INTEGER NOT NULL, proposed_content TEXT NOT NULL, rationale TEXT NOT NULL,
-  author TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','applied','rejected')),
-  created_at INTEGER NOT NULL, decided_by TEXT, decided_at INTEGER,
-  diff_summary TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS memory_proposals_document ON memory_proposals(doc_key,id DESC);
-)SQL",
-                     nullptr, nullptr, nullptr) != SQLITE_OK)
-        throw std::runtime_error(sqlite3_errmsg(db));
-}
-
 BotNotes Store::Impl::loadNotes(std::string_view bot, const Runtime::SoulLoader& soul, Seconds now) {
     BotNotes notes{soul ? bounded(soul(bot), memoryBytes) : std::string{}, {}};
     const auto key = privateKey(bot);

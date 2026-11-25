@@ -5,11 +5,38 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 include(FetchContent)
+include(CTest)
+option(FLOCK_REQUIRE_ALL_TESTS "Require tools for every Flock test group" OFF)
+if(BUILD_TESTING)
+  find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+  find_program(FLOCK_NODE_EXECUTABLE node NO_CACHE)
+  find_program(FLOCK_CHROME_EXECUTABLE
+    NAMES chromium chromium-browser google-chrome "Google Chrome" Chromium
+    PATHS "/Applications/Google Chrome.app/Contents/MacOS" "/Applications/Chromium.app/Contents/MacOS"
+    NO_CACHE)
+  find_program(FLOCK_TEST_OPENSSL openssl NO_CACHE)
+
+  if(NOT FLOCK_NODE_EXECUTABLE)
+    list(APPEND flock_skipped_test_groups "Node.js and browser DOM tests (node not found)")
+  endif()
+  if(NOT FLOCK_CHROME_EXECUTABLE)
+    list(APPEND flock_skipped_test_groups "browser DOM tests (Chrome/Chromium not found)")
+  endif()
+  if(NOT FLOCK_TEST_OPENSSL)
+    list(APPEND flock_skipped_test_groups "ChatGPT TLS test (openssl CLI not found)")
+  endif()
+  if(flock_skipped_test_groups)
+    list(JOIN flock_skipped_test_groups "\n  " flock_skipped_test_groups)
+    if(FLOCK_REQUIRE_ALL_TESTS)
+      message(FATAL_ERROR "FLOCK_REQUIRE_ALL_TESTS=ON cannot skip test groups:\n  ${flock_skipped_test_groups}")
+    endif()
+    message(STATUS "Skipping Flock test groups:\n  ${flock_skipped_test_groups}")
+  endif()
+endif()
+
 find_package(SQLite3 3.35 REQUIRED)
 find_package(CURL 7.85 REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-find_package(PNG 1.6 REQUIRED)
-find_package(JPEG REQUIRED)
 find_package(nlohmann_json 3.12 QUIET)
 if(NOT nlohmann_json_FOUND)
   FetchContent_Declare(nlohmann_json
@@ -19,6 +46,7 @@ if(NOT nlohmann_json_FOUND)
 endif()
 
 function(flock_fetch_cctz)
+  set(BUILD_SHARED_LIBS OFF)
   set(BUILD_TESTING OFF)
   set(BUILD_TOOLS OFF)
   set(BUILD_EXAMPLES OFF)
@@ -26,27 +54,30 @@ function(flock_fetch_cctz)
     URL https://codeload.github.com/google/cctz/tar.gz/refs/tags/v2.5
     URL_HASH SHA256=47d2d68e7cb5af3296dc7e69b0f4a765589f1b2f4af4b9c42e772414c428b421)
   FetchContent_MakeAvailable(cctz)
+  set_property(DIRECTORY "${cctz_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
 endfunction()
 flock_fetch_cctz()
 
 function(flock_fetch_cmark)
+  set(BUILD_SHARED_LIBS OFF)
   set(BUILD_TESTING OFF)
   set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
   FetchContent_Declare(flock_cmark
     URL https://codeload.github.com/commonmark/cmark/tar.gz/refs/tags/0.31.1
     URL_HASH SHA256=3da93db5469c30588cfeb283d9d62edfc6ded9eb0edc10a4f5bbfb7d722ea802)
   FetchContent_MakeAvailable(flock_cmark)
+  set_property(DIRECTORY "${flock_cmark_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
 endfunction()
 flock_fetch_cmark()
 
-add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
+add_library(flock_core STATIC src/store.cpp src/schema.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/run_reports.cpp src/project_slots.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
                        src/bot_settings_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/external_mcp.cpp src/skill_export.cpp
                        src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
-                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/base64.cpp
+                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/image_headers.cpp src/base64.cpp
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp src/git_followup.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
@@ -56,13 +87,15 @@ else()
   target_link_libraries(flock_core PUBLIC SQLite::SQLite3)
 endif()
 target_sources(flock_core PRIVATE src/session_question.cpp src/session_settings.cpp)
-target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl PNG::PNG JPEG::JPEG OpenSSL::Crypto cmark)
+target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl OpenSSL::Crypto cmark)
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
+<<<<<<< HEAD
 include(CTest)
 option(FLOCK_LIVE_TESTS "Register live ChatGPT and T3 tests in CTest" OFF)
+=======
+>>>>>>> origin/main
 if(BUILD_TESTING)
-  find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
   function(flock_verify_model name skill)
     set(model "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py")
     add_test(NAME "flock_verify_${name}" COMMAND "${Python3_EXECUTABLE}" "${model}")
@@ -144,6 +177,10 @@ if(BUILD_TESTING)
   add_executable(flock_markdown_tests tests/markdown.cpp)
   target_link_libraries(flock_markdown_tests PRIVATE flock_core)
   add_test(NAME flock_markdown COMMAND flock_markdown_tests)
+  add_executable(flock_image_headers tests/image_headers.cpp)
+  target_link_libraries(flock_image_headers PRIVATE flock_core)
+  target_compile_options(flock_image_headers PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_image_headers COMMAND flock_image_headers)
   add_executable(flock_conversation_runtime tests/conversation_runtime.cpp)
   target_link_libraries(flock_conversation_runtime PRIVATE flock_core)
   add_test(NAME flock_conversation_runtime COMMAND flock_conversation_runtime)
@@ -155,6 +192,11 @@ add_subdirectory(web)
 target_link_libraries(flock PRIVATE flock_web flock_t3)
 
 if(BUILD_TESTING)
+  set(schema_script "${CMAKE_CURRENT_SOURCE_DIR}/scripts/update-schema-snapshot")
+  add_test(NAME flock_schema_snapshot COMMAND "${Python3_EXECUTABLE}"
+    "${schema_script}" --check $<TARGET_FILE:flock>)
+  add_test(NAME flock_schema_open COMMAND "${Python3_EXECUTABLE}"
+    "${schema_script}" --concurrent $<TARGET_FILE:flock>)
   add_test(NAME flock_t3_connection_setup COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock> connection-setup)
   set_tests_properties(flock_t3_connection_setup PROPERTIES TIMEOUT 45)

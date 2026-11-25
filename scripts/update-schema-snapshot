@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+import hashlib
+from pathlib import Path
+import sqlite3
+import subprocess
+from tempfile import TemporaryDirectory
+from threading import Barrier
+
+
+SCHEMA_DIR = Path(__file__).resolve().parents[1] / "tests" / "schema"
+SNAPSHOT = SCHEMA_DIR / "schema.sql"
+VERSIONS = SCHEMA_DIR / "versions.txt"
+PROCESS_TIMEOUT = 15
+
+
+def open_store(flock: Path, home: Path) -> None:
+    subprocess.run(
+        [flock, "--home", home, "tasks"],
+        stdout=subprocess.DEVNULL,
+        check=True,
+        timeout=PROCESS_TIMEOUT,
+    )
+
+
+def dump_schema(database: Path) -> tuple[int, bytes]:
+    with closing(sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)) as db:
+        (version,) = db.execute("PRAGMA user_version").fetchone()
+        rows = db.execute("""
+            SELECT quote(type), quote(name), quote(tbl_name), quote(sql)
+            FROM sqlite_schema
+            ORDER BY type COLLATE BINARY, name COLLATE BINARY, tbl_name COLLATE BINARY
+        """)
+        values = ",\n".join(f"    ({', '.join(row)})" for row in rows)
+    return version, f"VALUES\n{values};\n".encode()
+
+
+def recorded_hashes() -> dict[int, str]:
+    if not VERSIONS.exists():
+        return {}
+    versions = {}
+    for line in VERSIONS.read_text(encoding="utf-8").splitlines():
+        version_text, digest = line.split()
+        version = int(version_text)
+        if version in versions:
+            raise ValueError(f"Duplicate version {version} in {VERSIONS.name}")
+        versions[version] = digest
+    return versions
+
+
+def check_or_update(version: int, dump: bytes, *, check: bool) -> None:
+    digest = hashlib.sha256(dump).hexdigest()
+    recorded = recorded_hashes().get(version)
+    if recorded is not None and recorded != digest:
+        raise ValueError(f"Schema changed for version {version}. Please bump schemaVersion.")
+    if check:
+        if recorded is None:
+            raise ValueError(f"No hash for version {version}. Run scripts/update-schema-snapshot.")
+        if SNAPSHOT.read_bytes() != dump:
+            raise ValueError("schema.sql differs from the fresh database. Run scripts/update-schema-snapshot.")
+        return
+
+    SNAPSHOT.write_bytes(dump)
+    if recorded is None:
+        with VERSIONS.open("a", encoding="utf-8") as output:
+            output.write(f"{version} {digest}\n")
+
+
+def check_concurrent_open(flock: Path, home: Path) -> None:
+    ready = Barrier(8, timeout=PROCESS_TIMEOUT)
+
+    def open_fresh_store() -> None:
+        ready.wait()
+        open_store(flock, home)
+
+    with ThreadPoolExecutor(max_workers=ready.parties) as workers:
+        opens = [workers.submit(open_fresh_store) for _ in range(ready.parties)]
+        for opened in opens:
+            opened.result()
+
+    database = home / "flock.sqlite3"
+    version, dump = dump_schema(database)
+    check_or_update(version, dump, check=True)
+
+    with closing(sqlite3.connect(database)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        open_store(flock, home)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Update or verify the versioned Flock schema snapshot.")
+    parser.add_argument("flock", type=Path, help="path to the built flock executable")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="verify without writing")
+    mode.add_argument("--concurrent", action="store_true", help="verify concurrent first opens and reopen under a writer lock")
+    args = parser.parse_args()
+
+    try:
+        flock = args.flock.resolve(strict=True)
+        with TemporaryDirectory(prefix="flock-schema-") as directory:
+            home = Path(directory)
+            if args.concurrent:
+                check_concurrent_open(flock, home)
+            else:
+                open_store(flock, home)
+                version, dump = dump_schema(home / "flock.sqlite3")
+                check_or_update(version, dump, check=args.check)
+    except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+        parser.exit(1, f"{error}\n")
+
+
+if __name__ == "__main__":
+    main()

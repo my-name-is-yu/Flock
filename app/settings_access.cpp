@@ -118,23 +118,11 @@ void keepAdministrator(const auto& db, std::string_view person, bool admin) {
 SettingsAccess::SettingsAccess(Store& store, const std::filesystem::path&, const char* externalFile) : store_(store) {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
-    {
-        // Add these relations to existing state directories without changing the
-        // version of the rest of the Flock Store.
+    if (externalFile) {
         Transaction transaction(db.db);
-        db.exec(R"SQL(CREATE TABLE IF NOT EXISTS managed_web_users(
- person TEXT PRIMARY KEY, verifier TEXT NOT NULL,
- admin INTEGER NOT NULL CHECK(admin IN (0,1)), revoked INTEGER NOT NULL CHECK(revoked IN (0,1))
-) WITHOUT ROWID)SQL");
-        db.exec(R"SQL(CREATE TABLE IF NOT EXISTS managed_web_pending(
- person TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires_at INTEGER NOT NULL
-) WITHOUT ROWID)SQL");
-        const auto mode = accessMode(db);
-        if (externalFile) {
-            if (mode == Mode::managed) throw Conflict("Remove the external Web identity file setting to use managed users");
-            external_ = loadIdentities(store_, externalFile);
-            store_.policy().requireWebIdentity();
-        }
+        if (accessMode(db) == Mode::managed) throw Conflict("Remove the external Web identity file setting to use managed users");
+        external_ = loadIdentities(store_, externalFile);
+        store_.policy().requireWebIdentity();
         transaction.commit();
     }
     store_.setWebIdentityResolver(identities().resolveRoot, !external_.authenticate);

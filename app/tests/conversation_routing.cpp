@@ -256,7 +256,7 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
           "the move did not use the requested or remembered project for " + std::string(alias));
 }
 
-void modelFailureGivesSettingsGuidance(ModelErrorCode code, std::string_view guidance) {
+void modelFailureGivesGuidance(ModelErrorCode code, std::string_view guidance) {
     Sandbox temp;
     const auto intake = pinnedBot(temp);
     RejectedModel model(code);
@@ -267,10 +267,11 @@ void modelFailureGivesSettingsGuidance(ModelErrorCode code, std::string_view gui
     runtime.runConversations();
     const auto events = store.conversation("release");
     const auto reply = std::ranges::find_if(events, [](const Json& event) { return event.value("kind", "") == "conversation_reply"; });
-    check(reply != events.end() && model.calls == 1, "a configuration failure did not finish the turn immediately");
-    const auto& text = reply->at("data").at("text").get_ref<const std::string&>();
-    check(text.find(guidance) != text.npos && text.find("private provider detail") == text.npos,
-          "the conversation did not give safe guidance for the model configuration error");
+    check(reply != events.end() && model.calls == 1, "a permanent model failure did not finish the turn immediately");
+    const auto& data = reply->at("data");
+    const auto& text = data.at("text").get_ref<const std::string&>();
+    check(data.at("route") == "error" && text.find(guidance) != text.npos && text.find("private provider detail") == text.npos,
+          "the conversation did not report the model error with safe guidance");
 }
 }
 
@@ -282,7 +283,8 @@ void pinnedConversationDestinations() {
     moveWithProject("mini", "mini-project");
     moveWithProject("mini-legacy", "remembered-project");
     moveWithProject("mini", "mini-project", true);
-    modelFailureGivesSettingsGuidance(ModelErrorCode::authentication_required, "Open Flock Settings");
-    modelFailureGivesSettingsGuidance(ModelErrorCode::unsupported_reasoning_effort, "Model default");
+    modelFailureGivesGuidance(ModelErrorCode::authentication_required, "Open Flock Settings");
+    modelFailureGivesGuidance(ModelErrorCode::unsupported_reasoning_effort, "Model default");
+    modelFailureGivesGuidance(ModelErrorCode::image_rejected, "Replace it or remove it");
 }
 }

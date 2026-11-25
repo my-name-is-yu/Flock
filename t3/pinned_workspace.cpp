@@ -52,12 +52,14 @@ std::optional<std::string> gitOutput(const std::filesystem::path& directory, std
     if (fcntl(reader.get(), F_SETFD, FD_CLOEXEC) != 0 || fcntl(writer.get(), F_SETFD, FD_CLOEXEC) != 0) return {};
 #endif
     SpawnActions spawn;
-    if (!spawn.ready || posix_spawn_file_actions_addclose(&spawn.actions, reader.get()) != 0 ||
-        posix_spawn_file_actions_adddup2(&spawn.actions, writer.get(), STDOUT_FILENO) != 0 ||
-        posix_spawn_file_actions_addclose(&spawn.actions, writer.get()) != 0 ||
-        posix_spawn_file_actions_addopen(&spawn.actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) != 0 ||
-        posix_spawn_file_actions_addopen(&spawn.actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) != 0)
-        return {};
+    if (!spawn.ready) return {};
+    const bool stdoutRedirected = posix_spawn_file_actions_addclose(&spawn.actions, reader.get()) == 0 &&
+                                  posix_spawn_file_actions_adddup2(&spawn.actions, writer.get(), STDOUT_FILENO) == 0 &&
+                                  posix_spawn_file_actions_addclose(&spawn.actions, writer.get()) == 0;
+    if (!stdoutRedirected) return {};
+    const bool unusedStreamsRedirected = posix_spawn_file_actions_addopen(&spawn.actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0 &&
+                                         posix_spawn_file_actions_addopen(&spawn.actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0;
+    if (!unusedStreamsRedirected) return {};
 #if defined(__linux__)
     if (posix_spawn_file_actions_addclosefrom_np(&spawn.actions, 3) != 0) return {};
 #endif

@@ -415,7 +415,7 @@ void externalTools(Fixture& f) {
                      {{"name", "tone.wav"},
                       {"mimeType", "audio/wav"},
                       {"dataBase64", "UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQIAAACAgA=="}},
-                     {{"name", "corrupt.png"}, {"mimeType", "image/png"}, {"dataBase64", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"}},
+                     {{"name", "corrupt.png"}, {"mimeType", "image/png"}, {"dataBase64", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQ"}},
                      {{"name", secretMarker}, {"mimeType", "audio/mpeg"}, {"dataBase64", "SUQzdmF1bHQtb25seS1tYXJrZXI="}}});
     f.model.next = {call("reply", {{"text", "Message received."}})};
     const auto message = f.store->receive(owner, f.intake(), "media", "Please inspect these photos and audio", 0, media).at("messageId");
@@ -456,7 +456,7 @@ void externalTools(Fixture& f) {
     check(jpegViews[0].at("result").at("data").at("width") == 1 && jpegViews[1].at("result").at("ok") == false &&
               f.model.content.size() == 3 &&
               f.model.content.at(2).at("image_url") == "data:image/jpeg;base64," + jpeg[0].at("dataBase64").get<std::string>(),
-          "JPEG decoding did not distinguish valid pixels from a truncated file");
+          "JPEG inspection did not distinguish a valid frame header from a truncated file");
 
     const auto searches = f.web->searches.load();
     const auto fetches = f.web->fetches.load();

@@ -21,45 +21,6 @@ bool terminalPrOperation(std::string_view status) {
 }
 }
 
-void Store::Impl::initializeGitSchema() {
-    const char* schema = R"SQL(
-CREATE TABLE IF NOT EXISTS git_pr_operations(
- operation_id TEXT PRIMARY KEY NOT NULL, host TEXT NOT NULL, base_repo TEXT NOT NULL,
- base_ref TEXT NOT NULL, head_repo TEXT NOT NULL, head_ref TEXT NOT NULL,
- task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL, invocation TEXT NOT NULL,
- event_cursor INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','created','ambiguous','failed','rejected')),
- pr_number INTEGER, url TEXT);
-CREATE UNIQUE INDEX IF NOT EXISTS unresolved_git_pr_target
- ON git_pr_operations(host,base_repo,base_ref,head_repo,head_ref) WHERE status IN ('pending','ambiguous','rejected');
-CREATE INDEX IF NOT EXISTS git_pr_history ON git_pr_operations(task_id,host,base_repo,base_ref,head_repo,head_ref);
-CREATE TABLE IF NOT EXISTS git_pr_watches(
- host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
- task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL,
- url TEXT NOT NULL, event_cursor INTEGER NOT NULL,
- PRIMARY KEY(host,repo,pr_number));
-CREATE TABLE IF NOT EXISTS git_pr_heads(
- host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,
- head_sha TEXT NOT NULL, synchronized INTEGER NOT NULL CHECK(synchronized IN (0,1)),
- PRIMARY KEY(host,repo,pr_number,event_cursor));
-CREATE TABLE IF NOT EXISTS git_mutations(
- invocation TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id), dedupe TEXT, result TEXT,
- PRIMARY KEY(task_id,invocation), UNIQUE(task_id,dedupe));
-CREATE TABLE IF NOT EXISTS git_task_reads(
- id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id),
- invocation TEXT NOT NULL, tool TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL,
- UNIQUE(task_id,invocation));
-CREATE INDEX IF NOT EXISTS git_task_reads_by_task ON git_task_reads(task_id,id);
-CREATE TABLE IF NOT EXISTS git_webhook_events(
- id INTEGER PRIMARY KEY, host TEXT NOT NULL, event_id TEXT NOT NULL, repo TEXT NOT NULL,
- data TEXT NOT NULL, payload_digest TEXT, UNIQUE(host,event_id), UNIQUE(host,payload_digest));
-CREATE TABLE IF NOT EXISTS git_webhook_deliveries(
- event INTEGER NOT NULL REFERENCES git_webhook_events(id) ON DELETE CASCADE, pr_number INTEGER NOT NULL,
- PRIMARY KEY(event,pr_number));
-CREATE INDEX IF NOT EXISTS git_events_repo ON git_webhook_events(host,repo);
-)SQL";
-    if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
-}
-
 bool Store::Impl::gitPrWatchUnavailable(const GitRepository& repo, Id pr, Id task) const {
     return gitPrMutationsInFlight.contains({repo.host, repo.repo, pr}) || query(R"SQL(
 SELECT 1 FROM git_pr_watches w WHERE (w.host,w.repo,w.pr_number)=(?,?,?) AND w.task_id<>?

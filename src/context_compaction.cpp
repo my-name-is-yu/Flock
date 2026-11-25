@@ -46,38 +46,6 @@ std::size_t conversation_storage::boundExpandedContext(Json& turn) {
     return expandedBytes;
 }
 
-void Store::Impl::initializeCompactionSchema() {
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS conversation_compactions(
-        id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, start_message_id INTEGER NOT NULL REFERENCES journal(id),
-        end_message_id INTEGER NOT NULL REFERENCES journal(id), summary TEXT NOT NULL, original_count INTEGER NOT NULL,
-        created_at INTEGER NOT NULL, created_by TEXT NOT NULL))SQL");
-    exec("CREATE INDEX IF NOT EXISTS compactions_bot ON conversation_compactions(bot_id,id DESC)");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS conversation_expansion_cursors(
-        id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, message_id INTEGER NOT NULL REFERENCES journal(id),
-        byte_offset INTEGER NOT NULL, redaction_revision TEXT NOT NULL, end_message_id INTEGER NOT NULL,
-        query_message_id INTEGER NOT NULL, query_step INTEGER NOT NULL,
-        FOREIGN KEY(query_message_id,query_step) REFERENCES conversation_steps(message_id,step),
-        UNIQUE(bot_id,message_id,byte_offset,redaction_revision,end_message_id,query_message_id,query_step)))SQL");
-    exec(R"SQL(CREATE VIEW IF NOT EXISTS compactable_messages AS
-        SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id) bot_id,j.kind,j.task_id,j.data,
-          CASE j.kind
-            WHEN 'conversation_message' THEN j.id
-            WHEN 'conversation_reply' THEN json_extract(j.data,'$.replyToMessageId')
-            ELSE json_extract(t.data,'$.sourceMessageId')
-          END source_message_id,
-          CASE j.kind
-            WHEN 'conversation_message' THEN m.text
-            WHEN 'report' THEN json_extract(j.data,'$.report')
-            ELSE json_extract(j.data,'$.text')
-          END text
-        FROM journal j LEFT JOIN messages m ON m.id=j.id LEFT JOIN tasks t ON t.id=j.task_id
-        WHERE (j.conversation_bot_id IS NOT NULL AND j.kind IN ('conversation_message','conversation_reply'))
-          OR (j.conversation_bot_id IS NULL AND (
-            j.kind IN ('completed','cancelled','report')
-            OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='user_question')
-            OR (j.kind='user_answer' AND json_extract(j.data,'$.conversation') IS NOT 1))))SQL");
-}
-
 Json Store::Impl::compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage) const {
     const auto scrub = redactor(bot);
     auto rows =
