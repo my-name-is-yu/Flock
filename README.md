@@ -44,6 +44,8 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 
 In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
 
+Bots can remember lasting preferences, corrections, conventions, and decisions from messages sent directly by a Bot owner or installation administrator. The conversation shows what changed and offers **Undo** while that edit is current. You can also ask a Bot to remember something explicitly.
+
 Flock uses the sole connected T3 environment when the Bot starts work. It uses the sole active project, or asks which project to use and remembers the choice for that Bot and environment. You can pin a destination with `environmentId` and `projectId` in the Bot configuration. Optional `conversationEnvironments` entries name other connected environments for requests such as “Run the measurement on the cloud Mac.” Each environment has its own project selection.
 
 For parallel verification on two connected Macs, configure the destination aliases with each machine's canonical T3 project ID. You can also use the Bot's pinned default project or its remembered project for that environment.
@@ -150,6 +152,7 @@ ownership apply in both modes.
 | Channel posts outside the asking conversation, published artifacts, and email sends | Ask |
 | T3 Session launch or a send outside the originating Thread | Ask |
 | Bot creation or rename, schedule, reminder, or trigger changes | Ask |
+| Bot private memory edits (`memory.write`, targeted by Bot ID) | Allow |
 | Distinct destructive operations or secret use at a new destination | Ask |
 | MCP tool calls | Allow when discovery returns `annotations.readOnlyHint: true` for the tool. Hints apply to the configured server and exact tool for two minutes. Ask otherwise |
 | Reads, workspace work, and replies, reactions, edits, and attachments in the originating conversation | Allow |

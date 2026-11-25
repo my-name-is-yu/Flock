@@ -29,6 +29,7 @@ enum class Action {
     environment_launch,
     shared_memory_read,
     shared_memory_write,
+    private_memory_write,
     workspace_read,
     workspace_write,
     workspace_exec,

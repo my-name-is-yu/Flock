@@ -439,6 +439,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
+    if (tool == "remember_preference") return rememberPreference(message,step,args,now);
     if (tool == "read_tool_result") {
         const auto sourceMessage = identifier(args,"messageId",true);
         const auto sourceStep = identifier(args,"step",true);
@@ -791,8 +792,9 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         tools.insert(tools.end(),botToolNames().begin(),botToolNames().end());
     }
     if (!message.channelScope.empty()) tools.insert(tools.end(),channelTools.begin(),channelTools.end());
-    const auto available = [&] {
+    const auto available = [&](int step) {
         auto offered = tools;
+        if (canRememberPreference(message,step)) offered.push_back("remember_preference");
         auto machines = Json::array();
         if (!notification) {
             for (const auto& [machineId,machine] : localMachines)
@@ -883,7 +885,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                 if (!row.string(1).empty()) continue;
                 effectType = row.string(2);
                 if (!row.string(0).empty()) {
-                    const auto [offered,machines] = available();
+                    const auto [offered,machines] = available(step);
                     bool rejectionChanged = false;
                     for (const auto& saved : row.json(0)) {
                         Decision call{saved.at("tool"),saved.at("args"),saved.at("reason")};
@@ -959,7 +961,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                     return;
                 }
                 std::vector<ModelImage> images;
-                auto [offered,machines] = available();
+                auto [offered,machines] = available(step);
                 const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),

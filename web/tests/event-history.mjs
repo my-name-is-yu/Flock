@@ -106,6 +106,8 @@ const outgoing = (id) => ({ id, kind: 'conversation_message' });
 const reply = (id) => ({ id, kind: 'conversation_reply' });
 assert.equal(replyArrivalId([reply(4)], undefined), undefined, 'Initial history stays still');
 assert.equal(replyArrivalId([reply(4), outgoing(5), reply(6)], 4), 6, 'The new reply follows its prompt');
+assert.equal(replyArrivalId([outgoing(5), { id: 6, kind: 'memory_remembered' }, reply(7)], 4), 7,
+  'A memory notice leaves the normal reply arrival in place');
 assert.equal(replyArrivalId([reply(4), outgoing(5), reply(6)], 6), undefined, 'A duplicate refresh stays still');
 assert.equal(replyArrivalId([reply(8), reply(9), reply(10)], 7), undefined, 'A large batch stays still');
 

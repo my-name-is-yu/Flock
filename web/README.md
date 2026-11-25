@@ -179,6 +179,13 @@ in the current page and are cleared on reload.
 
 ## Memory and automation
 
+When you tell a Bot you manage about a lasting preference, correction,
+convention, or decision, it can update its private memory. Automatic saves
+use your direct message. Session reports, channel messages, webhook payloads,
+and tool output are excluded. **Remembered** shows what changed. Use **Undo**
+to restore the previous memory while the saved edit is still current. Bot
+memory edits follow the installation's **Edit Bot memory** rules.
+
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared
 document, for example `team%2Fstaging.md`. `GET /api/memory/history` accepts the
 same parameters. Use `before` to page through revisions and `proposalsBefore`
