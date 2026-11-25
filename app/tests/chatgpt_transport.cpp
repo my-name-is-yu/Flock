@@ -190,7 +190,7 @@ void checkInspectedImageRequest() {
         }
         check(imageIndex == input.images.size(),"the Responses request lost an inspected image");
         const Json reply{{"type","function_call"},{"name","reply"},{"namespace","flock"},{"status","completed"},
-            {"arguments",Json{{"text","Reviewed the images"},{"reason","All four images were present"}}.dump()}};
+            {"arguments",Json{{"text","Reviewed the images"}}.dump()}};
         const Json event{{"type","response.completed"},{"response",{{"output",Json::array({reply})}}}};
         const HttpResponse response{200,"text/event-stream","fixture-request",{}};
         request.onData("data: " + event.dump() + "\n\n",response);
