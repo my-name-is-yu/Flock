@@ -201,48 +201,65 @@ std::string Store::Impl::taskEnvironment(std::string_view bot, const Json& routi
 
 TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std::string_view name,
                                 const Json* movingTask, const LinkedTaskDestinations* linked) {
+    using conversation_storage::ToolError;
     const auto configured = field(routing,"environmentId");
-    const auto resolved = [&](std::string environment, std::string project = {}, std::string gateway = {}) -> TaskRoute {
-        if (environment.empty()) return {};
-        if (project.empty() && movingTask) {
-            project = namedT3Project(routing.at("config"),environment,name);
-            if (project.empty()) {
-                if (environment == field(*movingTask,"environmentId")) project = field(*movingTask,"projectId");
-                else if (environment == configured) project = field(routing,"projectId");
+    const auto resolved = [&](TaskRoute route) {
+        if (route.environmentId.empty()) return route;
+        if (route.projectId.empty() && movingTask) {
+            route.projectId = namedT3Project(routing.at("config"),route.environmentId,name);
+            if (route.projectId.empty()) {
+                if (route.environmentId == field(*movingTask,"environmentId"))
+                    route.projectId = field(*movingTask,"projectId");
+                else if (route.environmentId == configured) route.projectId = field(routing,"projectId");
             }
-        } else if (project.empty()) project = configuredT3Project(routing,environment,name);
-        const bool linkedGateway = !gateway.empty() && gateway != environment;
-        if (gateway.empty()) gateway = environment;
-        if (linkedGateway && !registeredT3Environments(bot).contains(gateway)) return {};
-        return {std::move(environment),std::move(project),std::move(gateway)};
+        } else if (route.projectId.empty()) route.projectId = configuredT3Project(routing,route.environmentId,name);
+        if (route.gatewayEnvironmentId.empty()) route.gatewayEnvironmentId = route.environmentId;
+        return route;
     };
-    if (name.empty()) return resolved(defaultT3Environment(bot,configured,
-        field(routing.value("sessionOrigin",Json::object()),"environmentId")));
-    if (name == configured || (movingTask && name == field(*movingTask,"environmentId"))) {
-        auto gateway = movingTask && name == field(*movingTask,"environmentId")
-            ? field(*movingTask,"gatewayEnvironmentId") : std::string{};
-        return resolved(std::string(name),{},std::move(gateway));
+    const auto connected = [&](const TaskRoute& route) {
+        return route.gatewayEnvironmentId == route.environmentId ||
+            registeredT3Environments(bot).contains(route.gatewayEnvironmentId);
+    };
+    if (name.empty()) return resolved({defaultT3Environment(bot,configured,
+        field(routing.value("sessionOrigin",Json::object()),"environmentId")),{},{}});
+    if (movingTask && name == field(*movingTask,"environmentId")) {
+        const auto route = resolved({std::string(name),{},field(*movingTask,"gatewayEnvironmentId")});
+        return connected(route) ? route : TaskRoute{};
     }
-    if (movingTask && linked) {
-        std::vector<const LinkedTaskDestination*> matches;
-        for (const auto& choice : linked->choices)
-            if (choice.name == name || choice.route.environmentId == name) matches.push_back(&choice);
-        if (matches.size() > 1)
-            throw conversation_storage::ToolError("This T3 environment is linked through more than one gateway. Choose the destination name that identifies its gateway.");
-        if (!matches.empty())
-            return resolved(matches.front()->route.environmentId,matches.front()->route.projectId,
-                            matches.front()->route.gatewayEnvironmentId);
+    std::optional<TaskRoute> route;
+    if (name == configured) route = TaskRoute{std::string(name),{},{}};
+    else {
+        if (movingTask && movingTask->at("projectId") != routing.at("projectId"))
+            route = configuredTaskRoute(movingTask->at("config"),name);
+        if (!route) route = configuredTaskRoute(routing.at("config"),name);
+        if (!route && configured.empty() && registeredT3Environments(bot).contains(std::string(name)))
+            route = TaskRoute{std::string(name),{},{}};
     }
-    if (movingTask && movingTask->at("projectId") != routing.at("projectId")) {
-        const auto& config = movingTask->at("config");
-        if (auto route = configuredTaskRoute(config,name))
-            return resolved(route->environmentId,route->projectId,route->gatewayEnvironmentId);
+    if (route && route->environmentId.empty()) {
+        if (linked) throw ToolError("This T3 environment has conflicting configured routes. Choose a specific destination name.");
+        return {};
     }
-    const auto& config = routing.at("config");
-    if (auto route = configuredTaskRoute(config,name))
-        return resolved(route->environmentId,route->projectId,route->gatewayEnvironmentId);
-    if (configured.empty() && registeredT3Environments(bot).contains(std::string(name))) return resolved(std::string(name));
-    return {};
+    if (route) *route = resolved(std::move(*route));
+    const TaskRoute* discovered = nullptr;
+    if (linked) {
+        for (const auto& choice : linked->choices) {
+            if (choice.name != name && choice.route.environmentId != name) continue;
+            if (discovered)
+                throw ToolError("This T3 environment has more than one linked route. Choose a specific destination name.");
+            discovered = &choice.route;
+        }
+    }
+    if (!discovered) return route && connected(*route) ? *route : TaskRoute{};
+    if (route && (route->environmentId != discovered->environmentId || route->projectId != discovered->projectId ||
+                  route->gatewayEnvironmentId != discovered->gatewayEnvironmentId))
+        throw ToolError("This destination name resolves to both a configured route and a linked T3 gateway. Choose an unambiguous destination.");
+    if (!registeredT3Environments(bot).contains(discovered->gatewayEnvironmentId))
+        throw ToolError("The selected T3 gateway is no longer connected. Flock will not switch gateways.");
+    Policy policy(*this);
+    if (!policy.allows(bot,Action::environment_inspect,discovered->environmentId) ||
+        policy.forbidden(bot,Action::environment_launch,discovered->environmentId))
+        throw ToolError("Flock cannot launch in the linked target under the current permissions.");
+    return *discovered;
 }
 
 StartDestinations Store::Impl::startDestinations(const conversation::Message& message, const Json& args, bool resume,
@@ -255,28 +272,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
     const auto environment = text(args,"environment",256,false);
     const auto sessionRef = text(args,"sessionRef",128,false);
     StartDestinations destinations;
-    const auto routeForName = [&](const std::string& name) {
-        auto configured = taskRoute(bot,routing,name);
-        std::vector<const LinkedTaskDestination*> matches;
-        for (const auto& choice : linked.choices)
-            if (choice.name == name || choice.route.environmentId == name) matches.push_back(&choice);
-        if (matches.size() > 1)
-            throw ToolError("This T3 environment is linked through more than one gateway. Choose the destination name that identifies its gateway.");
-        if (matches.empty()) return configured;
-        const auto& selected = matches.front()->route;
-        if (!configured.environmentId.empty() &&
-            (configured.environmentId != selected.environmentId || configured.projectId != selected.projectId ||
-             (configured.gatewayEnvironmentId.empty() ? configured.environmentId : configured.gatewayEnvironmentId) !=
-                selected.gatewayEnvironmentId))
-            throw ToolError("This destination name resolves to both a configured route and a linked T3 gateway. Choose an unambiguous destination.");
-        if (!registeredT3Environments(bot).contains(selected.gatewayEnvironmentId))
-            throw ToolError("The selected T3 gateway is no longer connected. Flock will not switch gateways.");
-        Policy policy(*this);
-        if (!policy.allows(bot,Action::environment_inspect,selected.environmentId) ||
-            policy.forbidden(bot,Action::environment_launch,selected.environmentId))
-            throw ToolError("Flock cannot launch in the linked target under the current permissions.");
-        return selected;
-    };
+    const auto routeForName = [&](std::string_view name) { return taskRoute(bot,routing,name,nullptr,&linked); };
     destinations.commit = verifiedCommit(text(args,"commit",64,false));
     if (resume && !destinations.commit.empty())
         throw ToolError("Commit verification is not supported when resuming a cancelled task; start a new task on its saved destination.");

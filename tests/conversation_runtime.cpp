@@ -2134,6 +2134,42 @@ void discoveredLinkedNameMoveKeepsRoute() {
           "the next command did not use the discovered linked destination tuple");
 }
 
+void conflictingDiscoveryDoesNotMoveTask() {
+    const std::vector<Json> aliases{
+        {{"cloud-target",{{"environmentId","cloud"},{"projectId","configured-project"},{"gatewayEnvironmentId","desktop"}}}},
+        {{"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","disconnected"}}}},
+        {{"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}}},
+         {"alternate-target",{{"environmentId","cloud"},{"projectId","configured-project"},{"gatewayEnvironmentId","desktop"}}}},
+    };
+    for (const auto& configured : aliases) {
+        Fixture f;
+        T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+        f.t3.linksByGateway["desktop"].links.push_back({
+            {"cloud","desktop"},"Cloud via desktop",T3EnvironmentLink::Status::reachable});
+        f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+        auto intake = f.routing("Start on desktop");
+        intake.config["conversationEnvironments"] = configured;
+        const auto id = f.store->submit(intake);
+        f.reach(id,"running");
+        const auto original = f.task(id);
+        constexpr auto request = "Move the existing work to cloud";
+        f.script(request,{change(id,{{"environment","cloud"}}),start({{"environment","cloud"}})});
+        f.store->receive(localOwner,intake,"conflicting-discovery",request);
+        f.runtime->runConversations();
+        const auto steps = f.lastTurn();
+        check(steps.size() == 2 && !steps[0].at("result").at("ok").get<bool>() &&
+              !steps[1].at("result").at("ok").get<bool>(),
+              "a canonical route used discovery despite conflicting configured routing");
+        const auto unchanged = f.task(id);
+        check(!unchanged.contains("pendingDestination") && unchanged.at("generation") == original.at("generation") &&
+              unchanged.at("activeRun") == original.at("activeRun") && f.store->tasks("alpha").size() == 1,
+              "a rejected destination changed persisted task routing");
+        f.t3.finish("run-1","Desktop work settled");
+        f.reach(id,"completed");
+        check(f.t3.sent.size() == 1,"a conflicting linked destination received work");
+    }
+}
+
 Id twoLinkedDestinationTask(Fixture& f) {
     T3Connections(*f.store).connect("desktop",localOwner.id,48123);
     auto route = f.routing("Start work on both linked targets");
@@ -4167,6 +4203,7 @@ int main(int argc, char** argv) {
         gatewayOnlyCancelDoesNotCancelTask();
         productionGatewayOnlyLaunch();
         discoveredLinkedNameMoveKeepsRoute();
+        conflictingDiscoveryDoesNotMoveTask();
         destinationFollowupValidatesAndRedactsSourceReport();
         savedDestinationFollowupsRemainTaskWork();
         savedDestinationFollowupStopTargetsOnlyItsRun();
