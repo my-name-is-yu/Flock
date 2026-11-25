@@ -14,7 +14,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 8;
+constexpr Id schemaVersion = 9;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -262,7 +262,6 @@ CREATE TABLE IF NOT EXISTS conversation_model_failures(
 )SQL");
     exec("CREATE UNIQUE INDEX IF NOT EXISTS conversation_model_repairs"
          " ON conversation_model_failures(message_id) WHERE repair_attempt_id IS NOT NULL");
-    initializeWorkspaceSchema();
     initializeAttachmentsSchema();
     initializeCompactionSchema();
     initializeWorkflowSchema();

@@ -184,8 +184,6 @@ struct Runtime::Impl {
             if (lockFd >= 0) close(lockFd);
             throw Conflict("Cannot acquire the exclusive Runtime lock for this database");
         }
-        try { db.recoverWorkspace(); }
-        catch (...) { close(lockFd); throw; }
         {
             std::lock_guard lock(db.mutex);
             db.policyClock = options.clock;
@@ -200,10 +198,6 @@ struct Runtime::Impl {
         try { persistTaskInferences(); }
         catch (const std::exception& error) {
             std::fprintf(stderr,"Flock Task inference shutdown: %s\n",error.what());
-        }
-        try { db.stopWorkspace(); }
-        catch (const std::exception& error) {
-            std::fprintf(stderr,"Flock workspace shutdown: %s\n",error.what());
         }
         {
             std::lock_guard lock(db.mutex);
@@ -2620,7 +2614,6 @@ void Runtime::requestStop() { p_->shutdown.request_stop(); }
 void Runtime::runConversations() {
     if (p_->shutdown.stop_requested()) return;
     p_->settleApprovals();
-    p_->db.persistWorkspaceResults();
     p_->db.deliverGitWebhooks();
     p_->db.settleSessionQueueCancellations(p_->t3,p_->shutdown.get_token());
     p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
@@ -2637,7 +2630,6 @@ void Runtime::tick() {
     if (p_->shutdown.stop_requested()) return;
     p_->settleApprovals();
     p_->persistTaskInferences();
-    p_->db.persistWorkspaceResults();
     p_->fireDueAutomations();
     p_->db.deliverGitWebhooks();
     p_->db.settleSessionQueueCancellations(p_->t3,p_->shutdown.get_token());
@@ -2667,7 +2659,6 @@ void Runtime::tickConcurrent() {
     if (p_->channelWorker.valid() &&
         p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         p_->deferContendedWork("channel worker",[&] { p_->channelWorker.get(); });
-    p_->deferContendedWork("workspace outcomes",[&] { p_->db.persistWorkspaceResults(); });
     p_->runMaintenance(p_->automationsCheckedAt,"automations",[&] {
         return p_->fireDueAutomations();
     });
