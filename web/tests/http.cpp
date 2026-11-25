@@ -888,7 +888,6 @@ void readChanges(Browser& stream, const std::string& path, const std::function<b
 void notificationEvents(const std::filesystem::path& path) {
     const Person owner{"owner",true};
     Store store(path);
-    store.policy().setMember(owner,"release","reader",true);
     auto web = callbacks();
     web.authenticate = [owner](std::string_view credential) {
         if (credential == "Bearer owner") return owner;
@@ -922,13 +921,24 @@ void notificationEvents(const std::filesystem::path& path) {
     const auto reply = [&](std::string_view bot, std::string_view key) {
         store.receive(owner,web.intake(bot,"Can you help?"),key,"Can you help?");
     };
+    constexpr auto endpoint = "/api/notifications";
+    const auto cursor = [](const Json& page) {
+        return Json{{"after",page.at("through")},{"scope",page.at("scope")}};
+    };
+    const auto notify = [&](Browser& browser, const Json& page) { return browser.post(endpoint,cursor(page)); };
     reply("release","already-seen");
     runtime.runConversations();
-    const auto baseline = reader.get("/api/notifications");
-    check(baseline.at("through").get<Id>() > 0 && baseline.at("events").empty() && baseline.at("inbox").empty(),
-          "opening the notification feed replayed older activity");
+    const auto unshared = reader.post(endpoint,Json::object());
+    check(unshared.at("through") == 0 && unshared.at("scope").empty() && unshared.at("events").empty(),
+          "a private reply changed a viewer's baseline");
+    const auto adminBaseline = administrator.post(endpoint,Json::object());
+    store.policy().setMember(owner,"release","reader",true);
+    const auto baseline = notify(reader,unshared);
+    check(baseline.at("through") == 0 && baseline.at("scope").at("release").get<Id>() > 0 &&
+          baseline.at("events").empty() && baseline.at("inbox").empty(),
+          "a newly shared Bot replayed a reply or advanced the established cursor");
+    check(notify(reader,baseline).at("events").empty(),"a shared Bot replayed its history on the next page");
 
-    const auto after = "/api/notifications?after=" + std::to_string(baseline.at("through").get<Id>());
     bool wroteEvents = false;
     readChanges(stream,"/api/events",[&](const Json& change) {
         check(change.at("list") == true,"browser notification activity did not invalidate the Bot list");
@@ -946,12 +956,12 @@ void notificationEvents(const std::filesystem::path& path) {
         return true;
     });
 
-    const auto page = reader.get(after);
+    const auto page = notify(reader,baseline);
     const auto& events = page.at("events");
     check(events.size() == 3 && events.at(0).at("kind") == "reply" && events.at(1).at("kind") == "reply" &&
           events.at(2).at("kind") == "failure" && events.at(0).at("id").get<Id>() < events.at(1).at("id").get<Id>(),
           "notification catch-up lost a reply or confused a failed report with a reply: " + page.dump());
-    const auto administratorPage = administrator.get(after);
+    const auto administratorPage = notify(administrator,adminBaseline);
     check(std::ranges::all_of(events,[](const Json& item) {
         return item.size() == 4 && item.at("botId") == "release" && item.at("botName") == "Release";
     }) &&
@@ -960,30 +970,43 @@ void notificationEvents(const std::filesystem::path& path) {
     const auto question = reader.get("/api/inbox").at("items").at(0);
     check(page.at("inbox") == Json::array({{{"botId","release"},{"botName","Release"},{"kind","user_question"},
           {"id",question.at("itemId")}}}),"the notification feed lost the actionable question: " + page.dump());
-    const auto caughtUp = reader.get("/api/notifications?after=" + std::to_string(page.at("through").get<Id>()));
+    const auto caughtUp = notify(reader,page);
     check(caughtUp.at("events").empty() && caughtUp.at("inbox") == page.at("inbox"),
           "the feed replayed consumed events or dropped a pending question");
 
-    const auto visibleAfter = "/api/notifications?after=" + caughtUp.at("through").dump();
     for (int index = 0; index < 101; ++index) {
         reply("triage","private-burst-" + std::to_string(index));
         runtime.runConversations();
     }
-    check(reader.get(visibleAfter) == caughtUp &&
-          reader.get("/api/notifications").at("through") == caughtUp.at("through"),
+    auto spoofed = cursor(caughtUp);
+    spoofed["scope"]["triage"] = 0;
+    check(notify(reader,caughtUp) == caughtUp && reader.post(endpoint,spoofed) == caughtUp &&
+          reader.post(endpoint,Json::object()).at("through") == caughtUp.at("through"),
           "private Bot replies changed a limited viewer's page or baseline");
-    const auto privatePage = administrator.get(visibleAfter);
+    const auto privatePage = notify(administrator,administratorPage);
     check(privatePage.at("more") == true && privatePage.at("events").size() == 100,
           "the owner did not receive a full page of authorized replies");
-    const auto finalPrivatePage = administrator.get("/api/notifications?after=" + privatePage.at("through").dump());
+    const auto finalPrivatePage = notify(administrator,privatePage);
     check(finalPrivatePage.at("more") == false && finalPrivatePage.at("events").size() == 1,
           "the last authorized reply was missing from the following page");
     reply("release","reply-after-private-burst");
     runtime.runConversations();
-    const auto visiblePage = reader.get(visibleAfter);
+    reply("triage","last-private-reply");
+    runtime.runConversations();
+    store.policy().setMember(owner,"triage","reader",true);
+    const auto visiblePage = notify(reader,caughtUp);
     check(visiblePage.at("more") == false && visiblePage.at("events").size() == 1 &&
-          visiblePage.at("events").at(0).at("botId") == "release",
-          "private activity displaced an authorized reply");
+          visiblePage.at("events").at(0).at("botId") == "release" &&
+          visiblePage.at("scope").at("triage").get<Id>() > visiblePage.at("through").get<Id>(),
+          "sharing a Bot replayed its history or displaced a previously visible reply");
+    reply("triage","reply-after-sharing");
+    runtime.runConversations();
+    const auto sharedPage = notify(reader,visiblePage);
+    check(sharedPage.at("events").size() == 1 && sharedPage.at("events").at(0).at("botId") == "triage",
+          "the shared Bot's next reply did not enter the notification feed");
+    store.policy().setMember(owner,"triage","reader",false);
+    check(!notify(reader,sharedPage).at("scope").contains("triage"),
+          "notification scope exposed a Bot after unsharing");
 
     auto limited = web.intake("release","Check in several steps");
     limited.config["modelCallLimit"] = 1;
@@ -997,13 +1020,13 @@ void notificationEvents(const std::filesystem::path& path) {
         return *found;
     };
     auto firstApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"),"itemKind");
-    const auto firstAlert = budgetItem(reader.get("/api/notifications").at("inbox"),"kind");
+    const auto firstAlert = budgetItem(reader.post(endpoint,Json::object()).at("inbox"),"kind");
     check(firstAlert.at("id") == firstApproval.at("waitId"),"the alert did not identify the pending approval");
     firstApproval["decision"] = "approve";
     administrator.post("/api/inbox/decide",firstApproval);
     runtime.runConversations();
     const auto secondApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"),"itemKind");
-    const auto secondAlert = budgetItem(reader.get("/api/notifications").at("inbox"),"kind");
+    const auto secondAlert = budgetItem(reader.post(endpoint,Json::object()).at("inbox"),"kind");
     check(secondApproval.at("itemId") == receipt.at("messageId") &&
           secondAlert.at("id") == secondApproval.at("waitId") && secondAlert.at("id") != firstAlert.at("id"),
           "another approval for the same message did not get a distinct alert");

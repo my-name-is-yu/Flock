@@ -2472,6 +2472,17 @@ function settingsRow(label, value, click) {
   return row;
 }
 let reopenSettingsOnClose = false;
+let finishingBotEditor = false;
+let notificationDestination;
+
+function followNotification() {
+  if (!notificationDestination || finishingBotEditor || elements['bot-editor'].open) return false;
+  const botId = notificationDestination;
+  notificationDestination = null;
+  selectBot(botId);
+  return true;
+}
+
 const botEditor = createBotEditor(elements['bot-editor'], {
   api,
   onDraft(draft) {
@@ -2481,7 +2492,13 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   async onSaved(savedBot, savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
-    await Promise.all([refreshBots(), view?.id === savedBot.id && view.refresh()]);
+    finishingBotEditor = true;
+    try {
+      await Promise.all([refreshBots(), view?.id === savedBot.id && view.refresh()]);
+    } finally {
+      finishingBotEditor = false;
+    }
+    if (followNotification()) return;
     if (savedMode === 'create') {
       selectBot(savedBot.id);
       return;
@@ -2493,6 +2510,7 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   onCancel(savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
+    if (followNotification()) return;
     if (savedMode === 'edit' && returnToSettings && view?.data) {
       openDetail({ kind: 'settings', section: 'general' });
     }
@@ -3473,7 +3491,13 @@ document.addEventListener('keydown', (event) => {
 });
 
 let syncRetry;
-const browserNotifications = createBrowserNotifications({ viewingBot: () => view?.id ?? null, openBot: selectBot });
+const browserNotifications = createBrowserNotifications({
+  viewingBot: () => view?.id ?? null,
+  openBot(botId) {
+    notificationDestination = botId;
+    followNotification();
+  },
+});
 function retrySync() {
   if (!document.hidden) syncRetry ??= setTimeout(catchUp, 2500);
 }

@@ -38,6 +38,8 @@ if(BUILD_TESTING)
   find_program(FLOCK_CHROME_EXECUTABLE NAMES chromium chromium-browser google-chrome "Google Chrome"
     PATHS "/Applications/Google Chrome.app/Contents/MacOS")
   if(FLOCK_NODE_EXECUTABLE AND FLOCK_CHROME_EXECUTABLE)
+    add_test(NAME flock_web_browser_notification_navigation COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/browser-notification-navigation.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_bot_access_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-access.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_board_inbox_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"

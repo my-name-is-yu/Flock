@@ -578,36 +578,60 @@ ORDER BY 1,2
     return changes;
 }
 
-Store::NotificationEvents Store::notificationEventsSince(const std::vector<std::string>& visibleBots, std::optional<Id> after) const {
-    NotificationEvents result{after.value_or(0),Json::array(),false};
-    if (visibleBots.empty()) return result;
+Store::NotificationEvents Store::notificationEventsSince(const Person& viewer, const std::vector<std::string>& bots,
+    std::optional<Id> after, const std::map<std::string,Id>& previousScope) const {
+    NotificationEvents result{after.value_or(0),Json::array(),{},false};
     std::lock_guard lock(p_->mutex);
+    Transaction snapshot(p_->db,Transaction::Mode::read);
+    const Policy policy(*p_);
+    std::map<std::string,Id> established, newlyVisible;
+    for (const auto& bot : bots) {
+        if (!policy.allows(viewer,Action::bot_view,bot)) continue;
+        const auto previous = previousScope.find(bot);
+        if (after && previous != previousScope.end()) {
+            result.scope.emplace(bot,previous->second);
+            established.emplace(bot,std::max(*after,previous->second));
+        } else {
+            result.scope.emplace(bot,0);
+            newlyVisible.emplace(bot,result.through);
+        }
+    }
     constexpr Id pageSize = 100;
-    std::string query = R"SQL(
-WITH visible_bots AS (SELECT value FROM json_each(?2))
-SELECT j.id,j.conversation_bot_id,
+    static const std::string notificationEvents = R"SQL(
+WITH visible_bots AS (SELECT key AS bot,value AS after FROM json_each(?1)),
+events(id,bot,kind) AS (
+SELECT j.id,b.bot,
        CASE WHEN json_extract(j.data,'$.route')='error' THEN 'failure' ELSE 'reply' END
-FROM journal j
-WHERE j.id>?1 AND j.conversation_bot_id IN (SELECT value FROM visible_bots)
-  AND j.kind='conversation_reply' AND json_extract(j.data,'$.route') IS NOT 'model_budget'
+FROM visible_bots b JOIN journal j ON j.conversation_bot_id=b.bot AND j.id>b.after
+WHERE j.kind='conversation_reply' AND json_extract(j.data,'$.route') IS NOT 'model_budget'
 UNION ALL
-SELECT j.id,t.bot_id,'failure'
-FROM tasks t JOIN journal j ON j.task_id=t.id
-WHERE j.id>?1 AND j.conversation_bot_id IS NULL AND t.bot_id IN (SELECT value FROM visible_bots) AND (
+SELECT j.id,b.bot,'failure'
+FROM visible_bots b JOIN tasks t ON t.bot_id=b.bot JOIN journal j ON j.task_id=t.id AND j.id>b.after
+WHERE j.conversation_bot_id IS NULL AND (
   (j.kind='report' AND json_extract(j.data,'$.status') IN ('failed','interrupted','rolled_back'))
   OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='model_failure')
   OR (j.kind='completed' AND json_extract(j.data,'$.workflowOutcome')='failed')
 )
+)
 )SQL";
-    query += after ? " ORDER BY 1 LIMIT ?3" : " ORDER BY 1 DESC LIMIT ?3";
-    auto rows = p_->query(query.c_str(),{result.through,Json(visibleBots),after ? pageSize + 1 : Id{1}});
+    // The global page cursor advances only over events delivered for already visible Bots.
+    if (!newlyVisible.empty()) {
+        static const auto baselines = notificationEvents + " SELECT bot,max(id) FROM events GROUP BY bot";
+        auto rows = p_->query(baselines.c_str(),Json::array({newlyVisible}));
+        while (rows.next()) {
+            result.scope.at(rows.string(0)) = rows.number(1);
+            if (!after) result.through = std::max(result.through,rows.number(1));
+        }
+    }
+    static const auto page = notificationEvents + " SELECT id,bot,kind FROM events ORDER BY id LIMIT ?2";
+    auto rows = p_->query(page.c_str(),Json::array({established,pageSize + 1}));
     while (rows.next()) {
         if (result.events.size() == pageSize) {
             result.more = true;
             break;
         }
         result.through = rows.number(0);
-        if (after) result.events.push_back({{"id",result.through},{"botId",rows.string(1)},{"kind",rows.string(2)}});
+        result.events.push_back({{"id",result.through},{"botId",rows.string(1)},{"kind",rows.string(2)}});
     }
     return result;
 }

@@ -64,7 +64,7 @@ function addJournalRange(ranges, after, through) {
   return merged;
 }
 
-async function deliverNotifications({ inbox, events, after, through }, viewer, viewingBot, openBot) {
+async function deliverNotifications({ inbox, events, after, through, scope }, viewer, viewingBot, openBot) {
   if (!inbox.length && !events.length) return;
   const history = `${preference}:delivered:${viewer}`;
   const locks = navigator.locks;
@@ -94,7 +94,7 @@ async function deliverNotifications({ inbox, events, after, through }, viewer, v
     for (const event of events) {
       const { botId, id } = event;
       const ranges = deliveredJournal.get(botId) ?? [];
-      const previous = previousByBot.get(botId) ?? after;
+      const previous = previousByBot.get(botId) ?? Math.max(after, scope[botId]);
       const handled = ranges.some(([start, end]) => start < id && id <= end);
       if (handled || handle(event, eventKey(event)))
         deliveredJournal.set(botId, addJournalRange(ranges, previous, id));
@@ -137,8 +137,11 @@ export function createBrowserNotifications({
     try {
       let more;
       do {
-        const query = current.after == null ? '' : `?after=${current.after}`;
-        const response = await fetch(`/api/notifications${query}`);
+        const body = current.after == null ? {} : { after: current.after, scope: current.scope };
+        const response = await fetch('/api/notifications', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Flock-Action': '1' },
+          body: JSON.stringify(body),
+        });
         if (response.status === 401 || response.status === 403) {
           if (current === state) state = null;
           return;
@@ -154,11 +157,13 @@ export function createBrowserNotifications({
         }
         const inbox = new Set(page.inbox.map(eventKey));
         if (current.after != null) {
-          const added = page.inbox.filter(item => !current.inbox.has(eventKey(item)));
+          const added = page.inbox.filter(item => Object.hasOwn(current.scope, item.botId) &&
+            !current.inbox.has(eventKey(item)));
           await deliverNotifications({ ...page, inbox: added, after: current.after }, viewer, viewingBot, openBot);
         }
         current.viewer = viewer;
         current.after = page.through;
+        current.scope = page.scope;
         current.inbox = inbox;
         more = page.more;
       } while (more && current === state);

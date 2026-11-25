@@ -16,7 +16,7 @@ function browser(t, permission = 'granted') {
   const document = { hidden: false };
   const navigation = [];
   let permissionRequests = 0;
-  let page = { through: 10, inbox: [question], events: [] };
+  let page = { through: 10, scope: { release: 10 }, inbox: [question], events: [] };
   class Notification {
     static permission = permission;
     static async requestPermission() { permissionRequests++; return this.permission = 'granted'; }
@@ -42,8 +42,9 @@ function browser(t, permission = 'granted') {
     Notification, window, document, navigator: { locks }, location: { assign: url => navigation.push(url) },
     localStorage: { getItem: key => entries.get(key) ?? null,
       setItem: (key, value) => entries.set(key, value), removeItem: key => entries.delete(key) },
-    fetch: async (url) => {
-      requests.push(url);
+    fetch: async (url, request) => {
+      assert.equal(request.method, 'POST');
+      requests.push([url, JSON.parse(request.body)]);
       return Response.json(page, { headers: { 'X-Flock-Viewer': '"person"' } });
     },
   };
@@ -56,7 +57,7 @@ function browser(t, permission = 'granted') {
     });
   }
   return { notices, requests, document, navigation, permissionRequests: () => permissionRequests,
-    page(inbox, events = [], through = page.through + 1) { page = { through, inbox, events }; } };
+    page(inbox, events = [], through = page.through + 1, scope = page.scope) { page = { through, scope, inbox, events }; } };
 }
 
 test('loads a baseline only after explicit opt-in and ignores prior inbox items', async t => {
@@ -68,11 +69,11 @@ test('loads a baseline only after explicit opt-in and ignores prior inbox items'
   await setBrowserNotifications(true);
   await notifications.refresh();
   assert.equal(simulated.permissionRequests(), 1);
-  assert.deepEqual(simulated.requests, ['/api/notifications']);
+  assert.deepEqual(simulated.requests, [['/api/notifications', {}]]);
   assert.deepEqual(simulated.notices, []);
   simulated.page([question, approval]);
   await notifications.refresh();
-  assert.equal(simulated.requests.at(-1), '/api/notifications?after=10');
+  assert.deepEqual(simulated.requests.at(-1), ['/api/notifications', { after: 10, scope: { release: 10 } }]);
   assert.deepEqual(simulated.notices.map(notice => notice.options.body), ['Needs your approval.']);
 
   let prevented = false;
@@ -83,6 +84,27 @@ test('loads a baseline only after explicit opt-in and ignores prior inbox items'
   await setBrowserNotifications(false);
   await notifications.refresh();
   assert.equal(simulated.requests.length, 2);
+});
+
+test('starts alerts for a newly visible Bot after accepting its inbox and journal baseline', async t => {
+  const simulated = browser(t);
+  const notifications = createBrowserNotifications();
+  const triage = { botId: 'triage', botName: 'Triage' };
+  const sharedQuestion = { ...triage, id: 25, kind: 'user_question' };
+  simulated.page([], [], 0, {});
+  await setBrowserNotifications(true);
+  await notifications.refresh();
+
+  simulated.page([sharedQuestion], [], 0, { triage: 24 });
+  await notifications.refresh();
+  assert.deepEqual(simulated.requests.at(-1), ['/api/notifications', { after: 0, scope: {} }]);
+  assert.deepEqual(simulated.notices, []);
+
+  simulated.page([sharedQuestion, { ...triage, id: 26, kind: 'policy_approval' }],
+    [{ ...triage, id: 27, kind: 'reply' }], 27);
+  await notifications.refresh();
+  assert.deepEqual(simulated.requests.at(-1), ['/api/notifications', { after: 0, scope: { triage: 24 } }]);
+  assert.deepEqual(simulated.notices.map(notice => notice.options.body), ['Needs your approval.', 'Replied in the conversation.']);
 });
 
 test('alerts only when hidden or viewing a different Bot', async t => {
