@@ -88,6 +88,13 @@ if(BUILD_TESTING)
   flock_verify_model(run_settlement verify-run-settlement)
   flock_replay_model(run_settlement_historical verify-run-settlement --historical
     "Flock released the Run while its delegated work was active")
+  flock_verify_model(automation_routing verify-automation-routing)
+  flock_replay_model(automation_workspace_historical verify-automation-routing --historical=workspace
+    "A configured occurrence used the old workspace after the new workspace was published")
+  foreach(entry scheduler webhook)
+    flock_replay_model("automation_${entry}_historical" verify-automation-routing "--historical=${entry}"
+      "An unreadable Bot profile blocked another Bot's automation delivery")
+  endforeach()
 
   add_executable(flock_workflow_context tests/workflow_context.cpp)
   target_link_libraries(flock_workflow_context PRIVATE flock_core)
