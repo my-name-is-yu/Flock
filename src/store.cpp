@@ -750,7 +750,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         journal(id, "budget_granted", {{"waitId",waitId},{"remaining",task["remaining"]}});
     } else if (operation == "approve" && reason == "model_budget") {
         const Id eventId = task.at("eventId");
-        const auto attempt = approveModelBudget(taskModelBudget(id),"task_decision",0,id,eventId);
+        const auto attempt = approveModelBudget(actor,taskModelBudget(id),"task_decision",0,id,eventId);
         exec("UPDATE events SET reserved_attempt=? WHERE id=? AND task_id=?",{attempt,eventId,id});
         journal(id,"model_budget_granted",{{"waitId",waitId},{"attemptId",attempt}});
     } else if (operation == "retry" && reason == "model_failure") {

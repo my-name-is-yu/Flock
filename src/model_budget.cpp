@@ -127,27 +127,29 @@ void Store::Impl::releaseModelCall(Id attempt) {
     exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?",{budget});
 }
 
-Id Store::Impl::approveModelBudget(const ModelBudget& budget, std::string_view purpose,
+Id Store::Impl::approveModelBudget(const Person& actor, const ModelBudget& budget, std::string_view purpose,
                                   Id messageId, Id taskId, Id eventId) {
     exec("UPDATE model_budgets SET call_limit=call_limit+? WHERE id=? AND call_limit<=?",
          {budget.initialLimit,budget.id,std::numeric_limits<Id>::max() - budget.initialLimit});
     if (!sqlite3_changes(db)) throw Conflict("Cannot increase this model call limit");
     const auto attempt = reserveModelCall(budget,purpose,messageId,taskId,eventId);
     if (!attempt) throw Conflict("The approved model call could not be reserved");
-    resumeSharedModelBudgetWaits(budget.id,messageId,taskId);
+    resumeSharedModelBudgetWaits(actor,budget.id,messageId,taskId);
     return attempt;
 }
 
-void Store::Impl::resumeSharedModelBudgetWaits(std::string_view budget, Id approvedMessage, Id approvedTask) {
+void Store::Impl::resumeSharedModelBudgetWaits(const Person& actor, std::string_view budget, Id approvedMessage, Id approvedTask) {
     if (!query("SELECT 1 FROM model_budgets WHERE id=? AND attempts<call_limit",{budget}).next()) return;
+    const auto policy = Policy(*this);
     std::vector<Id> tasks;
     auto waits = query(R"SQL(
-SELECT w.task_id FROM waits w CROSS JOIN tasks t ON t.id=w.task_id
+SELECT w.task_id,t.bot_id FROM waits w CROSS JOIN tasks t ON t.id=w.task_id
 WHERE w.resolution IS NULL AND w.task_id<>? AND json_extract(w.data,'$.reason')='model_budget' AND t.state='waiting'
 )SQL",{approvedTask});
     while (waits.next()) {
         const auto task = waits.number(0);
-        if (taskModelBudget(task).id == budget) tasks.push_back(task);
+        if (policy.allows(actor,Action::bot_decide,waits.string(1)) && taskModelBudget(task).id == budget)
+            tasks.push_back(task);
     }
     for (const auto id : tasks) {
         auto task = load(id);
@@ -158,11 +160,14 @@ WHERE w.resolution IS NULL AND w.task_id<>? AND json_extract(w.data,'$.reason')=
     }
 
     std::vector<std::pair<Id,Id>> messages;
-    auto paused = query("SELECT message_id,pause_id FROM conversation_turns"
-                        " WHERE pause_id IS NOT NULL AND status='paused' AND message_id<>? ORDER BY pause_id",{approvedMessage});
+    auto paused = query(R"SQL(
+SELECT t.message_id,t.pause_id,m.bot_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
+WHERE t.pause_id IS NOT NULL AND t.status='paused' AND t.message_id<>? ORDER BY t.pause_id
+)SQL",{approvedMessage});
     while (paused.next()) {
         const auto message = paused.number(0);
-        if (messageModelBudget(message).id == budget) messages.emplace_back(message,paused.number(1));
+        if (policy.allows(actor,Action::bot_decide,paused.string(2)) && messageModelBudget(message).id == budget)
+            messages.emplace_back(message,paused.number(1));
     }
     for (const auto& [message,pause] : messages)
         resumeMessageModelCall(message,pause,0);
@@ -274,7 +279,7 @@ WHERE t.pause_id IS NOT NULL AND t.status='paused' AND j.conversation_bot_id=? O
     return result;
 }
 
-void Store::Impl::approveMessageModelCall(Id message, Id waitMessageId) {
+void Store::Impl::approveMessageModelCall(const Person& actor, Id message, Id waitMessageId) {
     auto slots = query(R"SQL(
 SELECT json_extract(s.decision,'$[' || slot.key || '].tool')
 FROM conversation_steps s, json_each(s.effect) slot
@@ -282,7 +287,7 @@ WHERE s.message_id=? AND s.result IS NULL AND json_type(s.effect)='array' AND sl
 )SQL",{message});
     bool toolPending = false;
     while (!toolPending && slots.next()) toolPending = isBotTool(slots.string(0));
-    const auto attempt = approveModelBudget(messageModelBudget(message),
+    const auto attempt = approveModelBudget(actor,messageModelBudget(message),
         toolPending ? "bot_tool" : "conversation_turn",message,0,0);
     resumeMessageModelCall(message,waitMessageId,attempt);
 }

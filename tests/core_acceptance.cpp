@@ -2195,7 +2195,18 @@ void modelBudgetFollowsBotConsultation() {
           f.task(recipient)["wait"]["allowance"] == 3,
           "the recipient reached the provider without approval, or restart changed its wait");
     Store writer(f.directory/"state.db");
-    writer.operate(localOwner,TaskTarget::from(writer.task(recipient),recipientWait),"approve");
+    const Person verifier{"verifier",false};
+    writer.policy().setMember(localOwner,"beta",verifier.id,true);
+    executeSql(f.directory/"state.db",R"SQL(
+INSERT INTO journal(time,kind,data,conversation_bot_id)
+VALUES(0,'conversation_budget_wait','{}','alpha');
+UPDATE conversation_turns SET status='paused',pause_id=last_insert_rowid()
+WHERE message_id=(SELECT id FROM messages WHERE bot_id='alpha' ORDER BY id LIMIT 1);
+)SQL");
+    check(writer.pausedConversations("alpha").size() == 1,"the shared conversation fixture is not paused");
+    writer.operate(verifier,TaskTarget::from(writer.task(recipient),recipientWait),"approve");
+    check(writer.pausedConversations("alpha").size() == 1,
+          "a member of the receiving Bot resumed a conversation on the originating Bot");
     f.rejects(recipient,recipientWait,"approve");
     f.reach(sender,"completed");
     check(f.model.calls == 5 && f.task(recipient)["state"] == "completed" &&

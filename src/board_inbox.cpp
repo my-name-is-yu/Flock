@@ -317,7 +317,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (!paused.next()) throw DecisionUnavailable{};
         if (item.taskId || item.targetRevision || item.waitId != paused.number(0) || item.targetGeneration != paused.number(0))
             throw RequestChanged{};
-        p_->approveMessageModelCall(item.itemId,item.waitId);
+        p_->approveMessageModelCall(actor,item.itemId,item.waitId);
         p_->recordInboxDecision(actor,item,decision);
     } else if (kind == pr_review || kind == pr_reconciliation) {
         if (!policy.allows(actor,Action::bot_decide,item.botId)) throw DecisionDenied{};

@@ -273,7 +273,7 @@ struct Store::Impl {
                         const Json& candidates = Json::array());
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
-    void approveMessageModelCall(Id message, Id pause);
+    void approveMessageModelCall(const Person&, Id message, Id pause);
     void recordTaskBlocker(Json&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
@@ -342,8 +342,8 @@ struct Store::Impl {
     Id takeReservedConversationCall(Id messageId);
     Id takeReservedTaskCall(Id event);
     void releaseModelCall(Id attempt);
-    Id approveModelBudget(const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
-    void resumeSharedModelBudgetWaits(std::string_view budget, Id approvedMessage, Id approvedTask);
+    Id approveModelBudget(const Person&, const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    void resumeSharedModelBudgetWaits(const Person&, std::string_view budget, Id approvedMessage, Id approvedTask);
     void resumeMessageModelCall(Id message, Id pause, Id attempt);
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                      bool gitNotification) const;
