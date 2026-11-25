@@ -7,6 +7,7 @@
 #include "record_decode.hpp"
 #include "runtime_maintenance.hpp"
 #include "runtime_task_scheduler.hpp"
+#include "runtime_run_observer.hpp"
 #include "runtime_task_questions.hpp"
 #include "runtime_peer_exchanges.hpp"
 #include "runtime_run_reports.hpp"
@@ -116,6 +117,7 @@ struct Runtime::Impl {
     PeerExchanges peerExchanges;
     std::future<void> channelWorker, sessionWakeWorker;
     std::stop_source shutdown;
+    RunObserver runs;
     int lockFd = -1;
     std::map<TaskScheduler::Work, std::future<void>> workers;
     // Keep provider outcomes until the Task decision and attempt usage are committed together.
@@ -131,7 +133,8 @@ struct Runtime::Impl {
         : db(*store.p_), policy(store.policy()), model(m), t3(adapter), soul(std::move(loader)), options(std::move(opts)),
           maintenance(db, options.clock, options.automationError, options.storageContention), taskScheduler(db), updates(db), questions(db),
           history(db, t3, policy, updates, options.sessionRead), reports(db, t3, policy, updates, history, options.clock),
-          peerExchanges(db, policy, updates, reports, history, options.peers) {
+          peerExchanges(db, policy, updates, reports, history, options.peers),
+          runs(db, t3, updates, questions, reports, peerExchanges, options.clock, shutdown.get_token()) {
         if (!options.botTools) options.botTools = std::make_shared<BotTools>();
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
         lockFd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
@@ -194,288 +197,6 @@ struct Runtime::Impl {
         });
     }
 
-    void cancelDone(TaskData& task) {
-        questions.closeQuestion(task, "cancelled");
-        if (!task.actionId.empty()) {
-            const auto action = db.outbox(task);
-            if (action && db.setOutboxPhase(action->command.actionId, OutboxPhase::closed, OutboxPhase::ready))
-                updates.refundUnsentWork(task, *action);
-            task.actionId.clear();
-        }
-        task.runStop.reset();
-        task.replanning = false;
-        task.pendingDestination.reset();
-        task.queuedInT3 = false;
-        task.cancelledInstructions = std::exchange(task.pendingInstructions, {});
-        task.activeRun.reset();
-        task.state = TaskState::cancelled;
-        db.journalCancelled(task.id);
-        if (const auto peer = db.peerExchange(task.id); peer && peer->recipient == task.id)
-            peerExchanges.finishPeer(*peer, task, db.load(peer->sender), "cancelled",
-                                     task.cancelledByBotPause ? "The receiving Bot is paused." : "The receiving Bot's task was cancelled.",
-                                     actionId());
-    }
-
-    void stopNote(const TaskData& snapshot, const std::string& detail) {
-        updates.change(snapshot, [&](TaskData& task) {
-            const bool cancel = task.state == TaskState::cancelling;
-            auto& saved = cancel ? task.cancellationDetail : task.replanningDetail;
-            if (saved == detail) return false;
-            saved = detail;
-            db.journal(task.id, cancel ? "cancelling" : "replanning", {{"detail", detail}, {"run", assignedRunJson(task.activeRun)}});
-            return true;
-        });
-    }
-
-    bool ingest(const TaskData& snapshot, const Observation& observed) {
-        std::lock_guard lock(db.mutex);
-        Transaction tx(db.db);
-        auto task = db.load(snapshot.id);
-        if (task.generation != snapshot.generation || task.eventId != snapshot.eventId ||
-            task.currentRevision != snapshot.currentRevision || task.activeRun != snapshot.activeRun)
-            return false;
-        if (task.workflow) db.stageObservation(task, observed, options.clock());
-        std::optional<DecisionCheckpoint> resumedDecision;
-        const bool changed = [&] {
-            const auto run = task.activeRun.value().ref;
-            const auto state = task.state;
-            const auto wait = db.currentWait(task.id);
-            const auto reason = wait ? std::optional{wait->reason()} : std::nullopt;
-            const bool connectionWait = reason == WaitReason::auth || reason == WaitReason::settings;
-            const bool replanning = task.replanning;
-            if (observed.kind == Observation::Kind::Finished) {
-                questions.closeQuestion(task, "run_finished");
-                if (!task.actionId.empty()) {
-                    const auto action = db.outbox(task);
-                    const bool supersededAnswer = action && action->command.tool == CommandTool::answer_session_question;
-                    if (supersededAnswer) {
-                        db.setOutboxPhase(action->command.actionId, OutboxPhase::closed);
-                        task.actionId.clear();
-                    }
-                }
-                task.lastRun = std::move(task.activeRun);
-                task.activeRun.reset();
-                task.queuedInT3 = false;
-                updates.consumeEvent(task);
-                SettledRunReport report{
-                    task.lastRun.value(),
-                    observed.resultRunId.empty() ? run.runId : observed.resultRunId,
-                    observed.status,
-                    {observed.evidence, observed.report, observed.itemId, observed.detail, observed.truncated, observed.sessionCreatedAt},
-                    observed.status == "interrupted" && (state == TaskState::cancelling || replanning)};
-                db.exec("INSERT OR IGNORE INTO t3_events VALUES(?,?,'result',?)", {task.environmentId, run.threadId, run.runId});
-                if (sqlite3_changes(db.db)) {
-                    if (observed.evidence == RunEvidence::Availability::ReportUnavailable && !observed.resultRunId.empty() &&
-                        state != TaskState::cancelling && !replanning) {
-                        db.journalRunSettled(task.id, report);
-                        task.pendingRunReport = PendingRunReport{std::move(report), options.clock() + 5, 0};
-                    } else
-                        reports.writeRunReport(task, report);
-                }
-                if (task.runStop) {
-                    db.journal(task.id, "interrupt_settled", runStopJson(*task.runStop));
-                    task.runStop.reset();
-                }
-                if (state == TaskState::cancelling)
-                    cancelDone(task);
-                else if (!terminal(task))
-                    task.state = TaskState::deciding;
-                return true;
-            }
-            if (state == TaskState::cancelling || replanning) return false;
-            if (!task.actionId.empty()) return false;
-            bool leftQueue = false;
-            if (task.selectedSession && observed.kind != Observation::Kind::Unavailable) {
-                if (observed.kind == Observation::Kind::Running && observed.status == "queued") {
-                    if (connectionWait) {
-                        db.clearWait(task, "connection_restored");
-                        task.state = TaskState::running;
-                    }
-                    if (task.queuedInT3) return connectionWait;
-                    task.queuedInT3 = true;
-                    task.deadline = 0;
-                    return true;
-                }
-                leftQueue = std::exchange(task.queuedInT3, false);
-                if (leftQueue) task.deadline = options.clock() + db.environmentTimeout(task.botId, task.environmentId, task.config);
-            }
-            if (observed.kind == Observation::Kind::Question) {
-                if (observed.question.requestId.empty()) return false;
-                if (task.question && task.question->target.requestId == observed.question.requestId) {
-                    if (!connectionWait && state != TaskState::running) return false;
-                    auto saved = task.question->target;
-                    saved.waitId.reset();
-                    if (saved != questionTarget(task)) return false;
-                    resumedDecision = questions.resumeQuestion(task);
-                    return true;
-                }
-                db.exec("INSERT OR IGNORE INTO t3_events VALUES(?,?,'question',?)",
-                        {task.environmentId, run.threadId, observed.question.requestId});
-                if (!sqlite3_changes(db.db)) return false;
-                questions.closeQuestion(task, "session_question", "replaced");
-                updates.consumeEvent(task);
-                const Json data = {{"kind", "question"}, {"run", runJson(run)}, {"question", questionJson(observed.question)}};
-                db.event(task, "question/" + task.environmentId + "/" + run.threadId + "/" + observed.question.requestId, data);
-                task.question =
-                    TaskQuestion{observed.question.fields, {std::nullopt, task.eventId, taskWaitRun(task), observed.question.requestId}};
-                db.journal(task.id, "session_question", data);
-                task.state = TaskState::deciding;
-                return true;
-            }
-            if (observed.kind == Observation::Kind::ExternalInput) {
-                if (reason == WaitReason::t3_input) return false;
-                db.unlockQuestion(task, "requires_t3");
-                updates.consumeEvent(task);
-                db.wait(task, SimpleWaitReason::t3_input, bounded(observed.status, 2048));
-                return true;
-            }
-            if (observed.kind == Observation::Kind::Unavailable) {
-                if (observed.status == "auth" && reason != WaitReason::auth) {
-                    questions.suspendQuestion(task);
-                    db.wait(task, SimpleWaitReason::auth, "T3 authentication is unavailable");
-                    return true;
-                }
-                if (observed.status == "settings" && reason != WaitReason::settings) {
-                    questions.suspendQuestion(task);
-                    db.wait(task, SimpleWaitReason::settings, "T3 connection settings need attention");
-                    return true;
-                }
-            }
-            const bool available = observed.kind != Observation::Kind::Unavailable;
-            if (available && (reason == WaitReason::t3_input || task.question)) {
-                questions.closeQuestion(task, "session_question_resolved", "resolved_in_t3");
-                updates.consumeEvent(task);
-                task.state = TaskState::running;
-                return true;
-            }
-            if (available && connectionWait) {
-                db.clearWait(task, "connection_restored");
-                task.state = TaskState::running;
-                return true;
-            }
-            if (state == TaskState::running && task.deadline > 0 && options.clock() >= task.deadline) {
-                db.wait(task, DeadlineWait{}, "This request reached its deadline");
-                return true;
-            }
-            return leftQueue;
-        }();
-        if (changed) updates.saveTask(task, std::move(resumedDecision));
-        tx.commit();
-        return changed;
-    }
-
-    Observation observeRun(const std::string& bot, const std::string& environment, const Json& config, const RunRef& run) {
-        try {
-            auto observed = t3.observe(environment, config, run);
-            const auto scrub = db.redactor(bot);
-            redactQuestion(observed.question, scrub);
-            for (auto* value : {&observed.resultRunId, &observed.itemId, &observed.checkedCommit})
-                if (scrub.text(*value) != *value) value->clear();
-            observed.report = scrub.text(observed.report);
-            observed.detail = scrub.text(observed.detail);
-            if (observed.status != "auth" && observed.status != "settings" && observed.status != "completed" &&
-                observed.status != "failed" && observed.status != "cancelled" && observed.status != "interrupted" &&
-                observed.status != "rolled_back")
-                observed.status = scrub.text(observed.status);
-            return observed;
-        } catch (const std::exception&) {
-            Observation observation;
-            observation.kind = Observation::Kind::Unavailable;
-            return observation;
-        }
-    }
-
-    Observation observe(const TaskData& task) {
-        const auto& run = task.activeRun.value();
-        return observeRun(task.botId, run.environmentId, task.config, run.ref);
-    }
-
-    void interruptRun(const TaskData& task) {
-        const auto& stop = task.runStop.value();
-        if (!task.activeRun || task.activeRun != stop.run ||
-            (task.state == TaskState::cancelling) != (stop.intent == RunStopIntent::cancel))
-            return;
-        const auto observed = observe(task);
-        if (ingest(task, observed)) return;
-        if (observed.kind == Observation::Kind::Settling) return stopNote(task, "Waiting for the remaining work on this request to finish");
-        if (observed.kind == Observation::Kind::Unavailable && !(task.workflow && stop.intent == RunStopIntent::cancel))
-            return stopNote(task, "Flock couldn't check the status of this work in T3");
-        const auto now = options.clock();
-        if (now < stop.retryAt.value_or(0)) return;
-        TaskData requested;
-        if (!updates.change(
-                task,
-                [&](TaskData& current) {
-                    if (shutdown.stop_requested()) return false;
-                    current.runStop.value().retryAt = now + 5;
-                    return true;
-                },
-                &requested))
-            return;
-        InterruptOutcome outcome;
-        try {
-            const auto& run = task.activeRun.value();
-            outcome = t3.interrupt(run.environmentId, task.config, run.ref);
-        } catch (const std::exception&) {
-            return stopNote(requested, "T3 did not confirm the interrupt request");
-        }
-        if (outcome != InterruptOutcome::Requested) return stopNote(requested, "Waiting for T3 to confirm this work has stopped");
-        std::lock_guard lock(db.mutex);
-        Transaction transaction(db.db);
-        db.journalInterrupt(task.id, stop);
-        transaction.commit();
-    }
-
-    void finishReplan(const TaskData& task) {
-        updates.change(task, [&](TaskData& current) {
-            const auto id = current.id;
-            const auto peer = db.peerExchange(id);
-            if (peer && !peer->allowsReplan(id)) return false;
-            const auto oldEnvironment = current.environmentId;
-            const auto oldProject = current.projectId;
-            const auto oldGateway =
-                current.gatewayEnvironmentId && !current.gatewayEnvironmentId->empty() ? *current.gatewayEnvironmentId : oldEnvironment;
-            const auto destination = current.pendingDestination;
-            const bool moving = destination && (destination->route.environmentId != oldEnvironment ||
-                                                destination->route.gatewayEnvironmentId != oldGateway ||
-                                                (destination->pinned && destination->route.projectId != oldProject));
-            const auto event = db.currentEvent(current);
-            const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true && event["kind"] == "bot_answer";
-            if (moving) {
-                current.environmentId = destination->route.environmentId;
-                current.projectId = destination->pinned ? destination->route.projectId : std::string{};
-                if (destination->route.gatewayEnvironmentId == destination->route.environmentId)
-                    current.gatewayEnvironmentId.reset();
-                else
-                    current.gatewayEnvironmentId = destination->route.gatewayEnvironmentId;
-                current.newSessionRequired = true;
-                current.selectedSession.reset();
-                db.journal(id, "session_destination_changed",
-                           {{"from", oldEnvironment},
-                            {"to", destination->route.environmentId},
-                            {"fromProject", oldProject},
-                            {"toProject", current.projectId},
-                            {"revisionId", revisionJson(current.currentRevision)}});
-            }
-            if (destination && (destination->pinned || destination->route.projectId.empty())) current.pendingDestination.reset();
-            questions.closeQuestion(current, "user_instruction");
-            if (!preservePeerAnswer) {
-                updates.consumeEvent(current);
-                const auto report = reports.settledSessionReport(current);
-                db.event(current, "replan/" + std::to_string(current.generation),
-                         report ? encodeRunReport(report->data) : Json{{"kind", "intake"}});
-            }
-            const bool needsQueue =
-                moving || current.state == TaskState::queued || current.projectId.empty() || (current.workflow && !current.lastRun);
-            current.state = needsQueue ? TaskState::queued : TaskState::deciding;
-            current.replanning = false;
-            current.replanningDetail.reset();
-            current.runStop.reset();
-            current.feedback.reset();
-            return true;
-        });
-    }
-
     void stop(TaskData task) {
         const bool cancel = task.state == TaskState::cancelling;
         const auto intent = cancel ? RunStopIntent::cancel : RunStopIntent::replan;
@@ -520,7 +241,7 @@ struct Runtime::Impl {
                     return true;
                 }))
                 deliver(task, *action);
-            if (reply && task.activeRun) interruptRun(updates.snapshot(task.id));
+            if (reply && task.activeRun) runs.interruptRun(updates.snapshot(task.id));
             return;
         }
         if (!cancel && action && action->phase == OutboxPhase::ready) {
@@ -536,14 +257,14 @@ struct Runtime::Impl {
             return;
         }
         if (task.activeRun)
-            interruptRun(task);
+            runs.interruptRun(task);
         else if (cancel)
             updates.change(task, [&](TaskData& current) {
-                cancelDone(current);
+                runs.cancelDone(current);
                 return true;
             });
         else
-            finishReplan(task);
+            runs.finishReplan(task);
     }
 
     Command command(const TaskData& task, const Outbox& action) {
@@ -639,7 +360,7 @@ struct Runtime::Impl {
     }
 
     void writeDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed) {
-        if (db.recordDestinationReport(task, run, observed) && task.state == TaskState::cancelling) cancelDone(task);
+        if (db.recordDestinationReport(task, run, observed) && task.state == TaskState::cancelling) runs.cancelDone(task);
     }
 
     static bool setDestinationStatus(DestinationRun& run, DestinationRunPhase status, std::string detail) {
@@ -756,7 +477,7 @@ AND action_id=? ORDER BY id LIMIT 1)SQL",
         if ((phase == OutboxPhase::ready || phase == OutboxPhase::started) && !stopRequested) return deliver(task, std::move(*action));
         if (phase != OutboxPhase::accepted) return;
         const auto cmd = command(task, *action);
-        const auto observed = observeRun(cmd.ownerBotId, cmd.environmentId, cmd.config, ref);
+        const auto observed = runs.observeRun(cmd.ownerBotId, cmd.environmentId, cmd.config, ref);
         if (observed.kind == Observation::Kind::Finished) {
             updates.changeTask(id, [&](TaskData& current) {
                 auto& saved = destinationRun(current, key);
@@ -1709,17 +1430,6 @@ ORDER BY j.id
         });
     }
 
-    bool questionStillOpen(const TaskData& task) {
-        const auto observed = observe(task);
-        if (ingest(task, observed) || observed.kind != Observation::Kind::Question) return false;
-        if (!task.question || task.question->target.requestId != observed.question.requestId) return false;
-        auto target = questionTarget(task);
-        const auto& savedTarget = task.question->target;
-        if (savedTarget == target) return true;
-        target.eventId = savedTarget.eventId;
-        return savedTarget == target && peerExchanges.forwardedQuestionAnswer(task, savedTarget);
-    }
-
     std::optional<TaskDecision> persistTaskInference(Id id) {
         const auto found = taskInferences.find(id);
         const auto& inference = found->second;
@@ -1836,7 +1546,7 @@ ORDER BY j.id
     }
 
     void decide(const TaskData& task) {
-        if (task.activeRun && !questionStillOpen(task)) return;
+        if (task.activeRun && !runs.questionStillOpen(task)) return;
         if (shutdown.stop_requested()) return;
         Json event, history = Json::array();
         std::optional<PeerExchange> peer;
@@ -1916,7 +1626,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             const bool replay = decision.has_value();
             if (!decision) decision = inferDecision(task, event, history, tools, pending, std::move(choices), peer);
             if (!decision || shutdown.stop_requested()) return;
-            if (task.activeRun && !questionStillOpen(task)) return;
+            if (task.activeRun && !runs.questionStillOpen(task)) return;
             if (!decision->rejection.empty()) {
                 rejectDecision(task, event, *decision, decision->rejection);
                 return;
@@ -1949,14 +1659,6 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         } catch (const std::exception& e) {
             failure(task, event, e.what(), false);
         }
-    }
-
-    bool shouldStop(const TaskData& task) {
-        if (db.replanReady(task)) return true;
-        if (task.state != TaskState::cancelling) return false;
-        std::lock_guard lock(db.mutex);
-        const auto peer = db.peerExchange(task.id);
-        return !peer || peer->recipient == task.id;
     }
 
     bool continueStage(const TaskData& task) {
@@ -2010,7 +1712,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         if (!task.runResults().empty()) return;
         if (task.pendingStageReport)
             updates.change(task, [&](TaskData& current) { return db.settleStageReport(current); });
-        else if (shouldStop(task))
+        else if (runs.shouldStop(task))
             stop(task);
         else if (task.pendingRunReport)
             reports.recoverRunReport(task);
@@ -2019,7 +1721,8 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         else if (state == TaskState::deciding) {
             if (!resumeGitApproval(task) && !continueStage(task)) decide(task);
         } else {
-            if (task.activeRun && (state == TaskState::running || state == TaskState::waiting) && ingest(task, observe(task))) return;
+            if (task.activeRun && (state == TaskState::running || state == TaskState::waiting) && runs.ingest(task, runs.observe(task)))
+                return;
             const bool reconcile = state == TaskState::waiting && (task.workflow || task.selectedSession) && !task.actionId.empty();
             if (state != TaskState::sending && !reconcile) return;
             std::optional<Outbox> action;
