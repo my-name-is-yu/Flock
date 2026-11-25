@@ -902,8 +902,11 @@ void notificationEvents(const std::filesystem::path& path) {
     };
     struct NotificationModel : FixedModel {
         ModelTurn decide(const ModelInput& input) override {
-            if (input.event.at("kind") == "conversation_turn")
+            if (input.event.at("kind") == "conversation_turn") {
+                if (input.event.at("text") == "Check in several steps" && input.event.at("turn").size() < 2)
+                    return {{{"find_tasks",{{"query","release"}},"Find the current work"}}};
                 return {{{"reply",{{"text","A reply"}},"Respond to the request"}}};
+            }
             if (input.event.at("kind") == "intake" && input.task.at("request") == "Choose a publish date")
                 return {{{"ask_user",{{"question","When should we publish?"}},"The schedule needs a date"}}};
             return FixedModel::decide(input);
@@ -960,6 +963,50 @@ void notificationEvents(const std::filesystem::path& path) {
     const auto caughtUp = reader.get("/api/notifications?after=" + std::to_string(page.at("through").get<Id>()));
     check(caughtUp.at("events").empty() && caughtUp.at("inbox") == page.at("inbox"),
           "the feed replayed consumed events or dropped a pending question");
+
+    const auto visibleAfter = "/api/notifications?after=" + caughtUp.at("through").dump();
+    for (int index = 0; index < 101; ++index) {
+        reply("triage","private-burst-" + std::to_string(index));
+        runtime.runConversations();
+    }
+    check(reader.get(visibleAfter) == caughtUp &&
+          reader.get("/api/notifications").at("through") == caughtUp.at("through"),
+          "private Bot replies changed a limited viewer's page or baseline");
+    const auto privatePage = administrator.get(visibleAfter);
+    check(privatePage.at("more") == true && privatePage.at("events").size() == 100,
+          "the owner did not receive a full page of authorized replies");
+    const auto finalPrivatePage = administrator.get("/api/notifications?after=" + privatePage.at("through").dump());
+    check(finalPrivatePage.at("more") == false && finalPrivatePage.at("events").size() == 1,
+          "the last authorized reply was missing from the following page");
+    reply("release","reply-after-private-burst");
+    runtime.runConversations();
+    const auto visiblePage = reader.get(visibleAfter);
+    check(visiblePage.at("more") == false && visiblePage.at("events").size() == 1 &&
+          visiblePage.at("events").at(0).at("botId") == "release",
+          "private activity displaced an authorized reply");
+
+    auto limited = web.intake("release","Check in several steps");
+    limited.config["modelCallLimit"] = 1;
+    const auto receipt = store.receive(owner,limited,"repeat-approval",limited.request);
+    runtime.runConversations();
+    const auto budgetItem = [](const Json& items, const char* kind) {
+        const auto found = std::ranges::find_if(items,[&](const Json& item) {
+            return item.at(kind) == "conversation_model_budget";
+        });
+        check(found != items.end(),"missing conversation approval: " + items.dump());
+        return *found;
+    };
+    auto firstApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"),"itemKind");
+    const auto firstAlert = budgetItem(reader.get("/api/notifications").at("inbox"),"kind");
+    check(firstAlert.at("id") == firstApproval.at("waitId"),"the alert did not identify the pending approval");
+    firstApproval["decision"] = "approve";
+    administrator.post("/api/inbox/decide",firstApproval);
+    runtime.runConversations();
+    const auto secondApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"),"itemKind");
+    const auto secondAlert = budgetItem(reader.get("/api/notifications").at("inbox"),"kind");
+    check(secondApproval.at("itemId") == receipt.at("messageId") &&
+          secondAlert.at("id") == secondApproval.at("waitId") && secondAlert.at("id") != firstAlert.at("id"),
+          "another approval for the same message did not get a distinct alert");
 }
 
 void recurringRequestStatus(const std::filesystem::path& path) {

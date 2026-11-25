@@ -56,7 +56,7 @@ function browser(t, permission = 'granted') {
     });
   }
   return { notices, requests, document, navigation, permissionRequests: () => permissionRequests,
-    page(inbox, events = []) { page = { through: page.through + 1, inbox, events }; } };
+    page(inbox, events = [], through = page.through + 1) { page = { through, inbox, events }; } };
 }
 
 test('loads a baseline only after explicit opt-in and ignores prior inbox items', async t => {
@@ -88,7 +88,10 @@ test('loads a baseline only after explicit opt-in and ignores prior inbox items'
 test('alerts only when hidden or viewing a different Bot', async t => {
   const simulated = browser(t);
   let selected = 'release';
-  const notifications = createBrowserNotifications(() => selected);
+  const notifications = createBrowserNotifications({
+    viewingBot: () => selected,
+    openBot: bot => simulated.navigation.push({ bot }),
+  });
   await setBrowserNotifications(true);
   await notifications.refresh();
 
@@ -108,11 +111,13 @@ test('alerts only when hidden or viewing a different Bot', async t => {
   assert.deepEqual(simulated.notices.map(notice => [notice.title, notice.options.body]), [
     ['Release', 'Replied in the conversation.'], ['Release', 'Something went wrong.'],
   ]);
+  simulated.notices[1].onclick({ preventDefault() {} });
+  assert.deepEqual(simulated.navigation, ['close', 'focus', { bot: 'release' }]);
 });
 
 test('delivers each event once across tabs and suppresses alerts for a Bot visible in another tab', async t => {
   const simulated = browser(t);
-  const first = createBrowserNotifications(() => 'planning');
+  const first = createBrowserNotifications({ viewingBot: () => 'planning' });
   const second = createBrowserNotifications();
   await setBrowserNotifications(true);
   await Promise.all([first.refresh(), second.refresh()]);
@@ -136,4 +141,39 @@ test('delivers each event once across tabs and suppresses alerts for a Bot visib
   simulated.page([question, approval], [{ ...release, id: 14, kind: 'reply' }]);
   await second.refresh();
   assert.equal(simulated.notices.length, 3);
+});
+
+test('a suspended tab can replay multiple pages without displaying alerts twice', async t => {
+  const simulated = browser(t);
+  const active = createBrowserNotifications();
+  const suspended = createBrowserNotifications();
+  await setBrowserNotifications(true);
+  await Promise.all([active.refresh(), suspended.refresh()]);
+  for (const tab of [active, suspended]) {
+    for (const after of [10, 110, 210]) {
+      const events = Array.from({ length: 100 }, (_, index) => ({ ...release, id: after + index + 1, kind: 'reply' }));
+      simulated.page([question], events, after + 100);
+      await tab.refresh();
+    }
+  }
+  assert.equal(simulated.notices.length, 300);
+  assert.equal(new Set(simulated.notices.map(notice => notice.options.tag)).size, 300);
+});
+
+test('a newer tab baseline leaves earlier undelivered alerts available to older tabs', async t => {
+  const simulated = browser(t);
+  const older = createBrowserNotifications();
+  const newer = createBrowserNotifications();
+  await setBrowserNotifications(true);
+  await older.refresh();
+  simulated.page([question], [], 15);
+  await newer.refresh();
+  const latest = { ...release, id: 16, kind: 'reply' };
+  simulated.page([question], [latest], 16);
+  await newer.refresh();
+  const earlier = { ...release, id: 15, kind: 'reply' };
+  simulated.page([question], [earlier, latest], 16);
+  await older.refresh();
+  assert.equal(simulated.notices.length, 2);
+  assert.notEqual(simulated.notices[0].options.tag, simulated.notices[1].options.tag);
 });

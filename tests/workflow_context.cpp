@@ -488,9 +488,25 @@ void uncertainLaunchAndStageStop() {
     f.ticks(1);
     require(f.t3.interrupts.contains("run-1") && f.status()["stages"][0]["status"]=="stop_requested",
             "stage interrupt acknowledgement treated as terminal");
+    const auto cursor = f.store->notificationEventsSince({"bot"},std::nullopt).through;
     f.t3.finish("run-1",Json::object(),"cancelled");
     f.ticks(2);
     require(f.status()["stages"][0]["status"]=="stopped" && f.t3.commands.size()==1,"dependent of stopped stage ran");
+    require(f.store->notificationEventsSince({"bot"},cursor).events.empty(),"a requested stop emitted a failure alert");
+}
+
+void workflowFailureNotifications() {
+    for (const auto status : {"cancelled","failed","completed"}) {
+        Fixture f;
+        f.call("start_workflow",{{"request","Implement feature"}});
+        f.ticks(2);
+        const auto cursor = f.store->notificationEventsSince({"bot"},std::nullopt).through;
+        f.t3.finish("run-1",Json::object(),status);
+        f.ticks(3);
+        const auto page = f.store->notificationEventsSince({"bot"},cursor);
+        require(f.status()["stages"][0]["status"]=="failed" && page.events.size()==1 &&
+                page.events[0]["kind"]=="failure","a failed stage did not emit exactly one failure alert");
+    }
 }
 
 void missingStageReportCannotAdvanceWorkflow() {
@@ -816,6 +832,7 @@ int main() {
         rejectInvalidGraphAndArtifact();
         stopAndDeadline();
         uncertainLaunchAndStageStop();
+        workflowFailureNotifications();
         missingStageReportCannotAdvanceWorkflow();
         stopDuringUnconfirmedStart();
         reopenedStageWaitsForProject();

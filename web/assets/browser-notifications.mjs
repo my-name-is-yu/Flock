@@ -1,10 +1,10 @@
 import { coalescedRefresh, createLiveUpdates } from './live-updates.js';
 
 const preference = 'flock-notifications';
-const recentLimit = 256;
 const summaries = {
   user_question: 'Has a question for you.',
   policy_approval: 'Needs your approval.',
+  conversation_model_budget: 'Needs your approval.',
   pr_review: 'Has a pull request for you to review.',
   reply: 'Replied in the conversation.',
   failure: 'Something went wrong.',
@@ -43,42 +43,79 @@ function viewLock(botId) {
   return `${preference}:view:${botId}`;
 }
 
-function showNotification({ botId, botName, kind }, tag) {
+function showNotification({ botId, botName, kind }, tag, openBot) {
   const notice = new Notification(botName, { body: summaries[kind] ?? 'Needs your input.', tag, icon: '/flock.svg' });
   notice.onclick = (event) => {
     event.preventDefault();
     notice.close();
     window.focus();
-    location.assign(`/?${new URLSearchParams({ bot: botId })}`);
+    openBot(botId);
   };
 }
 
-async function deliverNotifications(events, viewer, viewingBot) {
-  if (!events.length) return;
-  const history = `${preference}:recent:${viewer}`;
+function addJournalRange(ranges, after, through) {
+  if (after >= through) return ranges;
+  const merged = [];
+  for (const [start, end] of [...ranges, [after, through]].sort((a, b) => a[0] - b[0])) {
+    const previous = merged.at(-1);
+    if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
+async function deliverNotifications({ inbox, events, after, through }, viewer, viewingBot, openBot) {
+  if (!inbox.length && !events.length) return;
+  const history = `${preference}:delivered:${viewer}`;
   const locks = navigator.locks;
   const deliver = async () => {
-    let recent = new Set();
-    try { recent = new Set(JSON.parse(localStorage.getItem(history))); } catch {}
+    let deliveredInbox = new Set();
+    let deliveredJournal = new Map();
+    try {
+      const saved = JSON.parse(localStorage.getItem(history));
+      deliveredInbox = new Set(saved?.inbox);
+      deliveredJournal = new Map(saved?.journal);
+    } catch {}
     const activeViews = await locks?.query();
     if (!browserNotificationsEnabled()) return;
     const selected = document.hidden ? null : viewingBot();
-    for (const event of events) {
-      const key = eventKey(event);
-      if (recent.has(key)) continue;
+    const handle = (event, key) => {
       const viewing = selected === event.botId || activeViews?.held.some(({ name }) => name === viewLock(event.botId));
       if (!viewing) {
-        try { showNotification(event, `${history}:${key}`); } catch { continue; }
+        try { showNotification(event, `${history}:${key}`, openBot); } catch { return false; }
       }
-      recent.add(key);
+      return true;
+    };
+    for (const item of inbox) {
+      const key = eventKey(item);
+      if (!deliveredInbox.has(key) && handle(item, key)) deliveredInbox.add(key);
     }
-    try { localStorage.setItem(history, JSON.stringify([...recent].slice(-recentLimit))); } catch {}
+    const previousByBot = new Map();
+    for (const event of events) {
+      const { botId, id } = event;
+      const ranges = deliveredJournal.get(botId) ?? [];
+      const previous = previousByBot.get(botId) ?? after;
+      const handled = ranges.some(([start, end]) => start < id && id <= end);
+      if (handled || handle(event, eventKey(event)))
+        deliveredJournal.set(botId, addJournalRange(ranges, previous, id));
+      previousByBot.set(botId, id);
+    }
+    for (const [botId, id] of previousByBot) {
+      const ranges = deliveredJournal.get(botId) ?? [];
+      deliveredJournal.set(botId, addJournalRange(ranges, id, through));
+    }
+    try {
+      localStorage.setItem(history, JSON.stringify({ inbox: [...deliveredInbox], journal: [...deliveredJournal] }));
+    } catch {}
   };
   if (locks) await locks.request(history, deliver);
   else await deliver();
 }
 
-export function createBrowserNotifications(viewingBot = () => null) {
+export function createBrowserNotifications({
+  viewingBot = () => null,
+  openBot = bot => location.assign(`/?${new URLSearchParams({ bot })}`),
+} = {}) {
   let state = null;
   let visibleBot = null;
   let releaseView;
@@ -118,7 +155,7 @@ export function createBrowserNotifications(viewingBot = () => null) {
         const inbox = new Set(page.inbox.map(eventKey));
         if (current.after != null) {
           const added = page.inbox.filter(item => !current.inbox.has(eventKey(item)));
-          await deliverNotifications([...added, ...page.events], viewer, viewingBot);
+          await deliverNotifications({ ...page, inbox: added, after: current.after }, viewer, viewingBot, openBot);
         }
         current.viewer = viewer;
         current.after = page.through;
@@ -145,7 +182,7 @@ export function createBrowserNotifications(viewingBot = () => null) {
 }
 
 export function listenForBrowserNotifications(viewingBot) {
-  const notifications = createBrowserNotifications(viewingBot);
+  const notifications = createBrowserNotifications({ viewingBot });
   const live = createLiveUpdates(notifications.refresh, change => {
     if (change.list) void notifications.refresh();
   });

@@ -578,32 +578,36 @@ ORDER BY 1,2
     return changes;
 }
 
-Store::NotificationEvents Store::notificationEventsSince(std::optional<Id> after) const {
+Store::NotificationEvents Store::notificationEventsSince(const std::vector<std::string>& visibleBots, std::optional<Id> after) const {
+    NotificationEvents result{after.value_or(0),Json::array(),false};
+    if (visibleBots.empty()) return result;
     std::lock_guard lock(p_->mutex);
-    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal");
-    newest.next();
-    NotificationEvents result{newest.number(0),Json::array(),false};
-    if (!after || *after >= result.through) return result;
     constexpr Id pageSize = 100;
-    auto rows = p_->query(R"SQL(
-SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id),
-       CASE WHEN j.kind='conversation_reply' AND json_extract(j.data,'$.route') IS NOT 'error'
-            THEN 'reply' ELSE 'failure' END
-FROM journal j LEFT JOIN tasks t ON t.id=j.task_id
-WHERE j.id>? AND j.id<=? AND (
-  (j.kind='conversation_reply' AND json_extract(j.data,'$.route') IS NOT 'model_budget')
-  OR (j.kind='report' AND json_extract(j.data,'$.status') IN ('failed','interrupted','rolled_back'))
+    std::string query = R"SQL(
+WITH visible_bots AS (SELECT value FROM json_each(?2))
+SELECT j.id,j.conversation_bot_id,
+       CASE WHEN json_extract(j.data,'$.route')='error' THEN 'failure' ELSE 'reply' END
+FROM journal j
+WHERE j.id>?1 AND j.conversation_bot_id IN (SELECT value FROM visible_bots)
+  AND j.kind='conversation_reply' AND json_extract(j.data,'$.route') IS NOT 'model_budget'
+UNION ALL
+SELECT j.id,t.bot_id,'failure'
+FROM tasks t JOIN journal j ON j.task_id=t.id
+WHERE j.id>?1 AND j.conversation_bot_id IS NULL AND t.bot_id IN (SELECT value FROM visible_bots) AND (
+  (j.kind='report' AND json_extract(j.data,'$.status') IN ('failed','interrupted','rolled_back'))
   OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='model_failure')
   OR (j.kind='completed' AND json_extract(j.data,'$.workflowOutcome')='failed')
-) ORDER BY j.id LIMIT ?
-)SQL",{*after,result.through,pageSize + 1});
+)
+)SQL";
+    query += after ? " ORDER BY 1 LIMIT ?3" : " ORDER BY 1 DESC LIMIT ?3";
+    auto rows = p_->query(query.c_str(),{result.through,Json(visibleBots),after ? pageSize + 1 : Id{1}});
     while (rows.next()) {
         if (result.events.size() == pageSize) {
-            result.through = result.events.back().at("id").get<Id>();
             result.more = true;
             break;
         }
-        result.events.push_back({{"id",rows.number(0)},{"botId",rows.string(1)},{"kind",rows.string(2)}});
+        result.through = rows.number(0);
+        if (after) result.events.push_back({{"id",result.through},{"botId",rows.string(1)},{"kind",rows.string(2)}});
     }
     return result;
 }

@@ -561,29 +561,25 @@ private:
     }
 
     Json notificationPage(const Person& person, std::optional<Id> after) const {
-        auto page = store_.notificationEventsSince(after);
         const auto policy = store_.policy();
         std::map<std::string,std::string> names;
+        std::vector<std::string> visibleBots;
         for (const auto& bot : bots()) {
             const auto id = web::field(bot,"id");
-            if (policy.allows(person,Action::bot_view,id))
-                names.emplace(id,web::field(redactBot(id,{{"name",web::field(bot,"name")}}),"name"));
+            if (!policy.allows(person,Action::bot_view,id)) continue;
+            visibleBots.push_back(id);
+            names.emplace(id,web::field(redactBot(id,{{"name",web::field(bot,"name")}}),"name"));
         }
+        auto page = store_.notificationEventsSince(visibleBots,after);
         auto inbox = Json::array();
         for (const auto& item : store_.inbox(person,{})) {
             const auto id = web::field(item,"botId");
             if (!names.contains(id) || !item.value("canDecide",false) || web::field(item,"status") == "expired") continue;
-            inbox.push_back({{"id",item.at("itemId")},{"botId",id},{"botName",names.at(id)},
-                             {"kind",item.at("itemKind")}});
+            const auto kind = web::field(item,"itemKind");
+            const auto& eventId = item.at(kind == "conversation_model_budget" ? "waitId" : "itemId");
+            inbox.push_back({{"id",eventId},{"botId",id},{"botName",names.at(id)},{"kind",kind}});
         }
-        for (auto event = page.events.begin(); event != page.events.end();) {
-            const auto name = names.find(web::field(*event,"botId"));
-            if (name == names.end()) event = page.events.erase(event);
-            else {
-                (*event)["botName"] = name->second;
-                ++event;
-            }
-        }
+        for (auto& event : page.events) event["botName"] = names.at(web::field(event,"botId"));
         return {{"through",page.through},{"more",page.more},{"events",std::move(page.events)},{"inbox",std::move(inbox)}};
     }
 

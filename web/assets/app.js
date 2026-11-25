@@ -3473,7 +3473,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 let syncRetry;
-const browserNotifications = createBrowserNotifications(() => view?.id ?? null);
+const browserNotifications = createBrowserNotifications({ viewingBot: () => view?.id ?? null, openBot: selectBot });
 function retrySync() {
   if (!document.hidden) syncRetry ??= setTimeout(catchUp, 2500);
 }
