@@ -226,6 +226,8 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
         const auto route = resolved({std::string(name),{},field(*movingTask,"gatewayEnvironmentId")});
         return connected(route) ? route : TaskRoute{};
     }
+    // The Bot's default ID is the direct route offered by change_task.
+    if (movingTask && name == configured) return resolved({std::string(name),{},{}});
     std::optional<TaskRoute> route;
     if (name == configured) route = TaskRoute{std::string(name),{},{}};
     else {

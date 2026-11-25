@@ -2075,6 +2075,22 @@ void discoveredLinkedNameMoveKeepsRoute() {
     check(command.environmentId == "cloud" && command.projectId == "cloud-project" &&
           command.gatewayEnvironmentId == "desktop",
           "the next command did not use the discovered linked destination tuple");
+
+    f.reach(id,"running");
+    T3Connections(*f.store).connect("other-gateway",localOwner.id,48124);
+    f.t3.linksByGateway["other-gateway"].links.push_back({
+        {"desktop","other-gateway"},"Desktop via other gateway",T3EnvironmentLink::Status::reachable});
+    f.t3.projectsByEnvironment["desktop"] = {{"project","Desktop fixture",{}}};
+    constexpr auto back = "Move back to the directly connected default";
+    f.script(back,{change(id,{{"environment","desktop"}})});
+    f.receive("move-back-to-direct-default",back);
+    check(f.lastTurn()[0].at("result").at("ok") == true,"the Bot's default ID no longer selected its direct route");
+    f.t3.finish("run-2","Cloud work settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 3; },"the direct default did not launch");
+    const auto& direct = f.t3.sent.back();
+    check(direct.environmentId == "desktop" && direct.projectId == "project" &&
+          (direct.gatewayEnvironmentId.empty() || direct.gatewayEnvironmentId == "desktop"),
+          "a linked route replaced the Bot's direct default");
 }
 
 void conflictingDiscoveryDoesNotMoveTask() {
