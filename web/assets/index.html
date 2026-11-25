@@ -186,6 +186,13 @@
       </button>
       <div class="composer-container" id="composer-container" hidden>
         <p id="view-only-notice" class="view-only-notice" role="status" hidden>View only</p>
+        <div id="bot-paused-banner" class="bot-paused-banner" hidden>
+          <div>
+            <p class="bot-paused-title">This Bot is paused</p>
+            <p id="bot-paused-description" class="bot-paused-description" role="status"></p>
+          </div>
+          <button id="resume-bot" class="dialog-button primary" type="button" aria-describedby="bot-paused-description">Resume</button>
+        </div>
         <form id="composer" class="composer">
           <div id="decision-reply-context" class="decision-reply-context" hidden>
             <svg class="decision-reply-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>
@@ -229,6 +236,17 @@
     <div id="detail-body" class="dialog-body"></div>
   </dialog>
   <dialog id="bot-editor" class="bot-editor-dialog" aria-labelledby="studio-title"></dialog>
+  <dialog id="bot-pause" class="detail bot-pause-dialog accent-scope" aria-labelledby="bot-pause-title" aria-describedby="bot-pause-description">
+    <div class="dialog-head"><h2 id="bot-pause-title"></h2></div>
+    <div class="dialog-body">
+      <p id="bot-pause-description"></p>
+      <p id="bot-pause-feedback" class="dialog-feedback" role="status"></p>
+      <div class="bot-pause-actions">
+        <button id="bot-pause-cancel" type="button" class="dialog-button quiet" autofocus>Cancel</button>
+        <button id="bot-pause-confirm" type="button" class="dialog-button primary"></button>
+      </div>
+    </div>
+  </dialog>
   <dialog id="bot-delete" class="detail bot-delete-dialog" aria-labelledby="bot-delete-title" aria-describedby="bot-delete-description">
     <div class="dialog-head"><h2 id="bot-delete-title"></h2></div>
     <div class="dialog-body">

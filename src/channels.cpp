@@ -394,7 +394,8 @@ WHERE a.id=? AND length(CAST(a.html AS BLOB))<=? AND d.state IN ('unknown','acce
 void Store::Impl::queueChannelReply(Id source, Id reply, const Json& data) {
     exec(R"SQL(
 INSERT INTO channel_deliveries(id,source_id,reply_id,operation,payload)
-SELECT ?,message_id,?,'reply',? FROM channel_messages WHERE message_id=?
+SELECT ?,c.message_id,?,'reply',? FROM channel_messages c JOIN messages m ON m.id=c.message_id
+WHERE c.message_id=? AND NOT EXISTS (SELECT 1 FROM bot_pauses p WHERE p.bot=m.bot_id)
 ON CONFLICT(reply_id) DO NOTHING)SQL",
          {"reply-" + std::to_string(reply) + "-" + actionId(),
           reply,Json{{"text",data.at("text")},{"suggestions",data.value("suggestions",Json::array())}},source});
@@ -584,10 +585,18 @@ bool Store::Impl::channelDeliveryDue() const {
                                      " AND next_attempt<=? LIMIT 1",{unixTime()}).next();
 }
 
+void Store::Impl::dropPausedBotDeliveries(std::string_view bot) {
+    exec(R"SQL(
+UPDATE channel_deliveries SET state='rejected',reason=? WHERE state IN ('pending','unknown')
+AND source_id IN (SELECT id FROM messages WHERE bot_id=?)
+)SQL",{botPausedMessage,bot});
+}
+
 void Store::Impl::deliverChannels(std::stop_token shutdown) {
     std::unique_lock deliveryLock(deliveryMutex,std::try_to_lock);
     if (!deliveryLock.owns_lock()) return;
     for (int i = 0; i < 20 && !shutdown.stop_requested(); ++i) {
+        const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::shared);
         std::shared_ptr<ChannelTransport> transport;
         ChannelOrigin origin{};
         std::string key, operation, state, bot;

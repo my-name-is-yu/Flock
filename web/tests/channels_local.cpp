@@ -185,6 +185,26 @@ void channelEndpoints(const std::filesystem::path& database) {
     reviewBrowser.post("/api/channels/local-connections/disconnect",{{"id",id}});
     Browser::checked(sessionBridge.Post(endpoint,bridgeIdentity,request.dump(),"application/json"),403);
     check(reviewBrowser.get("/api/channels/local-connections")[0]["status"] == "disconnected","Local decision endpoints");
+    event["externalMessageId"] = "queued-before-pause";
+    const auto accepted = Browser::checked(sessionBridge.Post(imessage,credential,event.dump(),"application/json"),201);
+    const auto sentBeforePause = transport->replies.size();
+    store.setBotPaused(owner,"release",true);
+    check(Browser::checked(sessionBridge.Post(imessage,credential,event.dump(),"application/json"),201) == accepted,
+          "Pause changed an existing channel receipt");
+    event["externalMessageId"] = "while-paused";
+    for (const auto& path : {slack,imessage}) {
+        const auto paused = Browser::checked(sessionBridge.Post(path,credential,event.dump(),"application/json"),409);
+        check(paused.at("error") == botPausedMessage,"Channel did not explain why the Bot refused a message");
+    }
+    runtime.runConversations();
+    store.setBotPaused(owner,"release",false);
+    runtime.runConversations();
+    check(transport->replies.size() == sentBeforePause,"A channel reply escaped pause or replayed on resume");
+    event["externalMessageId"] = "after-resume";
+    event["text"] = "New message";
+    Browser::checked(sessionBridge.Post(imessage,credential,event.dump(),"application/json"),201);
+    runtime.runConversations();
+    check(transport->replies.size() == sentBeforePause + 1,"A resumed Bot could not reply to a new channel message");
     event["externalMessageId"] = "queued-before-revocation";
     Browser::checked(sessionBridge.Post(slack,credential,event.dump(),"application/json"),201);
     const auto sentBeforeRevocation = transport->replies.size();

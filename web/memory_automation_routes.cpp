@@ -127,8 +127,12 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
     server.Post(R"(/api/webhooks/([A-Za-z0-9][A-Za-z0-9_.-]*))",[&](const Request& req, Response& res) {
         handle(req,res,[&] {
             const auto args = body(req);
-            const auto result = store.receiveWebhook(person(callbacks,req),req.matches[1].str(),
+            auto result = store.receiveWebhook(person(callbacks,req),req.matches[1].str(),
                 args.at("externalEventId").get<std::string>(),args.at("event"),callbacks.clock());
+            if (result.contains("skippedBots") && result.at("tasks").empty()) {
+                result["error"] = "bot_paused";
+                return reply(res,409,result);
+            }
             reply(res,202,result);
         });
     });

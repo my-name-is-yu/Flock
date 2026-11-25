@@ -1149,6 +1149,31 @@ void recurringRequestStatus(const std::filesystem::path& path) {
           "canceled configured request still appeared scheduled");
 }
 
+void pausedWebhookStatus(const std::filesystem::path& path) {
+    Store store(path);
+    auto web = callbacks();
+    const auto now = web.clock();
+    const auto trigger = [&](std::string_view bot, std::string_view source) {
+        store.createAutomation(localOwner,web.intake(bot,"Check deployment"),
+            {{"kind","trigger"},{"source",source},{"request","Check deployment"}},now);
+    };
+    trigger("release","release-only");
+    trigger("release","shared");
+    trigger("triage","shared");
+    store.setBotPaused(localOwner,"release",true);
+
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server);
+    const Json payload{{"externalEventId","event-1"},{"event",Json::object()}};
+    const auto paused = browser.post("/api/webhooks/release-only",payload,409);
+    check(paused.at("error") == "bot_paused" && paused.at("tasks").empty() &&
+          paused.at("message").get<std::string>().find("paused") != std::string::npos,
+          "An entirely paused webhook did not explain the refusal");
+    const auto shared = browser.post("/api/webhooks/shared",payload,202);
+    check(shared.at("skippedBots") == Json::array({"release"}) && shared.at("tasks").size() == 1 &&
+          shared.at("tasks").front().at("botId") == "triage","A mixed webhook did not report both outcomes");
+}
+
 void watchedBotView(const std::filesystem::path& path) {
     Store store(path), cli(path);
     auto web = callbacks();
@@ -2054,6 +2079,7 @@ int main() {
         notificationEvents(directory.path / "notifications.db");
         failedCompletion(directory.path / "failed-completion.db");
         recurringRequestStatus(directory.path / "recurring-requests.db");
+        pausedWebhookStatus(directory.path / "paused-webhooks.db");
         watchedBotView(directory.path / "watched-bot-view.db");
         eventStream(directory.path / "events.db");
         conversationPermissions(directory.path / "conversation-permissions.db");

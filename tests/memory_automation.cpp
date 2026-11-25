@@ -425,6 +425,59 @@ void downtime(const std::filesystem::path& db) {
     }
 }
 
+void pausedSchedules(const std::filesystem::path& db) {
+    const auto now = utc(2026,1,4);
+    const auto first = now + 60, resumedAt = now + 5 * 60, next = resumedAt + 60;
+    const Json recurring{{"kind","schedule"},{"cron","* * * * *"},{"timezone","Etc/UTC"},{"request","Recurring check"}};
+    auto configured = alpha;
+    configured.request = "Configured check";
+    const ConfiguredSchedule schedule{"configured","* * * * *","Etc/UTC",configured};
+    const auto reminder = [&](Store& store, const Intake& target, Seconds fireAt) {
+        return store.createAutomation(owner,target,{{"kind","reminder"},{"timezone","Etc/UTC"},
+            {"fireAt",fireAt},{"request","Reminder"}},now).at("id");
+    };
+    Id duringDowntime, afterResume;
+    {
+        Store store(db);
+        store.createAutomation(owner,alpha,recurring,now);
+        check(store.syncSchedules(alpha.botId,{schedule},now + 1).empty(),"Could not import configured schedule");
+        reminder(store,alpha,first + 15);
+        duringDowntime = reminder(store,alpha,first + 75);
+        afterResume = reminder(store,alpha,next + 15);
+        reminder(store,beta,first + 15);
+        store.setBotPaused(owner,alpha.botId,true);
+    }
+    {
+        Store restarted(db);
+        check(restarted.botPaused(alpha.botId),"Bot pause was lost on restart");
+        restarted.fireDueAutomations(first + 15);
+        check(restarted.tasks(alpha.botId).empty() && restarted.tasks(beta.botId).size() == 1,
+              "A paused schedule fired or a different Bot's reminder was skipped");
+    }
+    {
+        Store restarted(db);
+        restarted.setBotPaused(owner,alpha.botId,false,[&] { return resumedAt; });
+        restarted.fireDueAutomations(resumedAt);
+        check(restarted.tasks(alpha.botId).empty(),"Resume replayed missed occurrences");
+        const auto schedules = restarted.automations(owner,alpha.botId).at("automations");
+        const auto missed = std::ranges::find_if(schedules,[&](const Json& item) {
+            return item.at("id") == duringDowntime;
+        });
+        check(missed != schedules.end() && missed->at("status") == "canceled",
+              "A reminder due during paused downtime was left pending");
+        restarted.fireDueAutomations(next);
+        const auto tasks = restarted.tasks(alpha.botId);
+        check(tasks.size() == 2 && std::ranges::all_of(tasks,[&](const Json& task) {
+            const auto& trigger = task.at("trigger");
+            return trigger.at("targetTime") == next && trigger.at("occurrenceCount") == 1;
+        }),"First recurring requests after resume included paused occurrences");
+        restarted.fireDueAutomations(next + 15);
+        check(restarted.tasks(alpha.botId).size() == 3 &&
+              restarted.tasks(alpha.botId).front().at("trigger").at("triggerId") == afterResume,
+              "A reminder due after resume did not fire");
+    }
+}
+
 void isolatedFirings(const std::filesystem::path& db) {
     Store store(db);
     const auto now = utc(2026,3,1,1) + 30 * 60;
@@ -525,6 +578,48 @@ void webhookPolicy(const std::filesystem::path& db) {
     const auto replay = restarted.receiveWebhook(sender,"deploy","evt-1",event,now);
     check(replay.at("duplicate") == true && replay.at("tasks") == alphaReceipt && restarted.tasks().size() == 2,
           "Webhook replay leaked unrelated receipts or queued duplicate work");
+}
+
+void pausedWebhookFanout(const std::filesystem::path& db) {
+    const auto now = utc(2026,1,4);
+    const Person sender{"alpha-ingress"};
+    const Json trigger{{"kind","trigger"},{"source","deploy"},{"request","Check deployment"}};
+    const auto deliver = [&](Store& store, const Person& actor, std::string_view eventId) {
+        return store.receiveWebhook(actor,"deploy",eventId,Json::object(),now);
+    };
+    const Json paused = Json::array({alpha.botId});
+    Json activeReceipts;
+    {
+        Store store(db);
+        store.policy().setMember(owner,alpha.botId,sender.id,true);
+        store.createAutomation(owner,alpha,trigger,now);
+        store.createAutomation(owner,beta,trigger,now);
+        store.setBotPaused(owner,alpha.botId,true);
+
+        const auto shared = deliver(store,owner,"shared");
+        activeReceipts = shared.at("tasks");
+        check(shared.at("skippedBots") == paused && activeReceipts.size() == 1 &&
+              activeReceipts.front().at("botId") == beta.botId,
+              "Paused recipient blocked the active webhook recipient");
+        const auto privateEvent = deliver(store,sender,"alpha-only");
+        check(privateEvent.at("skippedBots") == paused && privateEvent.at("tasks").empty() &&
+              !privateEvent.at("message").get<std::string>().empty() && store.tasks(alpha.botId).empty(),
+              "Webhook to a paused Bot was not refused clearly");
+    }
+    {
+        Store restarted(db);
+        restarted.setBotPaused(owner,alpha.botId,false,[&] { return now + 1; });
+        const auto shared = deliver(restarted,owner,"shared");
+        const auto privateEvent = deliver(restarted,sender,"alpha-only");
+        check(shared.at("duplicate") == true && shared.at("skippedBots") == paused &&
+              shared.at("tasks") == activeReceipts && privateEvent.at("duplicate") == true &&
+              privateEvent.at("skippedBots") == paused && privateEvent.at("tasks").empty(),
+              "A webhook skipped during pause was replayed after restart");
+        const auto fresh = deliver(restarted,owner,"fresh");
+        check(fresh.at("tasks").size() == 2 && !fresh.contains("skippedBots") &&
+              restarted.tasks(alpha.botId).size() == 1 && restarted.tasks(beta.botId).size() == 2,
+              "A fresh webhook did not reach both Bots after resume");
+    }
 }
 
 void webhookMatchesRawPublicFields(const std::filesystem::path& db) {
@@ -649,9 +744,11 @@ int main() {
         memoryRedactionLimit(temp.path / "memory-limit.sqlite3");
         configuredRequestLimit(temp.path / "schedule-limit.sqlite3");
         downtime(temp.path / "downtime.sqlite3");
+        pausedSchedules(temp.path / "paused-schedules.sqlite3");
         isolatedFirings(temp.path / "firings.sqlite3");
         automationConversation(temp.path / "webhook.sqlite3");
         webhookPolicy(temp.path / "webhook-policy.sqlite3");
+        pausedWebhookFanout(temp.path / "paused-webhook.sqlite3");
         webhookMatchesRawPublicFields(temp.path / "webhook-filters.sqlite3");
         webhookRechecksSavedMetadata(temp.path / "webhook-saved.sqlite3");
         webhookEventIdsStayPrivate(temp.path / "webhook-metadata.sqlite3");

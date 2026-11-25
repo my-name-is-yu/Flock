@@ -143,6 +143,35 @@ void credentialScopes() {
           "A valid credential could call the other route's tool");
 }
 
+void pausedBotRefusesExternalMessages() {
+    TestDirectory dir;
+    Store store(dir.path/"flock.sqlite3");
+    const auto token = ExternalMcp(store).connect(localOwner.id,{"release","triage"}).bearerToken;
+    const auto server = startWeb(store,0,callbacks());
+    Mcp client(*server,token);
+    Json ask{{"bot","release"},{"text","Check the release"},{"requestId","before-pause"}};
+    const auto receipt = client.success(submitTool,ask);
+    store.setBotPaused(localOwner,"release",true);
+    check(client.success(submitTool,ask) == receipt,"Pause changed an existing external MCP receipt");
+
+    ask["requestId"] = "while-paused";
+    const auto expectPaused = [&](std::string_view tool, const Json& arguments) {
+        const auto result = client.call(tool,arguments);
+        check(result.value("isError",false) && result.at("content").at(0).at("text") == botPausedMessage,
+              "An external MCP request did not return the paused response");
+    };
+    expectPaused(submitTool,ask);
+    expectPaused(answerTool,{{"taskId",receipt.at("taskId")},{"waitId",1},{"targetRevision",0},
+                            {"targetGeneration",0},{"text","Use main"}});
+    check(client.success(statusTool,{{"taskId",receipt.at("taskId")}}).at("status") == "cancelled" &&
+          store.tasks().size() == 1,"Pause did not close the old request or refused requests created work");
+
+    const auto other = client.success(submitTool,{{"bot","triage"},{"text","Check triage"},{"requestId","other-bot"}});
+    check(other.at("status") == "received","Pause prevented submitting to another Bot");
+    store.setBotPaused(localOwner,"release",false);
+    check(client.success(submitTool,ask).at("taskId") != receipt.at("taskId"),"Resume did not admit fresh external work");
+}
+
 void roundTrip() {
     TestDirectory dir;
     const auto database = dir.path/"flock.sqlite3";
@@ -402,6 +431,7 @@ void hostedSessionLinks() {
 int main() {
     try {
         credentialScopes();
+        pausedBotRefusesExternalMessages();
         roundTrip();
         hostedSessionLinks();
         peerCompletion(peerLink,peerLink);

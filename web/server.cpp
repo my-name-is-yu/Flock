@@ -339,6 +339,7 @@ public:
         server_.Post("/api/bots",[this](const Request& req, Response& res) { saveBot(req,res,false); });
         server_.Post("/api/bots/profile",[this](const Request& req, Response& res) { saveBot(req,res,true); });
         server_.Post("/api/bots/delete",[this](const Request& req, Response& res) { deleteBot(req,res); });
+        server_.Post("/api/bots/pause",[this](const Request& req, Response& res) { setBotPaused(req,res); });
         server_.Post("/api/messages",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Message); });
         server_.Post("/api/operations",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Operation); });
 
@@ -548,6 +549,23 @@ private:
         json(res,200,{{"ok",true}});
     }
 
+    void setBotPaused(const Request& req, Response& res) {
+        if (req.body.size() > web::maxStandardPayload) return error(res,413,"payload_too_large");
+        const auto body = Json::parse(req.body,nullptr,false);
+        if (!body.is_object()) return error(res,400,"invalid_json");
+        const auto bot = web::field(body,"botId");
+        if (!validBotId(bot)) return error(res,400,"invalid_bot");
+        const auto paused = body.find("paused");
+        if (paused == body.end() || !paused->is_boolean()) return error(res,400,"invalid_paused");
+        const auto actor = web::person(callbacks_,req);
+        if (!store_.policy().allows(actor,Action::bot_settings,bot)) return error(res,403,"access_denied");
+        if (findBot(bot).is_null()) return error(res,404,"bot_not_found");
+        try { store_.setBotPaused(actor,bot,paused->get<bool>()); }
+        catch (const DecisionDenied&) { return error(res,403,"access_denied"); }
+        changes_.rescan();
+        json(res,200,{{"paused",*paused}});
+    }
+
     Json bots() const {
         auto list = callbacks_.bots();
         if (!list.is_array()) throw std::runtime_error("Bot descriptors must be an array");
@@ -612,6 +630,7 @@ private:
         auto policy = store_.policy();
         view["canDecide"] = policy.allows(actor,Action::bot_decide,bot);
         view["bot"]["canDelete"] = policy.allows(actor,Action::bot_settings,bot);
+        view["bot"]["paused"] = store_.botPaused(bot);
         return view;
     }
 
@@ -685,6 +704,7 @@ private:
             const auto id = web::field(bot,"id");
             bot = redactBot(id,bot);
             bot["canDelete"] = policy.allows(person,Action::bot_settings,id);
+            bot["paused"] = store_.botPaused(id);
             if (auto about = bot.find("about"); about != bot.end()) {
                 const auto& soul = about->get_ref<const std::string&>();
                 const auto firstLine = std::string_view(soul).substr(0,soul.find_first_of("\r\n"));
@@ -759,6 +779,7 @@ private:
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
         catch (const DecisionDenied&) { error(res,403,"access_denied"); }
+        catch (const BotPaused& e) { json(res,409,{{"error","bot_paused"},{"message",e.what()}}); }
         catch (const RequestChanged&) { error(res,409,"request_changed"); }
         catch (const Conflict&) {
             error(res,409,mutation == Mutation::Message ? "message_conflict" : "operation_conflict");

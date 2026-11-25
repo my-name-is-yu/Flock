@@ -198,6 +198,7 @@ button.settings-row:hover, a.settings-row:hover { background: var(--detail-card-
 button.settings-row:active, a.settings-row:active { background: var(--selected); }
 button.settings-row:focus-visible, a.settings-row:focus-visible { outline-offset: -2px; border-radius: var(--radius-lg); }
 .settings-row-value { margin-left: auto; color: var(--text-2); }
+.settings-row > .dialog-button { flex: none; }
 .settings-row-switch { flex: none; margin-inline-start: auto; inline-size: 1.1rem; block-size: 1.1rem; accent-color: var(--text-2); }
 .settings-row-label .settings-card-feedback { display: block; }
 a.settings-row svg { margin-left: auto; }
@@ -275,6 +276,8 @@ a.settings-row svg { margin-left: auto; }
 .dialog-button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 88%, var(--text)); }
 .dialog-feedback { color: var(--danger); font-size: var(--text-sm); }
 .dialog-feedback:empty { margin-top: calc(-1 * var(--detail-gap)); }
+.bot-pause-dialog { width: min(26rem, calc(100% - 1.5rem)); }
+.bot-pause-actions { display: flex; justify-content: flex-end; gap: .5rem; }
 
 .dialog-button {
   display: inline-flex; align-items: center; justify-content: center; gap: .3rem; min-height: 2.3rem;

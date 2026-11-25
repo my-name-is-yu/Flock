@@ -38,6 +38,46 @@ void unsupportedSchemaLeavesDatabaseIntact(const std::filesystem::path& file, co
           "opening unsupported state did not fail with guidance or changed the original database");
 }
 
+void pauseSchemaPreservesExistingSessionReplies(const std::filesystem::path& file) {
+    {
+        Store store(file);
+        store.receiveWeb(localOwner,{"release","Check staging","env","proj"},
+                         "before-pause-schema","Check staging");
+    }
+    {
+        sqlite3* raw = nullptr;
+        const auto opened = sqlite3_open(file.c_str(),&raw);
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+        check(opened == SQLITE_OK,"could not open the existing Flock database fixture");
+        constexpr auto schema = R"SQL(
+DROP TABLE bot_pauses;
+DROP TABLE session_message_sends;
+DROP INDEX session_message_interrupts_due;
+DROP INDEX session_message_missing_targets;
+ALTER TABLE session_message_waits DROP COLUMN run_finished;
+ALTER TABLE session_message_waits DROP COLUMN interrupt_at;
+ALTER TABLE session_message_waits DROP COLUMN session_missing;
+INSERT INTO session_message_waits(message_id,bot,environment,thread,run,title)
+SELECT id,'release','env','thread','existing-run','Staging' FROM messages
+WHERE client_message_id='before-pause-schema';
+)SQL";
+        check(sqlite3_exec(db.get(),schema,nullptr,nullptr,nullptr) == SQLITE_OK && sqlite3_changes(db.get()) == 1,
+              "could not prepare the pre-Pause v9 database: " + std::string(sqlite3_errmsg(db.get())));
+    }
+    {
+        Store store(file);
+        store.setBotPaused(localOwner,"release",true);
+    }
+    {
+        Store store(file);
+        check(store.botPaused("release"),"Pause did not persist in the existing v9 database");
+        bool stopPending = false;
+        try { store.deleteBot(localOwner,"release"); }
+        catch (const BotBusy&) { stopPending = true; }
+        check(stopPending,"opening the existing v9 database discarded the pending Session reply");
+    }
+}
+
 void tickUntil(Runtime& runtime, const auto& satisfied, std::string_view failure) {
     for (int i = 0; i < 12 && !satisfied(); ++i) runtime.tick();
     check(satisfied(), failure);
@@ -110,6 +150,7 @@ int main() {
         unsupportedSchemaLeavesDatabaseIntact(path / "version-8.db",
             "PRAGMA application_id=0x464c4f43; PRAGMA user_version=8;"
             "CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES (1);");
+        pauseSchemaPreservesExistingSessionReplies(path / "pre-bot-pause.db");
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;

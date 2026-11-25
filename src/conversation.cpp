@@ -93,6 +93,13 @@ void Store::Impl::upgradeSessionMessageWaitSchema() {
     addColumn("action_id","TEXT REFERENCES outbox(id)");
     addColumn("delivery","TEXT NOT NULL DEFAULT 'started'");
     addColumn("link","TEXT NOT NULL DEFAULT ''");
+    addColumn("run_finished","INTEGER NOT NULL DEFAULT 0");
+    addColumn("interrupt_at","INTEGER");
+    addColumn("session_missing","INTEGER NOT NULL DEFAULT 0");
+    exec("CREATE INDEX IF NOT EXISTS session_message_interrupts_due ON session_message_waits(interrupt_at) "
+         "WHERE interrupt_at IS NOT NULL");
+    exec("CREATE INDEX IF NOT EXISTS session_message_missing_targets ON session_message_waits(task_id,action_id) "
+         "WHERE session_missing=1");
 }
 
 Id Store::Impl::addRevision(Json& task, std::string_view intent, std::string_view doneWhen, Id source) {
@@ -170,6 +177,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
         const auto existing = p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
         if (existing) receipt = *existing;
         else {
+            if (p_->botPaused(bot)) throw BotPaused{};
             const auto routing = route();
             if (routing.botId != bot) throw Conflict("Invalid Bot conversation route");
             const auto id = p_->enqueueConversation(actor,routing,source,clientId,text,replyTo);
@@ -185,6 +193,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
 Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
                                     std::string_view clientId, std::string_view text, Id replyTo,
                                     const SessionOrigin* origin, const Json& invitation) {
+    if (botPaused(routing.botId)) throw BotPaused{};
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     modelCallLimit(routing.config);
     Json saved{{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config}};

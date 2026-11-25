@@ -246,17 +246,83 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     if (sends() != before + 1 || model.result.value("delivery","") != "queued")
         throw std::runtime_error("Approved Session send did not queue: " + model.result.dump());
     const auto wire = effects("t3_thread_send").back();
-    const auto requestId = "flock-turn-" + std::to_string(origin.at("messageId").get<Id>()) + "-1";
+    const auto requestId = wire.at("clientRequestId").get<std::string>();
     check(wire.at("mode") == "queue" && wire.at("threadId") == thread &&
-          wire.at("message") == "Ernest: Check the fixture output" &&
-          wire.at("clientRequestId") == requestId,"Wrong Session send arguments");
+          requestId.starts_with("flock-turn-") &&
+          wire.at("message") == sessionPrompt(requestId,"Ernest: Check the fixture output"),"Wrong Session send arguments");
+    Command reconcile;
+    reconcile.tool = "message_session";
+    reconcile.environmentId = "env-1";
+    reconcile.target.threadId = thread;
+    reconcile.instruction = "Ernest: Check the fixture output";
+    reconcile.actionId = requestId;
+    const auto checkRecoveredSend = [&](std::string_view delivery) {
+        const auto recovered = t3.reconcile(reconcile);
+        check(recovered.kind == Delivery::Kind::Accepted && recovered.run.threadId == thread &&
+              recovered.run.runId == "bot-run-" + std::to_string(sends()) && sends() == before + 1 &&
+              recovered.delivery == delivery,
+              "Session send reconciliation missed the exact Run or resent work");
+    };
+    fixture({{"reconcileSessionSend",true}});
+    checkRecoveredSend("queued");
+    fixture({{"botRunStatus","running"}});
+    checkRecoveredSend("started");
+    fixture({{"directStopReadError","run_not_found"}});
+    check(t3.reconcile(reconcile).kind == Delivery::Kind::Unknown,
+          "A missing Run incorrectly cleared a Session send with lost receipt");
+    fixture({{"directStopReadError","thread_not_found"}});
+    check(t3.reconcile(reconcile).kind == Delivery::Kind::NotAccepted,
+          "A confirmed deleted Session did not settle an unconfirmed send");
+    fixture({{"directStopReadError",nullptr}});
+    fixture({{"reconcileSessionSend",false},{"botRunStatus","queued"}});
     check(receive("supervised").at("messageId") == origin.at("messageId"),"Duplicate intake created another turn");
     fixture({{"personFinished",true}});
     runtime->runConversations();
     check(model.wakes.empty() && sends() == before + 1,"The person's completion woke the Bot or resent the step");
-    fixture({{"differentWaitRun",true}});
+    const RunRef directRun{thread,"bot-run-" + std::to_string(sends()),{},{}};
+    const auto previousInterrupts = effects("t3_thread_interrupt").size();
+    fixture({{"botRunStatus","completed"},{"botRunDelegatesPending",true}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::AlreadyTerminal &&
+          effects("t3_thread_interrupt").size() == previousInterrupts,
+          "A completed reply stop depended on the shared Session's delegated work");
+    fixture({{"botRunDelegatesPending",false},{"botRunTimedOut",true}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::NoActiveRun,
+          "A completed reply stop settled while its restart continuation was pending");
+    fixture({{"botRunTimedOut",false},{"botRunStatus","running"},{"botRunContinuation","continued-reply"}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::Requested &&
+          effects("t3_thread_interrupt").size() == previousInterrupts + 1 &&
+          effects("t3_thread_interrupt").back() == Json{{"threadId",thread},{"runId","continued-reply"}} &&
+          t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::AlreadyTerminal,
+          "Pause did not interrupt and settle the exact restart continuation");
+    fixture({{"botRunContinuation",""}});
+    fixture({{"botRunStatus","queued"},{"differentWaitRun",true}});
+    bool stopRejected = false;
+    try { t3.interruptSessionMessage("env-1",directRun); }
+    catch (const std::exception&) { stopRejected = true; }
+    check(stopRejected,"A different Run's wait response settled a Session message interruption");
     runtime->runConversations();
     check(model.wakes.empty(),"A different Run's wait response woke the Bot");
+    fixture({{"differentWaitRun",false},{"directStopWaitError","thread_not_found"}});
+    const auto requireStopRetry = [&] {
+        bool retry = false;
+        try { t3.interruptSessionMessage("env-1",directRun); }
+        catch (const std::exception&) { retry = true; }
+        check(retry,"An unconfirmed missing Session incorrectly settled interruption");
+    };
+    requireStopRetry();
+    fixture({{"directStopReadError","capability_denied"}});
+    requireStopRetry();
+    fixture({{"directStopReadError",nullptr},{"directStopWaitError","run_not_found"}});
+    requireStopRetry();
+    fixture({{"directStopReadError","thread_not_found"}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::TargetGone,
+          "A missing Run in a confirmed deleted Session did not finish interruption");
+    fixture({{"directStopWaitError","invalid_request"},{"directStopReadError","invalid_request"},
+             {"directStopWaitErrorMessage","The thread was not found."},
+             {"directStopReadErrorMessage","The thread was not found."}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::TargetGone,
+          "A deleted Session reported by older T3 did not finish interruption");
+    fixture({{"directStopWaitError",nullptr},{"directStopReadError",nullptr}});
     fixture({{"differentWaitRun",false},{"transientWakeFailure",true}});
     runtime->runConversations();
     check(model.wakes.empty(),"A transient failure consumed the Run wait");

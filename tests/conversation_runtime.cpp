@@ -223,7 +223,10 @@ struct SimulatedT3 : T3 {
         std::lock_guard lock(stateMutex);
         reconciled.push_back(command);
         if (!deliveryVisible || !deliveries.contains(command.actionId)) return {};
-        return {Delivery::Kind::Accepted,deliveries.at(command.actionId),{}};
+        const auto& run = deliveries.at(command.actionId);
+        const auto delivery = command.tool != "message_session" ? "" :
+            observations.at(run.runId).status == "queued" ? "queued" : "started";
+        return {Delivery::Kind::Accepted,run,{},false,delivery};
     }
     Observation observe(const std::string&,const Json&,const RunRef& run) override {
         std::function<void(const RunRef&)> gate;
@@ -396,6 +399,60 @@ CREATE TABLE session_message_waits(
     }
     Json lastTurn() { return model.turnInputs.back().event.at("turn"); }
 };
+
+void pauseCancelsOpenWorkAcrossRestart() {
+    Fixture f;
+    const auto active = f.store->submit(f.routing("Active"));
+    f.reach(active,"running");
+    const auto queued = f.store->submit(f.routing("Queued"));
+    const auto pending = f.enqueue("queued-before-pause","Queued message");
+    const auto pausedRun = f.task(active).at("activeRun").at("runId").get<std::string>();
+    {
+        Store writer(f.dir/"state.db");
+        writer.setBotPaused(localOwner,"alpha",true);
+    }
+    check(f.store->botPaused("alpha") && f.task(active)["state"] == "cancelling" &&
+          f.task(queued)["state"] == "cancelled", "pause did not cancel active and queued work");
+    check(f.response(pending).at("text") == botPausedMessage,"pause did not close a queued message");
+    try {
+        f.enqueue("paused","Refused message");
+        check(false,"pause accepted a new message");
+    } catch (const BotPaused&) {}
+    try {
+        f.store->submit(f.routing("Refused request"));
+        check(false,"pause accepted a new task");
+    } catch (const BotPaused&) {}
+
+    f.restart();
+    check(f.store->botPaused("alpha"),"pause did not survive a Runtime restart");
+    f.tick(3);
+    check(f.t3.interrupted == std::vector{std::pair{std::string("desktop"),pausedRun}},
+          "pause did not interrupt the exact Run through the stop path");
+    f.t3.finish(pausedRun,"Stopped");
+    f.reach(active,"cancelled");
+    check(f.t3.sent.size() == 1 && f.model.turnInputs.empty(),"paused work was processed");
+
+    f.store->setBotPaused(localOwner,"alpha",false,[&] { return f.now; });
+    f.script("New message",{say("Ready again.")});
+    check(f.response(f.receive("new","New message")).at("text") == "Ready again.",
+          "resume did not restore new conversations");
+    check(f.model.turnInputs.size() == 1 && f.task(queued)["state"] == "cancelled",
+          "resume replayed unfinished work");
+}
+
+void pauseDiscardsInFlightModelResult() {
+    Fixture f;
+    f.script("Start work",{start()});
+    f.model.beforeTurn = [&](const ModelInput&) {
+        Store writer(f.dir/"state.db");
+        writer.setBotPaused(localOwner,"alpha",true);
+        writer.setBotPaused(localOwner,"alpha",false,[&] { return f.now; });
+    };
+    const auto receipt = f.receive("in-flight","Start work");
+    f.tick(3);
+    check(f.response(receipt).at("text") == botPausedMessage && f.t3.sent.empty() &&
+          f.store->activeTasks("alpha").empty(),"an in-flight model response acted after pause and resume");
+}
 
 void durableInboxAndTargetedRevision() {
     Fixture f;
@@ -3022,6 +3079,73 @@ void savedFollowupHoldsSlotUntilItsReceiptAndRunSettle() {
     }
 }
 
+void pauseRecoversTheRetainedSavedFollowup(bool sessionMissing = false) {
+    Fixture f;
+    const auto taskId = oneLinkedDestinationTask(f,"pause-recovery-parent","Start linked work before Pause");
+    f.advanceUntil([&] {
+        const auto task = f.task(taskId);
+        return task.contains("runResults") && destinationRunFor(task,"cloud").value("status","") == "running";
+    },"the original destination Run did not start");
+    const auto original = destinationRunFor(f.task(taskId),"cloud").at("runId").get<std::string>();
+    f.t3.loseNextSend = true;
+    f.t3.queueNextMessage = true;
+    f.t3.deliveryVisible = false;
+    constexpr auto instruction = "Queue another Run in the saved destination";
+    f.script(instruction,{sendCloudFollowup(taskId)});
+    const auto receipt = f.receive("pause-recovery-send",instruction);
+    const auto messageId = receipt.at("messageId").get<Id>();
+    check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == "message_session","the follow-up did not reach T3");
+    const auto request = f.t3.sent.back().actionId;
+    const auto followup = f.t3.delivered(request);
+    f.t3.finish(original,"Original report stopped holding the destination");
+    f.advanceUntil([&] {
+        return destinationRunFor(f.task(taskId),"cloud").value("status","") == "confirmation_pending";
+    },"the lost receipt did not hold the destination");
+    f.store->setBotPaused(localOwner,"alpha",true);
+    f.restart();
+    f.runtime->runConversations();
+    const auto pending = persistedTaskDiagnostics(f,taskId,messageId);
+    const auto effect = Json::parse(pending.at("sendSteps").at(0).at(2).get<std::string>());
+    check(f.task(taskId).at("state") == "cancelling" && effect.at("requestId") == request &&
+          f.t3.reconciled.size() == 1 && f.t3.reconciled.front().actionId == request,
+          "Pause released an unresolved send, or recovered a different request");
+    f.t3.deliveryVisible = true;
+    if (sessionMissing) {
+        f.t3.loseNextStop = true;
+        f.t3.observations.at(followup.runId).kind = Observation::Kind::Unavailable;
+    }
+    f.now += 5;
+    f.runtime->runConversations();
+    const auto recovered = persistedTaskDiagnostics(f,taskId,messageId);
+    const auto run = destinationRunFor(f.task(taskId),"cloud");
+    check(run.at("runId") == followup.runId && run.at("gatewayEnvironmentId") == "desktop" &&
+          run.at("status") == "queued" && recovered.at("sendSteps").empty() &&
+          f.t3.interruptedOnlyVia("cloud",followup.runId,"desktop") && f.t3.sent.size() == 2,
+          ("Pause did not clear the matching effect and stop the exact recovered Run: " + recovered.dump()).c_str());
+    f.store->setBotPaused(localOwner,"alpha",false,[&] { return f.now; });
+    const auto sibling = oneLinkedDestinationTask(f,"pause-recovery-sibling","Queue behind the recovered Run");
+    f.tick();
+    check(f.task(sibling).at("state") == "queued","the recovered Run released the project before settlement");
+    if (sessionMissing) {
+        const auto detail = [&] { return destinationRunFor(f.task(taskId),"cloud").at("detail").get<std::string>(); };
+        check(detail() == "Flock could not confirm the Run's status in T3.",
+              "An unconfirmed stop was recorded as Session deletion");
+        f.t3.interruptOutcome = InterruptOutcome::TargetGone;
+        f.now += 5;
+        f.tick();
+        const auto deleted = detail();
+        check(deleted.find("Check its delegated Sessions in T3") != std::string::npos,
+              "A deleted Session left only a generic status");
+        f.restart();
+        f.tick();
+        check(f.task(taskId).at("state") == "cancelling" && f.task(sibling).at("state") == "queued" &&
+              detail() == deleted,"Deletion lost the explanation or released the project after restart");
+    }
+    f.t3.finish(followup.runId,"The recovered Run was stopped",true,"cancelled");
+    f.reach(taskId,"cancelled");
+    f.reach(sibling,"running");
+}
+
 void recoveredStopApprovalBelongsToTheStopRequester() {
     Fixture f;
     T3Connections(*f.store).connect("desktop",localOwner.id,48123);
@@ -4103,6 +4227,12 @@ int main(int argc, char** argv) {
             std::cout << "Saved destination follow-up stop passed with simulated T3\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "pause-recovered-followup") {
+            pauseRecoversTheRetainedSavedFollowup();
+            pauseRecoversTheRetainedSavedFollowup(true);
+            std::cout << "Pause recovered and stopped its saved destination follow-up\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "recovered-stop-policy") {
             recoveredDestinationStopHonorsPolicy();
             std::cout << "Recovered destination stop policy acceptance passed with simulated T3\n";
@@ -4118,6 +4248,8 @@ int main(int argc, char** argv) {
             std::cout << "Queued destination stop acceptance passed with simulated T3\n";
             return 0;
         }
+        pauseCancelsOpenWorkAcrossRestart();
+        pauseDiscardsInFlightModelResult();
         durableInboxAndTargetedRevision();
         existingSessionStartsNormalWork();
         sessionMemoryFollowsTheAcceptedVersion();
@@ -4184,6 +4316,8 @@ int main(int argc, char** argv) {
         uncertainSavedSessionSendRemainsHeldAfterAccessLoss();
         terminalAccessRoutesSettleOnlyPreparedSessionSends();
         savedFollowupHoldsSlotUntilItsReceiptAndRunSettle();
+        pauseRecoversTheRetainedSavedFollowup();
+        pauseRecoversTheRetainedSavedFollowup(true);
         recoveredStopApprovalBelongsToTheStopRequester();
         recoveredDestinationStopHonorsPolicy();
         startedRunOutboxApprovalIsStale();

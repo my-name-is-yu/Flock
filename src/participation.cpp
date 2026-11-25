@@ -277,11 +277,13 @@ JOIN session_participations p ON p.id=a.participation_id WHERE a.person_id=? AND
         return row.number(0);
     };
 
+    const SessionDispatchFileLock dispatch(db.path,SessionDispatchFileLock::Mode::shared);
     std::vector<std::string> environments;
     {
         std::lock_guard lock(db.mutex);
         authorizedPerson();
         if (const auto message = replay()) return message;
+        if (db.botPaused(bot)) throw BotPaused{};
         const auto settings = T3Connections(store_).settings(connection.personId);
         if (settings)
             for (const auto& environment : settings->environments)
@@ -390,6 +392,7 @@ bool Store::Impl::inviteSessionBot(const conversation::Message& message, int ste
                 throw Conflict("Bot access is required");
             if (!peers || std::ranges::none_of(peers(message.bot),[&](const PeerBot& peer) { return peer.intake.botId == bot; }))
                 throw Conflict("The destination Bot is unavailable or not allowed");
+            if (botPaused(bot)) throw BotPaused{};
             const auto read = Resource::sessionRead(target.environmentId,target.threadId);
             if (!policy.allows(message.bot,read) || !policy.allows(bot,read)) throw Conflict(unavailable);
             if (!policy.allows(message.bot,Action::environment_inspect,target.environmentId) ||
@@ -708,6 +711,10 @@ ORDER BY c.participation_id,c.run
             exec("UPDATE session_queue_cancellations SET state=? WHERE participation_id=? AND run=?",
                  {state,item.participant,item.run});
             if (outcome == QueueCancelOutcome::Cancelled) {
+                exec(R"SQL(
+UPDATE session_message_waits SET notified=1,run_finished=1,interrupt_at=NULL
+WHERE bot=(SELECT bot_id FROM session_participations WHERE id=?) AND environment=? AND thread=? AND run=?
+)SQL",{item.participant,item.target.environmentId,item.target.threadId,item.run});
                 auto run = query(R"SQL(
 SELECT r.task_id FROM runs r JOIN outbox o ON o.id=r.action_id
 WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
@@ -730,8 +737,11 @@ WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
         }
         transaction.commit();
     }
+    if (!stop.participation) {
+        interruptPausedSessionRuns(t3,shutdown);
+        return {};
+    }
     SessionStopResult result;
-    if (!stop.participation) return result;
     std::lock_guard lock(mutex);
     auto rows = query((stopCascade + R"SQL(
 SELECT state,count(*) FROM session_queue_cancellations WHERE stop_id=?2 AND participation_id IN stopping GROUP BY state

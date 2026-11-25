@@ -167,6 +167,15 @@ Json waitResponse(Client& client, const RunRef& run, WaitFor scope, int timeout)
     return response;
 }
 
+bool confirmsMissingSession(Client& client, const std::string& thread) {
+    try { threadHead(client,thread); }
+    catch (const Failure& failure) {
+        if (failure.reason != Failure::Reason::ThreadNotFound) throw;
+        return true;
+    }
+    return false;
+}
+
 RunWait parseRunWait(const Json& response) {
     auto id = str(response,"runId");
     if (id.empty()) invalidResponse();
@@ -610,6 +619,7 @@ void queuedMatches(Client& client, Scan& scan, const std::string& thread,
 
 Delivery reconcileWork(Client& client, const Command& command) {
     const bool launch = command.tool == "delegate";
+    const bool direct = command.tool == "message_session";
     const auto& destination = launch ? command.launchReceiptThreadId : command.target.threadId;
     const auto& hint = command.candidate.threadId;
     if (!destination.empty() && !hint.empty() && hint != destination)
@@ -619,19 +629,20 @@ Delivery reconcileWork(Client& client, const Command& command) {
     if (destination.empty() && !hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end())
         threads.push_back(hint);
     const auto expected = sessionPrompt(command.actionId,command.instruction);
-    std::map<std::pair<std::string, std::string>, RunRef> matches;
+    struct Match { RunRef run; bool queued; };
+    std::map<std::pair<std::string, std::string>, Match> matches;
     bool incomplete = false;
     for (const auto& threadId : threads) {
         scan.step();
         const auto head = threadHead(client, threadId);
         const auto& thread = head.at("thread");
-        if (str(thread, "projectId") != command.projectId ||
+        if ((!direct && str(thread, "projectId") != command.projectId) ||
             (launch && (str(thread, "createdBy") != "agent" || str(thread, "creationSource") != "mcp"))) continue;
-        if (command.tool == "start_in_session") {
+        if (direct || command.tool == "start_in_session") {
             std::set<std::string> queued;
             queuedMatches(client,scan,threadId,expected,queued);
             for (const auto& run : queued)
-                matches[{threadId,run}] = {threadId,run,str(thread,"link"),command.target.gatewayEnvironmentId};
+                matches[{threadId,run}] = {{threadId,run,str(thread,"link"),command.target.gatewayEnvironmentId},true};
         }
         walkThreadHistoryForward(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
             if (str(item, "type") != "user_message" || !localItem(item, threadId)) return true;
@@ -644,7 +655,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
                 const bool exact = full && *full == expected;
                 if (!full || (runId.empty() && exact)) incomplete = true;
                 if (exact && !runId.empty() && (launch || runId != command.target.runId))
-                    matches[{threadId, runId}] = {threadId, runId, str(thread, "link"),command.target.gatewayEnvironmentId};
+                    matches[{threadId,runId}] = {{threadId,runId,str(thread,"link"),command.target.gatewayEnvironmentId},false};
             }
             // This is a launch, so only its initial local user message could have created the Thread.
             return !launch && matches.size() < 2;
@@ -654,11 +665,13 @@ Delivery reconcileWork(Client& client, const Command& command) {
     if (incomplete || matches.size() != 1)
         return result(Outcome::Unknown, matches.size() > 1 ? "More than one T3 Run matches the saved action" :
                       "T3 history did not establish exactly one Run for the saved action");
-    const auto& match = matches.begin()->second;
+    const auto& [match,queued] = matches.begin()->second;
     if ((!hint.empty() && hint != match.threadId) ||
         (!command.candidate.runId.empty() && command.candidate.runId != match.runId))
         return result(Outcome::Unknown, "The supplied T3 Run does not match the saved action");
-    return result(Outcome::Accepted, {}, match);
+    auto recovered = result(Outcome::Accepted, {}, match);
+    if (direct) recovered.delivery = queued ? "queued" : "started";
+    return recovered;
 }
 
 struct Report {
@@ -971,7 +984,8 @@ public:
                     return {Outcome::Settings,{},"The OAuth endpoint belongs to a different T3 environment",true};
                 invoked = true;
                 const auto reply = client.call("t3_thread_send",{{"threadId",command.target.threadId},
-                    {"mode","queue"},{"message",command.instruction},{"clientRequestId",command.actionId}});
+                    {"mode","queue"},{"message",sessionPrompt(command.actionId,command.instruction)},
+                    {"clientRequestId",command.actionId}});
                 const auto run = str(reply,"runId");
                 const auto delivery = str(reply,"delivery");
                 if (str(reply,"threadId") != command.target.threadId || run.empty() ||
@@ -1049,6 +1063,19 @@ public:
             auto connection = credential(gateway, command.config);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection),{},targetRoute(command.environmentId,gateway));
+            if (command.tool == "message_session") {
+                if (gateway == command.environmentId &&
+                    str(client.call("t3_environment_read",Json::object()),"environmentId") != command.environmentId)
+                    return result(Outcome::Settings,"The OAuth endpoint belongs to a different T3 environment");
+                try {
+                    return reconcileWork(client,command);
+                } catch (const Failure& failure) {
+                    if (failure.missingHistory() &&
+                        confirmsMissingSession(client,command.target.threadId))
+                        return result(Outcome::NotAccepted,"The T3 Session was removed");
+                    throw;
+                }
+            }
             if (command.tool == "delegate" || command.tool == "follow_up" || command.tool == "start_in_session") {
                 if (gateway == command.environmentId) checkVerificationRoute(client,command.config,command.environmentId);
                 auto recovered = reconcileWork(client, command);
@@ -1096,7 +1123,7 @@ public:
             if (str(head,"activeRunId") == effective) return "waiting_for_person";
             return {};
         } catch (const Failure& failure) {
-            return failure.reason == Failure::Reason::HistoryNotFound ||
+            return failure.missingHistory() ||
                    failure.reason == Failure::Reason::CredentialExpired ? "unknown" : "";
         }
     }
@@ -1181,32 +1208,11 @@ public:
     }
 
     InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef& run) override {
-        if (!hasRun(run)) throw Failure(Failure::Kind::Settings, "The assigned T3 Run is missing");
-        const auto gateway = gatewayFor(environmentId,run.gatewayEnvironmentId);
-        auto connection = credential(gateway, config);
-        requireOperate(connection);
-        Client client(std::move(connection),{},targetRoute(environmentId,gateway));
-        if (gateway == environmentId) checkVerificationRoute(client,config,environmentId,run.threadId);
-        // An explicit wait can resolve T3's own restart continuation of the assigned Run.
-        const auto current = waitForRun(client,run);
-        const auto& effective = current.runId;
-        if (config.contains("commitVerification") && effective != run.runId && !isRestartContinuation(client,run,effective))
-            throw Failure(Failure::Kind::Wire,"Could not identify the Run's restart continuation");
-        const auto& status = current.status;
-        if (terminal(status)) return InterruptOutcome::AlreadyTerminal;
-        if (status == "queued" && effective == run.runId) {
-            client.call("t3_queue",{{"action","cancel"},{"threadId",run.threadId},{"queuedRunId",run.runId}});
-            return InterruptOutcome::Requested;
-        }
-        if (!active(status)) invalidResponse();
-        const auto reply = client.call("t3_thread_interrupt", {{"threadId", run.threadId}, {"runId", effective}});
-        const auto replyStatus = str(reply, "status");
-        if (str(reply, "threadId") != run.threadId) invalidResponse();
-        if (replyStatus == "no_active_run") return InterruptOutcome::NoActiveRun;
-        if (str(reply, "runId") != effective) invalidResponse();
-        if (replyStatus == "interrupt_requested") return InterruptOutcome::Requested;
-        if (terminal(replyStatus)) return InterruptOutcome::AlreadyTerminal;
-        invalidResponse();
+        return interruptRun(environmentId,config,run,false);
+    }
+
+    InterruptOutcome interruptSessionMessage(const std::string& environmentId, const RunRef& run) override {
+        return interruptRun(environmentId,Json::object(),run,true);
     }
 
     QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget& target, std::string_view run) override {
@@ -1246,7 +1252,7 @@ public:
             if (status == "running" || status == "waiting" || status == "completed") return Outcome::AlreadyStarted;
             if (terminal(status)) return Outcome::NotCancellable;
         } catch (const Failure& failure) {
-            if (failure.reason == Failure::Reason::HistoryNotFound) return Outcome::NotCancellable;
+            if (failure.missingHistory()) return Outcome::NotCancellable;
         }
         return Outcome::Retry;
     }
@@ -1412,6 +1418,50 @@ public:
 
 private:
     std::filesystem::path directory_;
+
+    InterruptOutcome interruptRun(const std::string& environmentId, const Json& config, const RunRef& run,
+                                  bool exactSessionMessage) const {
+        if (!hasRun(run)) throw Failure(Failure::Kind::Settings, "The assigned T3 Run is missing");
+        const auto gateway = gatewayFor(environmentId,run.gatewayEnvironmentId);
+        auto connection = credential(gateway, config);
+        requireOperate(connection);
+        Client client(std::move(connection),{},targetRoute(environmentId,gateway));
+        if (gateway == environmentId) {
+            if (exactSessionMessage &&
+                str(client.call("t3_environment_read",Json::object()),"environmentId") != environmentId)
+                throw Failure(Failure::Kind::Settings,"The OAuth endpoint belongs to a different T3 environment");
+            checkVerificationRoute(client,config,environmentId,run.threadId);
+        }
+        RunWait current;
+        // Pause owns this reply Run, while delegated settlement covers the entire shared Session.
+        try { current = waitForRun(client,run); }
+        catch (const Failure& failure) {
+            if (exactSessionMessage && failure.missingHistory() &&
+                confirmsMissingSession(client,run.threadId)) return InterruptOutcome::TargetGone;
+            throw;
+        }
+        const auto& [effective,status,timedOut] = current;
+        if ((exactSessionMessage || config.contains("commitVerification")) && effective != run.runId &&
+            !isRestartContinuation(client,run,effective))
+            throw Failure(Failure::Kind::Wire,"Could not identify the Run's restart continuation");
+        if (terminal(status))
+            return exactSessionMessage && timedOut
+                ? InterruptOutcome::NoActiveRun : InterruptOutcome::AlreadyTerminal;
+        if (status == "queued" && (effective == run.runId || exactSessionMessage)) {
+            client.call("t3_queue",{{"action","cancel"},{"threadId",run.threadId},{"queuedRunId",effective}});
+            return InterruptOutcome::Requested;
+        }
+        if (!active(status)) invalidResponse();
+        const auto reply = client.call("t3_thread_interrupt", {{"threadId", run.threadId}, {"runId", effective}});
+        const auto replyStatus = str(reply, "status");
+        if (str(reply, "threadId") != run.threadId) invalidResponse();
+        if (replyStatus == "no_active_run") return InterruptOutcome::NoActiveRun;
+        if (str(reply, "runId") != effective) invalidResponse();
+        if (replyStatus == "interrupt_requested") return InterruptOutcome::Requested;
+        if (terminal(replyStatus))
+            return exactSessionMessage ? InterruptOutcome::NoActiveRun : InterruptOutcome::AlreadyTerminal;
+        invalidResponse();
+    }
 
     Credential credential(const std::string& environment, const Json& config) const {
         if (!config.is_object())

@@ -80,8 +80,9 @@ and steps. In the weekday field, 0 and 7 both mean Sunday.
 
 A missed reminder fires once on restart. Missed recurring occurrences produce
 one task with their first and last scheduled times and occurrence count, then
-resume according to the configured IANA timezone. Scheduling supports dates
-through 2199.
+resume according to the configured IANA timezone. Pause skips occurrences
+through the time the Bot resumes, even if the runtime was offline. Scheduling
+supports dates through 2199.
 
 Flock imports `MEMORY.md` on the first private memory access. SQLite supplies
 private memory for conversation and task decisions from then on. Bots can save
@@ -143,6 +144,9 @@ with `messageId` and a status of `received`. The running daemon processes the
 message in the Bot's conversation. If the Bot starts a Task, `flock tasks`
 shows the same message ID in the Task's `sourceMessageId` field.
 To include a screenshot with a message, choose or paste it in the Web composer.
+
+When a Bot is paused, a fresh `flock message` returns **This Bot is paused.**
+Pause and resume the Bot from its Web settings.
 
 ## Offline demo
 

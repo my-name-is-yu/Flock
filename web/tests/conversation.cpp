@@ -208,6 +208,47 @@ public:
 
 void tick(Runtime& runtime, int count) { for (int i = 0; i < count; ++i) runtime.tick(); }
 
+void botPauseEndpoints(const std::filesystem::path& path) {
+    Store store(path);
+    const Person owner{"owner",false};
+    store.policy().setOwner(owner,"release");
+    store.policy().setMember(owner,"release","reader",true);
+    auto settings = callbacks();
+    settings.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer owner") return Person{"owner",false};
+        if (credential == "Bearer reader") return Person{"reader",false};
+        if (credential == "Bearer root") return Person{"root",true};
+        return Person{};
+    };
+    settings.resolveIdentity = [](std::string_view person) -> std::optional<bool> { return person == "root"; };
+    const auto server = startWeb(store,0,std::move(settings));
+    Browser browser(*server);
+    const auto use = [&](std::string name) {
+        browser.client.set_default_headers({{"Authorization","Bearer " + name}});
+    };
+    const Json pause{{"botId","release"},{"paused",true}};
+    use("reader");
+    browser.post("/api/bots/pause",pause,403);
+    use("owner");
+    browser.post("/api/bots/pause",{{"botId","release"},{"paused","yes"}},400);
+    check(browser.post("/api/bots/pause",pause).at("paused") == true,"the owner could not pause their Bot");
+    use("reader");
+    check(browser.get("/api/bots").at(0).at("paused") == true &&
+          browser.get("/api/view?bot=release").at("bot").at("paused") == true,
+          "pause was missing from the Bot list or conversation view");
+    const Json message{{"botId","release"},{"clientMessageId","while-paused"},{"text","Prepare the release"}};
+    const auto denied = browser.post("/api/messages",message,409);
+    check(denied.at("error") == "bot_paused" && denied.at("message") == botPausedMessage,
+          "the Web composer received no clear pause error");
+    auto resume = pause;
+    resume["paused"] = false;
+    browser.post("/api/bots/pause",resume,403);
+    use("root");
+    check(browser.post("/api/bots/pause",resume).at("paused") == false,"an installation root could not resume the Bot");
+    use("reader");
+    browser.post("/api/messages",message,201);
+}
+
 bool hasEvent(const Json& events, std::string_view kind, std::string_view text) {
     for (const auto& event : events) {
         if (event["kind"] != kind) continue;
@@ -696,7 +737,10 @@ void conversationEntry(const std::filesystem::path& path) {
           "The model answer did not reach the intended Session or its reply was lost");
 }
 
-void botMediatedConversation(const std::filesystem::path& path, std::string_view note, bool authenticated = false) {
+enum class PeerAccess { local, shared, paused };
+
+void botMediatedConversation(const std::filesystem::path& path, std::string_view note, PeerAccess access) {
+    const bool authenticated = access == PeerAccess::shared;
     constexpr auto request = "出荷前に確認してください。\n\n署名付きビルドの確認手順を教えてください。";
     constexpr auto greeting = "こんにちは。";
     constexpr auto greetingReply = "こんにちは。出荷の準備についてお手伝いします。";
@@ -767,6 +811,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     if (authenticated) browser.client.set_default_headers({{"Authorization","Bearer fixture-author"}});
+    if (access == PeerAccess::paused) store.setBotPaused(localOwner,"reviewer",true);
     constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
 
     const auto hello = browser.post("/api/messages",{{"botId","ernest"},{"clientMessageId","hello"},{"text",greeting}},201);
@@ -789,6 +834,13 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
           "the user's request bypassed Ernest's decision and contacted Reviewer");
 
     tick(runtime,8);
+    if (access == PeerAccess::paused) {
+        const auto sender = store.tasks("ernest").at(0).at("id").get<Id>();
+        check(store.tasks("reviewer").empty() && browser.get(dm).at("messages").empty() &&
+              store.history(sender).dump().find(botPausedMessage) != std::string::npos,
+              "a paused peer accepted a consultation or gave the requesting Bot no reason");
+        return;
+    }
     std::string expectedNote(note);
     std::string expectedReview(review);
     if (authenticated) {
@@ -1689,14 +1741,16 @@ int main(int argc,char** argv) {
             return 0;
         }
         fullModeProfiles(directory.path / "full-mode-profiles");
+        botPauseEndpoints(directory.path / "bot-pause.sqlite");
         inspectors(directory.path / "inspectors.db");
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         parallelVerificationInView(directory.path / "parallel-verification.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite",
-            "確認手順の妥当性を確認してください。 Synthetic&ErnestCredential-221",true);
-        botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
+            "確認手順の妥当性を確認してください。 Synthetic&ErnestCredential-221",PeerAccess::shared);
+        botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{},PeerAccess::local);
+        botMediatedConversation(directory.path / "bot-mediated-paused.sqlite",{},PeerAccess::paused);
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");
         botRoleSavesRequireCompleteOriginal(directory.path / "role-edit");

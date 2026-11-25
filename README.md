@@ -25,6 +25,13 @@ Edit the Bot's instructions under **Role** in its Web settings.
 Under **How it runs**, choose its **Model** and **Reasoning effort**. Lower effort
 can reduce response time and reasoning tokens. **Model default** uses the model’s own setting.
 
+Bot owners and installation administrators can pause a Bot from **General**
+in its settings. Pause closes unfinished requests, requests interruption of the
+T3 Runs the Bot started, and refuses new messages. In shared Sessions, already
+delegated work can continue. **Resume** opens the Bot to new work.
+Recurring requests, reminders, and triggers due during the pause are skipped.
+Flock keeps the pause across restarts.
+
 Bots can read, write, and search files in their own workspaces. They delegate commands, scripts, builds, and tests to T3 Sessions. Make any files the work needs available in the selected T3 project.
 
 The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.

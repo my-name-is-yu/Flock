@@ -189,6 +189,7 @@ struct Store::Impl {
     void openSchema();
     void initializeSchema();
     bool botDeleted(std::string_view bot) const;
+    bool botPaused(std::string_view bot) const;
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource,
@@ -212,6 +213,7 @@ struct Store::Impl {
     void queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json&);
     bool channelDeliveryDue() const;
     void deliverChannels(std::stop_token = {});
+    void dropPausedBotDeliveries(std::string_view bot);
     Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<ModelImage>* images = nullptr) const;
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
@@ -236,6 +238,8 @@ struct Store::Impl {
                              std::string_view destinationEnvironment, Id message) const;
     bool sessionParticipationStopped(std::string_view bot, const SessionTarget&, Id message) const;
     SessionStop stopSessionParticipation(const Person&, std::string_view bot, const SessionTarget&, SessionExit, Id message = 0);
+    void stopPausedBotParticipation(std::string_view bot);
+    void interruptPausedSessionRuns(T3&, std::stop_token);
     SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     bool t3EnvironmentConnected(std::string_view environment);
@@ -263,7 +267,9 @@ struct Store::Impl {
     Json automations(std::string_view bot, Id before, bool activeOnly = false) const;
     Json cancelAutomation(std::string_view bot, Id id);
     void fireDueAutomations(Seconds now);
-    void fireAutomation(Id, const Statement&, Seconds now);
+    void skipDueAutomations(std::string_view bot, Seconds now);
+    std::vector<Id> dueAutomations(Seconds now, std::string_view bot = {}) const;
+    void processDueAutomation(Id, Seconds now, bool skip = false);
     static void applyPlannerModel(Json& config, const PlannerModel&);
     Json automationRoute(std::string_view bot, Json routing) const;
     SecretRedactor sharedRedactor() const;
@@ -277,6 +283,7 @@ struct Store::Impl {
     Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent,
                    std::string_view reason);
     void deliverGitWebhooks();
+    void skipPendingGitWebhooks(std::string_view bot);
     std::optional<Id> gitWebhooksDrainedAt;
     Id latestGitWebhookId() const;
     std::multiset<GitPrKey> gitPrMutationsInFlight, gitFeedbackMutationsInFlight;
@@ -348,6 +355,7 @@ struct Store::Impl {
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
     void initializeConversationSchema();
+    void initializeBotPauseSchema();
     void upgradeSessionMessageWaitSchema();
     void initializeModelBudgetSchema();
     void initializeAttachmentsSchema();
@@ -387,15 +395,16 @@ struct Store::Impl {
         SessionTarget target;
         std::string title;
         Delivery delivery;
-        int step;
+        int step = -1;
         Id taskId = 0;
-        std::string actionId;
-        bool notify;
+        std::string actionId, requestId;
+        bool notify = true;
     };
     std::map<Id,SessionSendReceipt> sessionSendReceipts;
-    void recordSessionSendRun(Id, const SessionSendReceipt&);
+    bool recordSessionSendRun(Id, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
     void saveSessionSendResult(std::string_view bot, Id message, int step, Json result);
-    void persistSessionSendReceipt(Id message, const SessionSendReceipt&);
+    void persistSessionSendReceipt(Id message, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
+    void reconcilePausedSessionSends(T3&, std::stop_token);
     bool advanceDestinationSessionMessageRun(Json&, Json&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,

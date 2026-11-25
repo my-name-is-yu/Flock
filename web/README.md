@@ -174,10 +174,28 @@ The creator owns the Bot. A root identity can manage all Bots. Shared members
 can view and talk to their Bot and answer its Decision Inbox items. With Web
 identities configured, the owner manages members in Bot settings.
 
+In **General**, the owner or an installation administrator can **Pause** or
+**Resume** the Bot. The Bot's menu offers the same controls. A paused Bot shows
+**Paused** in the sidebar and conversation header. Its composer shows a pause
+notice and offers **Resume** to people who manage the Bot.
+
+Pause closes unfinished conversations and requests and asks T3 to interrupt
+the active Runs the Bot started. Flock keeps the conversation history. In a
+shared T3 Session, delegated work can continue if the Bot's reply already
+finished. External T3 connections have no way to stop just those delegates.
+
+After resuming, send a new message to start work. Pause persists across
+restarts. Recurrences, reminders, and webhook triggers skipped during the pause
+stay skipped, including when a webhook sender retries the same event after
+resume.
+
 In the Bot's settings, edit **How it runs** to choose **Reasoning effort**.
 The options follow the selected model and include **Model default**.
 
 `GET /api/bot-settings?bot=ID` returns settings visible to that person.
+`POST /api/bots/pause` takes `botId` and the Boolean `paused`. A fresh message
+to a paused Bot returns HTTP 409 with `error` set to `bot_paused` and a plain
+message.
 `GET /api/settings/models?bot=ID` returns `models` and `fallbackReasoningEfforts`
 for the Bot owner and installation roots. Each model has `slug` and `displayName`,
 with `reasoningEfforts` when ChatGPT lists supported levels. An unavailable

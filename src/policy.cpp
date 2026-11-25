@@ -209,7 +209,7 @@ PolicyResult Policy::check(std::string_view bot, const Resource& resource) const
 PolicyResult Policy::check(Id task, Action action, std::string_view target) const {
     std::lock_guard lock(db_.mutex);
     auto row = db_.query("SELECT bot_id FROM tasks WHERE id=?",{task});
-    return row.next() ? check(row.string(0),action,target) : PolicyResult::deny;
+    return row.next() && !db_.botPaused(row.string(0)) ? check(row.string(0),action,target) : PolicyResult::deny;
 }
 
 PolicyResult Policy::check(const Person& actor, Action action, std::string_view target) const {
@@ -319,7 +319,7 @@ Json Policy::botSettings(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(db_.mutex);
     if (!allows(actor,Action::bot_view,bot)) throw DecisionDenied{};
     const bool owner = allows(actor,Action::bot_settings,bot);
-    Json result{{"canManage",owner},{"members",Json::array()},
+    Json result{{"canManage",owner},{"paused",db_.botPaused(bot)},{"members",Json::array()},
                 {"secretInputs",Json::array()}};
     if (owner) {
         auto members = db_.query("SELECT person FROM bot_members WHERE bot=? ORDER BY person",{bot});
@@ -492,7 +492,8 @@ void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destinati
         Transaction tx(db_.db);
         if (!upstream || !ref.valid() || !identifier(destination) || !identifier(operation)) throw Conflict("Secret access denied");
         const auto entry = db_.load(task);
-        if (forbidden(field(entry,"botId"),Action::secret_use,ref.name)) throw Conflict("Secret access denied");
+        const auto bot = field(entry,"botId");
+        if (db_.botPaused(bot) || forbidden(bot,Action::secret_use,ref.name)) throw Conflict("Secret access denied");
         const auto seen = db_.query("SELECT 1 FROM secret_destinations WHERE destination=?",{destination}).next();
         const auto key = "secret/" + Json::array({task,operation}).dump();
         const auto gate = db_.approveAction(db_.taskPolicyOrigin(entry),{Action::secret_use,std::string(destination),seen},

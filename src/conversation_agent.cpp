@@ -658,7 +658,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
                              const conversation::QuestionAnchor* question) {
     const auto receipt = sessionSendReceipts.find(message.id);
     if (receipt != sessionSendReceipts.end()) persistSessionSendReceipt(message.id,receipt->second);
-    if (route == "session_access" || route == "access" || route == "channel_access") {
+    if (route == "session_access" || route == "access" || route == "channel_access" || route == "bot_paused") {
         auto pending = query(R"SQL(
 SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
   AND json_extract(effect,'$.kind')='message_session'
@@ -669,7 +669,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         for (const auto step : steps)
             saveTurnResults(message.id,step,Json::array({redactor(message.bot).record({
                 {"ok",false},{"delivery","not_accepted"},
-                {"error","Access ended before the T3 Session message was sent."}})}));
+                {"error","The turn ended before the T3 Session message was sent."}})}));
     }
     Json actions = Json::array();
     std::set<Id> touched;
@@ -753,7 +753,7 @@ Person Store::Impl::turnActor(const Message& message) {
 }
 
 bool Store::Impl::authorizeTurn(const Message& message) {
-    if (!isNextTurn(message.id)) return false;
+    if (!isNextTurn(message.id) || botPaused(message.bot)) return false;
     if (message.principalSource == PrincipalSource::gitWebhook) {
         if (canReceiveGitWebhook(message.bot,message.routing.at("gitEvent"))) return true;
         releaseModelCall(takeReservedConversationCall(message.id));

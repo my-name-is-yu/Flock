@@ -240,6 +240,10 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
         safe.notes = {scrub.text(input.notes.soul),scrub.text(input.notes.memory)};
         safe.feedback = scrub.text(input.feedback);
         if (conversation) conversation_storage::projectToolHistory(safe.event.at("turn"),revision);
+        {
+            std::lock_guard lock(mutex);
+            if (botPaused(bot)) throw BotPaused{};
+        }
         auto turn = model.decide(safe);
         checked.calls.reserve(turn.calls.size());
         for (std::size_t i = 0; i < turn.calls.size(); ++i) {

@@ -335,26 +335,25 @@ void Store::fireDueAutomations(Seconds now) { p_->fireDueAutomations(now); }
 void Store::Impl::fireDueAutomations(Seconds now) {
     if (now < 0 || now > lastAutomationTime) throw Conflict("Clock is outside the supported range");
     std::lock_guard lock(mutex);
-    std::vector<Id> due;
-    {
-        auto rows = query("SELECT id FROM automations WHERE status='active' AND next_run_at<=? ORDER BY next_run_at,id",{now});
-        while (rows.next()) due.push_back(rows.number(0));
-    }
-    for (const auto id : due) {
+    for (const auto id : dueAutomations(now)) {
         Transaction tx(db);
-        auto row = query(R"SQL(
-SELECT bot_id,definition,routing,next_run_at
-FROM automations WHERE id=? AND status='active' AND next_run_at<=?
-)SQL",{id,now});
-        if (!row.next()) continue;
-        try {
-            fireAutomation(id,row,now);
-        } catch (const Conflict& error) {
-            exec("UPDATE automations SET status='failed',next_run_at=NULL,error=? WHERE id=?",
-                 {error.what(),id});
-        }
+        processDueAutomation(id,now);
         tx.commit();
     }
+}
+
+void Store::Impl::skipDueAutomations(std::string_view bot, Seconds now) {
+    for (const auto id : dueAutomations(now,bot)) processDueAutomation(id,now,true);
+}
+
+std::vector<Id> Store::Impl::dueAutomations(Seconds now, std::string_view bot) const {
+    std::vector<Id> due;
+    auto rows = query(R"SQL(
+SELECT id FROM automations WHERE status='active' AND next_run_at<=? AND (?2='' OR bot_id=?2)
+ORDER BY next_run_at,id
+)SQL",{now,bot});
+    while (rows.next()) due.push_back(rows.number(0));
+    return due;
 }
 
 void Store::Impl::applyPlannerModel(Json& config, const PlannerModel& planner) {
@@ -375,34 +374,45 @@ Json Store::Impl::automationRoute(std::string_view bot, Json routing) const {
     return routing;
 }
 
-void Store::Impl::fireAutomation(Id id, const Statement& row, Seconds now) {
+void Store::Impl::processDueAutomation(Id id, Seconds now, bool skip) {
+    auto row = query(R"SQL(
+SELECT bot_id,definition,routing,next_run_at
+FROM automations WHERE id=? AND status='active' AND next_run_at<=?
+)SQL",{id,now});
+    if (!row.next()) return;
     const auto bot = row.string(0);
-    const auto def = row.json(1);
-    const auto kind = field(def,"kind");
-    const auto from = row.number(3);
-    auto occurrences = Cron::Occurrences{from,from,1};
-    std::optional<Seconds> next;
-    if (kind == "schedule") {
-        const Cron cron(field(def,"cron"),field(def,"timezone"));
-        occurrences = cron.between(from,now);
-        next = cron.next(now);
-    }
-    if (occurrences.count) {
-        const auto key = "schedule:" + std::to_string(id) + ":" + std::to_string(occurrences.last);
-        if (!query("SELECT 1 FROM automation_firings WHERE dedupe_key=? AND bot_id=?",{key,bot}).next()) {
-            Json trigger = {{"triggerKind",kind},{"triggerId",id},{"targetTime",occurrences.last},{"coveredFrom",occurrences.first},
-                {"coveredTo",occurrences.last},{"occurrenceCount",occurrences.count},{"firedAt",now},{"timezone",def.at("timezone")}};
-            if (def.contains("label")) trigger["label"] = def.at("label");
-            auto scrub = redactor(bot);
-            trigger = scrub.record(std::move(trigger));
-            const auto routing = automationRoute(bot,row.json(2));
-            const auto task = submit(intake(bot,field(def,"request"),routing),0,nullptr,TaskSource::request,trigger);
-            const auto receipts = Json::array({{{"taskId",task},{"botId",bot},{"triggerId",id}}});
-            exec("INSERT INTO automation_firings VALUES(?,?,?,?)",{key,bot,now,receipts});
+    const bool skipped = skip || botPaused(bot);
+    try {
+        const auto def = row.json(1);
+        const auto kind = field(def,"kind");
+        const auto from = row.number(3);
+        auto occurrences = Cron::Occurrences{from,from,1};
+        std::optional<Seconds> next;
+        if (kind == "schedule") {
+            const Cron cron(field(def,"cron"),field(def,"timezone"));
+            next = cron.next(now);
+            if (!skipped) occurrences = cron.between(from,now);
         }
+        if (!skipped && occurrences.count) {
+            const auto key = "schedule:" + std::to_string(id) + ":" + std::to_string(occurrences.last);
+            if (!query("SELECT 1 FROM automation_firings WHERE dedupe_key=? AND bot_id=?",{key,bot}).next()) {
+                Json trigger = {{"triggerKind",kind},{"triggerId",id},{"targetTime",occurrences.last},{"coveredFrom",occurrences.first},
+                    {"coveredTo",occurrences.last},{"occurrenceCount",occurrences.count},{"firedAt",now},{"timezone",def.at("timezone")}};
+                if (def.contains("label")) trigger["label"] = def.at("label");
+                auto scrub = redactor(bot);
+                trigger = scrub.record(std::move(trigger));
+                const auto routing = automationRoute(bot,row.json(2));
+                const auto task = submit(intake(bot,field(def,"request"),routing),0,nullptr,TaskSource::request,trigger);
+                const auto receipts = Json::array({{{"taskId",task},{"botId",bot},{"triggerId",id}}});
+                exec("INSERT INTO automation_firings VALUES(?,?,?,?)",{key,bot,now,receipts});
+            }
+        }
+        const auto finished = skipped ? "canceled" : "delivered";
+        exec("UPDATE automations SET next_run_at=?,status=? WHERE id=?",
+             {next ? Json(*next) : Json(nullptr),next ? "active" : finished,id});
+    } catch (const Conflict& error) {
+        exec("UPDATE automations SET status='failed',next_run_at=NULL,error=? WHERE id=?",{error.what(),id});
     }
-    exec("UPDATE automations SET next_run_at=?,status=? WHERE id=?",
-         {next ? Json(*next) : Json(nullptr),next ? "active" : "delivered",id});
 }
 
 Json Store::receiveWebhook(const Person& actor, std::string_view source, std::string_view eventId,
@@ -413,11 +423,11 @@ Json Store::receiveWebhook(const Person& actor, std::string_view source, std::st
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
     const auto permits = [&](std::string_view bot) { return policy().allows(actor,Action::bot_decide,bot); };
-    std::map<std::string,Json> delivered;
+    std::map<std::string,Json> previous;
     auto existing = p_->query("SELECT bot_id,receipts FROM automation_firings WHERE dedupe_key=?",{key});
     while (existing.next()) {
         const auto bot = existing.string(0);
-        if (permits(bot)) delivered.emplace(bot,existing.json(1));
+        if (permits(bot)) previous.emplace(bot,existing.json(1));
     }
 
     auto rows = p_->query(R"SQL(
@@ -429,10 +439,14 @@ AND json_extract(definition,'$.source')=? ORDER BY id
     std::map<std::string,Json> received;
     while (rows.next()) {
         const auto bot = rows.string(1);
-        if (delivered.contains(bot) || !permits(bot)) continue;
+        if (previous.contains(bot) || !permits(bot)) continue;
         auto& receipts = received.try_emplace(bot,Json::array()).first->second;
         const auto def = rows.json(2);
-        if (!matchesEvent(def.at("eventFilter"),event,scrub)) continue;
+        if (receipts.is_null() || !matchesEvent(def.at("eventFilter"),event,scrub)) continue;
+        if (p_->botPaused(bot)) {
+            receipts = nullptr;
+            continue;
+        }
         const auto routing = p_->automationRoute(bot,rows.json(3));
         const Json destination = {bot,routing};
         if (scrub.record(destination,SecretRedactor::Fields::external) != destination) continue;
@@ -445,15 +459,25 @@ AND json_extract(definition,'$.source')=? ORDER BY id
         const auto task = p_->submit(intake(bot,request,routing),0,nullptr,TaskSource::request,trigger);
         receipts.push_back({{"taskId",task},{"botId",bot},{"triggerId",id}});
     }
-    if (delivered.empty() && received.empty()) throw AccessDenied("Webhook source unavailable");
-    Json tasks = Json::array();
+    if (previous.empty() && received.empty()) throw AccessDenied("Webhook source unavailable");
+    Json result{{"duplicate",received.empty()},{"tasks",Json::array()}};
+    auto& tasks = result.at("tasks");
+    Json skippedBots = Json::array();
+    const auto append = [&](const std::string& bot, const Json& receipts) {
+        if (receipts.is_null()) skippedBots.push_back(scrub.text(bot));
+        else tasks.insert(tasks.end(),receipts.begin(),receipts.end());
+    };
     for (const auto& [bot,receipts] : received) {
-        p_->exec("INSERT INTO automation_firings VALUES(?,?,?,?)",{key,bot,now,receipts});
-        tasks.insert(tasks.end(),receipts.begin(),receipts.end());
+        p_->exec("INSERT INTO automation_firings VALUES(?,?,?,?)",{key,bot,now,receipts.dump()});
+        append(bot,receipts);
     }
-    for (const auto& receipts : delivered | std::views::values)
-        tasks.insert(tasks.end(),receipts.begin(),receipts.end());
+    for (const auto& [bot,receipts] : previous) append(bot,receipts);
+    if (!skippedBots.empty()) {
+        result["message"] = skippedBots.size() == 1 ? "This event was skipped because the Bot was paused."
+                                                   : "Paused Bots skipped this event.";
+        result["skippedBots"] = std::move(skippedBots);
+    }
     tx.commit();
-    return {{"duplicate",received.empty()},{"tasks",tasks}};
+    return result;
 }
 }

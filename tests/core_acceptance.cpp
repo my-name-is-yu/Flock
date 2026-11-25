@@ -3,6 +3,7 @@
 #include "task_history.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <barrier>
 #include <chrono>
 #include <condition_variable>
@@ -388,6 +389,21 @@ void disconnectBlocksSendingAndRetry() {
     }
 }
 
+void pauseDuringPreflightPreventsSend() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.reach(id,"sending");
+    f.t3.onPreflight = [&] {
+        Store settings(f.directory/"state.db");
+        settings.setBotPaused(localOwner,"alpha",true);
+        settings.setBotPaused(localOwner,"alpha",false,[&] { return f.now; });
+    };
+    f.reach(id,"cancelled");
+    check(f.t3.seen.empty() && f.logs(id,"send_started") == 0,
+          "A send in preflight survived pause and resume");
+}
+
 void disconnectKeepsOwnedRunRecovery() {
     Fixture f(true);
     Store settingsStore(f.directory/"state.db");
@@ -447,6 +463,49 @@ void disconnectWaitsForInFlightSend() {
     tick.get();
     check(disconnect.get() && waited && f.task(id)["activeRun"]["runId"] == "run-1",
           "A separate Store disconnected during an in-flight send or lost its accepted Run");
+}
+
+void resumeSkipsOccurrencesWhileWaitingForDispatch() {
+    using namespace std::chrono_literals;
+    Fixture f;
+    Store settings(f.directory/"state.db");
+    const auto fireAt = f.now + 1;
+    settings.createAutomation(localOwner,{"alpha","Check staging","e","p",Json::object()},
+        {{"kind","reminder"},{"timezone","Etc/UTC"},{"fireAt",fireAt},{"request","Check staging"}},f.now);
+    settings.setBotPaused(localOwner,"alpha",true);
+
+    const auto id = f.submit("Other work","beta");
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.reach(id,"sending");
+    std::promise<void> sendEntered, releaseSend;
+    auto release = releaseSend.get_future();
+    f.t3.beforeWorkAcknowledgement = [&] {
+        sendEntered.set_value();
+        release.wait();
+    };
+    auto tick = std::async(std::launch::async,[&] { f.runtime->tick(); });
+    if (sendEntered.get_future().wait_for(2s) != std::future_status::ready) {
+        releaseSend.set_value();
+        tick.get();
+        throw std::runtime_error("The test did not reach the in-flight T3 send");
+    }
+
+    std::atomic<Seconds> clock{f.now};
+    std::promise<void> resumeEntered;
+    auto resume = std::async(std::launch::async,[&] {
+        resumeEntered.set_value();
+        settings.setBotPaused(localOwner,"alpha",false,[&] { return clock.load(); });
+    });
+    resumeEntered.get_future().wait();
+    const bool waited = resume.wait_for(100ms) == std::future_status::timeout;
+    clock = fireAt;
+    releaseSend.set_value();
+    tick.get();
+    resume.get();
+
+    settings.fireDueAutomations(fireAt);
+    check(waited && !settings.botPaused("alpha") && settings.tasks("alpha").empty(),
+          "Resume replayed a reminder that became due while dispatch held the lock");
 }
 
 void invalidDecisions() {
@@ -2949,6 +3008,8 @@ int main() {
             {"selected work reconciles and cancels only its own queued Run",selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun},
             {"selected work rechecks its T3 connection after approval",selectedWorkRechecksConnectionAfterApproval},
             {"disconnect blocks new work and retries",disconnectBlocksSendingAndRetry},
+            {"pause during preflight prevents a send",pauseDuringPreflightPreventsSend},
+            {"resume skips reminders while waiting for dispatch",resumeSkipsOccurrencesWhileWaitingForDispatch},
             {"disconnect preserves owned Run recovery",disconnectKeepsOwnedRunRecovery},
             {"disconnect fences sends across Stores",disconnectWaitsForInFlightSend},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},

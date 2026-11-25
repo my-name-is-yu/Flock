@@ -266,6 +266,45 @@ void webhookHeadPeriods() {
           "A SHA-only delivery was routed again when another watch moved to the same head");
 }
 
+void pausedGitNotifications() {
+    Directory directory;
+    const auto path = directory.path/"state.db";
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    script.openAfterSession = true;
+    Sessions sessions;
+    Id task;
+    {
+        Store store(path);
+        task = store.submit(intake());
+        Runtime runtime(store,script,sessions,{},options(host));
+        for (int i = 0; i < 8; ++i) runtime.tick();
+        check(store.task(task).at("state") == "completed" && host->createCalls == 1,
+              "Git notification fixture did not finish its watched request");
+        store.setBotPaused(localOwner,"owner",true);
+        check(store.receiveGitWebhook({hostName,"paused-delivery",repoName,"comment","created",{1},sha,"Paused",0}),
+              "Paused delivery was not acknowledged");
+        runtime.runConversations();
+        check(script.notifications == 0 && historyCount(store,task,"git_webhook") == 0,
+              "A Git webhook woke a paused Bot");
+        check(store.receiveGitWebhook({hostName,"paused-backlog",repoName,"ci","completed",{},sha,"Backlog",0}),
+              "Paused backlog delivery was not acknowledged");
+    }
+    {
+        Store restarted(path);
+        Runtime runtime(restarted,script,sessions,{},options(host));
+        restarted.setBotPaused(localOwner,"owner",false);
+        runtime.runConversations();
+        check(script.notifications == 0 && historyCount(restarted,task,"git_webhook") == 0,
+              "Resume backfilled a Git webhook received during the pause");
+        check(restarted.receiveGitWebhook({hostName,"after-resume",repoName,"ci","completed",{},sha,"Active",0}),
+              "New delivery was not acknowledged");
+        runtime.runConversations();
+        check(script.notifications == 1 && historyCount(restarted,task,"git_webhook") == 1,
+              "A new SHA-only webhook missed the resumed Bot's watch");
+    }
+}
+
 void reviewAfterTaskProgress() {
     Directory directory;
     Store store(directory.path/"state.db");
@@ -1073,6 +1112,7 @@ int main() {
         schemas();
         runner();
         webhookHeadPeriods();
+        pausedGitNotifications();
         reviewAfterTaskProgress();
         webhookDeliveryResumesAfterAnIdlePoll();
         reconciliationAfterTaskRevision();

@@ -151,6 +151,7 @@ void Store::Impl::openSchema() {
         upgradeSessionMessageWaitSchema();
         migration.commit();
     }
+    initializeBotPauseSchema();
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_review_receipts(
   inbox_key TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -699,6 +700,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), and environment are required");
     if (botDeleted(item.botId)) throw Conflict("Bot has been deleted");
+    if (botPaused(item.botId)) throw BotPaused{};
     const auto scrub = redactor(item.botId);
     scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.config});
     modelCallLimit(item.config);
@@ -767,6 +769,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
                           const Json& input, Id sourceMessage, std::optional<InboxKind> expectedKind) {
     const auto& [bot,id,waitId,revision,generation] = target;
     if (!Policy(*this).allows(actor,Action::bot_decide,bot)) throw DecisionDenied{};
+    if (operation != "cancel" && botPaused(bot)) throw BotPaused{};
     auto task = load(id);
     if (task.at("botId") != bot || task.value("currentRevision",Id{0}) != revision) throw RequestChanged{};
     const auto data = redactor(bot).payload(input);
