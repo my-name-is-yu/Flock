@@ -1298,12 +1298,13 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             const auto sharesMemory = [](const Json& config) {
                 return config.value("shareMemoryWithSessions",Json(false)) == true;
             };
-            bool includeMemory = sendsWork && sharesMemory(cmd.config);
-            if (includeMemory && options.intake) {
+            bool includeMemory = false;
+            if (sendsWork) {
                 try {
-                    includeMemory = sharesMemory(options.intake(cmd.ownerBotId,{}).config);
+                    includeMemory = options.intake ? sharesMemory(options.intake(cmd.ownerBotId,{}).config)
+                                                  : sharesMemory(cmd.config);
                 } catch (const std::exception&) {
-                    includeMemory = false;
+                    // An unreadable Bot profile cannot authorize sharing.
                 }
             }
             auto policyGate = ApprovalGate::allow;

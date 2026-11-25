@@ -2574,6 +2574,29 @@ void sessionMemoryFollowsTheAcceptedVersion() {
     check(cleared.find("Notes from") == cleared.npos,"empty memory added a section to the follow-up");
 }
 
+void existingAutomationUsesLiveMemorySharing() {
+    constexpr std::string_view note = "Keep release tests in the integration suite.";
+    Fixture f([note](std::string_view) { return std::string(note); });
+    auto saved = f.routing();
+    saved.config.erase("shareMemoryWithSessions");
+    const auto schedule = f.store->createAutomation(localOwner,saved,
+        {{"kind","schedule"},{"cron","* * * * *"},{"timezone","Etc/UTC"},{"request","Check the release"}},f.now);
+    f.shareMemoryWithSessions = true;
+    RuntimeOptions options{[&] { return f.now; }};
+    options.intake = [&](std::string_view, std::string_view) { return f.routing(); };
+    f.runtime.reset();
+    f.runtime = std::make_unique<Runtime>(*f.store,f.model,f.t3,Runtime::SoulLoader{},options);
+
+    f.now = schedule.at("nextRunAt");
+    f.store->fireDueAutomations(f.now);
+    const auto id = f.store->tasks("alpha").at(0).at("id").get<Id>();
+    check(!f.task(id).at("config").contains("shareMemoryWithSessions"),
+          "The schedule fixture did not preserve the settings saved before opt-in");
+    f.reach(id,"running");
+    check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find(note) != std::string::npos,
+          "Work from an existing schedule missed the memory the Bot had opted to share");
+}
+
 void privateMemoryStaysInFlockByDefault() {
     Fixture f([](std::string_view) { return "Private convention in a project other Bots can read."; });
     auto routing = f.routing();
@@ -2584,13 +2607,23 @@ void privateMemoryStaysInFlockByDefault() {
 
     f.t3.finish("run-1","Prior request completed");
     RuntimeOptions options;
-    options.intake = [&](std::string_view, std::string_view) { return f.routing(); };
+    bool profileReadable = true;
+    options.intake = [&](std::string_view, std::string_view) {
+        if (!profileReadable) throw Conflict("Could not read the fixture Bot profile");
+        return f.routing();
+    };
     f.runtime.reset();
     f.runtime = std::make_unique<Runtime>(*f.store,f.model,f.t3,Runtime::SoulLoader{},options);
     routing.config["shareMemoryWithSessions"] = true;
     f.reach(f.store->submit(routing),"running");
     check(f.t3.sent.size() == 2 && f.t3.sent.back().instruction.find("Private convention") == std::string::npos,
           "a queued task sent private memory after the Bot disabled sharing");
+
+    f.t3.finish("run-2","Prior request completed");
+    profileReadable = false;
+    f.reach(f.store->submit(routing),"running");
+    check(f.t3.sent.size() == 3 && f.t3.sent.back().instruction.find("Private convention") == std::string::npos,
+          "an unreadable Bot profile fell back to the saved memory-sharing opt-in");
 }
 }
 
@@ -2604,6 +2637,7 @@ int main(int argc, char** argv) {
         durableInboxAndTargetedRevision();
         existingSessionStartsNormalWork();
         sessionMemoryFollowsTheAcceptedVersion();
+        existingAutomationUsesLiveMemorySharing();
         privateMemoryStaysInFlockByDefault();
         linkedResultStartsANewSession();
         independentRequestQueuesSeparately();
