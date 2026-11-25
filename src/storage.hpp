@@ -418,6 +418,7 @@ struct Store::Impl {
     void save(Json&);
     void initializeProjectQueue();
     bool automationBeforeDispatch(Id task) const;
+    bool isUndispatchedNotesWait(const Json& task) const;
     bool projectRouteReady(Id task, std::string_view action) const;
     std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;
     void rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project);

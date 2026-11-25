@@ -24,8 +24,19 @@ namespace {
 class NotesModel final : public Model {
 public:
     std::vector<ModelInput> inputs;
+    std::optional<Id> editTask;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
+        if (editTask && input.event.contains("turn")) {
+            if (!input.event.at("turn").empty()) return {"reply",{{"text","Saved."}},"Confirm the edit"};
+            for (const auto& task : input.task.at("tasks")) {
+                if (task.at("taskId") == *editTask)
+                    return {"change_task",{{"taskId",*editTask},{"generation",task.at("generation")},
+                        {"revisionId",task.at("revisionId")},{"instruction","Check staging instead"},
+                        {"intent","Check staging instead"}},"Apply the new scope"};
+            }
+            throw std::runtime_error("The automation was missing from the conversation");
+        }
         inputs.push_back(input);
         if (input.event["kind"] == "result")
             return {"complete",{{"report","Original evidence confirmed"}},"The report meets the original acceptance criterion."};
@@ -58,7 +69,9 @@ public:
     InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
-void unavailableAutomationNotesDoNotOwnTheProject() {
+enum class NotesRecovery { Retry, Edit };
+
+void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery) {
     Sandbox temp;
     const auto folder = temp.path / "bots";
     createBot(folder / "release",botConfig(),"Release role","");
@@ -92,17 +105,25 @@ void unavailableAutomationNotesDoNotOwnTheProject() {
 
     std::filesystem::remove(folder / "release");
     std::filesystem::rename(folder / "release.saved",folder / "release");
-    store.operate(localOwner,TaskTarget::from(paused,paused.at("wait").at("id")),"retry");
+    if (recovery == NotesRecovery::Edit) {
+        model.editTask = release;
+        store.receive(localOwner,bots.get("release").intake(""),"edit-automation","Check staging instead");
+        runtime.runConversations();
+        check(store.task(release).at("intent") == "Check staging instead","the conversation did not save the edit");
+    } else store.operate(localOwner,TaskTarget::from(paused,paused.at("wait").at("id")),"retry");
     runtime.tick();
     const auto retried = store.task(release);
     check(retried.at("state") == "queued" && retried.at("blockedBy").is_object() &&
           retried.at("blockedBy").at("id") == triage && t3.commands.size() == 1,
-          "retrying an unreadable Bot's request overtook an active Run");
+          recovery == NotesRecovery::Edit ? "editing the paused automation did not requeue it behind the active Run"
+                                         : "retrying an unreadable Bot's request overtook an active Run");
 
     t3.finished = true;
     for (int i = 0; i < 10 && t3.commands.size() == 1; ++i) runtime.tick();
     check(t3.commands.size() == 2 && t3.commands.back().ownerBotId == "release" &&
           model.inputs.back().notes.soul == "Release role", "the repaired Bot did not resume with its restored role");
+    if (recovery == NotesRecovery::Edit)
+        check(model.inputs.back().task.at("request") == "Check staging instead","the resumed automation lost the edit");
 }
 
 void notesAndRoutingOnRestart() {
@@ -1022,7 +1043,8 @@ void botProfilesAndAvatars() {
 int main() {
     try {
         configuredSchedules();
-        unavailableAutomationNotesDoNotOwnTheProject();
+        unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Retry);
+        unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Edit);
         pinnedConversationDestinations();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();
