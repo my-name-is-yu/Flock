@@ -1,18 +1,15 @@
 #include "flock/policy.hpp"
+#include "live_conversation_judge.hpp"
 #include "live_setup.hpp"
 #include "model.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <charconv>
 #include <cstddef>
 #include <filesystem>
 #include <iostream>
-#include <iterator>
 #include <map>
 #include <ranges>
-#include <regex>
-#include <set>
 #include <stdexcept>
 
 using namespace flockv0;
@@ -55,7 +52,7 @@ struct Runs : T3 {
     std::map<std::string, Observation> runs;
     std::vector<std::string> interrupted;
     std::string authGeneration(const std::string&, const Json&) override { return "live-eval"; }
-    Delivery send(const Command& command) override {
+    Delivery send(const Command&) override {
         const auto id = std::to_string(runs.size() + 1);
         runs["run-" + id] = {};
         return {Delivery::Kind::Accepted, {"thread-" + id, "run-" + id, {}}, {}};
@@ -82,7 +79,6 @@ using Tasks = std::map<Id, Json>;
 struct Turn {
     Json reply;
     Tasks before, after;
-    std::size_t interrupts;
 
     Id message() const { return reply.at("replyToMessageId").get<Id>(); }
     Id replyMessage() const { return reply.at("messageId").get<Id>(); }
@@ -94,9 +90,11 @@ struct Scene {
     Mixed& model;
     Runs t3;
     Runtime runtime;
+    Judge judge;
     Json config;
-    Scene(Mixed& mixed, const std::string& slug)
+    Scene(Mixed& mixed, const std::string& slug, Judge textJudge)
         : store(directory.path / "state.db"), model(mixed), runtime(store, model, t3, [](std::string_view) { return std::string{}; }),
+          judge(std::move(textJudge)),
           config({{"modelProvider", "chatgpt"}, {"model", slug}, {"conversationEnvironments", {{"cloud Mac", "cloud"}}}}) {}
 
     Intake intake(std::string request = {}, std::string project = "project") const {
@@ -128,7 +126,7 @@ struct Scene {
     }
     Tasks snapshot() const {
         Tasks tasks;
-        for (auto& task : store.tasks("release", 0, 200)) {
+        for (auto& task : store.tasks("", 0, 200)) {
             const auto id = task.at("id").get<Id>();
             tasks.emplace(id, std::move(task));
         }
@@ -136,309 +134,142 @@ struct Scene {
     }
     Turn send(const std::string& text, Id replyTo = 0) {
         auto before = snapshot();
+        const auto runCount = t3.runs.size();
         const auto interruptCount = t3.interrupted.size();
         const auto receipt =
             store.receive(localOwner, intake(), "message-" + std::to_string(store.conversation("release", 0, 200).size()), text, replyTo);
         runtime.runConversations();
+        check(t3.runs.size() == runCount && t3.interrupted.size() == interruptCount, "unexpected T3 send or interrupt");
         for (const auto& row : store.conversation("release", 0, 200)) {
             const auto& data = row.at("data");
             if (row.at("kind") != "conversation_reply" || data.at("replyToMessageId") != receipt.at("messageId")) continue;
             checkReply(data);
-            return {data, std::move(before), snapshot(), t3.interrupted.size() - interruptCount};
+            return {data, std::move(before), snapshot()};
         }
         throw std::runtime_error("The turn did not reply");
     }
 };
 
-using Action = std::pair<std::string, Id>;
+struct Action {
+    std::string_view tool;
+    Id task;
+    std::string_view effect;
+};
 
-// Only applied, task-affecting tools appear in reply.actions. Read-only lookups are free.
-void checkActions(const Turn& turn, std::initializer_list<Action> expected) {
-    std::set<Action> remaining(expected);
-    std::set<Id> touched, started;
-    for (const auto& [tool, id] : expected) {
-        touched.insert(id);
-        if (tool == "start_task") started.insert(id);
+std::vector<Json> checkEvents(const Scene& s, const Turn& turn, Id task, std::initializer_list<std::string_view> expected) {
+    std::vector<std::string> kinds;
+    std::vector<Json> payloads;
+    for (const auto& row : s.store.history(task, turn.message(), 200)) {
+        if (row.at("id") >= turn.replyMessage()) break;
+        kinds.push_back(row.at("kind").get<std::string>());
+        payloads.push_back(row.at("data"));
     }
-    for (const auto& action : turn.reply.at("actions")) {
-        const auto tool = action.at("tool").get<std::string>();
-        const auto id = action.at("taskId").get<Id>();
-        check(remaining.erase({tool, id}) == 1, "unexpected action " + action.dump());
-    }
-    if (!remaining.empty()) {
-        const auto& [tool, id] = *remaining.begin();
-        throw std::runtime_error("missing " + tool + " for task " + std::to_string(id));
-    }
+    check(std::ranges::equal(kinds, expected),
+          "task " + std::to_string(task) + " expected journal events " + Json(expected).dump() + ", got " + Json(kinds).dump());
+    return payloads;
+}
+
+void checkActions(const Scene& s, const Turn& turn, const std::vector<Action>& expected) {
+    auto actions = Json::array();
+    for (const auto& [tool, task, effect] : expected) actions.push_back({{"tool", tool}, {"taskId", task}, {"effect", effect}});
+    const auto& applied = turn.reply.at("actions");
+    check(applied.is_array() && std::ranges::is_permutation(applied, actions),
+          "expected applied actions " + actions.dump() + ", got " + applied.dump());
 
     for (const auto& [id, task] : turn.before) {
         check(turn.after.contains(id), "task disappeared: " + std::to_string(id));
-        if (!touched.contains(id)) check(turn.after.at(id) == task, "untouched task changed: " + std::to_string(id));
+        if (std::ranges::any_of(expected, [id](const Action& action) { return action.task == id; })) continue;
+        check(turn.after.at(id) == task, "untouched task changed: " + std::to_string(id));
+        checkEvents(s, turn, id, {});
     }
-    std::set<Id> created;
-    for (const auto& [id, task] : turn.after)
-        if (!turn.before.contains(id)) created.insert(id);
-    check(created == started, "the tasks created by the turn did not match its start actions");
-    check(turn.interrupts == 0, "unexpected T3 interrupt");
-}
-
-std::string lower(std::string text) {
-    std::ranges::transform(text, text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return text;
-}
-
-bool includes(std::string_view text, std::string_view part) {
-    return text.find(part) != std::string_view::npos;
-}
-
-bool rejectsStartupColumn(const std::string& text) {
-    static const std::regex denial(
-        R"((?:(?:\b(?:not|never)|n['’]t)\s+(?:include|report|provide|require|add|use))"
-        R"(|\b(?:no|avoid|omit|exclude|skip|without(?:\s+(?:including|reporting|adding))?|instead of|rather than))"
-        R"()\s+(?:(?:a|the|report|column|field|named|called)\s+)*`?\bstartup_p95_ms\b)"
-        R"(|\bstartup_p95_ms\b`?(?:\s+(?:column|field))?\s+(?:is\s+(?:optional|unnecessary|not required)|(?:must|should)\s+not\s+be\s+(?:included|reported)))");
-    return std::regex_search(text, denial);
-}
-
-std::vector<Json> turnEvents(const Scene& s, const Turn& turn, Id task, std::string_view kind) {
-    std::vector<Json> found;
-    for (const auto& row : s.store.history(task, turn.message(), 200)) {
-        if (row.at("id") >= turn.replyMessage()) break;
-        if (row.at("kind") == kind) found.push_back(row.at("data"));
+    for (const auto& [id, task] : turn.after) {
+        if (turn.before.contains(id)) continue;
+        check(std::ranges::any_of(expected, [id](const Action& action) { return action.task == id && action.tool == "start_task"; }),
+              "unreported task creation: " + std::to_string(id));
     }
-    return found;
+}
+
+std::vector<Id> checkStarts(const Scene& s, const Turn& turn, std::size_t count) {
+    std::vector<Id> created;
+    std::vector<Action> actions;
+    for (const auto& [id, task] : turn.after) {
+        if (turn.before.contains(id)) continue;
+        created.push_back(id);
+        actions.push_back({"start_task", id, "started"});
+    }
+    check(created.size() == count, "expected " + std::to_string(count) + " new tasks");
+    checkActions(s, turn, actions);
+    for (const auto id : created) {
+        const auto& task = turn.after.at(id);
+        const auto request = checkEvents(s, turn, id, {"request"}).front();
+        check(task.at("state") == "queued" && task.at("sourceMessageId") == turn.message() && request.at("messageId") == turn.message() &&
+                  request.at("source") == "conversation" && request.at("text") == task.at("request"),
+              "new task is missing its queued conversation request");
+    }
+    return created;
 }
 
 void checkCancellation(const Scene& s, const Turn& turn, Id id) {
-    checkActions(turn, {{"cancel_task", id}});
-    const auto& state = turn.after.at(id).at("state");
-    check((state == "cancelling" || state == "cancelled") && turnEvents(s, turn, id, "cancel_requested").size() == 1,
-          "the requested task was not stopped by this turn");
+    checkActions(s, turn, {{"cancel_task", id, "cancelling"}});
+    checkEvents(s, turn, id, {"cancel_requested"});
+    check(turn.after.at(id).at("state") == "cancelling", "the requested task did not enter cancellation");
 }
 
-bool asksWhichTask(const Json& reply) {
-    bool mobile = false, desktop = false;
-    for (const auto& option : reply.value("suggestions", Json::array())) {
-        const auto& text = option.get_ref<const std::string&>();
-        const bool namesMobile = includes(text, "モバイル");
-        const bool namesDesktop = includes(text, "デスクトップ");
-        mobile |= namesMobile && !namesDesktop;
-        desktop |= namesDesktop && !namesMobile;
-    }
-    const auto text = lower(reply.at("text").get<std::string>());
-    const bool asks = includes(text, "?") || includes(text, "？") || includes(text, "教えて") || includes(text, "ください");
-    const bool identifiesChoice = includes(text, "どちら") || includes(text, "どの") || includes(text, "どっち") ||
-                                  includes(text, "which") || (includes(text, "モバイル") && includes(text, "デスクトップ"));
-    const bool namesTarget = includes(text, "タスク") || includes(text, "作業") || includes(text, "対象");
-    const bool requestsChoice = includes(text, "指定") || includes(text, "選択") || includes(text, "選んで") || includes(text, "教えて");
-    static const std::regex requestsTarget(R"((?:(?:^|[.!?;\n])\s*|\b(?:please|(?:can|could|would|will) you)\s+))"
-                                           R"((?:specify|clarify|choose|select|identify)\b[^.!?;\n]*\b(?:tasks?|target)\b)");
-    return (mobile && desktop) || (asks && (identifiesChoice || (namesTarget && requestsChoice))) ||
-           std::regex_search(text, requestsTarget);
+void checkQueuedInstruction(const Turn& turn, Id id, const Json& note, bool conflicting) {
+    auto pending = turn.before.at(id).value("pendingInstructions", Json::array());
+    pending.push_back(note);
+    const auto& after = turn.after.at(id);
+    check(note.at("messageId") == turn.message() && note.at("conflicting") == conflicting &&
+              note.at("revisionId") == after.at("currentRevision") && after.at("pendingInstructions") == pending &&
+              after.value("replanning", false) == conflicting,
+          "the turn did not queue one instruction for its current revision");
 }
 
-bool requiresStartupColumn(const std::string& criteria) {
-    static const std::regex column(R"(\bstartup_p95_ms\b)");
-    static const std::regex field(R"(\b(?:column|field)\b)");
-    static const std::regex requirement(R"(\b(?:include[sd]?|contain[s]?|require[sd]?|add|must|report|provide|with)\b)");
-    const auto text = lower(criteria);
-    return std::regex_search(text, column) && std::regex_search(text, field) && std::regex_search(text, requirement) &&
-           !rejectsStartupColumn(text);
+void checkMeaning(const Scene& s, Criterion criterion, std::string_view text, std::string_view failure) {
+    const auto judgment = s.judge(criterion, text);
+    check(judgment.verdict == Verdict::Match, std::string(failure) + "; judge quoted " + Json(judgment.evidence).dump());
 }
 
 void checkCriteria(const Scene& s, const Turn& turn, Id id) {
-    checkActions(turn, {{"change_task", id}});
+    checkActions(s, turn, {{"change_task", id, "replanning"}});
+    const auto events = checkEvents(s, turn, id, {"task_revision", "instruction_accepted"});
     const auto& before = turn.before.at(id);
     const auto& after = turn.after.at(id);
     const auto& criteria = after.at("doneWhen").get_ref<const std::string&>();
-    const auto& revisions = before.at("revisions");
-    const auto& savedRevisions = after.at("revisions");
-    check(savedRevisions.size() == revisions.size() + 1, "expected one new saved revision");
-    const auto& revision = savedRevisions.back();
-    check(std::equal(revisions.begin(), revisions.end(), savedRevisions.begin()) && revision.at("id") == after.at("currentRevision") &&
-              revision.at("sourceMessageId") == turn.message() && revision.at("doneWhen") == criteria &&
-              revision.at("intent") == before.at("intent") && after.at("intent") == before.at("intent") &&
-              before.at("doneWhen") != criteria && requiresStartupColumn(criteria),
-          "the new revision did not preserve the benchmark and require the startup_p95_ms report column");
+    const auto& revision = after.at("revisions").back();
+    const auto& revisionEvent = events.front();
+    auto expectedRevisions = before.at("revisions");
+    expectedRevisions.push_back(revision);
+    check(after.at("revisions") == expectedRevisions && revision.at("id") == after.at("currentRevision") &&
+              revision.at("id") != before.at("currentRevision") && revisionEvent.at("revisionId") == revision.at("id") &&
+              revisionEvent.at("sourceMessageId") == turn.message() && revision.at("sourceMessageId") == turn.message() &&
+              revision.at("doneWhen") == criteria && before.at("doneWhen") != criteria && revision.at("intent") == before.at("intent"),
+          "expected one journaled criteria revision retaining the original intent");
+    for (const auto* field :
+         {"intent", "request", "environmentId", "projectId", "gatewayEnvironmentId", "pendingDestination", "state", "activeRun"})
+        check(before.value(field, Json()) == after.value(field, Json()), "a criteria-only change altered " + std::string(field));
 
-    const auto accepted = turnEvents(s, turn, id, "instruction_accepted");
-    check(turn.reply.at("actions").front().at("effect") == "replanning" && after.value("replanning", false) && accepted.size() == 1 &&
-              accepted.front().at("messageId") == turn.message() && after.at("pendingInstructions").back() == accepted.front() &&
-              accepted.front().at("conflicting") == true && accepted.front().at("revisionId") == revision.at("id") &&
-              !rejectsStartupColumn(lower(accepted.front().at("text").get<std::string>())),
-          "the turn did not queue a consistent criteria replan for its new revision");
-}
-
-bool isAsciiDigit(char c) {
-    return c >= '0' && c <= '9';
-}
-
-constexpr std::string_view clauseSeparators = ".!?\n;";
-
-bool isDecimalPoint(std::string_view text, std::size_t position) {
-    return text[position] == '.' && position > 0 && position + 1 < text.size() && isAsciiDigit(text[position - 1]) &&
-           isAsciiDigit(text[position + 1]);
-}
-
-std::string stripMarkdownFormatting(std::string_view input) {
-    const auto alphanumeric = [](char c) { return isAsciiDigit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
-    std::string text;
-    text.reserve(input.size());
-    for (std::size_t i = 0; i < input.size(); ++i) {
-        const char c = input[i];
-        if (c == '*' || c == '`' || c == '~') continue;
-        if (c == '_' && !(i > 0 && i + 1 < input.size() && alphanumeric(input[i - 1]) && alphanumeric(input[i + 1]))) continue;
-        text += c;
-    }
-    return text;
-}
-
-bool isFivePercent(std::string_view token) {
-    try {
-        std::size_t parsed = 0;
-        const double value = std::stod(std::string(token), &parsed);
-        return parsed == token.size() && value == 5.0;
-    } catch (const std::invalid_argument&) {
-        return false;
-    } catch (const std::out_of_range&) {
-        return false;
-    }
-}
-
-bool validInitialDurations(std::string_view phase) {
-    static const std::regex duration(R"(((?:\b(?:not|never|avoid|instead\s+of|rather\s+than|no|without)|n(?:'|’)t)\s+)"
-                                     R"((?:(?:for|last|lasts|lasting|run|runs|running|wait|waiting|hold|holding)\s+){0,2})?)"
-                                     R"(\b((?:[0-9]+(?:\.[0-9]+)?|one|two|three|a)\s+(?:hours?|days?|weeks?))\b)");
-    static const std::regex allowedDuration(R"(24\s+hours?|(?:1|one|a)\s+day)");
-    using Iterator = std::regex_iterator<std::string_view::const_iterator>;
-    for (auto it = Iterator(phase.begin(), phase.end(), duration); it != Iterator(); ++it) {
-        const bool negated = (*it)[1].matched;
-        const auto& mention = (*it)[2];
-        if (negated == std::regex_match(mention.first, mention.second, allowedDuration)) return false;
-    }
-    return true;
-}
-
-bool validInitialDurationClauses(std::string_view text) {
-    static const std::regex initialPhase(R"(\b(?:initial(?:ly)?|first|canary|rollout_canary|before\s+(?:expand|expanding|full))\b)"
-                                         R"(|(?:^|[^0-9.])5(?:\.0+)?\s*(?:%|percent\b))");
-    std::size_t start = 0;
-    while (start < text.size()) {
-        auto end = text.find_first_of(clauseSeparators, start);
-        // A decimal point is part of a percentage or duration within the clause.
-        while (end != std::string_view::npos && isDecimalPoint(text, end)) end = text.find_first_of(clauseSeparators, end + 1);
-        const auto clause = text.substr(start, end == std::string_view::npos ? end : end - start);
-        if (std::regex_search(clause.begin(), clause.end(), initialPhase) && !validInitialDurations(clause)) return false;
-        if (end == std::string_view::npos) break;
-        start = end + 1;
-    }
-    return true;
-}
-
-bool explainsCanary(const std::string& reply) {
-    const auto text = stripMarkdownFormatting(lower(reply));
-    static const std::regex canary(R"(\brollout_canary\b)");
-    static const std::regex directsAlternative(
-        R"((?:(?:(?:^|[.!?;\n])\s*(?:please\s+)?|\b(?:but|then|and)\s+|\b(?:i|we|you)\s+(?:would|should)\s+))"
-        R"((?:use|enable|choose|select|go with)|\b(?:i|we)\s+(?:would\s+)?(?:prefer|recommend(?:\s+(?:using|choosing|selecting))?)))"
-        R"(\s+(?:the\s+)?\brollout_(?!canary\b)[a-z0-9_]+\b)");
-    static const std::regex alternativeChoice(
-        R"(\brollout_(?!canary\b)[a-z0-9_]+\b\s+(?:is\s+(?:recommended|preferred|selected)\b)"
-        R"(|is\s+the\s+(?:recommended|preferred|selected|best)\s+(?:flag|option|choice)\b|should\s+be\s+used\b))");
-    static const std::regex initialPercentage(R"((\b(?:not|never|avoid|instead of|rather than)\s+)?\b)"
-                                              R"((?:(?:start(?:s|ing)?|begin(?:s|ning)?)(?:\s+out)?\s+(?:at|with|by rolling out to))"
-                                              R"(|(?:roll(?:s|ing)?\s+out\s+)?initially\s+(?:roll(?:s|ing)?\s+out\s+)?(?:to|for|at|with)))"
-                                              R"(\s+([0-9]+(?:\.[0-9]+)?)\s*(?:%|percent\b))");
-    static const std::regex rejectsCanary(
-        R"(\b(?:not|never|avoid|instead of|rather than)\s+(?:(?:use|using|enable|enabling)\s+)?(?:the\s+)?rollout_canary\b)"
-        R"((?!\s+(?:to|for)\b))");
-    static const std::string fullAudience =
-        R"(\b(?:(?:everyone|all users|(?:the\s+)?(?:entire|full)\s+(?:audience|user base)|full rollout)\b|100\s*(?:%|percent\b)))";
-    static const std::regex rejectsExpansion(
-        R"(\b(?:not|never)\s+(?:expand|roll out|enable|use)\s+)"
-        R"((?:(?:it|the (?:flag|rollout)|rollout_canary)\s+)?(?:to|for)\s+)" +
-        fullAudience +
-        R"((?!\s+(?:initially|at first|immediately|right away|until|during|for the first)\b))"
-        R"(|\bnever\s+expand\b(?=\s*(?:[.!?;]|$)|\s+beyond\b))"
-        R"(|\b(?:keep|stay|remain)\s+(?:it\s+)?at\s+5(?:\.0+)?\s*(?:%|percent\b)\s+(?:permanently|indefinitely|forever)\b)");
-    static const std::regex rollout(R"((?:^|[^0-9.])([0-9]+(?:\.[0-9]+)?)\s*(?:%|percent\b)\s+(?:of\s+(?:the\s+)?)?(?:users|audience)\b)"
-                                    R"([\s\S]{0,160}?\b(?:24\s+hours?|(?:1|one|a)\s+day)\b)"
-                                    R"([\s\S]{0,160}?\b(?:then|after(?:ward|wards| that)?|before|followed by)\b)"
-                                    R"([\s\S]{0,160}?)" +
-                                    fullAudience);
-    if (!std::regex_search(text, canary) || std::regex_search(text, rejectsCanary) || std::regex_search(text, rejectsExpansion) ||
-        std::regex_search(text, directsAlternative) || std::regex_search(text, alternativeChoice))
-        return false;
-    for (auto it = std::sregex_iterator(text.begin(), text.end(), initialPercentage); it != std::sregex_iterator(); ++it) {
-        const bool negated = (*it)[1].matched;
-        if (negated == isFivePercent((*it)[2].str())) return false;
-    }
-    const std::string_view view = text;
-    for (auto it = std::sregex_iterator(text.begin(), text.end(), rollout); it != std::sregex_iterator(); ++it) {
-        if (!isFivePercent((*it)[1].str())) continue;
-        const auto percentage = static_cast<std::size_t>(it->position(1));
-        auto separator = view.find_last_of(clauseSeparators, percentage);
-        while (separator != std::string_view::npos && isDecimalPoint(view, separator))
-            separator = view.find_last_of(clauseSeparators, separator - 1);
-        const auto start = separator == std::string_view::npos ? 0 : separator + 1;
-        const auto expanded = static_cast<std::size_t>(it->position() + it->length());
-        // Score the initial phase once and check surrounding clauses for additional claims about it.
-        return validInitialDurations(view.substr(start, expanded - start)) && validInitialDurationClauses(view.substr(0, start)) &&
-               validInitialDurationClauses(view.substr(expanded));
-    }
-    return false;
-}
-
-const std::string databaseDirective = R"((?:use|using|(?:switch|move|point|set|change)(?:\s+(?!(?:to|but|then)\b)\w+){0,4}\s+to)"
-                                      R"(|target(?:ing)?|connect(?:ing)?\s+to)"
-                                      R"(|benchmark(?:ing)?\s+(?:against|on|with)|run(?:ning)?\s+(?:against|on)))";
-const std::string databaseExclusion = R"((?:\b(?:not|never|no|avoid|skip|without|instead\s+of|rather\s+than)|n(?:'|’)t)\s+)"
-                                      "(?:" +
-                                      databaseDirective + R"(\s+)?(?:the\s+)?)";
-const std::string passiveDatabaseExclusion = R"(\s+(?:should|must)\s+(?:not|never)\s+be\s+used\b)";
-
-bool selectsOtherDatabase(const std::string& text) {
-    // Capture each exclusion with its own database mention so a later directive is scored separately.
-    static const std::regex otherDatabase("(" + databaseExclusion + ")?" +
-                                          R"(\b(?:(?:production|prod)(?:\s+(?:database|db))?|(?:development|dev)[\s-]+(?:database|db))\b)" +
-                                          "(" + passiveDatabaseExclusion + ")?");
-    for (auto it = std::sregex_iterator(text.begin(), text.end(), otherDatabase); it != std::sregex_iterator(); ++it)
-        if (!(*it)[1].matched && !(*it)[2].matched) return true;
-    return false;
+    const auto& note = events.back();
+    checkQueuedInstruction(turn, id, note, true);
+    checkMeaning(s, Criterion::CompletionColumn, criteria, "saved criteria did not require the startup_p95_ms column");
+    checkMeaning(s, Criterion::CriteriaInstruction, note.at("text").get_ref<const std::string&>(),
+                 "the queued instruction conflicted with the updated criteria");
 }
 
 void checkStagingNote(const Scene& s, const Turn& turn, Id id) {
-    checkActions(turn, {{"send_to_task", id}});
-    const auto& before = turn.before.at(id);
-    const auto& after = turn.after.at(id);
-    const auto kind = "instruction_accepted";
-    const auto notes = turnEvents(s, turn, id, kind);
-    check(notes.size() == 1 && notes.front().at("messageId") == turn.message(),
-          "expected one new " + std::string(kind) + " event for this message");
-    const auto& note = notes.front();
-    const auto& instruction = note.at("text").get_ref<const std::string&>();
-    static const std::string stagingDatabase = R"(\bstaging(?:\s+(?:database|db))?\b)";
-    static const std::regex staging(R"(\b)" + databaseDirective + R"(\s+(?:the\s+)?)" + stagingDatabase + "|" + stagingDatabase +
-                                    R"(\s+(?:(?:should|must)\s+be\s+used|only|from\s+now\s+on|going\s+forward)\b)");
-    static const std::regex rejectsStaging(databaseExclusion + stagingDatabase + "|" + stagingDatabase + passiveDatabaseExclusion);
-    const auto text = stripMarkdownFormatting(lower(instruction));
-    check(std::regex_search(text, staging) && !std::regex_search(text, rejectsStaging) && !selectsOtherDatabase(text),
-          "the new instruction did not direct the benchmark to use the staging database");
+    checkActions(s, turn, {{"send_to_task", id, "accepted"}});
+    const auto note = checkEvents(s, turn, id, {"instruction_accepted"}).front();
+    checkQueuedInstruction(turn, id, note, false);
 
-    const auto& effect = turn.reply.at("actions").front().at("effect");
-    const auto& run = before.at("activeRun");
-    auto pending = before.value("pendingInstructions", Json::array());
-    pending.push_back(note);
-    check(effect == "accepted" && note.at("conflicting") == false && note.at("revisionId") == before.at("currentRevision") &&
-              after.at("pendingInstructions") == pending && after.at("state") == before.at("state") && after.at("activeRun") == run &&
-              after.at("currentRevision") == before.at("currentRevision") && after.at("revisions") == before.at("revisions") &&
-              !after.value("replanning", false),
-          "the note was not queued for the current revision's next safe boundary");
-}
-
-std::regex taskDenial(std::string_view action, std::string_view topic) {
-    return std::regex(R"((?:\b(?:not|never|no|avoid|omit|exclude|skip|without|instead of|rather than)|n['’]t)\s+(?:(?:)" +
-                      std::string(action) + R"()\s+)?(?:the\s+)?(?:third[- ]party\s+)?)" + std::string(topic) + "|" + std::string(topic) +
-                      R"(\s+(?:is|are)\s+(?:optional|unnecessary|not required)\b)");
+    auto before = turn.before.at(id);
+    auto after = turn.after.at(id);
+    for (const auto* field : {"pendingInstructions", "generation"}) {
+        before.erase(field);
+        after.erase(field);
+    }
+    check(after == before, "the queued note altered the running task");
+    checkMeaning(s, Criterion::StagingInstruction, note.at("text").get_ref<const std::string&>(),
+                 "the new instruction did not direct the benchmark to use the staging database");
 }
 
 using Scenario = std::function<void(Scene&)>;
@@ -446,44 +277,49 @@ using Scenario = std::function<void(Scene&)>;
 const std::vector<std::pair<std::string, Scenario>> scenarios{
     {"new request on a named destination",
      [](Scene& s) {
+         s.task("Inventory test fixtures", "inventory");
          const auto turn = s.send("Run the project's existing test suite on the cloud Mac and report any failures");
-         check(turn.after.size() == 1, "expected one new task");
-         const auto& [id, task] = *turn.after.begin();
-         checkActions(turn, {{"start_task", id}});
-         check(task.at("environmentId") == "cloud", "the task did not use the cloud Mac");
+         const auto id = checkStarts(s, turn, 1).front();
+         check(turn.after.at(id).at("environmentId") == "cloud", "the task did not use the cloud Mac");
      }},
     {"a reply that matches an offered choice answers the question",
      [](Scene& s) {
+         s.task("Inventory test fixtures", "inventory");
          const auto id = s.task("Prepare the release label", "label",
                                 {{"question", "Which label should I use?"}, {"choices", {"Cancel this task", "Status"}}});
          const auto wait = s.store.task(id).at("wait");
          const auto turn = s.send("Cancel this task", wait.at("messageId").get<Id>());
-         checkActions(turn, {{"answer_task_question", id}});
-         const auto answers = turnEvents(s, turn, id, "user_answer");
+         checkActions(s, turn, {{"answer_task_question", id, "answered"}});
+         const auto events = checkEvents(s, turn, id, {"user_answer", "wait_closed", "inbox_decision"});
+         const auto& answer = events[0];
+         const auto& closure = events[1];
          const auto& task = turn.after.at(id);
-         check(answers.size() == 1 && answers.front().at("messageId") == turn.message() && answers.front().at("waitId") == wait.at("id") &&
-                   answers.front().at("text") == "Cancel this task" && task.at("state") == "deciding" && task.at("wait").is_null(),
+         check(answer.at("messageId") == turn.message() && answer.at("waitId") == wait.at("id") && answer.at("conversation") == true &&
+                   answer.at("text") == "Cancel this task" && closure.at("waitId") == wait.at("id") &&
+                   closure.at("resolution") == "answer" && task.at("state") == "deciding" && task.at("wait").is_null(),
                "the offered choice was not saved as the answer to the open question");
      }},
     {"a named stop cancels only that task",
      [](Scene& s) {
          s.task("Write the release notes", "notes");
          const auto benchmark = s.task("Benchmark the startup time", "benchmark");
-         const auto turn = s.send("Stop the benchmark");
-         checkCancellation(s, turn, benchmark);
+         checkCancellation(s, s.send("Stop the benchmark"), benchmark);
      }},
     {"an ambiguous stop waits for a named target",
      [](Scene& s) {
          const auto mobile = s.task("モバイル版のログイン画面を修正", "mobile");
          s.task("デスクトップ版のログイン画面を修正", "desktop");
          const auto turn = s.send("その作業をキャンセルして");
-         checkActions(turn, {});
-         check(asksWhichTask(turn.reply), "the reply did not ask which task to cancel or offer both choices");
-         const auto followUp = s.send("モバイル版のほうです", turn.replyMessage());
-         checkCancellation(s, followUp, mobile);
+         checkActions(s, turn, {});
+         auto clarification = turn.reply.at("text").get<std::string>();
+         for (const auto& option : turn.reply.value("suggestions", Json::array()))
+             clarification += "\n" + option.get_ref<const std::string&>();
+         checkMeaning(s, Criterion::CancellationTarget, clarification, "the reply did not ask which task to cancel");
+         checkCancellation(s, s.send("モバイル版のほうです", turn.replyMessage()), mobile);
      }},
     {"new criteria change the task",
      [](Scene& s) {
+         s.task("Inventory test fixtures", "inventory");
          const auto id = s.task("Benchmark the startup time", "benchmark");
          const auto turn =
              s.send("For the startup benchmark, change only the completion criteria to require a report column named startup_p95_ms");
@@ -491,34 +327,22 @@ const std::vector<std::pair<std::string, Scenario>> scenarios{
      }},
     {"two requests in one message start two tasks",
      [](Scene& s) {
+         s.task("Inventory test fixtures", "inventory");
          const auto turn = s.send("Write the release notes. Separately, audit the third-party licenses.");
-         check(turn.after.size() == 2, "expected two new tasks");
-         const auto first = turn.after.begin();
-         const auto second = std::next(first);
-         checkActions(turn, {{"start_task", first->first}, {"start_task", second->first}});
-         constexpr auto notesTopic = R"(\brelease[- ]notes?\b)";
-         constexpr auto licenseTopic = R"(\blicen[cs](?:e[sd]?|ing)\b)";
-         static const std::regex notes(notesTopic);
-         static const std::regex licenses(licenseTopic);
-         static const std::regex audit(R"(\b(?:audit|review|check|inspect|verify|assess)\b)");
-         static const auto deniesNotes =
-             taskDenial(R"(writ(?:e|ing)|draft(?:ing)?|prepar(?:e|ing)|publish(?:ing)?|creat(?:e|ing))", notesTopic);
-         static const auto deniesAudit =
-             taskDenial(R"(audit(?:ing)?|review(?:ing)?|check(?:ing)?|inspect(?:ing)?|verif(?:y|ying)|assess(?:ing)?)", licenseTopic);
-         const auto role = [&](const Json& task) {
-             const auto request = lower(task.at("request").get<std::string>());
-             const bool hasNotes = std::regex_search(request, notes);
-             const bool hasLicenses = std::regex_search(request, licenses);
-             if (hasNotes == hasLicenses || std::regex_search(request, hasNotes ? deniesNotes : deniesAudit)) return "";
-             if (hasNotes) return "release notes";
-             return std::regex_search(request, audit) ? "license audit" : "";
+         const auto ids = checkStarts(s, turn, 2);
+         const auto classify = [&](Id id) {
+             return s.judge(Criterion::SplitRequest, turn.after.at(id).at("request").get_ref<const std::string&>());
          };
-         const std::set<std::string> roles{role(first->second), role(second->second)};
-         check(roles == std::set<std::string>{"release notes", "license audit"},
-               "the tasks did not map one-to-one to release notes and a license audit");
+         const auto first = classify(ids[0]);
+         const auto second = classify(ids[1]);
+         check((first.verdict == Verdict::ReleaseNotes && second.verdict == Verdict::LicenseAudit) ||
+                   (first.verdict == Verdict::LicenseAudit && second.verdict == Verdict::ReleaseNotes),
+               "the tasks did not map one-to-one to release notes and a license audit; judge quoted " +
+                   Json::array({first.evidence, second.evidence}).dump());
      }},
     {"explaining a result changes no work",
      [](Scene& s) {
+         s.task("Inventory test fixtures", "inventory");
          const auto id = s.task("Compare three rollout plans", "plans");
          s.t3.finish(s.store.task(id).at("activeRun").at("runId").get<std::string>(),
                      "1. Use rollout_global for a big bang release\n"
@@ -526,12 +350,13 @@ const std::vector<std::pair<std::string, Scenario>> scenarios{
                      "3. Use rollout_team to enable one team at a time");
          s.reach(id, "completed");
          const auto turn = s.send("Explain the second option in more detail and include its rollout flag name");
-         checkActions(turn, {});
-         check(explainsCanary(turn.reply.at("text").get_ref<const std::string&>()),
-               "the reply did not explain rollout_canary's 5% one-day rollout followed by full release");
+         checkActions(s, turn, {});
+         checkMeaning(s, Criterion::CanaryExplanation, turn.reply.at("text").get_ref<const std::string&>(),
+                      "the reply did not explain rollout_canary's 5% one-day rollout followed by full release");
      }},
     {"a note for running work waits for a safe boundary",
      [](Scene& s) {
+         s.task("Inventory test fixtures", "inventory");
          const auto id = s.task("Benchmark the startup time", "benchmark");
          const auto turn = s.send(
              "Leave a note for the benchmark task to use the staging database at its next safe point. Let the current run continue.");
@@ -561,172 +386,117 @@ struct Script : Model {
     }
 };
 
+struct RecordedJudgment {
+    Criterion criterion;
+    std::string_view text;
+    std::string_view verdict = "match";
+};
+
 void selfTest() {
+    using enum Criterion;
+    judgeSelfTest();
     int passed = 0;
     const auto run = [&](std::string_view name, const Scenario& scenario, std::vector<Decision> steps,
-                         std::string_view expectedFailure = {}) {
+                         std::vector<RecordedJudgment> judgments, std::string_view expectedFailure) {
         Script script(std::move(steps));
         Mixed model(script);
-        Scene scene(model, "offline");
+        std::size_t nextJudgment = 0;
+        Scene scene(model, "offline", [&](Criterion criterion, std::string_view text) {
+            const auto& recorded = judgments.at(nextJudgment++);
+            check(criterion == recorded.criterion && text == recorded.text, "unexpected text sent to the judge: " + std::string(text));
+            return parseJudgment(criterion, text, Json{{"verdict", recorded.verdict}, {"evidence", recorded.text}}.dump());
+        });
         std::string failure;
         try {
             scenario(scene);
         } catch (const std::exception& error) {
             failure = error.what();
         }
-        check(script.next == script.steps.size() && (expectedFailure.empty() ? failure.empty() : includes(failure, expectedFailure)),
+        check(script.next == script.steps.size() && nextJudgment == judgments.size() &&
+                  (expectedFailure.empty() ? failure.empty() : failure.find(expectedFailure) != std::string::npos),
               std::string(name) + " expected " + (expectedFailure.empty() ? "a pass" : std::string(expectedFailure)) + ", got " +
                   (failure.empty() ? "a pass" : failure) + "; script steps " + std::to_string(script.next) + "/" +
-                  std::to_string(script.steps.size()));
+                  std::to_string(script.steps.size()) + "; judgments " + std::to_string(nextJudgment) + "/" +
+                  std::to_string(judgments.size()));
         ++passed;
     };
-    const auto test = [&](std::string_view prefix, std::vector<Decision> steps, std::string_view failure = {}) {
+    const auto test = [&](std::string_view prefix, std::vector<Decision> steps, std::vector<RecordedJudgment> judgments = {},
+                          std::string_view failure = {}) {
         const auto scenario = std::ranges::find_if(scenarios, [&](const auto& item) { return item.first.starts_with(prefix); });
         check(scenario != scenarios.end(), "missing offline scenario: " + std::string(prefix));
-        run(scenario->first, scenario->second, std::move(steps), failure);
+        run(scenario->first, scenario->second, std::move(steps), std::move(judgments), failure);
     };
-    const auto say = [](const std::string& text) { return Decision{"reply", {{"text", text}}, "Scripted reply"}; };
-    const auto start = [](const std::string& request) { return Decision{"start_task", {{"request", request}}, "Scripted start"}; };
+    const auto say = [](std::string_view text) { return Decision{"reply", {{"text", text}}, "Scripted reply"}; };
+    const auto start = [](std::string_view request) { return Decision{"start_task", {{"request", request}}, "Scripted start"}; };
     const auto action = [](std::string tool, std::string_view task, Json args = Json::object()) {
         args["fixtureRequest"] = task;
         return Decision{std::move(tool), std::move(args), "Scripted action"};
     };
     const auto done = say("Done.");
-    const auto notes = start("Write the release notes");
-    const auto audit = start("Audit the third-party licenses");
+    constexpr auto notes = "Draft the notes for this release.";
+    constexpr auto audit = "Review licensing for the external dependencies.";
     constexpr auto benchmark = "Benchmark the startup time";
+    constexpr auto mobile = "モバイル版のログイン画面を修正";
+    constexpr auto clarify = "モバイル版とデスクトップ版のどちらをキャンセルしますか？";
+    constexpr auto column = "The report must have a startup_p95_ms column.";
+    constexpr auto update = "Update the report criteria.";
+    constexpr auto staging = "Use the staging database at the next safe point.";
+    constexpr auto explain = "Use rollout_canary for one in twenty users for a day, then expand to everyone.";
     const auto stop = action("cancel_task", benchmark);
-    const auto stopMobile = action("cancel_task", "モバイル版のログイン画面を修正");
-    const auto clarify = say("モバイル版とデスクトップ版のどちらをキャンセルしますか？");
-    auto choices = say("対象を選んでください。");
-    choices.args["suggestions"] = {"モバイル版", "デスクトップ版"};
-    const auto criteria = [&](std::string_view text, std::string_view instruction = "Update the report criteria") {
-        return action("change_task", benchmark, {{"doneWhen", text}, {"instruction", instruction}});
-    };
+    const auto stopMobile = action("cancel_task", mobile);
+    const auto criteria = action("change_task", benchmark, {{"doneWhen", column}, {"instruction", update}});
     const auto queue = [&](std::string_view text) { return action("send_to_task", benchmark, {{"instruction", text}}); };
-    const auto stagingAtSafePoint = queue("Use the staging database at the next safe point");
 
     auto cloud = start("Run the existing test suite");
     cloud.args["environment"] = "cloud Mac";
     test("new request", {cloud, done});
+    test("new request", {start("Run the existing test suite"), done}, {}, "did not use the cloud Mac");
     test("a reply", {action("answer_task_question", "Prepare the release label", {{"text", "Cancel this task"}}), done});
+    test("a reply", {action("answer_task_question", "Prepare the release label", {{"text", "Status"}}), done}, {},
+         "not saved as the answer");
     test("a named stop", {stop, done});
-    test("a named stop", {stop, action("send_to_task", "Write the release notes", {{"instruction", "Pause drafting"}}), done},
-         "unexpected action");
-    test("an ambiguous stop", {clarify, stopMobile, done});
-    test("an ambiguous stop", {choices, stopMobile, done});
-    test("an ambiguous stop", {say("キャンセルするタスクを指定してください。"), stopMobile, done});
-    test("an ambiguous stop", {say("Please specify the task to cancel."), stopMobile, done});
-    test("an ambiguous stop", {say("キャンセルしました。")}, "did not ask which task");
-    test("an ambiguous stop", {say("確認します。")}, "did not ask which task");
-    test("an ambiguous stop", {say("I cancelled the task.")}, "did not ask which task");
-    test("new criteria", {criteria("Include a report column named startup_p95_ms"), done});
-    constexpr auto columnConstraint = "Include a report column named startup_p95_ms without changing the benchmark";
-    test("new criteria", {criteria(columnConstraint, columnConstraint), done});
-    for (auto text : {"Do not include the startup_p95_ms column",
-                      "Include a report column named startup_p95_ms. Omit startup_p95_ms from the final report.",
-                      "Add a report column, but exclude startup_p95_ms."})
-        test("new criteria", {criteria(text), done}, "did not preserve the benchmark and require");
-    test("new criteria", {criteria(columnConstraint, "Omit startup_p95_ms"), done}, "did not queue a consistent criteria replan");
-    test("two requests", {notes, audit, done});
-    test("two requests", {start("Write the release notes without changing source code"), audit, done});
-    test("two requests", {start("Do not write release notes"), audit, done}, "one-to-one");
-    test("two requests", {notes, start("Do not audit the third-party licenses"), done}, "one-to-one");
-    test("two requests", {start("Write the release notes and audit the third-party licenses"), audit, done}, "one-to-one");
-    test("explaining", {say("Use rollout_canary for 5% of users for 24 hours, then expand it to everyone.")});
-    test("explaining", {say("Use rollout_canary for **5%** of users for a day, then expand to everyone.")});
-    test("explaining", {say("Use `rollout_canary` for _5%_ of users for **24 hours**, then expand to everyone.")});
-    test("explaining", {say("With rollout_canary, start with `5.00 percent` of users for a day, then expand to __everyone__.")});
-    test("explaining", {say("Use rollout_canary for 0.5% of users for a day, then expand to everyone.")}, "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
-                            "The initial phase lasts 24 hours, not two days.")});
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
-                            "The initial phase doesn’t last two days.")});
-    test("explaining",
-         {say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
-              "The initial phase lasts two days.")},
-         "did not explain");
-    test("explaining",
-         {say("Use rollout_canary for 5% of users for a day, then expand to everyone; "
-              "the 5.0% phase lasts 2.5 days.")},
-         "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then expand to everyone and monitor for 2 weeks.")});
-    test("explaining", {say("Use rollout_canary for 5% of users for 24 hours, not a day, then expand to everyone.")}, "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for 2 weeks, not 24 hours, then expand to everyone.")}, "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for 24 hours, then wait two days before expanding to everyone.")},
-         "did not explain");
-    test("explaining", {say("The flag is rollout_canary. Spend two days at 5% of users for 24 hours, then expand to everyone.")},
-         "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then expand to everyone, including the remaining 95%.")});
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
-                            "It does not expose all users initially.")});
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
-                            "Do not enable rollout_canary for everyone initially.")});
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
-                            "Unlike rollout_global, this limits initial exposure.")});
-    test("explaining", {say("Use rollout_canary, not rollout_global, for 5% of users for a day, then expand to everyone.")});
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then expand to everyone. Do not use rollout_global.")});
-    test("explaining", {say("The first option is to use rollout_global. "
-                            "For the second option, rollout_canary starts with 5% of users for a day, then expands to everyone.")});
-    test("explaining", {say("Start with 5% of users for a day, then expand to everyone.")}, "did not explain");
-    test("explaining",
-         {say("Use rollout_global for 5% of users for a day, then expand to everyone. "
-              "The other flag was rollout_canary.")},
-         "did not explain");
-    test("explaining",
-         {say("rollout_canary starts with 5% of users for a day, then expands to everyone. "
-              "I recommend using rollout_immediate.")},
-         "did not explain");
-    test("explaining",
-         {say("rollout_canary starts with 5% of users for a day, then expands to everyone. "
-              "rollout_immediate is the recommended option.")},
-         "did not explain");
-    test("explaining", {say("Use rollout_canary for 50% of users for a day, then everyone.")}, "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then everyone. Start with 50%.")}, "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then everyone. Roll out initially to 100%.")},
-         "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then never expand it to everyone.")}, "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then do not expand to all users after a day.")},
-         "did not explain");
-    test("explaining", {say("Use rollout_canary for 5% of users for a day, then expand to everyone. Keep it at 5% permanently.")},
-         "did not explain");
-    test("a note for running work waits", {stagingAtSafePoint, done});
-    test("a note for running work waits", {queue("Avoid staging database"), done}, "did not direct");
-    for (auto text :
-         {"Use the staging database, not the production database", "Use the staging database instead of production",
-          "Use the staging database rather than prod", "Avoid production and use the staging database",
-          "Switch the benchmark database to staging.", "Use staging for all subsequent benchmark queries.",
-          "Switch the benchmark database to staging, not production.", "Do not switch the benchmark database to production; use staging.",
-          "Use **staging** instead of `production`.", "Do not point the benchmark to the dev db. Staging should be used.",
-          "Production must not be used. Run the benchmark using staging."}) {
-        test("a note for running work waits", {queue(text), done});
-    }
-    for (auto text :
-         {"Use the production database", "Use staging and production database", "Use the staging database and production database",
-          "Use the staging database, then switch to production",
-          "Use the staging database, not the production database. Then run against prod.",
-          "Do not switch the benchmark database to staging.", "Switch the benchmark database to production.",
-          "Mention staging without changing the database.", "Use staging now, then production later.",
-          "Use staging now, then connect to prod.", "Use staging for now, then switch the benchmark database to the dev db.",
-          "Use staging for now. Do not switch from staging but switch to production later.",
-          "Use staging for now. Don't switch the benchmark database to staging later.",
-          "Use staging for now. Don’t use staging for the final run.", "Use staging for now. Staging should not be used going forward.",
-          "Use staging for now. Run on the existing database instead of staging."}) {
-        test("a note for running work waits", {queue(text), done}, "did not direct");
-    }
+    test("a named stop", {action("cancel_task", "Write the release notes"), done}, {}, "expected applied actions");
+    test("an ambiguous stop", {say(clarify), stopMobile, done}, {{CancellationTarget, clarify}});
+    test("an ambiguous stop", {stopMobile, done}, {}, "expected applied actions");
+    constexpr auto acknowledgement = "I will check.";
+    test("an ambiguous stop", {say(acknowledgement)}, {{CancellationTarget, acknowledgement, "ambiguous"}}, "did not ask which task");
+
+    test("new criteria", {criteria, done}, {{CompletionColumn, column}, {CriteriaInstruction, update}});
+    auto changedIntent = criteria;
+    changedIntent.args["intent"] = "Measure memory usage instead.";
+    test("new criteria", {changedIntent, done}, {}, "retaining the original intent");
+    auto movedBenchmark = criteria;
+    movedBenchmark.args["environment"] = "cloud Mac";
+    test("new criteria", {movedBenchmark, done}, {}, "altered pendingDestination");
+    constexpr auto omitColumn = "Do not include startup_p95_ms in the final report.";
+    auto conflicting = criteria;
+    conflicting.args["instruction"] = omitColumn;
+    test("new criteria", {conflicting, done}, {{CompletionColumn, column}, {CriteriaInstruction, omitColumn, "mismatch"}},
+         "instruction conflicted");
+
+    test("two requests", {start(audit), start(notes), done},
+         {{SplitRequest, audit, "license_audit"}, {SplitRequest, notes, "release_notes"}});
+    test("two requests", {start(notes), done}, {}, "expected 2 new tasks");
+    test("two requests", {start(notes), start(notes), done},
+         {{SplitRequest, notes, "release_notes"}, {SplitRequest, notes, "release_notes"}}, "one-to-one");
+    test("explaining", {say(explain)}, {{CanaryExplanation, explain}});
+    constexpr auto contradictory = "Use rollout_canary for 5% for a day, then expand to everyone. Never expand beyond 5%.";
+    test("explaining", {say(contradictory)}, {{CanaryExplanation, contradictory, "mismatch"}}, "did not explain");
+    test("a note for running work", {queue(staging), done}, {{StagingInstruction, staging}});
 
     constexpr auto stagingBenchmark = "Benchmark startup using the staging database";
-    const auto queuedNote = [&](std::string text) { return action("send_to_task", stagingBenchmark, {{"instruction", std::move(text)}}); };
+    constexpr auto oldInstruction = "Use the staging database.";
+    constexpr auto newInstruction = "Continue measuring as before.";
+    const auto queuedNote = [&](std::string_view text) { return action("send_to_task", stagingBenchmark, {{"instruction", text}}); };
     run(
         "old intent and instruction cannot satisfy the new turn",
         [&](Scene& s) {
             const auto id = s.task(stagingBenchmark, "benchmark");
-            const auto prior = s.send("Use the staging database");
-            checkStagingNote(s, prior, id);
-            const auto turn = s.send("Use staging for the next batch too");
-            checkStagingNote(s, turn, id);
+            checkStagingNote(s, s.send("Use the staging database"), id);
+            checkStagingNote(s, s.send("Use staging for the next batch too"), id);
         },
-        {queuedNote("Use the staging database"), done, queuedNote("Continue measuring"), done}, "did not direct");
+        {queuedNote(oldInstruction), done, queuedNote(newInstruction), done},
+        {{StagingInstruction, oldInstruction}, {StagingInstruction, newInstruction, "mismatch"}}, "did not direct");
 
     for (const auto* field : {"state", "currentRevision", "pendingInstructions"}) {
         run(
@@ -735,21 +505,21 @@ void selfTest() {
                 const auto id = s.task(benchmark, "benchmark");
                 auto turn = s.send("What's the status?");
                 turn.after.at(id)[field] = "unexpected change";
-                checkActions(turn, {});
+                checkActions(s, turn, {});
             },
-            {done}, "untouched task changed");
+            {done}, {}, "untouched task changed");
     }
     std::cout << "Offline scoring self-test: " << passed << " cases passed\n";
 }
 
 void usage(std::ostream& out) {
     out << "Usage:\n"
-        << "  flock_live_conversation --live\n"
+        << "  flock_live_conversation --live [--trials N]\n"
         << "  flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]\n"
         << "  flock_live_conversation --self-test\n\n"
-        << "--live runs one trial of each conversation scenario. --self-test checks scoring offline.\n"
+        << "--live reads connection settings from the environment. --self-test checks scoring offline.\n"
         << chatGPTSetup << "\n"
-        << "Positional runs default to three trials per scenario. The optional filter matches a substring of the scenario name.\n"
+        << "The default is one trial per scenario. The optional filter matches a substring of the scenario name.\n"
         << "Scenarios:\n";
     for (const auto& [name, scenario] : scenarios) out << "  " << name << '\n';
 }
@@ -766,16 +536,13 @@ int main(int argc, char** argv) {
             selfTest();
             return 0;
         }
-        const bool fromEnvironment = argc == 2 && operation == "--live";
-        if (!fromEnvironment && (argc < 3 || argc > 5 || operation.starts_with("--"))) {
+        const bool fromEnvironment = operation == "--live";
+        if (fromEnvironment ? argc != 2 && (argc != 4 || std::string_view(argv[2]) != "--trials")
+                            : argc < 3 || argc > 5 || operation.starts_with("--")) {
             usage(std::cerr);
             return 2;
         }
-        const auto home = fromEnvironment ? environment("FLOCK_HOME") : argv[1];
-        const auto slug = fromEnvironment ? environment("FLOCK_LIVE_MODEL") : argv[2];
-        if (home.empty()) return skip("FLOCK_HOME is unset", chatGPTSetup);
-        if (slug.empty()) return skip("FLOCK_LIVE_MODEL is unset", chatGPTSetup);
-        int trials = fromEnvironment ? 1 : 3;
+        int trials = 1;
         if (argc >= 4) {
             const std::string_view input(argv[3]);
             const auto [end, error] = std::from_chars(input.data(), input.data() + input.size(), trials);
@@ -790,6 +557,10 @@ int main(int argc, char** argv) {
             std::cerr << "No scenario matches '" << filter << "'\n";
             return 2;
         }
+        const auto home = fromEnvironment ? environment("FLOCK_HOME") : argv[1];
+        const auto slug = fromEnvironment ? environment("FLOCK_LIVE_MODEL") : argv[2];
+        if (home.empty()) return skip("FLOCK_HOME is unset", chatGPTSetup);
+        if (slug.empty()) return skip("FLOCK_LIVE_MODEL is unset", chatGPTSetup);
         const auto credentials = std::filesystem::path(home) / "credentials" / "chatgpt";
         if (!hasChatGPTProfile(credentials)) return skip("No ChatGPT sign-in in FLOCK_HOME", chatGPTSetup);
         app::ChatGPTModel live(credentials);
@@ -804,7 +575,7 @@ int main(int argc, char** argv) {
                 std::string failure;
                 Mixed model(live);
                 try {
-                    Scene scene(model, slug);
+                    Scene scene(model, slug, liveJudge(live, slug));
                     scenario(scene);
                 } catch (const std::exception& error) {
                     failure = error.what();
