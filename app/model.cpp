@@ -464,13 +464,10 @@ bool nonblank(const std::string& value) {
 ModelTurn ChatGPTModel::decide(const ModelInput& input) {
     const auto begin = std::chrono::steady_clock::now();
     const auto request = responseRequest(input);
-    auto body = request.dump(-1, ' ', false, Json::error_handler_t::replace);
     std::size_t inspectedImageBytes = 0;
     for (const auto& image : input.images)
         if (!image.attachmentId.empty()) inspectedImageBytes += image.dataBase64.size();
-    if (inspectedImageBytes > message_attachments::maxEncodedImages || body.size() > maxRequest + inspectedImageBytes)
-        throw ModelError("Flock's ChatGPT request exceeded the local transport limit", false);
-    const auto response = chatgpt::infer(transport_, accessToken(), std::move(body));
+    const auto response = respond(request, inspectedImageBytes);
     auto usage = chatgpt::tokenUsage(chatgpt::field(response, "usage"));
     usage["wallMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
     try {
@@ -480,6 +477,13 @@ ModelTurn ChatGPTModel::decide(const ModelInput& input) {
     } catch (const ModelError& error) {
         throw ModelError(error.what(), error.transient, std::move(usage), error.code);
     }
+}
+
+Json ChatGPTModel::respond(const Json& request, std::size_t inspectedImageBytes) {
+    auto body = request.dump(-1, ' ', false, Json::error_handler_t::replace);
+    if (inspectedImageBytes > message_attachments::maxEncodedImages || body.size() > maxRequest + inspectedImageBytes)
+        throw ModelError("Flock's ChatGPT request exceeded the local transport limit", false);
+    return chatgpt::infer(transport_, accessToken(), std::move(body));
 }
 
 Json responseRequest(const ModelInput& input) {
