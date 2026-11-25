@@ -82,6 +82,11 @@ if(BUILD_TESTING)
       "${PROJECT_SOURCE_DIR}/scripts/verify-model-replay.py"
       "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py" "${variant}" "${expected}")
   endfunction()
+  flock_verify_model(reply_motion verify-reply-motion)
+  flock_replay_model(reply_motion_historical verify-reply-motion --historical
+    "A catch-up refresh animated a reply")
+  flock_replay_model(reply_motion_ignored_catch_up verify-reply-motion --ignore-catch-up
+    "A catch-up refresh animated a reply")
   flock_verify_model(change_feed verify-change-feed)
   flock_replay_model(change_feed_historical verify-change-feed --historical
     "The Bot view recovered, but the history invalidation was lost")
