@@ -255,15 +255,11 @@ Json sessionOriginJson(const SessionOrigin& origin) {
     return data;
 }
 
-TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_view text) {
-    const auto rowId = std::to_string(id);
-    std::set<std::string_view> consumed;
-    const auto row = RecordDecoder("tasks", rowId).tracking(consumed);
-    auto data = row.parse(text);
-    row.object(data);
+namespace {
+TaskData decodeTaskData(Id id, TaskState state, Id generation, const Json& data, const RecordDecoder& row) {
     TaskData task;
     task.id = id;
-    task.state = decodeTaskState(id, state);
+    task.state = state;
     task.generation = generation;
     task.botId = row.get<std::string>(data, "botId");
     task.request = row.get<std::string>(data, "request");
@@ -271,8 +267,7 @@ TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_vi
     task.environmentId = row.get<std::string>(data, "environmentId");
     task.projectId = row.get<std::string>(data, "projectId");
     task.doneWhen = row.get<std::string>(data, "doneWhen");
-    row.object(row.require(data, "config"), "config");
-    task.config = std::move(data.at("config"));
+    task.config = row.object(row.require(data, "config"), "config");
     task.gatewayEnvironmentId = row.optional<std::string>(data, "gatewayEnvironmentId");
     task.currentRevision = row.optional<Id>(data, "currentRevision");
     if (const auto found = row.find(data, "pendingDestination"); found != data.end())
@@ -340,8 +335,16 @@ TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_vi
     task.feedback = row.optional<std::string>(data, "feedback");
     decodeTaskInteraction(task, data, row);
     decodeTaskContext(task, data, row);
-    row.rejectUnknown(data);
     return task;
+}
+}
+
+TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_view text) {
+    const auto rowId = std::to_string(id);
+    const RecordDecoder row("tasks", rowId);
+    return row.decodeClosed(row.parse(text), [&](const Json& data, const RecordDecoder& fields) {
+        return decodeTaskData(id, decodeTaskState(id, state), generation, data, fields);
+    });
 }
 
 TaskData decodeTaskRow(const Statement& row, int col) {

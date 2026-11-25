@@ -1,6 +1,8 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
+#include "outbox_storage.hpp"
+#include "record_decode.hpp"
 #include "task_storage.hpp"
 
 #include <algorithm>
@@ -262,12 +264,14 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
 }
 
 namespace {
-Json sourceRef(const Json& result) {
-    Json source = {{"taskId", result.at("taskId")},
-                   {"messageId", result.at("messageId")},
-                   {"revisionId", result.at("revisionId")},
-                   {"text", bounded(field(result, "text"), limits::session_prompt::maxQuoteTextBytes)}};
-    if (result.contains("run")) source["run"] = result.at("run");
+std::optional<OutboxSource> sourceRef(const Json& result) {
+    if (result.is_null()) return std::nullopt;
+    OutboxSource source{.taskId = result.at("taskId"),
+                        .messageId = result.at("messageId"),
+                        .revisionId = result.at("revisionId").get<Id>(),
+                        .text = bounded(field(result, "text"), limits::session_prompt::maxQuoteTextBytes)};
+    if (const auto run = result.find("run"); run != result.end())
+        source.run = decodeOutboxSourceRun(*run, {"journal", std::to_string(source.messageId), "run"});
     return source;
 }
 }
@@ -569,13 +573,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto result = source(nullptr);
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
-        const auto id = startConversationTask(routing, bot, request, destination, message.id,
-                                              result.is_null() ? Json(nullptr) : sourceRef(result), resume, selectedSession);
+        const auto id = startConversationTask(routing, bot, request, destination, message.id, sourceRef(result), resume, selectedSession);
         if (!doneWhen.empty() || !targets.empty()) {
             auto task = load(id);
-            if (!doneWhen.empty()) {
-                task.criteriaProposal = TaskCriteriaProposal{doneWhen, message.id};
-            }
+            if (!doneWhen.empty()) task.criteriaProposal = TaskCriteriaProposal{doneWhen, message.id};
             if (!targets.empty()) task.destinations = std::move(targets);
             if (!commit.empty()) task.requestedCommit = std::move(commit);
             save(task);
@@ -605,8 +606,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                     {{"applied", 0}, {"taskId", task.id}, {"expected", {{"revisionId", revision}}}, {"current", taskState(task, message)}});
             change = taskChange(message, args, task, linked);
         }
-        const bool conflicting = acceptInstruction(task, message.id, step, instruction,
-                                                   result.is_null() ? Json(nullptr) : sourceRef(result), change ? &*change : nullptr);
+        const bool conflicting = acceptInstruction(task, message.id, step, instruction, sourceRef(result), change ? &*change : nullptr);
         return {{"ok", true}, {"effect", conflicting ? "replanning" : "accepted"}, {"taskId", task.id}};
     }
     if (tool == "answer_task_question") {

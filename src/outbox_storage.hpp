@@ -16,6 +16,7 @@ Json instructionsJson(std::span<const OutboxInstruction>);
 void redactInstructions(std::span<OutboxInstruction>, const SecretRedactor&);
 std::vector<OutboxSource> taskResultReferences(const Json&, Id task);
 OutboxSource decodeOutboxSource(const Json&, const RecordDecoder&);
+OutboxSourceRun decodeOutboxSourceRun(const Json&, const RecordDecoder&);
 Json sourceJson(const OutboxSource&);
 Json sourceRunJson(const OutboxSourceRun&);
 void redactSource(OutboxSource&, const SecretRedactor&);

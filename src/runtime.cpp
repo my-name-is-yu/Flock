@@ -1815,13 +1815,12 @@ ORDER BY j.id
             auto remainingReports = recentReportLimit;
             while (reports.next()) {
                 const auto report = reports.json(1);
-                const Json source{{"taskId", task.id},
-                                  {"messageId", reports.number(0)},
-                                  {"run", report.at("run")},
-                                  {"resultRunId", report.at("resultRunId")},
-                                  {"text", field(report, "report")}};
-                quoteSource(decodeOutboxSource(source, {"journal", reports.string(0), "report"}),
-                            std::min(reportExcerptBytes, quotes.remaining / remainingReports));
+                OutboxSource source{.taskId = task.id,
+                                    .messageId = reports.number(0),
+                                    .text = field(report, "report"),
+                                    .resultRunId = field(report, "resultRunId"),
+                                    .run = decodeOutboxSourceRun(report.at("run"), {"journal", reports.string(0), "run"})};
+                quoteSource(std::move(source), std::min(reportExcerptBytes, quotes.remaining / remainingReports));
                 --remainingReports;
             }
         }

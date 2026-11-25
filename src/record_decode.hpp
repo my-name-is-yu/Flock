@@ -28,23 +28,14 @@ public:
 
     RecordDecoder nested(std::string_view key) const { return {table_, id_, qualify(key)}; }
 
-    RecordDecoder tracking(std::set<std::string_view>& keys) const {
+    template <class Decode> auto decodeClosed(const Json& data, Decode decode) const {
+        object(data);
+        std::set<std::string_view> keys;
         auto reader = *this;
         reader.keys_ = &keys;
-        return reader;
-    }
-
-    void rejectUnknown(const Json& data) const {
-        object(data);
-        for (auto it = data.begin(); it != data.end(); ++it)
-            if (!keys_->contains(it.key())) fail(it.key(), "unknown key");
-    }
-
-    template <class Decode> auto decodeClosed(const Json& data, Decode decode) const {
-        std::set<std::string_view> keys;
-        const auto reader = tracking(keys);
         auto value = decode(data, reader);
-        reader.rejectUnknown(data);
+        for (auto it = data.begin(); it != data.end(); ++it)
+            if (!keys.contains(it.key())) fail(it.key(), "unknown key");
         return value;
     }
 

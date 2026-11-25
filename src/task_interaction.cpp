@@ -21,68 +21,49 @@ Json checkpointJson(const DecisionCheckpoint& checkpoint) {
 }
 
 DecisionCheckpoint decodeCheckpoint(const Json& data, const RecordDecoder& row) {
-    std::set<std::string_view> keys;
-    const auto item = row.tracking(keys);
-    DecisionCheckpoint checkpoint{
-        item.get<Id>(data, "generation"),
-        item.get<Id>(data, "eventId"),
-        item.nullable<Id>(data, "revisionId"),
-        {{item.get<std::string>(data, "tool"), item.require(data, "args"), item.optional<std::string>(data, "reason").value_or("")},
-         item.require(data, "usage"),
-         item.get<Id>(data, "attemptId"),
-         item.optional<std::string>(data, "rejection").value_or("")}};
-    item.rejectUnknown(data);
-    return checkpoint;
+    return {row.get<Id>(data, "generation"),
+            row.get<Id>(data, "eventId"),
+            row.nullable<Id>(data, "revisionId"),
+            {{row.get<std::string>(data, "tool"), row.require(data, "args"), row.optional<std::string>(data, "reason").value_or("")},
+             row.require(data, "usage"),
+             row.get<Id>(data, "attemptId"),
+             row.optional<std::string>(data, "rejection").value_or("")}};
 }
 
 QuestionOption decodeQuestionOption(const Json& data, const RecordDecoder& row) {
-    std::set<std::string_view> keys;
-    const auto item = row.tracking(keys);
-    QuestionOption option{item.get<std::string>(data, "label"), item.get<std::string>(data, "value"),
-                          item.get<std::string>(data, "description")};
-    item.rejectUnknown(data);
-    return option;
+    return {row.get<std::string>(data, "label"), row.get<std::string>(data, "value"), row.get<std::string>(data, "description")};
 }
 
 QuestionField decodeQuestionField(const Json& data, const RecordDecoder& row) {
-    std::set<std::string_view> keys;
-    const auto item = row.tracking(keys);
-    QuestionField field{.id = item.get<std::string>(data, "id"),
-                        .prompt = item.get<std::string>(data, "question"),
-                        .header = item.get<std::string>(data, "header"),
-                        .required = item.get<bool>(data, "required"),
-                        .multiple = item.get<bool>(data, "multiple"),
-                        .freeform = item.get<bool>(data, "freeform"),
-                        .initialAnswer = item.optional<std::string>(data, "initialAnswer")};
-    for (const auto& option : item.array(item.require(data, "options"), "options"))
-        field.options.push_back(decodeQuestionOption(option, row.nested("options." + std::to_string(field.options.size()))));
-    item.rejectUnknown(data);
+    QuestionField field{.id = row.get<std::string>(data, "id"),
+                        .prompt = row.get<std::string>(data, "question"),
+                        .header = row.get<std::string>(data, "header"),
+                        .required = row.get<bool>(data, "required"),
+                        .multiple = row.get<bool>(data, "multiple"),
+                        .freeform = row.get<bool>(data, "freeform"),
+                        .initialAnswer = row.optional<std::string>(data, "initialAnswer")};
+    for (const auto& option : row.array(row.require(data, "options"), "options"))
+        field.options.push_back(row.nested("options." + std::to_string(field.options.size())).decodeClosed(option, decodeQuestionOption));
     return field;
 }
 
 QuestionTarget decodeQuestionTarget(const Json& data, const RecordDecoder& row) {
-    std::set<std::string_view> keys, runKeys;
-    const auto item = row.tracking(keys);
-    const auto& run = item.require(data, "run");
-    const auto runRow = row.nested("run").tracking(runKeys);
-    QuestionTarget target{item.nullable<Id>(data, "waitId"), item.get<Id>(data, "eventId"), decodeWaitRun(runRow, run),
-                          item.get<std::string>(data, "requestId")};
-    if (!run.is_null()) runRow.rejectUnknown(run);
-    item.rejectUnknown(data);
+    const auto& run = row.require(data, "run");
+    QuestionTarget target{row.nullable<Id>(data, "waitId"), row.get<Id>(data, "eventId"), std::nullopt,
+                          row.get<std::string>(data, "requestId")};
+    if (!run.is_null()) target.run = row.nested("run").decodeClosed(run, decodeWaitRun);
     return target;
 }
 
 TaskQuestion decodeTaskQuestion(const Json& data, const RecordDecoder& row) {
-    std::set<std::string_view> keys;
-    const auto item = row.tracking(keys);
-    TaskQuestion question{
-        {}, decodeQuestionTarget(item.require(data, "target"), row.nested("target")), item.optional<Id>(data, "suspendedWaitId")};
-    for (const auto& field : item.array(item.require(data, "fields"), "fields"))
-        question.fields.push_back(decodeQuestionField(field, row.nested("fields." + std::to_string(question.fields.size()))));
-    if (const auto found = item.find(data, "suspendedDecision"); found != data.end())
-        question.suspendedDecision = decodeCheckpoint(*found, row.nested("suspendedDecision"));
-    if (question.target.requestId != item.get<std::string>(data, "requestId")) item.fail("requestId", "does not match the question target");
-    item.rejectUnknown(data);
+    TaskQuestion question{{},
+                          row.nested("target").decodeClosed(row.require(data, "target"), decodeQuestionTarget),
+                          row.optional<Id>(data, "suspendedWaitId")};
+    for (const auto& field : row.array(row.require(data, "fields"), "fields"))
+        question.fields.push_back(row.nested("fields." + std::to_string(question.fields.size())).decodeClosed(field, decodeQuestionField));
+    if (const auto found = row.find(data, "suspendedDecision"); found != data.end())
+        question.suspendedDecision = row.nested("suspendedDecision").decodeClosed(*found, decodeCheckpoint);
+    if (question.target.requestId != row.get<std::string>(data, "requestId")) row.fail("requestId", "does not match the question target");
     return question;
 }
 
@@ -116,9 +97,9 @@ Json taskQuestionJson(const TaskQuestion& question) {
 
 void decodeTaskInteraction(TaskData& task, const Json& data, const RecordDecoder& row) {
     const auto& question = row.require(data, "question");
-    if (!question.is_null()) task.question = decodeTaskQuestion(question, row.nested("question"));
+    if (!question.is_null()) task.question = row.nested("question").decodeClosed(question, decodeTaskQuestion);
     if (const auto found = row.find(data, "pendingDecision"); found != data.end())
-        task.pendingDecision = decodeCheckpoint(*found, row.nested("pendingDecision"));
+        task.pendingDecision = row.nested("pendingDecision").decodeClosed(*found, decodeCheckpoint);
     const auto waitId = row.optional<Id>(data, "blockerWaitId");
     if (auto reason = row.optional<std::string>(data, "blockerReason"))
         task.blocker = RecordedTaskBlocker{std::move(*reason), waitId};

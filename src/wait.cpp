@@ -191,7 +191,7 @@ WaitDetails readWaitDetails(const RecordDecoder& decoder, const Json& data, Wait
 
 }
 
-std::optional<WaitRun> decodeWaitRun(const RecordDecoder& decoder, const Json& data) {
+std::optional<WaitRun> decodeWaitRun(const Json& data, const RecordDecoder& decoder) {
     if (data.is_null()) return std::nullopt;
     WaitRun run{decodeRunRef(data, decoder), decoder.optional<std::string>(data, "environmentId"),
                 decodeOptionalRunAssignment(data, decoder)};
@@ -206,7 +206,7 @@ Wait readWaitPayload(const RecordDecoder& decoder, const Json& data) {
     Wait wait{readWaitDetails(decoder, data, *reason), decoder.get<std::string>(data, "text")};
     wait.eventId = decoder.get<Id>(data, "eventId");
     wait.actionId = decoder.optional<std::string>(data, "actionId");
-    wait.run = decodeWaitRun(decoder.nested("run"), decoder.require(data, "run"));
+    wait.run = decodeWaitRun(decoder.require(data, "run"), decoder.nested("run"));
     return wait;
 }
 }

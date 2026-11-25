@@ -430,8 +430,8 @@ struct Store::Impl {
     TaskData ownTask(Id taskId, const conversation::Message&) const;
     Json resultReference(Id messageId, const conversation::Message&) const;
     Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute&, Id messageId,
-                             const Json& source, bool resume, const WorkSession* selectedSession = nullptr);
-    bool acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, const Json& source,
+                             const std::optional<OutboxSource>& source, bool resume, const WorkSession* selectedSession = nullptr);
+    bool acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, std::optional<OutboxSource> source,
                            const TaskChange* change);
     Id addRevision(TaskData&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;

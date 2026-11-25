@@ -907,11 +907,9 @@ void rememberSourceResult(TaskData& task, const OutboxSource& source) {
 }
 
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute& destination,
-                                      Id messageId, const Json& source, bool resume, const WorkSession* selectedSession) {
+                                      Id messageId, const std::optional<OutboxSource>& reference, bool resume,
+                                      const WorkSession* selectedSession) {
     if (selectedSession) redactor(bot).requirePublic(selectedSession->target.threadId);
-    std::optional<OutboxSource> reference;
-    const auto messageKey = std::to_string(messageId);
-    if (!source.is_null()) reference = decodeOutboxSource(source, {"messages", messageKey, "sourceResult"});
     const auto id = submit({std::string(bot), std::string(request), destination.environmentId, destination.projectId, routing.at("config")},
                            messageId, reference ? &*reference : nullptr);
     auto task = load(id);
@@ -978,8 +976,8 @@ WHERE t.id=? AND t.bot_id=? AND t.has_session_origin AND channel.message_id IS N
     return id;
 }
 
-bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, const Json& source,
-                                    const TaskChange* change) {
+bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction,
+                                    std::optional<OutboxSource> source, const TaskChange* change) {
     Id revision = task.currentRevision.value_or(0);
     bool conflicting = task.replanning;
     if (change) {
@@ -1030,11 +1028,8 @@ bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std:
             conflicting = true;
         }
     }
-    OutboxInstruction pending{messageId, step, std::string(instruction), revision, conflicting, std::nullopt};
-    if (!source.is_null()) {
-        pending.source = decodeOutboxSource(source, {"journal", std::to_string(messageId), "source"});
-        rememberSourceResult(task, *pending.source);
-    }
+    if (source) rememberSourceResult(task, *source);
+    OutboxInstruction pending{messageId, step, std::string(instruction), revision, conflicting, std::move(source)};
     if (conflicting) {
         task.replanning = true;
         releaseModelCall(takeReservedTaskCall(task.eventId));

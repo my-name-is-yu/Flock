@@ -2,8 +2,6 @@
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 
-#include <set>
-
 namespace flockv0 {
 namespace {
 using namespace std::literals;
@@ -18,33 +16,26 @@ constexpr std::array peerOutcomes{
     std::pair{TaskPeerOutcome::failed, "failed"sv},
 };
 
-TaskRestart decodeRestart(const Json& data, const RecordDecoder& record) {
-    std::set<std::string_view> keys;
-    const auto row = record.tracking(keys);
+TaskRestart decodeRestart(const Json& data, const RecordDecoder& row) {
     TaskRestart restart{row.get<Id>(data, "taskId"), {}};
     const auto& delivered = row.array(row.require(data, "deliveredInstructions"), "deliveredInstructions");
     for (const auto& instruction : delivered) {
-        std::set<std::string_view> instructionKeys;
-        const auto item =
-            row.nested("deliveredInstructions." + std::to_string(restart.deliveredInstructions.size())).tracking(instructionKeys);
-        restart.deliveredInstructions.push_back(
-            {item.get<Id>(instruction, "messageId"), item.get<int>(instruction, "step"), item.get<std::string>(instruction, "text")});
-        item.rejectUnknown(instruction);
+        const auto item = row.nested("deliveredInstructions." + std::to_string(restart.deliveredInstructions.size()));
+        restart.deliveredInstructions.push_back(item.decodeClosed(instruction, [](const Json& data, const RecordDecoder& field) {
+            return DeliveredInstruction{field.get<Id>(data, "messageId"), field.get<int>(data, "step"),
+                                        field.get<std::string>(data, "text")};
+        }));
     }
-    row.rejectUnknown(data);
     return restart;
 }
 
-TaskTrigger decodeTrigger(const Json& data, const RecordDecoder& record) {
-    std::set<std::string_view> keys;
-    const auto row = record.tracking(keys);
+TaskTrigger decodeTrigger(const Json& data, const RecordDecoder& row) {
     const auto id = row.get<Id>(data, "triggerId");
     const auto firedAt = row.get<Seconds>(data, "firedAt");
     const auto kind = row.get<std::string>(data, "triggerKind");
     if (kind == "webhook") {
         auto source = row.get<std::string>(data, "source");
         auto event = row.object(row.require(data, "event"), "event");
-        row.rejectUnknown(data);
         return {id, firedAt, WebhookTaskTrigger{std::move(source), std::move(event)}};
     }
     const auto timed = enumValue(timedKinds, kind);
@@ -57,7 +48,6 @@ TaskTrigger decodeTrigger(const Json& data, const RecordDecoder& record) {
                              row.get<Id>(data, "occurrenceCount"),
                              row.get<std::string>(data, "timezone"),
                              row.optional<std::string>(data, "label")};
-    row.rejectUnknown(data);
     return {id, firedAt, std::move(trigger)};
 }
 }
@@ -104,8 +94,9 @@ void decodeTaskContext(TaskData& task, const Json& data, const RecordDecoder& ro
     if (const auto found = row.find(data, "sourceResultRefs"); found != data.end())
         task.sourceResultRefs = taskResultReferences(*found, task.id);
     if (const auto found = row.find(data, "restartContext"); found != data.end())
-        task.restartContext = decodeRestart(*found, row.nested("restartContext"));
-    if (const auto found = row.find(data, "trigger"); found != data.end()) task.trigger = decodeTrigger(*found, row.nested("trigger"));
+        task.restartContext = row.nested("restartContext").decodeClosed(*found, decodeRestart);
+    if (const auto found = row.find(data, "trigger"); found != data.end())
+        task.trigger = row.nested("trigger").decodeClosed(*found, decodeTrigger);
     if (const auto workflow = row.optional<Id>(data, "workflowId"))
         task.workflow = TaskWorkflow{*workflow, row.get<std::string>(data, "stageId"), row.get<std::string>(data, "inputArtifactVersion")};
     if (const auto peer = row.optional<std::string>(data, "peerOutcome")) {

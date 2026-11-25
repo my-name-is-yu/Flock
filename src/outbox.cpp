@@ -47,7 +47,7 @@ OutboxSource readSource(const Json& data, const RecordDecoder& row) {
                         .artifactVersion = row.optional<std::string>(data, "artifactVersion"),
                         .resultRunId = row.optional<std::string>(data, "resultRunId"),
                         .run = std::nullopt};
-    if (const auto run = row.find(data, "run"); run != data.end()) source.run = row.nested("run").decodeClosed(*run, readSourceRun);
+    if (const auto run = row.find(data, "run"); run != data.end()) source.run = decodeOutboxSourceRun(*run, row.nested("run"));
     return source;
 }
 
@@ -244,6 +244,10 @@ std::vector<OutboxSource> taskResultReferences(const Json& data, Id task) {
 
 OutboxSource decodeOutboxSource(const Json& data, const RecordDecoder& row) {
     return row.decodeClosed(data, readSource);
+}
+
+OutboxSourceRun decodeOutboxSourceRun(const Json& data, const RecordDecoder& row) {
+    return row.decodeClosed(data, readSourceRun);
 }
 
 Json outboxActionJson(const OutboxAction& outbox) {

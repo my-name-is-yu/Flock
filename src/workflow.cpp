@@ -258,7 +258,7 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
             task->state = TaskState::queued;
             exec("UPDATE workflow_stages SET status='pending',deadline=0,alerted=0 WHERE workflow_id=? AND stage_id=?", {id, target});
         }
-        acceptInstruction(*task, message, step, instruction, nullptr, nullptr);
+        acceptInstruction(*task, message, step, instruction, std::nullopt, nullptr);
     }
     auto status = workflowStatus(id, bot, unixTime());
     status["effect"] = "accepted";
@@ -311,15 +311,15 @@ void Store::Impl::materializeWorkflowStages() {
         while (parents.next()) {
             const auto report = parents.json(4);
             if (parents.string(0) == inputFrom) input = parents.string(1);
-            auto source = scrub.record({{"stageId", parents.string(0)},
-                                        {"artifactVersion", parents.string(1)},
-                                        {"messageId", parents.number(2)},
-                                        {"taskId", parents.number(3)},
-                                        {"run", report.at("run")},
-                                        {"resultRunId", report.at("resultRunId")},
-                                        {"text", bounded(scrub.text(field(report, "report")), 2000)}},
-                                       SecretRedactor::Fields::external);
-            sources.push_back(decodeOutboxSource(source, {"journal", parents.string(2), "sourceResult"}));
+            OutboxSource source{.taskId = parents.number(3),
+                                .messageId = parents.number(2),
+                                .text = bounded(scrub.text(field(report, "report")), 2000),
+                                .stageId = parents.string(0),
+                                .artifactVersion = parents.string(1),
+                                .resultRunId = field(report, "resultRunId"),
+                                .run = decodeOutboxSourceRun(report.at("run"), {"journal", parents.string(2), "run"})};
+            redactSource(source, scrub);
+            sources.push_back(std::move(source));
         }
         const auto role = field(spec, "role");
         if (!conversation_storage::hasText(request) || scrub.text(input) != input || (role == "verify" && !immutableVersion(input)) ||
@@ -332,7 +332,7 @@ void Store::Impl::materializeWorkflowStages() {
             AND d.workflow_id=? AND d.stage_id=?)SQL",
              {id, stage});
         const TaskRoute route{field(routing, "environmentId"), field(routing, "projectId")};
-        const auto taskId = startConversationTask(routing, bot, request, route, ready.number(4), nullptr, false);
+        const auto taskId = startConversationTask(routing, bot, request, route, ready.number(4), std::nullopt, false);
         auto task = load(taskId);
         task.workflow = TaskWorkflow{id, stage, input};
         task.sourceResultRefs = std::move(sources);
@@ -341,7 +341,7 @@ void Store::Impl::materializeWorkflowStages() {
                     hasPriorRevision ? scrub.text(ready.string(8)) : request, ready.number(9));
         if (!ready.string(5).empty()) {
             const auto next = ready.json(5);
-            acceptInstruction(task, next.at("messageId"), next.at("step"), scrub.text(field(next, "text")), nullptr, nullptr);
+            acceptInstruction(task, next.at("messageId"), next.at("step"), scrub.text(field(next, "text")), std::nullopt, nullptr);
         } else
             save(task);
         exec("UPDATE workflow_stages SET task_id=?,input=?,instruction=NULL WHERE workflow_id=? AND stage_id=?",
