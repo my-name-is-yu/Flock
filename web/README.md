@@ -99,7 +99,8 @@ Use **Appearance** to set the theme for the current browser. Use **Permissions**
 to set the installation's permission mode and rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
-[category defaults](../README.md#installation-policy).
+[category defaults](../README.md#installation-policy). Rules added here or
+from an approval card stay in the list until an administrator removes them.
 
 Installation administrators manage ChatGPT, T3, and other integrations in
 **Connections**. Local discovery and URL connections both use T3 OAuth.
@@ -180,6 +181,10 @@ shows the number of images attached. Bot inspection follows the `attachment.insp
 in the current page and are cleared on reload.
 
 ## Memory and automation
+
+Model input starts with the Bot's role, private memory, and earlier conversation
+history. Flock puts the current event and tool results near the end to lengthen
+the prefix shared by requests for the same Bot.
 
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared
 document, for example `team%2Fstaging.md`. `GET /api/memory/history` accepts the

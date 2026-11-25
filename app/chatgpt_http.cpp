@@ -206,7 +206,8 @@ private:
         if (type.empty()) throw ModelError("Invalid ChatGPT response event",false);
         const auto& result = field(event,"response");
         if (type == "response.completed") {
-            if (!field(result,"output").is_array()) throw ModelError("Invalid ChatGPT completion",false);
+            if (!field(result,"output").is_array())
+                throw Failure("Invalid ChatGPT completion",false,{},field(result,"usage"));
             completed_ = result;
             return false;
         }
@@ -243,11 +244,16 @@ std::string stringField(const Json& object, std::string_view name) {
 }
 
 Json tokenUsage(const Json& usage) {
+    const auto isTokenCount = [](const Json& count) {
+        return count.is_number_integer() && count.get<long double>() >= 0;
+    };
     auto result = Json::object();
     for (const auto* key : {"input_tokens","output_tokens","total_tokens"}) {
         const auto& count = field(usage,key);
-        if (count.is_number_integer() && count.get<long double>() >= 0) result[key] = count;
+        if (isTokenCount(count)) result[key] = count;
     }
+    const auto& cached = field(field(usage,"input_tokens_details"),"cached_tokens");
+    if (isTokenCount(cached)) result["input_tokens_details"] = {{"cached_tokens",cached}};
     return result;
 }
 

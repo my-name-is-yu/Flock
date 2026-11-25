@@ -143,8 +143,8 @@ confirm actions that require policy approval.
 Use `flock rules list` and `flock rules add|remove allow|ask|never ACTION TARGET`
 to manage installation rules. Quote glob targets, such as `'demo-*'` for
 `environment.launch`. Never wins in both modes. Supervised checks Ask first
-before Allow and caps each of those rule kinds at 20. A rule saved from a
-card replaces the oldest Allow at capacity.
+before Allow. Rules added from the CLI, Web settings, or an approval card stay
+saved until they are removed.
 
 See the [installation policy table](../README.md#installation-policy) for
 which actions ask. The requester and installation roots can decide cards.
@@ -168,7 +168,13 @@ allowance. Every message gets its own allowance.
 
 Flock saves each attempt in SQLite before invoking the model. Failed attempts,
 retries, and in-flight attempts at restart count. The `model_attempts` table
-records usage fields when available. Missing fields are unknown.
+records usage fields when available, including `input_tokens_details.cached_tokens`.
+A reported zero means no input tokens were reused. An absent count is unknown.
+
+ChatGPT requests list tools by name and send the Bot's role, memory, earlier
+conversation history, task state, evidence, and feedback before the current
+event and its tool results. Reuse depends on matching tools and earlier
+content, and on where ChatGPT places cache boundaries for the selected model.
 
 When the allowance runs out, choose **Approve one more model call** on the
 paused conversation message or task. For a task, `flock approve TASK WAIT REVISION GENERATION`

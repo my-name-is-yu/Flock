@@ -1069,7 +1069,6 @@ void eventStream(const std::filesystem::path& path) {
         ++changes;
         return true;
     },[&] {
-        // Wait until the stream has delivered the Git tool's conversation changes.
         if (!approval.empty() && !approved) {
             botsBeforeApproval = browser.get("/api/bots");
             browser.post("/api/inbox/decide",approval);

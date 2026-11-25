@@ -413,19 +413,22 @@ Json responseRequest(const ModelInput& input) {
     const auto model = input.config.value("model","");
     if (provider != "chatgpt" || !nonblank(model))
         throw ModelError("Set modelProvider to chatgpt and model to a slug from 'flock model models'",false);
+    auto toolNames = input.tools;
+    std::ranges::sort(toolNames);
     auto functions = Json::array();
     const bool conversationRequest = input.event.value("kind","") == "conversation_turn";
     const bool gitNotification = input.event.contains("gitEvent");
     bool gitAvailable = false;
-    for (const auto& name : input.tools) {
+    for (const auto& name : toolNames) {
         const auto git = isGitTool(name);
         gitAvailable |= git;
         functions.push_back(git ? gitToolSchema(name,conversationRequest) : toolSchema(name,input));
     }
     if (functions.empty()) throw ModelError("No Flock decision tools are available",false);
     const bool parallel = conversationRequest && std::ranges::count_if(input.tools,tool_batch::batchable) >= 2;
-    const Json context = {{"task",input.task},{"event",input.event},{"history",input.history},
-        {"soul",input.notes.soul},{"memory",input.notes.memory},{"feedback",input.feedback},{"evidence",input.evidence}};
+    const nlohmann::ordered_json context = {{"soul",input.notes.soul},{"memory",input.notes.memory},
+        {"history",input.history},{"task",input.task},{"evidence",input.evidence},
+        {"feedback",input.feedback},{"event",input.event}};
     constexpr auto conversationInstructions = R"PROMPT(
 You are a Flock Bot talking with your user. event.text is the user's new message; event.replyTo is the
 message they replied to, if any. Use history, task.tasks, and your SOUL (soul) and MEMORY (memory) to
