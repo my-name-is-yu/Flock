@@ -6,7 +6,10 @@
 #include <iostream>
 #include <map>
 #include <sqlite3.h>
+#include <spawn.h>
 #include <sys/wait.h>
+
+extern char** environ;
 
 using namespace git_fixture;
 
@@ -14,6 +17,8 @@ void testGitPrFollowup();
 
 namespace {
 constexpr auto fixtureReason = "Use the verified fixture evidence";
+constexpr auto mutationChildFlag = "--task-mutation-child";
+std::string executable;
 
 ModelTurn decodeCall(const Json& request, std::string_view tool, const Json& args) {
     const Json call{{"type", "function_call"}, {"namespace", "flock"}, {"status", "completed"}, {"name", tool}, {"arguments", args.dump()}};
@@ -750,6 +755,24 @@ void taskMutationAttempts() {
           "separate decisions on one event did not all update the PR");
 }
 
+int taskMutationChild(const std::filesystem::path& path, const std::filesystem::path& effects, const std::string& title) {
+    auto host = std::make_shared<FakeHost>();
+    host->prs.push_back({GitPullRequest{}, "Change", FakeHost::State::open});
+    host->onPrStateUpdate = [&](std::string_view state) {
+        std::ofstream(effects, std::ios::app) << state << '\n';
+        _exit(73);
+    };
+    Script script;
+    script.onTaskResult = [&](const ModelInput&) -> Decision {
+        return {"git_update_pr", {{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", "closed"}, {"title", title}}, {}};
+    };
+    Sessions sessions;
+    Store store(path);
+    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    for (int i = 0; i < 10; ++i) runtime.tick();
+    return 1;
+}
+
 void taskMutationRestart(bool protectTitleOnRestart) {
     Directory directory;
     const auto path = directory.path / "state.db";
@@ -768,21 +791,15 @@ void taskMutationRestart(bool protectTitleOnRestart) {
         check(invoke(store, runtime, script, "fixture-pr", "git_open_pr", args).at("ok") == true, "fixture PR did not open");
     }
     const auto writeEffect = [&](std::string_view state) { std::ofstream(effects, std::ios::app) << state << '\n'; };
-    const auto child = fork();
-    check(child >= 0, "could not start the crash fixture");
-    if (child == 0) {
-        host->onPrStateUpdate = [&](std::string_view state) {
-            writeEffect(state);
-            _exit(73);
-        };
-        script.onTaskResult = [&](const ModelInput&) -> Decision {
-            return {"git_update_pr", {{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", "closed"}, {"title", title}}, {}};
-        };
-        Store store(path);
-        Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-        for (int i = 0; i < 10; ++i) runtime.tick();
-        _exit(1);
-    }
+    const std::string pathArg = path.string(), effectsArg = effects.string();
+    char* const argv[]{executable.data(),
+                       const_cast<char*>(mutationChildFlag),
+                       const_cast<char*>(pathArg.c_str()),
+                       const_cast<char*>(effectsArg.c_str()),
+                       const_cast<char*>(title.c_str()),
+                       nullptr};
+    pid_t child = 0;
+    check(posix_spawn(&child, executable.c_str(), nullptr, nullptr, argv, environ) == 0, "could not start the crash fixture");
     int status = 0;
     check(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 73,
           "fixture did not crash after dispatching the saved decision");
@@ -1160,8 +1177,10 @@ void schemas() {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 5 && std::string_view(argv[1]) == mutationChildFlag) return taskMutationChild(argv[2], argv[3], argv[4]);
+        executable = argv[0];
         freshPrReviewSchema();
         schemas();
         runner();

@@ -212,6 +212,8 @@ if(BUILD_TESTING)
   target_include_directories(flock_live_evidence PRIVATE app)
   target_link_libraries(flock_live_evidence PRIVATE flock_t3 flock_app_support)
   add_test(NAME flock_live_evidence_schema COMMAND flock_live_evidence --self-test)
+  add_test(NAME flock_verify_live_gate COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_live_gate.py")
   if(FLOCK_LIVE_TESTS)
     foreach(test flock_live_t3 flock_live_conversation flock_live_evidence)
       add_test(NAME ${test} COMMAND ${test} --live)
