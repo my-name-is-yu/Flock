@@ -40,7 +40,9 @@ Delivery result(Outcome kind, std::string message = {}, RunRef run = {}) {
     return {kind, std::move(run), std::move(message)};
 }
 
-Observation state(Observed kind, std::string status) {
+template<Observed kind>
+Observation state(std::string status) {
+    static_assert(kind != Observed::Finished,"Use RunSettlement::observation for finished Runs");
     Observation observation;
     observation.kind = kind;
     observation.status = std::move(status);
@@ -148,12 +150,37 @@ std::optional<std::string> readCompleteItemText(Client& client, Scan& scan, cons
 
 enum class WaitFor { Run, DelegatedWork };
 
-Json wait(Client& client, const RunRef& run, WaitFor scope, int timeout = 400) {
+struct RunWait {
+    std::string runId, status;
+    bool timedOut;
+};
+
+struct DelegatedWait {
+    RunWait parent;
+    std::string resultRunId, resultStatus;
+};
+
+Json waitResponse(Client& client, const RunRef& run, WaitFor scope, int timeout) {
     const auto response = client.call("t3_thread_wait", {{"threadId", run.threadId}, {"runId", run.runId},
         {"timeoutMs", timeout}, {"untilDelegatedWorkSettled", scope == WaitFor::DelegatedWork}});
-    if (str(response, "threadId") != run.threadId || str(response, "runId").empty()) invalidResponse();
-    boolean(response, "timedOut");
+    if (str(response, "threadId") != run.threadId) invalidResponse();
     return response;
+}
+
+RunWait parseRunWait(const Json& response) {
+    auto id = str(response,"runId");
+    if (id.empty()) invalidResponse();
+    return {std::move(id),str(response,"status"),boolean(response,"timedOut")};
+}
+
+RunWait waitForRun(Client& client, const RunRef& run) {
+    return parseRunWait(waitResponse(client,run,WaitFor::Run,1));
+}
+
+DelegatedWait waitForDelegatedWork(Client& client, const RunRef& run, int timeout = 400) {
+    const auto response = waitResponse(client,run,WaitFor::DelegatedWork,timeout);
+    const auto result = response.value("resultRun",Json::object());
+    return {parseRunWait(response),str(result,"runId"),str(result,"status")};
 }
 
 bool isRestartContinuation(Client& client, const RunRef& assigned, const std::string& effective) {
@@ -171,14 +198,11 @@ bool isRestartContinuation(Client& client, const RunRef& assigned, const std::st
     });
 }
 
-bool confirmsQueueCancellation(Client& client, const RunRef& assigned, const Json& head) {
+bool cancelledBeforeStarting(const Json& head, const std::string& assignedRunId) {
     for (const auto& run : array(head,"recentRuns")) {
-        if (str(run,"runId") != assigned.runId) continue;
+        if (str(run,"runId") != assignedRunId) continue;
         const auto started = run.find("startedAt");
-        if (str(run,"status") != "cancelled" || started == run.end() || !started->is_null()) return false;
-        const auto exact = wait(client,assigned,WaitFor::Run,1);
-        return str(exact,"runId") == assigned.runId && str(exact,"status") == "cancelled" &&
-               !boolean(exact,"timedOut");
+        return str(run,"status") == "cancelled" && started != run.end() && started->is_null();
     }
     return false;
 }
@@ -303,6 +327,46 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
     }
     return true;
 }
+
+class RunSettlement {
+public:
+    static std::optional<RunSettlement> confirm(Client& client, const RunRef& assigned, const DelegatedWait& wait,
+                                                std::optional<Json>& head) {
+        const auto& parent = wait.parent;
+        if (!terminal(parent.status)) return std::nullopt;
+        auto source = RunRef{assigned.threadId,parent.runId,assigned.link,assigned.gatewayEnvironmentId};
+        if (parent.timedOut) {
+            if (parent.status != "cancelled" || parent.runId != assigned.runId) return std::nullopt;
+            head = threadHead(client,assigned.threadId,50);
+            if (!cancelledBeforeStarting(*head,assigned.runId)) return std::nullopt;
+            const auto exact = waitForRun(client,assigned);
+            if (exact.runId != assigned.runId || exact.status != "cancelled" || exact.timedOut) return std::nullopt;
+        } else {
+            if (wait.resultRunId.empty() || !terminal(wait.resultStatus)) invalidResponse();
+            if (ownsResult(client,assigned,parent.runId,wait.resultRunId)) {
+                source.runId = wait.resultRunId;
+                return RunSettlement(std::move(source),wait.resultStatus);
+            }
+        }
+        return RunSettlement(std::move(source),parent.status);
+    }
+
+    const RunRef& source() const { return source_; }
+
+    Observation observation() const {
+        Observation observed;
+        observed.kind = Observed::Finished;
+        observed.status = status_;
+        observed.resultRunId = source_.runId;
+        return observed;
+    }
+
+private:
+    RunSettlement(RunRef source, std::string status) : source_(std::move(source)), status_(std::move(status)) {}
+
+    RunRef source_;
+    std::string status_;
+};
 
 std::set<std::string> pending(Client& client, const std::string& threadId) {
     const auto data = client.call(PendingRequest, {{"action", "list"}, {"threadId", threadId}});
@@ -759,10 +823,10 @@ RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::stri
 }
 
 bool followUpReady(Client& client, const Command& command) {
-    const auto settled = wait(client, command.target, WaitFor::DelegatedWork, 1);
-    const auto effective = str(settled, "runId");
-    const auto resultRun = str(settled.value("resultRun", Json::object()), "runId");
-    if (boolean(settled, "timedOut") || !terminal(str(settled, "status")) || resultRun.empty() ||
+    const auto settled = waitForDelegatedWork(client,command.target,1);
+    const auto& effective = settled.parent.runId;
+    const auto& resultRun = settled.resultRunId;
+    if (settled.parent.timedOut || !terminal(settled.parent.status) || resultRun.empty() ||
         !ownsResult(client, command.target, effective, resultRun)) return false;
     const auto response = threadHead(client, command.target.threadId);
     const auto& info = response.at("thread");
@@ -782,13 +846,12 @@ bool followUpReady(Client& client, const Command& command) {
 Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
-    const auto watching = wait(client, command.target, WaitFor::Run, 1);
-    const auto runId = str(watching, "runId");
+    const auto watching = waitForRun(client,command.target);
     // Codex's Run projection can stay "running" while its input activity
     // is "waiting". Attribution below checks the actual owned question.
-    if (!active(str(watching, "status")))
+    if (!active(watching.status))
         return result(Outcome::NotAccepted, "Use T3 to answer this question because the assigned Run is not waiting for input");
-    auto attribution = attribute(client, {thread, runId, command.target.link,command.target.gatewayEnvironmentId},
+    auto attribution = attribute(client, {thread, watching.runId, command.target.link,command.target.gatewayEnvironmentId},
                                  command.questionId);
     if (attribution.kind == Attribution::Kind::Resolved) return result(Outcome::QuestionGone);
     if (attribution.kind != Attribution::Kind::Owned)
@@ -1019,10 +1082,8 @@ public:
         try {
             const auto gateway = gatewayFor(target.environmentId,target.gatewayEnvironmentId);
             Client client(credential(gateway,Json::object()),{},targetRoute(target.environmentId,gateway));
-            const auto reply = wait(client,run,WaitFor::Run,1);
-            const auto effective = str(reply,"runId");
-            const auto status = str(reply,"status");
-            if (boolean(reply,"timedOut") && !active(status)) return {};
+            const auto [effective,status,timedOut] = waitForRun(client,run);
+            if (timedOut && !active(status)) return {};
             if (effective != run.runId && !isRestartContinuation(client,run,effective)) return {};
             if (terminal(status)) {
                 return status == "completed" ? "finished" : "failed";
@@ -1041,38 +1102,28 @@ public:
     }
 
     Observation observe(const std::string& environmentId, const Json& config, const RunRef& run) override {
-        if (!hasRun(run)) return state(Observed::Unavailable, "The assigned T3 Run is missing");
+        if (!hasRun(run)) return state<Observed::Unavailable>("The assigned T3 Run is missing");
         try {
             const auto gateway = gatewayFor(environmentId,run.gatewayEnvironmentId);
             auto connection = credential(gateway,config);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection),{},targetRoute(environmentId,gateway));
             if (gateway == environmentId) checkVerificationRoute(client,config,environmentId,run.threadId);
-            const auto reply = wait(client, run, WaitFor::DelegatedWork);
-            const auto effective = str(reply, "runId");
+            const auto reply = waitForDelegatedWork(client,run);
+            const auto& effective = reply.parent.runId;
+            const auto& status = reply.parent.status;
             const auto verification = config.find("commitVerification");
             if (verification != config.end() && effective != run.runId && !isRestartContinuation(client,run,effective))
-                return state(Observed::Unavailable,"Could not identify the Run's restart continuation");
-            const auto status = str(reply, "status");
+                return state<Observed::Unavailable>("Could not identify the Run's restart continuation");
             const bool finished = terminal(status);
-            if (status == "queued") return state(Observed::Running,status);
-            const auto timedOut = boolean(reply,"timedOut");
+            if (status == "queued") return state<Observed::Running>(status);
             std::optional<Json> head;
-            if (timedOut && status == "cancelled" && effective == run.runId)
-                head = threadHead(client,run.threadId,50);
-            if (finished && (!timedOut || (head && confirmsQueueCancellation(client,run,*head)))) {
-                auto source = RunRef{run.threadId, effective, run.link, run.gatewayEnvironmentId};
-                auto observed = state(Observed::Finished, status);
-                const auto later = reply.value("resultRun", Json::object());
-                const auto laterId = str(later, "runId");
-                if (!timedOut && (laterId.empty() || !terminal(str(later,"status")))) invalidResponse();
-                if (!timedOut && ownsResult(client, run, effective, laterId)) {
-                    source.runId = laterId;
-                    observed.status = str(later, "status");
-                }
+            if (const auto settled = RunSettlement::confirm(client,run,reply,head)) {
+                const auto& source = settled->source();
+                auto observed = settled->observation();
                 auto problem = pinnedEvidenceProblem(client,config,source,observed.status,origin);
                 if (problem && problem->availability == RunEvidence::Availability::ReportUnavailable)
-                    return state(Observed::Unavailable,std::move(problem->detail));
+                    return state<Observed::Unavailable>(std::move(problem->detail));
                 if (problem) observed.status = "failed";
                 auto evidence = problem ? std::move(*problem) : readTerminalEvidence(client,source,observed.status);
                 if (verification != config.end()) {
@@ -1087,7 +1138,6 @@ public:
                 observed.itemId = std::move(evidence.itemId);
                 observed.detail = std::move(evidence.detail);
                 observed.truncated = evidence.truncated;
-                observed.resultRunId = source.runId;
                 observed.sessionCreatedAt = std::move(evidence.sessionCreatedAt);
                 return observed;
             }
@@ -1095,24 +1145,24 @@ public:
             if (!head) head = threadHead(client,run.threadId);
             const auto& thread = head->at("thread");
             const auto count = position(member(thread, "pendingRequestCount"));
-            if (count == 0) return state(finished ? Observed::Settling : Observed::Running, status);
+            if (count == 0) return finished ? state<Observed::Settling>(status) : state<Observed::Running>(status);
             if (!finished && count == 1) {
                 const auto requests = pending(client, run.threadId);
                 if (requests.size() == 1) {
                     const auto& id = *requests.begin();
                     auto match = attribute(client,{run.threadId,effective,run.link,run.gatewayEnvironmentId},id);
                     if (match.kind == Attribution::Kind::Owned) {
-                        auto observed = state(Observed::Question, status);
+                        auto observed = state<Observed::Question>(status);
                         observed.question = {id, std::move(match.fields)};
                         return observed;
                     }
-                    if (match.kind == Attribution::Kind::Resolved) return state(Observed::Running, status);
+                    if (match.kind == Attribution::Kind::Resolved) return state<Observed::Running>(status);
                 }
             }
-            return state(Observed::ExternalInput, "Review pending approvals or questions in the T3 Thread");
+            return state<Observed::ExternalInput>("Review pending approvals or questions in the T3 Thread");
         } catch (const Failure& failure) {
-            if (failure.kind == Failure::Kind::Settings) return state(Observed::Unavailable, "settings");
-            return state(Observed::Unavailable, failure.kind == Failure::Kind::Auth ? "auth" : failure.what());
+            if (failure.kind == Failure::Kind::Settings) return state<Observed::Unavailable>("settings");
+            return state<Observed::Unavailable>(failure.kind == Failure::Kind::Auth ? "auth" : failure.what());
         }
     }
 
@@ -1138,11 +1188,11 @@ public:
         Client client(std::move(connection),{},targetRoute(environmentId,gateway));
         if (gateway == environmentId) checkVerificationRoute(client,config,environmentId,run.threadId);
         // An explicit wait can resolve T3's own restart continuation of the assigned Run.
-        const auto current = wait(client, run, WaitFor::Run, 1);
-        const auto effective = str(current, "runId");
+        const auto current = waitForRun(client,run);
+        const auto& effective = current.runId;
         if (config.contains("commitVerification") && effective != run.runId && !isRestartContinuation(client,run,effective))
             throw Failure(Failure::Kind::Wire,"Could not identify the Run's restart continuation");
-        const auto status = str(current,"status");
+        const auto& status = current.status;
         if (terminal(status)) return InterruptOutcome::AlreadyTerminal;
         if (status == "queued" && effective == run.runId) {
             client.call("t3_queue",{{"action","cancel"},{"threadId",run.threadId},{"queuedRunId",run.runId}});
@@ -1190,9 +1240,9 @@ public:
                 if (status == "cancelled" && started != entry.end() && started->is_null()) return Outcome::Cancelled;
                 break;
             }
-            const auto exact = wait(client,{target.threadId,std::string(run),{},target.gatewayEnvironmentId},WaitFor::Run,1);
-            if (str(exact,"runId") != run) return Outcome::NotCancellable;
-            const auto status = str(exact,"status");
+            const auto exact = waitForRun(client,{target.threadId,std::string(run),{},target.gatewayEnvironmentId});
+            if (exact.runId != run) return Outcome::NotCancellable;
+            const auto& status = exact.status;
             if (status == "running" || status == "waiting" || status == "completed") return Outcome::AlreadyStarted;
             if (terminal(status)) return Outcome::NotCancellable;
         } catch (const Failure& failure) {

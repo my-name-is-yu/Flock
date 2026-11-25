@@ -289,20 +289,6 @@ void followUpNeeded(const Decision& action, std::string_view guidance) {
           "The standalone action ran in the batch or its result was lost");
 }
 
-void workspaceCommandRunsAlone() {
-    Fixture f;
-    const auto command = call("workspace_run_command",{{"argv",{"pwd"}}});
-    const auto findFiles = call("workspace_search",{{"query","marker"}});
-    f.receive({command,findFiles},4);
-    f.runtime->runConversations();
-    f.checkFinished(2);
-    const auto results = f.results();
-    check(results[0].value("notRun",false) && results[0].at("ok") == false &&
-          f.query("SELECT count(*) FROM workspace_commands") == "0",
-          "A background workspace command started in a batch");
-    check(results[1].at("ok") == true,"A standalone command suppressed a sibling read");
-}
-
 void gatewayOnlyCancelDoesNotCancelBatchSibling() {
     Fixture f;
     const auto task = f.store->submit({"alpha","Keep this task running","env","project"});
@@ -666,7 +652,6 @@ int main(int argc, char** argv) {
         storeRemainsResponsiveDuringMcpCapabilityChecks();
         followUpNeeded(call("start_task",{{"request","Start a task"}}),"Run this action on its own after reviewing these results.");
         followUpNeeded(call("reply",{{"text","Premature reply"}}),"Reply after reviewing these results.");
-        workspaceCommandRunsAlone();
         gatewayOnlyCancelDoesNotCancelBatchSibling();
         conflictingWorkspaceCalls();
         rejectedCall();

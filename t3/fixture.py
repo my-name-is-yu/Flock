@@ -662,7 +662,7 @@ class Fixture(BaseHTTPRequestHandler):
         pre_check = "git -c flock.check=before rev-parse --verify HEAD"
         post_check = "git -c flock.check=after rev-parse --verify HEAD"
         summary = self.summary(thread) | {"projectId": project, "title": "Fixture verification"}
-        terminal = ("completed", "failed", "interrupted")
+        terminal = ("completed", "failed", "interrupted", "cancelled")
         if name == "t3_environment_links":
             return {"environmentId": env, "links": state.get("multiLinkedEnvironments", []),
                     "notListed": "No matching linked environment is available."}
