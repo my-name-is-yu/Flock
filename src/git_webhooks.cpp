@@ -45,6 +45,15 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
     if (!event.requestedReviewer.empty()) data["requestedReviewer"] = bounded(scrub.text(event.requestedReviewer),100);
     if (const auto followup = followupType(event.followup); !followup.empty()) data["followup"] = followup;
     if (event.feedbackId) data["feedbackId"] = event.feedbackId;
+    if (event.reviewLocation) {
+        const auto& [comment,path,side,line,original] = *event.reviewLocation;
+        if (event.kind != "comment" || comment <= 0 || line < 0)
+            throw std::invalid_argument("Invalid Git review comment location");
+        Json location{{"commentId",comment},{"path",bounded(redactT3Tokens(scrub.text(path)),600)}};
+        if (line) location.update({{"line",line},{"originalLine",original}});
+        if (side == "LEFT" || side == "RIGHT") location["side"] = side;
+        data["reviewLocation"] = std::move(location);
+    }
     Transaction transaction(p_->db);
     p_->exec("INSERT INTO git_webhook_events(host,event_id,repo,data,payload_digest) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
              {repo.host,event.eventId,repo.repo,data,digest.empty() ? Json(nullptr) : Json(digest)});
@@ -162,6 +171,12 @@ WHERE json_extract(result,'$.data.id')=?1
         const auto key = "webhook/" + std::to_string(delivery.get<Id>()) + "/" + std::to_string(pr.get<Id>());
         auto inboxKey = key;
         const auto url = field(event,"url");
+        if (const auto location = event.find("reviewLocation"); location != event.end()) {
+            const auto commentId = location->at("commentId").get<Id>();
+            location->erase("commentId");
+            (*location)["url"] = url + "#discussion_r" + std::to_string(commentId);
+            *location = scrub.record(std::move(*location));
+        }
         const auto prompt = field(event,"summary");
         std::string title;
         if (kind == "review" && action == "submitted") title = "Pull request review submitted";

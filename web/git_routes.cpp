@@ -104,7 +104,16 @@ std::optional<GitWebhook> githubEvent(const httplib::Request& request) {
             }
         }
         if (event.kind == "comment") {
-            event.summary = str(payload.at("comment"),"body");
+            const auto& comment = payload.at("comment");
+            event.summary = str(comment,"body");
+            GitReviewLocation location{number(comment,"id"),str(comment,"path"),str(comment,"side")};
+            if (comment.contains("line") && !comment.at("line").is_null()) {
+                location.line = number(comment,"line");
+            } else if (comment.contains("original_line") && !comment.at("original_line").is_null()) {
+                location.line = number(comment,"original_line");
+                location.originalLine = true;
+            }
+            event.reviewLocation = std::move(location);
             if (event.action == "created" && open && !event.summary.empty())
                 event.followup = GitFollowup::reviewComment;
         }

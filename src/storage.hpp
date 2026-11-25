@@ -264,7 +264,7 @@ struct Store::Impl {
         Status status;
     };
     std::optional<GitPrFollowup> gitPrFollowup(const conversation::Message&);
-    std::string gitPrFollowupInstruction(const GitPrFollowup&, const Decision&) const;
+    std::string gitPrFollowupInstruction(const conversation::Message&, const GitPrFollowup&, const Decision&) const;
     void recordGitPrFollowup(const conversation::Message&, const GitPrFollowup&);
     bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
     bool watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest&,

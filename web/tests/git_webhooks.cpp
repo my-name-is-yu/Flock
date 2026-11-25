@@ -216,7 +216,8 @@ void run() {
     check(post(client,"pull_request_review","review-feedback",reviewFeedback,202).at("status") == "received",
           "Commented review was not enqueued");
     const Json inlineComment{{"action","created"},{"repository",repository},{"pull_request",review.at("pull_request")},
-                             {"comment",{{"id",301},{"body","Could you validate this field?"}}}};
+                             {"comment",{{"id",301},{"body","Could you validate this field?"},
+                                         {"path","src/example.cpp"},{"side","RIGHT"},{"line",nullptr},{"original_line",72}}}};
     check(post(client,"pull_request_review_comment","inline-comment",inlineComment,202).at("status") == "received",
           "Inline review comment was not enqueued");
     auto editedInline = inlineComment;
@@ -238,6 +239,12 @@ void run() {
           model.followup("inline-comment") == "review_comment" && model.followup("inline-edit").empty() &&
           model.followup("failed-check") == "failed_check" && model.followup("passed-check").empty(),
           "Signed notifications did not distinguish actionable events from report-only updates");
+    const auto notifications = store.history(task).dump();
+    check(notifications.find("src/example.cpp") != std::string::npos &&
+          notifications.find("\"line\":72") != std::string::npos &&
+          notifications.find("\"originalLine\":true") != std::string::npos &&
+          notifications.find("/pull/1#discussion_r301") != std::string::npos,
+          "The signed inline webhook lost its review location");
 
     const Json ownComment{{"action","created"},{"repository",repository},{"issue",{{"number",1},{"pull_request",Json::object()}}},
                           {"comment",{{"id",101},{"body","Please check this."}}}};

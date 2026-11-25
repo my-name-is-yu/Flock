@@ -34,14 +34,23 @@ class Sessions final : public T3 {
 public:
     std::string authGeneration(const std::string&, const Json&) override { return "t3-fixture"; }
     std::vector<Command> sessionSends;
+    std::optional<SessionTarget> askOrigin;
+    std::function<void()> afterSessionSend;
+
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
+        if (!askOrigin || target != *askOrigin) return std::nullopt;
+        return SessionMetadata{.title="Original request",.project="Fixture project",.projectId="project"};
+    }
     Delivery send(const Command& command) override {
         if (command.tool == "message_session") {
             sessionSends.push_back(command);
+            if (afterSessionSend) afterSessionSend();
             return {Delivery::Kind::Accepted,{command.target.threadId,"followup-" + std::to_string(sessionSends.size()),{},
                 command.gatewayEnvironmentId},
                 {},false,"queued"};
         }
-        return {Delivery::Kind::Accepted,{"thread-" + command.projectId,"run-" + command.projectId,{}},{}};
+        return {Delivery::Kind::Accepted,{"thread-" + command.projectId,"run-" + command.projectId,{},
+                                         command.gatewayEnvironmentId},{}};
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&, const Json&, const RunRef&) override {
