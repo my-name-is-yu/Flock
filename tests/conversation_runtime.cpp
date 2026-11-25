@@ -2065,8 +2065,8 @@ void continuationUsesTheCurrentBudget() {
           f.event(id,"budget_granted").is_null(),"a conversation turn approved a budget wait");
     f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait["id"]),"approve");
     f.reach(id,"running");
-    check(f.t3.sent.size() == 5 && f.task(id)["remaining"] == 0 && f.task(id)["additionalUsed"] == 4 &&
-          f.store->tasks("alpha").size() == 1,"explicit budget approval did not permit precisely one extra Run");
+    check(f.t3.sent.size() == 5 && f.task(id)["remaining"] == 2 && f.task(id)["additionalUsed"] == 4 &&
+          f.store->tasks("alpha").size() == 1,"the resumed Run did not spend one round from the renewed allowance");
     check(f.t3.sent.back().instruction.find("for fixture 4") != std::string::npos,
           "the approved Run lost the instruction that was held for approval");
 }
