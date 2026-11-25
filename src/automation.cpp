@@ -361,15 +361,18 @@ Json Store::Impl::automationRoute(std::string_view bot, Json routing) const {
     if (!automationIntake) return routing;
     try {
         const auto current = automationIntake(bot,{}).config;
+        auto& config = routing.at("config");
+        if (current.contains("modelCallLimit"))
+            config["modelCallLimit"] = modelCallLimit(current);
+        else
+            config.erase("modelCallLimit");
         const auto model = field(current,"model");
         const auto provider = field(current,"modelProvider");
         if (!model.empty() && !provider.empty()) {
-            routing.at("config")["model"] = model;
-            routing.at("config")["modelProvider"] = provider;
+            config["model"] = model;
+            config["modelProvider"] = provider;
         }
-    } catch (const Conflict&) {
-        // Keep the saved model when the Bot configuration is temporarily unavailable.
-    }
+    } catch (const Conflict&) {}
     return routing;
 }
 

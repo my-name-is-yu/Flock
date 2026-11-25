@@ -242,11 +242,13 @@ void runSettingsChangesResyncConfiguredSchedules() {
     check(store.tasks("release").size() == 1,"a configured schedule fired after its destination was cleared");
 }
 
-void automationFiringsUseCurrentPlannerModel() {
+void automationFiringsUseCurrentPlannerSettings() {
     Sandbox temp;
     const auto home = temp.path / "bots";
     const auto folder = home / "release";
-    createBot(folder,botConfig("previous-model"),"","");
+    auto original = botConfig("previous-model");
+    original["modelCallLimit"] = 9;
+    createBot(folder,original,"","");
     Bots bots(home);
     Store store(temp.path / "tasks.db",{},[&](std::string_view id,std::string_view request) {
         return bots.get(id).intake(request);
@@ -268,7 +270,7 @@ void automationFiringsUseCurrentPlannerModel() {
     const auto previousTask = store.tasks("release").at(0).at("id").get<Id>();
     const auto report = [](std::string_view,std::string_view error) { throw std::runtime_error(std::string(error)); };
     bots.updateRunSettings(store,"release",{{"model","current-model"},{"environmentId","current-environment"},
-        {"projectId","current-project"}},firstDue,report);
+        {"projectId","current-project"},{"modelCallLimit",7}},firstDue,report);
 
     store.fireDueAutomations(nextDue);
     const auto recurring = store.tasks("release").at(0);
@@ -281,16 +283,23 @@ void automationFiringsUseCurrentPlannerModel() {
     auto currentConfig = saved.config;
     currentConfig["model"] = "current-model";
     currentConfig["modelProvider"] = "chatgpt";
+    currentConfig["modelCallLimit"] = 7;
     const auto checkTask = [&](Id id,const Json& expected) {
         const auto task = store.task(id);
         check(task.at("config") == expected && task.at("environmentId") == saved.environmentId &&
-              task.at("projectId") == saved.projectId,"automation task used the wrong planner model or lost its saved route");
+              task.at("projectId") == saved.projectId,"automation task used the wrong planner settings or lost its saved route");
     };
     checkTask(recurring.at("id").get<Id>(),currentConfig);
     checkTask(webhook.at("tasks").at(0).at("taskId").get<Id>(),currentConfig);
     auto previousConfig = currentConfig;
     previousConfig["model"] = "previous-model";
+    previousConfig["modelCallLimit"] = 9;
     checkTask(previousTask,previousConfig);
+
+    write(folder / "config.json",botConfig("current-model").dump());
+    const auto reset = store.receiveWebhook(owner,"deploy","event-2",{{"branch","main"}},nextDue);
+    currentConfig.erase("modelCallLimit");
+    checkTask(reset.at("tasks").at(0).at("taskId").get<Id>(),currentConfig);
 
     write(folder / "config.json","invalid");
     store.fireDueAutomations(utc(2026,1,4,0,0));
@@ -422,7 +431,7 @@ void configuredSchedules() {
     cronIntakeAndRestart();
     configuredScheduleLifecycle();
     runSettingsChangesResyncConfiguredSchedules();
-    automationFiringsUseCurrentPlannerModel();
+    automationFiringsUseCurrentPlannerSettings();
     failedScheduleSyncLeavesWorkspaceUnchanged();
     invalidSessionSettingsPreserveDueTimes();
     invalidEntriesPreserveDueSchedule();

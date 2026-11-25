@@ -173,7 +173,8 @@ records usage fields when available. Missing fields are unknown.
 When the allowance runs out, choose **Continue for 20 more steps** on the
 paused conversation message or in **Needs you**. The button shows the
 request's original allowance. If a request started with 8 steps, each approval
-grants 8 more, even after a settings change or restart.
+grants 8 more, even after a settings change or restart. Paused work that shares
+the request's allowance can continue when it has steps available.
 
 For a paused task, `flock approve TASK WAIT REVISION GENERATION` grants the
 same block. Use the wait ID, current revision (or `0` before the first
