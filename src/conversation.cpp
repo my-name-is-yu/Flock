@@ -95,8 +95,11 @@ void Store::Impl::upgradeSessionMessageWaitSchema() {
     addColumn("link","TEXT NOT NULL DEFAULT ''");
     addColumn("run_finished","INTEGER NOT NULL DEFAULT 0");
     addColumn("interrupt_at","INTEGER");
+    addColumn("session_missing","INTEGER NOT NULL DEFAULT 0");
     exec("CREATE INDEX IF NOT EXISTS session_message_interrupts_due ON session_message_waits(interrupt_at) "
          "WHERE interrupt_at IS NOT NULL");
+    exec("CREATE INDEX IF NOT EXISTS session_message_missing_targets ON session_message_waits(task_id,action_id) "
+         "WHERE session_missing=1");
 }
 
 Id Store::Impl::addRevision(Json& task, std::string_view intent, std::string_view doneWhen, Id source) {

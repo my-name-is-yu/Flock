@@ -3002,7 +3002,7 @@ void savedFollowupHoldsSlotUntilItsReceiptAndRunSettle() {
     }
 }
 
-void pauseRecoversTheRetainedSavedFollowup() {
+void pauseRecoversTheRetainedSavedFollowup(bool sessionMissing = false) {
     Fixture f;
     const auto taskId = oneLinkedDestinationTask(f,"pause-recovery-parent","Start linked work before Pause");
     f.advanceUntil([&] {
@@ -3033,6 +3033,10 @@ void pauseRecoversTheRetainedSavedFollowup() {
           f.t3.reconciled.size() == 1 && f.t3.reconciled.front().actionId == request,
           "Pause released an unresolved send, or recovered a different request");
     f.t3.deliveryVisible = true;
+    if (sessionMissing) {
+        f.t3.loseNextStop = true;
+        f.t3.observations.at(followup.runId).kind = Observation::Kind::Unavailable;
+    }
     f.now += 5;
     f.runtime->runConversations();
     const auto recovered = persistedTaskDiagnostics(f,taskId,messageId);
@@ -3045,6 +3049,21 @@ void pauseRecoversTheRetainedSavedFollowup() {
     const auto sibling = oneLinkedDestinationTask(f,"pause-recovery-sibling","Queue behind the recovered Run");
     f.tick();
     check(f.task(sibling).at("state") == "queued","the recovered Run released the project before settlement");
+    if (sessionMissing) {
+        const auto detail = [&] { return destinationRunFor(f.task(taskId),"cloud").at("detail").get<std::string>(); };
+        check(detail() == "Flock could not confirm the Run's status in T3.",
+              "An unconfirmed stop was recorded as Session deletion");
+        f.t3.interruptOutcome = InterruptOutcome::TargetGone;
+        f.now += 5;
+        f.tick();
+        const auto deleted = detail();
+        check(deleted.find("Check its delegated Sessions in T3") != std::string::npos,
+              "A deleted Session left only a generic status");
+        f.restart();
+        f.tick();
+        check(f.task(taskId).at("state") == "cancelling" && f.task(sibling).at("state") == "queued" &&
+              detail() == deleted,"Deletion lost the explanation or released the project after restart");
+    }
     f.t3.finish(followup.runId,"The recovered Run was stopped",true,"cancelled");
     f.reach(taskId,"cancelled");
     f.reach(sibling,"running");
@@ -4130,6 +4149,7 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "pause-recovered-followup") {
             pauseRecoversTheRetainedSavedFollowup();
+            pauseRecoversTheRetainedSavedFollowup(true);
             std::cout << "Pause recovered and stopped its saved destination follow-up\n";
             return 0;
         }
@@ -4214,6 +4234,7 @@ int main(int argc, char** argv) {
         terminalAccessRoutesSettleOnlyPreparedSessionSends();
         savedFollowupHoldsSlotUntilItsReceiptAndRunSettle();
         pauseRecoversTheRetainedSavedFollowup();
+        pauseRecoversTheRetainedSavedFollowup(true);
         recoveredStopApprovalBelongsToTheStopRequester();
         recoveredDestinationStopHonorsPolicy();
         startedRunOutboxApprovalIsStale();

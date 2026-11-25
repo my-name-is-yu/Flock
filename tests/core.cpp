@@ -53,8 +53,10 @@ void pauseSchemaPreservesExistingSessionReplies(const std::filesystem::path& fil
 DROP TABLE bot_pauses;
 DROP TABLE session_message_sends;
 DROP INDEX session_message_interrupts_due;
+DROP INDEX session_message_missing_targets;
 ALTER TABLE session_message_waits DROP COLUMN run_finished;
 ALTER TABLE session_message_waits DROP COLUMN interrupt_at;
+ALTER TABLE session_message_waits DROP COLUMN session_missing;
 INSERT INTO session_message_waits(message_id,bot,environment,thread,run,title)
 SELECT id,'release','env','thread','existing-run','Staging' FROM messages
 WHERE client_message_id='before-pause-schema';

@@ -1022,9 +1022,16 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
                 (savedAction.value("stopRequested",false) && field(savedAction,"stopRunId") == ref.runId &&
                  field(savedAction,"stopThreadId") == ref.threadId);
             bool changed = false;
-            if (observed.kind == Kind::Unavailable)
-                changed = setDestinationStatus(saved,"confirmation_pending","Flock could not confirm the Run's status in T3.");
-            else if (observed.kind == Kind::Question || observed.kind == Kind::ExternalInput)
+            if (observed.kind == Kind::Unavailable) {
+                const bool sessionMissing = stopping && db.query(R"SQL(
+SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environment=?
+  AND gateway_environment=? AND thread=? AND run=? AND session_missing=1 LIMIT 1
+)SQL",{id,key,field(saved,"environmentId"),field(saved,"gatewayEnvironmentId"),ref.threadId,ref.runId}).next();
+                changed = setDestinationStatus(saved,"confirmation_pending",sessionMissing
+                    ? "T3 could not find this Session when Flock tried to stop it. Check its delegated Sessions in T3. "
+                      "Flock is keeping the project on hold until the work settles."
+                    : "Flock could not confirm the Run's status in T3.");
+            } else if (observed.kind == Kind::Question || observed.kind == Kind::ExternalInput)
                 changed = setDestinationStatus(saved,"confirmation_pending","Review the pending input or approval in this T3 Session.");
             else if (!stopping)
                 changed = setDestinationStatus(saved,observed.status == "queued" ? "queued" : "running",{});

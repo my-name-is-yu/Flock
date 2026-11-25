@@ -356,14 +356,18 @@ void Store::Impl::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
     }
     for (const auto& item : pending) {
         if (shutdown.stop_requested()) return;
-        bool finished = false;
-        try {
-            const auto outcome = t3.interruptSessionMessage(item.environment,item.run);
-            finished = outcome == InterruptOutcome::AlreadyTerminal || outcome == InterruptOutcome::TargetGone;
-        } catch (const std::exception&) {}
+        auto outcome = InterruptOutcome::NoActiveRun;
+        try { outcome = t3.interruptSessionMessage(item.environment,item.run); }
+        catch (const std::exception&) {}
+        const bool missing = outcome == InterruptOutcome::TargetGone;
+        const bool finished = outcome == InterruptOutcome::AlreadyTerminal || missing;
         std::lock_guard lock(mutex);
-        exec("UPDATE session_message_waits SET interrupt_at=?,run_finished=? WHERE rowid=?",
-             {finished ? Json(nullptr) : Json(policyClock()+5),finished ? 1 : 0,item.key});
+        exec(R"SQL(
+UPDATE session_message_waits
+SET interrupt_at=?,run_finished=?,session_missing=max(session_missing,?)
+WHERE rowid=? AND interrupt_at IS NOT NULL AND environment=? AND gateway_environment=? AND thread=? AND run=?
+)SQL",{finished ? Json(nullptr) : Json(policyClock()+5),finished ? 1 : 0,missing ? 1 : 0,item.key,
+       item.environment,item.run.gatewayEnvironmentId,item.run.threadId,item.run.runId});
     }
 }
 
