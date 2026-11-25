@@ -82,8 +82,11 @@ export function approvalSummary(preview, { action, target } = {}) {
   if (startsNewSession && typeof fields.instruction === 'string') lines.push(...instructionLines(fields.instruction));
   for (const [key, value] of Object.entries(fields)) {
     const instruction = key === 'instruction' && typeof value === 'string';
-    if (startsNewSession && (instruction || key === 'tool' ||
-      (key === 'environmentId' && value === target) || (['run', 'questionId'].includes(key) && blank(value)))) continue;
+    if (startsNewSession) {
+      const repeatsTarget = key === 'environmentId' && value === target;
+      const emptySessionReference = (key === 'run' || key === 'questionId') && blank(value);
+      if (instruction || key === 'tool' || repeatsTarget || emptySessionReference) continue;
+    }
     const label = Object.hasOwn(approvalFieldLabels, key) ? approvalFieldLabels[key] : key.replace(/([a-z])([A-Z])/g, '$1 $2');
     const text = typeof value === 'string' ? value : JSON.stringify(value);
     const heading = label.charAt(0).toUpperCase() + label.slice(1);

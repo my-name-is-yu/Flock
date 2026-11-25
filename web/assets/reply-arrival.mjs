@@ -9,8 +9,8 @@ export function replyArrivalId(events, previousHead) {
   const reply = added.at(-1);
   if (!replyKinds.has(reply.kind)) return;
   const first = added[0];
-  if (added.length === 1 || !replyKinds.has(first.kind) ||
-      (first.kind === 'report' && reply.kind === 'completed' && first.taskId != null && first.taskId === reply.taskId)) {
-    return reply.id;
-  }
+  if (added.length === 1 || !replyKinds.has(first.kind)) return reply.id;
+  const completesSameTask = first.kind === 'report' && reply.kind === 'completed' &&
+    first.taskId != null && first.taskId === reply.taskId;
+  if (completesSameTask) return reply.id;
 }

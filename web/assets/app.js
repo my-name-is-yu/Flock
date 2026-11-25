@@ -1225,9 +1225,10 @@ function pausedActions(turn) {
 // The latest reply's first suggestion, offered in an empty composer as the likely next message.
 function nextSuggestion(context) {
   const composer = context?.composer;
-  if (context?.data?.canDecide !== true || context.dm || context.source || !composer ||
-      sendingMessages.has(composer) || composition || decisions.composer() || activeReply(composer) ||
-      composer.textAt(0) || ['working', 'thinking'].includes(context.data.presence)) return null;
+  if (context?.data?.canDecide !== true || context.dm || context.source || !composer) return null;
+  const composerBusy = sendingMessages.has(composer) || composition || decisions.composer() || activeReply(composer);
+  if (composerBusy || composer.textAt(0)) return null;
+  if (['working', 'thinking'].includes(context.data.presence)) return null;
   let latest = null;
   for (const event of context.events.values()) if (event.kind !== 'wait_closed' && (!latest || event.id > latest.id)) latest = event;
   if (latest?.kind !== 'conversation_reply') return null;
@@ -3528,8 +3529,10 @@ elements.message.addEventListener('input', (event) => {
 // Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
 elements.composer.addEventListener('keydown', (event) => {
   if (composition || event.isComposing || event.keyCode === 229) return;
-  if (event.target === elements.message && !elements.message.readOnly && !elements.message.value &&
-      !elements['composer-ghost'].hidden && isComposerSuggestionKey(event)) {
+  const fromMessage = event.target === elements.message;
+  const canAcceptSuggestion = fromMessage && !elements.message.readOnly && !elements.message.value &&
+    !elements['composer-ghost'].hidden;
+  if (canAcceptSuggestion && isComposerSuggestionKey(event)) {
     const suggestion = nextSuggestion(view);
     if (suggestion) {
       event.preventDefault();
@@ -3537,7 +3540,7 @@ elements.composer.addEventListener('keydown', (event) => {
       return;
     }
   }
-  if (event.target === elements.message) handleComposerEnter(event, elements.send);
+  if (fromMessage) handleComposerEnter(event, elements.send);
   if (event.key === 'Escape' && !elements['reply-context'].hidden) {
     event.preventDefault();
     event.stopPropagation();
