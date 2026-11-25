@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
+#include "task_storage.hpp"
 
 #include <algorithm>
 #include <tuple>
@@ -292,13 +293,10 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
                 throw ToolError("Choose a T3 project for " + name + " first, or configure its projectId in conversationEnvironments");
             if (!selected.emplace(route.environmentId, route.projectId).second)
                 throw ToolError("Choose each environment and project only once");
-            auto target = Json{{"environmentId", route.environmentId}, {"projectId", route.projectId}, {"name", name}};
-            if (!route.gatewayEnvironmentId.empty() && route.gatewayEnvironmentId != route.environmentId)
-                target["gatewayEnvironmentId"] = route.gatewayEnvironmentId;
-            destinations.targets.push_back(std::move(target));
-            if (destinations.primary.environmentId.empty()) destinations.primary = std::move(route);
+            if (destinations.primary.environmentId.empty()) destinations.primary = route;
+            destinations.targets.push_back({name, std::move(route)});
         }
-        redactor(bot).requirePublic({destinations.targets, destinations.commit});
+        redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
         return destinations;
     }
     if (!sessionRef.empty() && (!selectedSession || !permitsWorkSession(message, *selectedSession)))
@@ -319,14 +317,8 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
         if (destinations.primary.projectId.empty())
             destinations.primary.projectId = rememberedT3Project(bot, destinations.primary.environmentId);
         if (destinations.primary.projectId.empty()) throw ToolError("Choose a T3 project before verifying a commit");
-        auto target = Json{{"environmentId", destinations.primary.environmentId},
-                           {"projectId", destinations.primary.projectId},
-                           {"name", environment.empty() ? destinations.primary.environmentId : environment}};
-        if (!destinations.primary.gatewayEnvironmentId.empty() &&
-            destinations.primary.gatewayEnvironmentId != destinations.primary.environmentId)
-            target["gatewayEnvironmentId"] = destinations.primary.gatewayEnvironmentId;
-        destinations.targets.push_back(std::move(target));
-        redactor(bot).requirePublic({destinations.targets, destinations.commit});
+        destinations.targets.push_back({environment.empty() ? destinations.primary.environmentId : environment, destinations.primary});
+        redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
     }
     return destinations;
 }

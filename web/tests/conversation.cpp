@@ -533,8 +533,8 @@ void parallelVerificationInView(const std::filesystem::path& path) {
     t3.localFinished = true;
     runtime.tick();
     const auto saved = store.tasks("release").at(0);
-    const auto& prior = saved.task.rest.at("runResults").at(1);
-    now = prior.at("deadline").get<Seconds>() + 1;
+    const auto& prior = saved.task.runResults()[1];
+    now = prior.deadline.value() + 1;
     runtime.tick();
     const auto overdue = browser.get("/api/view?bot=release").at("waits").at(0);
     check(overdue.at("wait").at("reason") == "deadline" && overdue.at("wait").at("run").is_null(),

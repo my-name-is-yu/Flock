@@ -81,7 +81,7 @@ void parallelDestinations() {
     const auto& task = tasks.front().task;
     const Json expected = Json::array({{{"name", "mini"}, {"environmentId", "mini-env"}, {"projectId", "mini-project"}},
                                        {{"name", "local"}, {"environmentId", "env-canonical"}, {"projectId", "project-canonical"}}});
-    check(task.rest.at("runTargets") == expected && task.rest.at("requestedCommit") == std::string(40, 'a'),
+    check(taskJson(tasks.front()).at("runTargets") == expected && task.rest.at("requestedCommit") == std::string(40, 'a'),
           "the task must pin the selected canonical routes and normalized SHA");
 
     model.action.args["environments"] = {"local", "env-canonical"};
@@ -92,17 +92,16 @@ void parallelDestinations() {
     model.action.args = {{"request", "Verify on the Mini"}, {"environment", "mini"}, {"commit", std::string(40, 'a')}};
     store.receive(localOwner, intake, "single-verification", "Verify on the Mini");
     runtime.runConversations();
-    const auto singleNamed = store.task(model.receipt.at("taskId")).task;
-    check(model.receipt.value("ok", false) && singleNamed.projectId == "mini-project" &&
-              singleNamed.rest.at("requestedCommit") == std::string(40, 'a') && singleNamed.rest.at("runTargets").size() == 1 &&
-              singleNamed.rest.at("runTargets").at(0).at("environmentId") == "mini-env",
+    const auto singleNamed = store.task(model.receipt.at("taskId"));
+    check(model.receipt.value("ok", false) && singleNamed.task.projectId == "mini-project" &&
+              singleNamed.task.rest.at("requestedCommit") == std::string(40, 'a') && singleNamed.task.runTargets().size() == 1 &&
+              singleNamed.task.runTargets().front().route.environmentId == "mini-env",
           "a single named destination must retain optional verification and its saved route");
     model.action.args = {{"request", "Verify on the Mini"}, {"environments", Json::array({"mini"})}};
     store.receive(localOwner, intake, "single-array", "Verify on the Mini");
     runtime.runConversations();
-    const auto singleArray = store.task(model.receipt.at("taskId")).task;
-    check(singleArray.rest.at("runTargets").size() == 1 &&
-              singleArray.rest.at("runTargets").at(0) == singleNamed.rest.at("runTargets").at(0),
+    const auto singleArray = store.task(model.receipt.at("taskId"));
+    check(singleArray.task.runTargets().size() == 1 && taskJson(singleArray).at("runTargets") == taskJson(singleNamed).at("runTargets"),
           "a one-item environments list must route like a named single destination");
     model.action.args = {
         {"request", "Resume the cancelled task"}, {"resume", true}, {"sourceResultMessageId", 1}, {"commit", std::string(40, 'a')}};
@@ -125,7 +124,7 @@ void genericDestinationCounts() {
     auto tasks = store.tasks();
     check(tasks.size() == 1, "one destination must create one conversation task");
     const auto& single = tasks.front().task;
-    check(single.rest.at("runTargets").size() == 1 && !single.rest.contains("requestedCommit"),
+    check(single.runTargets().size() == 1 && !single.rest.contains("requestedCommit"),
           "ordinary one-destination work must not require commit verification");
 
     model.action.args = {{"request", "Run on all three"}, {"environments", {"mini", "local", "cloud"}}};
@@ -134,7 +133,7 @@ void genericDestinationCounts() {
     tasks = store.tasks();
     check(tasks.size() == 2, "three destinations must remain one additional conversation task");
     const auto& multi = tasks.front().task;
-    check(multi.rest.at("runTargets").size() == 3 && !multi.rest.contains("requestedCommit"),
+    check(multi.runTargets().size() == 3 && !multi.rest.contains("requestedCommit"),
           "ordinary multi-destination work must persist all routes without a SHA policy");
 }
 
@@ -176,8 +175,7 @@ void manyConfiguredDestinations() {
     check(allOptionsOffered, "all 17 configured destinations must be offered as choices to one request");
     const auto tasks = store.tasks();
     check(tasks.size() == 1, "one request across 17 destinations must create one task");
-    const auto& task = tasks.front().task;
-    check(task.rest.at("runTargets") == expected && t3.commands.empty(),
+    check(taskJson(tasks.front()).at("runTargets") == expected && t3.commands.empty(),
           "one request must save all 17 selected destinations without dropping or dispatching any early");
 }
 

@@ -160,6 +160,61 @@ void executionRoundTrips() {
           "Stop bound to an assigned Run changed on round-trip");
 }
 
+void destinationRoundTrips() {
+    const Json target = {{"name", "Mini"}, {"environmentId", "mini"}, {"projectId", "repo"}};
+    auto data = stored();
+    data["runTargets"] = Json::array({target});
+    const auto queued = decodeTask(id, "queued", generation, data.dump());
+    check(queued.runTargets().size() == 1 && queued.runTargets().front().route.projectId == "repo" && queued.runResults().empty() &&
+              !queued.rest.contains("runTargets") && encodeTask(queued) == data,
+          "queued destination did not retain its typed route and wire shape");
+
+    auto pending = target;
+    pending.update({{"actionId", "send-mini"},
+                    {"status", "confirmation_pending"},
+                    {"threadId", "mini-thread"},
+                    {"link", ""},
+                    {"gatewayEnvironmentId", "local"},
+                    {"deadline", 100},
+                    {"retryAt", 90},
+                    {"stopRetryAt", 95},
+                    {"evidenceAttempts", 1},
+                    {"detail", "Waiting for a receipt"}});
+    const Json settled{{"name", "Local"},
+                       {"environmentId", "local"},
+                       {"projectId", "other"},
+                       {"actionId", "send-local"},
+                       {"status", "rolled_back"},
+                       {"threadId", "local-thread"},
+                       {"runId", "local-run"},
+                       {"link", "t3://local"},
+                       {"gatewayEnvironmentId", ""},
+                       {"ownerBotId", "bot"},
+                       {"revisionId", nullptr},
+                       {"deadline", 120},
+                       {"commit", ""},
+                       {"report", ""},
+                       {"detail", ""},
+                       {"evidenceStatus", "report_unavailable"}};
+    data.erase("runTargets");
+    data["runResults"] = Json::array({pending, settled});
+    const auto running = decodeTask(id, "running", generation, data.dump());
+    const auto& result = running.runResults().front();
+    check(result.inPhase(DestinationRunPhase::confirmation_pending) && result.outstanding() && result.ref.threadId == "mini-thread" &&
+              result.ref.runId.empty() && result.deadline == 100 && result.retryAt == 90 && result.stopRetryAt == 95 &&
+              result.evidenceAttempts == 1 && !running.runResults().back().outstanding() && !running.rest.contains("runResults") &&
+              encodeTask(running) == data,
+          "destination progress and settlement changed on round-trip");
+
+    data["runResults"] = Json::array({settled});
+    data["runOutcome"] = "failed";
+    const auto completed = decodeTask(id, "completed", generation, data.dump());
+    const auto wire = taskJson(TaskView{.task = completed});
+    check(completed.runOutcome() == RunOutcome::failed && !completed.rest.contains("runOutcome") && encodeTask(completed) == data &&
+              wire.at("runResults") == data.at("runResults") && wire.at("runOutcome") == "failed",
+          "destination aggregate did not retain its typed outcome and wire shape");
+}
+
 void rejects(std::string_view record, std::string_view key, std::string_view issue, std::string_view state = "queued") {
     try {
         decodeTask(id, state, generation, record);
@@ -203,6 +258,14 @@ void decodeErrors() {
     invalid["pendingDestination"] = pendingDestination();
     invalid["pendingDestination"].erase("projectId");
     rejects(invalid.dump(), "pendingDestination.projectId", "missing required key");
+    invalid = stored();
+    invalid["runOutcome"] = "failed";
+    rejects(invalid.dump(), "runOutcome", "requires dispatched Runs");
+    invalid.erase("runOutcome");
+    invalid["runTargets"] = Json::array();
+    rejects(invalid.dump(), "runTargets", "expected at least one destination");
+    invalid["runResults"] = Json::array();
+    rejects(invalid.dump(), "runTargets", "cannot coexist with dispatched Runs");
 }
 
 void executionDecodeErrors() {
@@ -244,6 +307,7 @@ int main() {
     try {
         roundTrips();
         executionRoundTrips();
+        destinationRoundTrips();
         decodeErrors();
         executionDecodeErrors();
         return 0;

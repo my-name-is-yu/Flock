@@ -268,7 +268,7 @@ struct Scenario {
     TaskView task() { return store.task(taskId); }
 
     static Json result(const TaskView& task, const Endpoint& endpoint) {
-        for (const auto& run : task.task.rest.value("runResults", Json::array()))
+        for (const auto& run : taskJson(task).value("runResults", Json::array()))
             if (run.value("environmentId", "") == endpoint.id()) return run;
         return Json::object();
     }
@@ -322,8 +322,7 @@ void normal(Scenario& fixture) {
     fixture.mini.configure({{"multiStatus", "completed"}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; }, "both Runs should complete");
     const auto task = fixture.task();
-    check(task.task.rest.at("runResults").size() == 2 && task.task.rest.at("runOutcome") == "all_completed" &&
-              fixture.store.tasks(bot).size() == 1,
+    check(task.task.runResults().size() == 2 && task.task.runOutcome() == RunOutcome::all_completed && fixture.store.tasks(bot).size() == 1,
           "the original request must contain both outcomes");
     fixture.checkResult(fixture.local, Scenario::result(task, fixture.local), "completed", fixture.model.commit);
     fixture.checkResult(fixture.mini, Scenario::result(task, fixture.mini), "completed", fixture.model.commit);
@@ -338,8 +337,8 @@ void ordinaryMulti(const Endpoint& local, const Endpoint& mini, const std::files
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; },
                          "ordinary multi-environment work should complete without a requested commit");
     const auto task = fixture.task();
-    check(!task.task.rest.contains("requestedCommit") && task.task.rest.at("runOutcome") == "all_completed" &&
-              task.task.rest.at("runResults").size() == 2,
+    check(!task.task.rest.contains("requestedCommit") && task.task.runOutcome() == RunOutcome::all_completed &&
+              task.task.runResults().size() == 2,
           "ordinary work must aggregate both destinations without SHA policy");
     fixture.checkResult(fixture.local, Scenario::result(task, fixture.local), "completed", "");
     fixture.checkResult(fixture.mini, Scenario::result(task, fixture.mini), "completed", "");
@@ -426,11 +425,11 @@ void resumeNativeLinkedRoute(const Endpoint& local, const Endpoint& mini, const 
     const auto expectedTargetLink = local.origin + "/" + mini.id() + "/" + result.value("threadId", "");
     const auto routed = local.routedTargets();
     check(resumed.model.cancelResult.value("ok", false) && task.task.state == TaskState::completed &&
-              result.value("status", "") == "interrupted" && result.value("gatewayEnvironmentId", "") == local.id() &&
-              result.value("link", "") == expectedTargetLink && local.effects("t3_thread_launch").size() == 1 &&
-              mini.effects("t3_thread_launch").empty() && local.effects("t3_thread_send").size() == 1 &&
-              mini.effects("t3_thread_send").empty() && local.effects("t3_thread_interrupt").size() == 1 &&
-              mini.effects("t3_thread_interrupt").empty() && !routed.empty() &&
+              task.task.runOutcome() == RunOutcome::failed && result.value("status", "") == "interrupted" &&
+              result.value("gatewayEnvironmentId", "") == local.id() && result.value("link", "") == expectedTargetLink &&
+              local.effects("t3_thread_launch").size() == 1 && mini.effects("t3_thread_launch").empty() &&
+              local.effects("t3_thread_send").size() == 1 && mini.effects("t3_thread_send").empty() &&
+              local.effects("t3_thread_interrupt").size() == 1 && mini.effects("t3_thread_interrupt").empty() && !routed.empty() &&
               std::all_of(routed.begin(), routed.end(), [&](const auto& target) { return target == mini.id(); }),
           "restart recovery must retain the exact gateway and target without credential overwrite or rerouting");
 }
@@ -582,6 +581,9 @@ void cancelOneDestination(const Endpoint& local, const Endpoint& mini, const std
     fixture.mini.configure({{"multiDisconnected", false}, {"multiHoldSettlement", true}});
     fixture.advanceUntil([&](const TaskView&) { return fixture.mini.effects("t3_thread_interrupt").size() == 1; },
                          "Mini should be interrupted after reconnecting");
+    const auto stopping = fixture.task();
+    check(stopping.task.state == TaskState::running && !stopping.task.runOutcome(),
+          "the selected destination must keep the task open after dispatching the stop and before settlement");
     fixture.mini.configure({{"multiHoldSettlement", false}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; },
                          "the parent should settle after Mini's stop is confirmed");
@@ -681,7 +683,9 @@ void deadlines(Scenario& fixture) {
           "the sibling did not advance the task while preserving the original deadline");
     const auto extension = fixture.now.load() + 120;
     fixture.store.operate(localOwner, TaskTarget::from(waiting.task, waitId), "extend", {{"deadline", extension}});
-    check(!fixture.task().wait && Scenario::result(fixture.task(), overdue).at("deadline") == extension,
+    const auto extended = fixture.task();
+    check(!extended.wait && Scenario::result(extended, overdue).at("deadline") == extension &&
+              Scenario::result(extended, sibling).at("deadline") == (localExpiredFirst ? mini : local).at("deadline"),
           "extending changed the wrong deadline");
     overdue.configure({{"multiStatus", "completed"}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; },
@@ -712,7 +716,7 @@ void partial(Scenario& fixture) {
     fixture.mini.configure({{"multiDisconnected", false}, {"multiStatus", "failed"}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; }, "both outcomes should settle");
     task = fixture.task();
-    check(task.task.rest.at("runOutcome") == "partial_failure" && Scenario::result(task, fixture.local) == success,
+    check(task.task.runOutcome() == RunOutcome::partial_failure && Scenario::result(task, fixture.local) == success,
           "a later Mini failure changed the local success or the aggregate outcome");
     fixture.checkResult(fixture.mini, Scenario::result(task, fixture.mini), "failed", fixture.model.commit);
     fixture.checkLaunches();
@@ -726,7 +730,7 @@ void mismatch(Scenario& fixture) {
     fixture.mini.configure({{"multiStatus", "completed"}, {"multiActualCommit", otherCommit}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; }, "both outcomes should settle");
     const auto task = fixture.task();
-    check(task.task.rest.at("runOutcome") == "partial_failure", "a different verified commit must fail the Mini check");
+    check(task.task.runOutcome() == RunOutcome::partial_failure, "a different verified commit must fail the Mini check");
     fixture.checkResult(fixture.local, Scenario::result(task, fixture.local), "completed", fixture.model.commit);
     fixture.checkResult(fixture.mini, Scenario::result(task, fixture.mini), "failed", otherCommit);
 }
@@ -797,7 +801,7 @@ void supervised(Scenario& fixture) {
     fixture.local.configure({{"multiStatus", "completed"}});
     fixture.mini.configure({{"multiStatus", "completed"}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; }, "both approved Runs should settle");
-    check(fixture.task().task.rest.at("runOutcome") == "all_completed", "approving both Runs must preserve the verification results");
+    check(fixture.task().task.runOutcome() == RunOutcome::all_completed, "approving both Runs must preserve the verification results");
 }
 
 void stop(Scenario& fixture) {

@@ -90,9 +90,9 @@ bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
     if (selected == projects.end() && projects.size() == 1) selected = projects.begin();
     if (selected != projects.end()) {
         task.projectId = selected->id;
-        if (task.rest.contains("runTargets"))
-            for (auto& target : task.rest["runTargets"])
-                if (field(target, "environmentId") == environment && field(target, "projectId").empty()) target["projectId"] = selected->id;
+        if (auto* targets = std::get_if<RunTargets>(&task.destinations))
+            for (auto& target : *targets)
+                if (target.route.environmentId == environment && target.route.projectId.empty()) target.route.projectId = selected->id;
         rememberT3Project(bot, environment, selected->id);
         return true;
     }

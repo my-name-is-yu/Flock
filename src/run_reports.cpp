@@ -1,33 +1,34 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
+#include "task_storage.hpp"
 
 #include <algorithm>
 
 namespace flockv0 {
+RunEvidence boundedReportEvidence(const RunEvidence& evidence) {
+    const bool missing = evidence.availability == RunEvidence::Availability::ReportUnavailable;
+    auto report = missing ? std::string{} : bounded(evidence.report, limits::session_evidence::maxReportBytes);
+    const bool truncated = !missing && (evidence.truncated || report.size() < evidence.report.size());
+    return {evidence.availability,          std::move(report), missing ? std::string{} : evidence.itemId,
+            bounded(evidence.detail, 2048), truncated,         evidence.sessionCreatedAt};
+}
+
 void setReportEvidence(Json& data, const RunEvidence& evidence) {
-    using Availability = RunEvidence::Availability;
-    const bool missing = evidence.availability == Availability::ReportUnavailable;
-    const auto report = missing ? std::string{} : bounded(evidence.report, limits::session_evidence::maxReportBytes);
-    data["report"] = report;
-    data["truncated"] = !missing && (evidence.truncated || report.size() < evidence.report.size());
-    data["detail"] = bounded(evidence.detail, 2048);
-    data["itemId"] = missing ? std::string{} : evidence.itemId;
+    data["report"] = evidence.report;
+    data["truncated"] = evidence.truncated;
+    data["detail"] = evidence.detail;
+    data["itemId"] = evidence.itemId;
     if (!evidence.sessionCreatedAt.empty()) data["sessionCreatedAt"] = evidence.sessionCreatedAt;
     data.erase("evidenceStatus");
-    if (missing) data["evidenceStatus"] = "report_unavailable";
-    if (evidence.availability == Availability::DiagnosticUnavailable) data["evidenceStatus"] = "diagnostic_unavailable";
+    if (const auto status = runEvidenceStatusName(evidence.availability)) data["evidenceStatus"] = *status;
 }
 
-Json& destinationRun(TaskData& task, std::string_view action) {
-    auto& runs = task.rest.at("runResults");
-    const auto entry = std::ranges::find_if(runs, [&](const Json& run) { return field(run, "actionId") == action; });
-    if (entry == runs.end()) throw Conflict("The saved Run is outside this task");
-    return *entry;
-}
-
-bool destinationRunOutstanding(const Json& run) {
-    const auto status = field(run, "status");
-    return status == "queued" || status == "running" || status == "confirmation_pending";
+DestinationRun& destinationRun(TaskData& task, std::string_view action) {
+    if (auto* results = std::get_if<RunResults>(&task.destinations)) {
+        const auto entry = std::ranges::find(results->runs, action, &DestinationRun::actionId);
+        if (entry != results->runs.end()) return *entry;
+    }
+    throw Conflict("The saved Run is outside this task");
 }
 
 bool destinationStopRequested(const std::optional<Outbox>& action, const RunRef& run) {
@@ -36,9 +37,9 @@ bool destinationStopRequested(const std::optional<Outbox>& action, const RunRef&
     return !requested || (requested->runId == run.runId && requested->threadId == run.threadId);
 }
 
-bool Store::Impl::advanceDestinationSessionMessageRun(TaskData& task, Json& run) {
+bool Store::Impl::advanceDestinationSessionMessageRun(TaskData& task, DestinationRun& run) {
     auto pending = query(R"SQL(
-SELECT w.environment,w.thread,w.run,w.gateway_environment,w.delivery,w.link
+SELECT w.run,w.delivery,w.link
 FROM session_message_waits w
 WHERE w.task_id=? AND w.action_id=?
   AND w.environment=? AND w.thread=? AND w.gateway_environment=?
@@ -48,38 +49,34 @@ WHERE w.task_id=? AND w.action_id=?
       AND json_extract(j.data,'$.run.runId')=w.run
       AND json_extract(j.data,'$.run.threadId')=w.thread)
 ORDER BY w.rowid LIMIT 1)SQL",
-                         {task.id, field(run, "actionId"), field(run, "environmentId"), field(run, "threadId"),
-                          field(run, "gatewayEnvironmentId"), task.id});
+                         {task.id, run.actionId, run.environmentId, run.ref.threadId, run.ref.gatewayEnvironmentId, task.id});
     if (!pending.next()) return false;
-    const auto environment = pending.string(0);
-    const auto thread = pending.string(1);
-    const auto runId = pending.string(2);
-    const auto gateway = pending.string(3);
-    const auto delivery = pending.string(4);
-    const auto link = pending.string(5);
-    if (runId == field(run, "runId")) return false;
+    const auto runId = pending.string(0);
+    const auto delivery = pending.string(1);
+    const auto link = pending.string(2);
+    if (runId == run.ref.runId) return false;
     exec("UPDATE runs SET thread_id=?,run_id=?,link=? WHERE action_id=? AND task_id=? AND environment_id=?",
-         {thread, runId, link.empty() ? field(run, "link") : link, field(run, "actionId"), task.id, environment});
+         {run.ref.threadId, runId, link.empty() ? run.ref.link : link, run.actionId, task.id, run.environmentId});
     if (sqlite3_changes(db) != 1) return false;
-    run["threadId"] = thread;
-    run["runId"] = runId;
-    run["gatewayEnvironmentId"] = gateway;
-    if (!link.empty()) run["link"] = link;
-    run["status"] = delivery == "queued" ? "queued" : "running";
-    auto action = outbox(task, field(run, "actionId"));
+    run.ref.runId = runId;
+    run.explicitDirectGateway = run.ref.gatewayEnvironmentId.empty();
+    if (!link.empty()) run.ref.link = link;
+    run.status = delivery == "queued" ? DestinationRunPhase::queued : DestinationRunPhase::running;
+    auto action = outbox(task, run.actionId);
     if (action && action->stop) {
         action->stop.reset();
         saveOutbox(*action);
     }
-    for (const auto* key : {"commit", "report", "detail", "evidenceStatus", "sessionCreatedAt"}) run.erase(key);
-    run.erase("retryAt");
-    run.erase("stopRetryAt");
-    run.erase("evidenceAttempts");
+    run.report.reset();
+    run.detail.reset();
+    run.retryAt.reset();
+    run.stopRetryAt.reset();
+    run.evidenceAttempts = 0;
     return true;
 }
 
-bool Store::Impl::recordDestinationReport(TaskData& task, Json& run, const Observation& observed) {
-    const auto ref = runRef(run);
+bool Store::Impl::recordDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed) {
+    const auto& ref = run.ref;
     auto status = observed.status;
     if (status.empty()) status = "failed";
     auto detail = observed.detail;
@@ -89,35 +86,42 @@ bool Store::Impl::recordDestinationReport(TaskData& task, Json& run, const Obser
     }
     Json data = {{"kind", "result"},
                  {"run", runJson(ref)},
-                 {"environmentId", run.at("environmentId")},
-                 {"projectId", run.at("projectId")},
-                 {"destination", run.at("name")},
+                 {"environmentId", run.environmentId},
+                 {"projectId", run.assignment.projectId},
+                 {"destination", run.name},
                  {"status", status},
                  {"commit", observed.checkedCommit},
                  {"revisionId", task.currentRevision ? Json(*task.currentRevision) : Json(nullptr)},
                  {"resultRunId", observed.resultRunId.empty() ? ref.runId : observed.resultRunId}};
     if (task.rest.contains("requestedCommit")) data["requestedCommit"] = task.rest.at("requestedCommit");
     if (status == "interrupted" || status == "cancelled") {
-        const auto action = outbox(task, field(run, "actionId"));
+        const auto action = outbox(task, run.actionId);
         data["stopRequested"] = task.state == TaskState::cancelling || destinationStopRequested(action, ref);
     }
-    setReportEvidence(
-        data, {observed.evidence, observed.report, observed.itemId, std::move(detail), observed.truncated, observed.sessionCreatedAt});
-    for (const auto* key : {"status", "commit", "report", "detail", "evidenceStatus", "sessionCreatedAt"})
-        if (data.contains(key)) run[key] = data.at(key);
-    run.erase("retryAt");
-    run.erase("stopRetryAt");
-    run.erase("evidenceAttempts");
+    auto evidence = boundedReportEvidence(
+        {observed.evidence, observed.report, observed.itemId, std::move(detail), observed.truncated, observed.sessionCreatedAt});
+    setReportEvidence(data, evidence);
+    run.status = destinationRunStatusFromName(std::move(status));
+    if (run.report) {
+        if (evidence.availability == RunEvidence::Availability::Available) evidence.availability = run.report->evidence;
+        if (evidence.sessionCreatedAt.empty()) evidence.sessionCreatedAt = std::move(run.report->sessionCreatedAt);
+    }
+    run.report =
+        DestinationReport{observed.checkedCommit, std::move(evidence.report), std::move(evidence.sessionCreatedAt), evidence.availability};
+    run.detail = std::move(evidence.detail);
+    run.retryAt.reset();
+    run.stopRetryAt.reset();
+    run.evidenceAttempts = 0;
     const auto wait = currentWait(task.id);
     const auto* deadline = wait ? wait->verification() : nullptr;
-    if (deadline && deadline->actionId == field(run, "actionId")) {
+    if (deadline && deadline->actionId == run.actionId) {
         clearWait(task, "run_finished");
         task.state = TaskState::running;
     }
     auto priorReport = query("SELECT 1 FROM journal WHERE task_id=? AND kind='report' "
                              "AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run.runId')=? "
                              "AND json_extract(data,'$.run.threadId')=? AND json_extract(data,'$.revisionId') IS ? LIMIT 1",
-                             {task.id, run.at("environmentId"), ref.runId, ref.threadId, data.at("revisionId")});
+                             {task.id, run.environmentId, ref.runId, ref.threadId, data.at("revisionId")});
     if (!priorReport.next()) journal(task.id, "report", data);
     if (advanceDestinationSessionMessageRun(task, run)) return false;
     auto pendingSends = query(R"SQL(
@@ -126,32 +130,33 @@ WHERE json_extract(effect,'$.kind')='message_session'
   AND json_extract(effect,'$.taskId')=?
 )SQL",
                               {task.id});
+    auto& results = std::get<RunResults>(task.destinations);
+    auto& runs = results.runs;
     bool waitingForSend = false;
     while (pendingSends.next()) {
         waitingForSend = true;
-        const auto actionId = pendingSends.string(0);
-        const auto destination = std::ranges::find_if(task.rest.at("runResults"),
-                                                      [&](const Json& candidate) { return field(candidate, "actionId") == actionId; });
-        if (destination == task.rest.at("runResults").end()) continue;
-        if (!destinationRunOutstanding(*destination)) {
-            (*destination)["status"] = "confirmation_pending";
-            (*destination)["detail"] =
+        const auto destination = std::ranges::find(runs, pendingSends.string(0), &DestinationRun::actionId);
+        if (destination == runs.end()) continue;
+        if (!destination->outstanding()) {
+            destination->status = DestinationRunPhase::confirmation_pending;
+            destination->detail =
                 "A Session message may have been accepted by T3, but Flock has no receipt to identify its Run. The task remains held.";
-            (*destination)["retryAt"] = policyClock() + 5;
+            destination->retryAt = policyClock() + 5;
         }
     }
     if (waitingForSend) return false;
-    const auto& results = task.rest.at("runResults");
-    if (std::ranges::any_of(results, destinationRunOutstanding)) return false;
+    if (std::ranges::any_of(runs, &DestinationRun::outstanding)) return false;
     if (task.state == TaskState::cancelling) return true;
-    const auto completed = std::ranges::count_if(results, [](const Json& result) { return result.at("status") == "completed"; });
+    const auto completed =
+        std::ranges::count(runs, "completed", [](const DestinationRun& result) { return destinationRunStatusName(result.status); });
     const auto count = static_cast<std::size_t>(completed);
-    task.rest["runOutcome"] = count == results.size() ? "all_completed" : count > 0 ? "partial_failure" : "failed";
+    const auto outcome = count == runs.size() ? RunOutcome::all_completed : count > 0 ? RunOutcome::partial_failure : RunOutcome::failed;
+    results.outcome = outcome;
     task.state = TaskState::completed;
-    auto summary = std::to_string(count) + " of " + std::to_string(results.size()) + " T3 Runs completed";
+    auto summary = std::to_string(count) + " of " + std::to_string(runs.size()) + " T3 Runs completed";
     if (task.rest.contains("requestedCommit")) summary += " with a verified commit";
     Json completion = {{"text", std::move(summary) + "."},
-                       {"runOutcome", task.rest.at("runOutcome")},
+                       {"runOutcome", runOutcomeName(outcome)},
                        {"doneWhen", task.doneWhen},
                        {"revisionId", data.at("revisionId")}};
     if (task.rest.contains("requestedCommit")) completion["requestedCommit"] = task.rest.at("requestedCommit");

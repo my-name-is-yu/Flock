@@ -62,9 +62,9 @@ std::string actionId();
 std::string effectiveDoneWhen(const TaskData& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
-Json& destinationRun(TaskData& task, std::string_view action);
-bool destinationRunOutstanding(const Json& run);
+DestinationRun& destinationRun(TaskData& task, std::string_view action);
 bool destinationStopRequested(const std::optional<Outbox>& action, const RunRef&);
+RunEvidence boundedReportEvidence(const RunEvidence&);
 void setReportEvidence(Json&, const RunEvidence&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
@@ -87,17 +87,13 @@ struct PeerExchange {
     bool allowsReplan(Id task) const { return recipient == task && kind == "work" && phase == "working"; }
 };
 
-struct LinkedTaskDestination {
-    std::string name;
-    TaskRoute route;
-};
 struct LinkedTaskDestinations {
-    std::vector<LinkedTaskDestination> choices;
+    std::vector<RunTarget> choices;
     std::vector<std::string> unavailable;
 };
 struct StartDestinations {
     TaskRoute primary;
-    Json targets = Json::array();
+    std::vector<RunTarget> targets;
     std::string commit;
 };
 struct TaskChange {
@@ -375,7 +371,7 @@ struct Store::Impl {
     void saveSessionSendResult(std::string_view bot, Id message, int step, Json result);
     void persistSessionSendReceipt(Id message, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
     void reconcilePausedSessionSends(T3&, std::stop_token);
-    bool advanceDestinationSessionMessageRun(TaskData&, Json&);
+    bool advanceDestinationSessionMessageRun(TaskData&, DestinationRun&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*,
                  const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&, const PeerResolver&, std::stop_token);
     enum class CallOutcome { advance, waiting, stop, finished };
@@ -477,7 +473,7 @@ struct Store::Impl {
     std::optional<Wait> currentWait(Id task) const;
     std::optional<Wait> projectedWait(Id task, const Statement&, int col) const;
     void clearWait(TaskData&, std::string_view resolution);
-    bool recordDestinationReport(TaskData& task, Json& run, const Observation&);
+    bool recordDestinationReport(TaskData& task, DestinationRun& run, const Observation&);
     void consumeEvent(const TaskData&);
     std::optional<Outbox> outbox(const TaskData&, std::string_view actionId = {}) const;
     void insertOutbox(Id task, const Outbox&);
