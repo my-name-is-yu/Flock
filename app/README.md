@@ -78,12 +78,16 @@ one task with their first and last scheduled times and occurrence count, then
 resume according to the configured IANA timezone. Scheduling supports dates
 through 2199.
 
-Ask a Bot in its conversation to remember a convention, manage a schedule or
-reminder, or follow up on a webhook. Flock imports `MEMORY.md` on the first
-private memory access. SQLite supplies private memory for conversation and task
-decisions from then on. Use the memory tools or Web API to edit it. Shared
-playbooks and text documents use an explicit document ID and follow the installation policy
-for the requested `shared_memory` operation.
+Flock imports `MEMORY.md` on the first private memory access. SQLite supplies
+private memory for conversation and task decisions from then on. Bots can save
+lasting preferences and corrections from a Bot owner's or an administrator's
+direct messages, including messages sent with `flock message`. A separate
+review sees only that message and the existing private memory. Automatic saves
+update matching entries and follow the `memory.write` installation rules for
+the Bot ID. Use the conversation or Web API to edit memory explicitly. Shared
+playbooks use an explicit document ID and the applicable `shared_memory` rules.
+
+Ask a Bot in its conversation to manage a schedule or reminder or follow up on a webhook.
 
 ## Connect and run
 

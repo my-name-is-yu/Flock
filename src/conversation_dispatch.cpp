@@ -229,12 +229,15 @@ std::optional<Resource> Store::Impl::conversationCallResource(const Message& mes
         if (Policy(*this).forbidden(message.bot,Action::environment_configure,environment)) return std::nullopt;
         return Resource{Action::environment_configure,environment};
     }
-    if (!decision.args.contains("docId")) return channelToolPolicy(message.id,tool);
+    const bool shared = decision.args.contains("docId");
+    if (tool == "remember_preference") return Resource{Action::private_memory_write,message.bot};
+    if (tool == "propose_memory_edit" || tool == "apply_memory_edit" || tool == "revert_memory_edit")
+        return shared ? Resource{Action::shared_memory_write,field(decision.args,"docId")}
+                      : Resource{Action::private_memory_write,message.bot};
+    if (!shared) return channelToolPolicy(message.id,tool);
 
     if (tool == "read_memory" || tool == "memory_history")
         return Resource{Action::shared_memory_read,field(decision.args,"docId")};
-    if (tool == "propose_memory_edit" || tool == "apply_memory_edit" || tool == "revert_memory_edit")
-        return Resource{Action::shared_memory_write,field(decision.args,"docId")};
     return std::nullopt;
 }
 
@@ -277,6 +280,9 @@ std::optional<Json> Store::Impl::applyLocalConversationCall(
     const Message& message, int step, const Decision& decision, std::string_view key, Seconds now,
     ApprovalWait waitMode, const WorkSession* selectedSession, const LinkedTaskDestinations& linked) {
     if (const auto resource = conversationCallResource(message,decision)) {
+        if (resource->action == Action::private_memory_write &&
+            !Policy(*this).allows(turnActor(message),Action::bot_settings,resource->target))
+            return toolFailure("Memory access denied");
         const auto gate = approveAction(policyOrigin(message),*resource,key,
             Json::array({decision.tool,decision.args}),now,true,waitMode);
         if (gate == ApprovalGate::waiting) return std::nullopt;
