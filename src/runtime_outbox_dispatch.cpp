@@ -1,5 +1,6 @@
 #include "runtime_outbox_dispatch.hpp"
 
+#include "commit_check.hpp"
 #include "conversation_storage.hpp"
 #include "flock/limits.hpp"
 #include "flock/participation.hpp"
@@ -600,5 +601,76 @@ void Runtime::OutboxDispatch::step(const TaskData& task) {
             return;
     }
     deliver(task, std::move(*action));
+}
+
+void Runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id, CommandTool tool, std::string instruction,
+                                          const Json& args, const Json& event, bool charge, const TaskRoute* destination) {
+    const auto& run = tool == CommandTool::follow_up ? task.lastRun : task.activeRun;
+    auto target = run ? run->ref : RunRef{};
+    if (tool == CommandTool::delegate && task.selectedSession) {
+        if (task.newSessionRequired)
+            task.selectedSession.reset();
+        else {
+            target = {task.selectedSession->target.threadId, {}, {}, {}};
+            tool = CommandTool::start_in_session;
+        }
+    }
+    SessionPrompts::WorkPrompt prompt;
+    if (tool == CommandTool::follow_up) {
+        prompt = prompts.workPrompt(task, event, id.size());
+        const auto scrub = db.redactor(task.botId);
+        redactInstructions(prompt.pending, scrub);
+        instruction += prompt.instruction;
+        instruction = scrub.text(instruction);
+    }
+    if (tool != CommandTool::answer_session_question) task.deadline = 0;
+    auto route = destination ? *destination : TaskRoute{task.environmentId, task.projectId, task.gatewayEnvironmentId.value_or("")};
+    Outbox action;
+    auto& cmd = action.command;
+    cmd.actionId = id;
+    cmd.tool = tool;
+    cmd.environmentId = std::move(route.environmentId);
+    cmd.projectId = std::move(route.projectId);
+    if (route.gatewayEnvironmentId != cmd.environmentId) cmd.gatewayEnvironmentId = std::move(route.gatewayEnvironmentId);
+    cmd.target = std::move(target);
+    if (tool == CommandTool::answer_session_question) {
+        cmd.questionId = field(args, "requestId");
+        cmd.answers = args.value("answers", Json::object());
+    }
+    action.revisionId = task.currentRevision;
+    const Id taskId = task.id;
+    action.instructions = std::move(prompt.pending);
+    action.contextIds = std::move(prompt.contextIds);
+    action.sourceResultRefs = std::move(prompt.resultReferences);
+    action.chargesBudget = charge;
+    action.destinationAction = destination != nullptr;
+    if (tool == CommandTool::delegate || tool == CommandTool::start_in_session) {
+        if (destination && task.requestedCommit) {
+            action.commit = OutboxCommit{*task.requestedCommit, true};
+            instruction = commit_check::instructions(instruction, action.commit->expected);
+        }
+        action.instructionBase = db.redactor(task.botId).text(instruction);
+    } else
+        cmd.instruction = std::move(instruction);
+    db.insertOutbox(taskId, action);
+    if (destination) return;
+    task.actionId = id;
+    task.state = TaskState::sending;
+}
+
+void Runtime::OutboxDispatch::queueDestinations(TaskData& task, const std::string& first, std::string_view instruction, const Json& args,
+                                                const Json& event, bool charge) {
+    RunResults results;
+    for (const auto& target : task.runTargets()) {
+        const auto& route = target.route;
+        const auto key = results.runs.empty() ? first : actionId();
+        queueAction(task, key, CommandTool::delegate, std::string(instruction), args, event, charge, &route);
+        DestinationRun run{.actionId = key, .name = target.name, .environmentId = route.environmentId};
+        run.assignment.projectId = route.projectId;
+        if (route.gatewayEnvironmentId != route.environmentId) run.ref.gatewayEnvironmentId = route.gatewayEnvironmentId;
+        results.runs.push_back(std::move(run));
+    }
+    task.destinations = std::move(results);
+    task.state = TaskState::running;
 }
 }

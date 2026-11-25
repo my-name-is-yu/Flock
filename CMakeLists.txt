@@ -74,7 +74,7 @@ add_library(flock_core STATIC src/store.cpp src/schema.cpp src/journal.cpp src/t
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/runtime_maintenance.cpp src/runtime_task_scheduler.cpp
-                       src/runtime_outbox_dispatch.cpp
+                       src/runtime_outbox_dispatch.cpp src/runtime_outbox_destinations.cpp
                        src/runtime_session_prompts.cpp
                        src/runtime_run_observer.cpp
                        src/runtime_peer_exchanges.cpp
