@@ -298,6 +298,18 @@ struct Fixture {
     }
 };
 
+void runtimeDatabaseLockIsExclusive() {
+    Fixture f;
+    bool excluded = false;
+    try {
+        Runtime other(*f.store, f.model, f.t3, [](std::string_view) { return std::string{}; });
+    } catch (const Conflict&) {
+        excluded = true;
+    }
+    check(excluded, "Two Runtimes acquired the same database lock");
+    f.restart();
+}
+
 Id seedSelectedTask(Fixture& fixture) {
     T3Connections(*fixture.store).connect("e", localOwner.id, 4173);
     fixture.model.script = [](const ModelInput& input) -> Decision {
@@ -2986,7 +2998,9 @@ void prefillInFull() {
 }
 
 int main() {
-    for (const auto& [name, run] : std::vector<std::pair<const char*, void (*)()>>{{"invalid decisions", invalidDecisions},
+    for (const auto& [name, run] : std::vector<std::pair<const char*, void (*)()>>{{"exclusive Runtime database lock",
+                                                                                    runtimeDatabaseLockIsExclusive},
+                                                                                   {"invalid decisions", invalidDecisions},
                                                                                    {"correct invalid task arguments",
                                                                                     correctInvalidTaskArguments},
                                                                                    {"failed preflight", failedPreflightIsUnsent},

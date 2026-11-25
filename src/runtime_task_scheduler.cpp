@@ -1,10 +1,14 @@
 #include "runtime_task_scheduler.hpp"
+#include "runtime_outbox_dispatch.hpp"
+#include "runtime_task_updates.hpp"
 #include "storage.hpp"
 
 #include <algorithm>
 
 namespace flockv0 {
-Runtime::TaskScheduler::TaskScheduler(Store::Impl& db) : db(db) {}
+Runtime::TaskScheduler::TaskScheduler(Store::Impl& db, T3& t3, TaskUpdates& updates, OutboxDispatch& dispatch, bool requireT3Connection,
+                                      std::stop_token shutdown)
+    : db(db), t3(t3), updates(updates), dispatch(dispatch), requireT3Connection(requireT3Connection), shutdown(shutdown) {}
 
 std::vector<Runtime::TaskScheduler::Work> Runtime::TaskScheduler::eligible() {
     std::lock_guard lock(db.mutex);
@@ -64,5 +68,34 @@ std::vector<Runtime::TaskScheduler::Work> Runtime::TaskScheduler::nextBatch(std:
     }
     if (!jobs.empty()) lastScheduled = jobs.back();
     return jobs;
+}
+
+bool Runtime::TaskScheduler::selectProject(TaskData& task) {
+    const auto bot = task.botId;
+    const auto environment = task.environmentId;
+    {
+        std::lock_guard lock(db.mutex);
+        if (db.projectQuestionOpen(bot, environment)) return false;
+    }
+    auto catalog = db.readProjectCatalog(t3, bot, environment, requireT3Connection);
+    return updates.change(
+               task, [&](TaskData& current) { return !shutdown.stop_requested() && db.applyProjectCatalog(current, std::move(catalog)); },
+               &task) &&
+           !task.projectId.empty();
+}
+
+void Runtime::TaskScheduler::activate(TaskData task) {
+    if (task.projectId.empty() && !selectProject(task)) return;
+    updates.change(task, [&](TaskData& current) {
+        auto turn = db.query("SELECT 1 FROM task_project_slots WHERE id=? AND blocker_id IS NULL", {current.id});
+        if (!turn.next()) return false;
+        if (current.workflow && !current.lastRun) {
+            dispatch.queueAction(current, actionId(), CommandTool::delegate, "", Json::object(), Json::object(), false);
+            return true;
+        }
+        if (current.eventId == 0) db.event(current, "intake", {{"kind", "intake"}});
+        current.state = TaskState::deciding;
+        return true;
+    });
 }
 }
