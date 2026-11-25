@@ -87,11 +87,13 @@ HttpTransport eventStream(std::initializer_list<std::string_view> chunks) {
     };
 }
 
-void expectFailure(const HttpTransport& transport, bool transient, std::string_view message, Json usage = Json::object()) {
+void expectFailure(const HttpTransport& transport, bool transient, std::string_view message, Json usage = Json::object(),
+                   ModelErrorCode code = ModelErrorCode::inference_failed) {
     try {
         infer(transport, "fixture", "{}");
     } catch (const ModelError& error) {
-        check(error.transient == transient && std::string_view(error.what()).find(message) != message.npos && error.usage == usage,
+        check(error.code == code && error.transient == transient && std::string_view(error.what()).find(message) != message.npos &&
+                  error.usage == usage,
               "unexpected ChatGPT failure");
         check(std::string_view(error.what()).find("private provider message") == message.npos,
               "raw remote error appeared in the model failure");
@@ -134,6 +136,10 @@ void checkProviderErrors() {
         };
     };
     expectFailure(rejected(400, "feature_unavailable"), false, "feature_unavailable");
+    expectFailure(rejected(400, "invalid_image"), false, "invalid_image", Json::object(), ModelErrorCode::image_rejected);
+    expectFailure(eventStream({"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"image_parse_error\"},"
+                               "\"usage\":{\"input_tokens\":3}}}\n\n"}),
+                  false, "image_parse_error", {{"input_tokens", 3}}, ModelErrorCode::image_rejected);
     expectFailure(rejected(503, "test"), true, "HTTP 503");
     expectFailure(rejected(429, "subscription_sharing_usage_limit_exceeded"), false, "settings/usage");
     expectFailure([](const auto&) -> HttpResponse { throw ModelError("Unable to reach ChatGPT", true); }, true, "Unable to reach");

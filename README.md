@@ -7,7 +7,7 @@ Web UI share a SQLite database.
 ## Build
 
 Use a C++20 compiler, CMake 3.24+, and development libraries for SQLite
-3.35+, libcurl 7.85+, OpenSSL Crypto, libpng 1.6+, and libjpeg.
+3.35+, libcurl 7.85+, and OpenSSL Crypto.
 
 ```sh
 cmake --preset release
