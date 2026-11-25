@@ -10,7 +10,7 @@ import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
-import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
+import { screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
@@ -97,6 +97,7 @@ const waitLabels = {
   model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
   model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
     'I couldn’t choose my next step after several attempts. Try again to continue.'],
+  bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s role and memory, then try again.'],
   t3_input: ['Action in T3', 'Open the Session in T3 to approve or answer.'],
   deadline: ['Deadline extension', 'This request reached its deadline. You can set a new one.'],
   unknown_delivery: ['Message to T3 unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Check again asks T3 without resending anything.'],
@@ -106,6 +107,7 @@ const waitLabels = {
 // Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
 const pendingActionLabels = {
   budget: 'Approve one more run…', model_budget: 'Approve another model call…', model_failure: 'Try again…',
+  bot_notes_unavailable: 'Try again…',
   deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
 };
 const closedLabels = {
@@ -385,8 +387,8 @@ function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fro
   const context = view;
   if (context) {
     context.pageRead = Promise.resolve();
-    context.refresh = coalescedRefresh((scroll, liveGeneration) =>
-      readTimeline(context, () => refreshView(context, scroll, liveGeneration)));
+    context.refresh = coalescedRefresh((scroll, animationGeneration) =>
+      readTimeline(context, () => refreshView(context, scroll, animationGeneration)));
     void context.refresh(context.data ? undefined : 'bottom');
     if (context.dm) {
       context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
@@ -2747,7 +2749,7 @@ function waitContent(context, task, deadlineDraft) {
     primary.append(questionActions(context, task, { dialog: true }));
   } else if (wait.reason === 'budget') primary.append(action('Approve one more run', 'approve'));
   else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
-  else if (wait.reason === 'model_failure') primary.append(action('Try again', 'retry'));
+  else if (['model_failure', 'bot_notes_unavailable'].includes(wait.reason)) primary.append(action('Try again', 'retry'));
   else if (wait.reason === 'deadline') {
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
       type: 'datetime-local', value: deadlineDraft ?? localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
@@ -2948,11 +2950,11 @@ async function refreshPeerConversation(context, scroll) {
   }
   renderTimeline(scroll);
 }
-async function refreshView(context, scroll, liveGeneration) {
+async function refreshView(context, scroll, animationGeneration) {
   const isCurrent = () => context === view &&
-    (liveGeneration == null || (liveGeneration === visibilityGeneration && !document.hidden));
+    (animationGeneration == null || (animationGeneration === visibilityGeneration && !document.hidden));
   if (!isCurrent()) return;
-  const liveAfterId = liveGeneration == null ? undefined : context.newestEvent;
+  const liveAfterId = animationGeneration == null ? undefined : context.newestEvent;
   try {
     const params = new URLSearchParams({ bot: context.id });
     const eventHistory = eventHistoryForRefresh(context);
@@ -3141,8 +3143,7 @@ async function submit(event) {
       if (attachments.length) delete screenshots.pending;
       else composer.settleSend(payload, false);
     }
-    const message = error instanceof ScreenshotError ? error.message : errors[error.message];
-    setNotice(context, message ?? 'Flock could not confirm receipt. You can resend the same message.', true);
+    setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
     sendingMessages.delete(composer);

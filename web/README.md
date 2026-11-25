@@ -4,6 +4,8 @@ The executable serves the embedded UI on its IPv4 loopback listener. The Web UI 
 
 The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. For the same person and Bot, retrying the same payload with the same `clientMessageId` returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Select a task question's choice and press **Send answer** to answer directly through `POST /api/operations`. Written replies to questions go through the Bot.
 
+Bots can read, write, and search files in their own workspaces. Requests to run commands, scripts, builds, or tests go to T3 Sessions. If a Session needs a file it cannot access, the Bot asks you to make it available in the selected T3 project.
+
 The Bot's name and **needs you** count above its chat open the items waiting on you. The Bot list also shows a count shortcut. A question card uses the composer to answer its exact target through `POST /api/inbox/decide`. A pull request review card uses the composer to send a message to the Bot through `POST /api/messages`, with the review as the reply target. The review stays in **Needs you** until you respond. **History**, in the conversation controls and the Bot's menu, lists what you have already answered or approved.
 
 The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `sessionCursor` as `sessionsAfter` on the next view request to receive the groups that recorded a new Run. Each returned group includes its full list of Sessions. To continue paging backwards, pass the last page’s `sessionsBefore` to `GET /api/sessions?bot=...&before=...`.
@@ -104,7 +106,8 @@ Use **Permissions**
 to set the installation's permission mode and rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
-[category defaults](../README.md#installation-policy).
+[category defaults](../README.md#installation-policy). Rules added here or
+from an approval card stay in the list until an administrator removes them.
 
 Installation administrators manage ChatGPT, T3, and other integrations in
 **Connections**. Local discovery and URL connections both use T3 OAuth.
@@ -172,19 +175,33 @@ Mutations use the usual same-origin JSON headers. Fulfilled secret values
 stay inside adapters and follow the `secret.use` policy.
 
 `POST /api/messages` optionally accepts an `attachments` array with up to four
-objects containing `name`, `mimeType` and `dataBase64`. Supported types are
-`image/png`, `image/jpeg`, `audio/wav` and `audio/mpeg`. Each file is limited
-to 64 KiB and the attachment array to 98,000 JSON bytes. Media inspection follows the `attachment.inspect` action with the Bot ID as its target.
-An image-capable ChatGPT model receives authorized image contents. Audio
-inspection returns file properties and WAV format and duration.
+objects containing `name`, `mimeType` and `dataBase64`. PNG and JPEG files can
+each be up to 2 MiB. WAV and MP3 files can each be up to 64 KiB. The request
+limit fits four 2 MiB images plus Base64 and JSON overhead. Flock checks that
+the file signature matches its MIME type. Image inspection verifies that the
+image decodes and fits within 8,192 pixels per side and 4,194,304 pixels total.
+Media inspection follows the `attachment.inspect` rule for the Bot. An
+image-capable ChatGPT model can receive images the Bot is authorized to
+inspect. Audio inspection returns file properties and WAV format and duration.
 
-In the Web composer, attach PNG or JPEG screenshots with the attachment button
-or paste them into the message field. Each image can be up to 8,192 pixels per
-side and 4,194,304 pixels total. A message still requires text. The sent message
-shows the number of images attached. Bot inspection follows the `attachment.inspect` rule. Screenshot drafts and their retry keys live
-in the current page and are cleared on reload.
+In the Web composer, choose or paste up to four PNG or JPEG screenshots, each
+up to 20 MiB. The browser preserves images already within 2,048 pixels on the
+longest side and 1.75 MiB. For larger images, it scales them to fit and chooses
+the smaller PNG or JPEG before upload. The message requires text
+and shows the number of screenshots attached after sending. Screenshot drafts
+live on the current page and are cleared on reload.
+
+Slack and iMessage bridges accept up to four files totaling 4 MiB per event,
+subject to each bridge's advertised file types and per-file limit. Bridge files
+arrive as supplied and have their own channel permissions. Reading an
+attachment from a T3 Session returns its metadata and up to 8 KiB of text
+when available.
 
 ## Memory and automation
+
+Model input starts with the Bot's role, private memory, and earlier conversation
+history. Flock puts the current event and tool results near the end to lengthen
+the prefix shared by requests for the same Bot.
 
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared
 document, for example `team%2Fstaging.md`. `GET /api/memory/history` accepts the

@@ -1,5 +1,5 @@
 #include "storage.hpp"
-#include "flock/base64.hpp"
+#include "flock/message_attachments.hpp"
 
 #include <csetjmp>
 #include <jpeglib.h>
@@ -8,23 +8,12 @@
 
 namespace flockv0 {
 namespace {
-std::string decodeAttachment(std::string_view base64) {
-    if (base64.size() > 88000 || !base64DecodedSize(base64))
-        throw Conflict("Attachment exceeds the size limit or has invalid base64 data");
-    try {
-        return decodeBase64(base64,65536);
-    } catch (const std::length_error&) {
-        throw Conflict("Attachment exceeds the size limit");
-    } catch (const std::invalid_argument&) {
-        throw Conflict("Invalid attachment base64 data");
-    }
-}
+using namespace message_attachments;
 
 using ImageSize = std::pair<unsigned,unsigned>;
 
 bool supportedImageSize(unsigned width, unsigned height) {
-    constexpr unsigned maxEdge = 8192, maxPixels = 4 * 1024 * 1024;
-    return width && height && width <= maxEdge && height <= maxEdge && width <= maxPixels / height;
+    return width && height && width <= maxImageEdge && height <= maxImageEdge && width <= maxImagePixels / height;
 }
 
 struct PngImage {
@@ -114,7 +103,10 @@ Json metadata(const Json& value) {
     if (!value.is_object() || value.size() != 3) throw Conflict("Invalid attachment");
     const auto name = toolText(value,"name",128);
     const auto mime = toolText(value,"mimeType",64);
-    const auto bytes = decodeAttachment(toolText(value,"dataBase64",88000));
+    const bool isImage = mime == "image/png" || mime == "image/jpeg";
+    const auto encoded = value.find("dataBase64");
+    if (encoded == value.end() || !encoded->is_string()) throw Conflict("Invalid attachment base64 data");
+    const auto bytes = decodeAttachment(encoded->get_ref<const std::string&>(),isImage ? maxImageBytes : maxAudioBytes);
     const std::string_view data(bytes);
     Json result{{"name",name},{"mimeType",mime},{"sizeBytes",data.size()}};
     const bool png = mime == "image/png" && data.starts_with("\x89PNG\r\n\x1a\n");
@@ -125,7 +117,7 @@ Json metadata(const Json& value) {
     if (!png && !jpeg && !wav && !mp3)
         throw Conflict("Attachment must contain PNG, JPEG, WAV, or MP3 data matching its MIME type");
     if (wav) describeWav(data,result);
-    result["kind"] = png || jpeg ? "image" : "audio";
+    result["kind"] = isImage ? "image" : "audio";
     return result;
 }
 }
@@ -139,9 +131,8 @@ CREATE TABLE IF NOT EXISTS message_attachments(
 }
 
 void Store::Impl::saveAttachments(Id message, const Json& attachments) {
-    if (!attachments.is_array() || attachments.size() > 4 || attachments.dump().size() > 98000)
+    if (!attachments.is_array() || attachments.size() > maxFiles)
         throw Conflict("Attachments exceed the message limit");
-    if (attachments.empty()) return;
     for (std::size_t i = 0; i < attachments.size(); ++i) {
         const auto& attachment = attachments[i];
         const auto id = std::to_string(i+1);
@@ -174,7 +165,7 @@ Json Store::Impl::inspectAttachment(std::string_view bot, Id throughMessage, con
         if (view.at("kind") != "image") return view;
         attachment = row.json(1);
     }
-    const auto bytes = decodeAttachment(field(attachment,"dataBase64"));
+    const auto bytes = decodeAttachment(attachment.at("dataBase64").get_ref<const std::string&>(),maxImageBytes);
     const auto [width,height] = view.at("mimeType") == "image/png" ? pngSize(bytes) : jpegSize(bytes);
     if (width == 0 || height == 0) throw Conflict("Attachment image is corrupt or exceeds the pixel limit");
     view.update({{"width",width},{"height",height}});
@@ -184,7 +175,7 @@ Json Store::Impl::inspectAttachment(std::string_view bot, Id throughMessage, con
 std::vector<ModelImage> Store::Impl::inspectedImages(std::string_view bot, Id message, const Json& steps) const {
     std::vector<ModelImage> images;
     std::set<std::pair<Id,std::string>> seen;
-    for (auto it = steps.rbegin(); it != steps.rend() && images.size() < 4; ++it) {
+    for (auto it = steps.rbegin(); it != steps.rend() && images.size() < maxFiles; ++it) {
         const auto& entry = *it;
         if (entry.at("tool") != "inspect_attachment" || !entry.at("result").at("ok").get<bool>() ||
             entry.at("result").at("data").value("kind","") != "image") continue;
