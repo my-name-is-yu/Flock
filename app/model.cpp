@@ -459,6 +459,13 @@ bool nonblank(const std::string& value) {
     return value.find_first_not_of(" \t\r\n") != std::string::npos;
 }
 
+std::string boundedResponseBody(const Json& request, std::size_t inspectedImageBytes) {
+    auto body = request.dump(-1, ' ', false, Json::error_handler_t::replace);
+    if (inspectedImageBytes > limits::messages::maxEncodedImagesBytes || body.size() > maxRequest + inspectedImageBytes)
+        throw ModelError("Flock's ChatGPT request exceeded the local transport limit", false);
+    return body;
+}
+
 }
 
 ModelTurn ChatGPTModel::decide(const ModelInput& input) {
@@ -467,7 +474,8 @@ ModelTurn ChatGPTModel::decide(const ModelInput& input) {
     std::size_t inspectedImageBytes = 0;
     for (const auto& image : input.images)
         if (!image.attachmentId.empty()) inspectedImageBytes += image.dataBase64.size();
-    const auto response = respond(request, inspectedImageBytes);
+    auto body = boundedResponseBody(request, inspectedImageBytes);
+    const auto response = chatgpt::infer(transport_, accessToken(), std::move(body), &request);
     auto usage = chatgpt::tokenUsage(chatgpt::field(response, "usage"));
     usage["wallMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
     try {
@@ -480,9 +488,7 @@ ModelTurn ChatGPTModel::decide(const ModelInput& input) {
 }
 
 Json ChatGPTModel::respond(const Json& request, std::size_t inspectedImageBytes) {
-    auto body = request.dump(-1, ' ', false, Json::error_handler_t::replace);
-    if (inspectedImageBytes > limits::messages::maxEncodedImagesBytes || body.size() > maxRequest + inspectedImageBytes)
-        throw ModelError("Flock's ChatGPT request exceeded the local transport limit", false);
+    auto body = boundedResponseBody(request, inspectedImageBytes);
     return chatgpt::infer(transport_, accessToken(), std::move(body));
 }
 
@@ -688,9 +694,11 @@ Decision decodeResponseCall(const std::string& name, const std::string& argument
     const auto schema = std::ranges::find_if(tools, [&](const Json& tool) { return tool.at("name") == name; });
     if (schema == tools.end())
         throw ModelError("ChatGPT selected an action that is unavailable for this event", ModelErrorCode::unavailable_tool);
-    if (arguments.size() > 32000) throw ModelError("Tool arguments exceeded the size limit", ModelErrorCode::invalid_tool_arguments);
+    if (arguments.size() > limits::model::maxToolArgumentBytes)
+        throw ModelError("Tool arguments exceeded the size limit", ModelErrorCode::invalid_tool_arguments);
     const auto checkDepth = [](int depth, Json::parse_event_t, Json&) {
-        if (depth > 20) throw ModelError("Tool arguments are nested too deeply", ModelErrorCode::invalid_tool_arguments);
+        if (depth > limits::model::maxToolArgumentDepth)
+            throw ModelError("Tool arguments are nested too deeply", ModelErrorCode::invalid_tool_arguments);
         return true;
     };
     auto args = Json::parse(arguments, checkDepth, false);

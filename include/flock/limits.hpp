@@ -47,4 +47,6 @@ inline constexpr std::size_t maxDocumentBytes = 8'192;
 
 namespace flockv0::limits::model {
 inline constexpr std::size_t maxDecisionReasonBytes = 4'000;
+inline constexpr std::size_t maxToolArgumentBytes = 32'000;
+inline constexpr int maxToolArgumentDepth = 20;
 }

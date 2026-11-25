@@ -1,11 +1,16 @@
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
-add_library(flock_t3 STATIC mcp.cpp oauth.cpp discovery.cpp adapter.cpp session_read.cpp pinned_workspace.cpp)
+add_library(flock_t3 STATIC mcp.cpp recording.cpp oauth.cpp discovery.cpp adapter.cpp session_read.cpp pinned_workspace.cpp)
 target_link_libraries(flock_t3 PUBLIC flock_core PRIVATE CURL::libcurl OpenSSL::Crypto)
 target_compile_options(flock_t3 PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
+  add_executable(flock_t3_recording_probe recording_probe.cpp)
+  target_link_libraries(flock_t3_recording_probe PRIVATE flock_t3)
+  add_test(NAME flock_t3_recording_contract COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/fixture.py"
+    $<TARGET_FILE:flock_t3_recording_probe> recording-contract "${PROJECT_SOURCE_DIR}/tests/recordings/t3.jsonl")
+  set_tests_properties(flock_t3_recording_contract PROPERTIES TIMEOUT 30)
   add_executable(flock_t3_tests tests.cpp session_search_tests.cpp)
   target_link_libraries(flock_t3_tests PRIVATE flock_t3)
   add_test(NAME flock_t3 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixture.py" $<TARGET_FILE:flock_t3_tests>)

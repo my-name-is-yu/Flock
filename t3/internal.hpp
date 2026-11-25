@@ -4,6 +4,10 @@
 
 #include <map>
 
+namespace flockv0::recording {
+class Capture;
+}
+
 namespace flockv0::t3detail {
 
 inline constexpr auto ProtocolVersion = "2025-06-18";
@@ -97,12 +101,15 @@ public:
     Json call(std::string_view tool, Json arguments);
 private:
     Json rpc(std::string_view method, const Json& arguments);
+    void record(recording::Capture&, unsigned id, std::string_view method, const Json& arguments, const Json& message,
+                std::string_view contentType, long status) noexcept;
     HttpResponse request(std::string_view method, const std::string& body, long timeoutMs = 6000);
     Credential credential_;
     SessionReadDeadline deadline_;
     std::string targetEnvironmentId_;
     Headers headers_;
     unsigned nextId_ = 0;
+    std::string recordingVersion_;
 };
 
 Json readThread(Client&, std::string_view threadId, std::string_view view, unsigned limit, int chars, Json args = Json::object(),
