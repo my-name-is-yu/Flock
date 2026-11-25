@@ -19,6 +19,9 @@ build directory and removes it when the command exits. Use `--keep-build` to
 keep the directory for debugging. Set `CMAKE_BUILD_PARALLEL_LEVEL` to control
 build concurrency.
 
+Local verification requires clang-format 21. Run `./scripts/format.sh` to apply the C++ style.
+Run `git config blame.ignoreRevsFile .git-blame-ignore-revs` to skip the formatting commit in blame.
+
 ## Configure a Bot
 
 Edit the Bot's instructions under **Role** in its Web settings.

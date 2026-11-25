@@ -8,8 +8,7 @@ namespace flockv0::app {
 
 class SettingsSystem {
 public:
-    SettingsSystem(const std::filesystem::path& home, std::optional<unsigned> cliPort,
-                   std::optional<std::string> cliSessionRead);
+    SettingsSystem(const std::filesystem::path& home, std::optional<unsigned> cliPort, std::optional<std::string> cliSessionRead);
 
     unsigned startupPort(unsigned t3Port) const;
     unsigned t3CliPort(unsigned requestedPort, unsigned t3Port) const;
@@ -18,7 +17,6 @@ public:
     void listenerStarted(unsigned port);
     Json view(unsigned t3Port) const;
     Json change(const Json& patch, unsigned t3Port);
-
 private:
     Json viewLocked(unsigned t3Port) const;
 

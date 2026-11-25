@@ -29,7 +29,9 @@ constexpr std::string_view completePath = "/auth/complete";
 class Descriptor {
 public:
     explicit Descriptor(int fd) : fd_(fd) {}
-    ~Descriptor() { if (fd_ >= 0) close(fd_); }
+    ~Descriptor() {
+        if (fd_ >= 0) close(fd_);
+    }
     Descriptor(const Descriptor&) = delete;
     Descriptor& operator=(const Descriptor&) = delete;
     int get() const { return fd_; }
@@ -47,9 +49,11 @@ public:
         try {
             std::thread([pid = *pid_] {
                 int status;
-                while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+                }
             }).detach();
-        } catch (const std::system_error&) {}
+        } catch (const std::system_error&) {
+        }
     }
     std::optional<bool> result() {
         if (!pid_) return false;
@@ -110,7 +114,8 @@ std::string_view requestTarget(std::string_view request, std::string_view expect
     const auto version = first.substr(space + 1);
     const auto target = first.substr(0, space);
     if ((version != "HTTP/1.1" && version != "HTTP/1.0") || !target.starts_with('/') || target.starts_with("//") ||
-        std::ranges::any_of(target, [](unsigned char c) { return c <= ' ' || c == 127 || c == '#'; })) return {};
+        std::ranges::any_of(target, [](unsigned char c) { return c <= ' ' || c == 127 || c == '#'; }))
+        return {};
 
     request.remove_prefix(firstEnd + 2);
     bool sawHost = false;
@@ -172,10 +177,11 @@ std::string_view formField(const Form& fields, std::string_view name, std::strin
 }
 
 void reply(int client, std::string_view status, std::string_view body = {}, std::string_view headers = {}) {
-    auto response = "HTTP/1.1 " + std::string(status) + "\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n"
-        "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nContent-Type: text/plain; charset=utf-8\r\n"
-        "Connection: close\r\nContent-Length: " + std::to_string(body.size()) + "\r\n" + std::string(headers) + "\r\n" +
-        std::string(body);
+    auto response = "HTTP/1.1 " + std::string(status) +
+                    "\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n"
+                    "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                    "Connection: close\r\nContent-Length: " +
+                    std::to_string(body.size()) + "\r\n" + std::string(headers) + "\r\n" + std::string(body);
 #ifdef SO_NOSIGPIPE
     const int on = 1;
     if (setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on)) != 0) return;
@@ -206,8 +212,7 @@ int acceptClient(int listener) {
         listenerFailure();
     }
 #endif
-    if (client < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK && errno != ECONNABORTED)
-        listenerFailure();
+    if (client < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK && errno != ECONNABORTED) listenerFailure();
     return client;
 }
 
@@ -247,15 +252,15 @@ std::optional<pid_t> openBrowser(const std::string& url) {
     return started ? std::optional{pid} : std::nullopt;
 }
 
-Authorization authorizeBrowser(const BrowserOpener& open, const std::string& endpoint, Form parameters,
-                               const std::string& savedClient, bool printUrl, bool browserRequired, std::stop_token stop) {
+Authorization authorizeBrowser(const BrowserOpener& open, const std::string& endpoint, Form parameters, const std::string& savedClient,
+                               bool printUrl, bool browserRequired, std::stop_token stop) {
     checkStop(stop);
 #ifdef __linux__
     const Descriptor listener(socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
 #else
     const Descriptor listener(socket(AF_INET, SOCK_STREAM, 0));
-    if (listener.get() < 0 || fcntl(listener.get(), F_SETFD, FD_CLOEXEC) != 0 ||
-        fcntl(listener.get(), F_SETFL, O_NONBLOCK) != 0) listenerFailure();
+    if (listener.get() < 0 || fcntl(listener.get(), F_SETFD, FD_CLOEXEC) != 0 || fcntl(listener.get(), F_SETFL, O_NONBLOCK) != 0)
+        listenerFailure();
 #endif
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -323,8 +328,8 @@ Authorization authorizeBrowser(const BrowserOpener& open, const std::string& end
     if (fieldCount(*callback, "error")) throw ModelError("ChatGPT authorization was declined or expired", false);
     const auto code = formField(*callback, "code");
     const auto clientId = formField(*callback, "client_id", savedClient);
-    if (fieldCount(*callback, "code") != 1 || code.empty() || fieldCount(*callback, "client_id") > 1 ||
-        !validClient(clientId) || (!savedClient.empty() && clientId != savedClient))
+    if (fieldCount(*callback, "code") != 1 || code.empty() || fieldCount(*callback, "client_id") > 1 || !validClient(clientId) ||
+        (!savedClient.empty() && clientId != savedClient))
         throw ModelError("ChatGPT did not return a valid Flock client registration", false);
     return {std::string(code), std::string(clientId), redirectUri};
 }

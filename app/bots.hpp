@@ -18,7 +18,7 @@ struct Bot {
 
 class Bots {
 public:
-    using ScheduleReporter = std::function<void(std::string_view,std::string_view)>;
+    using ScheduleReporter = std::function<void(std::string_view, std::string_view)>;
 
     explicit Bots(std::filesystem::path directory);
     std::vector<std::string> ids() const;

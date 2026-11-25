@@ -18,7 +18,9 @@ namespace {
 constexpr std::size_t maxResponse = 4 * 1024 * 1024;
 constexpr std::string_view responsesApi = "ChatGPT Responses API";
 
-bool success(long status) { return status >= 200 && status < 300; }
+bool success(long status) {
+    return status >= 200 && status < 300;
+}
 
 std::string safeCode(const Json& value) {
     constexpr std::string_view characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-";
@@ -31,22 +33,21 @@ std::string safeCode(const Json& value) {
 int suppressSocketSigpipe(void*, curl_socket_t socket, curlsocktype) {
     // On macOS a broken socket can signal the process instead of its writer.
     const int enabled = 1;
-    return setsockopt(socket,SOL_SOCKET,SO_NOSIGPIPE,&enabled,sizeof(enabled)) == 0
-        ? CURL_SOCKOPT_OK : CURL_SOCKOPT_ERROR;
+    return setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) == 0 ? CURL_SOCKOPT_OK : CURL_SOCKOPT_ERROR;
 }
 #else
 class BlockSigpipe {
 public:
     BlockSigpipe() {
         sigemptyset(&blocked_);
-        sigaddset(&blocked_,SIGPIPE);
-        if (pthread_sigmask(SIG_BLOCK,&blocked_,&previous_) != 0) fail();
+        sigaddset(&blocked_, SIGPIPE);
+        if (pthread_sigmask(SIG_BLOCK, &blocked_, &previous_) != 0) fail();
         sigset_t pending;
         if (sigpending(&pending) != 0) {
-            pthread_sigmask(SIG_SETMASK,&previous_,nullptr);
+            pthread_sigmask(SIG_SETMASK, &previous_, nullptr);
             fail();
         }
-        alreadyPending_ = sigismember(&pending,SIGPIPE) == 1;
+        alreadyPending_ = sigismember(&pending, SIGPIPE) == 1;
     }
 
     ~BlockSigpipe() {
@@ -54,16 +55,16 @@ public:
         // SIGPIPE from this transfer before restoring the caller's mask.
         if (!alreadyPending_) {
             const timespec noWait{};
-            while (sigtimedwait(&blocked_,nullptr,&noWait) == -1 && errno == EINTR) {}
+            while (sigtimedwait(&blocked_, nullptr, &noWait) == -1 && errno == EINTR) {
+            }
         }
-        pthread_sigmask(SIG_SETMASK,&previous_,nullptr);
+        pthread_sigmask(SIG_SETMASK, &previous_, nullptr);
     }
 
     BlockSigpipe(const BlockSigpipe&) = delete;
     BlockSigpipe& operator=(const BlockSigpipe&) = delete;
-
 private:
-    [[noreturn]] static void fail() { throw ModelError("Unable to protect ChatGPT transport from broken pipes",true); }
+    [[noreturn]] static void fail() { throw ModelError("Unable to protect ChatGPT transport from broken pipes", true); }
     sigset_t blocked_, previous_;
     bool alreadyPending_;
 };
@@ -80,24 +81,21 @@ struct Transfer {
     void headers() {
         char* contentType = nullptr;
         curl_header* requestId = nullptr;
-        curl_easy_getinfo(curl,CURLINFO_RESPONSE_CODE,&response.status);
-        if (curl_easy_getinfo(curl,CURLINFO_CONTENT_TYPE,&contentType) == CURLE_OK && contentType)
-            response.contentType = contentType;
-        if (curl_easy_header(curl,"x-request-id",0,CURLH_HEADER,-1,&requestId) == CURLHE_OK)
-            response.requestId = requestId->value;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.status);
+        if (curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &contentType) == CURLE_OK && contentType) response.contentType = contentType;
+        if (curl_easy_header(curl, "x-request-id", 0, CURLH_HEADER, -1, &requestId) == CURLHE_OK) response.requestId = requestId->value;
     }
 };
 
 std::size_t receive(char* bytes, std::size_t size, std::size_t count, void* context) noexcept {
     auto& transfer = *static_cast<Transfer*>(context);
-    const std::string_view chunk(bytes,size * count);
+    const std::string_view chunk(bytes, size * count);
     try {
-        if (chunk.size() > maxResponse - transfer.received)
-            throw ModelError("ChatGPT response exceeded the transport limit",false);
+        if (chunk.size() > maxResponse - transfer.received) throw ModelError("ChatGPT response exceeded the transport limit", false);
         if (transfer.received == 0) transfer.headers();
         transfer.received += chunk.size();
         if (transfer.request.onData && success(transfer.response.status)) {
-            transfer.complete = !transfer.request.onData(chunk,transfer.response);
+            transfer.complete = !transfer.request.onData(chunk, transfer.response);
             if (transfer.complete) return 0;
         } else {
             transfer.response.body.append(chunk);
@@ -114,14 +112,13 @@ int progress(void* context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) noex
 }
 
 bool eventStream(std::string_view contentType) {
-    contentType = contentType.substr(0,contentType.find(';'));
+    contentType = contentType.substr(0, contentType.find(';'));
     const auto begin = contentType.find_first_not_of(" \t");
     if (begin == contentType.npos) return true;
-    contentType = contentType.substr(begin,contentType.find_last_not_of(" \t") - begin + 1);
+    contentType = contentType.substr(begin, contentType.find_last_not_of(" \t") - begin + 1);
     constexpr std::string_view expected = "text/event-stream";
-    return std::ranges::equal(contentType,expected,[](unsigned char a, unsigned char b) {
-        return (a >= 'A' && a <= 'Z' ? a + ('a' - 'A') : a) == b;
-    });
+    return std::ranges::equal(contentType, expected,
+                              [](unsigned char a, unsigned char b) { return (a >= 'A' && a <= 'Z' ? a + ('a' - 'A') : a) == b; });
 }
 
 // Validate the entire stream, including comments, across arbitrary curl chunk boundaries.
@@ -140,9 +137,11 @@ public:
             maximum_ = c == 0xed ? 0x9f : c == 0xf4 ? 0x8f : 0xbf;
         }
     }
-    void finish() const { if (remaining_ != 0) invalid(); }
+    void finish() const {
+        if (remaining_ != 0) invalid();
+    }
 private:
-    [[noreturn]] static void invalid() { throw ModelError("Invalid UTF-8 in ChatGPT response stream",false); }
+    [[noreturn]] static void invalid() { throw ModelError("Invalid UTF-8 in ChatGPT response stream", false); }
     int remaining_ = 0;
     unsigned char minimum_ = 0x80, maximum_ = 0xbf;
 };
@@ -150,8 +149,7 @@ private:
 class ResponseStream {
 public:
     bool read(std::string_view chunk, const HttpResponse& response) {
-        if (!eventStream(response.contentType))
-            throw ModelError("ChatGPT did not return the expected response stream",false);
+        if (!eventStream(response.contentType)) throw ModelError("ChatGPT did not return the expected response stream", false);
         for (const auto c : chunk) {
             utf8_.read(static_cast<unsigned char>(c));
             // SSE accepts CR, LF, and CRLF, including a separator split across chunks.
@@ -172,10 +170,9 @@ public:
 
     Json take() {
         utf8_.finish();
-        if (completed_.is_null()) throw ModelError("ChatGPT stream ended before a completed response",true);
+        if (completed_.is_null()) throw ModelError("ChatGPT stream ended before a completed response", true);
         return std::move(completed_);
     }
-
 private:
     bool line(std::string_view requestId) {
         std::string_view current(line_);
@@ -185,9 +182,11 @@ private:
         }
         if (!current.empty()) {
             const auto colon = current.find(':');
-            if (current.substr(0,colon) == "data") {
-                if (colon != current.npos) current.remove_prefix(colon + 1);
-                else current = {};
+            if (current.substr(0, colon) == "data") {
+                if (colon != current.npos)
+                    current.remove_prefix(colon + 1);
+                else
+                    current = {};
                 if (current.starts_with(' ')) current.remove_prefix(1);
                 data_.append(current);
                 data_.push_back('\n');
@@ -200,24 +199,22 @@ private:
             data_.clear();
             return true;
         }
-        const auto event = Json::parse(data_,nullptr,false);
+        const auto event = Json::parse(data_, nullptr, false);
         data_.clear();
-        if (event.is_discarded()) throw ModelError("Invalid JSON in ChatGPT response stream",false);
-        const auto type = stringField(event,"type");
-        if (type.empty()) throw ModelError("Invalid ChatGPT response event",false);
-        const auto& result = field(event,"response");
+        if (event.is_discarded()) throw ModelError("Invalid JSON in ChatGPT response stream", false);
+        const auto type = stringField(event, "type");
+        if (type.empty()) throw ModelError("Invalid ChatGPT response event", false);
+        const auto& result = field(event, "response");
         if (type == "response.completed") {
-            if (!field(result,"output").is_array())
-                throw Failure("Invalid ChatGPT completion",false,{},field(result,"usage"));
+            if (!field(result, "output").is_array()) throw Failure("Invalid ChatGPT completion", false, {}, field(result, "usage"));
             completed_ = result;
             return false;
         }
-        const auto& responseUsage = field(result,"usage");
-        const auto& usage = responseUsage.is_null() ? field(event,"usage") : responseUsage;
-        if (type == "response.incomplete")
-            throw Failure("ChatGPT returned an incomplete response",false,{},usage);
+        const auto& responseUsage = field(result, "usage");
+        const auto& usage = responseUsage.is_null() ? field(event, "usage") : responseUsage;
+        if (type == "response.incomplete") throw Failure("ChatGPT returned an incomplete response", false, {}, usage);
         if (type == "response.failed" || type == "error")
-            throw remoteFailure(responsesApi,0,result.is_null() ? event : result,requestId,usage);
+            throw remoteFailure(responsesApi, 0, result.is_null() ? event : result, requestId, usage);
         return true;
     }
 
@@ -229,7 +226,7 @@ private:
 
 void checkApi(const HttpResponse& response, std::string_view site) {
     if (!success(response.status))
-        throw remoteFailure(site,response.status,Json::parse(response.body,nullptr,false),response.requestId);
+        throw remoteFailure(site, response.status, Json::parse(response.body, nullptr, false), response.requestId);
 }
 }
 
@@ -240,33 +237,31 @@ const Json& field(const Json& object, std::string_view name) {
 }
 
 std::string stringField(const Json& object, std::string_view name) {
-    const auto& value = field(object,name);
+    const auto& value = field(object, name);
     return value.is_string() ? value.get<std::string>() : std::string{};
 }
 
 Json tokenUsage(const Json& usage) {
-    const auto isTokenCount = [](const Json& count) {
-        return count.is_number_integer() && count.get<long double>() >= 0;
-    };
+    const auto isTokenCount = [](const Json& count) { return count.is_number_integer() && count.get<long double>() >= 0; };
     auto result = Json::object();
-    for (const auto* key : {"input_tokens","output_tokens","total_tokens"}) {
-        const auto& count = field(usage,key);
+    for (const auto* key : {"input_tokens", "output_tokens", "total_tokens"}) {
+        const auto& count = field(usage, key);
         if (isTokenCount(count)) result[key] = count;
     }
-    const auto& cached = field(field(usage,"input_tokens_details"),"cached_tokens");
-    if (isTokenCount(cached)) result["input_tokens_details"] = {{"cached_tokens",cached}};
+    const auto& cached = field(field(usage, "input_tokens_details"), "cached_tokens");
+    if (isTokenCount(cached)) result["input_tokens_details"] = {{"cached_tokens", cached}};
     return result;
 }
 
 Failure::Failure(std::string message, bool transient, std::string providerCode, Json usage, ModelErrorCode code)
-    : ModelError(std::move(message),transient,tokenUsage(usage),code), providerCode(std::move(providerCode)) {}
+    : ModelError(std::move(message), transient, tokenUsage(usage), code), providerCode(std::move(providerCode)) {}
 
 Failure remoteFailure(std::string_view site, long status, const Json& value, std::string_view requestId, Json usage) {
-    const auto& error = field(value,"error");
-    const auto& errorCode = field(error,"code");
-    const auto& errorParameter = field(error,"param");
-    const auto code = safeCode(error.is_string() ? error : errorCode.is_null() ? field(value,"code") : errorCode);
-    const auto parameter = safeCode(errorParameter.is_null() ? field(value,"param") : errorParameter);
+    const auto& error = field(value, "error");
+    const auto& errorCode = field(error, "code");
+    const auto& errorParameter = field(error, "param");
+    const auto code = safeCode(error.is_string() ? error : errorCode.is_null() ? field(value, "code") : errorCode);
+    const auto parameter = safeCode(errorParameter.is_null() ? field(value, "param") : errorParameter);
     const auto safeId = safeCode(Json(requestId));
     std::string details;
     const auto add = [&](std::string part) {
@@ -281,36 +276,37 @@ Failure remoteFailure(std::string_view site, long status, const Json& value, std
     message += " rejected the request";
     if (!details.empty()) message += " (" + details + ")";
     const bool limit = code == "subscription_sharing_usage_limit_exceeded";
-    if (limit) message += " — review the app limit at https://chatgpt.com/settings/usage";
+    if (limit)
+        message += " — review the app limit at https://chatgpt.com/settings/usage";
     else if (site == responsesApi && status == 401)
         message += " — check Flock's ChatGPT connection and granted plan permissions";
-    const bool transient = !limit && (status == 429 || status == 408 || (status >= 500 && status <= 599) ||
-        code == "server_error" || code == "rate_limit_exceeded" || code == "service_unavailable");
+    const bool transient = !limit && (status == 429 || status == 408 || (status >= 500 && status <= 599) || code == "server_error" ||
+                                      code == "rate_limit_exceeded" || code == "service_unavailable");
     if (!transient && !limit && site == responsesApi && (status == 0 || status == 400 || status == 422) &&
         (parameter == "reasoning.effort" || parameter == "reasoning"))
         return Failure("This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.",
-                       false,code,std::move(usage),ModelErrorCode::unsupported_reasoning_effort);
-    return Failure(std::move(message),transient,code,std::move(usage));
+                       false, code, std::move(usage), ModelErrorCode::unsupported_reasoning_effort);
+    return Failure(std::move(message), transient, code, std::move(usage));
 }
 
 bool validAccessToken(std::string_view value) {
-    return !value.empty() && std::ranges::all_of(value,[](unsigned char c) { return c >= 0x21 && c <= 0x7e; });
+    return !value.empty() && std::ranges::all_of(value, [](unsigned char c) { return c >= 0x21 && c <= 0x7e; });
 }
 
 HttpResponse httpRequest(const HttpRequest& request) {
     static const auto initialized = curl_global_init(CURL_GLOBAL_DEFAULT);
-    if (initialized != CURLE_OK) throw ModelError("Unable to initialize ChatGPT transport",true);
-    if (request.stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled",true);
+    if (initialized != CURLE_OK) throw ModelError("Unable to initialize ChatGPT transport", true);
+    if (request.stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled", true);
 #ifndef SO_NOSIGPIPE
     // The mask must stay in place through TLS cleanup.
     const BlockSigpipe blockSigpipe;
 #endif
-    const std::unique_ptr<CURL,decltype(&curl_easy_cleanup)> curl(curl_easy_init(),curl_easy_cleanup);
-    if (!curl) throw ModelError("Unable to initialize ChatGPT transport",true);
-    std::unique_ptr<curl_slist,decltype(&curl_slist_free_all)> headers(nullptr,curl_slist_free_all);
+    const std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
+    if (!curl) throw ModelError("Unable to initialize ChatGPT transport", true);
+    std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(nullptr, curl_slist_free_all);
     const auto add = [&](const std::string& header) {
-        auto* list = curl_slist_append(headers.get(),header.c_str());
-        if (!list) throw ModelError("Unable to initialize ChatGPT transport headers",true);
+        auto* list = curl_slist_append(headers.get(), header.c_str());
+        if (!list) throw ModelError("Unable to initialize ChatGPT transport headers", true);
         headers.release();
         headers.reset(list);
     };
@@ -320,66 +316,68 @@ HttpResponse httpRequest(const HttpRequest& request) {
     // Send small and large requests the same way.
     add("Expect:");
 
-    Transfer transfer{curl.get(),request};
+    Transfer transfer{curl.get(), request};
     const auto set = [&](CURLoption option, auto value) {
-        if (curl_easy_setopt(curl.get(),option,value) != CURLE_OK)
-            throw ModelError("Unable to configure ChatGPT transport",true);
+        if (curl_easy_setopt(curl.get(), option, value) != CURLE_OK) throw ModelError("Unable to configure ChatGPT transport", true);
     };
-    set(CURLOPT_URL,request.url.c_str());
-    set(CURLOPT_PROTOCOLS_STR,"https");
-    set(CURLOPT_DISALLOW_USERNAME_IN_URL,1L);
-    set(CURLOPT_FOLLOWLOCATION,0L);
-    set(CURLOPT_SSL_VERIFYPEER,1L);
-    set(CURLOPT_SSL_VERIFYHOST,2L);
-    if (!request.caFile.empty()) set(CURLOPT_CAINFO,request.caFile.c_str());
-    set(CURLOPT_NOSIGNAL,1L);
+    set(CURLOPT_URL, request.url.c_str());
+    set(CURLOPT_PROTOCOLS_STR, "https");
+    set(CURLOPT_DISALLOW_USERNAME_IN_URL, 1L);
+    set(CURLOPT_FOLLOWLOCATION, 0L);
+    set(CURLOPT_SSL_VERIFYPEER, 1L);
+    set(CURLOPT_SSL_VERIFYHOST, 2L);
+    if (!request.caFile.empty()) set(CURLOPT_CAINFO, request.caFile.c_str());
+    set(CURLOPT_NOSIGNAL, 1L);
 #ifdef SO_NOSIGPIPE
-    set(CURLOPT_SOCKOPTFUNCTION,suppressSocketSigpipe);
+    set(CURLOPT_SOCKOPTFUNCTION, suppressSocketSigpipe);
 #endif
-    set(CURLOPT_TIMEOUT_MS,static_cast<long>(request.timeout.count()));
-    set(CURLOPT_ACCEPT_ENCODING,"");
-    set(CURLOPT_HTTPHEADER,headers.get());
-    set(CURLOPT_WRITEFUNCTION,receive);
-    set(CURLOPT_WRITEDATA,&transfer);
+    set(CURLOPT_TIMEOUT_MS, static_cast<long>(request.timeout.count()));
+    set(CURLOPT_ACCEPT_ENCODING, "");
+    set(CURLOPT_HTTPHEADER, headers.get());
+    set(CURLOPT_WRITEFUNCTION, receive);
+    set(CURLOPT_WRITEDATA, &transfer);
     if (request.stop.stop_possible()) {
-        set(CURLOPT_NOPROGRESS,0L);
-        set(CURLOPT_XFERINFOFUNCTION,progress);
-        set(CURLOPT_XFERINFODATA,&transfer);
+        set(CURLOPT_NOPROGRESS, 0L);
+        set(CURLOPT_XFERINFOFUNCTION, progress);
+        set(CURLOPT_XFERINFODATA, &transfer);
     }
     if (!request.contentType.empty()) {
-        set(CURLOPT_POSTFIELDSIZE_LARGE,static_cast<curl_off_t>(request.body.size()));
-        set(CURLOPT_POSTFIELDS,request.body.data());
+        set(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
+        set(CURLOPT_POSTFIELDS, request.body.data());
     }
     const auto result = curl_easy_perform(curl.get());
     if (transfer.failure) std::rethrow_exception(transfer.failure);
-    if (request.stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled",true);
+    if (request.stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled", true);
     if (result != CURLE_OK && !transfer.complete) {
         if (request.onData && transfer.received != 0 && success(transfer.response.status))
-            throw ModelError("ChatGPT response stream was interrupted",true);
-        throw ModelError("Unable to reach ChatGPT within the request deadline",true);
+            throw ModelError("ChatGPT response stream was interrupted", true);
+        throw ModelError("Unable to reach ChatGPT within the request deadline", true);
     }
     if (transfer.received == 0) transfer.headers();
     return std::move(transfer.response);
 }
 
 Json models(const HttpTransport& transport, const std::string& token) {
-    const auto response = transport({.url = std::string(resource) + "/models", .body = {},
-                                     .authorization = "Bearer " + token, .contentType = {}, .accept = "application/json"});
-    checkApi(response,"ChatGPT model catalog");
-    const auto data = Json::parse(response.body,nullptr,false);
-    const auto& catalog = field(data,"models");
-    if (!catalog.is_array()) throw ModelError("ChatGPT did not return a model catalog",true);
+    const auto response = transport({.url = std::string(resource) + "/models",
+                                     .body = {},
+                                     .authorization = "Bearer " + token,
+                                     .contentType = {},
+                                     .accept = "application/json"});
+    checkApi(response, "ChatGPT model catalog");
+    const auto data = Json::parse(response.body, nullptr, false);
+    const auto& catalog = field(data, "models");
+    if (!catalog.is_array()) throw ModelError("ChatGPT did not return a model catalog", true);
     auto result = Json::array();
     for (const auto& model : catalog) {
-        const auto& slug = field(model,"slug");
-        if (field(model,"visibility") != "list" || !slug.is_string()) continue;
-        const auto& displayName = field(model,"display_name");
-        Json entry = {{"slug",slug},{"displayName",displayName.is_string() ? displayName : slug}};
-        if (const auto& supported = field(model,"supported_reasoning_levels"); supported.is_array()) {
+        const auto& slug = field(model, "slug");
+        if (field(model, "visibility") != "list" || !slug.is_string()) continue;
+        const auto& displayName = field(model, "display_name");
+        Json entry = {{"slug", slug}, {"displayName", displayName.is_string() ? displayName : slug}};
+        if (const auto& supported = field(model, "supported_reasoning_levels"); supported.is_array()) {
             auto levels = Json::array();
             for (const auto& level : supported) {
-                const auto effort = stringField(level,"effort");
-                if (validReasoningEffort(effort) && std::find(levels.begin(),levels.end(),effort) == levels.end())
+                const auto effort = stringField(level, "effort");
+                if (validReasoningEffort(effort) && std::find(levels.begin(), levels.end(), effort) == levels.end())
                     levels.push_back(effort);
             }
             entry["reasoningEfforts"] = std::move(levels);
@@ -391,13 +389,16 @@ Json models(const HttpTransport& transport, const std::string& token) {
 
 Json infer(const HttpTransport& transport, const std::string& token, std::string body) {
     ResponseStream stream;
-    const auto response = transport({.url = std::string(resource) + "/responses", .body = std::move(body),
-        .authorization = "Bearer " + token, .contentType = "application/json", .accept = "text/event-stream",
-        .timeout = std::chrono::seconds(90),
-        .onData = [&](std::string_view data, const HttpResponse& headers) { return stream.read(data,headers); }});
-    checkApi(response,responsesApi);
-    if (!eventStream(response.contentType))
-        throw ModelError("ChatGPT did not return the expected response stream",false);
+    const auto response =
+        transport({.url = std::string(resource) + "/responses",
+                   .body = std::move(body),
+                   .authorization = "Bearer " + token,
+                   .contentType = "application/json",
+                   .accept = "text/event-stream",
+                   .timeout = std::chrono::seconds(90),
+                   .onData = [&](std::string_view data, const HttpResponse& headers) { return stream.read(data, headers); }});
+    checkApi(response, responsesApi);
+    if (!eventStream(response.contentType)) throw ModelError("ChatGPT did not return the expected response stream", false);
     return stream.take();
 }
 }

@@ -7,14 +7,15 @@ namespace flockv0 {
 namespace {
 constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 constexpr auto digits = [] {
-    std::array<int,256> table;
+    std::array<int, 256> table;
     table.fill(-1);
-    for (int i = 0; i < static_cast<int>(alphabet.size()); ++i)
-        table[static_cast<unsigned char>(alphabet[i])] = i;
+    for (int i = 0; i < static_cast<int>(alphabet.size()); ++i) table[static_cast<unsigned char>(alphabet[i])] = i;
     return table;
 }();
 
-int digit(unsigned char ch) { return digits[ch]; }
+int digit(unsigned char ch) {
+    return digits[ch];
+}
 }
 
 std::optional<std::size_t> base64DecodedSize(std::string_view input) {
@@ -27,12 +28,12 @@ std::string encodeBase64(std::string_view bytes) {
     result.reserve((bytes.size() + 2) / 3 * 4);
     for (std::size_t i = 0; i < bytes.size(); i += 3) {
         const unsigned a = static_cast<unsigned char>(bytes[i]);
-        const unsigned b = i+1 < bytes.size() ? static_cast<unsigned char>(bytes[i+1]) : 0;
-        const unsigned c = i+2 < bytes.size() ? static_cast<unsigned char>(bytes[i+2]) : 0;
+        const unsigned b = i + 1 < bytes.size() ? static_cast<unsigned char>(bytes[i + 1]) : 0;
+        const unsigned c = i + 2 < bytes.size() ? static_cast<unsigned char>(bytes[i + 2]) : 0;
         result += alphabet[a >> 2];
         result += alphabet[((a & 3) << 4) | (b >> 4)];
-        result += i+1 < bytes.size() ? alphabet[((b & 15) << 2) | (c >> 6)] : '=';
-        result += i+2 < bytes.size() ? alphabet[c & 63] : '=';
+        result += i + 1 < bytes.size() ? alphabet[((b & 15) << 2) | (c >> 6)] : '=';
+        result += i + 2 < bytes.size() ? alphabet[c & 63] : '=';
     }
     return result;
 }

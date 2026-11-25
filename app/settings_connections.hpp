@@ -20,7 +20,6 @@ public:
     Json change(std::string_view section, const Json& input);
     Json botChannels(std::string_view botId) const;
     Json changeBotChannel(std::string_view botId, const Json& input, const Store&);
-
 private:
     struct Check {
         bool passed;
@@ -40,7 +39,7 @@ private:
     bool hostChannels_ = false;
     bool hostTools_ = false;
     std::optional<Check> githubCheck_;
-    std::map<std::pair<std::string,std::string>,Check> bridgeChecks_;
+    std::map<std::pair<std::string, std::string>, Check> bridgeChecks_;
     mutable std::mutex mutex_;
 };
 }

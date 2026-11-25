@@ -11,36 +11,36 @@ void check(bool pass, std::string_view reason) {
 }
 
 void sessionConversationDispatch(Store& store, const Json& config) {
-    const auto shared = Resource::sessionRead("env-canonical","manual-staging");
+    const auto shared = Resource::sessionRead("env-canonical", "manual-staging");
     struct HistoryT3 final : T3 {
         int sends = 0;
-        std::string authGeneration(const std::string&,const Json&) override { return "test-auth"; }
-        Delivery send(const Command&) override { ++sends; return {}; }
+        std::string authGeneration(const std::string&, const Json&) override { return "test-auth"; }
+        Delivery send(const Command&) override {
+            ++sends;
+            return {};
+        }
         Delivery reconcile(const Command&) override { throw std::runtime_error("Unexpected reconcile"); }
-        Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
-        InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
-        std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
-            std::string_view, std::string_view, Id, SessionReadDeadline) override {
+        Observation observe(const std::string&, const Json&, const RunRef&) override { return {}; }
+        InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
+        std::pair<std::vector<std::string>, std::optional<Id>> projectSessions(std::string_view, std::string_view, Id,
+                                                                               SessionReadDeadline) override {
             std::vector<std::string> sessions;
             for (int i = 0; i < 64; ++i) sessions.push_back("background-" + std::to_string(i));
             sessions.push_back("manual-staging");
-            return {std::move(sessions),std::nullopt};
+            return {std::move(sessions), std::nullopt};
         }
-        std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages,
-                                                      SessionReadDeadline) override {
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages, SessionReadDeadline) override {
             if (target.threadId.starts_with("background-")) return {};
-            check(target.environmentId == "env-canonical" && target.threadId == "manual-staging",
-                  "search lost the authorized target");
-            return SessionMetadata{"Staging investigation","Release","project-canonical","failed",
-                                   "2026-11-21T00:00:00Z","2026-11-21T00:00:00Z",{},includeMessages};
+            check(target.environmentId == "env-canonical" && target.threadId == "manual-staging", "search lost the authorized target");
+            return SessionMetadata{"Staging investigation", "Release", "project-canonical", "failed", "2026-11-21T00:00:00Z",
+                                   "2026-11-21T00:00:00Z",  {},        includeMessages};
         }
-        std::optional<SessionEventPage> sessionEvents(const SessionTarget& target,
-                                                     const SessionEventFilter& filter) override {
-            check(target.threadId == "manual-staging" && filter.limit == 1,"Session reference or limit was not applied");
+        std::optional<SessionEventPage> sessionEvents(const SessionTarget& target, const SessionEventFilter& filter) override {
+            check(target.threadId == "manual-staging" && filter.limit == 1, "Session reference or limit was not applied");
             SessionEvent evidence;
             evidence.id = filter.afterPosition ? "failed" : "start";
             evidence.text = filter.afterPosition ? "staging failed" : "staging started";
-            return SessionEventPage{{evidence},filter.afterPosition ? std::nullopt : std::optional<Id>(0),false};
+            return SessionEventPage{{evidence}, filter.afterPosition ? std::nullopt : std::optional<Id>(0), false};
         }
     } t3;
     struct HistoryModel final : Model {
@@ -53,7 +53,7 @@ void sessionConversationDispatch(Store& store, const Json& config) {
             const auto request = responseRequest(input);
             const auto& steps = input.event.at("turn");
             std::string tool = "flock_session_search";
-            Json args{{"query","staging"}};
+            Json args{{"query", "staging"}};
             if (steps.size() == 1) {
                 emptyPage = steps[0].at("result");
                 check(emptyPage.at("sessions").empty() && emptyPage.at("nextCursor").is_string(),
@@ -63,32 +63,36 @@ void sessionConversationDispatch(Store& store, const Json& config) {
                 const auto& sessions = steps[1].at("result").at("sessions");
                 sessionRef = sessions.at(0).at("sessionRef");
                 tool = "flock_session_events";
-                args = {{"sessionRef",sessionRef},{"operation","list"},{"limit",1}};
+                args = {{"sessionRef", sessionRef}, {"operation", "list"}, {"limit", 1}};
             } else if (steps.size() == 3) {
                 tool = "flock_session_events";
-                args = {{"sessionRef",sessionRef},{"operation","list"},{"limit",1},
-                        {"cursor",steps[2].at("result").at("nextCursor")}};
+                args = {
+                    {"sessionRef", sessionRef}, {"operation", "list"}, {"limit", 1}, {"cursor", steps[2].at("result").at("nextCursor")}};
             } else if (steps.size() == 4) {
                 const auto& event = steps[3].at("result").at("events").at(0);
                 paged = event.at("excerpt") == "staging failed";
-                store.policy().changeNeverRule(localOwner,shared.action,shared.target,true);
+                store.policy().changeNeverRule(localOwner, shared.action, shared.target, true);
                 tool = "flock_session_events";
-                args = {{"sessionRef",sessionRef},{"operation","read_event"},{"eventRef",event.at("eventRef")}};
+                args = {{"sessionRef", sessionRef}, {"operation", "read_event"}, {"eventRef", event.at("eventRef")}};
             } else if (steps.size() == 5) {
-                const Json missing{{"ok",false},{"error","Session evidence not found"}};
+                const Json missing{{"ok", false}, {"error", "Session evidence not found"}};
                 revoked = steps[0].at("result") == emptyPage &&
-                    std::all_of(steps.begin()+1,steps.end(),[&](const Json& step) { return step.at("result") == missing; });
+                          std::all_of(steps.begin() + 1, steps.end(), [&](const Json& step) { return step.at("result") == missing; });
                 tool = "reply";
-                args = {{"text","The investigation is no longer readable."}};
+                args = {{"text", "The investigation is no longer readable."}};
             }
-            return responseDecision(Json::array({{{"type","function_call"},{"namespace","flock"},{"status","completed"},
-                                    {"name",tool},{"arguments",args.dump()}}}),request);
+            return responseDecision(Json::array({{{"type", "function_call"},
+                                                  {"namespace", "flock"},
+                                                  {"status", "completed"},
+                                                  {"name", tool},
+                                                  {"arguments", args.dump()}}}),
+                                    request);
         }
-    } model(store,shared);
-    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
-    store.receive(localOwner,{"release","Read staging","env-canonical","project-canonical",config},
-                  "read-staging","How much work went into the staging investigation?");
+    } model(store, shared);
+    Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
+    store.receive(localOwner, {"release", "Read staging", "env-canonical", "project-canonical", config}, "read-staging",
+                  "How much work went into the staging investigation?");
     runtime.runConversations();
-    check(model.paged && model.revoked && t3.sends == 0,"model schemas did not dispatch pagination and revocation");
+    check(model.paged && model.revoked && t3.sends == 0, "model schemas did not dispatch pagination and revocation");
 }
 }

@@ -3,9 +3,7 @@
 
 namespace flockv0 {
 void Store::Impl::initializeBotPauseSchema() {
-    const auto installed = [&] {
-        return query("SELECT 1 FROM pragma_table_info('session_message_sends') WHERE name='step'").next();
-    };
+    const auto installed = [&] { return query("SELECT 1 FROM pragma_table_info('session_message_sends') WHERE name='step'").next(); };
     if (installed()) return;
     Transaction transaction(db);
     if (!installed()) {
@@ -26,7 +24,7 @@ CREATE TABLE IF NOT EXISTS session_message_sends(
 }
 
 bool Store::Impl::botDeleted(std::string_view bot) const {
-    return query("SELECT 1 FROM deleted_bots WHERE bot=?",{bot}).next();
+    return query("SELECT 1 FROM deleted_bots WHERE bot=?", {bot}).next();
 }
 
 bool Store::botDeleted(std::string_view bot) const {
@@ -35,7 +33,7 @@ bool Store::botDeleted(std::string_view bot) const {
 }
 
 bool Store::Impl::botPaused(std::string_view bot) const {
-    return query("SELECT 1 FROM bot_pauses WHERE bot=?",{bot}).next();
+    return query("SELECT 1 FROM bot_pauses WHERE bot=?", {bot}).next();
 }
 
 bool Store::botPaused(std::string_view bot) const {
@@ -44,36 +42,39 @@ bool Store::botPaused(std::string_view bot) const {
 }
 
 void Store::setBotPaused(const Person& actor, std::string_view bot, bool paused, const std::function<Seconds()>& clock) {
-    const SessionDispatchFileLock dispatch(p_->path,SessionDispatchFileLock::Mode::exclusive);
+    const SessionDispatchFileLock dispatch(p_->path, SessionDispatchFileLock::Mode::exclusive);
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
     auto permissions = policy();
-    if (!permissions.allows(actor,Action::bot_settings,bot)) throw DecisionDenied{};
+    if (!permissions.allows(actor, Action::bot_settings, bot)) throw DecisionDenied{};
     if (p_->botPaused(bot) == paused) return;
 
     if (paused) {
-        p_->exec("INSERT INTO bot_pauses VALUES(?)",{bot});
+        p_->exec("INSERT INTO bot_pauses VALUES(?)", {bot});
         auto turns = p_->query(R"SQL(
 SELECT id FROM messages WHERE bot_id=? AND id IN (
     SELECT message_id FROM conversation_turns WHERE status<>'done')
-)SQL",{bot});
+)SQL",
+                               {bot});
         std::vector<Id> openTurns;
         while (turns.next()) openTurns.push_back(turns.number(0));
-        for (const auto id : openTurns)
-            p_->finishTurn(p_->loadTurnMessage(id),botPausedMessage,nullptr,"bot_paused");
+        for (const auto id : openTurns) p_->finishTurn(p_->loadTurnMessage(id), botPausedMessage, nullptr, "bot_paused");
         p_->exec(R"SQL(
 UPDATE workflows SET stop_requested=1 WHERE bot_id=? AND stop_requested=0 AND EXISTS (
     SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id
     WHERE s.workflow_id=workflows.id AND
       (t.state NOT IN ('completed','cancelled') OR (s.task_id IS NULL AND s.status='pending')))
-)SQL",{bot});
+)SQL",
+                 {bot});
         p_->exec(R"SQL(
 UPDATE workflow_stages SET status='stopped' WHERE status='pending' AND task_id IS NULL
 AND workflow_id IN (SELECT id FROM workflows WHERE bot_id=?)
-)SQL",{bot});
+)SQL",
+                 {bot});
         auto tasks = p_->query(R"SQL(
 SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','cancelling') ORDER BY id
-)SQL",{bot});
+)SQL",
+                               {bot});
         std::vector<Id> openTasks;
         while (tasks.next()) openTasks.push_back(tasks.number(0));
         for (const auto id : openTasks) {
@@ -86,12 +87,12 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
         p_->stopPausedBotParticipation(bot);
         p_->dropPausedBotDeliveries(bot);
     } else {
-        p_->skipDueAutomations(bot,clock());
+        p_->skipDueAutomations(bot, clock());
         p_->skipPendingGitWebhooks(bot);
-        p_->exec("DELETE FROM bot_pauses WHERE bot=?",{bot});
+        p_->exec("DELETE FROM bot_pauses WHERE bot=?", {bot});
     }
 
-    permissions.audit(actor,bot,paused ? "pause_bot" : "resume_bot",Json::object());
+    permissions.audit(actor, bot, paused ? "pause_bot" : "resume_bot", Json::object());
     tx.commit();
 }
 
@@ -99,7 +100,7 @@ void Store::deleteBot(const Person& actor, std::string_view bot) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
     auto permissions = policy();
-    if (!permissions.allows(actor,Action::bot_settings,bot)) throw DecisionDenied{};
+    if (!permissions.allows(actor, Action::bot_settings, bot)) throw DecisionDenied{};
     if (p_->query(R"SQL(
 SELECT 1 WHERE
   EXISTS (SELECT 1 FROM tasks WHERE bot_id=?1 AND state NOT IN ('completed','cancelled'))
@@ -112,11 +113,15 @@ SELECT 1 WHERE
              WHERE m.bot_id=?1 AND s.interrupt_at IS NOT NULL)
   OR EXISTS (SELECT 1 FROM messages m JOIN channel_deliveries d ON d.source_id=m.id
              WHERE m.bot_id=?1 AND d.state IN ('pending','unknown'))
-)SQL",{bot}).next() || p_->actionablePrReviews(bot).next()) throw BotBusy{};
-    p_->exec("INSERT INTO deleted_bots VALUES(?)",{bot});
-    p_->exec("DELETE FROM bot_pauses WHERE bot=?",{bot});
+)SQL",
+                  {bot})
+            .next() ||
+        p_->actionablePrReviews(bot).next())
+        throw BotBusy{};
+    p_->exec("INSERT INTO deleted_bots VALUES(?)", {bot});
+    p_->exec("DELETE FROM bot_pauses WHERE bot=?", {bot});
     p_->retireAutomations(Json::array({bot}));
-    permissions.audit(actor,bot,"delete_bot",Json::object());
+    permissions.audit(actor, bot, "delete_bot", Json::object());
     tx.commit();
 }
 }

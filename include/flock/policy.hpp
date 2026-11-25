@@ -56,7 +56,7 @@ struct Person {
     bool adminRoot = false;
     auto operator<=>(const Person&) const = default;
 };
-inline const Person localOwner{"local-owner",true};
+inline const Person localOwner{"local-owner", true};
 struct Resource {
     Action action;
     std::string target;
@@ -64,7 +64,10 @@ struct Resource {
     bool routine = false;
     static Resource sessionRead(std::string_view environment, std::string_view thread);
 };
-struct SecretRef { std::string name; bool valid() const; };
+struct SecretRef {
+    std::string name;
+    bool valid() const;
+};
 class SecretRedactor;
 
 struct BotChange {
@@ -76,13 +79,10 @@ public:
     PolicyResult check(std::string_view bot, Action, std::string_view target) const;
     PolicyResult check(const Person&, Action, std::string_view target) const;
     PolicyResult check(Id task, Action, std::string_view target) const;
-    template<class Origin>
-    bool allows(const Origin& origin, Action action, std::string_view target) const {
-        return check(origin,action,target) == PolicyResult::allow;
+    template <class Origin> bool allows(const Origin& origin, Action action, std::string_view target) const {
+        return check(origin, action, target) == PolicyResult::allow;
     }
-    bool allows(std::string_view bot, const Resource& resource) const {
-        return allows(bot,resource.action,resource.target);
-    }
+    bool allows(std::string_view bot, const Resource& resource) const { return allows(bot, resource.action, resource.target); }
     PolicyResult check(std::string_view bot, const Resource&) const;
     bool forbidden(std::string_view bot, Action, std::string_view target) const;
     std::string mode() const;
@@ -95,17 +95,16 @@ public:
     void setOwner(const Person& creator, std::string_view bot);
     void setMember(const Person&, std::string_view bot, std::string_view person, bool add);
     Json botSettings(const Person&, std::string_view bot) const;
-    void executeSessionResource(std::string_view environment, const RunRef&, const Resource&,
-                                const std::function<bool()>& upstreamPermits,
+    void executeSessionResource(std::string_view environment, const RunRef&, const Resource&, const std::function<bool()>& upstreamPermits,
                                 const std::function<void(Id ownerTask)>& execute) const;
     SecretRedactor secretRedactor(std::string_view bot) const;
     Json redactSecrets(std::string_view bot, const Json& view) const;
     void requireWebIdentity();
     bool requiresIdentity() const;
     struct BotCreationUncertain : std::exception {};
-    Id applyBotChange(std::string_view bot, const Person& creator, std::string_view operation,
-                      std::string_view target, std::string_view name, Id message, int step,
-                      const ApplyBotChange&, const ReconcileBotCreation* onExhausted = nullptr);
+    Id applyBotChange(std::string_view bot, const Person& creator, std::string_view operation, std::string_view target,
+                      std::string_view name, Id message, int step, const ApplyBotChange&,
+                      const ReconcileBotCreation* onExhausted = nullptr);
     Id requestSecret(std::string_view bot, const SecretRef&, Id sourceMessage = 0);
     void submitSecret(const Person&, std::string_view bot, Id request, std::string_view value);
     void useSecret(Id task, const SecretRef&, std::string_view destination, std::string_view operation, bool upstreamPermitted,

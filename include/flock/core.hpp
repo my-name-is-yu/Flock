@@ -24,10 +24,16 @@ Seconds unixTime();
 std::string bounded(std::string_view text, std::size_t bytes);
 std::string actionId();
 
-struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
-struct BotBusy : Conflict { BotBusy() : Conflict("Bot has unfinished work") {} };
+struct Conflict : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+struct BotBusy : Conflict {
+    BotBusy() : Conflict("Bot has unfinished work") {}
+};
 inline constexpr char botPausedMessage[] = "This Bot is paused.";
-struct BotPaused : Conflict { BotPaused() : Conflict(botPausedMessage) {} };
+struct BotPaused : Conflict {
+    BotPaused() : Conflict(botPausedMessage) {}
+};
 
 // Initial allowance from an intake's saved config. Each approval adds one attempt.
 Id modelCallLimit(const Json& config);
@@ -41,9 +47,17 @@ using IntakeResolver = std::function<Intake(std::string_view botId, std::string_
 // Prepare a reconciliation from a Store::task snapshot and the current Bot configuration.
 Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake);
 
-struct BotNotes { std::string soul, memory; };
-struct BotNotesUnavailable : Conflict { using Conflict::Conflict; };
-struct PeerBot { std::string name; Intake intake; std::string role = {}; };
+struct BotNotes {
+    std::string soul, memory;
+};
+struct BotNotesUnavailable : Conflict {
+    using Conflict::Conflict;
+};
+struct PeerBot {
+    std::string name;
+    Intake intake;
+    std::string role = {};
+};
 using PeerResolver = std::function<std::vector<PeerBot>(std::string_view)>;
 
 struct Decision {
@@ -57,7 +71,7 @@ bool validDecisionReason(std::string_view reason);
 struct ModelTurn {
     std::vector<Decision> calls;
     Json usage = Json::object();
-    std::map<std::size_t,std::string> rejections{}; // Adapter validation errors by zero-based call index.
+    std::map<std::size_t, std::string> rejections{}; // Adapter validation errors by zero-based call index.
 };
 struct ModelImage {
     Id messageId;
@@ -73,14 +87,20 @@ struct ModelInput {
     bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
 };
-enum class ModelErrorCode { inference_failed, authentication_required, unsupported_reasoning_effort,
-                            invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
+enum class ModelErrorCode {
+    inference_failed,
+    authentication_required,
+    unsupported_reasoning_effort,
+    invalid_tool_count,
+    invalid_tool_output,
+    unavailable_tool,
+    invalid_tool_arguments
+};
 struct ModelError : std::runtime_error {
     ModelError(std::string message, bool retryable, Json measurements = Json::object(),
                ModelErrorCode failureCode = ModelErrorCode::inference_failed)
         : std::runtime_error(std::move(message)), transient(retryable), usage(std::move(measurements)), code(failureCode) {}
-    ModelError(std::string message, ModelErrorCode failureCode)
-        : ModelError(std::move(message),false,Json::object(),failureCode) {}
+    ModelError(std::string message, ModelErrorCode failureCode) : ModelError(std::move(message), false, Json::object(), failureCode) {}
     bool transient;
     Json usage;
     ModelErrorCode code;
@@ -227,9 +247,7 @@ class T3 {
 public:
     virtual ~T3() = default;
     virtual std::string sessionMessageWake(const SessionTarget&, const RunRef&) { return "unknown"; }
-    virtual QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget&, std::string_view) {
-        return QueueCancelOutcome::Retry;
-    }
+    virtual QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget&, std::string_view) { return QueueCancelOutcome::Retry; }
     virtual std::string authGeneration(const std::string& environmentId, const Json& config) = 0;
     // Local/preflight checks only. Throw ModelError for a settings failure and report auth separately.
     virtual std::optional<Delivery> preflight(const Command&) { return std::nullopt; }
@@ -245,20 +263,21 @@ public:
     }
     virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual InterruptOutcome interruptSessionMessage(const std::string& environmentId, const RunRef& run) {
-        return interrupt(environmentId,Json::object(),run);
+        return interrupt(environmentId, Json::object(), run);
     }
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
     virtual std::vector<T3Project> projects(std::string_view) { return {}; }
     virtual std::vector<T3Project> projects(const T3EnvironmentRoute& route) { return projects(route.environmentId); }
     virtual T3EnvironmentLinks linkedEnvironments(std::string_view) { return {}; }
-    virtual std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
-        std::string_view, std::string_view, Id, SessionReadDeadline) { return {}; }
+    virtual std::pair<std::vector<std::string>, std::optional<Id>> projectSessions(std::string_view, std::string_view, Id,
+                                                                                   SessionReadDeadline) {
+        return {};
+    }
     virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
     virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }
     virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view) { return {}; }
     virtual std::optional<SessionCounts> sessionCounts(const SessionTarget&) { return {}; }
-    virtual std::optional<SessionAttachment> sessionAttachment(const SessionTarget&, std::string_view,
-                                                               std::string_view) { return {}; }
+    virtual std::optional<SessionAttachment> sessionAttachment(const SessionTarget&, std::string_view, std::string_view) { return {}; }
 };
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
@@ -284,7 +303,9 @@ class LocalMachine;
 enum class ChannelKind;
 struct ChannelResource;
 struct VerifiedChannelMessage;
-namespace conversation { enum class PrincipalSource; }
+namespace conversation {
+enum class PrincipalSource;
+}
 // An absent result means the person is unavailable. Otherwise the value is their current root authority.
 using WebIdentityResolver = std::function<std::optional<bool>(std::string_view personId)>;
 class Store {
@@ -296,8 +317,7 @@ public:
         std::optional<Id> modelCallLimit = std::nullopt;
     };
     using AutomationModelResolver = std::function<std::optional<PlannerModel>(std::string_view botId)>;
-    using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&,
-                                                       const std::function<void()>&)>;
+    using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&, const std::function<void()>&)>;
     using EditConfiguredSchedules = std::function<void(const CommitConfiguredSchedules&)>;
     explicit Store(std::filesystem::path database, MemorySeed = {}, AutomationModelResolver = {});
     ~Store();
@@ -314,29 +334,25 @@ public:
     Json automations(const Person&, std::string_view bot, Id before = 0, bool activeOnly = false) const;
     Json activeConfiguredSchedules(std::string_view bot) const;
     Json cancelAutomation(const Person&, std::string_view bot, Id id);
-    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
-        std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
-    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
-        std::string_view bot, Seconds now, const EditConfiguredSchedules&);
+    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
+    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(std::string_view bot, Seconds now, const EditConfiguredSchedules&);
     void pruneAutomations(const std::vector<std::string>& configuredBots);
     void fireDueAutomations(Seconds now);
-    Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,
-                        const Json& event, Seconds now);
+    Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId, const Json& event, Seconds now);
     Json inbox(const Person&, std::string_view bot = {}) const;
     Json decisionHistory(const Person&, std::string_view bot = {}) const;
-    void decideInbox(const Person&, const InboxTarget&, std::string_view decision,
-                     const Json& data = Json::object());
+    void decideInbox(const Person&, const InboxTarget&, std::string_view decision, const Json& data = Json::object());
     bool receiveGitWebhook(const GitWebhook&);
     void protectGitCredential(std::string value);
     Id submit(const Intake&, const Person* requester = nullptr);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
-    Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId = 0, const Json& attachments = Json::array());
+    Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text, Id replyToMessageId = 0,
+                 const Json& attachments = Json::array());
     // Refers to a person in the current Web identity directory when the Runtime executes the turn.
-    Json receiveWeb(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
-                    Id replyToMessageId = 0, const Json& attachments = Json::array());
-    std::optional<Json> receipt(const Person&, std::string_view botId, std::string_view clientMessageId,
-                                std::string_view text, Id replyToMessageId = 0, const Json& attachments = Json::array()) const;
+    Json receiveWeb(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text, Id replyToMessageId = 0,
+                    const Json& attachments = Json::array());
+    std::optional<Json> receipt(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text,
+                                Id replyToMessageId = 0, const Json& attachments = Json::array()) const;
     // Conversation turns paused on the model call limit, newest first.
     Json pausedConversations(std::string_view botId) const;
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
@@ -354,22 +370,22 @@ public:
     Json sessionTasks(std::string_view botId, Id before, unsigned limit) const;
     // Journal position and tasks with a Run start or settled report since that position.
     // On the initial read only the position is needed, before loading the first page.
-    std::pair<Id,Json> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
+    std::pair<Id, Json> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     enum class ConversationEvents { all, incoming };
-    Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50,
-                      ConversationEvents events = ConversationEvents::all, std::string_view viewer = {}) const;
+    Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50, ConversationEvents events = ConversationEvents::all,
+                      std::string_view viewer = {}) const;
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
-    Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50,
-                          Id from = 0, std::string_view viewer = {}) const;
+    Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50, Id from = 0,
+                          std::string_view viewer = {}) const;
     Id peerMessageAnchor(std::string_view bot, std::string_view peer, Id event) const;
-    std::vector<std::pair<std::string,std::string>> peerExchangePairs() const;
+    std::vector<std::pair<std::string, std::string>> peerExchangePairs() const;
     bool hasPeerExchange(std::string_view bot, std::string_view peer) const;
     // A change hint for readers, covering writes on this connection and other connections.
-    std::pair<std::int64_t,std::int64_t> changeStamp() const;
+    std::pair<std::int64_t, std::int64_t> changeStamp() const;
     struct BotViewStamp {
-        std::pair<Id,Id> database;
+        std::pair<Id, Id> database;
         std::size_t gitCredentialCount;
         bool operator==(const BotViewStamp&) const = default;
     };
@@ -377,18 +393,18 @@ public:
     std::optional<BotViewStamp> botViewStamp() const;
     struct ConversationChanges {
         Id through;
-        std::map<std::string,std::vector<Id>> messages;
+        std::map<std::string, std::vector<Id>> messages;
     };
     // Original messages affected by replies and instruction delivery since a journal cursor.
     ConversationChanges conversationChangesSince(std::optional<Id> after, std::string_view bot = {}) const;
     struct NotificationEvents {
         Id through;
         Json events;
-        std::map<std::string,Id> scope;
+        std::map<std::string, Id> scope;
         bool more;
     };
-    NotificationEvents notificationEventsSince(const Person&, const std::vector<std::string>& bots,
-        std::optional<Id> after, const std::map<std::string,Id>& previousScope) const;
+    NotificationEvents notificationEventsSince(const Person&, const std::vector<std::string>& bots, std::optional<Id> after,
+                                               const std::map<std::string, Id>& previousScope) const;
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
     Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
@@ -401,14 +417,12 @@ public:
     Json localConnections(const Person&) const;
     void decideLocalConnection(const Person&, Id id, bool approve);
     void disconnectLocalConnection(const Person&, Id id);
-    Json runLocalMachineOperation(std::string_view environment, const RunRef& authenticatedRun,
-                                  std::string_view machineId, std::string_view operation,
-                                  const std::filesystem::path& path);
+    Json runLocalMachineOperation(std::string_view environment, const RunRef& authenticatedRun, std::string_view machineId,
+                                  std::string_view operation, const std::filesystem::path& path);
     const std::filesystem::path& path() const;
-
 private:
-    Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId, conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&,
+    Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
+                 conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&,
                  const Json& attachments = Json::array());
     struct Impl;
     std::unique_ptr<Impl> p_;

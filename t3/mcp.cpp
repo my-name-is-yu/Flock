@@ -29,8 +29,11 @@ size_t receiveBody(char* data, size_t size, size_t count, void* context) noexcep
     auto& body = static_cast<HttpResponse*>(context)->body;
     const auto length = size * count;
     if (length > MaxResponseBytes - body.size()) return 0;
-    try { body.append(data, length); }
-    catch (...) { return 0; }
+    try {
+        body.append(data, length);
+    } catch (...) {
+        return 0;
+    }
     return length;
 }
 
@@ -45,20 +48,20 @@ size_t receiveHeader(char* data, size_t size, size_t count, void* context) noexc
             std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
             if (key == "www-authenticate" && headers.contains(key))
                 headers[key] += ", " + trim(line.substr(end + 1));
-            else headers[key] = trim(line.substr(end + 1));
+            else
+                headers[key] = trim(line.substr(end + 1));
         }
-    } catch (...) { return 0; }
+    } catch (...) {
+        return 0;
+    }
     return line.size();
 }
 
 // Only a validation diagnostic specific to this property is safe to retry.
 bool rejectsDelegatedFrom(std::string_view message) {
-    return message == "Unknown field: delegatedFrom" ||
-        message == "Unrecognized key: \"delegatedFrom\"" ||
-        message == "Unexpected property: delegatedFrom" ||
-        message == "Unknown argument: delegatedFrom" ||
-        message == "delegatedFrom is not supported" ||
-        message.find("[\"delegatedFrom\"] is unexpected") != message.npos;
+    return message == "Unknown field: delegatedFrom" || message == "Unrecognized key: \"delegatedFrom\"" ||
+           message == "Unexpected property: delegatedFrom" || message == "Unknown argument: delegatedFrom" ||
+           message == "delegatedFrom is not supported" || message.find("[\"delegatedFrom\"] is unexpected") != message.npos;
 }
 
 Json rpcResponse(const HttpResponse& response, unsigned id) {
@@ -72,12 +75,13 @@ Json rpcResponse(const HttpResponse& response, unsigned id) {
     if (str(message, "jsonrpc") != "2.0") invalidResponse();
     if (message.contains("error")) {
         const auto& error = message["error"];
-        if (message.contains("result") || !error.contains("code") || !error["code"].is_number_integer() ||
-            !error.contains("message") || !error["message"].is_string()) invalidResponse();
-        const auto detail = str(error,"message");
-        const auto reason = error["code"] == -32602 && rejectsDelegatedFrom(detail)
-            ? Failure::Reason::DelegatedFromRejected : Failure::Reason::Other;
-        throw Failure(Failure::Kind::Rpc, "T3 JSON-RPC error " + error["code"].dump() + ": " + detail,reason);
+        if (message.contains("result") || !error.contains("code") || !error["code"].is_number_integer() || !error.contains("message") ||
+            !error["message"].is_string())
+            invalidResponse();
+        const auto detail = str(error, "message");
+        const auto reason =
+            error["code"] == -32602 && rejectsDelegatedFrom(detail) ? Failure::Reason::DelegatedFromRejected : Failure::Reason::Other;
+        throw Failure(Failure::Kind::Rpc, "T3 JSON-RPC error " + error["code"].dump() + ": " + detail, reason);
     }
     if (!message.contains("result") || !message["result"].is_object()) invalidResponse();
     return std::move(message["result"]);
@@ -101,7 +105,9 @@ Json parse(std::string_view body) {
     return value;
 }
 
-void invalidResponse() { throw Failure(Failure::Kind::Wire, "T3 returned an incomplete or unexpected response"); }
+void invalidResponse() {
+    throw Failure(Failure::Kind::Wire, "T3 returned an incomplete or unexpected response");
+}
 
 Url checkedUrl(const std::string& value) {
     initializeCurl();
@@ -113,8 +119,8 @@ Url checkedUrl(const std::string& value) {
     const auto scheme = part(url.get(), CURLUPART_SCHEME);
     const auto host = part(url.get(), CURLUPART_HOST);
     const auto port = part(url.get(), CURLUPART_PORT, CURLU_NO_DEFAULT_PORT);
-    if (host.empty() || (scheme != "https" && (scheme != "http" ||
-        (host != "127.0.0.1" && host != "localhost" && host != "[::1]")))) invalid();
+    if (host.empty() || (scheme != "https" && (scheme != "http" || (host != "127.0.0.1" && host != "localhost" && host != "[::1]"))))
+        invalid();
     const auto origin = scheme + "://" + host + (port.empty() ? "" : ":" + port);
     const auto path = part(url.get(), CURLUPART_PATH);
     return {origin + path, origin, path};
@@ -124,9 +130,13 @@ std::string encode(std::string_view value) {
     std::string result;
     const auto hex = "0123456789ABCDEF";
     for (unsigned char c : value) {
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-            c == '-' || c == '.' || c == '_' || c == '~') result += static_cast<char>(c);
-        else { result += '%'; result += hex[c >> 4]; result += hex[c & 15]; }
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~')
+            result += static_cast<char>(c);
+        else {
+            result += '%';
+            result += hex[c >> 4];
+            result += hex[c & 15];
+        }
     }
     return result;
 }
@@ -141,7 +151,10 @@ std::string decode(std::string_view value) {
     std::string result;
     for (std::size_t i = 0; i < value.size(); ++i) {
         const auto c = value[i];
-        if (c != '%') { result += c == '+' ? ' ' : c; continue; }
+        if (c != '%') {
+            result += c == '+' ? ' ' : c;
+            continue;
+        }
         if (i + 2 >= value.size()) invalidResponse();
         const int high = nibble(value[i + 1]), low = nibble(value[i + 2]);
         if (high < 0 || low < 0) invalidResponse();
@@ -151,8 +164,7 @@ std::string decode(std::string_view value) {
     return result;
 }
 
-HttpResponse http(const std::string& url, std::string_view method, const Headers& headers,
-                  const std::string& body, long timeoutMs) {
+HttpResponse http(const std::string& url, std::string_view method, const Headers& headers, const std::string& body, long timeoutMs) {
     initializeCurl();
     Easy curl(curl_easy_init(), curl_easy_cleanup);
     std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> list(nullptr, curl_slist_free_all);
@@ -190,9 +202,10 @@ HttpResponse http(const std::string& url, std::string_view method, const Headers
 }
 
 Client::Client(Credential credential, SessionReadDeadline deadline, std::string targetEnvironmentId)
-    : credential_(std::move(credential)), deadline_(deadline), targetEnvironmentId_(std::move(targetEnvironmentId)), headers_{
-    {"Authorization", "Bearer " + credential_.token}, {"Accept", "application/json, text/event-stream"},
-    {"Content-Type", "application/json"}} {
+    : credential_(std::move(credential)), deadline_(deadline), targetEnvironmentId_(std::move(targetEnvironmentId)),
+      headers_{{"Authorization", "Bearer " + credential_.token},
+               {"Accept", "application/json, text/event-stream"},
+               {"Content-Type", "application/json"}} {
     try {
         const auto result = rpc("initialize", initializeParams());
         if (str(result, "protocolVersion") != ProtocolVersion) invalidResponse();
@@ -200,7 +213,10 @@ Client::Client(Credential credential, SessionReadDeadline deadline, std::string 
         request("POST", Json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}.dump());
     } catch (...) {
         if (headers_.contains("Mcp-Session-Id")) {
-            try { request("DELETE", {}, 750); } catch (...) {}
+            try {
+                request("DELETE", {}, 750);
+            } catch (...) {
+            }
         }
         throw;
     }
@@ -208,35 +224,37 @@ Client::Client(Credential credential, SessionReadDeadline deadline, std::string 
 
 Client::~Client() {
     if (headers_.contains("Mcp-Session-Id")) {
-        try { request("DELETE", {}, 750); } catch (...) {}
+        try {
+            request("DELETE", {}, 750);
+        } catch (...) {
+        }
     }
 }
 
 HttpResponse Client::request(std::string_view method, const std::string& body, long timeoutMs) {
     // Leave time for best-effort MCP session teardown within the same deadline.
     const auto cleanupTime = std::chrono::milliseconds(method == "DELETE" ? 0 : 250);
-    const auto remaining = deadline_ ? std::chrono::ceil<std::chrono::milliseconds>(
-        *deadline_ - std::chrono::steady_clock::now() - cleanupTime).count() : timeoutMs;
+    const auto remaining =
+        deadline_ ? std::chrono::ceil<std::chrono::milliseconds>(*deadline_ - std::chrono::steady_clock::now() - cleanupTime).count()
+                  : timeoutMs;
     if (remaining <= 0) throw SessionReadTimeout();
     HttpResponse response;
     try {
-        response = http(credential_.mcpUrl, method, headers_, body, std::min<long>(timeoutMs,remaining));
+        response = http(credential_.mcpUrl, method, headers_, body, std::min<long>(timeoutMs, remaining));
     } catch (const Failure& error) {
-        if (deadline_ && remaining <= timeoutMs && error.reason == Failure::Reason::Timeout)
-            throw SessionReadTimeout();
+        if (deadline_ && remaining <= timeoutMs && error.reason == Failure::Reason::Timeout) throw SessionReadTimeout();
         throw;
     }
     if (response.status == 403) {
-        const auto body = Json::parse(response.body,nullptr,false);
-        if (body.is_object() && str(body,"error") == "linked_environments_off")
+        const auto body = Json::parse(response.body, nullptr, false);
+        if (body.is_object() && str(body, "error") == "linked_environments_off")
             throw Failure(Failure::Kind::Settings,
                           "Linked environments are turned off in T3 Settings > Labs. Turn them on to use this target.",
                           Failure::Reason::LinkedEnvironmentUnavailable);
     }
     if (response.status == 401 || response.status == 403)
         throw Failure(Failure::Kind::Auth, "T3 refused the OAuth credential or its access level");
-    if (response.status < 200 || response.status >= 300)
-        throw Failure(Failure::Kind::Wire, "T3 returned an unsuccessful HTTP response");
+    if (response.status < 200 || response.status >= 300) throw Failure(Failure::Kind::Wire, "T3 returned an unsuccessful HTTP response");
     if (const auto session = response.headers.find("mcp-session-id"); session != response.headers.end()) {
         if (session->second.empty() || session->second.size() > 1024) invalidResponse();
         headers_["Mcp-Session-Id"] = session->second;
@@ -256,44 +274,41 @@ static Failure toolFailure(const Json& payload) {
     const auto code = str(error, "code");
     const auto message = str(error, "message");
     if ((code == "invalid_request" || code == "invalid_params") && rejectsDelegatedFrom(message))
-        return Failure(Failure::Kind::Tool,"T3 rejected the delegatedFrom launch field",Failure::Reason::DelegatedFromRejected);
+        return Failure(Failure::Kind::Tool, "T3 rejected the delegatedFrom launch field", Failure::Reason::DelegatedFromRejected);
     if ((code == "capability_denied" &&
          message.starts_with("Linked environments is off on this machine, so no tool can act on another machine.")) ||
         (code == "orchestration_error" && message == "This environment cannot reach linked environments."))
-        return Failure(Failure::Kind::Settings,
-                       "This T3 connection cannot forward to linked environments. Enable linked environments in T3 Settings > Labs or use a connection with forwarding enabled.",
-                       Failure::Reason::LinkedEnvironmentUnavailable);
-    if (code == "capability_denied" || code == "thread_credential_required" ||
-        code == "runtime_mode_escalation_denied" || code == "interaction_mode_escalation_denied")
+        return Failure(
+            Failure::Kind::Settings,
+            "This T3 connection cannot forward to linked environments. Enable linked environments in T3 Settings > Labs or use a connection with forwarding enabled.",
+            Failure::Reason::LinkedEnvironmentUnavailable);
+    if (code == "capability_denied" || code == "thread_credential_required" || code == "runtime_mode_escalation_denied" ||
+        code == "interaction_mode_escalation_denied")
         return Failure(Failure::Kind::Auth, "T3 OAuth approval does not allow this operation or mode");
     if (code == "thread_not_found" || (code == "invalid_request" && message == "The thread was not found."))
         return Failure(Failure::Kind::Tool, "T3 Session was not found", Failure::Reason::ThreadNotFound);
     if (code == "run_not_found" || code == "item_not_found" || code == "attachment_not_found")
         return Failure(Failure::Kind::Tool, "T3 history was not found", Failure::Reason::HistoryNotFound);
     if (code == "project_not_found" || (code == "invalid_request" && message == "The project was not found."))
-        return Failure(Failure::Kind::Settings, "T3 rejected the project, model, or workspace settings",
-                       Failure::Reason::ProjectNotFound);
+        return Failure(Failure::Kind::Settings, "T3 rejected the project, model, or workspace settings", Failure::Reason::ProjectNotFound);
     if (code == "model_unavailable" || code == "provider_unavailable" ||
-        (code == "invalid_request" && (message.starts_with("Pass modelSelection:") ||
-         message.find("No thread was created.") != std::string::npos)))
-        return Failure(Failure::Kind::Settings, "T3 rejected the project, model, or workspace settings",
-                       Failure::Reason::WorkSettings);
-    if (code == "invalid_request" && (message == "The pending user-input request was not found." ||
-        message == "The user-input request was already answered." ||
-        message.starts_with("The user-input request is no longer pending (")))
+        (code == "invalid_request" &&
+         (message.starts_with("Pass modelSelection:") || message.find("No thread was created.") != std::string::npos)))
+        return Failure(Failure::Kind::Settings, "T3 rejected the project, model, or workspace settings", Failure::Reason::WorkSettings);
+    if (code == "invalid_request" &&
+        (message == "The pending user-input request was not found." || message == "The user-input request was already answered." ||
+         message.starts_with("The user-input request is no longer pending (")))
         return Failure(Failure::Kind::Tool, message, Failure::Reason::QuestionGone);
     return Failure(Failure::Kind::Tool, "T3 rejected the operation");
 }
 
 Json Client::call(std::string_view tool, Json arguments) {
-    const bool targetTool = tool == "t3_project_list" || tool == "t3_project_read" ||
-        tool == "t3_thread_launch" || tool == "t3_thread_send" || tool == "t3_thread_wait" ||
-        tool == "t3_thread_read" || tool == "t3_thread_interrupt" || tool == "t3_thread_list" ||
-        tool == "t3_pending_request" || tool == "t3_queue";
+    const bool targetTool = tool == "t3_project_list" || tool == "t3_project_read" || tool == "t3_thread_launch" ||
+                            tool == "t3_thread_send" || tool == "t3_thread_wait" || tool == "t3_thread_read" ||
+                            tool == "t3_thread_interrupt" || tool == "t3_thread_list" || tool == "t3_pending_request" || tool == "t3_queue";
     if (!targetEnvironmentId_.empty() && targetTool) {
         if (!arguments.is_object()) invalidResponse();
-        if (arguments.contains("environmentId") && arguments.at("environmentId") != targetEnvironmentId_)
-            invalidResponse();
+        if (arguments.contains("environmentId") && arguments.at("environmentId") != targetEnvironmentId_) invalidResponse();
         arguments["environmentId"] = targetEnvironmentId_;
     }
     auto response = rpc("tools/call", {{"name", tool}, {"arguments", std::move(arguments)}});
@@ -302,12 +317,11 @@ Json Client::call(std::string_view tool, Json arguments) {
     Json data = response.value("structuredContent", Json());
     if (data.is_null()) {
         const auto content = response.find("content");
-        if (content != response.end() && content->is_array() && content->size() == 1 &&
-            str(content->front(), "type") == "text") {
-            const auto detail = str(content->front(),"text");
+        if (content != response.end() && content->is_array() && content->size() == 1 && str(content->front(), "type") == "text") {
+            const auto detail = str(content->front(), "text");
             if (isError && detail.starts_with("MCP error -32602: Input validation error:") && rejectsDelegatedFrom(detail))
-                throw Failure(Failure::Kind::Tool,"T3 rejected the delegatedFrom launch field",Failure::Reason::DelegatedFromRejected);
-            data = Json::parse(detail,nullptr,false);
+                throw Failure(Failure::Kind::Tool, "T3 rejected the delegatedFrom launch field", Failure::Reason::DelegatedFromRejected);
+            data = Json::parse(detail, nullptr, false);
         }
     }
     if (isError) throw toolFailure(data);
@@ -315,24 +329,22 @@ Json Client::call(std::string_view tool, Json arguments) {
     return data;
 }
 
-Json readThread(Client& client, std::string_view threadId, std::string_view view, unsigned limit, int chars,
-                Json args, int runLimit) {
-    args.update(Json{{"threadId",threadId},{"view",view},{"limit",limit},{"maxCharsPerItem",chars},{"runLimit",runLimit}});
-    auto page = client.call("t3_thread_read",std::move(args));
-    if (str(member(page,"thread"),"threadId") != threadId || array(page,"items").size() > limit)
-        invalidResponse();
+Json readThread(Client& client, std::string_view threadId, std::string_view view, unsigned limit, int chars, Json args, int runLimit) {
+    args.update(Json{{"threadId", threadId}, {"view", view}, {"limit", limit}, {"maxCharsPerItem", chars}, {"runLimit", runLimit}});
+    auto page = client.call("t3_thread_read", std::move(args));
+    if (str(member(page, "thread"), "threadId") != threadId || array(page, "items").size() > limit) invalidResponse();
     return page;
 }
 
 void advancePosition(const Json& item, Id& after) {
-    const auto next = position(member(item,"position"));
+    const auto next = position(member(item, "position"));
     if (next <= after) invalidResponse();
     after = next;
 }
 
 bool moreHistory(const Json& page, Id after, Id start) {
-    if (!boolean(page,"hasMore")) return false;
-    if (after <= start || position(member(page,"nextPosition")) != after) invalidResponse();
+    if (!boolean(page, "hasMore")) return false;
+    if (after <= start || position(member(page, "nextPosition")) != after) invalidResponse();
     return true;
 }
 }

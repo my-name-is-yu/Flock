@@ -29,97 +29,97 @@ void pageAssets(Browser& browser, const std::string& html) {
     const std::regex href(R"(\shref\s*=\s*["']([^"']+)["'])");
     const std::regex stylesheet(R"(\srel\s*=\s*["']stylesheet["'])");
     bool hasScript = false, hasStylesheet = false;
-    for (auto tag = std::sregex_iterator(html.begin(),html.end(),tags); tag != std::sregex_iterator(); ++tag) {
+    for (auto tag = std::sregex_iterator(html.begin(), html.end(), tags); tag != std::sregex_iterator(); ++tag) {
         const auto markup = tag->str();
         const bool script = (*tag)[1] == "script";
-        if (!script && !std::regex_search(markup,stylesheet)) continue;
+        if (!script && !std::regex_search(markup, stylesheet)) continue;
         std::smatch reference;
-        if (!std::regex_search(markup,reference,script ? source : href)) continue;
+        if (!std::regex_search(markup, reference, script ? source : href)) continue;
         auto path = reference[1].str();
-        if (!path.starts_with('/')) path.insert(0,"/");
+        if (!path.starts_with('/')) path.insert(0, "/");
         const auto asset = browser.client.Get(path);
-        check(asset && asset->status == 200 && !asset->body.empty(),"missing page asset: " + path);
+        check(asset && asset->status == 200 && !asset->body.empty(), "missing page asset: " + path);
         const auto contentType = asset->get_header_value("Content-Type");
-        const auto mediaType = contentType.substr(0,contentType.find(';'));
+        const auto mediaType = contentType.substr(0, contentType.find(';'));
         check(script ? mediaType == "text/javascript" || mediaType == "application/javascript" : mediaType == "text/css",
               "incorrect media type for page asset: " + path);
-        if (script) hasScript = true;
-        else hasStylesheet = true;
+        if (script)
+            hasScript = true;
+        else
+            hasStylesheet = true;
     }
-    check(hasScript && hasStylesheet,"landing page does not load its script and stylesheet");
+    check(hasScript && hasStylesheet, "landing page does not load its script and stylesheet");
 }
 
 void boundary(Browser& browser) {
     auto landing = browser.client.Get("/");
-    check(landing && landing->status == 200 && !landing->body.empty() &&
-          landing->get_header_value("Content-Type").starts_with("text/html"),"Flock did not serve its landing page");
+    check(landing && landing->status == 200 && !landing->body.empty() && landing->get_header_value("Content-Type").starts_with("text/html"),
+          "Flock did not serve its landing page");
     check(landing->get_header_value("X-Frame-Options") == "DENY" &&
-          landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
+              landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
-    pageAssets(browser,landing->body);
-    for (const auto* path : {"/event-history.mjs","/live-updates.js","/avatars.js","/bot-editor.js","/composer-drafts.mjs","/flock.svg",
-                            "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
+    pageAssets(browser, landing->body);
+    for (const auto* path : {"/event-history.mjs", "/live-updates.js", "/avatars.js", "/bot-editor.js", "/composer-drafts.mjs",
+                             "/flock.svg", "/vendor/open-bot-avatar/index.js", "/vendor/open-bot-avatar/dom/index.js"}) {
         auto asset = browser.client.Get(path);
-        check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
+        check(asset && asset->status == 200 && !asset->body.empty(), "missing embedded browser asset");
     }
-    const httplib::Headers channelNavigation{{"Sec-Fetch-Site","cross-site"},
-        {"Sec-Fetch-Mode","navigate"},{"Sec-Fetch-Dest","document"}};
-    Browser::checked(browser.client.Get("/settings/release/access",channelNavigation),403);
-    Browser::checked(browser.client.Get("/settings/release/access"),404);
-    const auto missingPage = browser.client.Get("/settings/release/access",httplib::Headers{{"Accept","text/html,*/*"}});
-    check(missingPage && missingPage->status == 404 &&
-          missingPage->get_header_value("Content-Type").starts_with("text/html") &&
-          missingPage->body.find("Page not found") != std::string::npos,"browser navigation to a missing page did not get the HTML page");
-    const auto rejectedHtml = browser.client.Get("/settings/release/access",
-        httplib::Headers{{"Accept","text/html;q=0, application/json"}});
-    check(rejectedHtml && rejectedHtml->status == 404 &&
-          rejectedHtml->get_header_value("Content-Type").starts_with("application/json"),
+    const httplib::Headers channelNavigation{
+        {"Sec-Fetch-Site", "cross-site"}, {"Sec-Fetch-Mode", "navigate"}, {"Sec-Fetch-Dest", "document"}};
+    Browser::checked(browser.client.Get("/settings/release/access", channelNavigation), 403);
+    Browser::checked(browser.client.Get("/settings/release/access"), 404);
+    const auto missingPage = browser.client.Get("/settings/release/access", httplib::Headers{{"Accept", "text/html,*/*"}});
+    check(missingPage && missingPage->status == 404 && missingPage->get_header_value("Content-Type").starts_with("text/html") &&
+              missingPage->body.find("Page not found") != std::string::npos,
+          "browser navigation to a missing page did not get the HTML page");
+    const auto rejectedHtml =
+        browser.client.Get("/settings/release/access", httplib::Headers{{"Accept", "text/html;q=0, application/json"}});
+    check(rejectedHtml && rejectedHtml->status == 404 && rejectedHtml->get_header_value("Content-Type").starts_with("application/json"),
           "an explicitly rejected HTML page was rendered");
-    const auto missingApi = browser.client.Get("/api/missing",httplib::Headers{{"Accept","text/html,*/*"}});
+    const auto missingApi = browser.client.Get("/api/missing", httplib::Headers{{"Accept", "text/html,*/*"}});
     check(missingApi && missingApi->status == 404 && missingApi->body.find("http_error") != std::string::npos,
           "a missing API route returned HTML instead of a JSON error");
     const auto draft = R"({"botId":"release","clientMessageId":"draft","text":"do not accept this"})";
-    Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Host","rebound.invalid"}}),403);
-    Browser::checked(browser.client.Get("/",httplib::Headers{{"Host","rebound.invalid"}}),403);
-    Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Origin","https://other.invalid"}}),403);
-    Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Sec-Fetch-Site","same-site"}}),403);
-    Browser::checked(browser.client.Post("/api/messages",draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/messages",{{"Origin",browser.origin}},draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/messages",{{"Origin","null"},{"X-Flock-Action","1"}},draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/messages",browser.headers(),draft,"text/plain"),415);
-    Browser::checked(browser.client.Post("/api/messages",browser.headers(),"{","application/json"),400);
-    Browser::checked(browser.client.Post("/api/operations",browser.headers(),std::string(140000,'x'),"application/json"),413);
-    const auto preflight = browser.client.Options("/api/messages",{{"Origin","https://other.invalid"}});
-    check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
-    Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
-    Browser::checked(browser.client.Get("/api/view?bot=missing"),404);
-    check(browser.get("/api/view?bot=release").at("composerPerson").is_null(),"local composer was given an authenticated identity");
-    for (const std::string path : {"/api/compactions","/api/workflows"}) {
-        check(browser.get(path+"?bot=release").is_array(),"Missing inspector collection");
-        Browser::checked(browser.client.Get(path+"?bot=missing"),404);
+    Browser::checked(browser.client.Get("/api/bots", httplib::Headers{{"Host", "rebound.invalid"}}), 403);
+    Browser::checked(browser.client.Get("/", httplib::Headers{{"Host", "rebound.invalid"}}), 403);
+    Browser::checked(browser.client.Get("/api/bots", httplib::Headers{{"Origin", "https://other.invalid"}}), 403);
+    Browser::checked(browser.client.Get("/api/bots", httplib::Headers{{"Sec-Fetch-Site", "same-site"}}), 403);
+    Browser::checked(browser.client.Post("/api/messages", draft, "application/json"), 403);
+    Browser::checked(browser.client.Post("/api/messages", {{"Origin", browser.origin}}, draft, "application/json"), 403);
+    Browser::checked(browser.client.Post("/api/messages", {{"Origin", "null"}, {"X-Flock-Action", "1"}}, draft, "application/json"), 403);
+    Browser::checked(browser.client.Post("/api/messages", browser.headers(), draft, "text/plain"), 415);
+    Browser::checked(browser.client.Post("/api/messages", browser.headers(), "{", "application/json"), 400);
+    Browser::checked(browser.client.Post("/api/operations", browser.headers(), std::string(140000, 'x'), "application/json"), 413);
+    const auto preflight = browser.client.Options("/api/messages", {{"Origin", "https://other.invalid"}});
+    check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),
+          "cross-origin preflight was permitted");
+    Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"), 400);
+    Browser::checked(browser.client.Get("/api/view?bot=missing"), 404);
+    check(browser.get("/api/view?bot=release").at("composerPerson").is_null(), "local composer was given an authenticated identity");
+    for (const std::string path : {"/api/compactions", "/api/workflows"}) {
+        check(browser.get(path + "?bot=release").is_array(), "Missing inspector collection");
+        Browser::checked(browser.client.Get(path + "?bot=missing"), 404);
     }
-    browser.post("/api/requests",{{"botId","release"},{"clientRequestId","draft"},{"request","test"}},404);
+    browser.post("/api/requests", {{"botId", "release"}, {"clientRequestId", "draft"}, {"request", "test"}}, 404);
 }
 
 constexpr auto screenshotPixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
 std::string screenshotPng(std::size_t size) {
-    auto png = decodeBase64(screenshotPixel,1024);
-    std::string chunk(size - png.size(),'x');
+    auto png = decodeBase64(screenshotPixel, 1024);
+    std::string chunk(size - png.size(), 'x');
     const auto writeUint32 = [&](std::size_t offset, std::uint32_t value) {
-        for (unsigned byte = 0; byte < 4; ++byte)
-            chunk[offset + byte] = static_cast<char>(value >> (24 - byte * 8));
+        for (unsigned byte = 0; byte < 4; ++byte) chunk[offset + byte] = static_cast<char>(value >> (24 - byte * 8));
     };
-    writeUint32(0,static_cast<std::uint32_t>(chunk.size() - 12));
-    chunk.replace(4,9,"tEXtNote\0",9);
+    writeUint32(0, static_cast<std::uint32_t>(chunk.size() - 12));
+    chunk.replace(4, 9, "tEXtNote\0", 9);
     std::uint32_t crc = 0xffffffff;
-    for (const unsigned char byte : std::string_view(chunk).substr(4,chunk.size() - 8)) {
+    for (const unsigned char byte : std::string_view(chunk).substr(4, chunk.size() - 8)) {
         crc ^= byte;
-        for (unsigned bit = 0; bit < 8; ++bit)
-            crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+        for (unsigned bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
     }
-    writeUint32(chunk.size() - 4,~crc);
-    png.insert(png.size() - 12,chunk);
+    writeUint32(chunk.size() - 4, ~crc);
+    png.insert(png.size() - 12, chunk);
     return encodeBase64(png);
 }
 
@@ -127,102 +127,98 @@ void messageAttachmentLimits(const std::filesystem::path& path) {
     constexpr std::size_t imageLimit = 2 * 1024 * 1024;
     constexpr auto endpoint = "/api/messages";
     Store store(path);
-    const auto server = startWeb(store,0,callbacks());
+    const auto server = startWeb(store, 0, callbacks());
     Browser browser(*server);
-    const Json small{{"name","screenshot.png"},{"mimeType","image/png"},{"dataBase64",screenshotPixel}};
+    const Json small{{"name", "screenshot.png"}, {"mimeType", "image/png"}, {"dataBase64", screenshotPixel}};
     const auto message = [](std::string_view key, const Json& attachments) {
-        return Json{{"botId","release"},{"clientMessageId",key},
-            {"text","Look at these screenshots"},{"attachments",attachments}};
+        return Json{{"botId", "release"}, {"clientMessageId", key}, {"text", "Look at these screenshots"}, {"attachments", attachments}};
     };
     const auto submit = [&](std::string_view key, const Json& attachments, int status) {
-        return browser.post(endpoint,message(key,attachments),status);
+        return browser.post(endpoint, message(key, attachments), status);
     };
 
     auto large = small;
     large["dataBase64"] = screenshotPng(imageLimit);
-    const auto four = Json::array({large,large,large,large});
-    const auto receipt = submit("four-screenshots",four,201);
-    check(submit("four-screenshots",four,201) == receipt,"large attachments changed the message receipt on retry");
+    const auto four = Json::array({large, large, large, large});
+    const auto receipt = submit("four-screenshots", four, 201);
+    check(submit("four-screenshots", four, 201) == receipt, "large attachments changed the message receipt on retry");
 
-    submit("too-many",Json::array({small,small,small,small,small}),409);
+    submit("too-many", Json::array({small, small, small, small, small}), 409);
     large["dataBase64"] = screenshotPng(imageLimit + 1);
-    submit("too-large",Json::array({large}),409);
+    submit("too-large", Json::array({large}), 409);
     auto mismatch = small;
     mismatch["mimeType"] = "image/jpeg";
-    submit("wrong-type",Json::array({mismatch}),409);
+    submit("wrong-type", Json::array({mismatch}), 409);
     auto invalidBase64 = small;
     invalidBase64["dataBase64"] = "!!!!";
-    submit("bad-encoding",Json::array({invalidBase64}),409);
+    submit("bad-encoding", Json::array({invalidBase64}), 409);
 
-    std::string audio(64 * 1024 + 1,'x');
-    audio.replace(0,3,"ID3");
-    submit("oversized-audio",Json::array({{{"name","clip.mp3"},{"mimeType","audio/mpeg"},
-        {"dataBase64",encodeBase64(audio)}}}),409);
+    std::string audio(64 * 1024 + 1, 'x');
+    audio.replace(0, 3, "ID3");
+    submit("oversized-audio", Json::array({{{"name", "clip.mp3"}, {"mimeType", "audio/mpeg"}, {"dataBase64", encodeBase64(audio)}}}), 409);
 
-    auto oversized = message("oversized-request",four).dump();
-    oversized.append(256 * 1024,' ');
+    auto oversized = message("oversized-request", four).dump();
+    oversized.append(256 * 1024, ' ');
     auto headers = browser.headers();
-    headers.emplace("Expect","100-continue");
-    const auto response = browser.client.Post(endpoint,headers,oversized,"application/json");
-    Browser::checked(response,413);
+    headers.emplace("Expect", "100-continue");
+    const auto response = browser.client.Post(endpoint, headers, oversized, "application/json");
+    Browser::checked(response, 413);
 
     const auto view = browser.get("/api/view?bot=release");
     const auto& events = view.at("events");
-    check(events.size() == 1 && events[0].at("id") == receipt.at("messageId") &&
-          events[0].at("data").at("imageAttachmentCount") == 4,
+    check(events.size() == 1 && events[0].at("id") == receipt.at("messageId") && events[0].at("data").at("imageAttachmentCount") == 4,
           "HTTP attachment intake did not save exactly four screenshots on one message");
-    check(!events[0].at("data").contains("attachments"),"HTTP projection exposed attachment payloads");
+    check(!events[0].at("data").contains("attachments"), "HTTP projection exposed attachment payloads");
 }
 
 void messageReceipts(const std::filesystem::path& path) {
-    const Person owner{"owner",true};
+    const Person owner{"owner", true};
     auto web = callbacks();
     web.authenticate = [](std::string_view credential) {
-        if (credential == "Bearer requester") return Person{"requester",false};
-        if (credential == "Bearer other") return Person{"other",false};
+        if (credential == "Bearer requester") return Person{"requester", false};
+        if (credential == "Bearer other") return Person{"other", false};
         return Person{};
     };
     web.resolveIdentity = [](std::string_view person) -> std::optional<bool> {
         if (person == "requester" || person == "other") return false;
         return std::nullopt;
     };
-    const Json message{{"botId","release"},{"clientMessageId","draft"},{"text","Draft the release notes"}};
+    const Json message{{"botId", "release"}, {"clientMessageId", "draft"}, {"text", "Draft the release notes"}};
     Json accepted;
     {
         Store store(path);
         auto access = store.policy();
-        access.setMember(owner,"release","requester",true);
-        access.setMember(owner,"release","other",true);
-        access.setMember(owner,"triage","requester",true);
+        access.setMember(owner, "release", "requester", true);
+        access.setMember(owner, "release", "other", true);
+        access.setMember(owner, "triage", "requester", true);
         auto configured = web;
-        configured.intake = [route=web.intake,&access,&owner](std::string_view bot, std::string_view text) {
-            if (text == "Revoke while loading settings")
-                access.setMember(owner,"release","requester",false);
-            return route(bot,text);
+        configured.intake = [route = web.intake, &access, &owner](std::string_view bot, std::string_view text) {
+            if (text == "Revoke while loading settings") access.setMember(owner, "release", "requester", false);
+            return route(bot, text);
         };
-        const auto server = startWeb(store,0,configured);
+        const auto server = startWeb(store, 0, configured);
         Browser requester(*server), other(*server);
-        requester.client.set_default_headers({{"Authorization","Bearer requester"}});
-        other.client.set_default_headers({{"Authorization","Bearer other"}});
+        requester.client.set_default_headers({{"Authorization", "Bearer requester"}});
+        other.client.set_default_headers({{"Authorization", "Bearer other"}});
 
         auto missingId = message;
         missingId.erase("clientMessageId");
-        requester.post("/api/messages",missingId,400);
-        accepted = requester.post("/api/messages",message,201);
+        requester.post("/api/messages", missingId, 400);
+        accepted = requester.post("/api/messages", message, 201);
         check(accepted.at("status") == "received" && accepted.at("messageId").get<Id>() > 0,
               "HTTP intake did not return a message receipt");
-        check(requester.post("/api/messages",message,201) == accepted,"identical retry created a new message");
-        check(other.post("/api/messages",message,201) != accepted,"different actors shared a receipt");
+        check(requester.post("/api/messages", message, 201) == accepted, "identical retry created a new message");
+        check(other.post("/api/messages", message, 201) != accepted, "different actors shared a receipt");
         auto otherBot = message;
         otherBot["botId"] = "triage";
-        check(requester.post("/api/messages",otherBot,201) != accepted,"different Bots shared a receipt");
+        check(requester.post("/api/messages", otherBot, 201) != accepted, "different Bots shared a receipt");
 
-        const Json revoked{{"botId","release"},{"clientMessageId","revoked"},{"text","Revoke while loading settings"}};
-        requester.post("/api/messages",revoked,403);
-        requester.post("/api/messages",message,403);
+        const Json revoked{{"botId", "release"}, {"clientMessageId", "revoked"}, {"text", "Revoke while loading settings"}};
+        requester.post("/api/messages", revoked, 403);
+        requester.post("/api/messages", message, 403);
         check(store.conversation("release").size() == 2 && store.conversation("triage").size() == 1 && store.tasks().empty(),
               "denied or replayed messages duplicated conversation entries or started work");
-        access.setMember(owner,"release","requester",true);
+        access.setMember(owner, "release", "requester", true);
     }
     {
         Store store(path);
@@ -231,14 +227,14 @@ void messageReceipts(const std::filesystem::path& path) {
             ++intakeCalls;
             throw std::runtime_error("The Bot settings are temporarily unavailable");
         };
-        const auto server = startWeb(store,0,web);
+        const auto server = startWeb(store, 0, web);
         Browser requester(*server);
-        requester.client.set_default_headers({{"Authorization","Bearer requester"}});
-        check(requester.post("/api/messages",message,201) == accepted && intakeCalls == 0,
+        requester.client.set_default_headers({{"Authorization", "Bearer requester"}});
+        check(requester.post("/api/messages", message, 201) == accepted && intakeCalls == 0,
               "message receipt was lost on reopen or needed current Bot settings");
         auto changed = message;
         changed["text"] = "Draft something else";
-        check(requester.post("/api/messages",changed,409).at("error") == "message_conflict",
+        check(requester.post("/api/messages", changed, 409).at("error") == "message_conflict",
               "changing the text behind a receipt did not conflict");
         check(store.conversation("release").size() == 2 && store.conversation("triage").size() == 1 && store.tasks().empty(),
               "replaying persisted receipts duplicated conversation entries or started work");
@@ -246,41 +242,38 @@ void messageReceipts(const std::filesystem::path& path) {
 }
 
 void checkPresence(Browser& browser, const Json& list, const std::string& bot, std::string_view expected) {
-    const auto row = std::find_if(list.begin(),list.end(),[&](const Json& candidate) {
-        return candidate.at("id") == bot;
-    });
-    check(row != list.end(),"Bot list is missing " + bot);
-    check(row->at("presence") == expected,"unexpected Bot list presence for " + bot);
+    const auto row = std::find_if(list.begin(), list.end(), [&](const Json& candidate) { return candidate.at("id") == bot; });
+    check(row != list.end(), "Bot list is missing " + bot);
+    check(row->at("presence") == expected, "unexpected Bot list presence for " + bot);
     const auto view = browser.get("/api/view?bot=" + bot);
-    check(view.at("presence") == expected,"unexpected Bot view presence for " + bot);
+    check(view.at("presence") == expected, "unexpected Bot view presence for " + bot);
 }
 
 bool hasEvent(const Json& events, std::string_view kind, std::string_view field, std::string_view text) {
     for (const auto& event : events) {
         if (event["kind"] != kind) continue;
-        if (event.at("data").value(field,std::string{}) == text) return true;
+        if (event.at("data").value(field, std::string{}) == text) return true;
     }
     return false;
 }
 
-void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id triage,
-                       const std::map<Id,std::string>& earlierRequests) {
-    std::map<Id,std::string> expectedRequests = {
-        {release,"下書きの掲載範囲を確認する"},
-        {next,"次の版の変更点を調べる"},
+void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id triage, const std::map<Id, std::string>& earlierRequests) {
+    std::map<Id, std::string> expectedRequests = {
+        {release, "下書きの掲載範囲を確認する"},
+        {next, "次の版の変更点を調べる"},
     };
-    expectedRequests.insert(earlierRequests.begin(),earlierRequests.end());
+    expectedRequests.insert(earlierRequests.begin(), earlierRequests.end());
     for (int i = 0; i < 43; ++i) {
         const auto text = "Paged request " + std::to_string(i);
-        const auto id = cli.submit({"release",text,"local-env","release"});
-        expectedRequests.emplace(id,text);
+        const auto id = cli.submit({"release", text, "local-env", "release"});
+        expectedRequests.emplace(id, text);
     }
 
     auto page = browser.get("/api/view?bot=release");
-    check(page.at("olderBefore").get<Id>() > 0,"conversation did not offer older history");
-    const std::map<std::string,std::pair<std::string,std::string>> expectedResults{
-        {"report",{"report","T3 finished while the browser was closed"}},
-        {"completed",{"text","Draft complete"}},
+    check(page.at("olderBefore").get<Id>() > 0, "conversation did not offer older history");
+    const std::map<std::string, std::pair<std::string, std::string>> expectedResults{
+        {"report", {"report", "T3 finished while the browser was closed"}},
+        {"completed", {"text", "Draft complete"}},
     };
     std::set<std::string> foundResults;
     std::set<Id> cursors;
@@ -290,14 +283,13 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
         Id previous = 0;
         for (const auto& event : events) {
             const auto id = event.at("id").get<Id>();
-            check(id > previous && (oldestSeen == 0 || id < oldestSeen),"conversation order or page boundary was incorrect");
+            check(id > previous && (oldestSeen == 0 || id < oldestSeen), "conversation order or page boundary was incorrect");
             previous = id;
             const auto task = event.at("taskId").get<Id>();
-            check(task != triage,"conversation included another Bot's history");
+            check(task != triage, "conversation included another Bot's history");
             const auto kind = event.at("kind").get<std::string>();
             if (const auto expected = expectedResults.find(kind); task == release && expected != expectedResults.end()) {
-                check(foundResults.insert(kind).second &&
-                      event.at("data").at(expected->second.first) == expected->second.second,
+                check(foundResults.insert(kind).second && event.at("data").at(expected->second.first) == expected->second.second,
                       "conversation returned a wrong or repeated report or completion");
             }
             if (kind != "request") continue;
@@ -309,34 +301,33 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
         }
         const auto before = page.at("olderBefore").get<Id>();
         if (before == 0) break;
-        check(!events.empty() && cursors.insert(before).second,"older conversation cursor did not advance");
+        check(!events.empty() && cursors.insert(before).second, "older conversation cursor did not advance");
         oldestSeen = events.front().at("id").get<Id>();
         page = browser.get("/api/conversation?bot=release&before=" + std::to_string(before));
     } while (true);
-    check(expectedRequests.empty(),"conversation pagination skipped requests");
-    check(foundResults.size() == expectedResults.size(),"conversation pagination skipped a report or completion");
+    check(expectedRequests.empty(), "conversation pagination skipped requests");
+    check(foundResults.size() == expectedResults.size(), "conversation pagination skipped a report or completion");
 }
 
 void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, Id triage) {
     const auto original = browser.get("/api/view?bot=triage");
     const auto viewPath = [](const Json& page) {
-        return "/api/view?bot=triage&changesAfter=" + page.at("historyCursor").dump() +
-            "&sessionsAfter=" + page.at("sessionCursor").dump();
+        return "/api/view?bot=triage&changesAfter=" + page.at("historyCursor").dump() + "&sessionsAfter=" + page.at("sessionCursor").dump();
     };
     std::set<Id> expectedTasks = {triage};
     Id failed = 0, historical = 0;
     for (int i = 0; i < 8; ++i) {
         const auto id = std::to_string(i);
-        const auto task = cli.submit({"triage","Session " + id,"linked env","separate-" + id});
+        const auto task = cli.submit({"triage", "Session " + id, "linked env", "separate-" + id});
         expectedTasks.insert(task);
         if (i == 0) failed = task;
         if (i == 1) historical = task;
     }
     const auto allRunsStarted = [&] {
-        return std::ranges::all_of(expectedTasks,[&](Id id) { return cli.task(id).at("runs").size() == 1; });
+        return std::ranges::all_of(expectedTasks, [&](Id id) { return cli.task(id).at("runs").size() == 1; });
     };
     for (int attempt = 0; attempt < 20 && !allRunsStarted(); ++attempt) runtime.tick();
-    check(allRunsStarted(),"session fixtures did not each start one Run");
+    check(allRunsStarted(), "session fixtures did not each start one Run");
 
     const auto updates = browser.get(viewPath(original));
     check(updates.contains("historyCursor") && updates.contains("changedMessageIds") && updates.contains("sessionCursor"),
@@ -344,20 +335,21 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     auto expectedAdded = expectedTasks;
     expectedAdded.erase(triage);
     for (const auto& task : updates.at("sessionTasks"))
-        check(expectedAdded.erase(task.at("id").get<Id>()) == 1,"refresh returned an unexpected Session task");
-    check(expectedAdded.empty(),"refresh missed new Sessions outside the newest page");
-    check(browser.get(viewPath(updates)).at("sessionTasks").empty(),
-          "refresh returned unchanged Session history");
+        check(expectedAdded.erase(task.at("id").get<Id>()) == 1, "refresh returned an unexpected Session task");
+    check(expectedAdded.empty(), "refresh missed new Sessions outside the newest page");
+    check(browser.get(viewPath(updates)).at("sessionTasks").empty(), "refresh returned unchanged Session history");
 
     constexpr auto creation = "2026-11-21T00:15:00.000Z";
-    t3.observations["thread-separate-0"] = {.kind=Observation::Kind::Finished,.status="failed",
-        .report="The health check failed",.resultRunId="distinct-result-run",.sessionCreatedAt=creation};
-    t3.observations["thread-separate-1"] = {.kind=Observation::Kind::Finished,
-        .report="Historical report without a status"};
-    tick(runtime,3);
+    t3.observations["thread-separate-0"] = {.kind = Observation::Kind::Finished,
+                                            .status = "failed",
+                                            .report = "The health check failed",
+                                            .resultRunId = "distinct-result-run",
+                                            .sessionCreatedAt = creation};
+    t3.observations["thread-separate-1"] = {.kind = Observation::Kind::Finished, .report = "Historical report without a status"};
+    tick(runtime, 3);
     const auto settled = browser.get(viewPath(updates));
     const auto& settledTasks = settled.at("sessionTasks");
-    const std::map<Id,std::string_view> states = {{failed,"failed"},{historical,"ended"}};
+    const std::map<Id, std::string_view> states = {{failed, "failed"}, {historical, "ended"}};
     check(settled.at("sessionCursor") > updates.at("sessionCursor") && settledTasks.size() == states.size(),
           "settled Runs did not advance the Session cursor");
     for (const auto& task : settledTasks) {
@@ -370,76 +362,78 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     }
 
     auto page = browser.get("/api/view?bot=triage");
-    check(page.at("sessionsBefore").get<Id>() > 0,"session list did not offer older history");
+    check(page.at("sessionsBefore").get<Id>() > 0, "session list did not offer older history");
     std::set<Id> cursors;
     do {
         const auto& tasks = page.at("sessionTasks");
-        check(!tasks.empty(),"session page contained no tasks");
+        check(!tasks.empty(), "session page contained no tasks");
         for (const auto& task : tasks) {
             const auto id = task.at("id").get<Id>();
-            check(expectedTasks.erase(id) == 1,"session page returned an unexpected or repeated task");
-            check(!task.at("sessions").empty(),"session task contained no links to work");
+            check(expectedTasks.erase(id) == 1, "session page returned an unexpected or repeated task");
+            check(!task.at("sessions").empty(), "session task contained no links to work");
             if (id == triage || id == failed || id == historical) {
                 const auto expected = id == triage ? "completed" : id == failed ? "failed" : "ended";
-                check(task.at("sessions").at(0).at("state") == expected,"Session history lost its terminal state");
+                check(task.at("sessions").at(0).at("state") == expected, "Session history lost its terminal state");
             }
         }
         const auto before = page.at("sessionsBefore").get<Id>();
         if (before == 0) break;
-        check(cursors.insert(before).second,"session cursor did not advance");
+        check(cursors.insert(before).second, "session cursor did not advance");
         page = browser.get("/api/sessions?bot=triage&before=" + std::to_string(before));
     } while (true);
-    check(expectedTasks.empty(),"session pagination skipped tasks");
+    check(expectedTasks.empty(), "session pagination skipped tasks");
 }
 
 void failedCompletion(const std::filesystem::path& path) {
     Store store(path);
     FixedModel model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
-    t3.observations["thread-release"] = {.kind=Observation::Kind::Finished,.status="failed",
-        .report="The health check failed",.resultRunId="failed-result",.itemId="failed-report"};
-    store.submit({"release","Verify staging","local-env","release"});
-    tick(runtime,8);
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
+    t3.observations["thread-release"] = {.kind = Observation::Kind::Finished,
+                                         .status = "failed",
+                                         .report = "The health check failed",
+                                         .resultRunId = "failed-result",
+                                         .itemId = "failed-report"};
+    store.submit({"release", "Verify staging", "local-env", "release"});
+    tick(runtime, 8);
 
-    const auto server = startWeb(store,0,callbacks());
+    const auto server = startWeb(store, 0, callbacks());
     Browser browser(*server);
     const auto events = browser.get("/api/conversation?bot=release").at("events");
-    check(hasEvent(events,"completed","runStatus","failed"),"the final Bot message lost its failed Session outcome");
+    check(hasEvent(events, "completed", "runStatus", "failed"), "the final Bot message lost its failed Session outcome");
 }
 
 struct PeerModel final : Model {
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         if (input.event["kind"] == "intake")
-            return {"send_bot_message",{{"botId","triage"},{"kind","consult"},{"text","判定基準を教えて"}},
-                "Triage owns the criteria"};
+            return {
+                "send_bot_message", {{"botId", "triage"}, {"kind", "consult"}, {"text", "判定基準を教えて"}}, "Triage owns the criteria"};
         if (input.event["kind"] == "bot_request")
-            return {"reply_to_bot",{{"kind","result"},{"text","再現条件を確認してください"}},
-                "The requested criteria are already known"};
-        check(input.event["kind"] == "bot_result","unexpected peer history fixture event");
-        return {"complete",{{"report","判定基準を確認しました"}},"Triage answered the request"};
+            return {
+                "reply_to_bot", {{"kind", "result"}, {"text", "再現条件を確認してください"}}, "The requested criteria are already known"};
+        check(input.event["kind"] == "bot_result", "unexpected peer history fixture event");
+        return {"complete", {{"report", "判定基準を確認しました"}}, "Triage answered the request"};
     }
 };
 
 std::vector<PeerBot> fixturePeers(std::string_view sender) {
     if (sender != "release") return {};
-    return {{"Triage",{"triage","","local-env","release"}}};
+    return {{"Triage", {"triage", "", "local-env", "release"}}};
 }
 
 void seedPeerHistory(Store& store, Browser& browser, Runtime& runtime, const FixedT3& t3) {
-    store.submit({"release","判定基準の確認","local-env","release"});
+    store.submit({"release", "判定基準の確認", "local-env", "release"});
     Json waiting;
     for (unsigned attempt = 0; attempt < 8; ++attempt) {
         runtime.tick();
         waiting = browser.get("/api/view?bot=release");
         if (waiting.at("presence") == "peer_waiting") break;
     }
-    check(waiting.at("waits").empty() && waiting.at("presence") == "peer_waiting",
-          "waiting on a peer was presented as a user action");
-    tick(runtime,8);
+    check(waiting.at("waits").empty() && waiting.at("presence") == "peer_waiting", "waiting on a peer was presented as a user action");
+    tick(runtime, 8);
     const auto finished = browser.get("/api/view?bot=release");
-    check(hasEvent(finished.at("events"),"completed","text","判定基準を確認しました") && t3.launches.empty(),
+    check(hasEvent(finished.at("events"), "completed", "text", "判定基準を確認しました") && t3.launches.empty(),
           "consultation did not show the result without starting a T3 Session");
 }
 
@@ -449,20 +443,20 @@ void peerHistory(const std::filesystem::path& path) {
     FixedT3 t3;
     RuntimeOptions options;
     options.peers = fixturePeers;
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
-    const auto server = startWeb(store,0,callbacks());
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
+    const auto server = startWeb(store, 0, callbacks());
     Browser browser(*server);
-    seedPeerHistory(store,browser,runtime,t3);
+    seedPeerHistory(store, browser, runtime, t3);
 
-    for (int i = 0; i < 2001; ++i) store.submit({"release","Newer request " + std::to_string(i),"local-env","release"});
+    for (int i = 0; i < 2001; ++i) store.submit({"release", "Newer request " + std::to_string(i), "local-env", "release"});
     const auto newest = browser.get("/api/view?bot=release");
     auto cursor = newest.at("olderBefore").get<Id>();
-    check(cursor > 0,"missing older peer history cursor");
-    check(newest.at("queued").size() == 2000,"overview lost its pending queue");
+    check(cursor > 0, "missing older peer history cursor");
+    check(newest.at("queued").size() == 2000, "overview lost its pending queue");
     const auto blocker = newest.at("queued").front().at("blockedBy").at("id");
-    check(std::all_of(newest.at("queued").begin(),newest.at("queued").end(),[&](const Json& row) {
-        return row.at("blockedBy").at("id") == blocker;
-    }),"overview reported a different head for the same project");
+    check(std::all_of(newest.at("queued").begin(), newest.at("queued").end(),
+                      [&](const Json& row) { return row.at("blockedBy").at("id") == blocker; }),
+          "overview reported a different head for the same project");
     const auto recipient = browser.get("/api/view?bot=triage");
     const auto peerMessages = [](const Json& page) {
         Json messages = Json::array();
@@ -474,36 +468,34 @@ void peerHistory(const std::filesystem::path& path) {
     while (cursor > 0) {
         const auto older = browser.get("/api/conversation?bot=release&before=" + std::to_string(cursor));
         const auto messages = peerMessages(older);
-        senderExchange.insert(senderExchange.begin(),messages.begin(),messages.end());
+        senderExchange.insert(senderExchange.begin(), messages.begin(), messages.end());
         const auto next = older.at("olderBefore").get<Id>();
-        check(0 <= next && next < cursor,"older peer history cursor did not advance");
+        check(0 <= next && next < cursor, "older peer history cursor did not advance");
         cursor = next;
     }
     const auto recipientExchange = peerMessages(recipient);
     const auto checkExchange = [](const Json& exchange) {
-        check(exchange.size() == 2,"peer history must show one request and one reply");
+        check(exchange.size() == 2, "peer history must show one request and one reply");
         const auto& request = exchange.at(0);
         const auto& reply = exchange.at(1);
-        check(request.at("messageType") == "request" && request.at("requestKind") == "consult" &&
-              request.at("fromBotId") == "release" && request.at("toBotId") == "triage" &&
-              request.at("text") == "判定基準を教えて","peer history lost the consultation request");
-        check(reply.at("messageType") == "result" && reply.at("fromBotId") == "triage" &&
-              reply.at("toBotId") == "release" && reply.at("text") == "再現条件を確認してください",
+        check(request.at("messageType") == "request" && request.at("requestKind") == "consult" && request.at("fromBotId") == "release" &&
+                  request.at("toBotId") == "triage" && request.at("text") == "判定基準を教えて",
+              "peer history lost the consultation request");
+        check(reply.at("messageType") == "result" && reply.at("fromBotId") == "triage" && reply.at("toBotId") == "release" &&
+                  reply.at("text") == "再現条件を確認してください",
               "peer history lost the consultation reply");
-        check(!request.at("exchangeId").get<std::string>().empty() &&
-              !request.at("messageId").get<std::string>().empty() &&
-              request.at("messageId") != reply.at("messageId") &&
-              request.at("exchangeId") == reply.at("exchangeId") && reply.at("replyTo") == request.at("messageId"),
+        check(!request.at("exchangeId").get<std::string>().empty() && !request.at("messageId").get<std::string>().empty() &&
+                  request.at("messageId") != reply.at("messageId") && request.at("exchangeId") == reply.at("exchangeId") &&
+                  reply.at("replyTo") == request.at("messageId"),
               "peer history lost its message or thread identity");
     };
     checkExchange(senderExchange);
     checkExchange(recipientExchange);
     check(senderExchange.at(0).at("exchangeId") == recipientExchange.at(0).at("exchangeId") &&
-          senderExchange.at(0).at("messageId") == recipientExchange.at(0).at("messageId") &&
-          senderExchange.at(1).at("messageId") == recipientExchange.at(1).at("messageId"),
+              senderExchange.at(0).at("messageId") == recipientExchange.at(0).at("messageId") &&
+              senderExchange.at(1).at("messageId") == recipientExchange.at(1).at("messageId"),
           "sender and recipient see different message identities");
-    check(peerMessages(browser.get("/api/view?bot=settings")).empty(),
-          "peer history appeared in a third Bot's conversation");
+    check(peerMessages(browser.get("/api/view?bot=settings")).empty(), "peer history appeared in a third Bot's conversation");
 }
 
 void peerConversation(const std::filesystem::path& path) {
@@ -515,14 +507,14 @@ void peerConversation(const std::filesystem::path& path) {
     options.peers = [&](std::string_view sender) -> std::vector<PeerBot> {
         if (sender != "release") return {};
         auto peers = allowed ? fixturePeers(sender) : std::vector<PeerBot>{};
-        peers.push_back({"Settings",{"settings","","local-env","settings"}});
+        peers.push_back({"Settings", {"settings", "", "local-env", "settings"}});
         return peers;
     };
     auto web = callbacks();
-    web.bots = [all = web.bots,&configured] {
+    web.bots = [all = web.bots, &configured] {
         auto bots = all();
         if (!configured) {
-            const auto archived = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "triage"; });
+            const auto archived = std::ranges::find_if(bots, [](const Json& bot) { return bot.at("id") == "triage"; });
             bots.erase(archived);
         }
         return bots;
@@ -533,28 +525,28 @@ void peerConversation(const std::filesystem::path& path) {
     Json history;
     {
         Store store(path);
-        Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
-        const auto server = startWeb(store,0,web);
+        Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
+        const auto server = startWeb(store, 0, web);
         Browser browser(*server);
         const auto empty = browser.get(primary);
-        check(empty.at("messages").empty() && empty.at("hasOlder") == false &&
-              !empty.contains("canSend") && browser.get(reverse) == empty,
+        check(empty.at("messages").empty() && empty.at("hasOlder") == false && !empty.contains("canSend") && browser.get(reverse) == empty,
               "an unused permitted pair did not open as the same read-only history");
-        browser.post("/api/peer-messages",{{"botId","release"},{"peerId","triage"},
-            {"clientMessageId","direct-send"},{"text","Send directly to the peer"}},404);
+        browser.post(
+            "/api/peer-messages",
+            {{"botId", "release"}, {"peerId", "triage"}, {"clientMessageId", "direct-send"}, {"text", "Send directly to the peer"}}, 404);
         runtime.tick();
-        check(store.tasks().empty() && t3.launches.empty(),"opening a DM or posting to the old route started work");
-        Browser::checked(browser.client.Get("/api/peer-conversation?bot=triage&peer=settings"),403);
+        check(store.tasks().empty() && t3.launches.empty(), "opening a DM or posting to the old route started work");
+        Browser::checked(browser.client.Get("/api/peer-conversation?bot=triage&peer=settings"), 403);
 
-        seedPeerHistory(store,browser,runtime,t3);
+        seedPeerHistory(store, browser, runtime, t3);
         history = browser.get(primary).at("messages");
         check(history.size() == 2 && history == browser.get(reverse).at("messages"),
               "an exchange was missing, duplicated, or different from the opposite Bot page");
         check(history.at(0).at("data").at("text") == "判定基準を教えて" &&
-              history.at(1).at("data").at("text") == "再現条件を確認してください" &&
-              history.at(0).at("id").get<Id>() < history.at(1).at("id").get<Id>(),
+                  history.at(1).at("data").at("text") == "再現条件を確認してください" &&
+                  history.at(0).at("id").get<Id>() < history.at(1).at("id").get<Id>(),
               "the conversation lost its messages or order");
-        check(browser.get(separate).at("messages").empty(),"an exchange leaked to another allowed pair");
+        check(browser.get(separate).at("messages").empty(), "an exchange leaked to another allowed pair");
         const auto before = std::to_string(history.back().at("id").get<Id>());
         check(browser.get(std::string(reverse) + "&before=" + before).at("messages") == Json::array({history.front()}),
               "the peer history cursor repeated the anchor or skipped older messages");
@@ -562,8 +554,8 @@ void peerConversation(const std::filesystem::path& path) {
         const auto checkProjection = [](const Json& messages) {
             for (const auto& message : messages) {
                 if (message.at("kind") != "bot_message") continue;
-                check(!message.contains("taskId") && !message.contains("taskBotId") &&
-                      !message.at("data").contains("evidence"),"peer chat leaked internal task information");
+                check(!message.contains("taskId") && !message.contains("taskBotId") && !message.at("data").contains("evidence"),
+                      "peer chat leaked internal task information");
             }
         };
         checkProjection(history);
@@ -572,27 +564,27 @@ void peerConversation(const std::filesystem::path& path) {
     }
     {
         Store store(path);
-        const auto server = startWeb(store,0,web);
+        const auto server = startWeb(store, 0, web);
         Browser browser(*server);
-        check(browser.get(primary).at("messages") == history,"restarting lost the conversation");
+        check(browser.get(primary).at("messages") == history, "restarting lost the conversation");
         allowed = false;
-        check(browser.get(reverse).at("messages") == history,"removing a peer permission lost existing history");
-        Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=broken"),403);
-        Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=unknown"),404);
+        check(browser.get(reverse).at("messages") == history, "removing a peer permission lost existing history");
+        Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=broken"), 403);
+        Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=unknown"), 404);
         const auto bots = browser.get("/api/bots");
-        const auto triage = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "triage"; });
-        check(triage != bots.end() && triage->at("peers") == Json::array({Json{{"id","release"}}}),
+        const auto triage = std::ranges::find_if(bots, [](const Json& bot) { return bot.at("id") == "triage"; });
+        check(triage != bots.end() && triage->at("peers") == Json::array({Json{{"id", "release"}}}),
               "the recipient lost its historical partner after peer permission was removed");
         configured = false;
-        check(browser.get(primary).at("messages") == history,"removing a peer's configuration lost history");
+        check(browser.get(primary).at("messages") == history, "removing a peer's configuration lost history");
         const auto beforeFirst = std::to_string(history.front().at("id").get<Id>());
-        check(browser.get(std::string(primary) + "&before=" + beforeFirst) ==
-              Json{{"messages",Json::array()},{"hasOlder",false}},"an empty page of archived history could not be read");
+        check(browser.get(std::string(primary) + "&before=" + beforeFirst) == Json{{"messages", Json::array()}, {"hasOlder", false}},
+              "an empty page of archived history could not be read");
         const auto list = browser.get("/api/bots");
-        const auto release = std::ranges::find_if(list,[](const Json& bot) { return bot.at("id") == "release"; });
-        check(release != list.end() && std::ranges::any_of(release->at("peers"),[](const Json& peer) {
-            return peer == Json{{"id","triage"}};
-        }),"the picker lost the archived conversation or exposed a send action");
+        const auto release = std::ranges::find_if(list, [](const Json& bot) { return bot.at("id") == "release"; });
+        check(release != list.end() &&
+                  std::ranges::any_of(release->at("peers"), [](const Json& peer) { return peer == Json{{"id", "triage"}}; }),
+              "the picker lost the archived conversation or exposed a send action");
     }
 }
 
@@ -602,66 +594,63 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     FixedT3 t3;
     RuntimeOptions options;
     options.peers = fixturePeers;
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
     for (int i = 0; i < 36; ++i) {
-        store.submit({"release","Check release criteria","local-env","release"});
-        tick(runtime,8);
+        store.submit({"release", "Check release criteria", "local-env", "release"});
+        tick(runtime, 8);
     }
 
     auto web = callbacks();
     web.peers = [](std::string_view bot) {
         auto peers = fixturePeers(bot);
-        if (bot == "release") peers.push_back({"Settings",{"settings","","local-env","settings"}});
+        if (bot == "release") peers.push_back({"Settings", {"settings", "", "local-env", "settings"}});
         return peers;
     };
-    web.authenticate = [](std::string_view credential) {
-        return credential == "Bearer reader" ? Person{"reader"} : Person{};
-    };
-    const Person owner{"fixture",true};
+    web.authenticate = [](std::string_view credential) { return credential == "Bearer reader" ? Person{"reader"} : Person{}; };
+    const Person owner{"fixture", true};
     auto policy = store.policy();
-    policy.setMember(owner,"release","reader",true);
-    policy.setMember(owner,"settings","reader",true);
-    const auto server = startWeb(store,0,web);
+    policy.setMember(owner, "release", "reader", true);
+    policy.setMember(owner, "settings", "reader", true);
+    const auto server = startWeb(store, 0, web);
     Browser browser(*server);
-    browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+    browser.client.set_default_headers({{"Authorization", "Bearer reader"}});
 
-    const auto recipient = store.conversation("triage",0,200);
-    const auto sender = store.peerConversation("release","triage",0,200);
-    check(sender.size() == 72,"historical DM fixture did not span multiple pages");
+    const auto recipient = store.conversation("triage", 0, 200);
+    const auto sender = store.peerConversation("release", "triage", 0, 200);
+    check(sender.size() == 72, "historical DM fixture did not span multiple pages");
     const auto& target = sender.at(24);
     const auto targetId = target.at("id").get<Id>();
-    const auto copy = std::ranges::find_if(recipient,[&](const Json& event) {
-        return event.at("kind") == "bot_message" &&
-            event.at("data").at("messageId") == target.at("data").at("messageId");
+    const auto copy = std::ranges::find_if(recipient, [&](const Json& event) {
+        return event.at("kind") == "bot_message" && event.at("data").at("messageId") == target.at("data").at("messageId");
     });
-    check(copy != recipient.end() && copy->at("id") != targetId,"fixture has no recipient copy of the anchor");
+    check(copy != recipient.end() && copy->at("id") != targetId, "fixture has no recipient copy of the anchor");
 
     const std::string primary = "/api/peer-conversation?bot=release&peer=triage";
     const std::string reverse = "/api/peer-conversation?bot=triage&peer=release";
     const auto anchor = "&anchor=" + std::to_string(targetId);
-    Browser::checked(browser.client.Get(primary + anchor),403);
-    policy.setMember(owner,"triage","reader",true);
+    Browser::checked(browser.client.Get(primary + anchor), 403);
+    policy.setMember(owner, "triage", "reader", true);
 
     const auto latest = browser.get(primary);
-    check(latest.at("messages").front().at("id").get<Id>() > targetId,"fixture anchor appeared in the latest page");
+    check(latest.at("messages").front().at("id").get<Id>() > targetId, "fixture anchor appeared in the latest page");
     const auto page = browser.get(primary + anchor);
     const auto& messages = page.at("messages");
-    check(page.at("anchorId") == targetId && page.at("hasOlder") == true && messages.size() == 36 &&
-        messages.at(18).at("id") == targetId &&
-        messages.at(19).at("data").at("replyTo") == messages.at(18).at("data").at("messageId"),
-        "the bounded historical page missed the precise message or its reply");
+    check(page.at("anchorId") == targetId && page.at("hasOlder") == true && messages.size() == 36 && messages.at(18).at("id") == targetId &&
+              messages.at(19).at("data").at("replyTo") == messages.at(18).at("data").at("messageId"),
+          "the bounded historical page missed the precise message or its reply");
     for (std::size_t i = 0; i < messages.size(); ++i)
-        check(messages.at(i).at("id") == sender.at(i + 6).at("id"),"historical pages skipped or reordered messages");
+        check(messages.at(i).at("id") == sender.at(i + 6).at("id"), "historical pages skipped or reordered messages");
     const auto reverseAnchor = "&anchor=" + std::to_string(copy->at("id").get<Id>());
-    check(browser.get(reverse + reverseAnchor) == page,"the recipient anchor did not resolve to the same shared DM page");
+    check(browser.get(reverse + reverseAnchor) == page, "the recipient anchor did not resolve to the same shared DM page");
     const auto before = "&before=" + std::to_string(messages.front().at("id").get<Id>());
     const auto older = browser.get(primary + before);
     check(older.at("messages").size() == 6 && older.at("hasOlder") == false,
-        "earlier pagination repeated or skipped messages around the anchor");
-    Browser::checked(browser.client.Get(primary + anchor + before),400);
-    Browser::checked(browser.client.Get(primary + "&anchor=-1"),400);
-    check(Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=settings" + anchor),404)
-        == Json{{"error","peer_message_not_found"}},"a different readable pair resolved the anchor");
+          "earlier pagination repeated or skipped messages around the anchor");
+    Browser::checked(browser.client.Get(primary + anchor + before), 400);
+    Browser::checked(browser.client.Get(primary + "&anchor=-1"), 400);
+    check(Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=settings" + anchor), 404) ==
+              Json{{"error", "peer_message_not_found"}},
+          "a different readable pair resolved the anchor");
 }
 
 void conversationRequestApproval(const std::filesystem::path& path) {
@@ -670,14 +659,14 @@ void conversationRequestApproval(const std::filesystem::path& path) {
         ModelTurn decide(const ModelInput& input) override {
             if (input.event.at("kind") != "conversation_turn") return FixedModel::decide(input);
             if (input.event.at("turn").empty())
-                return {{{"start_task",{{"request",input.event.at("text")}},"Start the requested work"}}};
-            return {{{"reply",{{"text","I queued your request."}},"Report the queued Task"}}};
+                return {{{"start_task", {{"request", input.event.at("text")}}, "Start the requested work"}}};
+            return {{{"reply", {{"text", "I queued your request."}}, "Report the queued Task"}}};
         }
     } model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
-    const Person requester{"requester",false};
-    const Person administrator{"administrator",true};
+    Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
+    const Person requester{"requester", false};
+    const Person administrator{"administrator", true};
     auto web = callbacks();
     web.authenticate = [&](std::string_view credential) {
         if (credential == "Bearer administrator") return administrator;
@@ -689,16 +678,21 @@ void conversationRequestApproval(const std::filesystem::path& path) {
         return std::nullopt;
     };
     auto policy = store.policy();
-    policy.setMember(localOwner,"release",requester.id,true);
-    policy.setMode(localOwner,"supervised");
-    const auto server = startWeb(store,0,web);
+    policy.setMember(localOwner, "release", requester.id, true);
+    policy.setMode(localOwner, "supervised");
+    const auto server = startWeb(store, 0, web);
     Browser browser(*server);
-    browser.client.set_default_headers({{"Authorization","Bearer requester"}});
-    const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","supervised-release"},
-        {"text","Build a supervised release"},{"environmentId","ignored"},{"projectId","ignored"},
-        {"trigger",{{"triggerKind","ignored"}}}},201);
-    check(receipt.at("status") == "received" && store.tasks().empty(),"HTTP intake did not wait for the conversation turn");
-    tick(runtime,4);
+    browser.client.set_default_headers({{"Authorization", "Bearer requester"}});
+    const auto receipt = browser.post("/api/messages",
+                                      {{"botId", "release"},
+                                       {"clientMessageId", "supervised-release"},
+                                       {"text", "Build a supervised release"},
+                                       {"environmentId", "ignored"},
+                                       {"projectId", "ignored"},
+                                       {"trigger", {{"triggerKind", "ignored"}}}},
+                                      201);
+    check(receipt.at("status") == "received" && store.tasks().empty(), "HTTP intake did not wait for the conversation turn");
+    tick(runtime, 4);
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && tasks.at(0).at("sourceMessageId") == receipt.at("messageId"),
           "the Task did not retain its conversation message");
@@ -706,28 +700,32 @@ void conversationRequestApproval(const std::filesystem::path& path) {
     check(task.at("environmentId") == "local-env" && task.at("projectId") == "release" && !task.contains("trigger"),
           "the HTTP client changed routing or schedule");
     const auto approvals = browser.get("/api/inbox").at("items");
-    check(approvals.size() == 1 && approvals.at(0).at("taskId") == task.at("id") &&
-          approvals.at(0).at("itemKind") == "policy_approval" && approvals.at(0).at("canDecide") == true &&
-          approvals.at(0).at("canSaveRule") == false,
+    check(approvals.size() == 1 && approvals.at(0).at("taskId") == task.at("id") && approvals.at(0).at("itemKind") == "policy_approval" &&
+              approvals.at(0).at("canDecide") == true && approvals.at(0).at("canSaveRule") == false,
           "the message sender could not approve once without access to Flock-wide rules");
-    browser.client.set_default_headers({{"Authorization","Bearer administrator"}});
+    browser.client.set_default_headers({{"Authorization", "Bearer administrator"}});
     const auto adminApprovals = browser.get("/api/inbox").at("items");
     check(adminApprovals.size() == 1 && adminApprovals.at(0).at("itemId") == approvals.at(0).at("itemId") &&
-          adminApprovals.at(0).at("canSaveRule") == true,"the administrator could not save a rule from this approval");
-    browser.client.set_default_headers({{"Authorization","Bearer requester"}});
-    check(t3.launches.empty(),"the Task launched before approval");
+              adminApprovals.at(0).at("canSaveRule") == true,
+          "the administrator could not save a rule from this approval");
+    browser.client.set_default_headers({{"Authorization", "Bearer requester"}});
+    check(t3.launches.empty(), "the Task launched before approval");
     const auto& item = approvals.at(0);
-    Json decision{{"botId",item.at("botId")},{"itemKind",item.at("itemKind")},
-        {"itemId",item.at("itemId")},{"waitId",item.at("waitId")},{"taskId",item.at("taskId")},
-        {"targetRevision",item.at("targetRevision")},{"targetGeneration",item.at("targetGeneration")},
-        {"decision","always_allow"}};
-    browser.post("/api/inbox/decide",decision,403);
+    Json decision{{"botId", item.at("botId")},
+                  {"itemKind", item.at("itemKind")},
+                  {"itemId", item.at("itemId")},
+                  {"waitId", item.at("waitId")},
+                  {"taskId", item.at("taskId")},
+                  {"targetRevision", item.at("targetRevision")},
+                  {"targetGeneration", item.at("targetGeneration")},
+                  {"decision", "always_allow"}};
+    browser.post("/api/inbox/decide", decision, 403);
     check(browser.get("/api/inbox").at("items") == approvals && policy.rules().empty(),
           "a denied Flock-wide rule changed the request or policy");
     decision["decision"] = "allow_once";
-    browser.post("/api/inbox/decide",decision);
-    tick(runtime,4);
-    check(t3.launches["release"] == 1,"the Task could not launch with approval");
+    browser.post("/api/inbox/decide", decision);
+    tick(runtime, 4);
+    check(t3.launches["release"] == 1, "the Task could not launch with approval");
 }
 
 void exercise(const std::filesystem::path& path) {
@@ -736,86 +734,90 @@ void exercise(const std::filesystem::path& path) {
     FixedModel model;
     FixedT3 t3;
     const auto notes = [](std::string_view) { return std::string{}; };
-    auto runtime = std::make_unique<Runtime>(store,model,t3,notes);
+    auto runtime = std::make_unique<Runtime>(store, model, t3, notes);
     const auto web = callbacks();
-    auto server = startWeb(store,0,web);
+    auto server = startWeb(store, 0, web);
     const auto port = server->port();
     Browser browser(*server);
     boundary(browser);
-    check(cli.tasks().empty() && cli.conversation("release").empty(),"rejected HTTP requests still submitted messages or work");
-    const auto release = cli.submit(web.intake("release","下書きの掲載範囲を確認する"));
-    const auto triage = cli.submit(web.intake("triage","昨日届いた不具合を確認する"));
-    const auto settings = cli.submit(web.intake("settings","接続設定を確認する"));
-    tick(*runtime,3);
+    check(cli.tasks().empty() && cli.conversation("release").empty(), "rejected HTTP requests still submitted messages or work");
+    const auto release = cli.submit(web.intake("release", "下書きの掲載範囲を確認する"));
+    const auto triage = cli.submit(web.intake("triage", "昨日届いた不具合を確認する"));
+    const auto settings = cli.submit(web.intake("settings", "接続設定を確認する"));
+    tick(*runtime, 3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
-    t3.observations["thread-release"].question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
+    t3.observations["thread-release"].question = {"scope-question", Json::array({{{"id", "scope"}, {"required", true}}})};
     t3.observations["thread-triage"].kind = Observation::Kind::ExternalInput;
     t3.observations["thread-triage"].status = "権限の承認が必要";
-    tick(*runtime,2);
+    tick(*runtime, 2);
 
     const auto releasePage = browser.get("/api/view?bot=release");
     const auto triagePage = browser.get("/api/view?bot=triage");
     auto waits = releasePage.at("waits");
-    check(waits.size() == 1 && waits[0]["id"] == release &&
-          waits[0]["wait"]["text"] == "利用者向けの変更だけを載せますか？" &&
-          waits[0]["wait"]["choices"] == Json::array({"利用者向けのみ","すべて"}),
+    check(waits.size() == 1 && waits[0]["id"] == release && waits[0]["wait"]["text"] == "利用者向けの変更だけを載せますか？" &&
+              waits[0]["wait"]["choices"] == Json::array({"利用者向けのみ", "すべて"}),
           "release Bot question or available answers were incorrect");
-    check(triagePage["waits"].size() == 1 && triagePage["waits"][0]["id"] == triage,"T3 wait belongs to wrong Bot");
+    check(triagePage["waits"].size() == 1 && triagePage["waits"][0]["id"] == triage, "T3 wait belongs to wrong Bot");
     check(releasePage["bot"]["soul"] == "利用者向けのリリースノートをまとめる。" &&
-          triagePage["bot"]["soul"] == "報告された問題を整理する。" && !releasePage["bot"].contains("cron"),
+              triagePage["bot"]["soul"] == "報告された問題を整理する。" && !releasePage["bot"].contains("cron"),
           "selected Bots showed incorrect settings");
     check(releasePage["sessionTasks"][0]["sessions"][0]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
-          triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage" &&
-          triagePage["sessionTasks"][0]["sessions"][0]["link"] == "http://localhost:3773/linked%20env/thread-triage",
+              triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage" &&
+              triagePage["sessionTasks"][0]["sessions"][0]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "T3 links did not preserve environment and Thread ownership");
     const auto settingsPage = browser.get("/api/view?bot=settings");
     check(settingsPage["waits"][0]["id"] == settings && settingsPage["waits"][0]["wait"]["reason"] == "settings",
           "configuration failure was not classified");
     const auto list = browser.get("/api/bots");
-    const auto releaseRow = std::find_if(list.begin(),list.end(),[](const Json& bot) { return bot.at("id") == "release"; });
+    const auto releaseRow = std::find_if(list.begin(), list.end(), [](const Json& bot) { return bot.at("id") == "release"; });
     check(releaseRow != list.end() && releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
           "Bot list does not show Release's latest question");
-    check(releaseRow->at("about") == "利用者向けのリリースノートをまとめる。",
-          "Bot list does not show Release's role");
-    check(releaseRow->at("latestIncomingEventId") == waits[0]["wait"]["messageId"],
-          "a Bot question did not update the incoming event ID");
+    check(releaseRow->at("about") == "利用者向けのリリースノートをまとめる。", "Bot list does not show Release's role");
+    check(releaseRow->at("latestIncomingEventId") == waits[0]["wait"]["messageId"], "a Bot question did not update the incoming event ID");
     const Id waitId = waits[0]["wait"]["id"];
-    std::map<Id,std::string> earlierRequests;
+    std::map<Id, std::string> earlierRequests;
     for (int i = 0; i < 45; ++i) {
         const auto text = "Earlier request " + std::to_string(i);
-        earlierRequests.emplace(cli.submit({"release",text,"local-env","release"}),text);
+        earlierRequests.emplace(cli.submit({"release", text, "local-env", "release"}), text);
     }
     const auto beforeAnswer = browser.get("/api/view?bot=release");
-    check(std::none_of(beforeAnswer["events"].begin(),beforeAnswer["events"].end(),[&](const Json& row) {
-        return row["kind"] == "waiting" && row["data"]["id"] == waitId;
-    }),"question fixture did not cross a history page boundary");
+    check(std::none_of(beforeAnswer["events"].begin(), beforeAnswer["events"].end(),
+                       [&](const Json& row) { return row["kind"] == "waiting" && row["data"]["id"] == waitId; }),
+          "question fixture did not cross a history page boundary");
 
-    const auto next = cli.submit(web.intake("release","次の版の変更点を調べる"));
+    const auto next = cli.submit(web.intake("release", "次の版の変更点を調べる"));
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
-    checkPresence(browser,browser.get("/api/bots"),"release","waiting");
+    checkPresence(browser, browser.get("/api/bots"), "release", "waiting");
     const auto& visibleWait = afterSubmit.at("waits").at(0);
-    Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"},
-                  {"targetRevision",visibleWait.at("currentRevision")},{"targetGeneration",visibleWait.at("generation")}};
-    browser.post("/api/operations",reply,404);
+    Json reply = {{"botId", "triage"},
+                  {"taskId", release},
+                  {"waitId", waitId},
+                  {"operation", "answer"},
+                  {"text", "すべて"},
+                  {"targetRevision", visibleWait.at("currentRevision")},
+                  {"targetGeneration", visibleWait.at("generation")}};
+    browser.post("/api/operations", reply, 404);
     reply["botId"] = "release";
-    cli.operate(localOwner,TaskTarget::from(cli.task(release),waitId),"answer",{{"text","利用者向けのみ"}});
+    cli.operate(localOwner, TaskTarget::from(cli.task(release), waitId), "answer", {{"text", "利用者向けのみ"}});
     const auto answered = browser.get("/api/view?bot=release");
-    check(std::any_of(answered["events"].begin(),answered["events"].end(),[&](const Json& row) {
-        return row["kind"] == "user_answer" && row["taskId"] == release &&
-               row["data"]["question"] == "利用者向けの変更だけを載せますか？";
-    }),"the answer did not carry the question from the older page");
-    browser.post("/api/operations",reply,409);
-    tick(*runtime,2);
-    check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-release" &&
-          t3.replies[0].target.runId == "run-release-1" && t3.replies[0].questionId == "scope-question" &&
-          t3.replies[0].answers["scope"] == "利用者向けのみ" && cli.task(next)["state"] == "queued",
+    check(std::any_of(answered["events"].begin(), answered["events"].end(),
+                      [&](const Json& row) {
+                          return row["kind"] == "user_answer" && row["taskId"] == release &&
+                                 row["data"]["question"] == "利用者向けの変更だけを載せますか？";
+                      }),
+          "the answer did not carry the question from the older page");
+    browser.post("/api/operations", reply, 409);
+    tick(*runtime, 2);
+    check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-release" && t3.replies[0].target.runId == "run-release-1" &&
+              t3.replies[0].questionId == "scope-question" && t3.replies[0].answers["scope"] == "利用者向けのみ" &&
+              cli.task(next)["state"] == "queued",
           "stale reply affected the active Run or another task");
-    check(browser.get("/api/view?bot=release")["waits"].empty(),"resolved wait stayed selectable");
+    check(browser.get("/api/view?bot=release")["waits"].empty(), "resolved wait stayed selectable");
     const auto resumed = browser.get("/api/bots");
-    checkPresence(browser,resumed,"release","working");
-    checkPresence(browser,resumed,"triage","waiting");
+    checkPresence(browser, resumed, "release", "working");
+    checkPresence(browser, resumed, "triage", "waiting");
 
     server.reset();
     runtime.reset();
@@ -823,54 +825,68 @@ void exercise(const std::filesystem::path& path) {
     finished.kind = Observation::Kind::Finished;
     finished.report = "T3 finished while the browser was closed";
     finished.status = "completed";
-    runtime = std::make_unique<Runtime>(store,model,t3,notes);
-    tick(*runtime,2);
+    runtime = std::make_unique<Runtime>(store, model, t3, notes);
+    tick(*runtime, 2);
     auto updatedBots = callbacks();
     updatedBots.intake = [read = updatedBots.intake](std::string_view bot, std::string_view request) {
-        auto routing = read(bot,request);
-        if (bot == "settings") routing.config["session"] = {{"runtimeMode","approval-required"}};
+        auto routing = read(bot, request);
+        if (bot == "settings") routing.config["session"] = {{"runtimeMode", "approval-required"}};
         return routing;
     };
-    server = startWeb(store,port,std::move(updatedBots));
+    server = startWeb(store, port, std::move(updatedBots));
     Browser reopened(*server);
     const auto& settingsWait = settingsPage.at("waits").at(0);
-    reopened.post("/api/operations",{{"botId","settings"},{"taskId",settings},
-        {"waitId",settingsWait.at("wait").at("id")},{"operation","reconcile"},
-        {"targetRevision",settingsWait.at("currentRevision")},{"targetGeneration",settingsWait.at("generation")},
-        {"session",{{"runtimeMode","invalid-client-setting"}}}});
-    tick(*runtime,2);
+    reopened.post("/api/operations", {{"botId", "settings"},
+                                      {"taskId", settings},
+                                      {"waitId", settingsWait.at("wait").at("id")},
+                                      {"operation", "reconcile"},
+                                      {"targetRevision", settingsWait.at("currentRevision")},
+                                      {"targetGeneration", settingsWait.at("generation")},
+                                      {"session", {{"runtimeMode", "invalid-client-setting"}}}});
+    tick(*runtime, 2);
     check(cli.task(settings)["state"] == "running" && t3.launches["settings"] == 1,
           "Web reconciliation did not start the Session with the corrected Bot settings");
     const auto page = reopened.get("/api/view?bot=release");
-    check(hasEvent(page["events"],"report","report","T3 finished while the browser was closed") &&
-          hasEvent(page["events"],"completed","text","Draft complete") &&
-          hasEvent(page["events"],"completed","runStatus","completed"),
+    check(hasEvent(page["events"], "report", "report", "T3 finished while the browser was closed") &&
+              hasEvent(page["events"], "completed", "text", "Draft complete") &&
+              hasEvent(page["events"], "completed", "runStatus", "completed"),
           "reopened UI lost the Session result or Bot decision");
     const auto external = reopened.get("/api/view?bot=triage").at("waits").at(0);
     check(external["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "restart lost the active T3 approval link");
     const Id externalId = external["wait"]["id"];
     t3.observations["thread-triage"] = {};
-    tick(*runtime,1);
-    check(reopened.get("/api/view?bot=triage")["waits"].empty(),"resolved T3 wait stayed visible");
-    reopened.post("/api/operations",{{"botId","triage"},{"taskId",triage},{"waitId",externalId},{"operation","cancel"},
-        {"targetRevision",external.at("currentRevision")},{"targetGeneration",external.at("generation")}},409);
-    check(cli.task(triage)["state"] == "running","stale cancellation affected a resumed Run");
+    tick(*runtime, 1);
+    check(reopened.get("/api/view?bot=triage")["waits"].empty(), "resolved T3 wait stayed visible");
+    reopened.post("/api/operations",
+                  {{"botId", "triage"},
+                   {"taskId", triage},
+                   {"waitId", externalId},
+                   {"operation", "cancel"},
+                   {"targetRevision", external.at("currentRevision")},
+                   {"targetGeneration", external.at("generation")}},
+                  409);
+    check(cli.task(triage)["state"] == "running", "stale cancellation affected a resumed Run");
 
     auto& triageQuestion = t3.observations["thread-triage"];
     triageQuestion.kind = Observation::Kind::Question;
-    triageQuestion.question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
-    tick(*runtime,2);
+    triageQuestion.question = {"scope-question", Json::array({{{"id", "scope"}, {"required", true}}})};
+    tick(*runtime, 2);
     const auto question = reopened.get("/api/view?bot=triage").at("waits").at(0);
-    const Json answer = {{"botId","triage"},{"taskId",triage},{"waitId",question.at("wait").at("id")},
-        {"operation","answer"},{"text","すべて"},{"targetRevision",question.at("currentRevision")},
-        {"targetGeneration",question.at("generation")}};
-    reopened.post("/api/operations",answer);
-    reopened.post("/api/operations",answer,409);
-    tick(*runtime,2);
+    const Json answer = {{"botId", "triage"},
+                         {"taskId", triage},
+                         {"waitId", question.at("wait").at("id")},
+                         {"operation", "answer"},
+                         {"text", "すべて"},
+                         {"targetRevision", question.at("currentRevision")},
+                         {"targetGeneration", question.at("generation")}};
+    reopened.post("/api/operations", answer);
+    reopened.post("/api/operations", answer, 409);
+    tick(*runtime, 2);
     check(t3.replies.size() == 2 && t3.replies.back().target.threadId == "thread-triage" &&
-          t3.replies.back().target.runId == "run-triage-1" && t3.replies.back().questionId == "scope-question" &&
-          t3.replies.back().answers["scope"] == "すべて","a Web answer did not resume its own question exactly once");
+              t3.replies.back().target.runId == "run-triage-1" && t3.replies.back().questionId == "scope-question" &&
+              t3.replies.back().answers["scope"] == "すべて",
+          "a Web answer did not resume its own question exactly once");
 
     auto& completedTriage = t3.observations["thread-triage"];
     completedTriage.kind = Observation::Kind::Finished;
@@ -878,51 +894,49 @@ void exercise(const std::filesystem::path& path) {
     completedTriage.report = "Triage evidence is complete";
     completedTriage.resultRunId = "run-triage-1-result";
     completedTriage.itemId = "triage-result-item";
-    tick(*runtime,3);
+    tick(*runtime, 3);
     const auto completedTriagePage = reopened.get("/api/view?bot=triage");
-    const auto completedTriageEvent = std::find_if(completedTriagePage["events"].begin(),completedTriagePage["events"].end(),
-        [&](const Json& event) { return event["kind"] == "completed" && event["taskId"] == triage; });
+    const auto completedTriageEvent =
+        std::find_if(completedTriagePage["events"].begin(), completedTriagePage["events"].end(),
+                     [&](const Json& event) { return event["kind"] == "completed" && event["taskId"] == triage; });
     check(completedTriageEvent != completedTriagePage["events"].end() &&
-          (*completedTriageEvent)["data"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
+              (*completedTriageEvent)["data"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "completed source lost its saved local T3 link");
 
-    conversationPages(reopened,cli,release,next,triage,earlierRequests);
-    sessionPages(reopened,cli,*runtime,t3,triage);
+    conversationPages(reopened, cli, release, next, triage, earlierRequests);
+    sessionPages(reopened, cli, *runtime, t3, triage);
 }
 
 void sidebarReplies(const std::filesystem::path& path) {
     struct ReplyModel : Model {
-        ModelTurn decide(const ModelInput&) override {
-            return {{{"reply",{{"text","Same reply"}},"Reply to the message"}}};
-        }
+        ModelTurn decide(const ModelInput&) override { return {{{"reply", {{"text", "Same reply"}}, "Reply to the message"}}}; }
     } model;
     Store store(path);
     FixedT3 t3;
-    Runtime runtime(store,model,t3,{});
+    Runtime runtime(store, model, t3, {});
     const auto cb = callbacks();
-    const auto server = startWeb(store,0,cb);
+    const auto server = startWeb(store, 0, cb);
     Browser browser(*server);
     const auto release = [&] {
         const auto bots = browser.get("/api/bots");
-        const auto row = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "release"; });
-        check(row != bots.end(),"Release was not listed");
+        const auto row = std::ranges::find_if(bots, [](const Json& bot) { return bot.at("id") == "release"; });
+        check(row != bots.end(), "Release was not listed");
         return *row;
     };
     const auto send = [&](unsigned sequence) {
-        store.receive(Person{"owner",true},cb.intake("release","Same request"),
-                      "sidebar-" + std::to_string(sequence),"Same request");
+        store.receive(Person{"owner", true}, cb.intake("release", "Same request"), "sidebar-" + std::to_string(sequence), "Same request");
     };
     send(0);
-    check(release().at("latestIncomingEventId") == 0,"an outgoing message appeared as an incoming reply");
-    tick(runtime,3);
+    check(release().at("latestIncomingEventId") == 0, "an outgoing message appeared as an incoming reply");
+    tick(runtime, 3);
     const auto first = release();
     const auto incoming = first.at("latestIncomingEventId").get<Id>();
     const auto events = browser.get("/api/conversation?bot=release").at("events");
     check(incoming > 0 && events.back().at("kind") == "conversation_reply" && events.back().at("id") == incoming,
           "the sidebar did not identify the visible conversation reply");
     send(1);
-    check(release().at("latestIncomingEventId") == incoming,"an outgoing message advanced the incoming reply");
-    tick(runtime,3);
+    check(release().at("latestIncomingEventId") == incoming, "an outgoing message advanced the incoming reply");
+    tick(runtime, 3);
     const auto second = release();
     check(second.at("preview") == first.at("preview") && second.at("latestIncomingEventId").get<Id>() > incoming,
           "two replies with the same text did not have distinct incoming IDs");
@@ -939,28 +953,31 @@ void readChanges(Browser& stream, const std::string& path, const std::function<b
     bool ready = false;
     bool finished = false;
     std::string buffer;
-    const auto result = stream.client.Get(path,[&](const httplib::Response& response) {
-        return response.status == 200 && response.get_header_value("Content-Type") == "text/event-stream";
-    },[&](const char* data, std::size_t size) {
-        buffer.append(data,size);
-        for (auto end = buffer.find("\n\n"); end != std::string::npos; end = buffer.find("\n\n")) {
-            const auto frame = buffer.substr(0,end);
-            buffer.erase(0,end + 2);
-            if (frame.find("event: ready\n") != std::string::npos) ready = true;
-            if (onPing && frame.starts_with("event: ping\n")) onPing();
-            constexpr std::string_view prefix = "event: change\ndata: ";
-            if (!frame.starts_with(prefix)) continue;
-            check(ready,"received an invalidation before the stream was ready");
-            finished = !next(Json::parse(frame.substr(prefix.size())));
-            if (finished) return false;
-        }
-        return std::chrono::steady_clock::now() < deadline;
-    });
-    check(!result && ready && finished,"stream missed an invalidation");
+    const auto result = stream.client.Get(
+        path,
+        [&](const httplib::Response& response) {
+            return response.status == 200 && response.get_header_value("Content-Type") == "text/event-stream";
+        },
+        [&](const char* data, std::size_t size) {
+            buffer.append(data, size);
+            for (auto end = buffer.find("\n\n"); end != std::string::npos; end = buffer.find("\n\n")) {
+                const auto frame = buffer.substr(0, end);
+                buffer.erase(0, end + 2);
+                if (frame.find("event: ready\n") != std::string::npos) ready = true;
+                if (onPing && frame.starts_with("event: ping\n")) onPing();
+                constexpr std::string_view prefix = "event: change\ndata: ";
+                if (!frame.starts_with(prefix)) continue;
+                check(ready, "received an invalidation before the stream was ready");
+                finished = !next(Json::parse(frame.substr(prefix.size())));
+                if (finished) return false;
+            }
+            return std::chrono::steady_clock::now() < deadline;
+        });
+    check(!result && ready && finished, "stream missed an invalidation");
 }
 
 void notificationEvents(const std::filesystem::path& path) {
-    const Person owner{"owner",true};
+    const Person owner{"owner", true};
     Store store(path);
     auto web = callbacks();
     web.authenticate = [owner](std::string_view credential) {
@@ -977,175 +994,180 @@ void notificationEvents(const std::filesystem::path& path) {
         ModelTurn decide(const ModelInput& input) override {
             if (input.event.at("kind") == "conversation_turn") {
                 if (input.event.at("text") == "Check in several steps" && input.event.at("turn").size() < 2)
-                    return {{{"find_tasks",{{"query","release"}},"Find the current work"}}};
-                return {{{"reply",{{"text","A reply"}},"Respond to the request"}}};
+                    return {{{"find_tasks", {{"query", "release"}}, "Find the current work"}}};
+                return {{{"reply", {{"text", "A reply"}}, "Respond to the request"}}};
             }
             if (input.event.at("kind") == "intake" && input.task.at("request") == "Choose a publish date")
-                return {{{"ask_user",{{"question","When should we publish?"}},"The schedule needs a date"}}};
+                return {{{"ask_user", {{"question", "When should we publish?"}}, "The schedule needs a date"}}};
             return FixedModel::decide(input);
         }
     } model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,{});
-    const auto server = startWeb(store,0,web);
+    Runtime runtime(store, model, t3, {});
+    const auto server = startWeb(store, 0, web);
     Browser reader(*server), administrator(*server), stream(*server);
-    for (auto* browser : {&reader,&stream}) browser->client.set_default_headers({{"Authorization","Bearer reader"}});
-    administrator.client.set_default_headers({{"Authorization","Bearer owner"}});
+    for (auto* browser : {&reader, &stream}) browser->client.set_default_headers({{"Authorization", "Bearer reader"}});
+    administrator.client.set_default_headers({{"Authorization", "Bearer owner"}});
 
     const auto reply = [&](std::string_view bot, std::string_view key) {
-        store.receive(owner,web.intake(bot,"Can you help?"),key,"Can you help?");
+        store.receive(owner, web.intake(bot, "Can you help?"), key, "Can you help?");
     };
     constexpr auto endpoint = "/api/notifications";
-    const auto cursor = [](const Json& page) {
-        return Json{{"after",page.at("through")},{"scope",page.at("scope")}};
-    };
-    const auto notify = [&](Browser& browser, const Json& page) { return browser.post(endpoint,cursor(page)); };
-    reply("release","already-seen");
+    const auto cursor = [](const Json& page) { return Json{{"after", page.at("through")}, {"scope", page.at("scope")}}; };
+    const auto notify = [&](Browser& browser, const Json& page) { return browser.post(endpoint, cursor(page)); };
+    reply("release", "already-seen");
     runtime.runConversations();
-    const auto unshared = reader.post(endpoint,Json::object());
+    const auto unshared = reader.post(endpoint, Json::object());
     check(unshared.at("through") == 0 && unshared.at("scope").empty() && unshared.at("events").empty(),
           "a private reply changed a viewer's baseline");
-    const auto adminBaseline = administrator.post(endpoint,Json::object());
-    store.policy().setMember(owner,"release","reader",true);
-    const auto baseline = notify(reader,unshared);
-    check(baseline.at("through") == 0 && baseline.at("scope").at("release").get<Id>() > 0 &&
-          baseline.at("events").empty() && baseline.at("inbox").empty(),
+    const auto adminBaseline = administrator.post(endpoint, Json::object());
+    store.policy().setMember(owner, "release", "reader", true);
+    const auto baseline = notify(reader, unshared);
+    check(baseline.at("through") == 0 && baseline.at("scope").at("release").get<Id>() > 0 && baseline.at("events").empty() &&
+              baseline.at("inbox").empty(),
           "a newly shared Bot replayed a reply or advanced the established cursor");
-    check(notify(reader,baseline).at("events").empty(),"a shared Bot replayed its history on the next page");
+    check(notify(reader, baseline).at("events").empty(), "a shared Bot replayed its history on the next page");
 
     bool wroteEvents = false;
-    readChanges(stream,"/api/events",[&](const Json& change) {
-        check(change.at("list") == true,"browser notification activity did not invalidate the Bot list");
+    readChanges(stream, "/api/events", [&](const Json& change) {
+        check(change.at("list") == true, "browser notification activity did not invalidate the Bot list");
         if (wroteEvents) return false;
-        reply("release","new-reply-one");
-        reply("triage","private-reply");
-        reply("release","new-reply-two");
+        reply("release", "new-reply-one");
+        reply("triage", "private-reply");
+        reply("release", "new-reply-two");
         runtime.runConversations();
-        store.submit({"release","Choose a publish date","local-env","publication"});
-        store.submit(web.intake("release","Verify staging"));
-        t3.observations["thread-release"] = {.kind=Observation::Kind::Finished,.status="failed",
-            .report="Health check failed",.resultRunId="run-result",.itemId="failed-report"};
-        tick(runtime,8);
+        store.submit({"release", "Choose a publish date", "local-env", "publication"});
+        store.submit(web.intake("release", "Verify staging"));
+        t3.observations["thread-release"] = {.kind = Observation::Kind::Finished,
+                                             .status = "failed",
+                                             .report = "Health check failed",
+                                             .resultRunId = "run-result",
+                                             .itemId = "failed-report"};
+        tick(runtime, 8);
         wroteEvents = true;
         return true;
     });
 
-    const auto page = notify(reader,baseline);
+    const auto page = notify(reader, baseline);
     const auto& events = page.at("events");
     check(events.size() == 3 && events.at(0).at("kind") == "reply" && events.at(1).at("kind") == "reply" &&
-          events.at(2).at("kind") == "failure" && events.at(0).at("id").get<Id>() < events.at(1).at("id").get<Id>(),
+              events.at(2).at("kind") == "failure" && events.at(0).at("id").get<Id>() < events.at(1).at("id").get<Id>(),
           "notification catch-up lost a reply or confused a failed report with a reply: " + page.dump());
-    const auto administratorPage = notify(administrator,adminBaseline);
-    check(std::ranges::all_of(events,[](const Json& item) {
-        return item.size() == 4 && item.at("botId") == "release" && item.at("botName") == "Release";
-    }) &&
-          administratorPage.at("events").size() == 4,
+    const auto administratorPage = notify(administrator, adminBaseline);
+    check(std::ranges::all_of(
+              events,
+              [](const Json& item) { return item.size() == 4 && item.at("botId") == "release" && item.at("botName") == "Release"; }) &&
+              administratorPage.at("events").size() == 4,
           "notification access did not match the visible Bots: " + page.dump() + " / " + administratorPage.dump());
     const auto question = reader.get("/api/inbox").at("items").at(0);
-    check(page.at("inbox") == Json::array({{{"botId","release"},{"botName","Release"},{"kind","user_question"},
-          {"id",question.at("itemId")}}}),"the notification feed lost the actionable question: " + page.dump());
-    const auto caughtUp = notify(reader,page);
+    check(page.at("inbox") ==
+              Json::array({{{"botId", "release"}, {"botName", "Release"}, {"kind", "user_question"}, {"id", question.at("itemId")}}}),
+          "the notification feed lost the actionable question: " + page.dump());
+    const auto caughtUp = notify(reader, page);
     check(caughtUp.at("events").empty() && caughtUp.at("inbox") == page.at("inbox"),
           "the feed replayed consumed events or dropped a pending question");
 
     for (int index = 0; index < 101; ++index) {
-        reply("triage","private-burst-" + std::to_string(index));
+        reply("triage", "private-burst-" + std::to_string(index));
         runtime.runConversations();
     }
     auto spoofed = cursor(caughtUp);
     spoofed["scope"]["triage"] = 0;
-    check(notify(reader,caughtUp) == caughtUp && reader.post(endpoint,spoofed) == caughtUp &&
-          reader.post(endpoint,Json::object()).at("through") == caughtUp.at("through"),
+    check(notify(reader, caughtUp) == caughtUp && reader.post(endpoint, spoofed) == caughtUp &&
+              reader.post(endpoint, Json::object()).at("through") == caughtUp.at("through"),
           "private Bot replies changed a limited viewer's page or baseline");
-    const auto privatePage = notify(administrator,administratorPage);
+    const auto privatePage = notify(administrator, administratorPage);
     check(privatePage.at("more") == true && privatePage.at("events").size() == 100,
           "the owner did not receive a full page of authorized replies");
-    const auto finalPrivatePage = notify(administrator,privatePage);
+    const auto finalPrivatePage = notify(administrator, privatePage);
     check(finalPrivatePage.at("more") == false && finalPrivatePage.at("events").size() == 1,
           "the last authorized reply was missing from the following page");
-    reply("release","reply-after-private-burst");
+    reply("release", "reply-after-private-burst");
     runtime.runConversations();
-    reply("triage","last-private-reply");
+    reply("triage", "last-private-reply");
     runtime.runConversations();
-    store.policy().setMember(owner,"triage","reader",true);
-    const auto visiblePage = notify(reader,caughtUp);
+    store.policy().setMember(owner, "triage", "reader", true);
+    const auto visiblePage = notify(reader, caughtUp);
     check(visiblePage.at("more") == false && visiblePage.at("events").size() == 1 &&
-          visiblePage.at("events").at(0).at("botId") == "release" &&
-          visiblePage.at("scope").at("triage").get<Id>() > visiblePage.at("through").get<Id>(),
+              visiblePage.at("events").at(0).at("botId") == "release" &&
+              visiblePage.at("scope").at("triage").get<Id>() > visiblePage.at("through").get<Id>(),
           "sharing a Bot replayed its history or displaced a previously visible reply");
-    reply("triage","reply-after-sharing");
+    reply("triage", "reply-after-sharing");
     runtime.runConversations();
-    const auto sharedPage = notify(reader,visiblePage);
+    const auto sharedPage = notify(reader, visiblePage);
     check(sharedPage.at("events").size() == 1 && sharedPage.at("events").at(0).at("botId") == "triage",
           "the shared Bot's next reply did not enter the notification feed");
-    store.policy().setMember(owner,"triage","reader",false);
-    check(!notify(reader,sharedPage).at("scope").contains("triage"),
-          "notification scope exposed a Bot after unsharing");
+    store.policy().setMember(owner, "triage", "reader", false);
+    check(!notify(reader, sharedPage).at("scope").contains("triage"), "notification scope exposed a Bot after unsharing");
 
-    auto limited = web.intake("release","Check in several steps");
+    auto limited = web.intake("release", "Check in several steps");
     limited.config["modelCallLimit"] = 1;
-    const auto receipt = store.receive(owner,limited,"repeat-approval",limited.request);
+    const auto receipt = store.receive(owner, limited, "repeat-approval", limited.request);
     runtime.runConversations();
     const auto budgetItem = [](const Json& items, const char* kind) {
-        const auto found = std::ranges::find_if(items,[&](const Json& item) {
-            return item.at(kind) == "conversation_model_budget";
-        });
-        check(found != items.end(),"missing conversation approval: " + items.dump());
+        const auto found = std::ranges::find_if(items, [&](const Json& item) { return item.at(kind) == "conversation_model_budget"; });
+        check(found != items.end(), "missing conversation approval: " + items.dump());
         return *found;
     };
-    auto firstApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"),"itemKind");
-    const auto firstAlert = budgetItem(reader.post(endpoint,Json::object()).at("inbox"),"kind");
-    check(firstAlert.at("id") == firstApproval.at("waitId"),"the alert did not identify the pending approval");
+    auto firstApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"), "itemKind");
+    const auto firstAlert = budgetItem(reader.post(endpoint, Json::object()).at("inbox"), "kind");
+    check(firstAlert.at("id") == firstApproval.at("waitId"), "the alert did not identify the pending approval");
     firstApproval["decision"] = "approve";
-    administrator.post("/api/inbox/decide",firstApproval);
+    administrator.post("/api/inbox/decide", firstApproval);
     runtime.runConversations();
-    const auto secondApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"),"itemKind");
-    const auto secondAlert = budgetItem(reader.post(endpoint,Json::object()).at("inbox"),"kind");
-    check(secondApproval.at("itemId") == receipt.at("messageId") &&
-          secondAlert.at("id") == secondApproval.at("waitId") && secondAlert.at("id") != firstAlert.at("id"),
+    const auto secondApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"), "itemKind");
+    const auto secondAlert = budgetItem(reader.post(endpoint, Json::object()).at("inbox"), "kind");
+    check(secondApproval.at("itemId") == receipt.at("messageId") && secondAlert.at("id") == secondApproval.at("waitId") &&
+              secondAlert.at("id") != firstAlert.at("id"),
           "another approval for the same message did not get a distinct alert");
 }
 
 void recurringRequestStatus(const std::filesystem::path& path) {
     constexpr Seconds now = 2'000'000'000;
-    const Person owner{"fixture",true};
+    const Person owner{"fixture", true};
     auto web = callbacks();
     auto cards = web.bots();
     auto& cron = cards.at(0).at("cron");
-    cron.push_back({{"id","invalid"},{"schedule","0 9 * * Mon"},{"timezone","Asia/Tokyo"},{"request","Invalid weekday"}});
-    cron.push_back({{"id","edited"},{"schedule","0 7 * * *"},{"timezone","Etc/UTC"},{"request","Check staging"}});
+    cron.push_back({{"id", "invalid"}, {"schedule", "0 9 * * Mon"}, {"timezone", "Asia/Tokyo"}, {"request", "Invalid weekday"}});
+    cron.push_back({{"id", "edited"}, {"schedule", "0 7 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Check staging"}});
     web.bots = [cards] { return cards; };
     Store store(path);
-    const auto errors = store.syncSchedules("release",{
-        {"daily","0 9 * * *","Asia/Tokyo",web.intake("release","前日の変更を確認する")},
-        {"invalid","0 9 * * Mon","Asia/Tokyo",web.intake("release","Invalid weekday")},
-        {"edited","0 8 * * *","Etc/UTC",web.intake("release","Check staging")},
-    },now);
-    check(errors.size() == 1 && errors.front().id == "invalid","fixture accepted an unsupported weekday");
+    const auto errors = store.syncSchedules("release",
+                                            {
+                                                {"daily", "0 9 * * *", "Asia/Tokyo", web.intake("release", "前日の変更を確認する")},
+                                                {"invalid", "0 9 * * Mon", "Asia/Tokyo", web.intake("release", "Invalid weekday")},
+                                                {"edited", "0 8 * * *", "Etc/UTC", web.intake("release", "Check staging")},
+                                            },
+                                            now);
+    check(errors.size() == 1 && errors.front().id == "invalid", "fixture accepted an unsupported weekday");
     for (int i = 0; i < 40; ++i) {
-        const auto reminder = store.createAutomation(owner,web.intake("release","Check staging"),{
-            {"kind","reminder"},{"timezone","Etc/UTC"},{"fireAt",now + 60},{"request","Check staging"},
-        },now);
-        if (i >= 20) store.cancelAutomation(owner,"release",reminder.at("id").get<Id>());
+        const auto reminder = store.createAutomation(owner, web.intake("release", "Check staging"),
+                                                     {
+                                                         {"kind", "reminder"},
+                                                         {"timezone", "Etc/UTC"},
+                                                         {"fireAt", now + 60},
+                                                         {"request", "Check staging"},
+                                                     },
+                                                     now);
+        if (i >= 20) store.cancelAutomation(owner, "release", reminder.at("id").get<Id>());
     }
 
-    const auto server = startWeb(store,0,web);
+    const auto server = startWeb(store, 0, web);
     Browser browser(*server);
     const auto pathForActive = std::string("/api/schedules?bot=release&active=1");
     const auto first = browser.get(pathForActive);
-    check(first.at("canManage") == true && first.at("unscheduledRequests") == Json::array({"Invalid weekday","Check staging"}),
+    check(first.at("canManage") == true && first.at("unscheduledRequests") == Json::array({"Invalid weekday", "Check staging"}),
           "missing or incorrect configured request warnings");
     const auto& recent = first.at("automations");
-    check(recent.size() == 20 && std::ranges::all_of(recent,[](const Json& row) { return row.at("status") == "active"; }),
+    check(recent.size() == 20 && std::ranges::all_of(recent, [](const Json& row) { return row.at("status") == "active"; }),
           "canceled entries consumed the active page");
     const auto second = browser.get(pathForActive + "&before=" + std::to_string(first.at("before").get<Id>()));
     const auto& older = second.at("automations");
     check(older.size() == 2 && older.at(1).at("configId") == "daily" && second.at("before") == 0,
           "newer entries hid an active configured request");
 
-    Store(path).cancelAutomation(owner,"release",older.at(1).at("id").get<Id>());
-    check(browser.get(pathForActive).at("unscheduledRequests") ==
-          Json::array({"前日の変更を確認する","Invalid weekday","Check staging"}),
+    Store(path).cancelAutomation(owner, "release", older.at(1).at("id").get<Id>());
+    check(browser.get(pathForActive).at("unscheduledRequests") == Json::array({"前日の変更を確認する", "Invalid weekday", "Check staging"}),
           "canceled configured request still appeared scheduled");
 }
 
@@ -1154,31 +1176,32 @@ void pausedWebhookStatus(const std::filesystem::path& path) {
     auto web = callbacks();
     const auto now = web.clock();
     const auto trigger = [&](std::string_view bot, std::string_view source) {
-        store.createAutomation(localOwner,web.intake(bot,"Check deployment"),
-            {{"kind","trigger"},{"source",source},{"request","Check deployment"}},now);
+        store.createAutomation(localOwner, web.intake(bot, "Check deployment"),
+                               {{"kind", "trigger"}, {"source", source}, {"request", "Check deployment"}}, now);
     };
-    trigger("release","release-only");
-    trigger("release","shared");
-    trigger("triage","shared");
-    store.setBotPaused(localOwner,"release",true);
+    trigger("release", "release-only");
+    trigger("release", "shared");
+    trigger("triage", "shared");
+    store.setBotPaused(localOwner, "release", true);
 
-    const auto server = startWeb(store,0,web);
+    const auto server = startWeb(store, 0, web);
     Browser browser(*server);
-    const Json payload{{"externalEventId","event-1"},{"event",Json::object()}};
-    const auto paused = browser.post("/api/webhooks/release-only",payload,409);
+    const Json payload{{"externalEventId", "event-1"}, {"event", Json::object()}};
+    const auto paused = browser.post("/api/webhooks/release-only", payload, 409);
     check(paused.at("error") == "bot_paused" && paused.at("tasks").empty() &&
-          paused.at("message").get<std::string>().find("paused") != std::string::npos,
+              paused.at("message").get<std::string>().find("paused") != std::string::npos,
           "An entirely paused webhook did not explain the refusal");
-    const auto shared = browser.post("/api/webhooks/shared",payload,202);
+    const auto shared = browser.post("/api/webhooks/shared", payload, 202);
     check(shared.at("skippedBots") == Json::array({"release"}) && shared.at("tasks").size() == 1 &&
-          shared.at("tasks").front().at("botId") == "triage","A mixed webhook did not report both outcomes");
+              shared.at("tasks").front().at("botId") == "triage",
+          "A mixed webhook did not report both outcomes");
 }
 
 void watchedBotView(const std::filesystem::path& path) {
     Store store(path), cli(path);
     auto web = callbacks();
     std::atomic<bool> renamed = false;
-    web.bots = [bots = web.bots,&renamed] {
+    web.bots = [bots = web.bots, &renamed] {
         auto cards = bots();
         if (renamed.load()) cards.at(0)["name"] = "Release Notes";
         return cards;
@@ -1188,19 +1211,19 @@ void watchedBotView(const std::filesystem::path& path) {
         if (token == "Bearer owner") return localOwner;
         return Person{};
     };
-    store.policy().setMember(localOwner,"release","reader",true);
-    const auto intake = web.intake("release","Check staging");
+    store.policy().setMember(localOwner, "release", "reader", true);
+    const auto intake = web.intake("release", "Check staging");
     store.submit(intake);
     FixedModel model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
-    tick(runtime,3);
-    const auto link = store.receive(localOwner,intake,"link","[docs](https://example.com/A%26Bcache-test)").at("messageId");
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
+    tick(runtime, 3);
+    const auto link = store.receive(localOwner, intake, "link", "[docs](https://example.com/A%26Bcache-test)").at("messageId");
 
-    const auto server = startWeb(store,0,web);
+    const auto server = startWeb(store, 0, web);
     Browser reader(*server), owner(*server), stream(*server);
-    for (auto* browser : {&reader,&stream}) browser->client.set_default_headers({{"Authorization","Bearer reader"}});
-    owner.client.set_default_headers({{"Authorization","Bearer owner"}});
+    for (auto* browser : {&reader, &stream}) browser->client.set_default_headers({{"Authorization", "Bearer reader"}});
+    owner.client.set_default_headers({{"Authorization", "Bearer owner"}});
     const std::string viewPath = "/api/view?bot=release";
     const auto baseline = reader.get(viewPath);
     const auto deltaPath = viewPath + "&sessionsAfter=" + baseline.at("sessionCursor").dump();
@@ -1211,28 +1234,28 @@ void watchedBotView(const std::filesystem::path& path) {
           "fixture did not contain a rendered link");
 
     Id arrival = 0;
-    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
-        check(change.value("bot","") == "release","missing the initial selected Bot projection");
+    readChanges(stream, "/api/events?bot=release", [&](const Json& change) {
+        check(change.value("bot", "") == "release", "missing the initial selected Bot projection");
         if (!arrival) {
             check(reader.get(viewPath) == baseline && reader.get(deltaPath) == delta,
                   "the watched projection changed a full or cursor-based response");
             check(owner.get(viewPath).at("bot").at("canDelete") == true && baseline.at("bot").at("canDelete") == false,
                   "the watched projection crossed viewer scopes");
             renamed = true;
-            check(reader.get(viewPath).at("bot").at("name") == "Release Notes","the watched projection hid a descriptor change");
+            check(reader.get(viewPath).at("bot").at("name") == "Release Notes", "the watched projection hid a descriptor change");
             renamed = false;
-            arrival = cli.receive(localOwner,intake,"cli","Written by the CLI").at("messageId");
-            check(reader.get(viewPath).at("events").back().at("id") == arrival,"the watched projection hid a concurrent CLI write");
+            arrival = cli.receive(localOwner, intake, "cli", "Written by the CLI").at("messageId");
+            check(reader.get(viewPath).at("events").back().at("id") == arrival, "the watched projection hid a concurrent CLI write");
             return true;
         }
 
         store.protectGitCredential("A&Bcache-test");
         const auto events = reader.get(viewPath).at("events");
-        const auto scrubbed = std::ranges::find_if(events,[&](const Json& event) { return event.at("id") == link; });
+        const auto scrubbed = std::ranges::find_if(events, [&](const Json& event) { return event.at("id") == link; });
         check(scrubbed != events.end() && scrubbed->at("data").at("textHtml").get<std::string>().find("href=") == std::string::npos,
               "a watched projection retained a link containing newly protected text");
-        cli.policy().setMember(localOwner,"release","reader",false);
-        Browser::checked(reader.client.Get(viewPath),403);
+        cli.policy().setMember(localOwner, "release", "reader", false);
+        Browser::checked(reader.client.Get(viewPath), 403);
         return false;
     });
 }
@@ -1241,12 +1264,12 @@ void eventStream(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
     auto web = callbacks();
-    const auto server = startWeb(store,0,web);
+    const auto server = startWeb(store, 0, web);
     Browser browser(*server);
     Browser stream(*server);
-    check(browser.get("/api/view?bot=release").at("canDecide") == true,"local owner lost conversation access");
-    Browser::checked(browser.client.Get("/api/events?peer=triage"),400);
-    Browser::checked(browser.client.Get("/api/events",httplib::Headers{{"Origin","http://example.test"}}),403);
+    check(browser.get("/api/view?bot=release").at("canDecide") == true, "local owner lost conversation access");
+    Browser::checked(browser.client.Get("/api/events?peer=triage"), 400);
+    Browser::checked(browser.client.Get("/api/events", httplib::Headers{{"Origin", "http://example.test"}}), 403);
 
     struct ReviewModel : FixedModel {
         Id task = 0;
@@ -1255,95 +1278,100 @@ void eventStream(const std::filesystem::path& path) {
             const auto& turn = input.event.at("turn");
             if (turn.empty()) {
                 auto args = git_fixture::openArgs();
-                args.update({{"taskId",task},{"title","Review the draft"}});
-                return {{{"git_open_pr",std::move(args),"Prepare the review fixture"}}};
+                args.update({{"taskId", task}, {"title", "Review the draft"}});
+                return {{{"git_open_pr", std::move(args), "Prepare the review fixture"}}};
             }
-            check(turn.front().at("result").at("status") == "created","could not open the fixture PR");
-            return {{{"reply",{{"text","Ready for review."}},"Report the pull request"}}};
+            check(turn.front().at("result").at("status") == "created", "could not open the fixture PR");
+            return {{{"reply", {{"text", "Ready for review."}}, "Report the pull request"}}};
         }
     } model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
-                    git_fixture::options(std::make_shared<git_fixture::FakeHost>()));
+    Runtime runtime(
+        store, model, t3, [](std::string_view) { return std::string{}; }, git_fixture::options(std::make_shared<git_fixture::FakeHost>()));
     unsigned changes = 0;
     Id releaseTask = 0;
     Json botsBeforeApproval;
     Json approval;
     bool approved = false;
-    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
-        if (changes >= 3) {
-            if (changes == 3) {
-                check(change == Json{{"list",true}},"another Bot invalidated the selected view");
-                model.task = releaseTask;
-                cli.receive(localOwner,web.intake("release","unused"),"pr-review","Open a pull request for review.");
-                runtime.runConversations();
-            } else if (changes == 4) {
-                check(change == Json{{"list",true},{"bot","release"}},"the PR review source did not invalidate its conversation");
-                const auto items = browser.get("/api/inbox?bot=release").at("items");
-                check(items.size() == 1 && items.at(0).at("itemKind") == "pr_review",
-                      "the update did not expose the pending PR review");
-                const auto events = browser.get("/api/view?bot=release").at("events");
-                check(std::ranges::any_of(events,[&](const auto& event) {
-                    return event.at("id") == items.at(0).at("conversationEventId") &&
-                        event.at("kind") == "pr_review_requested" &&
-                        event.at("data") == Json{{"itemId",items.at(0).at("itemId")},{"title","Pull request awaiting review"},
-                            {"text","Review the draft"},{"prUrl","https://github.com/org/flock/pull/1"}};
-                }),"the PR review did not have an exact reply source in the Web view");
-                approval = items.at(0);
-                approval["decision"] = "approve";
+    readChanges(
+        stream, "/api/events?bot=release",
+        [&](const Json& change) {
+            if (changes >= 3) {
+                if (changes == 3) {
+                    check(change == Json{{"list", true}}, "another Bot invalidated the selected view");
+                    model.task = releaseTask;
+                    cli.receive(localOwner, web.intake("release", "unused"), "pr-review", "Open a pull request for review.");
+                    runtime.runConversations();
+                } else if (changes == 4) {
+                    check(change == Json{{"list", true}, {"bot", "release"}}, "the PR review source did not invalidate its conversation");
+                    const auto items = browser.get("/api/inbox?bot=release").at("items");
+                    check(items.size() == 1 && items.at(0).at("itemKind") == "pr_review",
+                          "the update did not expose the pending PR review");
+                    const auto events = browser.get("/api/view?bot=release").at("events");
+                    check(std::ranges::any_of(events,
+                                              [&](const auto& event) {
+                                                  return event.at("id") == items.at(0).at("conversationEventId") &&
+                                                         event.at("kind") == "pr_review_requested" &&
+                                                         event.at("data") == Json{{"itemId", items.at(0).at("itemId")},
+                                                                                  {"title", "Pull request awaiting review"},
+                                                                                  {"text", "Review the draft"},
+                                                                                  {"prUrl", "https://github.com/org/flock/pull/1"}};
+                                              }),
+                          "the PR review did not have an exact reply source in the Web view");
+                    approval = items.at(0);
+                    approval["decision"] = "approve";
+                } else {
+                    if (!approved) return true;
+                    check(change == Json{{"list", true}}, "an inbox-only approval invalidated the selected view");
+                    check(browser.get("/api/bots") == botsBeforeApproval && browser.get("/api/inbox?bot=release").at("items").empty(),
+                          "the Inbox-only invalidation did not remove the approved review");
+                    return false;
+                }
+                ++changes;
+                return true;
+            }
+            check(change == Json{{"list", true}, {"bot", "release"}}, "unexpected SSE invalidation scope or payload");
+            if (changes == 0) {
+                releaseTask = cli.submit(web.intake("release", "CLI write"));
+            } else if (changes == 1) {
+                tick(runtime, 3);
             } else {
-                if (!approved) return true;
-                check(change == Json{{"list",true}},"an inbox-only approval invalidated the selected view");
-                check(browser.get("/api/bots") == botsBeforeApproval &&
-                      browser.get("/api/inbox?bot=release").at("items").empty(),
-                      "the Inbox-only invalidation did not remove the approved review");
-                return false;
+                check(browser.get("/api/view?bot=release").at("presence") == "working",
+                      "a state-only Runtime change did not reach the view");
+                cli.submit(web.intake("triage", "Other Bot"));
             }
             ++changes;
             return true;
-        }
-        check(change == Json{{"list",true},{"bot","release"}},"unexpected SSE invalidation scope or payload");
-        if (changes == 0) {
-            releaseTask = cli.submit(web.intake("release","CLI write"));
-        } else if (changes == 1) {
-            tick(runtime,3);
-        } else {
-            check(browser.get("/api/view?bot=release").at("presence") == "working",
-                "a state-only Runtime change did not reach the view");
-            cli.submit(web.intake("triage","Other Bot"));
-        }
-        ++changes;
-        return true;
-    },[&] {
-        if (!approval.empty() && !approved) {
-            botsBeforeApproval = browser.get("/api/bots");
-            browser.post("/api/inbox/decide",approval);
-            approved = true;
-        }
-    });
+        },
+        [&] {
+            if (!approval.empty() && !approved) {
+                botsBeforeApproval = browser.get("/api/bots");
+                browser.post("/api/inbox/decide", approval);
+                approved = true;
+            }
+        });
 }
 
 void conversationPermissions(const std::filesystem::path& path) {
     Store store(path);
-    const Person owner{"fixture",true};
+    const Person owner{"fixture", true};
     auto policy = store.policy();
-    policy.setMember(owner,"release","reader",true);
-    policy.setMember(owner,"release","decider",true);
+    policy.setMember(owner, "release", "reader", true);
+    policy.setMember(owner, "release", "decider", true);
     auto web = callbacks();
     web.authenticate = [](std::string_view credential) {
         if (credential == "Bearer reader") return Person{"reader"};
         if (credential == "Bearer decider") return Person{"decider"};
         return Person{};
     };
-    const Json message = {{"botId","release"},{"clientMessageId","permission-test"},{"text","Check the next release"}};
+    const Json message = {{"botId", "release"}, {"clientMessageId", "permission-test"}, {"text", "Check the next release"}};
     {
-        const auto server = startWeb(store,0,web);
+        const auto server = startWeb(store, 0, web);
         Browser decider(*server);
-        decider.client.set_default_headers({{"Authorization","Bearer decider"}});
-        check(decider.get("/api/view?bot=release").at("canDecide") == true,
-              "custom authentication without a resolver prevented reads");
-        decider.post("/api/messages",message,503);
-        check(store.conversation("release").empty(),"a listener without a resolver queued a message");
+        decider.client.set_default_headers({{"Authorization", "Bearer decider"}});
+        check(decider.get("/api/view?bot=release").at("canDecide") == true, "custom authentication without a resolver prevented reads");
+        decider.post("/api/messages", message, 503);
+        check(store.conversation("release").empty(), "a listener without a resolver queued a message");
     }
     bool deciderAvailable = true;
     web.resolveIdentity = [&](std::string_view person) -> std::optional<bool> {
@@ -1351,65 +1379,71 @@ void conversationPermissions(const std::filesystem::path& path) {
         return std::nullopt;
     };
 
-    const auto taskId = store.submit(web.intake("release","Draft release notes"));
+    const auto taskId = store.submit(web.intake("release", "Draft release notes"));
     struct ConversationModel : FixedModel {
         ModelTurn decide(const ModelInput& input) override {
             if (input.event.at("kind") == "conversation_turn")
-                return {{{"reply",{{"text","Ready to check the release"}},"Reply to the user"}}};
+                return {{{"reply", {{"text", "Ready to check the release"}}, "Reply to the user"}}};
             return FixedModel::decide(input);
         }
     } model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
-    tick(runtime,3);
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
+    tick(runtime, 3);
     auto& observation = t3.observations["thread-release"];
     observation.kind = Observation::Kind::Question;
-    observation.question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
-    tick(runtime,2);
+    observation.question = {"scope-question", Json::array({{{"id", "scope"}, {"required", true}}})};
+    tick(runtime, 2);
 
-    const auto server = startWeb(store,0,web);
+    const auto server = startWeb(store, 0, web);
     Browser reader(*server), decider(*server), stream(*server);
-    reader.client.set_default_headers({{"Authorization","Bearer reader"}});
-    stream.client.set_default_headers({{"Authorization","Bearer reader"}});
-    decider.client.set_default_headers({{"Authorization","Bearer decider"}});
+    reader.client.set_default_headers({{"Authorization", "Bearer reader"}});
+    stream.client.set_default_headers({{"Authorization", "Bearer reader"}});
+    decider.client.set_default_headers({{"Authorization", "Bearer decider"}});
     const auto viewPath = "/api/view?bot=release";
     const auto readable = reader.get(viewPath);
     const auto writable = decider.get(viewPath);
-    check(readable.at("canDecide") == true && writable.at("canDecide") == true,"conversation permission did not follow the caller");
-    check(!readable.at("events").empty() && readable.at("events") == writable.at("events") &&
-          readable.at("waits") == writable.at("waits"),"reader lost conversation or wait history");
+    check(readable.at("canDecide") == true && writable.at("canDecide") == true, "conversation permission did not follow the caller");
+    check(!readable.at("events").empty() && readable.at("events") == writable.at("events") && readable.at("waits") == writable.at("waits"),
+          "reader lost conversation or wait history");
 
     const auto& wait = readable.at("waits").at(0);
-    const Json answer = {{"botId","release"},{"taskId",taskId},{"waitId",wait.at("wait").at("id")},
-        {"operation","answer"},{"text","すべて"},{"targetRevision",wait.at("currentRevision")},
-        {"targetGeneration",wait.at("generation")}};
+    const Json answer = {{"botId", "release"},
+                         {"taskId", taskId},
+                         {"waitId", wait.at("wait").at("id")},
+                         {"operation", "answer"},
+                         {"text", "すべて"},
+                         {"targetRevision", wait.at("currentRevision")},
+                         {"targetGeneration", wait.at("generation")}};
     auto memberMessage = message;
     memberMessage["clientMessageId"] = "shared-member-message";
-    reader.post("/api/messages",memberMessage,201);
+    reader.post("/api/messages", memberMessage, 201);
     runtime.runConversations();
-    policy.setMember(owner,"release","reader",false);
-    Browser::checked(reader.client.Get(viewPath),403);
-    reader.post("/api/operations",answer,403);
-    policy.setMember(owner,"release","reader",true);
+    policy.setMember(owner, "release", "reader", false);
+    Browser::checked(reader.client.Get(viewPath), 403);
+    reader.post("/api/operations", answer, 403);
+    policy.setMember(owner, "release", "reader", true);
 
-    decider.post("/api/operations",answer);
-    const auto authorized = decider.post("/api/messages",message,201).at("messageId");
+    decider.post("/api/operations", answer);
+    const auto authorized = decider.post("/api/messages", message, 201).at("messageId");
     runtime.runConversations();
     const auto assertReply = [&](const Json& id, std::string_view route) {
         const auto events = reader.get(viewPath).at("events");
-        check(std::ranges::any_of(events,[&](const Json& event) {
-            return event.at("kind") == "conversation_reply" && event.at("data").at("replyToMessageId") == id &&
-                   event.at("data").at("route") == route;
-        }),"Queued message did not use the custom identity resolver");
+        check(std::ranges::any_of(events,
+                                  [&](const Json& event) {
+                                      return event.at("kind") == "conversation_reply" && event.at("data").at("replyToMessageId") == id &&
+                                             event.at("data").at("route") == route;
+                                  }),
+              "Queued message did not use the custom identity resolver");
     };
-    assertReply(authorized,"reply");
+    assertReply(authorized, "reply");
 
     auto queued = message;
     queued["clientMessageId"] = "removed-before-run";
-    const auto revoked = decider.post("/api/messages",queued,201).at("messageId");
+    const auto revoked = decider.post("/api/messages", queued, 201).at("messageId");
     deciderAvailable = false;
     runtime.runConversations();
-    assertReply(revoked,"access");
+    assertReply(revoked, "access");
 }
 
 void retryEventProjection(const std::filesystem::path& path) {
@@ -1420,14 +1454,14 @@ void retryEventProjection(const std::filesystem::path& path) {
         if (!peersAvailable.load()) throw std::runtime_error("profiles unavailable");
         return fixturePeers(bot);
     };
-    const auto server = startWeb(store,0,web);
+    const auto server = startWeb(store, 0, web);
     Browser stream(*server);
-    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
+    readChanges(stream, "/api/events?bot=release", [&](const Json& change) {
         if (!peersAvailable.exchange(true)) {
-            check(change == Json{{"bot","release"}},"a failed list projection blocked a healthy Bot view");
+            check(change == Json{{"bot", "release"}}, "a failed list projection blocked a healthy Bot view");
             return true;
         }
-        check(change == Json{{"list",true}},"list projection did not recover independently");
+        check(change == Json{{"list", true}}, "list projection did not recover independently");
         return false;
     });
 }
@@ -1435,22 +1469,21 @@ void retryEventProjection(const std::filesystem::path& path) {
 void retryHistoryInvalidation(const std::filesystem::path& path) {
     Store store(path);
     auto web = callbacks();
-    const auto task = store.submit(web.intake("release","Release notes"));
-    const auto intake = web.intake("release","Follow up");
-    const auto message = store.receive(Person{"owner",true},intake,"old","Follow up").at("messageId").get<Id>();
-    for (int i = 0; i < 40; ++i)
-        store.receive(Person{"owner",true},intake,"new-" + std::to_string(i),"Newer message");
+    const auto task = store.submit(web.intake("release", "Release notes"));
+    const auto intake = web.intake("release", "Follow up");
+    const auto message = store.receive(Person{"owner", true}, intake, "old", "Follow up").at("messageId").get<Id>();
+    for (int i = 0; i < 40; ++i) store.receive(Person{"owner", true}, intake, "new-" + std::to_string(i), "Newer message");
 
     std::atomic<bool> projectionUnavailable = false;
     std::atomic<bool> projectionFailed = false;
-    web.bots = [bots = web.bots,&projectionUnavailable,&projectionFailed] {
+    web.bots = [bots = web.bots, &projectionUnavailable, &projectionFailed] {
         if (projectionUnavailable.load()) {
             projectionFailed = true;
             throw std::runtime_error("Bot profiles unavailable");
         }
         return bots();
     };
-    const auto server = startWeb(store,0,web);
+    const auto server = startWeb(store, 0, web);
     Browser browser(*server), stream(*server);
     const std::string viewPath = "/api/view?bot=release";
     const auto olderPath = "/api/conversation?bot=release&before=" + std::to_string(message + 1);
@@ -1458,92 +1491,94 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
     const auto changesPath = viewPath + "&changesAfter=" + baseline.at("historyCursor").dump();
     baseline.erase("historyCursor");
     check(baseline.at("events").front().at("id").get<Id>() > message &&
-          browser.get(olderPath).at("events").back().at("data").at("deliveredToT3") == false,
+              browser.get(olderPath).at("events").back().at("data").at("deliveredToT3") == false,
           "expected an undelivered message outside the newest view");
 
     bool initial = true;
     unsigned pingsDuringFailure = 0;
-    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
-        if (std::exchange(initial,false)) {
-            check(change == Json{{"list",true},{"bot","release"}},"missing initial view scopes");
-            projectionUnavailable = true;
+    readChanges(
+        stream, "/api/events?bot=release",
+        [&](const Json& change) {
+            if (std::exchange(initial, false)) {
+                check(change == Json{{"list", true}, {"bot", "release"}}, "missing initial view scopes");
+                projectionUnavailable = true;
 
-            sqlite3* raw = nullptr;
-            const auto opened = sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
-            const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
-            check(opened == SQLITE_OK,"could not open the fixture writer");
-            sqlite3_busy_timeout(db.get(),2000);
-            std::string write;
-            for (const auto* kind : {"instruction_accepted","instruction_delivered"})
-                write += "INSERT INTO journal(task_id,time,kind,data) VALUES(" + std::to_string(task) + ",unixepoch(),'" +
-                    kind + "',json_object('messageId'," + std::to_string(message) + ",'step',1));";
-            check(sqlite3_exec(db.get(),write.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
-                  "could not record the historical delivery");
-            return true;
-        }
-        check(!projectionUnavailable && change == Json{{"bot","release"}},
-              "recovery did not invalidate only the affected Bot view");
-        auto current = browser.get(viewPath);
-        current.erase("historyCursor");
-        check(current == baseline,"the history-only write changed the newest view");
-        check(browser.get(changesPath).at("changedMessageIds") == Json::array({message}) &&
-              browser.get(olderPath).at("events").back().at("data").at("deliveredToT3") == true,
-              "the recovered notification did not expose the updated historical message");
-        return false;
-    },[&] {
-        if (projectionFailed && ++pingsDuringFailure == 2) projectionUnavailable = false;
-    });
+                sqlite3* raw = nullptr;
+                const auto opened = sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr);
+                const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
+                check(opened == SQLITE_OK, "could not open the fixture writer");
+                sqlite3_busy_timeout(db.get(), 2000);
+                std::string write;
+                for (const auto* kind : {"instruction_accepted", "instruction_delivered"})
+                    write += "INSERT INTO journal(task_id,time,kind,data) VALUES(" + std::to_string(task) + ",unixepoch(),'" + kind +
+                             "',json_object('messageId'," + std::to_string(message) + ",'step',1));";
+                check(sqlite3_exec(db.get(), write.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
+                      "could not record the historical delivery");
+                return true;
+            }
+            check(!projectionUnavailable && change == Json{{"bot", "release"}}, "recovery did not invalidate only the affected Bot view");
+            auto current = browser.get(viewPath);
+            current.erase("historyCursor");
+            check(current == baseline, "the history-only write changed the newest view");
+            check(browser.get(changesPath).at("changedMessageIds") == Json::array({message}) &&
+                      browser.get(olderPath).at("events").back().at("data").at("deliveredToT3") == true,
+                  "the recovered notification did not expose the updated historical message");
+            return false;
+        },
+        [&] {
+            if (projectionFailed && ++pingsDuringFailure == 2) projectionUnavailable = false;
+        });
 }
 
 void retryOneBotProjection(const std::filesystem::path& path) {
     using web::ChangeFeed;
     Store store(path), writer(path);
     const auto web = callbacks();
-    const auto intake = web.intake("release","Follow up");
-    const auto message = writer.receive(localOwner,intake,"old","Follow up").at("messageId").get<Id>();
-    const auto task = writer.submit(web.intake("release","Latest release request"));
-    const auto latest = store.conversation("release",0,1);
+    const auto intake = web.intake("release", "Follow up");
+    const auto message = writer.receive(localOwner, intake, "old", "Follow up").at("messageId").get<Id>();
+    const auto task = writer.submit(web.intake("release", "Latest release request"));
+    const auto latest = store.conversation("release", 0, 1);
     std::atomic<bool> releaseAvailable = true;
     std::atomic<bool> releaseFailed = false;
-    ChangeFeed feed(store,[&](const ChangeFeed::Scope& scope) {
+    ChangeFeed feed(store, [&](const ChangeFeed::Scope& scope) {
         const auto* view = std::get_if<ChangeFeed::BotView>(&scope.target);
         if (!view) return Json::object();
         if (view->bot == "release" && !releaseAvailable.load()) {
             releaseFailed = true;
             throw std::runtime_error("release projection unavailable");
         }
-        return store.conversation(view->bot,0,1);
+        return store.conversation(view->bot, 0, 1);
     });
-    auto release = feed.subscribe({localOwner,ChangeFeed::BotView{"release"}}).value();
-    auto triage = feed.subscribe({localOwner,ChangeFeed::BotView{"triage"}}).value();
+    auto release = feed.subscribe({localOwner, ChangeFeed::BotView{"release"}}).value();
+    auto triage = feed.subscribe({localOwner, ChangeFeed::BotView{"triage"}}).value();
     const auto expectBot = [&](ChangeFeed::Cursor& cursor, std::string_view bot) {
         for (int attempt = 0; attempt < 5; ++attempt)
-            if (feed.next(cursor).value().value("bot","") == bot) return;
+            if (feed.next(cursor).value().value("bot", "") == bot) return;
         throw std::runtime_error("missing change for " + std::string(bot));
     };
-    expectBot(release,"release");
-    expectBot(triage,"triage");
+    expectBot(release, "release");
+    expectBot(triage, "triage");
 
     releaseAvailable = false;
     sqlite3* raw = nullptr;
-    const auto opened = sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
-    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
-    check(opened == SQLITE_OK,"could not open the fixture writer");
-    sqlite3_busy_timeout(db.get(),2000);
+    const auto opened = sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr);
+    const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
+    check(opened == SQLITE_OK, "could not open the fixture writer");
+    sqlite3_busy_timeout(db.get(), 2000);
     const auto event = [&](std::string_view kind) {
-        return "(" + std::to_string(task) + ",unixepoch(),'" + std::string(kind) + "',json_object('messageId'," +
-            std::to_string(message) + ",'step',1))";
+        return "(" + std::to_string(task) + ",unixepoch(),'" + std::string(kind) + "',json_object('messageId'," + std::to_string(message) +
+               ",'step',1))";
     };
-    const auto write = "INSERT INTO journal(task_id,time,kind,data) VALUES" + event("instruction_accepted") +
-        "," + event("instruction_delivered");
-    check(sqlite3_exec(db.get(),write.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,"could not update historical message");
-    writer.submit(web.intake("triage","Healthy Bot request"));
-    expectBot(triage,"triage");
-    check(feed.next(release).value().empty() && releaseFailed.load(),"release did not remain pending during the failed projection");
+    const auto write =
+        "INSERT INTO journal(task_id,time,kind,data) VALUES" + event("instruction_accepted") + "," + event("instruction_delivered");
+    check(sqlite3_exec(db.get(), write.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK, "could not update historical message");
+    writer.submit(web.intake("triage", "Healthy Bot request"));
+    expectBot(triage, "triage");
+    check(feed.next(release).value().empty() && releaseFailed.load(), "release did not remain pending during the failed projection");
     releaseAvailable = true;
-    expectBot(release,"release");
-    check(store.conversation("release",0,1) == latest,"history invalidation unexpectedly changed the latest page");
-    check(store.conversation("release",message+1,1).back().at("data").at("deliveredToT3") == true,
+    expectBot(release, "release");
+    check(store.conversation("release", 0, 1) == latest, "history invalidation unexpectedly changed the latest page");
+    check(store.conversation("release", message + 1, 1).back().at("data").at("deliveredToT3") == true,
           "the recovered Bot skipped the historical change");
     feed.release(release);
     feed.release(triage);
@@ -1557,17 +1592,17 @@ void peerEventStream(const std::filesystem::path& path) {
     options.peers = fixturePeers;
     PeerModel model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
-    const auto server = startWeb(store,0,web);
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
+    const auto server = startWeb(store, 0, web);
     Browser browser(*server);
     Browser stream(*server);
     bool initial = true;
-    readChanges(stream,"/api/events?bot=release&peer=triage",[&](const Json& change) {
-        const Json pair = {{"bot","release"},{"peer","triage"}};
-        if (change.contains("dm")) check(change.at("dm") == pair,"the DM stream sent the wrong scope");
-        if (std::exchange(initial,false)) {
-            check(change == Json{{"list",true},{"bot","release"},{"dm",pair}},"missing initial DM scope");
-            seedPeerHistory(store,browser,runtime,t3);
+    readChanges(stream, "/api/events?bot=release&peer=triage", [&](const Json& change) {
+        const Json pair = {{"bot", "release"}, {"peer", "triage"}};
+        if (change.contains("dm")) check(change.at("dm") == pair, "the DM stream sent the wrong scope");
+        if (std::exchange(initial, false)) {
+            check(change == Json{{"list", true}, {"bot", "release"}, {"dm", pair}}, "missing initial DM scope");
+            seedPeerHistory(store, browser, runtime, t3);
             return true;
         }
         return !change.contains("dm");
@@ -1575,30 +1610,35 @@ void peerEventStream(const std::filesystem::path& path) {
 }
 void botProfileEndpoints(const std::filesystem::path& path) {
     Store store(path);
-    std::map<std::string,Json,std::less<>> profiles;
-    std::map<std::string,AvatarImage,std::less<>> images;
+    std::map<std::string, Json, std::less<>> profiles;
+    std::map<std::string, AvatarImage, std::less<>> images;
     unsigned counter = 0;
 
     WebCallbacks cb;
     cb.bots = [&] {
         Json list = Json::array();
-        for (const auto& [id,card] : profiles) list.push_back(card);
+        for (const auto& [id, card] : profiles) list.push_back(card);
         return list;
     };
     cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
-        return {std::string(bot),std::string(request),"local-env","proj",Json::object()};
+        return {std::string(bot), std::string(request), "local-env", "proj", Json::object()};
     };
     cb.createBot = [&](const Person& creator, const Json& profile, const std::optional<AvatarImage>& image) {
         const auto id = "bot-" + std::to_string(++counter);
-        store.policy().setOwner(creator,id);
+        store.policy().setOwner(creator, id);
         Json avatar = profile.at("avatar");
         if (image) {
-            images.insert_or_assign(id,*image);
+            images.insert_or_assign(id, *image);
             avatar["version"] = "v" + std::to_string(counter);
             avatar["file"] = image->format().filename;
         }
-        Json card = {{"id",id},{"name",profile.at("name")},{"role",profile.value("role","custom")},
-                     {"soul",""},{"cron",Json::array()},{"avatar",avatar},{"secret",privateValue}};
+        Json card = {{"id", id},
+                     {"name", profile.at("name")},
+                     {"role", profile.value("role", "custom")},
+                     {"soul", ""},
+                     {"cron", Json::array()},
+                     {"avatar", avatar},
+                     {"secret", privateValue}};
         profiles[id] = card;
         return card;
     };
@@ -1615,12 +1655,14 @@ void botProfileEndpoints(const std::filesystem::path& path) {
             return card;
         }
         if (botRunSettingCount(profile)) {
-            check(!image,"run settings update carried an image");
+            check(!image, "run settings update carried an image");
             for (const auto& [key, value] : profile.items()) {
-                check(std::find(std::begin(botRunSettingFields),std::end(botRunSettingFields),key) != std::end(botRunSettingFields),
+                check(std::find(std::begin(botRunSettingFields), std::end(botRunSettingFields), key) != std::end(botRunSettingFields),
                       "run settings update forwarded other settings");
-                if (value == "") card.erase(key);
-                else card[key] = value;
+                if (value == "")
+                    card.erase(key);
+                else
+                    card[key] = value;
             }
             return card;
         }
@@ -1631,12 +1673,12 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         Json avatar = profile.at("avatar");
         if (avatar.at("kind") == "upload") {
             if (image) {
-                images.insert_or_assign(std::string(botId),*image);
+                images.insert_or_assign(std::string(botId), *image);
                 avatar["version"] = "v" + std::to_string(++counter);
                 avatar["file"] = image->format().filename;
             } else {
                 const auto& existing = card.at("avatar");
-                if (existing.value("kind","") != "upload") throw Conflict("Uploaded image is required");
+                if (existing.value("kind", "") != "upload") throw Conflict("Uploaded image is required");
                 avatar["version"] = existing.at("version");
                 avatar["file"] = existing.at("file");
             }
@@ -1653,229 +1695,274 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         return found->second;
     };
 
-    const auto server = startWeb(store,0,std::move(cb));
+    const auto server = startWeb(store, 0, std::move(cb));
     Browser browser(*server);
 
     // 1x1 transparent PNG (67 bytes) base64
-    const std::string validPngBase64 =
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    const std::string validPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
     // 1x1 GIF base64
     const std::string validGifBase64 = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
     // SVG payload base64 (must be rejected)
     const std::string svgBase64 = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjwvc3ZnPg==";
 
-    const auto created = browser.post("/api/bots",{
-        {"name","Scout"},
-        {"role","reviewer"},
-        {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
-    },201);
+    const auto created = browser.post("/api/bots",
+                                      {
+                                          {"name", "Scout"},
+                                          {"role", "reviewer"},
+                                          {"avatar", {{"kind", "shape"}, {"example", "sprout"}, {"color", "#69c9ac"}}},
+                                      },
+                                      201);
     check(created.at("id") == "bot-1" && created.at("name") == "Scout" && created.at("role") == "reviewer" &&
-          created.at("avatar").at("kind") == "shape" && created.at("avatar").at("example") == "sprout",
+              created.at("avatar").at("kind") == "shape" && created.at("avatar").at("example") == "sprout",
           "POST /api/bots did not return sanitized created Bot");
-    check(created.at("fixPullRequests") == true,"a new Bot did not default to fixing pull requests");
-    const auto disabled = browser.post("/api/bots/profile",{{"botId","bot-1"},{"fixPullRequests",false}});
-    check(disabled.at("fixPullRequests") == false &&
-          browser.get("/api/view?bot=bot-1").at("bot").at("fixPullRequests") == false,
+    check(created.at("fixPullRequests") == true, "a new Bot did not default to fixing pull requests");
+    const auto disabled = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"fixPullRequests", false}});
+    check(disabled.at("fixPullRequests") == false && browser.get("/api/view?bot=bot-1").at("bot").at("fixPullRequests") == false,
           "turning off PR follow-ups did not update the Bot settings view");
-    for (const auto& invalid : Json::array({"true",1,nullptr})) {
-        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"fixPullRequests",invalid}},400);
-        check(rejected.at("error") == "invalid_pull_request_setting","a non-boolean PR setting was accepted");
+    for (const auto& invalid : Json::array({"true", 1, nullptr})) {
+        const auto rejected = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"fixPullRequests", invalid}}, 400);
+        check(rejected.at("error") == "invalid_pull_request_setting", "a non-boolean PR setting was accepted");
     }
 
-    const auto uploaded = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},
-        {"name","Scout Photo"},
-        {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"},{"imageData",validPngBase64}}},
-    },200);
+    const auto uploaded =
+        browser.post("/api/bots/profile",
+                     {
+                         {"botId", "bot-1"},
+                         {"name", "Scout Photo"},
+                         {"avatar", {{"kind", "upload"}, {"color", "#75b8e8"}, {"filename", "photo.png"}, {"imageData", validPngBase64}}},
+                     },
+                     200);
     check(uploaded.at("name") == "Scout Photo" && uploaded.at("avatar").at("kind") == "upload" &&
-          uploaded.at("avatar").at("filename") == "photo.png" && !uploaded.at("avatar").contains("file"),
+              uploaded.at("avatar").at("filename") == "photo.png" && !uploaded.at("avatar").contains("file"),
           "POST /api/bots/profile leaked internal filename or missed upload metadata");
     const auto originalUrl = uploaded.at("avatar").at("imageUrl").get<std::string>();
-    check(originalUrl.starts_with("/api/bot-avatar?bot=bot-1&v="),"missing projected avatar imageUrl");
+    check(originalUrl.starts_with("/api/bot-avatar?bot=bot-1&v="), "missing projected avatar imageUrl");
 
     const auto fetchedImage = browser.client.Get(originalUrl);
-    check(fetchedImage && fetchedImage->status == 200 &&
-          fetchedImage->get_header_value("Content-Type") == "image/png" &&
-          fetchedImage->get_header_value("X-Content-Type-Options") == "nosniff" &&
-          fetchedImage->body.starts_with("\x89PNG"),
+    check(fetchedImage && fetchedImage->status == 200 && fetchedImage->get_header_value("Content-Type") == "image/png" &&
+              fetchedImage->get_header_value("X-Content-Type-Options") == "nosniff" && fetchedImage->body.starts_with("\x89PNG"),
           "GET /api/bot-avatar did not serve verified PNG");
 
     auto paddedPng = validPngBase64;
-    paddedPng[paddedPng.size()-2] = 'J';
-    const auto padded = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},
-        {"name","Scout Photo"},
-        {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"},{"imageData",paddedPng}}},
-    },400);
-    check(padded.at("error") == "invalid_image","unused Base64 bits were accepted for an avatar upload");
+    paddedPng[paddedPng.size() - 2] = 'J';
+    const auto padded =
+        browser.post("/api/bots/profile",
+                     {
+                         {"botId", "bot-1"},
+                         {"name", "Scout Photo"},
+                         {"avatar", {{"kind", "upload"}, {"color", "#75b8e8"}, {"filename", "photo.png"}, {"imageData", paddedPng}}},
+                     },
+                     400);
+    check(padded.at("error") == "invalid_image", "unused Base64 bits were accepted for an avatar upload");
 
     // Rename without re-uploading keeps imageUrl intact.
-    const auto renamed = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},
-        {"name","Scout Kept"},
-        {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"}}},
-    },200);
-    check(renamed.at("avatar").at("imageUrl") == originalUrl,"rename did not preserve uploaded avatar URL");
+    const auto renamed = browser.post("/api/bots/profile",
+                                      {
+                                          {"botId", "bot-1"},
+                                          {"name", "Scout Kept"},
+                                          {"avatar", {{"kind", "upload"}, {"color", "#75b8e8"}, {"filename", "photo.png"}}},
+                                      },
+                                      200);
+    check(renamed.at("avatar").at("imageUrl") == originalUrl, "rename did not preserve uploaded avatar URL");
 
     // A name-only update may omit the avatar entirely.
-    const auto nameOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Name"}},200);
+    const auto nameOnly = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"name", "Scout Name"}}, 200);
     check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == originalUrl,
           "name-only update changed the avatar");
 
-    const auto noOriginal = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul","Other role"}},400);
-    check(noOriginal.at("error") == "invalid_profile_update","role update accepted without original text");
-    const auto roleOnly = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},{"soul"," \tCheck releases.\r\n"},{"originalSoul",""},
-    },200);
+    const auto noOriginal = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"soul", "Other role"}}, 400);
+    check(noOriginal.at("error") == "invalid_profile_update", "role update accepted without original text");
+    const auto roleOnly = browser.post("/api/bots/profile",
+                                       {
+                                           {"botId", "bot-1"},
+                                           {"soul", " \tCheck releases.\r\n"},
+                                           {"originalSoul", ""},
+                                       },
+                                       200);
     check(roleOnly.at("soul") == "Check releases." && roleOnly.at("name") == "Scout Name" &&
-          roleOnly.at("avatar").at("imageUrl") == originalUrl,"role-only update lost profile settings");
-    const auto mixed = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},{"name","Stale Name"},{"soul","Other role"},{"originalSoul",roleOnly.at("soul")},
-    },400);
-    check(mixed.at("error") == "invalid_profile_update","role and name were accepted in the same request");
-    for (const Json& invalid : Json::array({nullptr,std::string("a\0b",3),std::string(maxBotRoleBytes + 1,'x')})) {
-        const auto rejected = browser.post("/api/bots/profile",{
-            {"botId","bot-1"},{"soul",invalid},{"originalSoul",roleOnly.at("soul")},
-        },400);
-        check(rejected.at("error") == "invalid_soul","invalid role was accepted");
+              roleOnly.at("avatar").at("imageUrl") == originalUrl,
+          "role-only update lost profile settings");
+    const auto mixed = browser.post("/api/bots/profile",
+                                    {
+                                        {"botId", "bot-1"},
+                                        {"name", "Stale Name"},
+                                        {"soul", "Other role"},
+                                        {"originalSoul", roleOnly.at("soul")},
+                                    },
+                                    400);
+    check(mixed.at("error") == "invalid_profile_update", "role and name were accepted in the same request");
+    for (const Json& invalid : Json::array({nullptr, std::string("a\0b", 3), std::string(maxBotRoleBytes + 1, 'x')})) {
+        const auto rejected = browser.post("/api/bots/profile",
+                                           {
+                                               {"botId", "bot-1"},
+                                               {"soul", invalid},
+                                               {"originalSoul", roleOnly.at("soul")},
+                                           },
+                                           400);
+        check(rejected.at("error") == "invalid_soul", "invalid role was accepted");
     }
-    const auto secret = store.policy().requestSecret("bot-1",{"fixture-role-token"});
-    store.policy().submitSecret(localOwner,"bot-1",secret,privateValue);
-    const auto credentials = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},{"soul","Use " + std::string(privateValue)},{"originalSoul",roleOnly.at("soul")},
-    },400);
-    check(credentials.at("error") == "role_contains_secrets","role update accepted a stored secret");
-    const auto nameAfterRole = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Latest"}},200);
-    check(nameAfterRole.at("soul") == "Check releases.","rename or rejected role update changed the role");
+    const auto secret = store.policy().requestSecret("bot-1", {"fixture-role-token"});
+    store.policy().submitSecret(localOwner, "bot-1", secret, privateValue);
+    const auto credentials = browser.post("/api/bots/profile",
+                                          {
+                                              {"botId", "bot-1"},
+                                              {"soul", "Use " + std::string(privateValue)},
+                                              {"originalSoul", roleOnly.at("soul")},
+                                          },
+                                          400);
+    check(credentials.at("error") == "role_contains_secrets", "role update accepted a stored secret");
+    const auto nameAfterRole = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"name", "Scout Latest"}}, 200);
+    check(nameAfterRole.at("soul") == "Check releases.", "rename or rejected role update changed the role");
 
-    const auto workspace = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},{"environmentId"," env-1 "},{"projectId","project-1"},{"model"," first-model "},
-    },200);
+    const auto workspace = browser.post("/api/bots/profile",
+                                        {
+                                            {"botId", "bot-1"},
+                                            {"environmentId", " env-1 "},
+                                            {"projectId", "project-1"},
+                                            {"model", " first-model "},
+                                        },
+                                        200);
     check(workspace.at("name") == "Scout Latest" && workspace.at("soul") == "Check releases." &&
-          workspace.at("avatar").at("imageUrl") == originalUrl && workspace.at("environmentId") == "env-1" &&
-          workspace.at("projectId") == "project-1" && workspace.at("model") == "first-model",
+              workspace.at("avatar").at("imageUrl") == originalUrl && workspace.at("environmentId") == "env-1" &&
+              workspace.at("projectId") == "project-1" && workspace.at("model") == "first-model",
           "run settings update lost another setting or failed to return the model and destination");
-    for (const auto& extra : {"name","soul","avatar","role","modelProvider"}) {
-        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model","next-model"},{extra,"stale"}},400);
-        check(rejected.at("error") == "invalid_profile_update","model update accepted an unrelated field");
+    for (const auto& extra : {"name", "soul", "avatar", "role", "modelProvider"}) {
+        const auto rejected = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"model", "next-model"}, {extra, "stale"}}, 400);
+        check(rejected.at("error") == "invalid_profile_update", "model update accepted an unrelated field");
     }
-    for (const Json& invalid : Json::array({42," \t\n","has space",std::string("a\0b",3),std::string(257,'x')})) {
-        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"projectId",invalid}},400);
-        check(rejected.at("error") == "invalid_workspace","invalid project ID was accepted");
-        const auto badModel = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model",invalid}},400);
-        check(badModel.at("error") == "invalid_model","invalid model was accepted");
+    for (const Json& invalid : Json::array({42, " \t\n", "has space", std::string("a\0b", 3), std::string(257, 'x')})) {
+        const auto rejected = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"projectId", invalid}}, 400);
+        check(rejected.at("error") == "invalid_workspace", "invalid project ID was accepted");
+        const auto badModel = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"model", invalid}}, 400);
+        check(badModel.at("error") == "invalid_model", "invalid model was accepted");
     }
-    const auto partial = browser.post("/api/bots/profile",{{"botId","bot-1"},{"environmentId","env-2"}},200);
-    check(partial.at("environmentId") == "env-2" && partial.at("projectId") == "project-1" &&
-          partial.at("model") == "first-model","partial update replaced the project or model");
-    const auto modelOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model","next-model"}},200);
-    check(modelOnly.at("model") == "next-model" && modelOnly.at("projectId") == "project-1",
-          "model-only update lost the workspace");
-    const auto allowance = browser.post("/api/bots/profile",{{"botId","bot-1"},{"modelCallLimit",12}},200);
+    const auto partial = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"environmentId", "env-2"}}, 200);
+    check(partial.at("environmentId") == "env-2" && partial.at("projectId") == "project-1" && partial.at("model") == "first-model",
+          "partial update replaced the project or model");
+    const auto modelOnly = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"model", "next-model"}}, 200);
+    check(modelOnly.at("model") == "next-model" && modelOnly.at("projectId") == "project-1", "model-only update lost the workspace");
+    const auto allowance = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"modelCallLimit", 12}}, 200);
     check(allowance.at("modelCallLimit") == 12 && allowance.at("model") == "next-model" && allowance.at("projectId") == "project-1",
           "saving the allowance changed the model or destination");
-    for (const auto& invalid : Json::array({nullptr,"15",true,-1,0,1.5,2147483648LL})) {
-        const auto rejected = browser.post("/api/bots/profile",{
-            {"botId","bot-1"},{"modelCallLimit",invalid},{"model","other-model"},
-        },400);
-        check(rejected.at("error") == "invalid_model_call_limit","invalid allowance was accepted");
+    for (const auto& invalid : Json::array({nullptr, "15", true, -1, 0, 1.5, 2147483648LL})) {
+        const auto rejected = browser.post("/api/bots/profile",
+                                           {
+                                               {"botId", "bot-1"},
+                                               {"modelCallLimit", invalid},
+                                               {"model", "other-model"},
+                                           },
+                                           400);
+        check(rejected.at("error") == "invalid_model_call_limit", "invalid allowance was accepted");
     }
     const auto settingsView = browser.get("/api/view?bot=bot-1").at("bot");
     check(settingsView.at("modelCallLimit") == 12 && settingsView.at("model") == "next-model",
           "the Bot settings view lost saved settings or an invalid update changed them");
-    check(browser.get("/api/view?bot=bot-1").at("bot").at("model") == "next-model","Bot settings view lost its model");
-    for (const auto& invalid : {Json(nullptr),Json(1),Json("high effort"),Json(" low ")}) {
-        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"reasoningEffort",invalid}},400);
-        check(rejected.at("error") == "invalid_reasoning_effort","invalid reasoning effort was accepted");
+    check(browser.get("/api/view?bot=bot-1").at("bot").at("model") == "next-model", "Bot settings view lost its model");
+    for (const auto& invalid : {Json(nullptr), Json(1), Json("high effort"), Json(" low ")}) {
+        const auto rejected = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"reasoningEffort", invalid}}, 400);
+        check(rejected.at("error") == "invalid_reasoning_effort", "invalid reasoning effort was accepted");
     }
-    const auto effort = browser.post("/api/bots/profile",{{"botId","bot-1"},{"reasoningEffort","low"}},200);
+    const auto effort = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"reasoningEffort", "low"}}, 200);
     check(effort.at("model") == "next-model" && effort.at("reasoningEffort") == "low" &&
-          browser.get("/api/view?bot=bot-1").at("bot").at("reasoningEffort") == "low",
+              browser.get("/api/view?bot=bot-1").at("bot").at("reasoningEffort") == "low",
           "effort-only update changed the model or missed the Bot settings view");
-    const auto defaultEffort = browser.post("/api/bots/profile",{{"botId","bot-1"},{"reasoningEffort",""}},200);
-    check(!defaultEffort.contains("reasoningEffort"),"Model default did not clear the saved effort");
-    const auto clearedModel = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model",""}},200);
-    check(!clearedModel.contains("model") && clearedModel.at("projectId") == "project-1",
-          "clearing the model lost the workspace");
-    const auto clearedProject = browser.post("/api/bots/profile",{{"botId","bot-1"},{"projectId",""}},200);
+    const auto defaultEffort = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"reasoningEffort", ""}}, 200);
+    check(!defaultEffort.contains("reasoningEffort"), "Model default did not clear the saved effort");
+    const auto clearedModel = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"model", ""}}, 200);
+    check(!clearedModel.contains("model") && clearedModel.at("projectId") == "project-1", "clearing the model lost the workspace");
+    const auto clearedProject = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"projectId", ""}}, 200);
     check(!clearedProject.contains("projectId") && clearedProject.at("environmentId") == "env-2",
           "explicitly clearing a project also cleared the environment");
 
-    const auto cleared = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},{"soul"," \t\n"},{"originalSoul",roleOnly.at("soul")},
-    },200);
-    check(cleared.at("soul") == "" && cleared.at("name") == "Scout Latest","clearing the role changed the name");
+    const auto cleared = browser.post("/api/bots/profile",
+                                      {
+                                          {"botId", "bot-1"},
+                                          {"soul", " \t\n"},
+                                          {"originalSoul", roleOnly.at("soul")},
+                                      },
+                                      200);
+    check(cleared.at("soul") == "" && cleared.at("name") == "Scout Latest", "clearing the role changed the name");
 
     // Replace with GIF updates version and content-type.
-    const auto replaced = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},
-        {"name","Scout GIF"},
-        {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","badge.gif"},{"imageData",validGifBase64}}},
-    },200);
+    const auto replaced =
+        browser.post("/api/bots/profile",
+                     {
+                         {"botId", "bot-1"},
+                         {"name", "Scout GIF"},
+                         {"avatar", {{"kind", "upload"}, {"color", "#75b8e8"}, {"filename", "badge.gif"}, {"imageData", validGifBase64}}},
+                     },
+                     200);
     const auto gifUrl = replaced.at("avatar").at("imageUrl").get<std::string>();
-    check(gifUrl != originalUrl,"replacing uploaded image did not rotate version URL");
+    check(gifUrl != originalUrl, "replacing uploaded image did not rotate version URL");
     const auto fetchedGif = browser.client.Get(gifUrl);
-    check(fetchedGif && fetchedGif->status == 200 &&
-          fetchedGif->get_header_value("Content-Type") == "image/gif",
+    check(fetchedGif && fetchedGif->status == 200 && fetchedGif->get_header_value("Content-Type") == "image/gif",
           "GET /api/bot-avatar did not serve replaced GIF");
 
     // Switch to icon removes image.
-    const auto iconed = browser.post("/api/bots/profile",{
-        {"botId","bot-1"},
-        {"name","Scout Icon"},
-        {"avatar",{{"kind","icon"},{"icon","sparkles"},{"color","#b5a3ef"}}},
-    },200);
-    check(iconed.at("avatar").at("kind") == "icon" && iconed.at("avatar").at("icon") == "sparkles",
-          "switching to icon avatar failed");
-    Browser::checked(browser.client.Get("/api/bot-avatar?bot=bot-1"),404);
+    const auto iconed = browser.post("/api/bots/profile",
+                                     {
+                                         {"botId", "bot-1"},
+                                         {"name", "Scout Icon"},
+                                         {"avatar", {{"kind", "icon"}, {"icon", "sparkles"}, {"color", "#b5a3ef"}}},
+                                     },
+                                     200);
+    check(iconed.at("avatar").at("kind") == "icon" && iconed.at("avatar").at("icon") == "sparkles", "switching to icon avatar failed");
+    Browser::checked(browser.client.Get("/api/bot-avatar?bot=bot-1"), 404);
 
     // Reject invalid inputs cleanly.
-    const auto rejected = browser.post("/api/bots",{
-        {"name","Bad SVG"},
-        {"role","custom"},
-        {"avatar",{{"kind","upload"},{"imageData",svgBase64}}},
-    },400);
-    check(rejected.at("error") == "invalid_image","unsupported image lost its HTTP error code");
-    browser.post("/api/bots",{
-        {"name",""},
-        {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
-    },400);
-    browser.post("/api/bots",{
-        {"name","TooLongNameThatExceedsThirtyTwoCharactersLimit"},
-        {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
-    },400);
-    browser.post("/api/bots/profile",{
-        {"botId","missing"},
-        {"name","Ghost"},
-        {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
-    },404);
+    const auto rejected = browser.post("/api/bots",
+                                       {
+                                           {"name", "Bad SVG"},
+                                           {"role", "custom"},
+                                           {"avatar", {{"kind", "upload"}, {"imageData", svgBase64}}},
+                                       },
+                                       400);
+    check(rejected.at("error") == "invalid_image", "unsupported image lost its HTTP error code");
+    browser.post("/api/bots",
+                 {
+                     {"name", ""},
+                     {"avatar", {{"kind", "shape"}, {"example", "sprout"}, {"color", "#69c9ac"}}},
+                 },
+                 400);
+    browser.post("/api/bots",
+                 {
+                     {"name", "TooLongNameThatExceedsThirtyTwoCharactersLimit"},
+                     {"avatar", {{"kind", "shape"}, {"example", "sprout"}, {"color", "#69c9ac"}}},
+                 },
+                 400);
+    browser.post("/api/bots/profile",
+                 {
+                     {"botId", "missing"},
+                     {"name", "Ghost"},
+                     {"avatar", {{"kind", "shape"}, {"example", "sprout"}, {"color", "#69c9ac"}}},
+                 },
+                 404);
 }
 void settingsEndpoints(const std::filesystem::path& path) {
     Store store(path);
-    store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/org/private",true);
+    store.policy().changeNeverRule(localOwner, Action::repository_read, "github.com/org/private", true);
     auto cb = callbacks();
-    const Json t3Target{{"source","url"},{"mcpUrl","https://t3.example/mcp"}};
+    const Json t3Target{{"source", "url"}, {"mcpUrl", "https://t3.example/mcp"}};
     std::atomic<bool> t3Started = false;
     cb.t3Connect = [&](const Person& actor, const T3ConnectRequest& target) {
-        check(actor.id == "owner" && target.source == T3ConnectRequest::Source::Url &&
-              target.value == "https://t3.example/mcp",
+        check(actor.id == "owner" && target.source == T3ConnectRequest::Source::Url && target.value == "https://t3.example/mcp",
               "T3 connection callback received the wrong requester or target");
         return !t3Started.exchange(true);
     };
     cb.t3Setup = [&](const Person& actor) {
-        return Json{{"running",t3Started.load()},
-                    {"authorizationUrl",actor.id == "owner" && t3Started ? "https://t3.example/authorize" : ""}};
+        return Json{{"running", t3Started.load()},
+                    {"authorizationUrl", actor.id == "owner" && t3Started ? "https://t3.example/authorize" : ""}};
     };
-    const std::string legacyEnvironment(513,'e');
+    const std::string legacyEnvironment(513, 'e');
     auto connections = T3Connections(store);
-    const auto legacyBearer = connections.connect(legacyEnvironment,localOwner.id,4173);
+    const auto legacyBearer = connections.connect(legacyEnvironment, localOwner.id, 4173);
     cb.t3Disconnect = [&](const std::optional<std::string>& environment) {
         if (environment) {
-            check(*environment == legacyEnvironment,"T3 disconnect callback received the wrong environment");
-            check(connections.disconnect(*environment),"last T3 environment did not leave cleanup pending");
+            check(*environment == legacyEnvironment, "T3 disconnect callback received the wrong environment");
+            check(connections.disconnect(*environment), "last T3 environment did not leave cleanup pending");
             throw std::runtime_error("fixture provider failure");
         }
-        check(connections.providerCleanupPending(),"missing T3 provider registration to clean up");
+        check(connections.providerCleanupPending(), "missing T3 provider registration to clean up");
         connections.providerRemoved();
     };
     std::atomic<bool> unavailable = false;
@@ -1883,8 +1970,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
     std::atomic<bool> registeredAccount = false;
     std::atomic<unsigned> statusCalls = 0;
     std::atomic<unsigned> catalogCalls = 0;
-    const auto catalog = Json::array({{{"slug","test-model"},{"displayName","Test model"},{"reasoningEfforts",{"low","ultra"}}}});
-    const Json catalogResponse{{"models",catalog},{"fallbackReasoningEfforts",fallbackReasoningEfforts()}};
+    const auto catalog = Json::array({{{"slug", "test-model"}, {"displayName", "Test model"}, {"reasoningEfforts", {"low", "ultra"}}}});
+    const Json catalogResponse{{"models", catalog}, {"fallbackReasoningEfforts", fallbackReasoningEfforts()}};
     cb.modelCatalog = [&] {
         ++catalogCalls;
         if (unavailable) throw std::runtime_error("private credential detail");
@@ -1893,76 +1980,89 @@ void settingsEndpoints(const std::filesystem::path& path) {
     std::atomic<bool> reconsentRequested = false;
     std::atomic<bool> switchRequested = false;
     cb.modelLogin = [&](const Person& actor, bool reconsent) {
-        check(actor == Person{"owner",true},"model sign-in lost the initiating administrator");
+        check(actor == Person{"owner", true}, "model sign-in lost the initiating administrator");
         return reconsent && !reconsentRequested.exchange(true);
     };
     cb.modelStatus = [&] {
         ++statusCalls;
         if (unavailable) throw std::runtime_error("private credential detail");
-        if (signedOut) return Json{{"connected",false},{"registered",registeredAccount.load()}};
-        return Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
-                    {"needsSignIn",true},{"accessToken","internal fixture token"}};
+        if (signedOut) return Json{{"connected", false}, {"registered", registeredAccount.load()}};
+        return Json{{"connected", true},
+                    {"account", "owner@example.test"},
+                    {"planUsage", false},
+                    {"needsSignIn", true},
+                    {"accessToken", "internal fixture token"}};
     };
     cb.modelSwitch = [&](const Person& actor) {
-        check(actor == Person{"owner",true},"model switch lost the initiating administrator");
+        check(actor == Person{"owner", true}, "model switch lost the initiating administrator");
         return !switchRequested.exchange(true);
     };
     cb.intake = [original = cb.intake](std::string_view bot, std::string_view request) {
-        auto intake = original(bot,request);
+        auto intake = original(bot, request);
         intake.config.erase("token");
         return intake;
     };
-    const auto file = path.parent_path()/"identities.json";
-    const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
-                                       {{"authorization","Bearer fixture-alice"},{"person","alice"}},
-                                       {{"authorization","Bearer fixture-bot-owner"},{"person","bot-owner"}},
-                                       {{"authorization","Bearer fixture-root"},{"person","another-root"},{"adminRoot",true}}});
+    const auto file = path.parent_path() / "identities.json";
+    const Json accounts = Json::array({{{"authorization", "Bearer fixture-owner"}, {"person", "owner"}, {"adminRoot", true}},
+                                       {{"authorization", "Bearer fixture-alice"}, {"person", "alice"}},
+                                       {{"authorization", "Bearer fixture-bot-owner"}, {"person", "bot-owner"}},
+                                       {{"authorization", "Bearer fixture-root"}, {"person", "another-root"}, {"adminRoot", true}}});
     std::ofstream(file) << accounts;
-    std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
-    configureWebIdentities(store,file,cb);
-    const auto link = path.parent_path()/"identity-link";
-    std::filesystem::create_symlink(file,link);
+    std::filesystem::permissions(file, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+    configureWebIdentities(store, file, cb);
+    const auto link = path.parent_path() / "identity-link";
+    std::filesystem::create_symlink(file, link);
     bool rejected = false;
-    try { configureWebIdentities(store,link,cb); } catch (const Conflict&) { rejected = true; }
-    check(rejected,"symlink identity file accepted");
-    auto server = startWeb(store,0,cb);
+    try {
+        configureWebIdentities(store, link, cb);
+    } catch (const Conflict&) {
+        rejected = true;
+    }
+    check(rejected, "symlink identity file accepted");
+    auto server = startWeb(store, 0, cb);
     Browser browser(*server);
-    Browser::checked(browser.client.Get("/api/bot-settings?bot=release"),401);
+    Browser::checked(browser.client.Get("/api/bot-settings?bot=release"), 401);
     const auto modelsRoute = "/api/settings/models?bot=release";
-    check(Browser::checked(browser.client.Get(modelsRoute),401) == Json{{"error","identity_required"}} && !catalogCalls,
+    check(Browser::checked(browser.client.Get(modelsRoute), 401) == Json{{"error", "identity_required"}} && !catalogCalls,
           "unauthenticated request reached the model provider");
-    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
-    check(browser.get(modelsRoute) == catalogResponse,"root could not fetch the model catalog");
-    check(Browser::checked(browser.client.Get("/api/settings/models"),400) == Json{{"error","invalid_bot"}},
+    browser.client.set_default_headers({{"Authorization", "Bearer fixture-owner"}});
+    check(browser.get(modelsRoute) == catalogResponse, "root could not fetch the model catalog");
+    check(Browser::checked(browser.client.Get("/api/settings/models"), 400) == Json{{"error", "invalid_bot"}},
           "model catalog accepted a missing Bot ID");
-    check(browser.get("/api/view?bot=release").at("composerPerson")=="owner","composer identity did not match owner");
-    Browser::checked(browser.client.Get("/api/bot-settings?bot=release&bot=triage"),400);
+    check(browser.get("/api/view?bot=release").at("composerPerson") == "owner", "composer identity did not match owner");
+    Browser::checked(browser.client.Get("/api/bot-settings?bot=release&bot=triage"), 400);
     auto crossOrigin = browser.headers();
     crossOrigin.erase("Origin");
-    crossOrigin.emplace("Origin","https://example.invalid");
-    const Json share{{"botId","release"},{"person","alice"},{"add",true}};
-    Browser::checked(browser.client.Post("/api/bot-settings/members",crossOrigin,share.dump(),"application/json"),403);
-    const auto secretRequest = store.policy().requestSecret("release",{"fixture-token"});
-    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}});
-    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}},403);
-    browser.post("/api/bot-settings/members",share);
+    crossOrigin.emplace("Origin", "https://example.invalid");
+    const Json share{{"botId", "release"}, {"person", "alice"}, {"add", true}};
+    Browser::checked(browser.client.Post("/api/bot-settings/members", crossOrigin, share.dump(), "application/json"), 403);
+    const auto secretRequest = store.policy().requestSecret("release", {"fixture-token"});
+    browser.post("/api/bot-settings/secret", {{"botId", "release"}, {"requestId", secretRequest}, {"value", privateValue}});
+    browser.post("/api/bot-settings/secret", {{"botId", "release"}, {"requestId", secretRequest}, {"value", privateValue}}, 403);
+    browser.post("/api/bot-settings/members", share);
     const auto state = browser.get("/api/bot-settings?bot=release");
-    check(state.at("members") == Json::array({"alice"}) &&
-          !state.contains("mode") && !state.contains("rules") && !state.contains("t3"),
+    check(state.at("members") == Json::array({"alice"}) && !state.contains("mode") && !state.contains("rules") && !state.contains("t3"),
           "Bot settings exposed installation settings or lost membership");
     const auto settings = browser.get("/api/settings");
-    check(settings.at("mode") == "full" && settings.at("canManagePolicy") == true &&
-          settings.at("rules").size() == 1 && !settings.contains("members"),
+    check(settings.at("mode") == "full" && settings.at("canManagePolicy") == true && settings.at("rules").size() == 1 &&
+              !settings.contains("members"),
           "Flock settings lost the installation policy");
-    check(settings.at("model") == Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
-                                      {"demo",false},{"needsSignIn",true},{"unavailable",false},
-                                      {"signingIn",false},{"signInError",""},{"canSignIn",true},{"canSwitch",true}},
+    check(settings.at("model") == Json{{"connected", true},
+                                       {"account", "owner@example.test"},
+                                       {"planUsage", false},
+                                       {"demo", false},
+                                       {"needsSignIn", true},
+                                       {"unavailable", false},
+                                       {"signingIn", false},
+                                       {"signInError", ""},
+                                       {"canSignIn", true},
+                                       {"canSwitch", true}},
           "Flock settings lost model status or exposed credential fields");
     unavailable = true;
-    check(browser.get("/api/settings").at("model") == Json{{"unavailable",true}},
+    check(browser.get("/api/settings").at("model") == Json{{"unavailable", true}},
           "A failed credential check exposed details or broke the rest of settings");
-    check(Browser::checked(browser.client.Get(modelsRoute),503) ==
-          Json{{"error","models_unavailable"},{"fallbackReasoningEfforts",fallbackReasoningEfforts()}},
+    check(Browser::checked(browser.client.Get(modelsRoute), 503) ==
+              Json{{"error", "models_unavailable"}, {"fallbackReasoningEfforts", fallbackReasoningEfforts()}},
           "model catalog failure leaked provider details or used the wrong error");
     unavailable = false;
     signedOut = true;
@@ -1970,100 +2070,99 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Initial sign-in exposed an account switch without a saved registration");
     registeredAccount = true;
     const auto signedOutModel = browser.get("/api/settings").at("model");
-    check(signedOutModel.at("connected") == false && signedOutModel.at("canSignIn") == true &&
-          signedOutModel.at("canSwitch") == true,
+    check(signedOutModel.at("connected") == false && signedOutModel.at("canSignIn") == true && signedOutModel.at("canSwitch") == true,
           "The signed-out account lost the normal sign-in or switch action");
-    browser.post("/api/settings/model-login",{{"reconsent",false},{"switchAccount",true}},202);
-    check(switchRequested,"an administrator could not switch the signed-out account");
+    browser.post("/api/settings/model-login", {{"reconsent", false}, {"switchAccount", true}}, 202);
+    check(switchRequested, "an administrator could not switch the signed-out account");
     signedOut = false;
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
-    check(settingsPage && settingsPage->status == 200 &&
-          settingsPage->body.find("data-panel=\"bots\"") != std::string::npos,
+    check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("data-panel=\"bots\"") != std::string::npos,
           "Flock settings did not include the Bots section");
     check(botPage && botPage->status == 200 && botPage->body.find("Access · Flock settings") != std::string::npos &&
-          botPage->body.find("id=\"local-connections\"") != std::string::npos &&
-          botPage->body.find("id=\"channel-senders\"") != std::string::npos,
+              botPage->body.find("id=\"local-connections\"") != std::string::npos &&
+              botPage->body.find("id=\"channel-senders\"") != std::string::npos,
           "Bot Access did not include the computer approval and channel sender sections");
-    browser.post("/api/settings/mode",{{"mode","supervised"}});
+    browser.post("/api/settings/mode", {{"mode", "supervised"}});
     const auto rule = settings.at("rules").at(0);
-    const Json removal{{"kind",rule.at("kind")},{"action",rule.at("action")},{"target",rule.at("target")},{"add",false}};
-    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    const Json removal{{"kind", rule.at("kind")}, {"action", rule.at("action")}, {"target", rule.at("target")}, {"add", false}};
+    browser.client.set_default_headers({{"Authorization", "Bearer fixture-alice"}});
     const auto beforeSharedRead = statusCalls.load();
     const auto sharedSettings = browser.get("/api/settings");
     check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false &&
-          sharedSettings.at("model").is_null() && statusCalls.load() == beforeSharedRead,
+              sharedSettings.at("model").is_null() && statusCalls.load() == beforeSharedRead,
           "Shared member lost read-only settings or gained access to model status");
-    check(Browser::checked(browser.client.Get(modelsRoute),403) == Json{{"error","access_denied"}} && catalogCalls == 2,
+    check(Browser::checked(browser.client.Get(modelsRoute), 403) == Json{{"error", "access_denied"}} && catalogCalls == 2,
           "shared member reached the model provider");
-    store.policy().setOwner(Person{"bot-owner"},"triage");
+    store.policy().setOwner(Person{"bot-owner"}, "triage");
     Browser botOwner(*server);
-    botOwner.client.set_default_headers({{"Authorization","Bearer fixture-bot-owner"}});
+    botOwner.client.set_default_headers({{"Authorization", "Bearer fixture-bot-owner"}});
     check(botOwner.get("/api/settings/models?bot=triage") == catalogResponse,
           "Bot owner needed installation access to fetch the model catalog");
-    browser.post("/api/settings/mode",{{"mode","full"}},403);
-    browser.post("/api/settings/rule",removal,403);
-    browser.post("/api/settings/model-login",{{"reconsent",true}},403);
-    check(!reconsentRequested,"a non-root started model sign-in");
-    const Json addition{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",true}};
-    browser.post("/api/settings/rule",addition,403);
-    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
-    browser.post("/api/settings/model-login",{{"reconsent","true"}},400);
-    browser.post("/api/settings/t3-disconnect",{{"environmentId",false}},400);
-    browser.post("/api/settings/t3-disconnect",{{"environmentId",legacyEnvironment}},500);
+    browser.post("/api/settings/mode", {{"mode", "full"}}, 403);
+    browser.post("/api/settings/rule", removal, 403);
+    browser.post("/api/settings/model-login", {{"reconsent", true}}, 403);
+    check(!reconsentRequested, "a non-root started model sign-in");
+    const Json addition{{"kind", "allow"}, {"action", "repository.pr"}, {"target", "github.com/acme/app"}, {"add", true}};
+    browser.post("/api/settings/rule", addition, 403);
+    browser.client.set_default_headers({{"Authorization", "Bearer fixture-owner"}});
+    browser.post("/api/settings/model-login", {{"reconsent", "true"}}, 400);
+    browser.post("/api/settings/t3-disconnect", {{"environmentId", false}}, 400);
+    browser.post("/api/settings/t3-disconnect", {{"environmentId", legacyEnvironment}}, 500);
     const auto cleanup = browser.get("/api/settings");
-    check(cleanup.at("t3").is_null() && cleanup.at("t3CleanupPending") == true &&
-          !connections.authenticate(legacyBearer),"failed T3 cleanup retained access or could not be retried");
-    browser.post("/api/settings/t3-disconnect",{{"environmentId",nullptr}});
-    check(browser.get("/api/settings").at("t3CleanupPending") == false,"retry did not clear T3 cleanup status");
-    browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl",false}},400);
-    browser.post("/api/settings/t3-connect",{{"source","local"},{"mcpUrl","https://t3.example/mcp"}},400);
-    browser.post("/api/settings/t3-connect",{{"source","saved"},{"mcpUrl","https://t3.example/mcp"}},400);
-    browser.post("/api/settings/t3-connect",{{"source","url"},{"mcpUrl",""}},400);
-    browser.post("/api/settings/t3-connect",t3Target,202);
-    browser.post("/api/settings/t3-connect",t3Target,409);
+    check(cleanup.at("t3").is_null() && cleanup.at("t3CleanupPending") == true && !connections.authenticate(legacyBearer),
+          "failed T3 cleanup retained access or could not be retried");
+    browser.post("/api/settings/t3-disconnect", {{"environmentId", nullptr}});
+    check(browser.get("/api/settings").at("t3CleanupPending") == false, "retry did not clear T3 cleanup status");
+    browser.post("/api/settings/t3-connect", {{"environmentId", "env-1"}, {"mcpUrl", false}}, 400);
+    browser.post("/api/settings/t3-connect", {{"source", "local"}, {"mcpUrl", "https://t3.example/mcp"}}, 400);
+    browser.post("/api/settings/t3-connect", {{"source", "saved"}, {"mcpUrl", "https://t3.example/mcp"}}, 400);
+    browser.post("/api/settings/t3-connect", {{"source", "url"}, {"mcpUrl", ""}}, 400);
+    browser.post("/api/settings/t3-connect", t3Target, 202);
+    browser.post("/api/settings/t3-connect", t3Target, 409);
     check(browser.get("/api/settings").at("t3Setup").at("authorizationUrl") == "https://t3.example/authorize",
           "T3 authorization link missing for its requester");
-    browser.client.set_default_headers({{"Authorization","Bearer fixture-root"}});
+    browser.client.set_default_headers({{"Authorization", "Bearer fixture-root"}});
     check(browser.get("/api/settings").at("t3Setup").at("authorizationUrl") == "",
           "T3 authorization link was exposed to a different administrator");
-    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
-    browser.post("/api/settings/model-login",{{"reconsent",true}},202);
-    check(reconsentRequested,"root could not request model reconsent");
-    browser.post("/api/settings/model-login",{{"reconsent",true}},409);
-    browser.post("/api/settings/rule",removal);
-    check(browser.get("/api/settings").at("rules").empty(),"Root could not remove the rule");
-    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target",""},{"add",true}},400);
-    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","  "},{"add",true}},400);
-    browser.post("/api/settings/rule",{{"kind","never"},{"action","bot.talk"},{"target","release"},{"add",true}},400);
-    browser.post("/api/settings/rule",{{"kind","allow"},{"action","workspace.exec"},{"target","release"},{"add",true}},400);
-    check(browser.get("/api/settings").at("rules").empty(),"an invalid addition changed installation rules");
-    browser.post("/api/settings/rule",addition);
+    browser.client.set_default_headers({{"Authorization", "Bearer fixture-owner"}});
+    browser.post("/api/settings/model-login", {{"reconsent", true}}, 202);
+    check(reconsentRequested, "root could not request model reconsent");
+    browser.post("/api/settings/model-login", {{"reconsent", true}}, 409);
+    browser.post("/api/settings/rule", removal);
+    check(browser.get("/api/settings").at("rules").empty(), "Root could not remove the rule");
+    browser.post("/api/settings/rule", {{"kind", "allow"}, {"action", "repository.pr"}, {"target", ""}, {"add", true}}, 400);
+    browser.post("/api/settings/rule", {{"kind", "allow"}, {"action", "repository.pr"}, {"target", "  "}, {"add", true}}, 400);
+    browser.post("/api/settings/rule", {{"kind", "never"}, {"action", "bot.talk"}, {"target", "release"}, {"add", true}}, 400);
+    browser.post("/api/settings/rule", {{"kind", "allow"}, {"action", "workspace.exec"}, {"target", "release"}, {"add", true}}, 400);
+    check(browser.get("/api/settings").at("rules").empty(), "an invalid addition changed installation rules");
+    browser.post("/api/settings/rule", addition);
     const auto added = browser.get("/api/settings").at("rules");
     check(added.size() == 1 && added.at(0).at("kind") == "allow" && added.at(0).at("action") == "repository.pr" &&
-          added.at(0).at("target") == "github.com/acme/app","Root could not add a rule from Flock settings");
-    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",false}});
-    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
-    check(browser.get("/api/settings").at("t3Setup").is_null(),"member could see administrator T3 setup status");
-    browser.post("/api/settings/t3-connect",t3Target,403);
-    browser.post("/api/settings/t3-disconnect",{{"environmentId",legacyEnvironment}},403);
-    browser.post("/api/settings/t3-disconnect",{{"environmentId",nullptr}},403);
-    check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
+              added.at(0).at("target") == "github.com/acme/app",
+          "Root could not add a rule from Flock settings");
+    browser.post("/api/settings/rule", {{"kind", "allow"}, {"action", "repository.pr"}, {"target", "github.com/acme/app"}, {"add", false}});
+    browser.client.set_default_headers({{"Authorization", "Bearer fixture-alice"}});
+    check(browser.get("/api/settings").at("t3Setup").is_null(), "member could see administrator T3 setup status");
+    browser.post("/api/settings/t3-connect", t3Target, 403);
+    browser.post("/api/settings/t3-disconnect", {{"environmentId", legacyEnvironment}}, 403);
+    browser.post("/api/settings/t3-disconnect", {{"environmentId", nullptr}}, 403);
+    check(browser.get("/api/view?bot=release").at("composerPerson") == "alice", "composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
-    check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");
+    check(browser.get("/api/bots").size() == 1, "view-only person listed unrelated Bots");
     const auto list = browser.client.Get("/api/bots");
     const auto view = browser.client.Get("/api/view?bot=release");
     check(list && view && list->get_header_value("X-Flock-Viewer") == "\"alice\"" &&
-          view->get_header_value("X-Flock-Viewer") == "\"alice\"",
+              view->get_header_value("X-Flock-Viewer") == "\"alice\"",
           "list and conversation did not expose the same authenticated viewer scope");
-    Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
-    Browser::checked(browser.client.Get("/api/workflows?bot=triage"),403);
-    Browser::checked(browser.client.Get("/api/compactions?bot=triage"),403);
-    Browser::checked(browser.client.Get("/api/events?bot=triage"),403);
-    Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"),403);
-    browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},201);
-    browser.post("/api/bot-settings/members",{{"botId","release"},{"person","owner"},{"add",false}},403);
-    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",1},{"value",privateValue}},403);
+    Browser::checked(browser.client.Get("/api/conversation?bot=triage"), 403);
+    Browser::checked(browser.client.Get("/api/workflows?bot=triage"), 403);
+    Browser::checked(browser.client.Get("/api/compactions?bot=triage"), 403);
+    Browser::checked(browser.client.Get("/api/events?bot=triage"), 403);
+    Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"), 403);
+    browser.post("/api/messages", {{"botId", "release"}, {"text", "hello"}, {"clientMessageId", "1"}}, 201);
+    browser.post("/api/bot-settings/members", {{"botId", "release"}, {"person", "owner"}, {"add", false}}, 403);
+    browser.post("/api/bot-settings/secret", {{"botId", "release"}, {"requestId", 1}, {"value", privateValue}}, 403);
 }
 
 } // namespace
@@ -2094,6 +2193,8 @@ int main() {
         boardInboxEndpoints(directory.path / "board-inbox.db");
         channelEndpoints(directory.path / "channels.db");
         botProfileEndpoints(directory.path / "profiles.db");
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
     }
-    catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -27,21 +27,22 @@ struct HttpRequest {
 
 using HttpTransport = std::function<HttpResponse(const HttpRequest&)>;
 using BrowserOpener = std::function<std::optional<pid_t>(const std::string&)>;
-using Form = std::vector<std::pair<std::string,std::string>>;
+using Form = std::vector<std::pair<std::string, std::string>>;
 
-struct Authorization { std::string code, clientId, redirectUri; };
+struct Authorization {
+    std::string code, clientId, redirectUri;
+};
 
 struct Failure : ModelError {
-    Failure(std::string message, bool transient = false, std::string providerCode = {},
-            Json usage = Json::object(), ModelErrorCode code = ModelErrorCode::inference_failed);
+    Failure(std::string message, bool transient = false, std::string providerCode = {}, Json usage = Json::object(),
+            ModelErrorCode code = ModelErrorCode::inference_failed);
     std::string providerCode;
 };
 
 const Json& field(const Json&, std::string_view);
 std::string stringField(const Json&, std::string_view);
 Json tokenUsage(const Json&);
-Failure remoteFailure(std::string_view site, long status, const Json&, std::string_view requestId = {},
-                      Json usage = Json::object());
+Failure remoteFailure(std::string_view site, long status, const Json&, std::string_view requestId = {}, Json usage = Json::object());
 bool validAccessToken(std::string_view);
 
 HttpResponse httpRequest(const HttpRequest&);
@@ -55,11 +56,11 @@ Json exchange(const HttpTransport&, const Json& discovery, Form parameters, std:
 Json identity(const HttpTransport&, const Json& idToken, const std::string& clientId, const Json& discovery,
               const std::optional<std::string>& nonce, double now, std::stop_token stop = {});
 Json credentials(const Json& tokens, const Json& previous = Json::object());
-Json authorize(const HttpTransport&, const BrowserOpener&, const Json& active, bool printUrl, bool reconsent,
-               bool switchAccount, bool web, std::stop_token, const std::function<void(const Json&)>& saveRegistration);
+Json authorize(const HttpTransport&, const BrowserOpener&, const Json& active, bool printUrl, bool reconsent, bool switchAccount, bool web,
+               std::stop_token, const std::function<void(const Json&)>& saveRegistration);
 bool revokeSession(const HttpTransport&, const std::string& clientId, const std::string& refreshToken);
 
-Authorization authorizeBrowser(const BrowserOpener&, const std::string& endpoint, Form parameters,
-                               const std::string& savedClient, bool printUrl, bool browserRequired, std::stop_token);
+Authorization authorizeBrowser(const BrowserOpener&, const std::string& endpoint, Form parameters, const std::string& savedClient,
+                               bool printUrl, bool browserRequired, std::stop_token);
 std::optional<pid_t> openBrowser(const std::string&);
 }
