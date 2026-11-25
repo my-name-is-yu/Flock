@@ -134,21 +134,6 @@ void reopenDirectTask(const std::filesystem::path& path) {
         store.memory(requester, "release", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the old signing process."}});
         task = store.submit({"release", "Build the release", "env", "project", {{"shareMemoryWithSessions", true}}}, &requester);
     }
-    {
-        sqlite3* handle = nullptr;
-        const auto opened = sqlite3_open(path.c_str(), &handle);
-        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(handle, sqlite3_close);
-        check(opened == SQLITE_OK, "Could not open the direct-request fixture");
-        const char* receipts = R"SQL(
-CREATE TABLE task_request_receipts(
-  bot_id TEXT NOT NULL, person_id TEXT NOT NULL, client_request_id TEXT NOT NULL,
-  request_digest TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
-  PRIMARY KEY(bot_id,person_id,client_request_id));
-INSERT INTO task_request_receipts SELECT bot_id,'requester','existing','digest',id FROM tasks;
-)SQL";
-        check(sqlite3_exec(db.get(), receipts, nullptr, nullptr, nullptr) == SQLITE_OK,
-              "Fresh v3 state must omit the old receipt table before it is added to the fixture");
-    }
     Store reopened(path);
     FixtureModel model;
     Adapter adapter;

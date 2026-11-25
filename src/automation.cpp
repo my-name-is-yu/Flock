@@ -98,26 +98,6 @@ bool matchesEvent(const Json& filter, const Json& event, const SecretRedactor& s
 }
 }
 
-void Store::Impl::initializeAutomationSchema() {
-    if (sqlite3_exec(db, R"SQL(
-CREATE TABLE IF NOT EXISTS automations(
-  id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('schedule','reminder','trigger')),
-  definition TEXT NOT NULL, routing TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('active','inactive','canceled','delivered','failed')),
-  next_run_at INTEGER, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, config_id TEXT, error TEXT,
-  UNIQUE(bot_id,config_id));
-CREATE INDEX IF NOT EXISTS automation_due ON automations(next_run_at) WHERE status='active' AND next_run_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS automation_bot ON automations(bot_id,id DESC);
-CREATE INDEX IF NOT EXISTS automation_active_bot ON automations(bot_id,id DESC) WHERE status='active';
-CREATE INDEX IF NOT EXISTS automation_source ON automations(json_extract(definition,'$.source'))
-  WHERE status='active' AND kind='trigger';
-CREATE TABLE IF NOT EXISTS automation_firings(
-  dedupe_key TEXT NOT NULL, bot_id TEXT NOT NULL, fired_at INTEGER NOT NULL, receipts TEXT NOT NULL,
-  PRIMARY KEY(dedupe_key,bot_id));
-)SQL",
-                     nullptr, nullptr, nullptr) != SQLITE_OK)
-        throw std::runtime_error(sqlite3_errmsg(db));
-}
-
 Json Store::createAutomation(const Person& actor, const Intake& target, const Json& args, Seconds now) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);

@@ -123,40 +123,6 @@ ChannelCapabilities channelCapabilities(ChannelKind kind) {
     return {true, kind == ChannelKind::slack, true, true, {"image/png", "image/jpeg", "image/webp", "text/plain"}, attachmentLimit};
 }
 
-void Store::Impl::initializeChannelSchema() {
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_messages(
-      message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-      event_key TEXT NOT NULL UNIQUE, scope_key TEXT NOT NULL, origin TEXT NOT NULL,
-      sender_id TEXT NOT NULL, person_id TEXT NOT NULL))SQL");
-    exec("CREATE INDEX IF NOT EXISTS channel_messages_scope ON channel_messages(scope_key,message_id DESC)");
-    exec(R"SQL(CREATE VIEW IF NOT EXISTS channel_tasks AS
-      SELECT t.id AS task_id,c.message_id,c.scope_key FROM tasks t JOIN channel_messages c
-      ON c.message_id=json_extract(t.data,'$.sourceMessageId'))SQL");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_attachments(
-      id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL REFERENCES channel_messages(message_id),
-      position INTEGER NOT NULL, name TEXT NOT NULL, mime_type TEXT NOT NULL, bytes BLOB NOT NULL,
-      UNIQUE(message_id,position)))SQL");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_deliveries(
-      id TEXT PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES channel_messages(message_id),
-      reply_id INTEGER UNIQUE REFERENCES journal(id),
-      operation TEXT NOT NULL, payload TEXT NOT NULL,
-      state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','unknown','accepted','rejected','unsupported')),
-      external_id TEXT NOT NULL DEFAULT '', next_attempt INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT ''))SQL");
-    exec("CREATE INDEX IF NOT EXISTS channel_delivery_due ON channel_deliveries(next_attempt) WHERE state IN ('pending','unknown')");
-    exec(R"SQL(CREATE VIEW IF NOT EXISTS channel_posts AS
-      SELECT d.rowid AS sequence,d.reply_id,d.external_id,d.payload,c.scope_key,m.bot_id
-      FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id
-      JOIN messages m ON m.id=c.message_id
-      WHERE d.state='accepted' AND d.external_id!=''
-      AND d.operation IN ('reply','channel_send_attachment','publish_artifact'))SQL");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_notices(
-      source_id INTEGER NOT NULL REFERENCES channel_messages(message_id), reason TEXT NOT NULL,
-      PRIMARY KEY(source_id,reason)))SQL");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_artifacts(
-      id TEXT PRIMARY KEY REFERENCES channel_deliveries(id),
-      title TEXT NOT NULL, html TEXT NOT NULL))SQL");
-}
-
 void Store::connectChannel(ChannelConnector connector) {
     if (!connector.authenticates || !connector.resolveSender || !connector.transport)
         throw Conflict("A channel needs authentication, an identity directory, and transport");

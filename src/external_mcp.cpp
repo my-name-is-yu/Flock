@@ -25,27 +25,6 @@ Json currentRun(const Json& task) {
 }
 }
 
-void Store::Impl::initializeExternalMcpSchema() {
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS external_mcp_connections(
- id TEXT PRIMARY KEY, person_id TEXT NOT NULL, token_digest TEXT UNIQUE
-)
-)SQL");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS external_mcp_allowed_bots(
- connection_id TEXT NOT NULL REFERENCES external_mcp_connections(id), bot_id TEXT NOT NULL,
- PRIMARY KEY(connection_id,bot_id)
-)
-)SQL");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS external_mcp_receipts(
- connection_id TEXT NOT NULL REFERENCES external_mcp_connections(id), request_id TEXT NOT NULL,
- request_digest TEXT NOT NULL, task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
- PRIMARY KEY(connection_id,request_id)
-)
-)SQL");
-}
-
 ExternalMcpCredential ExternalMcp::connect(std::string_view person, const std::vector<std::string>& bots) {
     if (bots.empty()) throw Conflict("At least one Bot is required");
     auto& db = *store_.p_;

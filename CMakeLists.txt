@@ -39,7 +39,7 @@ function(flock_fetch_cmark)
 endfunction()
 flock_fetch_cmark()
 
-add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
+add_library(flock_core src/store.cpp src/schema.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/run_reports.cpp src/project_slots.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
@@ -154,6 +154,11 @@ add_subdirectory(web)
 target_link_libraries(flock PRIVATE flock_web flock_t3)
 
 if(BUILD_TESTING)
+  set(schema_script "${CMAKE_CURRENT_SOURCE_DIR}/scripts/update-schema-snapshot")
+  add_test(NAME flock_schema_snapshot COMMAND "${Python3_EXECUTABLE}"
+    "${schema_script}" --check $<TARGET_FILE:flock>)
+  add_test(NAME flock_schema_open COMMAND "${Python3_EXECUTABLE}"
+    "${schema_script}" --concurrent $<TARGET_FILE:flock>)
   add_test(NAME flock_t3_connection_setup COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock> connection-setup)
   set_tests_properties(flock_t3_connection_setup PROPERTIES TIMEOUT 45)

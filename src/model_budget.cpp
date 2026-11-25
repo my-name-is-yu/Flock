@@ -51,21 +51,6 @@ Id modelCallLimit(const Json& config) {
     return limit->get<Id>();
 }
 
-void Store::Impl::initializeModelBudgetSchema() {
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS model_budgets(
-  id TEXT PRIMARY KEY, call_limit INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-  CHECK(attempts>=0 AND attempts<=call_limit))
-)SQL");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS model_attempts(
-  id INTEGER PRIMARY KEY, budget_id TEXT NOT NULL REFERENCES model_budgets(id),
-  purpose TEXT NOT NULL, time INTEGER NOT NULL,
-  message_id INTEGER REFERENCES messages(id), task_id INTEGER REFERENCES tasks(id),
-  event_id INTEGER REFERENCES events(id), usage TEXT)
-)SQL");
-}
-
 ModelBudget Store::Impl::messageModelBudget(Id messageId) const {
     for (;;) {
         auto row = query(R"SQL(

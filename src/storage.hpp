@@ -200,11 +200,8 @@ struct Store::Impl {
     std::mutex sessionQueueCancellationMutex;
     std::function<Seconds()> policyClock = unixTime;
     void openSchema();
-    void initializeSchema();
     bool botDeleted(std::string_view bot) const;
     bool botPaused(std::string_view bot) const;
-    void initializeChannelSchema();
-    void initializeLocalMachineSchema();
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource, std::string_view clientId, std::string_view text,
                            Id replyTo = 0, const SessionOrigin* origin = nullptr, const Json& invitation = nullptr);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
@@ -228,7 +225,6 @@ struct Store::Impl {
     Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<ModelImage>* images = nullptr) const;
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
-    void initializePolicySchema();
     PolicyOrigin policyOrigin(const conversation::Message&);
     PolicyOrigin taskPolicyOrigin(const Json&);
     enum class ApprovalWait { pause, defer };
@@ -241,8 +237,6 @@ struct Store::Impl {
     Json policyApprovalCards(const Person&, std::string_view bot);
     void releasePolicyTurn(Id turn);
     void releasePolicyTask(Id approval, std::string_view resolution);
-    void initializeParticipationSchema();
-    void initializeExternalMcpSchema();
     Person sessionActor(std::string_view person);
     bool activeSessionOrigin(const conversation::Message&) const;
     bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
@@ -254,8 +248,6 @@ struct Store::Impl {
     SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     bool t3EnvironmentConnected(std::string_view environment);
-    void initializeMemorySchema();
-    void initializeAutomationSchema();
     void retireAutomations(const Json& botIds);
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
     std::optional<SessionMemory> sessionMemory(const Command&, Seconds now);
@@ -281,9 +273,7 @@ struct Store::Impl {
     static void applyPlannerModel(Json& config, const PlannerModel&);
     Json automationRoute(std::string_view bot, Json routing) const;
     SecretRedactor sharedRedactor() const;
-    void initializeBoardInboxSchema();
     Statement actionablePrReviews(std::string_view bot) const;
-    void initializeGitSchema();
     Json gitTool(GitHost&, std::string_view bot, Id task, const Json& routing, const Decision&, std::string_view invocation,
                  std::optional<Id> generation = {}, Id turn = 0);
     void projectTaskGitReads(GitHost&, const Json& task, Json& event);
@@ -349,8 +339,6 @@ struct Store::Impl {
     Json sessionTask(Id) const;
     void addTaskDetails(Json&) const;
     Json queueBlocker(Id) const;
-    void initializeWorkflowSchema();
-    void initializeCompactionSchema();
     Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;
     Json conversationHistory(const conversation::Message&, const Json& summaries, std::size_t expandedBytes) const;
     Json contextTool(std::string_view tool, const Json&, const conversation::Message&, int step);
@@ -362,11 +350,6 @@ struct Store::Impl {
     void appendStageRequirements(std::string& instruction, const Json& task) const;
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
-    void initializeConversationSchema();
-    void initializeBotPauseSchema();
-    void upgradeSessionMessageWaitSchema();
-    void initializeModelBudgetSchema();
-    void initializeAttachmentsSchema();
     void saveAttachments(Id, const Json&);
     Json inspectAttachment(std::string_view bot, Id throughMessage, const Json&);
     Json attachmentViews(Id) const;
@@ -475,7 +458,6 @@ struct Store::Impl {
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
-    void initializeProjectQueue();
     bool automationBeforeDispatch(Id task) const;
     bool isUndispatchedNotesWait(const Json& task) const;
     bool projectRouteReady(Id task, std::string_view action) const;

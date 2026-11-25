@@ -120,14 +120,6 @@ Json metadata(const Json& value) {
 }
 }
 
-void Store::Impl::initializeAttachmentsSchema() {
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS message_attachments(
- message_id INTEGER NOT NULL REFERENCES messages(id), attachment_id TEXT NOT NULL,
- metadata TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(message_id,attachment_id));
-)SQL");
-}
-
 void Store::Impl::saveAttachments(Id message, const Json& attachments) {
     if (!attachments.is_array() || attachments.size() > maxFiles) throw Conflict("Attachments exceed the message limit");
     for (std::size_t i = 0; i < attachments.size(); ++i) {

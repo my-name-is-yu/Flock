@@ -74,41 +74,6 @@ bool closed(std::string_view status) {
 }
 }
 
-void Store::Impl::initializeWorkflowSchema() {
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS workflows(
-        id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,routing TEXT NOT NULL,request TEXT NOT NULL,
-        message_id INTEGER NOT NULL REFERENCES messages,stop_requested INTEGER NOT NULL DEFAULT 0))SQL");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS workflow_stages(workflow_id INTEGER NOT NULL REFERENCES workflows,
-        stage_id TEXT NOT NULL,spec TEXT NOT NULL,task_id INTEGER UNIQUE REFERENCES tasks,result_id INTEGER REFERENCES journal,instruction TEXT,status TEXT NOT NULL DEFAULT 'pending',
-        input TEXT NOT NULL DEFAULT '',output TEXT NOT NULL DEFAULT '',deadline INTEGER NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0,
-        confirmed_state TEXT NOT NULL DEFAULT '',confirmed_at INTEGER NOT NULL DEFAULT 0,unreachable INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY(workflow_id,stage_id)))SQL");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS workflow_dependencies(
-        workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,parent_id TEXT NOT NULL,report_id INTEGER REFERENCES journal,
-        artifact_version TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY(workflow_id,stage_id,parent_id),
-        FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages,
-        FOREIGN KEY(workflow_id,parent_id) REFERENCES workflow_stages))SQL");
-    exec(R"SQL(CREATE VIEW IF NOT EXISTS outdated_workflow_stages AS
-        WITH RECURSIVE outdated(workflow_id,stage_id) AS (
-          SELECT d.workflow_id,d.stage_id FROM workflow_dependencies d JOIN workflow_stages p
-            ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
-            WHERE d.report_id IS NOT NULL AND (p.status<>'completed' OR p.output<>d.artifact_version
-              OR (p.result_id IS NOT d.report_id AND
-                  (d.artifact_version='' OR json_extract(p.spec,'$.role') NOT IN ('implement','verify'))))
-          UNION
-          SELECT d.workflow_id,d.stage_id FROM workflow_dependencies d JOIN outdated p
-            ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id)
-        SELECT * FROM outdated)SQL");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS workflow_artifacts(
-        report_id INTEGER PRIMARY KEY REFERENCES journal,workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,
-        version TEXT NOT NULL,FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages))SQL");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS workflow_verdicts(
-        report_id INTEGER PRIMARY KEY REFERENCES journal,workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,
-        version TEXT NOT NULL,verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail')),
-        FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages))SQL");
-}
-
 Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const {
     auto owner = query("SELECT stop_requested,request FROM workflows WHERE id=? AND bot_id=?", {id, bot});
     if (!owner.next()) throw Conflict("Unknown workflow");
