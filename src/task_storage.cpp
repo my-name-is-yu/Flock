@@ -26,6 +26,56 @@ constexpr std::array unavailableEvidence{
     std::pair{RunEvidence::Availability::DiagnosticUnavailable, std::string_view{"diagnostic_unavailable"}},
 };
 
+constexpr std::array destinationPhases{
+    std::pair{DestinationRunPhase::queued, std::string_view{"queued"}},
+    std::pair{DestinationRunPhase::running, std::string_view{"running"}},
+    std::pair{DestinationRunPhase::confirmation_pending, std::string_view{"confirmation_pending"}},
+};
+
+constexpr std::array runOutcomes{
+    std::pair{RunOutcome::all_completed, std::string_view{"all_completed"}},
+    std::pair{RunOutcome::partial_failure, std::string_view{"partial_failure"}},
+    std::pair{RunOutcome::failed, std::string_view{"failed"}},
+};
+
+RunEvidence::Availability decodeReportAvailability(const Json& data, const RecordDecoder& row) {
+    const auto status = row.optional<std::string>(data, "evidenceStatus");
+    if (!status) return RunEvidence::Availability::Available;
+    const auto availability = enumValue(unavailableEvidence, *status);
+    if (!availability) row.fail("evidenceStatus", "unknown Run evidence status");
+    return *availability;
+}
+
+RunTarget decodeRunTarget(const Json& data, const RecordDecoder& row) {
+    return {row.get<std::string>(data, "name"),
+            {row.get<std::string>(data, "environmentId"), row.get<std::string>(data, "projectId"),
+             row.optional<std::string>(data, "gatewayEnvironmentId").value_or("")}};
+}
+
+DestinationRun decodeDestinationRun(const Json& data, const RecordDecoder& row) {
+    auto [name, route] = decodeRunTarget(data, row);
+    DestinationRun run{
+        .actionId = row.get<std::string>(data, "actionId"), .name = std::move(name), .environmentId = std::move(route.environmentId)};
+    if (data.contains("ownerBotId") || data.contains("revisionId"))
+        run.assignment = decodeRunAssignment(data, row);
+    else
+        run.assignment.projectId = std::move(route.projectId);
+    run.explicitDirectGateway = route.gatewayEnvironmentId.empty() && data.contains("gatewayEnvironmentId");
+    run.ref = {row.optional<std::string>(data, "threadId").value_or(""), row.optional<std::string>(data, "runId").value_or(""),
+               row.optional<std::string>(data, "link").value_or(""), std::move(route.gatewayEnvironmentId)};
+    run.status = destinationRunStatusFromName(row.get<std::string>(data, "status"));
+    run.deadline = row.optional<Seconds>(data, "deadline");
+    run.retryAt = row.optional<Seconds>(data, "retryAt");
+    run.stopRetryAt = row.optional<Seconds>(data, "stopRetryAt");
+    run.evidenceAttempts = row.optional<unsigned>(data, "evidenceAttempts").value_or(0);
+    run.detail = row.optional<std::string>(data, "detail");
+    if (data.contains("commit") || data.contains("report") || data.contains("sessionCreatedAt") || data.contains("evidenceStatus"))
+        run.report =
+            DestinationReport{row.get<std::string>(data, "commit"), row.get<std::string>(data, "report"),
+                              row.optional<std::string>(data, "sessionCreatedAt").value_or(""), decodeReportAvailability(data, row)};
+    return run;
+}
+
 AssignedRun decodeAssignedRun(const Json& data, const RecordDecoder& row) {
     return {decodeRunRef(data, row), row.get<std::string>(data, "environmentId"), decodeRunAssignment(data, row)};
 }
@@ -48,16 +98,12 @@ SettledRunReport decodeSettledRunReport(const Json& data, const RecordDecoder& r
     auto run = decodeAssignedRun(row.require(data, "run"), row.nested("run"));
     if (row.get<std::string>(data, "environmentId") != run.environmentId) row.fail("environmentId", "does not match the assigned Run");
     if (row.nullable<Id>(data, "revisionId") != run.assignment.revisionId) row.fail("revisionId", "does not match the assigned Run");
-    RunEvidence evidence{.report = row.get<std::string>(data, "report"),
+    RunEvidence evidence{.availability = decodeReportAvailability(data, row),
+                         .report = row.get<std::string>(data, "report"),
                          .itemId = row.get<std::string>(data, "itemId"),
                          .detail = row.get<std::string>(data, "detail"),
                          .truncated = row.get<bool>(data, "truncated"),
                          .sessionCreatedAt = row.optional<std::string>(data, "sessionCreatedAt").value_or("")};
-    if (const auto status = row.optional<std::string>(data, "evidenceStatus")) {
-        const auto availability = enumValue(unavailableEvidence, *status);
-        if (!availability) row.fail("evidenceStatus", "unknown Run evidence status");
-        evidence.availability = *availability;
-    }
     return {std::move(run), row.get<std::string>(data, "resultRunId"), row.get<std::string>(data, "status"), std::move(evidence),
             row.optional<bool>(data, "stopRequested").value_or(false)};
 }
@@ -94,6 +140,72 @@ std::string_view taskStateName(TaskState state) {
     return enumName(states, state);
 }
 
+DestinationRunStatus destinationRunStatusFromName(std::string status) {
+    if (const auto phase = enumValue(destinationPhases, status)) return *phase;
+    return status;
+}
+
+std::string_view destinationRunStatusName(const DestinationRunStatus& status) {
+    if (const auto* phase = std::get_if<DestinationRunPhase>(&status)) return enumName(destinationPhases, *phase);
+    return std::get<std::string>(status);
+}
+
+std::string_view runOutcomeName(RunOutcome outcome) {
+    return enumName(runOutcomes, outcome);
+}
+
+std::optional<std::string_view> runEvidenceStatusName(RunEvidence::Availability availability) {
+    if (availability == RunEvidence::Availability::Available) return std::nullopt;
+    return enumName(unavailableEvidence, availability);
+}
+
+Json runTargetJson(const RunTarget& target) {
+    const auto& [environment, project, gateway] = target.route;
+    Json data{{"name", target.name}, {"environmentId", environment}, {"projectId", project}};
+    if (!gateway.empty() && gateway != environment) data["gatewayEnvironmentId"] = gateway;
+    return data;
+}
+
+Json runTargetsJson(std::span<const RunTarget> targets) {
+    auto result = Json::array();
+    for (const auto& target : targets) result.push_back(runTargetJson(target));
+    return result;
+}
+
+Json destinationRunSummaryJson(const DestinationRun& run) {
+    Json data{{"name", run.name},
+              {"environmentId", run.environmentId},
+              {"projectId", run.assignment.projectId},
+              {"status", destinationRunStatusName(run.status)}};
+    if (!run.ref.threadId.empty()) {
+        data["threadId"] = run.ref.threadId;
+        data["link"] = run.ref.link;
+    }
+    if (!run.ref.runId.empty()) data["runId"] = run.ref.runId;
+    if (const auto& report = run.report) {
+        data["commit"] = report->commit;
+        if (const auto status = runEvidenceStatusName(report->evidence)) data["evidenceStatus"] = *status;
+    }
+    return data;
+}
+
+Json destinationRunJson(const DestinationRun& run) {
+    auto data = destinationRunSummaryJson(run);
+    data["actionId"] = run.actionId;
+    if (!run.ref.gatewayEnvironmentId.empty() || run.explicitDirectGateway) data["gatewayEnvironmentId"] = run.ref.gatewayEnvironmentId;
+    if (!run.assignment.ownerBotId.empty()) encodeRunAssignment(data, run.assignment);
+    if (run.deadline) data["deadline"] = *run.deadline;
+    if (run.retryAt) data["retryAt"] = *run.retryAt;
+    if (run.stopRetryAt) data["stopRetryAt"] = *run.stopRetryAt;
+    if (run.evidenceAttempts) data["evidenceAttempts"] = run.evidenceAttempts;
+    if (const auto& report = run.report) {
+        data["report"] = report->text;
+        if (!report->sessionCreatedAt.empty()) data["sessionCreatedAt"] = report->sessionCreatedAt;
+    }
+    if (run.detail) data["detail"] = *run.detail;
+    return data;
+}
+
 bool terminal(const TaskData& task) {
     return task.state == TaskState::completed || task.state == TaskState::cancelled;
 }
@@ -127,7 +239,7 @@ Json settledRunReportJson(const SettledRunReport& report) {
         {"kind", "result"},        {"run", assignedRunJson(report.run)},        {"resultRunId", report.resultRunId},
         {"status", report.status}, {"environmentId", report.run.environmentId}, {"revisionId", revision ? Json(*revision) : Json(nullptr)}};
     if (report.stopRequested) data["stopRequested"] = true;
-    setReportEvidence(data, report.evidence);
+    setReportEvidence(data, boundedReportEvidence(report.evidence));
     return data;
 }
 
@@ -168,6 +280,25 @@ TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_vi
     task.activeRun = decodeNullableRun(data, row, "activeRun");
     task.lastRun = decodeNullableRun(data, row, "lastRun");
     if (const auto found = data.find("runStop"); found != data.end()) task.runStop = decodeRunStop(*found, row.nested("runStop"));
+    if (const auto found = data.find("runTargets"); found != data.end()) {
+        if (data.contains("runResults")) row.fail("runTargets", "cannot coexist with dispatched Runs");
+        auto& targets = task.destinations.emplace<RunTargets>();
+        for (const auto& target : row.array(*found, "runTargets"))
+            targets.push_back(decodeRunTarget(target, row.nested("runTargets." + std::to_string(targets.size()))));
+        if (targets.empty()) row.fail("runTargets", "expected at least one destination");
+    }
+    if (const auto found = data.find("runResults"); found != data.end()) {
+        auto& results = task.destinations.emplace<RunResults>();
+        for (const auto& run : row.array(*found, "runResults"))
+            results.runs.push_back(decodeDestinationRun(run, row.nested("runResults." + std::to_string(results.runs.size()))));
+        if (results.runs.empty()) row.fail("runResults", "expected at least one destination");
+        if (const auto status = row.optional<std::string>(data, "runOutcome")) {
+            results.outcome = enumValue(runOutcomes, *status);
+            if (!results.outcome) row.fail("runOutcome", "unknown task Run outcome");
+        }
+    } else if (data.contains("runOutcome")) {
+        row.fail("runOutcome", "requires dispatched Runs");
+    }
     task.replanning = row.optional<bool>(data, "replanning").value_or(false);
     task.queuedInT3 = row.optional<bool>(data, "queuedInT3").value_or(false);
     task.cancelledByBotPause = row.optional<bool>(data, "cancelledByBotPause").value_or(false);
@@ -209,6 +340,9 @@ TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_vi
                             "activeRun",
                             "lastRun",
                             "runStop",
+                            "runTargets",
+                            "runResults",
+                            "runOutcome",
                             "replanning",
                             "queuedInT3",
                             "cancelledByBotPause",
@@ -251,6 +385,13 @@ Json encodeTask(const TaskData& task) {
     if (task.pendingDestination) data["pendingDestination"] = destinationJson(*task.pendingDestination);
     if (task.currentRevision) data["currentRevision"] = *task.currentRevision;
     if (task.runStop) data["runStop"] = runStopJson(*task.runStop);
+    if (const auto* targets = std::get_if<RunTargets>(&task.destinations))
+        data["runTargets"] = runTargetsJson(*targets);
+    else if (const auto* results = std::get_if<RunResults>(&task.destinations)) {
+        auto& runs = data["runResults"] = Json::array();
+        for (const auto& run : results->runs) runs.push_back(destinationRunJson(run));
+        if (results->outcome) data["runOutcome"] = runOutcomeName(*results->outcome);
+    }
     if (task.replanning) data["replanning"] = true;
     if (task.queuedInT3) data["queuedInT3"] = true;
     if (task.cancelledByBotPause) data["cancelledByBotPause"] = true;

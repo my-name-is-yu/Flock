@@ -172,23 +172,20 @@ Json Store::Impl::taskState(const TaskData& task, const Message& message, bool f
                  {"replanning", task.replanning},
                  {"wait", std::move(wait)}};
     if (task.queuedInT3) view["queuedInT3"] = true;
-    if (task.rest.contains("runTargets") || task.rest.contains("runResults")) {
+    if (task.hasDestinations()) {
         if (task.rest.contains("requestedCommit")) view["requestedCommit"] = task.rest.at("requestedCommit");
-        if (task.rest.contains("runOutcome")) view["runOutcome"] = task.rest.at("runOutcome");
+        if (const auto outcome = task.runOutcome()) view["runOutcome"] = runOutcomeName(*outcome);
         auto& results = view["runResults"] = Json::array();
-        if (task.rest.contains("runResults")) {
-            for (const auto& run : task.rest.at("runResults")) {
-                Json summary = Json::object();
-                for (const auto* key :
-                     {"name", "environmentId", "projectId", "status", "commit", "threadId", "runId", "link", "evidenceStatus"})
-                    if (run.contains(key)) summary[key] = run.at(key);
-                if (fullContract && run.contains("report")) summary["report"] = bounded(field(run, "report"), 2000);
-                if (run.contains("detail")) summary["detail"] = bounded(field(run, "detail"), 320);
+        if (!task.runResults().empty()) {
+            for (const auto& run : task.runResults()) {
+                auto summary = destinationRunSummaryJson(run);
+                if (fullContract && run.report) summary["report"] = bounded(run.report->text, 2000);
+                if (run.detail) summary["detail"] = bounded(*run.detail, 320);
                 results.push_back(std::move(summary));
             }
         } else {
-            for (const auto& target : task.rest.at("runTargets")) {
-                auto summary = target;
+            for (const auto& target : task.runTargets()) {
+                auto summary = runTargetJson(target);
                 summary["status"] = task.state == TaskState::cancelled ? "cancelled" : "queued";
                 results.push_back(std::move(summary));
             }
@@ -528,8 +525,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
         if (tool == "continue_fresh_session") {
             const auto freshTask = ownTask(identifier(args, "taskId", true), message);
-            if (freshTask.rest.contains("runTargets") || freshTask.rest.contains("runResults"))
-                throw ToolError("Use a new request to run more work across T3 environments");
+            if (freshTask.hasDestinations()) throw ToolError("Use a new request to run more work across T3 environments");
         }
         if (tool == "compact_conversation" || tool == "expand_context" || tool == "continue_fresh_session")
             return contextTool(tool, args, message, step);
@@ -581,7 +577,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                 task.rest["requestedDoneWhen"] = doneWhen;
                 task.rest["criteriaSourceMessageId"] = message.id;
             }
-            if (!targets.empty()) task.rest["runTargets"] = std::move(targets);
+            if (!targets.empty()) task.destinations = std::move(targets);
             if (!commit.empty()) task.rest["requestedCommit"] = std::move(commit);
             save(task);
         }
@@ -593,11 +589,11 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         auto task = ownTask(identifier(args, "taskId", true), message);
         expectGeneration(task);
         active(task);
-        if (tool == "change_task" && (task.rest.contains("runTargets") || task.rest.contains("runResults")))
+        if (tool == "change_task" && task.hasDestinations())
             throw ToolError("Task-wide changes are not available for tasks with destination Runs yet");
-        if (tool == "send_to_task" && task.rest.contains("runTargets"))
+        if (tool == "send_to_task" && !task.runTargets().empty())
             throw ToolError("A destination Session is unavailable until its T3 Thread is saved");
-        if (tool == "send_to_task" && task.rest.contains("runResults"))
+        if (tool == "send_to_task" && !task.runResults().empty())
             throw ToolError("Send this destination instruction on its own to use the saved T3 Thread");
         const auto instruction = text(args, "instruction", maxBodyBytes, true);
         const auto result = source(&task);

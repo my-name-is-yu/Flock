@@ -9,8 +9,10 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace flockv0 {
@@ -20,6 +22,45 @@ std::string_view taskStateName(TaskState);
 
 struct TaskRoute {
     std::string environmentId, projectId, gatewayEnvironmentId;
+};
+
+struct RunTarget {
+    std::string name;
+    TaskRoute route;
+};
+
+enum class DestinationRunPhase { queued, running, confirmation_pending };
+using DestinationRunStatus = std::variant<DestinationRunPhase, std::string>;
+
+struct DestinationReport {
+    std::string commit, text, sessionCreatedAt;
+    RunEvidence::Availability evidence;
+};
+
+struct DestinationRun {
+    std::string actionId, name, environmentId;
+    RunAssignment assignment{};
+    RunRef ref{};
+    bool explicitDirectGateway = false;
+    DestinationRunStatus status = DestinationRunPhase::queued;
+    std::optional<std::int64_t> deadline{}, retryAt{}, stopRetryAt{};
+    unsigned evidenceAttempts = 0;
+    std::optional<DestinationReport> report{};
+    std::optional<std::string> detail{};
+
+    bool outstanding() const { return std::holds_alternative<DestinationRunPhase>(status); }
+    bool inPhase(DestinationRunPhase phase) const { return status == DestinationRunStatus{phase}; }
+};
+
+std::string_view destinationRunStatusName(const DestinationRunStatus&);
+enum class RunOutcome { all_completed, partial_failure, failed };
+std::string_view runOutcomeName(RunOutcome);
+
+using RunTargets = std::vector<RunTarget>;
+
+struct RunResults {
+    std::vector<DestinationRun> runs;
+    std::optional<RunOutcome> outcome{};
 };
 
 struct PendingDestination {
@@ -52,6 +93,7 @@ struct TaskData {
     std::int64_t eventId = 0, deadline = 0;
     std::optional<AssignedRun> activeRun{}, lastRun{};
     std::optional<RunStop> runStop{};
+    std::variant<std::monostate, RunTargets, RunResults> destinations{};
     bool replanning = false, queuedInT3 = false, cancelledByBotPause = false;
     std::optional<std::string> replanningDetail{}, cancellationDetail{};
     std::vector<OutboxInstruction> cancelledInstructions{};
@@ -63,6 +105,20 @@ struct TaskData {
     std::optional<std::string> launchWarning{};
     nlohmann::json config = nlohmann::json::object();
     nlohmann::json rest = nlohmann::json::object();
+
+    bool hasDestinations() const { return !std::holds_alternative<std::monostate>(destinations); }
+    std::span<const RunTarget> runTargets() const {
+        if (const auto* targets = std::get_if<RunTargets>(&destinations)) return *targets;
+        return {};
+    }
+    std::span<const DestinationRun> runResults() const {
+        if (const auto* results = std::get_if<RunResults>(&destinations)) return results->runs;
+        return {};
+    }
+    std::optional<RunOutcome> runOutcome() const {
+        if (const auto* results = std::get_if<RunResults>(&destinations)) return results->outcome;
+        return std::nullopt;
+    }
 };
 
 bool terminal(const TaskData&);

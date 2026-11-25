@@ -277,12 +277,15 @@ Json taskSummary(const TaskData& task) {
     return result;
 }
 
-Json verificationRun(const Json& source) {
-    auto run = runView(source, field(source, "environmentId"));
+Json verificationRun(const DestinationRun& source) {
+    auto run = runView(source.environmentId, source.ref.threadId, source.ref.runId, source.ref.link);
     if (run.is_null()) run = Json::object();
-    copyFields(run, source, {"name", "environmentId", "commit"});
-    run["state"] = source.value("status", "queued");
-    if (run["state"] == "confirmation_pending" && !field(run, "runId").empty()) copyFields(run, source, {"detail"});
+    run["name"] = source.name;
+    run["environmentId"] = source.environmentId;
+    if (source.report) run["commit"] = source.report->commit;
+    run["state"] = destinationRunStatusName(source.status);
+    if (source.inPhase(DestinationRunPhase::confirmation_pending) && !field(run, "runId").empty() && source.detail)
+        run["detail"] = *source.detail;
     return run;
 }
 
@@ -298,10 +301,8 @@ Json currentWait(const TaskData& task, const Wait& wait) {
     }
     if (const auto* verification = wait.verification()) {
         result["deadline"] = verification->deadline;
-        const auto& results = task.rest.at("runResults");
-        const auto saved =
-            std::ranges::find_if(results, [&](const Json& item) { return field(item, "actionId") == verification->actionId; });
-        if (saved != results.end()) run = runView(*saved, env);
+        const auto saved = std::ranges::find(task.runResults(), verification->actionId, &DestinationRun::actionId);
+        if (saved != task.runResults().end()) run = runView(saved->environmentId, saved->ref.threadId, saved->ref.runId, saved->ref.link);
     }
     if (run.is_null()) run = runView(task.lastRun, env);
     return result;
@@ -322,16 +323,14 @@ Json sessionGroup(const TaskView& view) {
         const bool active = activeRun && field(*run, "runId") == activeRun->ref.runId && thread == activeRun->ref.threadId &&
                             field(session, "environmentId") == env;
         session["state"] = active ? displayState(task) : run->value("status", "ended");
-        if (task.rest.contains("runResults")) {
-            const auto& results = task.rest.at("runResults");
-            const auto result = std::ranges::find_if(results, [&](const Json& check) {
-                return field(check, "environmentId") == field(*run, "environmentId") && field(check, "threadId") == thread &&
-                       field(check, "runId") == field(*run, "runId");
-            });
-            if (result != results.end()) {
-                copyFields(session, *result, {"name", "commit"});
-                if (result->contains("status")) session["state"] = result->at("status");
-            }
+        const auto result = std::ranges::find_if(task.runResults(), [&](const DestinationRun& check) {
+            return check.environmentId == field(*run, "environmentId") && check.ref.threadId == thread &&
+                   check.ref.runId == field(*run, "runId");
+        });
+        if (result != task.runResults().end()) {
+            session["name"] = result->name;
+            if (result->report) session["commit"] = result->report->commit;
+            session["state"] = destinationRunStatusName(result->status);
         }
         if (const auto createdAt = field(*run, "sessionCreatedAt"); !createdAt.empty()) session["createdAt"] = createdAt;
         sessions.push_back(std::move(session));
@@ -372,13 +371,17 @@ Json activity(const std::vector<Store::ActiveTask>& activeTasks, std::string_vie
                     {"id", blocker->id}, {"botId", blocker->botId}, {"request", blocker->request}, {"state", displayState(blocker->state)}};
             result["queued"].push_back(std::move(queued));
         }
-        if (task.rest.contains("runTargets") || task.rest.contains("runResults")) {
+        if (task.hasDestinations()) {
             Json checks = Json::array();
-            const auto& routes = task.rest.contains("runResults") ? task.rest.at("runResults") : task.rest.at("runTargets");
-            for (const auto& route : routes) {
+            for (const auto& target : task.runTargets())
+                checks.push_back({{"name", target.name},
+                                  {"environmentId", target.route.environmentId},
+                                  {"state", task.state == TaskState::cancelling ? "stopping" : "queued"}});
+            for (const auto& route : task.runResults()) {
                 auto run = verificationRun(route);
-                const bool activeRun = run["state"] == "running" || run["state"] == "confirmation_pending" || run["state"] == "queued";
-                if (activeRun && task.state == TaskState::cancelling && run["state"] != "confirmation_pending") run["state"] = "stopping";
+                const bool activeRun = route.outstanding();
+                if (activeRun && task.state == TaskState::cancelling && !route.inPhase(DestinationRunPhase::confirmation_pending))
+                    run["state"] = "stopping";
                 if (activeRun && !field(run, "threadId").empty()) {
                     auto active = run;
                     active["taskId"] = task.id;

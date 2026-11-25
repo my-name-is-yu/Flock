@@ -637,8 +637,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         const auto deadline = data.at("deadline").get<Seconds>();
         if (verification) {
             auto& run = destinationRun(task, verification->actionId);
-            if (!destinationRunOutstanding(run)) throw RequestChanged{};
-            run["deadline"] = deadline;
+            if (!run.outstanding()) throw RequestChanged{};
+            run.deadline = deadline;
         } else {
             task.deadline = deadline;
         }
