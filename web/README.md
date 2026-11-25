@@ -93,7 +93,13 @@ environment's OAuth endpoint.
 
 ## Flock settings
 
-Use **Appearance** to set the theme for the current browser. Use **Permissions**
+Use **Appearance** to set the theme and turn on **Notifications** for the
+current browser. Allow notifications when the browser asks. Flock alerts you
+when a Bot replies, needs your input, or encounters a failure. Alerts work
+while a Flock tab is open and pause for the Bot you are viewing. Select an
+alert to open its Bot.
+
+Use **Permissions**
 to set the installation's permission mode and rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the

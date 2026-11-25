@@ -363,6 +363,12 @@ public:
     };
     // Original messages affected by replies and instruction delivery since a journal cursor.
     ConversationChanges conversationChangesSince(std::optional<Id> after, std::string_view bot = {}) const;
+    struct NotificationEvents {
+        Id through;
+        Json events;
+        bool more;
+    };
+    NotificationEvents notificationEventsSince(std::optional<Id> after) const;
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
     Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);

@@ -885,6 +885,83 @@ void readChanges(Browser& stream, const std::string& path, const std::function<b
     check(!result && ready && finished,"stream missed an invalidation");
 }
 
+void notificationEvents(const std::filesystem::path& path) {
+    const Person owner{"owner",true};
+    Store store(path);
+    store.policy().setMember(owner,"release","reader",true);
+    auto web = callbacks();
+    web.authenticate = [owner](std::string_view credential) {
+        if (credential == "Bearer owner") return owner;
+        if (credential == "Bearer reader") return Person{"reader"};
+        return Person{};
+    };
+    web.resolveIdentity = [](std::string_view id) -> std::optional<bool> {
+        if (id == "owner") return true;
+        if (id == "reader") return false;
+        return std::nullopt;
+    };
+    struct NotificationModel : FixedModel {
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") == "conversation_turn")
+                return {{{"reply",{{"text","A reply"}},"Respond to the request"}}};
+            if (input.event.at("kind") == "intake" && input.task.at("request") == "Choose a publish date")
+                return {{{"ask_user",{{"question","When should we publish?"}},"The schedule needs a date"}}};
+            return FixedModel::decide(input);
+        }
+    } model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,{});
+    const auto server = startWeb(store,0,web);
+    Browser reader(*server), administrator(*server), stream(*server);
+    for (auto* browser : {&reader,&stream}) browser->client.set_default_headers({{"Authorization","Bearer reader"}});
+    administrator.client.set_default_headers({{"Authorization","Bearer owner"}});
+
+    const auto reply = [&](std::string_view bot, std::string_view key) {
+        store.receive(owner,web.intake(bot,"Can you help?"),key,"Can you help?");
+    };
+    reply("release","already-seen");
+    runtime.runConversations();
+    const auto baseline = reader.get("/api/notifications");
+    check(baseline.at("through").get<Id>() > 0 && baseline.at("events").empty() && baseline.at("inbox").empty(),
+          "opening the notification feed replayed older activity");
+
+    const auto after = "/api/notifications?after=" + std::to_string(baseline.at("through").get<Id>());
+    bool wroteEvents = false;
+    readChanges(stream,"/api/events",[&](const Json& change) {
+        check(change.at("list") == true,"browser notification activity did not invalidate the Bot list");
+        if (wroteEvents) return false;
+        reply("release","new-reply-one");
+        reply("triage","private-reply");
+        reply("release","new-reply-two");
+        runtime.runConversations();
+        store.submit({"release","Choose a publish date","local-env","publication"});
+        store.submit(web.intake("release","Verify staging"));
+        t3.observations["thread-release"] = {.kind=Observation::Kind::Finished,.status="failed",
+            .report="Health check failed",.resultRunId="run-result",.itemId="failed-report"};
+        tick(runtime,8);
+        wroteEvents = true;
+        return true;
+    });
+
+    const auto page = reader.get(after);
+    const auto& events = page.at("events");
+    check(events.size() == 3 && events.at(0).at("kind") == "reply" && events.at(1).at("kind") == "reply" &&
+          events.at(2).at("kind") == "failure" && events.at(0).at("id").get<Id>() < events.at(1).at("id").get<Id>(),
+          "notification catch-up lost a reply or confused a failed report with a reply: " + page.dump());
+    const auto administratorPage = administrator.get(after);
+    check(std::ranges::all_of(events,[](const Json& item) {
+        return item.size() == 4 && item.at("botId") == "release" && item.at("botName") == "Release";
+    }) &&
+          administratorPage.at("events").size() == 4,
+          "notification access did not match the visible Bots: " + page.dump() + " / " + administratorPage.dump());
+    const auto question = reader.get("/api/inbox").at("items").at(0);
+    check(page.at("inbox") == Json::array({{{"botId","release"},{"botName","Release"},{"kind","user_question"},
+          {"id",question.at("itemId")}}}),"the notification feed lost the actionable question: " + page.dump());
+    const auto caughtUp = reader.get("/api/notifications?after=" + std::to_string(page.at("through").get<Id>()));
+    check(caughtUp.at("events").empty() && caughtUp.at("inbox") == page.at("inbox"),
+          "the feed replayed consumed events or dropped a pending question");
+}
+
 void recurringRequestStatus(const std::filesystem::path& path) {
     constexpr Seconds now = 2'000'000'000;
     const Person owner{"fixture",true};
@@ -1791,6 +1868,7 @@ int main() {
         exercise(directory.path / "state.db");
         messageReceipts(directory.path / "message-receipts.db");
         sidebarReplies(directory.path / "sidebar.db");
+        notificationEvents(directory.path / "notifications.db");
         failedCompletion(directory.path / "failed-completion.db");
         recurringRequestStatus(directory.path / "recurring-requests.db");
         watchedBotView(directory.path / "watched-bot-view.db");

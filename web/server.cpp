@@ -257,6 +257,14 @@ public:
             json(res,200,botList(actor));
         });
         server_.Get("/api/events",[this](const Request& req, Response& res) { changes(req,res); });
+        server_.Get("/api/notifications",[this](const Request& req, Response& res) {
+            const auto actor = web::person(callbacks_,req);
+            try {
+                const auto after = queryId(req,"after",true);
+                setViewer(res,callbacks_,actor);
+                json(res,200,notificationPage(actor,req.has_param("after") ? std::optional{after} : std::nullopt));
+            } catch (const InputError& e) { error(res,400,e.what()); }
+        });
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
             const auto id = req.get_param_value("bot");
             if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
@@ -550,6 +558,33 @@ private:
 
     Json snapshot(const Person& person, const ChangeFeed::BotList&) const {
         return {{"bots",botList(person)},{"inbox",store_.inbox(person,{})}};
+    }
+
+    Json notificationPage(const Person& person, std::optional<Id> after) const {
+        auto page = store_.notificationEventsSince(after);
+        const auto policy = store_.policy();
+        std::map<std::string,std::string> names;
+        for (const auto& bot : bots()) {
+            const auto id = web::field(bot,"id");
+            if (policy.allows(person,Action::bot_view,id))
+                names.emplace(id,web::field(redactBot(id,{{"name",web::field(bot,"name")}}),"name"));
+        }
+        auto inbox = Json::array();
+        for (const auto& item : store_.inbox(person,{})) {
+            const auto id = web::field(item,"botId");
+            if (!names.contains(id) || !item.value("canDecide",false) || web::field(item,"status") == "expired") continue;
+            inbox.push_back({{"id",item.at("itemId")},{"botId",id},{"botName",names.at(id)},
+                             {"kind",item.at("itemKind")}});
+        }
+        for (auto event = page.events.begin(); event != page.events.end();) {
+            const auto name = names.find(web::field(*event,"botId"));
+            if (name == names.end()) event = page.events.erase(event);
+            else {
+                (*event)["botName"] = name->second;
+                ++event;
+            }
+        }
+        return {{"through",page.through},{"more",page.more},{"events",std::move(page.events)},{"inbox",std::move(inbox)}};
     }
 
     Json withConversationAccess(const Person& actor, std::string_view bot, Json view) const {

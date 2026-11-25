@@ -105,5 +105,7 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME flock_web_composer_shortcuts
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-shortcuts.mjs")
+    add_test(NAME flock_web_browser_notifications
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/browser-notifications.mjs")
   endif()
 endif()

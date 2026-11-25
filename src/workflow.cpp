@@ -414,8 +414,10 @@ bool Store::Impl::settleStageReport(Json& task) {
     consumeEvent(task);
     task["state"] = "completed";
     const auto text = field(report,"evidenceStatus") == "report_unavailable" ? field(report,"detail") : field(report,"report");
-    journal(task.at("id"),"completed",{{"text",ok ? text : "Workflow stage failed: "+text},
-        {"revisionId",task.at("currentRevision")},{"source",report.at("run")}});
+    Json completion = {{"text",ok ? text : "Workflow stage failed: "+text},
+        {"revisionId",task.at("currentRevision")},{"source",report.at("run")}};
+    if (field(report,"status") == "completed") completion["workflowOutcome"] = ok ? "completed" : "failed";
+    journal(task.at("id"),"completed",std::move(completion));
     return true;
 }
 }
