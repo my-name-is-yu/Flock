@@ -401,9 +401,12 @@ void rerunRevisedDependentStage() {
         {"intent",intent},{"doneWhen",criteria},{"instruction","Use the revised assignment."}});
     f.ticks(2);
     require(f.t3.interrupts.contains("run-2"),"active verifier did not stop for the revision");
+    const auto cursor = f.store->notificationEventsSince(localOwner,{"bot"},std::nullopt,{});
     f.t3.finish("run-2",Json::object(),"interrupted");
     f.ticks(5);
     require(f.t3.commands.size()==3,"revised verifier did not start");
+    require(f.store->notificationEventsSince(localOwner,{"bot"},cursor.through,cursor.scope).events.empty(),
+            "an interrupted verifier emitted a failure alert after its assignment was revised");
     f.t3.finish("run-3",{{"artifactVersion",shaA},{"verdict","pass"}});
     f.ticks(1);
     require(f.status()["stages"][1]["verified"]==true,"revised verifier did not settle");
@@ -497,7 +500,7 @@ void uncertainLaunchAndStageStop() {
 }
 
 void workflowFailureNotifications() {
-    for (const auto status : {"cancelled","failed","completed"}) {
+    for (const auto status : {"cancelled","failed","interrupted","completed"}) {
         Fixture f;
         f.call("start_workflow",{{"request","Implement feature"}});
         f.ticks(2);
@@ -507,6 +510,25 @@ void workflowFailureNotifications() {
         const auto page = f.store->notificationEventsSince(localOwner,{"bot"},cursor.through,cursor.scope);
         require(f.status()["stages"][0]["status"]=="failed" && page.events.size()==1 &&
                 page.events[0]["kind"]=="failure","a failed stage did not emit exactly one failure alert");
+    }
+}
+
+void stoppedStageNotificationsDistinguishFailures() {
+    for (const auto status : {"interrupted","failed"}) {
+        Fixture f;
+        const auto id = f.call("start_workflow",{{"request","Implement feature"}}).at("workflowId");
+        f.ticks(2);
+        f.call("stop_workflow_stage",{{"workflowId",id},{"stageId","implement"}});
+        const auto cursor = f.store->notificationEventsSince(localOwner,{"bot"},std::nullopt,{});
+        f.t3.finish("run-1",Json::object(),status);
+        f.ticks(3);
+        require(f.t3.interrupts.empty() && f.status()["stages"][0]["status"]=="stopped",
+                "the stop-race fixture did not settle before an interrupt acknowledgement");
+        const auto page = f.store->notificationEventsSince(localOwner,{"bot"},cursor.through,cursor.scope);
+        if (std::string_view(status)=="interrupted")
+            require(page.events.empty(),"an interrupted stage emitted a failure alert before the stop was acknowledged");
+        else require(page.events.size()==1 && page.events[0]["kind"]=="failure",
+                     "a pending stop hid a genuine stage failure");
     }
 }
 
@@ -834,6 +856,7 @@ int main() {
         stopAndDeadline();
         uncertainLaunchAndStageStop();
         workflowFailureNotifications();
+        stoppedStageNotificationsDistinguishFailures();
         missingStageReportCannotAdvanceWorkflow();
         stopDuringUnconfirmedStart();
         reopenedStageWaitsForProject();
