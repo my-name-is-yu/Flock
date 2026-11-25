@@ -283,6 +283,8 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
         bot.settings[key] = config[key];
     }
     if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
+    if (const auto fix = config.find("fixPullRequests"); fix != config.end())
+        bot.settings["fixPullRequests"] = validatedBotFixPullRequests(*fix);
     if (config.contains("conversationEnvironments")) {
         const auto& destinations = config["conversationEnvironments"];
         if (!destinations.is_object())
@@ -461,6 +463,7 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     }
 
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
+    if (const auto fix = config.find("fixPullRequests"); fix != config.end()) item["fixPullRequests"] = *fix == true;
     try { item["modelCallLimit"] = modelCallLimit(config); } catch (const Conflict&) {}
     for (const std::string_view key : botRunSettingFields) {
         if (key == "modelCallLimit") continue;
@@ -638,6 +641,12 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
     const auto botDir = path(id);
     const auto file = botDir / "config.json";
     auto config = readBotConfig(file);
+    if (const auto fix = profile.find("fixPullRequests"); fix != profile.end()) {
+        if (profile.size() != 1 || image) throw Conflict("Save pull request follow-ups separately from other settings");
+        config["fixPullRequests"] = validatedBotFixPullRequests(*fix);
+        writeAtomic(file,profileText(config));
+        return cardLocked(id);
+    }
     if (const auto soul = profile.find("soul"); soul != profile.end()) {
         const auto original = profile.find("originalSoul");
         if (profile.size() != 2 || original == profile.end() || !original->is_string() || image)

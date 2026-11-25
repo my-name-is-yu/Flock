@@ -194,7 +194,8 @@ function decisionCard(item, submit, source, question, busy) {
   if (item.itemKind !== 'policy_approval' && labels[item.itemKind]) {
     parts.push(element('span', labels[item.itemKind]));
   }
-  if (approval && item.target) parts.push(element('span', item.target, 'board-inbox-target'));
+  const target = item.displayTarget ?? item.target;
+  if (approval && target) parts.push(element('span', target, 'board-inbox-target'));
   if (item.status === 'expired') parts.push(element('span', 'Expired'));
   const rel = relativeTime(item.createdAt);
   if (rel) parts.push(element('span', rel));

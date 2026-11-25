@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <limits>
 #include <set>
+#include <tuple>
 
 namespace flockv0 {
 using conversation_storage::integer;
@@ -794,21 +795,49 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         tools.insert(tools.end(),botToolNames().begin(),botToolNames().end());
     }
     if (!message.channelScope.empty()) tools.insert(tools.end(),channelTools.begin(),channelTools.end());
+    bool currentCheck = true;
+    if (gitHost && notification) {
+        const auto& event = message.routing.at("gitEvent");
+        if (field(event,"followup") == "failed_check") {
+            bool shouldVerify = false;
+            {
+                std::lock_guard lock(mutex);
+                if (canReceiveGitWebhook(message.bot,event)) {
+                    const auto followup = gitPrFollowup(message,intake);
+                    shouldVerify = followup && followup->status != GitPrFollowup::Status::attempted;
+                }
+            }
+            currentCheck = shouldVerify && currentGitPrCheck(*gitHost,message);
+        }
+    }
     const auto available = [&](int step, bool reviewPreference) {
         if (reviewPreference) {
             std::vector<std::string> reviewTools{"skip_preference"};
             if (canReviewPreference(message)) reviewTools.push_back("remember_preference");
-            return std::pair{std::move(reviewTools),Json::array()};
+            return std::tuple{std::move(reviewTools),Json::array(),std::string_view{}};
         }
         auto offered = tools;
         if (step == 1 && canReviewPreference(message)) offered.push_back("review_preference");
         auto machines = Json::array();
-        if (!notification) {
+        std::string_view followupStatus;
+        if (notification) {
+            if (const auto followup = gitHost ? gitPrFollowup(message,intake) : std::nullopt) {
+                switch (followup->status) {
+                case GitPrFollowup::Status::available:
+                    if (currentCheck) offered.push_back("fix_pull_request");
+                    break;
+                case GitPrFollowup::Status::attempted: followupStatus = "already_requested"; break;
+                case GitPrFollowup::Status::limitReached:
+                    if (currentCheck) followupStatus = "limit_reached";
+                    break;
+                }
+            }
+        } else {
             for (const auto& [machineId,machine] : localMachines)
                 if (permitsLocalMachineOwner(machine->owner(),message.bot)) machines.push_back(machineId);
             if (!machines.empty()) offered.push_back("request_local_machine_connection");
         }
-        return std::pair{std::move(offered),std::move(machines)};
+        return std::tuple{std::move(offered),std::move(machines),followupStatus};
     };
     const bool ja = japanese(message.text);
     const auto finish = [&](std::string text, std::string_view route) {
@@ -889,7 +918,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                 if (!row.string(1).empty()) continue;
                 effectType = row.string(2);
                 if (!row.string(0).empty()) {
-                    const auto [offered,machines] = available(step,reviewPreference);
+                    const auto [offered,machines,followupStatus] = available(step,reviewPreference);
                     bool rejectionChanged = false;
                     for (const auto& saved : row.json(0)) {
                         Decision call{saved.at("tool"),saved.at("args"),field(saved,"reason")};
@@ -956,7 +985,7 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                                "Reason: " + repair.string(2) + ". Return offered tools with valid arguments. "
                                "Batch independent reads, and propose replies or actions that make changes on their own.";
                 }
-                auto [offered,machines] = available(step,reviewPreference);
+                auto [offered,machines,followupStatus] = available(step,reviewPreference);
                 if (reviewPreference) {
                     auto prepared = preferenceReviewInput(message,std::move(offered),std::move(feedback),now);
                     if (!prepared) {
@@ -982,7 +1011,8 @@ SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=ca
                 }
                 if (!reviewPreference) {
                     std::vector<ModelImage> images;
-                    const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
+                    auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
+                    if (!followupStatus.empty()) context["event"]["gitFollowupStatus"] = followupStatus;
                     input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                              .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
                              .images = std::move(images)};

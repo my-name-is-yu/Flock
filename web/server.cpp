@@ -114,6 +114,10 @@ struct ParsedProfile {
 };
 
 ParsedProfile parseBotProfile(const Json& body, bool creating) {
+    if (!creating && body.contains("fixPullRequests")) {
+        if (body.size() != 2) throw InputError("invalid_profile_update");
+        return {{{"fixPullRequests",validatedBotFixPullRequests(body.at("fixPullRequests"))}},std::nullopt};
+    }
     if (!creating && body.contains("soul")) {
         const auto original = body.find("originalSoul");
         if (body.size() != 3 || original == body.end() || !original->is_string())
