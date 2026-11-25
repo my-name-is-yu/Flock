@@ -17,6 +17,10 @@ namespace flockv0::app::chatgpt {
 namespace {
 constexpr std::size_t maxResponse = 4 * 1024 * 1024;
 constexpr std::string_view responsesApi = "ChatGPT Responses API";
+constexpr std::string_view rejectedImageCodes[]{"invalid_image",     "invalid_image_format", "invalid_base64_image",
+                                                "image_parse_error", "invalid_image_mode",   "unsupported_image_media_type",
+                                                "image_too_large",   "image_too_small",      "image_file_too_large",
+                                                "empty_image_file"};
 
 bool success(long status) {
     return status >= 200 && status < 300;
@@ -282,10 +286,14 @@ Failure remoteFailure(std::string_view site, long status, const Json& value, std
         message += " — check Flock's ChatGPT connection and granted plan permissions";
     const bool transient = !limit && (status == 429 || status == 408 || (status >= 500 && status <= 599) || code == "server_error" ||
                                       code == "rate_limit_exceeded" || code == "service_unavailable");
-    if (!transient && !limit && site == responsesApi && (status == 0 || status == 400 || status == 422) &&
-        (parameter == "reasoning.effort" || parameter == "reasoning"))
-        return Failure("This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.",
-                       false, code, std::move(usage), ModelErrorCode::unsupported_reasoning_effort);
+    if (!transient && !limit && site == responsesApi) {
+        if ((status == 0 || status == 400 || status == 422) && (parameter == "reasoning.effort" || parameter == "reasoning"))
+            return Failure(
+                "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.", false,
+                code, std::move(usage), ModelErrorCode::unsupported_reasoning_effort);
+        if (std::ranges::find(rejectedImageCodes, code) != std::ranges::end(rejectedImageCodes))
+            return Failure(std::move(message), false, code, std::move(usage), ModelErrorCode::image_rejected);
+    }
     return Failure(std::move(message), transient, code, std::move(usage));
 }
 

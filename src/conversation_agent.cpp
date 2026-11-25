@@ -57,6 +57,7 @@ std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
     case ModelErrorCode::authentication_required: return "authentication_required";
     case ModelErrorCode::unsupported_reasoning_effort: return "unsupported_reasoning_effort";
+    case ModelErrorCode::image_rejected: return "image_rejected";
     case ModelErrorCode::invalid_tool_count: return "invalid_tool_count";
     case ModelErrorCode::invalid_tool_output: return "invalid_tool_output";
     case ModelErrorCode::unavailable_tool: return "unavailable_tool";
@@ -78,6 +79,9 @@ std::string modelFailureReply(ModelErrorCode code, bool ja) {
     if (code == ModelErrorCode::unsupported_reasoning_effort)
         return ja ? "このモデルは選択された推論レベルに対応していません。Botの設定で別のレベルか「Model default」を選んでください。"
                   : "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.";
+    if (code == ModelErrorCode::image_rejected)
+        return ja ? "添付画像を読み込めませんでした。別の画像に差し替えるか、画像を外して、メッセージを送り直してください。"
+                  : "I couldn't read an attached image. Replace it or remove it, then send your message again.";
     return ja ? "このメッセージを処理できませんでした。もう一度送ってください。" : "I couldn't process this message. Please send it again.";
 }
 
