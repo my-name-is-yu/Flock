@@ -433,13 +433,15 @@ void downtime(const std::filesystem::path& db) {
         tick(store);
         const auto tasks = taskJson(store.tasks());
         check(tasks.size() == 2, "Downtime did not produce exactly two queued requests");
-        const auto recurring = store.tasks("alpha").at(0).task.rest.at("trigger");
-        const auto reminder = store.tasks("beta").at(0).task.rest.at("trigger");
-        check(recurring.at("triggerId") == summaryId && recurring.at("triggerKind") == "schedule" && recurring.at("coveredFrom") == first &&
-                  recurring.at("coveredTo") == last && recurring.at("occurrenceCount") == 3 && recurring.at("targetTime") == last,
+        const auto recurring = store.tasks("alpha").at(0).task.trigger.value();
+        const auto reminder = store.tasks("beta").at(0).task.trigger.value();
+        const auto& scheduleDetails = std::get<TimedTaskTrigger>(recurring.details);
+        const auto& reminderDetails = std::get<TimedTaskTrigger>(reminder.details);
+        check(recurring.id == summaryId && scheduleDetails.kind == TimedTriggerKind::schedule && scheduleDetails.coveredFrom == first &&
+                  scheduleDetails.occurrenceCount == 3 && scheduleDetails.targetTime == last,
               "Weekly occurrences were not coalesced into one covered interval");
-        check(reminder.at("triggerId") == reminderId && reminder.at("triggerKind") == "reminder" && reminder.at("targetTime") == fireAt &&
-                  reminder.at("occurrenceCount") == 1,
+        check(reminder.id == reminderId && reminderDetails.kind == TimedTriggerKind::reminder && reminderDetails.targetTime == fireAt &&
+                  reminderDetails.occurrenceCount == 1,
               "Missed reminder lost its provenance");
         const auto botSchedules = store.automations(owner, "beta").at("automations");
         check(botSchedules.at(0).at("id") == canceledId && botSchedules.at(0).at("status") == "canceled" &&
@@ -458,8 +460,8 @@ void downtime(const std::filesystem::path& db) {
         now = next;
         tick(store);
         tick(store);
-        check(store.tasks().size() == 3 && store.tasks("alpha").at(0).task.rest.at("trigger").at("targetTime") == next &&
-                  store.tasks("alpha").at(0).task.rest.at("trigger").at("occurrenceCount") == 1,
+        const auto fired = std::get<TimedTaskTrigger>(store.tasks("alpha").at(0).task.trigger.value().details);
+        check(store.tasks().size() == 3 && fired.targetTime == next && fired.occurrenceCount == 1,
               "Next weekly occurrence did not fire once");
     }
 }
@@ -512,8 +514,7 @@ void pausedSchedules(const std::filesystem::path& db) {
                                                        }),
               "First recurring requests after resume included paused occurrences");
         restarted.fireDueAutomations(next + 15);
-        check(restarted.tasks(alpha.botId).size() == 3 &&
-                  restarted.tasks(alpha.botId).front().task.rest.at("trigger").at("triggerId") == afterResume,
+        check(restarted.tasks(alpha.botId).size() == 3 && restarted.tasks(alpha.botId).front().task.trigger.value().id == afterResume,
               "A reminder due after resume did not fire");
     }
 }
@@ -537,12 +538,11 @@ void isolatedFirings(const std::filesystem::path& db) {
     policy.submitSecret(owner, "broken", secret, "protected-destination");
     store.fireDueAutomations(now);
     const auto alphaSchedule = store.automations(owner, "alpha").at("automations").at(0);
-    check(alphaSchedule.at("nextRunAt") == utc(2037, 3, 1, 1) + 30 * 60 &&
-              store.tasks("alpha").at(0).task.rest.at("trigger").at("triggerId") == schedule,
+    check(alphaSchedule.at("nextRunAt") == utc(2037, 3, 1, 1) + 30 * 60 && store.tasks("alpha").at(0).task.trigger.value().id == schedule,
           "A long gap after a valid occurrence prevented delivery");
     const auto failed = store.automations(owner, "broken").at("automations").at(0);
     check(failed.at("id") == invalid && failed.at("status") == "failed" && failed.at("nextRunAt").is_null() &&
-              store.tasks("broken").empty() && store.tasks("beta").at(0).task.rest.at("trigger").at("triggerId") == regular,
+              store.tasks("broken").empty() && store.tasks("beta").at(0).task.trigger.value().id == regular,
           "A rejected firing blocked or contaminated the rest of the batch");
 
     const auto end = lastAutomationTime;
@@ -586,9 +586,9 @@ void automationConversation(const std::filesystem::path& db) {
     const auto replay = restarted.receiveWebhook(owner, "deploy", "deployment-1", {{"status", "finished"}}, options.clock());
     check(replay.at("duplicate") == true && replay.at("tasks") == delivery.at("tasks") && restarted.tasks().size() == 1,
           "Webhook duplicate across connections was enqueued");
-    const auto trigger = restarted.tasks().at(0).task.rest.at("trigger");
-    check(trigger.at("triggerId") == triggerId && trigger.at("triggerKind") == "webhook" && trigger.at("source") == "deploy" &&
-              trigger.at("event").at("status") == "finished",
+    const auto trigger = restarted.tasks().at(0).task.trigger.value();
+    const auto& webhook = std::get<WebhookTaskTrigger>(trigger.details);
+    check(trigger.id == triggerId.get<Id>() && webhook.source == "deploy" && webhook.event.at("status") == "finished",
           "Webhook trigger provenance was not retained");
 }
 
@@ -611,7 +611,7 @@ void webhookPolicy(const std::filesystem::path& db) {
         check(received.at("duplicate") == false && alphaReceipt.size() == 1 && alphaReceipt.at(0).at("botId") == "alpha" &&
                   store.tasks("beta").empty(),
               "An unrelated Bot's trigger blocked or received the webhook");
-        check(store.tasks("alpha").at(0).task.rest.at("trigger").at("event").at("data") == "[redacted]",
+        check(std::get<WebhookTaskTrigger>(store.tasks("alpha").at(0).task.trigger.value().details).event.at("data") == "[redacted]",
               "Webhook fanout copied a protected value into a task");
     }
     Store restarted(db);

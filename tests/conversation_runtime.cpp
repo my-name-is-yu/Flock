@@ -1417,7 +1417,7 @@ void resumeBatchesOversizedPendingBacklog() {
     check(f.task(next).at("pendingInstructions") == remaining, "restart lost the outstanding batch");
     for (std::size_t batch = 0; batch < specs.size(); ++batch) {
         f.t3.finish(f.task(next).at("activeRun").at("runId").get<std::string>(), "Batch applied");
-        if (f.task(next).at("pendingInstructions").empty()) break;
+        if (f.store->task(next).task.pendingInstructions.empty()) break;
         f.reach(next, "deciding");
         f.reach(next, "running");
         check(f.t3.sent.back().tool == CommandTool::follow_up, "a subsequent batch did not continue the Session");

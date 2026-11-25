@@ -64,12 +64,10 @@ PolicyOrigin Store::Impl::policyOrigin(const conversation::Message& message) {
 
 PolicyOrigin Store::Impl::taskPolicyOrigin(const TaskData& task) {
     const auto id = task.id;
-    auto source = integer(task.rest, "criteriaSourceMessageId");
-    if (!source) source = integer(task.rest, "sourceMessageId");
-    for (const auto& instruction : task.rest.value("pendingInstructions", Json::array()))
-        source = std::max(source, integer(instruction, "messageId"));
-    PolicyOrigin origin{task.botId, field(task.rest, "channelScope"), {}, source, 0, id, task.currentRevision.value_or(0), task.generation,
-                        !source};
+    auto source = task.criteriaProposal ? task.criteriaProposal->sourceMessageId.value_or(0) : Id{0};
+    if (!source) source = task.sourceMessageId.value_or(0);
+    for (const auto& instruction : task.pendingInstructions) source = std::max(source, instruction.messageId);
+    PolicyOrigin origin{task.botId, {}, {}, source, 0, id, task.currentRevision.value_or(0), task.generation, !source};
     if (!source) origin.scope = "task/" + std::to_string(id);
     if (source) {
         const auto message = loadTurnMessage(source);
@@ -78,11 +76,10 @@ PolicyOrigin Store::Impl::taskPolicyOrigin(const TaskData& task) {
         origin.requester = fromMessage.requester;
         origin.background = fromMessage.background;
         if (message.bot != origin.bot && !origin.requester.empty()) origin.scope = "task/" + std::to_string(id);
-    } else if (const auto requester = field(task.rest, "requester"); !requester.empty()) {
-        origin.requester = requester;
+    } else if (const auto& requester = task.requester; requester && !requester->empty()) {
+        origin.requester = *requester;
         origin.background = false;
-        origin.scope = "task/" + std::to_string(id);
-    } else if (task.rest.contains("trigger")) {
+    } else if (task.trigger) {
         auto owner = query("SELECT person FROM bot_owners WHERE bot=?", {origin.bot});
         origin.requester = owner.next() ? owner.string(0) : localOwner.id;
     } else {
@@ -111,7 +108,7 @@ SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
 WHERE t.id=? AND (o.id=? OR json_extract(o.data,'$.stopOperation')=?)
   AND o.phase IN ('started','accepted') AND json_extract(o.data,'$.stopRequested')=1
   AND t.state IN ('running','waiting')
-  AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
+  AND coalesce(t.current_revision,0)=?
 )SQL",
                          {task, operation.substr(prefix.size()), operation.substr(prefix.size()), revision})
                 .next();
@@ -119,13 +116,13 @@ WHERE t.id=? AND (o.id=? OR json_extract(o.data,'$.stopOperation')=?)
 SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
 WHERE o.id=? AND t.id=? AND o.phase='ready'
   AND t.state IN ('running','waiting')
-  AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
+  AND coalesce(t.current_revision,0)=?
 )SQL",
                      {operation.substr(prefix.size()), task, revision})
             .next();
     }
     return query("SELECT 1 FROM tasks WHERE id=? AND generation=?"
-                 " AND coalesce(json_extract(data,'$.currentRevision'),0)=?"
+                 " AND coalesce(current_revision,0)=?"
                  " AND state NOT IN ('cancelling','cancelled') AND (? OR state<>'completed')",
                  {task, generation, revision, turn ? 1 : 0})
         .next();

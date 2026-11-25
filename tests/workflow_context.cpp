@@ -733,10 +733,12 @@ void observeAfterUnsentAnswer() {
     f.ticks(2);
     auto& run = f.t3.observations["run-1"];
     run.kind = Observation::Kind::Question;
-    run.question = {"q", Json::array({{{"id", "choice"}, {"freeform", true}}})};
+    run.question = {"q", {{.id = "choice"}}};
     f.ticks(3);
     const Id task = f.status()["stages"][0]["taskId"];
-    require(taskJson(f.store->task(task))["wait"]["reason"] == "unknown_delivery" && f.store->task(task).pendingAction["phase"] == "ready",
+    const auto pending = f.store->task(task);
+    require(pending.wait && pending.wait->reason() == WaitReason::unknown_delivery && pending.pendingAction &&
+                pending.pendingAction->phase == OutboxPhase::ready,
             "unsent answer fixture did not reach its safe retry point");
     f.restart();
     f.t3.finish("run-1", {{"artifactVersion", shaA}});

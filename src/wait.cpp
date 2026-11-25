@@ -189,7 +189,9 @@ WaitDetails readWaitDetails(const RecordDecoder& decoder, const Json& data, Wait
     throw std::logic_error("Invalid wait reason");
 }
 
-std::optional<WaitRun> decodeRun(const RecordDecoder& decoder, const Json& data) {
+}
+
+std::optional<WaitRun> decodeWaitRun(const RecordDecoder& decoder, const Json& data) {
     if (data.is_null()) return std::nullopt;
     WaitRun run{decodeRunRef(data, decoder), decoder.optional<std::string>(data, "environmentId"),
                 decodeOptionalRunAssignment(data, decoder)};
@@ -197,13 +199,14 @@ std::optional<WaitRun> decodeRun(const RecordDecoder& decoder, const Json& data)
     return run;
 }
 
+namespace {
 Wait readWaitPayload(const RecordDecoder& decoder, const Json& data) {
     const auto reason = enumValue(reasons, decoder.get<std::string>(data, "reason"));
     if (!reason) decoder.fail("reason", "unknown wait reason");
     Wait wait{readWaitDetails(decoder, data, *reason), decoder.get<std::string>(data, "text")};
     wait.eventId = decoder.get<Id>(data, "eventId");
     wait.actionId = decoder.optional<std::string>(data, "actionId");
-    wait.run = decodeRun(decoder.nested("run"), decoder.require(data, "run"));
+    wait.run = decodeWaitRun(decoder.nested("run"), decoder.require(data, "run"));
     return wait;
 }
 }

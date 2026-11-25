@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
         const auto& verifier = recipients.at(0);
         check(verifier.task.state == TaskState::completed, "the recovered Verifier task did not finish");
         const auto& runs = verifier.runs;
-        check(runs.size() == 1 && runs.at(0).at("threadId") == "thread" && runs.at(0).at("runId") == "root",
+        check(runs.size() == 1 && runs.at(0).run.ref.threadId == "thread" && runs.at(0).run.ref.runId == "root",
               "Verifier did not adopt the one original Run");
         check(eventTexts(store.conversation("verifier"), "report", "report") == std::vector<std::string>{"root report"},
               "Verifier did not receive one report from the recovered Run");

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <set>
 #include <type_traits>
 
 namespace flockv0 {
@@ -27,6 +28,26 @@ public:
 
     RecordDecoder nested(std::string_view key) const { return {table_, id_, qualify(key)}; }
 
+    RecordDecoder tracking(std::set<std::string_view>& keys) const {
+        auto reader = *this;
+        reader.keys_ = &keys;
+        return reader;
+    }
+
+    void rejectUnknown(const Json& data) const {
+        object(data);
+        for (auto it = data.begin(); it != data.end(); ++it)
+            if (!keys_->contains(it.key())) fail(it.key(), "unknown key");
+    }
+
+    template <class Decode> auto decodeClosed(const Json& data, Decode decode) const {
+        std::set<std::string_view> keys;
+        const auto reader = tracking(keys);
+        auto value = decode(data, reader);
+        reader.rejectUnknown(data);
+        return value;
+    }
+
     [[noreturn]] void fail(std::string_view key, std::string_view issue) const {
         throw RecordDecodeError(table_, id_, qualify(key), issue);
     }
@@ -38,10 +59,16 @@ public:
     }
 
     const Json& require(const Json& object, std::string_view key) const {
-        if (!object.is_object()) fail({}, "expected an object");
-        const auto found = object.find(key);
+        const auto found = find(object, key);
         if (found == object.end()) fail(key, "missing required key");
         return *found;
+    }
+
+    Json::const_iterator find(const Json& data, std::string_view key) const {
+        object(data);
+        const auto it = data.find(key);
+        if (keys_ && it != data.end()) keys_->insert(it.key());
+        return it;
     }
 
     const Json& object(const Json& value, std::string_view key = {}) const {
@@ -77,8 +104,9 @@ public:
     template <class T> T get(const Json& object, std::string_view key) const { return value<T>(require(object, key), key); }
 
     template <class T> std::optional<T> optional(const Json& object, std::string_view key) const {
-        if (!object.contains(key)) return std::nullopt;
-        return get<T>(object, key);
+        const auto input = find(object, key);
+        if (input == object.end()) return std::nullopt;
+        return value<T>(*input, key);
     }
 
     template <class T> std::optional<T> nullable(const Json& object, std::string_view key) const {
@@ -89,6 +117,7 @@ public:
 private:
     std::string_view table_, id_;
     std::string path_;
+    std::set<std::string_view>* keys_ = nullptr;
 
     std::string qualify(std::string_view key) const {
         if (path_.empty()) return key.empty() ? "data" : std::string(key);

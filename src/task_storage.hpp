@@ -22,5 +22,4 @@ Json runStopJson(const RunStop&);
 Json settledRunReportJson(const SettledRunReport&);
 SessionOrigin decodeSessionOrigin(const Json&, const RecordDecoder&);
 Json sessionOriginJson(const SessionOrigin&);
-Json waitQuestionTarget(const Wait&);
 }

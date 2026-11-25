@@ -702,11 +702,10 @@ void conversationRequestApproval(const std::filesystem::path& path) {
     check(receipt.at("status") == "received" && store.tasks().empty(), "HTTP intake did not wait for the conversation turn");
     tick(runtime, 4);
     const auto tasks = store.tasks("release");
-    check(tasks.size() == 1 && tasks.front().task.rest.at("sourceMessageId") == receipt.at("messageId"),
+    check(tasks.size() == 1 && tasks.front().task.sourceMessageId == receipt.at("messageId").get<Id>(),
           "the Task did not retain its conversation message");
     const auto& task = tasks.front().task;
-    check(task.environmentId == "local-env" && task.projectId == "release" && !task.rest.contains("trigger"),
-          "the HTTP client changed routing or schedule");
+    check(task.environmentId == "local-env" && task.projectId == "release" && !task.trigger, "the HTTP client changed routing or schedule");
     const auto approvals = browser.get("/api/inbox").at("items");
     check(approvals.size() == 1 && approvals.at(0).at("taskId") == task.id && approvals.at(0).at("itemKind") == "policy_approval" &&
               approvals.at(0).at("canDecide") == true && approvals.at(0).at("canSaveRule") == false,
@@ -754,7 +753,7 @@ void exercise(const std::filesystem::path& path) {
     const auto settings = cli.submit(web.intake("settings", "接続設定を確認する"));
     tick(*runtime, 3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
-    t3.observations["thread-release"].question = {"scope-question", Json::array({{{"id", "scope"}, {"required", true}}})};
+    t3.observations["thread-release"].question = {"scope-question", {{.id = "scope"}}};
     t3.observations["thread-triage"].kind = Observation::Kind::ExternalInput;
     t3.observations["thread-triage"].status = "権限の承認が必要";
     tick(*runtime, 2);
@@ -878,7 +877,7 @@ void exercise(const std::filesystem::path& path) {
 
     auto& triageQuestion = t3.observations["thread-triage"];
     triageQuestion.kind = Observation::Kind::Question;
-    triageQuestion.question = {"scope-question", Json::array({{{"id", "scope"}, {"required", true}}})};
+    triageQuestion.question = {"scope-question", {{.id = "scope"}}};
     tick(*runtime, 2);
     const auto question = reopened.get("/api/view?bot=triage").at("waits").at(0);
     const Json answer = {{"botId", "triage"},
@@ -1400,7 +1399,7 @@ void conversationPermissions(const std::filesystem::path& path) {
     tick(runtime, 3);
     auto& observation = t3.observations["thread-release"];
     observation.kind = Observation::Kind::Question;
-    observation.question = {"scope-question", Json::array({{{"id", "scope"}, {"required", true}}})};
+    observation.question = {"scope-question", {{.id = "scope"}}};
     tick(runtime, 2);
 
     const auto server = startWeb(store, 0, web);

@@ -57,7 +57,7 @@ std::string conversationGatewayEnvironmentId(const Json& alias);
 std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name = {});
 inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 inline constexpr std::string_view runStopOperation = "run-stop/";
-Json questionTarget(const TaskData&, Id waitId = 0);
+QuestionTarget questionTarget(const TaskData&, Id waitId = 0);
 std::string actionId();
 std::string effectiveDoneWhen(const TaskData& task);
 Json runJson(const RunRef&);
@@ -436,6 +436,7 @@ struct Store::Impl {
     Id addRevision(TaskData&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     void save(TaskData&);
+    void saveDecisionCheckpoint(TaskData&, DecisionCheckpoint);
     bool automationBeforeDispatch(Id task) const;
     bool isUndispatchedNotesWait(const TaskData& task) const;
     bool projectRouteReady(Id task, std::string_view action) const;
@@ -454,8 +455,8 @@ struct Store::Impl {
     TaskChange taskChange(const conversation::Message&, const Json& args, const TaskData& task, const LinkedTaskDestinations& linked);
     std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
     Id submitRequest(const Intake&, const Person* requester);
-    Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr, TaskSource sourceKind = TaskSource::request,
-              const Json& trigger = nullptr);
+    Id submit(const Intake&, Id sourceMessageId = 0, const OutboxSource* source = nullptr, TaskSource sourceKind = TaskSource::request,
+              std::optional<TaskTrigger> trigger = {}, std::optional<std::string> requester = {});
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&, Id sourceMessage = 0, std::optional<InboxKind> = {});
     bool waitIsActionable(const TaskData& task) const;
     Id waitAnchor(Id task, Id wait) const;

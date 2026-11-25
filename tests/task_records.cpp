@@ -29,6 +29,9 @@ Json stored() {
             {"deadline", 0},
             {"activeRun", nullptr},
             {"lastRun", nullptr},
+            {"createdAt", 1700000000},
+            {"remaining", 3},
+            {"additionalUsed", 0},
             {"feedback", "Run is ready"},
             {"question", nullptr}};
 }
@@ -63,17 +66,13 @@ void roundTrips() {
                   task.pendingDestination->route.projectId == "other" &&
                   task.pendingDestination->route.gatewayEnvironmentId == "other-gateway",
               "Pending destination did not decode");
-        check(task.rest == Json{{"feedback", "Run is ready"}, {"question", nullptr}}, "Typed fields leaked into TaskData::rest");
+        check(task.feedback == "Run is ready" && !task.question && task.createdAt == 1700000000 && task.allowance.remaining == 3 &&
+                  task.allowance.additionalUsed == 0,
+              "Task request state did not decode");
         check(encodeTask(task) == revised, "Task payload changed on round-trip");
     }
 
-    auto storedWithColumns = revised;
-    storedWithColumns.update({{"id", 10}, {"generation", 9}, {"state", "completed"}, {"revisions", Json::array()}});
-    const auto task = decodeTask(id, "queued", generation, storedWithColumns.dump());
-    check(task.id == id && task.generation == generation && task.state == queued && encodeTask(task) == revised,
-          "Task data overrode a persisted column or retained a projection");
-
-    const TaskView view{.task = task, .revisions = {{23, 2, "Revised request", "Provide results", 33}}};
+    const TaskView view{.task = intake, .revisions = {{23, 2, "Revised request", "Provide results", 33}}};
     const auto projected = taskJson(view);
     check(
         projected.at("id") == id && projected.at("generation") == generation && projected.at("state") == "queued" &&
@@ -150,8 +149,7 @@ void executionRoundTrips() {
               task.sessionOrigin->target == SessionTarget{"parent", "parent-session", ""} && task.sessionOrigin->title == "Planning" &&
               task.newSessionRequired && task.freshContextRequested && task.launchWarning == "Session lineage unavailable",
           "Selected Session or Session origin did not decode");
-    check(task.rest == Json{{"feedback", "Run is ready"}, {"question", nullptr}} && encodeTask(task) == data,
-          "Typed execution data changed on round-trip");
+    check(encodeTask(task) == data, "Typed execution data changed on round-trip");
     data["activeRun"] = data.at("lastRun");
     data["runStop"] = {{"intent", "replan"}, {"run", data.at("activeRun")}, {"retryAt", 94}};
     const auto stopping = decodeTask(id, "running", generation, data.dump());
@@ -166,7 +164,7 @@ void destinationRoundTrips() {
     data["runTargets"] = Json::array({target});
     const auto queued = decodeTask(id, "queued", generation, data.dump());
     check(queued.runTargets().size() == 1 && queued.runTargets().front().route.projectId == "repo" && queued.runResults().empty() &&
-              !queued.rest.contains("runTargets") && encodeTask(queued) == data,
+              encodeTask(queued) == data,
           "queued destination did not retain its typed route and wire shape");
 
     auto pending = target;
@@ -202,16 +200,15 @@ void destinationRoundTrips() {
     const auto& result = running.runResults().front();
     check(result.inPhase(DestinationRunPhase::confirmation_pending) && result.outstanding() && result.ref.threadId == "mini-thread" &&
               result.ref.runId.empty() && result.deadline == 100 && result.retryAt == 90 && result.stopRetryAt == 95 &&
-              result.evidenceAttempts == 1 && !running.runResults().back().outstanding() && !running.rest.contains("runResults") &&
-              encodeTask(running) == data,
+              result.evidenceAttempts == 1 && !running.runResults().back().outstanding() && encodeTask(running) == data,
           "destination progress and settlement changed on round-trip");
 
     data["runResults"] = Json::array({settled});
     data["runOutcome"] = "failed";
     const auto completed = decodeTask(id, "completed", generation, data.dump());
     const auto wire = taskJson(TaskView{.task = completed});
-    check(completed.runOutcome() == RunOutcome::failed && !completed.rest.contains("runOutcome") && encodeTask(completed) == data &&
-              wire.at("runResults") == data.at("runResults") && wire.at("runOutcome") == "failed",
+    check(completed.runOutcome() == RunOutcome::failed && encodeTask(completed) == data && wire.at("runResults") == data.at("runResults") &&
+              wire.at("runOutcome") == "failed",
           "destination aggregate did not retain its typed outcome and wire shape");
 }
 
@@ -238,7 +235,18 @@ void decodeErrors() {
         invalid[key] = 42;
         rejects(invalid.dump(), key, "expected a string");
     }
+    for (const auto* key : {"typo", "id", "state", "generation", "revisions", "runs", "pendingAction"}) {
+        auto invalid = stored();
+        invalid[key] = nullptr;
+        rejects(invalid.dump(), key, "unknown key");
+    }
     auto invalid = stored();
+    invalid["remaining"] = "3";
+    rejects(invalid.dump(), "remaining", "expected an integer");
+    invalid = stored();
+    invalid["criteriaSourceMessageId"] = 3;
+    rejects(invalid.dump(), "criteriaSourceMessageId", "requires proposed completion criteria");
+    invalid = stored();
     invalid["config"] = Json::array();
     rejects(invalid.dump(), "config", "expected an object");
     invalid = stored();
@@ -258,6 +266,9 @@ void decodeErrors() {
     invalid["pendingDestination"] = pendingDestination();
     invalid["pendingDestination"].erase("projectId");
     rejects(invalid.dump(), "pendingDestination.projectId", "missing required key");
+    invalid["pendingDestination"] = pendingDestination();
+    invalid["pendingDestination"]["typo"] = nullptr;
+    rejects(invalid.dump(), "pendingDestination.typo", "unknown key");
     invalid = stored();
     invalid["runOutcome"] = "failed";
     rejects(invalid.dump(), "runOutcome", "requires dispatched Runs");
@@ -301,6 +312,42 @@ void executionDecodeErrors() {
     invalid["sessionOrigin"]["title"] = 20;
     rejects(invalid.dump(), "sessionOrigin.title", "expected a string");
 }
+
+void questionAndCheckpointRoundTrip() {
+    const Json decision{{"generation", generation},
+                        {"eventId", 15},
+                        {"revisionId", nullptr},
+                        {"tool", "answer_session_question"},
+                        {"args", {{"answers", {{"branch", "main"}}}}},
+                        {"usage", {{"total_tokens", 19}}},
+                        {"attemptId", 25}};
+    auto data = stored();
+    data["question"] = {
+        {"requestId", "request"},
+        {"fields", Json::array({{{"id", "branch"},
+                                 {"question", "Which branch?"},
+                                 {"header", "Revision"},
+                                 {"required", true},
+                                 {"multiple", false},
+                                 {"freeform", false},
+                                 {"options", Json::array({{{"label", "Main"}, {"value", "main"}, {"description", "Default"}}})}}})},
+        {"target", {{"eventId", 15}, {"requestId", "request"}, {"run", nullptr}, {"waitId", 20}}},
+        {"suspendedWaitId", 20},
+        {"suspendedDecision", decision}};
+    data["pendingDecision"] = decision;
+    data["blockerReason"] = "Waiting for a branch";
+    data["blockerWaitId"] = 20;
+    const auto task = decodeTask(id, "waiting", generation, data.dump());
+    check(task.question && task.question->fields.at(0).options.at(0).value == "main" && task.question->target.waitId == 20 &&
+              task.question->suspendedWaitId == 20 && task.question->suspendedDecision &&
+              task.question->suspendedDecision->decision.attemptId == 25 && task.pendingDecision && !task.pendingDecision->revisionId &&
+              task.pendingDecision->decision.tool == "answer_session_question" && task.blocker && task.blocker->waitId == 20 &&
+              encodeTask(task) == data,
+          "Question, suspended checkpoint, and blocker changed on round-trip");
+
+    data["question"]["suspendedDecision"]["attempt"] = 25;
+    rejects(data.dump(), "question.suspendedDecision.attempt", "unknown key");
+}
 }
 
 int main() {
@@ -310,6 +357,7 @@ int main() {
         destinationRoundTrips();
         decodeErrors();
         executionDecodeErrors();
+        questionAndCheckpointRoundTrip();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

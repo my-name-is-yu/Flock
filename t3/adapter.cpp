@@ -393,10 +393,10 @@ Json readQuestion(Client& client, const std::string& threadId, const std::string
     return array(result, "questions");
 }
 
-Json questionFields(const Json& questions) {
+std::optional<std::vector<QuestionField>> questionFields(const Json& questions) {
     if (!questions.is_array() || questions.empty()) return {};
     std::set<std::string> ids;
-    auto fields = Json::array();
+    std::vector<QuestionField> fields;
     for (const auto& question : questions) {
         const auto id = str(question, "id");
         if (id.empty() || !ids.insert(id).second || trimSessionQuestionText(str(question, "question")).empty() ||
@@ -407,26 +407,22 @@ Json questionFields(const Json& questions) {
         }
         const bool freeform = question.value("allowCustomAnswer", true);
         const bool required = question.value("required", true);
-        auto options = Json::array();
+        std::vector<QuestionOption> options;
         std::set<std::string> values;
         for (const auto& option : question["options"]) {
             const auto label = str(option, "label");
             const auto specified = option.find("value");
             const auto trimmedLabel = trimSessionQuestionText(label);
             if (trimmedLabel.empty() || (specified != option.end() && !specified->is_string())) return {};
-            const auto value = specified == option.end() ? std::string(trimmedLabel) : specified->get<std::string>();
+            auto value = specified == option.end() ? std::string(trimmedLabel) : specified->get<std::string>();
             if (!values.insert(value).second) return {};
-            options.push_back({{"label", label}, {"value", value}, {"description", str(option, "description")}});
+            options.push_back({label, std::move(value), str(option, "description")});
         }
         if (!freeform && required && options.empty()) return {};
-        Json field = {{"id", id},
-                      {"question", str(question, "question")},
-                      {"header", str(question, "header")},
-                      {"required", required},
-                      {"multiple", question.value("multiSelect", false)},
-                      {"freeform", freeform},
-                      {"options", std::move(options)}};
-        if (question.contains("initialAnswer") && question["initialAnswer"].is_string()) field["initialAnswer"] = question["initialAnswer"];
+        QuestionField field{id,       str(question, "question"), str(question, "header"), required, question.value("multiSelect", false),
+                            freeform, std::move(options)};
+        if (const auto initial = question.find("initialAnswer"); initial != question.end() && initial->is_string())
+            field.initialAnswer = initial->get<std::string>();
         fields.push_back(std::move(field));
     }
     return fields;
@@ -434,7 +430,7 @@ Json questionFields(const Json& questions) {
 
 struct Attribution {
     enum class Kind { Owned, Ambiguous, Resolved } kind;
-    Json fields;
+    std::vector<QuestionField> fields;
     Json raw;
 };
 
@@ -447,7 +443,7 @@ Attribution attribute(Client& client, const RunRef& run, const std::string& requ
         throw;
     }
     auto fields = questionFields(questions);
-    if (fields.is_null()) return {Attribution::Kind::Ambiguous, {}, {}};
+    if (!fields) return {Attribution::Kind::Ambiguous, {}, {}};
     int matching = 0;
     bool exactOwner = false, unverified = false;
     Scan scan;
@@ -475,7 +471,7 @@ Attribution attribute(Client& client, const RunRef& run, const std::string& requ
         return {Attribution::Kind::Ambiguous, {}, {}};
     }
     if (unverified || matching != 1 || !exactOwner) return {Attribution::Kind::Ambiguous, {}, {}};
-    return {Attribution::Kind::Owned, std::move(fields), std::move(questions)};
+    return {Attribution::Kind::Owned, std::move(*fields), std::move(questions)};
 }
 
 void useLocalThreadLink(RunRef& run, std::string_view environment, std::string_view origin) {

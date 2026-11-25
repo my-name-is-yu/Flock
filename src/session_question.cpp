@@ -20,10 +20,9 @@ std::string_view trimSessionQuestionText(std::string_view text) {
 }
 
 namespace {
-Json fieldAnswer(const Json& field, const Json& options, const Json& answer) {
+Json fieldAnswer(const QuestionField& field, const Json& answer) {
     const auto selected = answer.is_array() ? answer : Json::array({answer});
-    const bool multiple = field.value("multiple", false);
-    if (selected.empty() || (!multiple && selected.size() != 1)) throw Conflict("Question field answer has the wrong cardinality");
+    if (selected.empty() || (!field.multiple && selected.size() != 1)) throw Conflict("Question field answer has the wrong cardinality");
 
     constexpr std::size_t maxFieldAnswerBytes = 8'000;
     std::set<std::string> seen;
@@ -31,34 +30,32 @@ Json fieldAnswer(const Json& field, const Json& options, const Json& answer) {
         if (!value.is_string()) throw Conflict("Expected a textual question answer");
         const auto& text = value.get_ref<const std::string&>();
         if (text.size() > maxFieldAnswerBytes || !seen.insert(text).second) throw Conflict("Question answer is too long or repeated");
-        if (std::ranges::any_of(options, [&](const Json& option) { return option.at("value") == value; })) continue;
+        if (std::ranges::find(field.options, text, &QuestionOption::value) != field.options.end()) continue;
 
         if (selected.size() != 1) throw Conflict("A freeform answer must be submitted on its own");
-        const bool editor = field.contains("initialAnswer");
+        const bool editor = field.initialAnswer.has_value();
         const auto custom = editor ? std::string_view(text) : trimSessionQuestionText(text);
-        if (!editor && custom.empty() && options.empty() && !field.value("required", true)) return "";
-        if (!field.value("freeform", options.empty()) || (custom.empty() && !editor))
-            throw Conflict("Answer does not match the question's input options");
+        if (!editor && custom.empty() && field.options.empty() && !field.required) return "";
+        if (!field.freeform || (custom.empty() && !editor)) throw Conflict("Answer does not match the question's input options");
         return std::string(custom);
     }
-    return multiple ? selected : selected.front();
+    return field.multiple ? selected : selected.front();
 }
 }
 
-Json sessionQuestionAnswers(const Json& fields, const Json& answers) {
-    if (!fields.is_array() || fields.empty() || !answers.is_object()) throw Conflict("Answers are required per question field");
+Json sessionQuestionAnswers(std::span<const QuestionField> fields, const Json& answers) {
+    if (fields.empty() || !answers.is_object()) throw Conflict("Answers are required per question field");
 
     auto result = Json::object();
     std::set<std::string> ids;
     for (const auto& field : fields) {
-        const auto id = field.value("id", std::string{});
+        const auto& id = field.id;
         if (id.empty() || !ids.insert(id).second) throw Conflict("Unsupported question fields");
-        const auto options = field.value("options", Json::array());
         if (const auto answer = answers.find(id); answer != answers.end()) {
-            result[id] = fieldAnswer(field, options, *answer);
-        } else if (field.value("required", true)) {
+            result[id] = fieldAnswer(field, *answer);
+        } else if (field.required) {
             throw Conflict("A required question field was not answered");
-        } else if (options.empty()) {
+        } else if (field.options.empty()) {
             result[id] = "";
         }
     }

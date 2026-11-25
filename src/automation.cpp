@@ -392,19 +392,17 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
         if (!skipped && occurrences.count) {
             const auto key = "schedule:" + std::to_string(id) + ":" + std::to_string(occurrences.last);
             if (!query("SELECT 1 FROM automation_firings WHERE dedupe_key=? AND bot_id=?", {key, bot}).next()) {
-                Json trigger = {{"triggerKind", kind},
-                                {"triggerId", id},
-                                {"targetTime", occurrences.last},
-                                {"coveredFrom", occurrences.first},
-                                {"coveredTo", occurrences.last},
-                                {"occurrenceCount", occurrences.count},
-                                {"firedAt", now},
-                                {"timezone", def.at("timezone")}};
-                if (def.contains("label")) trigger["label"] = def.at("label");
-                auto scrub = redactor(bot);
-                trigger = scrub.record(std::move(trigger));
+                const auto scrub = redactor(bot);
+                TimedTaskTrigger trigger{kind == "schedule" ? TimedTriggerKind::schedule : TimedTriggerKind::reminder,
+                                         occurrences.last,
+                                         occurrences.first,
+                                         occurrences.count,
+                                         scrub.text(def.at("timezone").get<std::string>()),
+                                         {}};
+                if (def.contains("label")) trigger.label = scrub.text(def.at("label").get<std::string>());
                 const auto routing = automationRoute(bot, row.json(2));
-                const auto task = submit(intake(bot, field(def, "request"), routing), 0, nullptr, TaskSource::request, trigger);
+                const auto task = submit(intake(bot, field(def, "request"), routing), 0, nullptr, TaskSource::request,
+                                         TaskTrigger{id, now, std::move(trigger)});
                 const auto receipts = Json::array({{{"taskId", task}, {"botId", bot}, {"triggerId", id}}});
                 exec("INSERT INTO automation_firings VALUES(?,?,?,?)", {key, bot, now, receipts});
             }
@@ -456,12 +454,8 @@ AND json_extract(definition,'$.source')=? ORDER BY id
         if (request.find_first_not_of(" \r\n\t") == request.npos) continue;
         if (!payload) payload = scrub.payload(event);
         const auto id = rows.number(0);
-        const Json trigger = {{"triggerKind", "webhook"},
-                              {"triggerId", id},
-                              {"source", scrub.text(std::string(source))},
-                              {"event", *payload},
-                              {"firedAt", now}};
-        const auto task = p_->submit(intake(bot, request, routing), 0, nullptr, TaskSource::request, trigger);
+        const auto task = p_->submit(intake(bot, request, routing), 0, nullptr, TaskSource::request,
+                                     TaskTrigger{id, now, WebhookTaskTrigger{scrub.text(source), *payload}});
         receipts.push_back({{"taskId", task}, {"botId", bot}, {"triggerId", id}});
     }
     if (previous.empty() && received.empty()) throw AccessDenied("Webhook source unavailable");

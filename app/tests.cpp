@@ -867,14 +867,14 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         store.receive(localOwner, intake, "criteria", "Completion criteria: Confirm the output");
         routing.runConversations();
     }
-    check(store.task(task).task.doneWhen == "" && store.task(task).task.rest["requestedDoneWhen"] == "Confirm the output",
+    check(store.task(task).task.doneWhen == "" && store.task(task).task.criteriaProposal.value().doneWhen == "Confirm the output",
           "the requested criteria was prematurely marked as fixed");
     {
         Runtime runtime(store, *demo, *t3, notes);
         tickUntil(runtime, [&] { return store.task(task).task.state == TaskState::running; }, "the fixed demo never started");
     }
     const auto first = store.task(task);
-    check(first.task.doneWhen == "Confirm the output" && first.task.rest.at("remaining") == 3 && first.runs.size() == 1,
+    check(first.task.doneWhen == "Confirm the output" && first.task.allowance.remaining == 3 && first.runs.size() == 1,
           "the fixed demo failed to delegate with the user's provisional criteria");
     {
         Runtime routing(store, changes, *t3, notes);
@@ -889,7 +889,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
             runtime, [&] { return store.task(task).task.state == TaskState::completed; }, "the fixed demo did not finish its continuation");
     }
     const auto runs = store.task(task).runs;
-    check(runs.size() == 2 && runs[0]["threadId"] == runs[1]["threadId"] && runs[0]["runId"] != runs[1]["runId"],
+    check(runs.size() == 2 && runs[0].run.ref.threadId == runs[1].run.ref.threadId && runs[0].run.ref.runId != runs[1].run.ref.runId,
           "the fixed demo follow-up started another Session");
     check(std::ranges::any_of(store.history(task),
                               [](const Json& entry) {
@@ -904,7 +904,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
     Command followUp;
     followUp.tool = CommandTool::follow_up;
     followUp.actionId = "persisted-demo-action";
-    followUp.target = {runs[0]["threadId"], runs[0]["runId"], ""};
+    followUp.target = {runs[0].run.ref.threadId, runs[0].run.ref.runId, {}, {}};
     const auto sent = t3->send(followUp);
     const auto reconciled = t3->reconcile(followUp);
     check(sent.run.threadId == followUp.target.threadId && sent.run.runId == reconciled.run.runId &&

@@ -83,7 +83,7 @@ SELECT t.data,t.id,t.state,t.generation FROM ancestry a JOIN tasks t USING(id) O
                           {taskId});
     if (!ancestor.next()) throw Conflict("The originating task is missing");
     const auto root = decodeTaskRow(ancestor);
-    if (const auto source = root.rest.value("sourceMessageId", Id{0}); source) return messageModelBudget(source);
+    if (root.sourceMessageId) return messageModelBudget(*root.sourceMessageId);
     return {"task/" + std::to_string(root.id), initialModelCallLimit(root.config)};
 }
 

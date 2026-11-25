@@ -38,17 +38,6 @@ OutboxSourceRun readSourceRun(const Json& data, const RecordDecoder& row) {
             .assignment = decodeOptionalRunAssignment(data, row)};
 }
 
-Json sourceRunJson(const OutboxSourceRun& run) {
-    Json data = {{"threadId", run.threadId}, {"runId", run.runId}};
-    writeOptional(data, "environmentId", run.environmentId);
-    writeOptional(data, "gatewayEnvironmentId", run.gatewayEnvironmentId);
-    writeOptional(data, "link", run.link);
-    writeOptional(data, "itemId", run.itemId);
-    writeOptional(data, "status", run.status);
-    if (run.assignment) encodeRunAssignment(data, *run.assignment);
-    return data;
-}
-
 OutboxSource readSource(const Json& data, const RecordDecoder& row) {
     OutboxSource source{.taskId = row.get<Id>(data, "taskId"),
                         .messageId = row.get<Id>(data, "messageId"),
@@ -58,7 +47,7 @@ OutboxSource readSource(const Json& data, const RecordDecoder& row) {
                         .artifactVersion = row.optional<std::string>(data, "artifactVersion"),
                         .resultRunId = row.optional<std::string>(data, "resultRunId"),
                         .run = std::nullopt};
-    if (const auto run = data.find("run"); run != data.end()) source.run = readSourceRun(*run, row.nested("run"));
+    if (const auto run = row.find(data, "run"); run != data.end()) source.run = row.nested("run").decodeClosed(*run, readSourceRun);
     return source;
 }
 
@@ -69,13 +58,13 @@ OutboxInstruction readInstruction(const Json& data, const RecordDecoder& row) {
                            .revisionId = row.nullable<Id>(data, "revisionId"),
                            .conflicting = row.get<bool>(data, "conflicting"),
                            .source = std::nullopt};
-    if (const auto source = data.find("source"); source != data.end()) item.source = readSource(*source, row.nested("source"));
+    if (const auto source = row.find(data, "source"); source != data.end()) item.source = decodeOutboxSource(*source, row.nested("source"));
     return item;
 }
 
 template <class T> std::vector<T> readArray(const Json& data, const RecordDecoder& row, T (*decode)(const Json&, const RecordDecoder&)) {
     std::vector<T> items;
-    for (const auto& item : row.array(data)) items.push_back(decode(item, row.nested(std::to_string(items.size()))));
+    for (const auto& item : row.array(data)) items.push_back(row.nested(std::to_string(items.size())).decodeClosed(item, decode));
     return items;
 }
 
@@ -175,6 +164,17 @@ Json stopPolicyJson(const OutboxStopApproval& approval) {
             {"revisionId", approval.revisionId}};
 }
 
+Json sourceRunJson(const OutboxSourceRun& run) {
+    Json data = {{"threadId", run.threadId}, {"runId", run.runId}};
+    writeOptional(data, "environmentId", run.environmentId);
+    writeOptional(data, "gatewayEnvironmentId", run.gatewayEnvironmentId);
+    writeOptional(data, "link", run.link);
+    writeOptional(data, "itemId", run.itemId);
+    writeOptional(data, "status", run.status);
+    if (run.assignment) encodeRunAssignment(data, *run.assignment);
+    return data;
+}
+
 Json sourceJson(const OutboxSource& source) {
     Json data = {{"taskId", source.taskId}, {"messageId", source.messageId}};
     writeOptional(data, "revisionId", source.revisionId);
@@ -196,6 +196,42 @@ Json instructionJson(const OutboxInstruction& item) {
     return data;
 }
 
+void redactSource(OutboxSource& source, const SecretRedactor& scrub) {
+    const auto redact = [&](std::optional<std::string>& value) {
+        if (value) *value = scrub.text(*value);
+    };
+    redact(source.text);
+    redact(source.stageId);
+    redact(source.artifactVersion);
+    redact(source.resultRunId);
+    if (auto& run = source.run) {
+        run->threadId = scrub.text(run->threadId);
+        run->runId = scrub.text(run->runId);
+        redact(run->environmentId);
+        redact(run->gatewayEnvironmentId);
+        redact(run->link);
+        redact(run->itemId);
+        redact(run->status);
+        if (auto& assignment = run->assignment) {
+            assignment->ownerBotId = scrub.text(assignment->ownerBotId);
+            assignment->projectId = scrub.text(assignment->projectId);
+        }
+    }
+}
+
+void redactInstructions(std::span<OutboxInstruction> instructions, const SecretRedactor& scrub) {
+    for (auto& instruction : instructions) {
+        instruction.text = scrub.text(instruction.text);
+        if (instruction.source) redactSource(*instruction.source, scrub);
+    }
+}
+
+Json instructionsJson(std::span<const OutboxInstruction> instructions) {
+    auto data = Json::array();
+    for (const auto& instruction : instructions) data.push_back(instructionJson(instruction));
+    return data;
+}
+
 std::vector<OutboxInstruction> taskInstructions(const Json& data, Id task, std::string_view key) {
     const auto id = std::to_string(task);
     return readArray(data, {"tasks", id, std::string(key)}, readInstruction);
@@ -206,7 +242,11 @@ std::vector<OutboxSource> taskResultReferences(const Json& data, Id task) {
     return readArray(data, {"tasks", id, "sourceResultRefs"}, readSource);
 }
 
-Json to_json(const Outbox& outbox) {
+OutboxSource decodeOutboxSource(const Json& data, const RecordDecoder& row) {
+    return row.decodeClosed(data, readSource);
+}
+
+Json outboxActionJson(const OutboxAction& outbox) {
     const auto& command = outbox.command;
     Json data = {{"tool", commandToolName(command.tool)},
                  {"environmentId", command.environmentId},
@@ -233,11 +273,16 @@ Json to_json(const Outbox& outbox) {
     if (!command.candidateQuestionId.empty()) data["candidateQuestionId"] = command.candidateQuestionId;
     if (!command.launchReceiptThreadId.empty()) data["launchReceiptThreadId"] = command.launchReceiptThreadId;
     writeOptional(data, "sessionParticipationId", outbox.sessionParticipationId);
-    if (const auto& memory = outbox.sessionMemory)
-        data["sessionMemory"] = {{"version", memory->version}, {"section", memory->section}, {"excerptBytes", memory->excerptBytes}};
     if (outbox.stop) writeStop(data, *outbox.stop);
     for (const auto& item : outbox.instructions) data["instructions"].push_back(instructionJson(item));
     for (const auto& source : outbox.sourceResultRefs) data["sourceResultRefs"].push_back(sourceJson(source));
+    return data;
+}
+
+Json to_json(const Outbox& outbox) {
+    auto data = outboxActionJson(outbox);
+    if (const auto& memory = outbox.sessionMemory)
+        data["sessionMemory"] = {{"version", memory->version}, {"section", memory->section}, {"excerptBytes", memory->excerptBytes}};
     return data;
 }
 

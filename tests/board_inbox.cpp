@@ -141,7 +141,7 @@ struct Sessions : T3 {
         Observation result;
         if (run.threadId == "thread-" + questionProject) {
             result.kind = Observation::Kind::Question;
-            result.question = {"fixture-question", Json::array({{{"id", "report"}, {"required", true}}})};
+            result.question = {"fixture-question", {{.id = "report"}}};
         }
         return result;
     }
@@ -321,7 +321,7 @@ SELECT )SQL" +
           "rejected approval changed task, delivery, or history");
 
     const auto extra = target(row(store.inbox(alice), "taskId", budget));
-    const auto allowance = store.task(budget).task.rest.at("remaining").get<int>();
+    const auto allowance = store.task(budget).task.allowance.remaining;
     std::barrier ready(2);
     const auto act = [&](Store& connection, const Person& actor) {
         ready.arrive_and_wait();
@@ -336,7 +336,7 @@ SELECT )SQL" +
     auto second = std::async(std::launch::async, [&] { return act(concurrent, bob); });
     const auto a = first.get();
     const auto b = second.get();
-    check(a.empty() != b.empty() && store.task(budget).task.rest.at("remaining") == allowance + 3,
+    check(a.empty() != b.empty() && store.task(budget).task.allowance.remaining == allowance + 3,
           "simultaneous approval took effect more or less than once");
     const auto decided = row(store.history(budget), "kind", "inbox_decision").at("data");
     check(decided.at("decidedBy") == (a.empty() ? b : a) && decided.at("decidedAt").get<Id>() > 0 && decided.at("decision") == "approve" &&
@@ -382,8 +382,10 @@ SELECT )SQL" +
           "failed history insertion committed reconciliation intent or wait update");
     db.exec("DROP TRIGGER reject_audit");
     store.decideInbox(alice, delivery, "reconcile", {{"threadId", "candidate"}});
-    check(store.task(unknown).pendingAction.at("candidate").at("threadId") == "candidate" &&
-              store.task(unknown).task.state == TaskState::sending && sessions.reconciles == 0,
+    const auto reconciling = store.task(unknown);
+    check(reconciling.pendingAction && reconciling.pendingAction->command.candidate &&
+              reconciling.pendingAction->command.candidate->threadId == "candidate" && reconciling.task.state == TaskState::sending &&
+              sessions.reconciles == 0,
           "reconciliation did not commit the canonical delivery intent");
     store.decideInbox(alice, pending(store, deadline), "extend", {{"deadline", due + 3600}});
     check(store.task(deadlineTask).task.deadline == due + 3600, "deadline extension did not resume the run");

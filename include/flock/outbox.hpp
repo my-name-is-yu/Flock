@@ -1,7 +1,14 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/command.hpp"
+#include "flock/decision.hpp"
 #include "flock/outbox_instruction.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace flockv0 {
 enum class OutboxPhase { ready, started, accepted, closed, superseded };
@@ -12,9 +19,9 @@ struct OutboxRunIdentity {
 
 struct OutboxStopApproval {
     Decision decision;
-    Id generation, revisionId;
+    std::int64_t generation, revisionId;
     std::string scope, requester;
-    Id anchor, turn;
+    std::int64_t anchor, turn;
     bool background;
 };
 
@@ -30,21 +37,20 @@ struct OutboxCommit {
 };
 
 struct OutboxContext {
-    std::optional<Id> answerEventId, sourceMessageId;
+    std::optional<std::int64_t> answerEventId, sourceMessageId;
     std::optional<std::string> peerMessageId;
 };
 
 struct SessionMemory {
-    Id version;
+    std::int64_t version;
     std::string section;
     std::size_t excerptBytes;
 };
 
-struct Outbox {
+struct OutboxAction {
     CommandPayload command;
     OutboxPhase phase = OutboxPhase::ready;
-    std::string authGeneration;
-    std::optional<Id> revisionId;
+    std::optional<std::int64_t> revisionId;
     std::optional<std::string> instructionBase;
     std::vector<OutboxInstruction> instructions;
     OutboxContext contextIds;
@@ -52,8 +58,12 @@ struct Outbox {
     bool chargesBudget = false;
     bool destinationAction = false;
     std::optional<OutboxCommit> commit;
-    std::optional<Id> sessionParticipationId;
-    std::optional<SessionMemory> sessionMemory;
+    std::optional<std::int64_t> sessionParticipationId;
     std::optional<OutboxStop> stop;
+};
+
+struct Outbox : OutboxAction {
+    std::string authGeneration;
+    std::optional<SessionMemory> sessionMemory;
 };
 }

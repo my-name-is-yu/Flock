@@ -173,7 +173,7 @@ Json Store::Impl::taskState(const TaskData& task, const Message& message, bool f
                  {"wait", std::move(wait)}};
     if (task.queuedInT3) view["queuedInT3"] = true;
     if (task.hasDestinations()) {
-        if (task.rest.contains("requestedCommit")) view["requestedCommit"] = task.rest.at("requestedCommit");
+        if (task.requestedCommit) view["requestedCommit"] = *task.requestedCommit;
         if (const auto outcome = task.runOutcome()) view["runOutcome"] = runOutcomeName(*outcome);
         auto& results = view["runResults"] = Json::array();
         if (!task.runResults().empty()) {
@@ -204,15 +204,15 @@ Json Store::Impl::taskState(const TaskData& task, const Message& message, bool f
         if (view[key].get_ref<const std::string&>().size() < value.size()) view[std::string(key) + "Truncated"] = true;
     };
     project("doneWhen", effectiveDoneWhen(task), 1600);
-    if (task.rest.contains("requestedDoneWhen")) {
+    if (task.criteriaProposal) {
         view["doneWhenSource"] = "requested";
-        if (task.rest.contains("criteriaSourceMessageId")) view["criteriaSourceMessageId"] = task.rest.at("criteriaSourceMessageId");
+        if (task.criteriaProposal->sourceMessageId) view["criteriaSourceMessageId"] = *task.criteriaProposal->sourceMessageId;
     }
-    if (task.rest.contains("workflowId")) {
-        view["workflowId"] = task.rest.at("workflowId");
-        view["stageId"] = task.rest.at("stageId");
+    if (const auto& workflow = task.workflow) {
+        view["workflowId"] = workflow->id;
+        view["stageId"] = workflow->stageId;
     }
-    if (const auto reason = field(task.rest, "blockerReason"); !reason.empty()) view["blockerReason"] = reason;
+    if (task.blocker && !task.blocker->reason.empty()) view["blockerReason"] = task.blocker->reason;
     if (!task.intent.empty()) project("intent", task.intent, 1000);
     return view;
 }
@@ -229,7 +229,7 @@ WHERE t.id=? AND t.bot_id=? AND (?='' OR c.scope_key=?)
 
 Json Store::Impl::resultReference(Id messageId, const Message& message) const {
     auto row = query(R"SQL(
-SELECT t.id,t.state,j.kind,j.data,json_extract(t.data,'$.request'),coalesce(json_extract(t.data,'$.currentRevision'),0)
+SELECT t.id,t.state,j.kind,j.data,t.request,coalesce(t.current_revision,0)
 FROM journal j JOIN tasks t ON t.id=j.task_id
 LEFT JOIN channel_tasks c ON c.task_id=t.id
 WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND (?='' OR c.scope_key=?)
@@ -354,7 +354,7 @@ ORDER BY id DESC LIMIT 1
         view.update(taskState(task, message));
         if (!localMachines.empty() && task.activeRun)
             view["activeSession"] = {{"threadId", task.activeRun->ref.threadId}, {"runId", task.activeRun->ref.runId}};
-        if (task.rest.contains("sourceTaskId")) view["sourceTaskId"] = task.rest.at("sourceTaskId");
+        if (task.sourceTaskId) view["sourceTaskId"] = *task.sourceTaskId;
         if (auto result = latestResult(taskId); !result.is_null()) view["latestResult"] = std::move(result);
         tasks.push_back(std::move(view));
     };
@@ -574,11 +574,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (!doneWhen.empty() || !targets.empty()) {
             auto task = load(id);
             if (!doneWhen.empty()) {
-                task.rest["requestedDoneWhen"] = doneWhen;
-                task.rest["criteriaSourceMessageId"] = message.id;
+                task.criteriaProposal = TaskCriteriaProposal{doneWhen, message.id};
             }
             if (!targets.empty()) task.destinations = std::move(targets);
-            if (!commit.empty()) task.rest["requestedCommit"] = std::move(commit);
+            if (!commit.empty()) task.requestedCommit = std::move(commit);
             save(task);
         }
         Json receipt{{"ok", true}, {"effect", "started"}, {"taskId", id}};
@@ -691,7 +690,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto before = identifier(args, "before", false);
         auto rows = query(R"SQL(
 SELECT t.id FROM tasks t LEFT JOIN channel_tasks c ON c.task_id=t.id
-WHERE t.bot_id=? AND (?='' OR instr(lower(json_extract(t.data,'$.request')),lower(?))>0)
+WHERE t.bot_id=? AND (?='' OR instr(lower(t.request),lower(?))>0)
 AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
 )SQL",
                           {bot, search, search, before, before, message.channelScope, message.channelScope, findLimit + 1});

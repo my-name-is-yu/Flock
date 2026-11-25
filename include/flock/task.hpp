@@ -1,8 +1,11 @@
 #pragma once
 
+#include "flock/outbox.hpp"
 #include "flock/outbox_instruction.hpp"
 #include "flock/run_report.hpp"
 #include "flock/session_ref.hpp"
+#include "flock/task_context.hpp"
+#include "flock/task_interaction.hpp"
 #include "flock/wait.hpp"
 
 #include <nlohmann/json.hpp>
@@ -82,6 +85,15 @@ struct PendingRunReport {
     int attempts;
 };
 
+struct TaskCriteriaProposal {
+    std::string doneWhen;
+    std::optional<std::int64_t> sourceMessageId;
+};
+
+struct TaskWorkAllowance {
+    int remaining = 0, additionalUsed = 0;
+};
+
 struct TaskData {
     std::int64_t id = 0, generation = 0;
     TaskState state = TaskState::queued;
@@ -96,15 +108,29 @@ struct TaskData {
     std::variant<std::monostate, RunTargets, RunResults> destinations{};
     bool replanning = false, queuedInT3 = false, cancelledByBotPause = false;
     std::optional<std::string> replanningDetail{}, cancellationDetail{};
-    std::vector<OutboxInstruction> cancelledInstructions{};
+    std::vector<OutboxInstruction> pendingInstructions{}, cancelledInstructions{};
     std::optional<PendingRunReport> pendingRunReport{};
     std::optional<std::int64_t> pendingStageReport{}, sessionReconcileAt{}, workflowReconcileAt{};
     std::optional<WorkSession> selectedSession{};
     std::optional<SessionOrigin> sessionOrigin{};
     bool newSessionRequired = false, freshContextRequested = false;
     std::optional<std::string> launchWarning{};
+    std::int64_t createdAt = 0;
+    TaskWorkAllowance allowance{};
+    std::optional<TaskCriteriaProposal> criteriaProposal{};
+    std::optional<std::string> requestedCommit{}, feedback{};
+    std::optional<TaskQuestion> question{};
+    std::optional<DecisionCheckpoint> pendingDecision{};
+    std::optional<RecordedTaskBlocker> blocker{};
+    std::optional<std::int64_t> sourceMessageId{}, sourceTaskId{};
+    std::optional<bool> sourceMessageCoversFullRequest{};
+    std::optional<std::string> requester{};
+    std::vector<OutboxSource> sourceResultRefs{};
+    std::optional<TaskRestart> restartContext{};
+    std::optional<TaskTrigger> trigger{};
+    std::optional<TaskWorkflow> workflow{};
+    std::optional<TaskPeerOutcome> peerOutcome{};
     nlohmann::json config = nlohmann::json::object();
-    nlohmann::json rest = nlohmann::json::object();
 
     bool hasDestinations() const { return !std::holds_alternative<std::monostate>(destinations); }
     std::span<const RunTarget> runTargets() const {
@@ -140,11 +166,19 @@ struct TaskPresence {
     bool replanning;
 };
 
+struct TaskRunView {
+    AssignedRun run;
+    std::string actionId;
+    std::optional<std::string> status{}, sessionCreatedAt{};
+    bool operator==(const TaskRunView&) const = default;
+};
+
 struct TaskView {
     TaskData task;
     std::optional<Wait> wait{};
     std::optional<TaskBlocker> blockedBy{};
-    nlohmann::json pendingAction = nullptr, runs = nlohmann::json::array();
+    std::optional<OutboxAction> pendingAction{};
+    std::vector<TaskRunView> runs{};
     std::vector<TaskRevision> revisions{};
 };
 

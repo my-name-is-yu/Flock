@@ -1,4 +1,6 @@
 #include "conversation_storage.hpp"
+#include "outbox_storage.hpp"
+#include "record_decode.hpp"
 #include "task_storage.hpp"
 
 #include <set>
@@ -90,9 +92,9 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
     auto rows = query(R"SQL(SELECT s.spec,s.status,s.task_id,s.input,s.output,s.deadline,t.data,t.id,t.state,t.generation,s.alerted,
           s.confirmed_state,s.confirmed_at,s.unreachable,old.stage_id IS NOT NULL,
           (SELECT json_group_array(d.parent_id) FROM workflow_dependencies d WHERE d.workflow_id=s.workflow_id AND d.stage_id=s.stage_id),
-          pending.phase='started' AND json_extract(t.data,'$.activeRun') IS NULL,v.verdict
+          pending.phase='started' AND t.has_active_run IS NOT 1,v.verdict
         FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id
-        LEFT JOIN outbox pending ON pending.id=json_extract(t.data,'$.actionId')
+        LEFT JOIN outbox pending ON pending.id=t.action_id
         LEFT JOIN outdated_workflow_stages old USING(workflow_id,stage_id)
         LEFT JOIN workflow_verdicts v ON v.report_id=s.result_id
         WHERE s.workflow_id=? ORDER BY s.rowid)SQL",
@@ -294,12 +296,12 @@ void Store::Impl::materializeWorkflowStages() {
     while (ready.next()) {
         const Id id = ready.number(0);
         const auto spec = ready.json(1);
-        const auto stage = spec.at("stageId");
+        const auto stage = spec.at("stageId").get<std::string>();
         const auto bot = ready.string(2);
         const auto scrub = redactor(bot);
         const auto routing = ready.json(3);
         const auto request = scrub.text(field(spec, "request"));
-        Json sources = Json::array();
+        std::vector<OutboxSource> sources;
         std::string input;
         const auto inputFrom = field(spec, "inputFrom");
         auto parents = query(R"SQL(SELECT p.stage_id,p.output,p.result_id,p.task_id,j.data
@@ -309,13 +311,15 @@ void Store::Impl::materializeWorkflowStages() {
         while (parents.next()) {
             const auto report = parents.json(4);
             if (parents.string(0) == inputFrom) input = parents.string(1);
-            sources.push_back({{"stageId", parents.string(0)},
-                               {"artifactVersion", parents.string(1)},
-                               {"messageId", parents.number(2)},
-                               {"taskId", parents.number(3)},
-                               {"run", report.at("run")},
-                               {"resultRunId", report.at("resultRunId")},
-                               {"text", bounded(scrub.text(field(report, "report")), 2000)}});
+            auto source = scrub.record({{"stageId", parents.string(0)},
+                                        {"artifactVersion", parents.string(1)},
+                                        {"messageId", parents.number(2)},
+                                        {"taskId", parents.number(3)},
+                                        {"run", report.at("run")},
+                                        {"resultRunId", report.at("resultRunId")},
+                                        {"text", bounded(scrub.text(field(report, "report")), 2000)}},
+                                       SecretRedactor::Fields::external);
+            sources.push_back(decodeOutboxSource(source, {"journal", parents.string(2), "sourceResult"}));
         }
         const auto role = field(spec, "role");
         if (!conversation_storage::hasText(request) || scrub.text(input) != input || (role == "verify" && !immutableVersion(input)) ||
@@ -330,10 +334,8 @@ void Store::Impl::materializeWorkflowStages() {
         const TaskRoute route{field(routing, "environmentId"), field(routing, "projectId")};
         const auto taskId = startConversationTask(routing, bot, request, route, ready.number(4), nullptr, false);
         auto task = load(taskId);
-        task.rest["workflowId"] = id;
-        task.rest["stageId"] = spec.at("stageId");
-        task.rest["sourceResultRefs"] = scrub.record(std::move(sources), SecretRedactor::Fields::external);
-        task.rest["inputArtifactVersion"] = input;
+        task.workflow = TaskWorkflow{id, stage, input};
+        task.sourceResultRefs = std::move(sources);
         const bool hasPriorRevision = ready.number(6) != 0;
         addRevision(task, hasPriorRevision ? scrub.text(ready.string(7)) : request,
                     hasPriorRevision ? scrub.text(ready.string(8)) : request, ready.number(9));
@@ -376,8 +378,9 @@ bool Store::Impl::settleStageReport(TaskData& task) {
     if (task.state != TaskState::cancelling && conversationPending(task.botId)) return false;
     const Id reportId = task.pendingStageReport.value();
     task.pendingStageReport.reset();
-    const auto id = task.rest.at("workflowId");
-    const auto stage = task.rest.at("stageId");
+    const auto& workflow = task.workflow.value();
+    const auto id = workflow.id;
+    const auto& stage = workflow.stageId;
     auto row = query("SELECT s.spec,s.input,j.data FROM workflow_stages s JOIN journal j ON j.id=? AND j.task_id=s.task_id"
                      " WHERE workflow_id=? AND stage_id=? AND s.task_id=?",
                      {reportId, id, stage, task.id});
@@ -406,8 +409,7 @@ bool Store::Impl::settleStageReport(TaskData& task) {
         }
     } else if (ok)
         output = pin;
-    if (task.state == TaskState::cancelling || task.replanning || !task.rest.value("pendingInstructions", Json::array()).empty())
-        return true;
+    if (task.state == TaskState::cancelling || task.replanning || !task.pendingInstructions.empty()) return true;
     exec("UPDATE workflow_stages SET status=?,output=?,result_id=? WHERE workflow_id=? AND stage_id=?",
          {ok ? "completed" : "failed", output, reportId, id, stage});
     consumeEvent(task);
