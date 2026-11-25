@@ -451,6 +451,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
+    if (tool == "review_preference") {
+        if (step != 1 || !canReviewPreference(message)) throw ToolError("Automatic memory is unavailable");
+        return {{"ok",true}};
+    }
+    if (tool == "remember_preference") return rememberPreference(message,step,args,now);
+    if (tool == "skip_preference") return {{"ok",true}};
     if (tool == "read_tool_result") {
         const auto sourceMessage = identifier(args,"messageId",true);
         const auto sourceStep = identifier(args,"step",true);
@@ -788,8 +794,14 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         tools.insert(tools.end(),botToolNames().begin(),botToolNames().end());
     }
     if (!message.channelScope.empty()) tools.insert(tools.end(),channelTools.begin(),channelTools.end());
-    const auto available = [&] {
+    const auto available = [&](int step, bool reviewPreference) {
+        if (reviewPreference) {
+            std::vector<std::string> reviewTools{"skip_preference"};
+            if (canReviewPreference(message)) reviewTools.push_back("remember_preference");
+            return std::pair{std::move(reviewTools),Json::array()};
+        }
         auto offered = tools;
+        if (step == 1 && canReviewPreference(message)) offered.push_back("review_preference");
         auto machines = Json::array();
         if (!notification) {
             for (const auto& [machineId,machine] : localMachines)
@@ -864,17 +876,19 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         std::vector<ModelCall> calls;
         std::string effectType;
         bool hasWebEvidence = false;
+        bool reviewPreference = false;
         {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!authorizeTurn(message)) { transaction.commit(); return; }
+            reviewPreference = preferenceReviewPending(id,step);
             auto row = query("SELECT decision,result,json_type(effect) FROM conversation_steps WHERE message_id=? AND step=?",
                              {id,step});
             if (row.next()) {
                 if (!row.string(1).empty()) continue;
                 effectType = row.string(2);
                 if (!row.string(0).empty()) {
-                    const auto [offered,machines] = available();
+                    const auto [offered,machines] = available(step,reviewPreference);
                     bool rejectionChanged = false;
                     for (const auto& saved : row.json(0)) {
                         Decision call{saved.at("tool"),saved.at("args"),saved.at("reason")};
@@ -904,7 +918,7 @@ LIMIT 1
             const auto now = clock();
             BotNotes botNotes;
             try {
-                if (!notification) botNotes = loadNotes(message.bot,soul,now);
+                if (!notification && !reviewPreference) botNotes = loadNotes(message.bot,soul,now);
             } catch (const StorageError&) {
                 throw;
             } catch (const std::exception& error) {
@@ -915,7 +929,7 @@ LIMIT 1
                        "error");
                 return;
             }
-            const auto linkedDestinations = discoverLinkedTaskDestinations(t3,message.bot);
+            const auto linkedDestinations = reviewPreference ? LinkedTaskDestinations{} : discoverLinkedTaskDestinations(t3,message.bot);
             ModelInput input;
             {
                 std::lock_guard lock(mutex);
@@ -941,6 +955,22 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                                "Reason: " + repair.string(2) + ". Return offered tools with valid arguments. "
                                "Batch independent reads, and propose replies or actions that make changes on their own.";
                 }
+                auto [offered,machines] = available(step,reviewPreference);
+                if (reviewPreference) {
+                    auto prepared = preferenceReviewInput(message,std::move(offered),std::move(feedback),now);
+                    if (!prepared) {
+                        const std::vector<ModelCall> skipped{
+                            ModelCall{Decision{"skip_preference",Json::object(),{}},{}}};
+                        exec(R"SQL(
+INSERT INTO conversation_steps(message_id,step,decision,result) VALUES(?,?,?,?)
+ON CONFLICT(message_id,step) DO UPDATE SET decision=excluded.decision,result=excluded.result
+WHERE conversation_steps.result IS NULL
+)SQL",{id,step,encodeCalls(skipped),Json::array({{{"ok",true}}})});
+                        transaction.commit();
+                        continue;
+                    }
+                    input = std::move(*prepared);
+                }
                 if (!query(R"SQL(
 SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=call_limit)
     OR EXISTS(SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL)
@@ -949,18 +979,21 @@ SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=ca
                     transaction.commit();
                     return;
                 }
-                std::vector<ModelImage> images;
-                auto [offered,machines] = available();
-                const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
-                input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
-                         .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
-                         .images = std::move(images)};
+                if (!reviewPreference) {
+                    std::vector<ModelImage> images;
+                    const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
+                    input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
+                             .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
+                             .images = std::move(images)};
+                }
                 transaction.commit();
             }
             ConversationModelCheckpoint checkpoint{0,step,Json::object(),ConversationModelFailure{}};
             try {
-                authorizeSessionHistory(message,input.event.at("turn"),t3);
-                authorizeBotToolHistory(message.bot,id,input);
+                if (!reviewPreference) {
+                    authorizeSessionHistory(message,input.event.at("turn"),t3);
+                    authorizeBotToolHistory(message.bot,id,input);
+                }
                 {
                     std::lock_guard lock(mutex);
                     Transaction transaction(db);

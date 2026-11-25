@@ -181,19 +181,36 @@ Mutations use the usual same-origin JSON headers. Fulfilled secret values
 stay inside adapters and follow the `secret.use` policy.
 
 `POST /api/messages` optionally accepts an `attachments` array with up to four
-objects containing `name`, `mimeType` and `dataBase64`. Supported types are
-`image/png`, `image/jpeg`, `audio/wav` and `audio/mpeg`. Each file is limited
-to 64 KiB and the attachment array to 98,000 JSON bytes. Media inspection follows the `attachment.inspect` action with the Bot ID as its target.
-An image-capable ChatGPT model receives authorized image contents. Audio
-inspection returns file properties and WAV format and duration.
+objects containing `name`, `mimeType` and `dataBase64`. PNG and JPEG files can
+each be up to 2 MiB. WAV and MP3 files can each be up to 64 KiB. The request
+limit fits four 2 MiB images plus Base64 and JSON overhead. Flock checks that
+the file signature matches its MIME type. Image inspection verifies that the
+image decodes and fits within 8,192 pixels per side and 4,194,304 pixels total.
+Media inspection follows the `attachment.inspect` rule for the Bot. An
+image-capable ChatGPT model can receive images the Bot is authorized to
+inspect. Audio inspection returns file properties and WAV format and duration.
 
-In the Web composer, attach PNG or JPEG screenshots with the attachment button
-or paste them into the message field. Each image can be up to 8,192 pixels per
-side and 4,194,304 pixels total. A message still requires text. The sent message
-shows the number of images attached. Bot inspection follows the `attachment.inspect` rule. Screenshot drafts and their retry keys live
-in the current page and are cleared on reload.
+In the Web composer, choose or paste up to four PNG or JPEG screenshots, each
+up to 20 MiB. The browser preserves images already within 2,048 pixels on the
+longest side and 1.75 MiB. For larger images, it scales them to fit and chooses
+the smaller PNG or JPEG before upload. The message requires text
+and shows the number of screenshots attached after sending. Screenshot drafts
+live on the current page and are cleared on reload.
+
+Slack and iMessage bridges accept up to four files totaling 4 MiB per event,
+subject to each bridge's advertised file types and per-file limit. Bridge files
+arrive as supplied and have their own channel permissions. Reading an
+attachment from a T3 Session returns its metadata and up to 8 KiB of text
+when available.
 
 ## Memory and automation
+
+When you tell a Bot you manage about a lasting preference, correction,
+convention, or decision, it can update its private memory. The memory review
+sees only your direct message and the Bot's existing private memory.
+**Remembered** shows what changed. Use **Undo**
+to restore the previous memory while the saved edit is still current. Bot
+memory edits follow the installation's **Edit Bot memory** rules.
 
 Model input starts with the Bot's role, private memory, and earlier conversation
 history. Flock puts the current event and tool results near the end to lengthen

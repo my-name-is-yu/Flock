@@ -9,7 +9,7 @@ import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
-import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
+import { screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
@@ -1452,10 +1452,50 @@ function verificationLine(run, showLink) {
   return line;
 }
 
+function memoryNotice(event, canUndo, context) {
+  const { data } = event;
+  const note = node('article', 'system-note memory-notice');
+  note.id = `event-${event.id}`;
+  note.tabIndex = -1;
+  note.append(node('strong', null, data.undone ? 'Memory undone' : 'Remembered'), ' · ', data.text);
+  if (!canUndo) return note;
+
+  const status = node('span', 'memory-notice-status');
+  status.setAttribute('role', 'status');
+  const undo = button('Undo', 'text-button', async () => {
+    if (undo.getAttribute('aria-disabled') === 'true') return;
+    undo.setAttribute('aria-disabled', 'true');
+    status.textContent = 'Undoing…';
+    try {
+      await api('memory/revert', { botId: context.id, revisionId: data.revisionId, baseVersion: data.version });
+    } catch (error) {
+      if (error.status === 409) {
+        status.textContent = 'Memory has changed.';
+        if (context === view) void context.refresh();
+      } else {
+        status.textContent = 'Could not undo. Try again.';
+        undo.removeAttribute('aria-disabled');
+      }
+      return;
+    }
+    const current = context.events.get(event.id);
+    if (current) context.events.set(event.id, { ...current, data: { ...current.data, canUndo: false, undone: true } });
+    if (context === view) {
+      renderTimeline();
+      void context.refresh();
+    }
+  });
+  undo.dataset.timelineAction = 'undo-memory';
+  note.append(undo, status);
+  return note;
+}
+
 function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
+  if (event.kind === 'memory_remembered')
+    return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
     const name = `T3 Session “${session.title || session.threadId}”`;
@@ -2113,6 +2153,7 @@ function conversationRows(data, events, keep, source) {
         wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), paused,
         paused && decisions.busy(pausedDecision(view.id, paused)), blocker, blockedOwner,
         request ? timeline.parallelTasks.get(event.taskId) : null,
+        event.kind === 'memory_remembered' && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
@@ -3124,8 +3165,7 @@ async function submit(event) {
       if (attachments.length) delete screenshots.pending;
       else composer.settleSend(payload, false);
     }
-    const message = error instanceof ScreenshotError ? error.message : errors[error.message];
-    setNotice(context, message ?? 'Flock could not confirm receipt. You can resend the same message.', true);
+    setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
     sendingMessages.delete(composer);

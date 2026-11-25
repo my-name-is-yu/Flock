@@ -8,6 +8,7 @@ namespace {
 bool redactsProse(std::string_view tool, std::string_view key) {
     if (tool == "reply") return key == "text";
     if (tool == "apply_memory_edit") return key == "content";
+    if (tool == "remember_preference") return key == "content" || key == "summary";
     if (tool == "propose_memory_edit") return key == "content" || key == "rationale";
     return false;
 }

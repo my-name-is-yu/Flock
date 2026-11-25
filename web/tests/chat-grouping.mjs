@@ -23,6 +23,10 @@ assert.equal(messagePlacement(lastNight, midnight, null).timeBreak, false);
 assert.equal(messagePlacement(second, first, null).groupStart, true);
 
 const shortlyAfter = localTime(10, 1);
+const remembered = message(shortlyAfter, 'memory_remembered', 0, { text: 'Prefer short release notes.' });
+assert.equal(messagePlacement(first, remembered, later).side, 'system');
+assert.equal(messagePlacement(null, first, remembered).groupEnd, true);
+assert.equal(messagePlacement(remembered, later, null).groupStart, true);
 for (const type of ['sessionWake', 'sessionInvitation']) {
   const event = message(shortlyAfter, 'conversation_message', 0, { [type]: {}, channel: { fromViewer: true, channelKind: 'slack' } });
   assert.equal(messagePlacement(first, event, later).side, 'system');
