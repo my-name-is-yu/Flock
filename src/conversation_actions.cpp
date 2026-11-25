@@ -369,7 +369,7 @@ void Store::Impl::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
 
 Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     const conversation::Message& message, int step, const Decision& decision, std::string_view key,
-    bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
+    const ConversationCallContext& ctx) {
     using enum CallOutcome;
     const auto id = message.id;
     const bool fixesPullRequest = decision.tool == "fix_pull_request";
@@ -406,7 +406,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             sessionSendReceipts.erase(id);
             return advance;
         }
-        if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
+        if (ctx.hasWebEvidence && !allowedAfterWebEvidence(decision)) {
             save(webEvidenceActionDenied());
             transaction.commit();
             return advance;
@@ -415,7 +415,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             std::string expectedCommit;
             Json source = nullptr;
             if (fixesPullRequest) {
-                followup = gitPrFollowup(message);
+                followup = gitPrFollowup(message,ctx.intake);
                 if (!followup || followup->status != GitPrFollowup::Status::available)
                     throw ToolError("Automatic follow-up is unavailable for this pull request");
                 command.environmentId = followup->session.environmentId;
@@ -476,7 +476,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         transaction.commit();
     }
     const auto availableFollowup = [&]() -> std::optional<GitPrFollowup> {
-        auto current = gitPrFollowup(message);
+        auto current = gitPrFollowup(message,ctx.intake);
         if (!current || current->operation != followup->operation || current->session != target ||
             current->status != GitPrFollowup::Status::available) return std::nullopt;
         return current;
@@ -484,18 +484,21 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     std::string error;
     std::string title;
     try {
-        command.authGeneration = t3.authGeneration(
+        command.authGeneration = ctx.t3.authGeneration(
             target.gatewayEnvironmentId.empty() ? target.environmentId : target.gatewayEnvironmentId,command.config);
         if (!fixesPullRequest && !savedTaskTarget) {
-            if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
+            if (const auto metadata = ctx.t3.sessionMetadata(target,false)) title = metadata->title;
             else error = "This Session is unavailable through your T3 connection";
         }
     } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
+    if (error.empty() && followup && followup->target.contains("headSha") &&
+        (!ctx.gitHost || !currentGitPrCheck(*ctx.gitHost,message)))
+        error = "Could not confirm that the failing check belongs to this pull request's current head";
     const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::shared);
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (shutdown.stop_requested()) return stop;
+        if (ctx.shutdown.stop_requested()) return stop;
         if (!authorizeTurn(message)) { transaction.commit(); return stop; }
         if (sessionParticipationStopped(message.bot,target,id)) {
             save(toolFailure(stopped));
@@ -578,7 +581,7 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (shutdown.stop_requested()) return stop;
+        if (ctx.shutdown.stop_requested()) return stop;
         if (!authorizeTurn(message)) { transaction.commit(); return stop; }
         auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
                          {id,step});
@@ -609,7 +612,7 @@ VALUES(?,?,?,?,?,?,?)
     try {
         receipt = Policy(*this).forbidden(message.bot,resource.action,resource.target)
             ? Delivery{Delivery::Kind::NotAccepted,{},std::string(approvalError(ApprovalGate::denied)),true}
-            : t3.send(command);
+            : ctx.t3.send(command);
     } catch (const std::exception&) {
         receipt.detail = "Could not confirm delivery to T3";
     }

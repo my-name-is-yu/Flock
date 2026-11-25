@@ -65,6 +65,11 @@ struct Script : Model {
 
 Decision reply() { return {"reply",{{"text","Done"}},"Confirmed"}; }
 
+Decision remember(Id version, std::string_view content, std::string_view summary, std::string_view quote) {
+    return {"remember_preference",{{"baseVersion",version},{"content",content},
+            {"summary",summary},{"sourceQuote",quote}},"User preference"};
+}
+
 const Json& lastResult(const ModelInput& input) {
     return input.event.at("turn").back().at("result");
 }
@@ -216,6 +221,100 @@ void memoryFlow(const std::filesystem::path& db) {
     check(bot.choices.empty() && lastResult(bot.inputs.back()).at("ok") == false &&
           bot.inputs.back().event.dump().find("Example: [redacted]") == std::string::npos,
           "Resuming after revocation exposed a cached shared-memory read");
+}
+
+void proactiveMemory(const std::filesystem::path& db) {
+    constexpr auto seed = "Release-note format: CSV.\n";
+    constexpr auto preference = "I prefer release notes under one page.";
+    constexpr auto preferred = "Release-note format: CSV.\nKeep release notes under one page.\n";
+    constexpr auto correction = "Use Markdown instead of CSV for future release notes.";
+    constexpr auto corrected = "Release-note format: Markdown.\nKeep release notes under one page.\n";
+    Store store(db,[seed](auto) { return seed; });
+    Script model;
+    Adapter adapter;
+    Runtime runtime(store,model,adapter,{});
+    const auto send = [&](std::string_view key, std::string_view message, Decision edit) {
+        model.choices = {{"review_preference",Json::object(),"Review a lasting preference"},std::move(edit),reply()};
+        store.receive(localOwner,alpha,key,message);
+        runtime.runConversations();
+    };
+    const auto notices = [&] {
+        Json result = Json::array();
+        for (const auto& event : store.conversation(alpha.botId))
+            if (event.at("kind") == "memory_remembered") result.push_back(event.at("data"));
+        return result;
+    };
+    const auto memory = [&] { return store.memory(owner,alpha.botId,"read_memory",Json::object()); };
+
+    send("preferred",preference,remember(0,preferred,"Keep release notes under one page.",preference));
+    auto saved = notices();
+    check(model.choices.empty() && saved.size() == 1 && saved.front().at("text") == "Keep release notes under one page." &&
+          saved.front().at("canUndo") == true && memory().at("content") == preferred && memory().at("version") == 1,
+          "A direct preference did not update memory and show an Undo notice");
+    const auto firstRevision = saved.front().at("revisionId");
+
+    send("same-preference",preference,remember(1,preferred,"Keep release notes under one page.",preference));
+    check(model.choices.empty() && notices().size() == 1 && memory().at("version") == 1,
+          "An unchanged preference created another revision or notice");
+
+    send("skip-preference","What is the release date?",{"skip_preference",Json::object(),"No lasting preference"});
+    check(model.choices.empty() && notices().size() == 1 && memory().at("version") == 1,
+          "Skipping an unrelated message changed memory or interrupted the reply");
+
+    send("unrelated","What is the release date?",remember(1,corrected,correction,correction));
+    check(model.choices.empty() && lastResult(model.inputs.back()).at("ok") == false && memory().at("content") == preferred &&
+          notices().size() == 1,"A preference missing from the person's message changed memory");
+
+    auto policy = store.policy();
+    policy.setMode(owner,"supervised");
+    policy.changeRule(owner,RuleKind::ask,Action::private_memory_write,alpha.botId,true);
+    send("correction",correction,remember(1,corrected,"Use Markdown for release notes.",correction));
+    const auto pending = store.inbox(localOwner);
+    check(pending.size() == 1 && pending.front().at("status") == "pending" &&
+          pending.front().at("prompt") == "\"Use Markdown for release notes.\"" &&
+          notices().size() == 1 && memory().at("version") == 1,"A private memory correction bypassed approval");
+    const auto& item = pending.front();
+    store.decideInbox(localOwner,{alpha.botId,InboxKind::policy_approval,item.at("itemId"),item.at("waitId"),
+                                item.at("taskId"),item.at("targetRevision"),item.at("targetGeneration")},"allow_once");
+    runtime.runConversations();
+    saved = notices();
+    check(model.choices.empty() && saved.size() == 2 && saved.back().at("text") == "Use Markdown for release notes." &&
+          !saved.front().value("canUndo",false) && saved.back().at("canUndo") == true && memory().at("content") == corrected,
+          "The approved correction did not replace the old preference");
+    rejectsWithConflict([&] {
+        store.memory(owner,alpha.botId,"revert_memory_edit",{{"baseVersion",saved.front().at("version")},
+                    {"revisionId",firstRevision}});
+    },"Memory version conflict: expected 1, current 2");
+
+    const auto revision = saved.back().at("revisionId");
+    store.memory(owner,alpha.botId,"revert_memory_edit",{{"baseVersion",saved.back().at("version")},{"revisionId",revision}});
+    const auto reverted = notices();
+    Store reopened(db);
+    const auto history = reopened.memory(owner,alpha.botId,"memory_history",Json::object()).at("revisions");
+    check(memory().at("content") == preferred && reverted.size() == 2 && reverted.back().at("undone") == true &&
+          !reverted.back().value("canUndo",false) && history.size() == 3 && history.front().at("revertedFrom") == revision,
+          "Undo did not persist the restored memory and identify the reverted edit");
+}
+
+void unavailablePreferenceReviewStillReplies(const std::filesystem::path& db) {
+    Store store(db,[](auto) { return "Prefer CSV."; });
+    auto policy = store.policy();
+    policy.submitSecret(owner,alpha.botId,policy.requestSecret(alpha.botId,{"fixture-token"}),"memory");
+    Script model;
+    Adapter adapter;
+    Runtime runtime(store,model,adapter,{});
+    model.choices = {{"review_preference",Json::object(),"Review a lasting preference"},reply()};
+    const auto receipt = store.receive(localOwner,alpha,"unavailable-review","I prefer short release notes.");
+    runtime.runConversations();
+
+    const auto events = store.conversation(alpha.botId);
+    check(model.choices.empty() && model.inputs.size() == 2 &&
+          model.inputs.back().event.at("kind") == "conversation_turn" &&
+          std::ranges::any_of(events,[&](const auto& event) {
+              return event.at("kind") == "conversation_reply" &&
+                  event.at("data").at("replyToMessageId") == receipt.at("messageId") &&
+                  event.at("data").at("text") == "Done";
+          }),"Unavailable preference review interrupted the ordinary reply");
 }
 
 void memoryRedactionLimit(const std::filesystem::path& db) {
@@ -553,6 +652,7 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
     Store store(db);
     const auto now = utc(2026,1,1);
     const std::string source = "fixture-webhook-source", token = "fixture-request-token";
+    constexpr auto payloadText = "I prefer HTML for future release notes.";
     const auto id = store.createAutomation(owner,alpha,{{"kind","trigger"},{"source",source},
         {"request","Check " + token},{"eventFilter",{{token,"ready"}}}},now).at("id");
     const auto publicId = store.createAutomation(owner,alpha,{{"kind","trigger"},{"source",source},
@@ -566,7 +666,7 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
           list.at(1).at("request") == "Check [redacted]" && list.at(1).at("eventFilter").contains("[redacted]"),
           "Trigger listing exposed saved webhook metadata that became protected");
 
-    const auto delivery = store.receiveWebhook(owner,source,"evt-1",{{token,"ready"}},now);
+    const auto delivery = store.receiveWebhook(owner,source,"evt-1",{{token,"ready"},{"text",payloadText}},now);
     const auto receipts = delivery.at("tasks");
     check(receipts.size() == 1 && receipts.at(0).at("triggerId") == publicId,
           "A newly protected filter matched or a redacted trigger failed to deliver");
@@ -591,6 +691,12 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
     check(model.inputs.size() == 1 && model.inputs.front().task.at("trigger") == task.at("trigger") &&
           !containsMetadata(model.inputs.front().task) && !containsMetadata(model.inputs.front().event),
           "The task model lost webhook provenance or received protected metadata");
+    const auto& input = model.inputs.front();
+    check(input.task.at("trigger").at("event").at("text") == payloadText &&
+          std::ranges::find(input.tools,"review_preference") == input.tools.end() &&
+          std::ranges::find(input.tools,"remember_preference") == input.tools.end() &&
+          store.memory(owner,alpha.botId,"memory_history",Json::object()).at("revisions").empty(),
+          "A webhook payload can be used as a preference source");
 
     const auto replay = store.receiveWebhook(owner,source,"evt-1",Json::object(),now);
     check(replay.at("duplicate") == true && replay.at("tasks") == receipts,
@@ -633,6 +739,8 @@ int main() {
     try {
         Directory temp;
         memoryFlow(temp.path / "memory.sqlite3");
+        proactiveMemory(temp.path / "proactive-memory.sqlite3");
+        unavailablePreferenceReviewStillReplies(temp.path / "unavailable-review.sqlite3");
         memoryRedactionLimit(temp.path / "memory-limit.sqlite3");
         configuredRequestLimit(temp.path / "schedule-limit.sqlite3");
         downtime(temp.path / "downtime.sqlite3");

@@ -240,6 +240,12 @@ struct Store::Impl {
     std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
     Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&,
                 Seconds now, bool fromBot = false);
+    bool canReviewPreference(const conversation::Message&);
+    bool preferenceReviewPending(Id message, int step) const;
+    std::optional<ModelInput> preferenceReviewInput(const conversation::Message&, std::vector<std::string>,
+                                                    std::string feedback, Seconds now);
+    Json rememberPreference(const conversation::Message&, int step, const Json&, Seconds now);
+    void projectMemoryNotice(std::string_view bot, Json& data) const;
     Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
     Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
     std::vector<ScheduleImportError> stageConfiguredSchedules(
@@ -276,7 +282,8 @@ struct Store::Impl {
         Json target;
         Status status;
     };
-    std::optional<GitPrFollowup> gitPrFollowup(const conversation::Message&);
+    std::optional<GitPrFollowup> gitPrFollowup(const conversation::Message&, const IntakeResolver&);
+    bool currentGitPrCheck(GitHost&, const conversation::Message&);
     std::string gitPrFollowupInstruction(const conversation::Message&, const GitPrFollowup&, const Decision&) const;
     void recordGitPrFollowup(const conversation::Message&, const GitPrFollowup&);
     bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
@@ -414,7 +421,7 @@ struct Store::Impl {
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                   bool hasWebEvidence, T3&, std::stop_token);
+                                   const ConversationCallContext&);
     CallOutcome cancelDestinationRun(const conversation::Message&, int step, const Decision&, std::string_view key,
                                      bool offered, bool hasWebEvidence, std::stop_token);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&,

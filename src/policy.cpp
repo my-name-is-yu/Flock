@@ -50,6 +50,7 @@ constexpr std::pair<Action,std::string_view> actions[] = {
     {Action::environment_launch,"environment.launch"},
     {Action::shared_memory_read,"shared_memory.read"},
     {Action::shared_memory_write,"shared_memory.write"},
+    {Action::private_memory_write,"memory.write"},
     {Action::workspace_read,"workspace.read"},
     {Action::workspace_write,"workspace.write"},
     {Action::web_search,"web.search"},

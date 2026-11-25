@@ -13,8 +13,8 @@ Flock selects its state directory with `--home DIRECTORY`, then `FLOCK_HOME`,
 then `~/.config/flock`. Set up each Bot in `bots/<botId>/` under that directory.
 Place its role and decision criteria in `SOUL.md` and its task-independent
 starting notes in `MEMORY.md`. Each decision reads the current `SOUL.md` and
-the latest private memory in SQLite. Intake records the selected model and
-Session settings for each task.
+the latest private memory in SQLite. Intake records the selected model,
+reasoning effort, and Session settings for each task.
 
 Example `bots/release/config.json`
 
@@ -23,6 +23,7 @@ Example `bots/release/config.json`
   "name": "Release",
   "modelProvider": "chatgpt",
   "model": "MODEL_SLUG_FROM_FLOCK_MODEL_MODELS",
+  "reasoningEffort": "low",
   "environmentId": "CANONICAL_T3_ENVIRONMENT_ID",
   "projectId": "CANONICAL_T3_PROJECT_ID",
   "allowedBots": ["verifier"],
@@ -83,12 +84,16 @@ resume according to the configured IANA timezone. Pause skips occurrences
 through the time the Bot resumes, even if the runtime was offline. Scheduling
 supports dates through 2199.
 
-Ask a Bot in its conversation to remember a convention, manage a schedule or
-reminder, or follow up on a webhook. Flock imports `MEMORY.md` on the first
-private memory access. SQLite supplies private memory for conversation and task
-decisions from then on. Use the memory tools or Web API to edit it. Shared
-playbooks and text documents use an explicit document ID and follow the installation policy
-for the requested `shared_memory` operation.
+Flock imports `MEMORY.md` on the first private memory access. SQLite supplies
+private memory for conversation and task decisions from then on. Bots can save
+lasting preferences and corrections from a Bot owner's or an administrator's
+direct messages, including messages sent with `flock message`. A separate
+review sees only that message and the existing private memory. Automatic saves
+update matching entries and follow the `memory.write` installation rules for
+the Bot ID. Use the conversation or Web API to edit memory explicitly. Shared
+playbooks use an explicit document ID and the applicable `shared_memory` rules.
+
+Ask a Bot in its conversation to manage a schedule or reminder or follow up on a webhook.
 
 ## Connect and run
 
@@ -104,6 +109,11 @@ Approve the two Flock connections in your browser. For ChatGPT sign-in, grant
 permission to use the eligible ChatGPT plan and check for `planUsage: true` in
 `flock model status`. Copy a slug from `flock model models` into each Bot
 configuration. Use `flock model login --reconsent` if plan usage is missing.
+`reasoningEffort` sets the effort for this Bot's ChatGPT decisions. Omit it to use
+the model default. `flock model models` shows `reasoningEfforts` when ChatGPT
+lists the supported levels. Otherwise Flock offers `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, and `max`. If ChatGPT rejects the chosen effort,
+select another level or **Model default** in Bot settings.
 For T3, approve Operate access. `flock t3 connect` discovers the running local
 T3 server. To connect another machine, pass its MCP URL as the argument. When
 authorization expires, use `flock t3 reconnect ENVIRONMENT` to approve again.
@@ -126,6 +136,7 @@ build/app/flock answer TASK_ID WAIT_ID REVISION_ID GENERATION "Use main"
 with `messageId` and a status of `received`. The running daemon processes the
 message in the Bot's conversation. If the Bot starts a Task, `flock tasks`
 shows the same message ID in the Task's `sourceMessageId` field.
+To include a screenshot with a message, choose or paste it in the Web composer.
 
 When a Bot is paused, a fresh `flock message` returns **This Bot is paused.**
 Pause and resume the Bot from its Web settings.

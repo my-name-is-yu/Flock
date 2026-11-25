@@ -70,7 +70,8 @@ struct ModelInput {
     bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
 };
-enum class ModelErrorCode { inference_failed, authentication_required, invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
+enum class ModelErrorCode { inference_failed, authentication_required, unsupported_reasoning_effort,
+                            invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
 struct ModelError : std::runtime_error {
     ModelError(std::string message, bool retryable, Json measurements = Json::object(),
                ModelErrorCode failureCode = ModelErrorCode::inference_failed)
@@ -286,7 +287,10 @@ using WebIdentityResolver = std::function<std::optional<bool>(std::string_view p
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
-    struct PlannerModel { std::string model, provider; };
+    struct PlannerModel {
+        std::string model, provider;
+        std::optional<std::string> reasoningEffort;
+    };
     using AutomationModelResolver = std::function<std::optional<PlannerModel>(std::string_view botId)>;
     using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&,
                                                        const std::function<void()>&)>;

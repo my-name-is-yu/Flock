@@ -22,9 +22,13 @@ struct RoutingModel final : Model {
     }
 };
 
-struct MissingAuthModel final : Model {
+struct RejectedModel final : Model {
+    explicit RejectedModel(ModelErrorCode code) : code(code) {}
+    ModelErrorCode code;
+    int calls = 0;
     ModelTurn decide(const ModelInput&) override {
-        throw ModelError("private provider detail",ModelErrorCode::authentication_required);
+        ++calls;
+        throw ModelError("private provider detail",code);
     }
 };
 
@@ -250,22 +254,23 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
           "the move did not use the requested or remembered project for " + std::string(alias));
 }
 
-void missingChatGPTSignInIsActionable() {
+void modelFailureGivesSettingsGuidance(ModelErrorCode code, std::string_view guidance) {
     Sandbox temp;
     const auto intake = pinnedBot(temp);
-    MissingAuthModel model;
+    RejectedModel model(code);
     RoutingT3 t3;
     Store store(temp.path / "state.db");
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
-    store.receive(localOwner,intake,"missing-chatgpt-sign-in","Check the release");
+    store.receive(localOwner,intake,"rejected-model-request","Check the release");
     runtime.runConversations();
     const auto events = store.conversation("release");
     const auto reply = std::ranges::find_if(events,[](const Json& event) {
         return event.value("kind","") == "conversation_reply";
     });
-    check(reply != events.end() && reply->at("data").at("text").get<std::string>().find("Open Flock Settings") != std::string::npos &&
-          reply->at("data").at("text").get<std::string>().find("private provider detail") == std::string::npos,
-          "missing ChatGPT sign-in did not give a safe, actionable reply");
+    check(reply != events.end() && model.calls == 1,"a configuration failure did not finish the turn immediately");
+    const auto& text = reply->at("data").at("text").get_ref<const std::string&>();
+    check(text.find(guidance) != text.npos && text.find("private provider detail") == text.npos,
+          "the conversation did not give safe guidance for the model configuration error");
 }
 }
 
@@ -277,6 +282,7 @@ void pinnedConversationDestinations() {
     moveWithProject("mini","mini-project");
     moveWithProject("mini-legacy","remembered-project");
     moveWithProject("mini","mini-project",true);
-    missingChatGPTSignInIsActionable();
+    modelFailureGivesSettingsGuidance(ModelErrorCode::authentication_required,"Open Flock Settings");
+    modelFailureGivesSettingsGuidance(ModelErrorCode::unsupported_reasoning_effort,"Model default");
 }
 }

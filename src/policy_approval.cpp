@@ -20,6 +20,16 @@ std::string fingerprint(const Json& payload) {
     return hex;
 }
 
+Json privateMemoryPreview(const Json& payload) {
+    const auto& tool = payload.front();
+    const auto& args = payload.back();
+    if (tool == "remember_preference") return field(args,"summary");
+    if (tool == "propose_memory_edit") return field(args,"rationale");
+    if (tool == "revert_memory_edit") return "Restore the Bot’s earlier memory.";
+    if (args.contains("proposalId")) return "Save a proposed memory edit.";
+    return field(args,"content");
+}
+
 Person currentApprovalActor(const Policy& policy, const WebIdentityResolver& resolve,
                             bool liveInteractiveRoles, const Person& actor) {
     // Managed accounts can be edited after the HTTP request authenticates.
@@ -219,7 +229,9 @@ AND (anchor>=? OR requester='' OR ?='')
         return value;
     };
     const auto shown = resource.action == Action::secret_use ? std::string{} :
-        bounded(scrub.payload(preview(preview,payload),false,480).dump(-1,' ',false,Json::error_handler_t::replace),1200);
+        bounded(scrub.payload(resource.action == Action::private_memory_write
+            ? privateMemoryPreview(payload) : preview(preview,payload),false,480)
+            .dump(-1,' ',false,Json::error_handler_t::replace),1200);
     exec(R"SQL(
 INSERT INTO policy_approvals(operation,bot,action,target,fingerprint,preview,scope,requester,anchor,turn,
  task,revision,generation,created_at,expires_at,mode_revision,card_generation)
