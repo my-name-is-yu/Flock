@@ -72,6 +72,7 @@ std::string_view validate(const Decision& decision, bool conversation) {
     };
     const auto op = gitOperation(decision);
     if (op.empty()) throw Conflict("Unknown Git operation");
+    if (op != "read" && !validDecisionReason(decision.reason)) throw Conflict("Git changes require a brief reason");
     const auto& tool = decision.tool;
     if (tool == "git_open_pr" || args.contains("title")) requireText("title");
     if (tool == "git_comment" || (tool == "git_submit_review" && args.at("verdict") != "approve")) requireText("body");
@@ -377,10 +378,11 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             const auto key = turn ? std::string(invocation) : "git/" + std::to_string(taskId) + "/" + std::string(invocation);
             const auto payload = Json::array({decision.tool,decision.args});
             const auto gate = approveAction(origin,{action,repo.resource()},key,payload,policyClock());
-            if (gate == ApprovalGate::waiting && !turn)
-                exec("UPDATE policy_approvals SET resume=? WHERE operation=?",
-                     {Json{{"tool",decision.tool},{"args",decision.args},{"reason",sharedRedactor().text(decision.reason)},
-                           {"invocation",invocation}},key});
+            if (gate == ApprovalGate::waiting && !turn) {
+                Json resume{{"tool",decision.tool},{"args",decision.args},{"invocation",invocation}};
+                if (op != "read") resume["reason"] = sharedRedactor().text(decision.reason);
+                exec("UPDATE policy_approvals SET resume=? WHERE operation=?",{resume,key});
+            }
             transaction.commit();
             if (gate == ApprovalGate::waiting) return {{"policyWaiting",true}};
             if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
@@ -393,7 +395,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             throw Conflict("Head repository read access denied");
         auto result = openGitPr(host,context,{{repo,head,branch(args,"baseRef"),branch(args,"headRef")},{},
                                      field(args,"title"),field(args,"body"),args.value("draft",false)},
-                                invocation,args.value("newIntent",false));
+                                invocation,args.value("newIntent",false),decision.reason);
         result["ok"] = result.at("status") == "created";
         return result;
     }
@@ -469,7 +471,7 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
 )SQL",{reviewKey,taskId,repo.host,repo.repo,args.at("prNumber"),eventCursor,args.at("reviewers").dump()});
         }
         journal(taskId,"git_mutation",sharedRedactor().record(gitJournal(context,decision.tool,repo,
-            {{"status","pending"},{"target",audit}})));
+            {{"status","pending"},{"target",audit},{"reason",decision.reason}})));
         tx.commit();
     }
     try {

@@ -13,6 +13,14 @@ using namespace git_fixture;
 void testGitPrFollowup();
 
 namespace {
+constexpr auto fixtureReason = "Use the verified fixture evidence";
+
+ModelTurn decodeCall(const Json& request, std::string_view tool, const Json& args) {
+    const Json call{{"type","function_call"},{"namespace","flock"},{"status","completed"},
+                    {"name",tool},{"arguments",args.dump()}};
+    return app::responseDecision(Json::array({call}),request);
+}
+
 class Script final : public Model {
 public:
     std::map<std::string,Decision> calls;
@@ -28,10 +36,10 @@ public:
         if (rawNotification && input.event.contains("gitEvent")) return {{rawNotification(input)}};
         auto request = app::responseRequest(input);
         auto next = choose(input);
-        next.args["reason"] = "Use the verified fixture evidence";
-        const Json call{{"type","function_call"},{"namespace","flock"},{"status","completed"},
-                        {"name",next.tool},{"arguments",next.args.dump()}};
-        return app::responseDecision(Json::array({call}),request);
+        const auto operation = gitOperation(next);
+        if (recordsTaskDecisionReason(next.tool) || (!operation.empty() && operation != "read"))
+            next.args["reason"] = fixtureReason;
+        return decodeCall(request,next.tool,next.args);
     }
 
 private:
@@ -86,6 +94,16 @@ Json invoke(Store& store, Runtime& runtime, Script& model, std::string id, std::
     runtime.runConversations();
     if (!model.results.contains(id)) throw std::runtime_error("No result for " + id);
     return model.results.at(id);
+}
+
+bool recordedMutationReason(const Json& history, std::string_view tool) {
+    return std::ranges::any_of(history,[&](const Json& event) {
+        if (event.at("kind") != "git_mutation") return false;
+        const auto& data = event.at("data");
+        const auto& result = data.at("result");
+        return data.at("tool") == tool && result.value("status","") == "pending" &&
+            result.value("reason","") == fixtureReason;
+    });
 }
 
 Json persistence(const std::filesystem::path& db, std::string_view operationId) {
@@ -156,6 +174,7 @@ void runner() {
         other = store.submit(intake("other","other-project"));
         check(script.results.at("session-pr").at("prNumber") == 1,"task did not receive the PR number");
         check(historyCount(store,task,"git_mutation") == 2,"PR operation history must include intent and result");
+        check(recordedMutationReason(store.history(task),"git_open_pr"),"PR creation lost its rationale in task history");
         check(historyCount(store,task,"report") == 1,"Session result missing");
         check(store.inbox(localOwner,"owner").at(0).at("prTitle") == "Pull request awaiting review","PR awaiting review missing");
         check(store.receiveGitWebhook({hostName,"ci-before-restart",repoName,"ci","completed",{1},sha,"test job failed",81}),
@@ -568,6 +587,7 @@ void accessAndActions() {
     check(retry.at("data").at("id") == 101 && host->comments == 1 && host->edits == 2,"comment edit retry duplicated a comment");
     check(historyCount(store,task,"git_mutation") == 18 && historyCount(store,other,"git_mutation") == 0,
           "Git mutations were not recorded on the owning task");
+    check(recordedMutationReason(store.history(task,0,200),"git_update_pr"),"PR update lost its rationale in task history");
 
     const auto review = invoke(store,runtime,script,"review-existing-pr","git_request_review",
                                argsFor({{"prNumber",20},{"reviewers",{"alice"}}},repoName));
@@ -1002,10 +1022,13 @@ void schemas() {
         if (function.at("name") == "git_read_ci_logs") {
             check(schema.at("properties").at("maxBytes").at("maximum") == 16384 &&
                   std::ranges::find(schema.at("required"),"jobId") != schema.at("required").end(),"incorrect log schema");
+            check(!schema.at("properties").contains("reason"),"Git log read still offers a rationale");
         }
         if (function.at("name") == "git_comment") {
             check(schema.at("properties").at("commentId").at("type") == "integer" &&
                   schema.at("properties").at("target").at("enum") == Json::array({"pr","issue"}),"incorrect comment schema");
+            check(std::ranges::find(schema.at("required"),"reason") != schema.at("required").end(),
+                  "Git comment schema does not require a rationale");
         }
         if (function.at("name") == "git_manage_issue") {
             for (const auto* action : {"list","read","list_comments","create","update"}) {
@@ -1018,11 +1041,29 @@ void schemas() {
                 const auto branch = std::ranges::find_if(conditions,matching);
                 const auto required = branch->value("required",Json::array());
                 const bool mutates = std::string_view(action) == "create" || std::string_view(action) == "update";
-                check((std::ranges::find(required,"taskId") != required.end()) == mutates,
-                      "issue schema requires taskId for the wrong actions");
+                for (const auto* key : {"taskId","reason"})
+                    check((std::ranges::find(required,key) != required.end()) == mutates,
+                          "issue schema requires the wrong fields for this action");
             }
         }
     }
+
+    const Json list{{"host",hostName},{"repo",repoName},{"action","list"}};
+    const auto read = decodeCall(request,"git_manage_issue",list).calls.at(0);
+    check(read.args == list && read.reason.empty(),"reasonless issue listing did not decode");
+
+    const Json create{{"host",hostName},{"repo",repoName},{"action","create"},{"title","Follow-up"},{"taskId",1}};
+    bool rejected = false;
+    try {
+        decodeCall(request,"git_manage_issue",create);
+    } catch (const ModelError& error) {
+        rejected = error.code == ModelErrorCode::invalid_tool_arguments;
+    }
+    check(rejected,"issue creation decoded without a required rationale");
+    auto withReason = create;
+    withReason["reason"] = fixtureReason;
+    const auto write = decodeCall(request,"git_manage_issue",withReason).calls.at(0);
+    check(write.args == create && write.reason == fixtureReason,"issue creation lost its rationale when decoded");
 }
 }
 

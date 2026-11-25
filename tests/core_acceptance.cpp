@@ -1263,7 +1263,7 @@ void evidenceResume() {
         check(std::find(i.tools.begin(),i.tools.end(),"session_read") != i.tools.end(),"read tool not presented");
         auto req = Json{{"threadId",i.event["run"]["threadId"]},{"runId",i.event["run"]["runId"]},{"view","activity"}};
         if (!i.evidence.empty()) req["cursor"] = i.evidence.back()["nextCursor"];
-        return Decision{"session_read",req,"Check the commit and setting"};
+        return Decision{"session_read",req,{}};
     };
     f.reach(id,"running");
     f.t3.finish("run-1");

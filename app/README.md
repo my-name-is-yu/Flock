@@ -203,8 +203,8 @@ inside T3 or an external provider are outside the local model call allowance.
 
 After ChatGPT sign-in, run the following command with a slug from the model
 catalog. It writes one JSON record per trial with the chosen action, arguments,
-and reason, or an error. All six must match their expected actions for exit
-status 0.
+and reason, or an error. All six must match their expected actions and include
+a reason for exit status 0.
 
 ```sh
 build/app/flock model acceptance MODEL_SLUG > model-acceptance.jsonl
@@ -222,6 +222,11 @@ home has one ChatGPT connection. See the official [sign-in guide][signin],
 [limits]: https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
 
 ## Bot tools
+
+Workspace, web, MCP, skill, attachment, and conversation tools use their
+operation arguments without a separate rationale. Git issue reads and other
+Git reads work the same way. Git writes include a reason recorded in task
+history.
 
 Conversation turns can read, write, and search files under
 `<home>/workspaces/<botId>`. The `workspace.read` policy action governs reading

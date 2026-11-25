@@ -2312,7 +2312,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         if (saved == task.end() || saved->at("eventId") != event.at("id") ||
             saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
             return std::nullopt;
-        return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage"),
+        return TaskDecision{{saved->at("tool"),saved->at("args"),field(*saved,"reason")},saved->at("usage"),
                             saved->at("attemptId"),
                             saved->value("rejection",std::string{})};
     }
@@ -2337,8 +2337,9 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
                 decision = TaskDecision{call,inference.usage,inference.attemptId,call.rejection};
                 // Bookkeeping must not advance the generation observed by conversation turns.
                 Json saved{{"generation",inference.generation},{"eventId",inference.eventId},{"revisionId",inference.revisionId},
-                    {"tool",call.tool},{"args",call.args},{"reason",call.reason},{"usage",inference.usage},
+                    {"tool",call.tool},{"args",call.args},{"usage",inference.usage},
                     {"attemptId",inference.attemptId}};
+                if (!call.reason.empty()) saved["reason"] = call.reason;
                 if (!call.rejection.empty()) saved["rejection"] = call.rejection;
                 db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?)) WHERE id=?",{saved,id});
             }
@@ -2514,9 +2515,11 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 decision->reason = std::move(call.reason);
             }
             try {
-                if (!decision->args.is_object() || decision->args.dump().size() > 20000 || !present(decision->reason,4000) ||
+                if (!decision->args.is_object() || decision->args.dump().size() > 20000 ||
                     std::ranges::find(tools,decision->tool) == tools.end())
-                    throw Conflict("Return exactly one permitted action, valid arguments and a reason");
+                    throw Conflict("Return exactly one permitted action with valid arguments");
+                if (recordsTaskDecisionReason(decision->tool) && !validDecisionReason(decision->reason))
+                    throw Conflict("This action requires a brief reason");
                 accept(task,event,*decision);
             } catch (const Conflict& error) {
                 rejectDecision(task,event,*decision,error.what());

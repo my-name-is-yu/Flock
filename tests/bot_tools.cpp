@@ -41,7 +41,7 @@ std::string read(const fs::path& path) {
     return {std::istreambuf_iterator<char>(file),{}};
 }
 Decision call(std::string tool, Json args = Json::object()) {
-    return {std::move(tool),std::move(args),"Collect the requested evidence"};
+    return {std::move(tool),std::move(args),{}};
 }
 
 struct Provider : Model {
@@ -57,12 +57,13 @@ struct Provider : Model {
         auto output = Json::array();
         auto emit = [&](const Decision& action) {
             auto args = action.args;
-            args["reason"] = action.reason;
+            if (!action.reason.empty()) args["reason"] = action.reason;
             output.push_back({{"type","function_call"},{"namespace","flock"},{"status","completed"},
                               {"name",action.tool},{"arguments",args.dump()}});
         };
         if (input.event.at("kind") != "conversation_turn") {
-            emit(call("delegate",{{"instruction","Read private history"},{"doneWhen","Private fixture checked"}}));
+            emit({"delegate",{{"instruction","Read private history"},{"doneWhen","Private fixture checked"}},
+                  "The evidence is in the Session."});
         } else {
             if (beforeTurn) beforeTurn(input);
             check(request.at("instructions").get<std::string>().find("untrustedData") != std::string::npos,
@@ -247,6 +248,11 @@ void workspaceFiles(Fixture& f) {
     check(marker.value("files",Json::array()) == Json::array({"allowed.txt"}),"Workspace search missed its marker: " + marker.dump());
     check(f.run(call("workspace_read_file",{{"path","allowed.txt"}})).at("text") == "workspace-only-marker",
           "Workspace read missed its content");
+    const auto messageId = std::to_string(f.lastMessage);
+    check(f.sql("SELECT count(*) FROM conversation_model_failures WHERE message_id=" + messageId) == "0" &&
+          f.sql("SELECT count(*) FROM conversation_steps, json_each(decision) WHERE message_id=" + messageId +
+                " AND json_type(json_each.value,'$.reason') IS NOT NULL") == "0",
+          "Routine workspace read and reply required repair or persisted a rationale");
     write(root/"script","#!/bin/sh\n");
     check(chmod((root/"script").c_str(),0700) == 0,"Could not make fixture script executable");
     check(f.run(call("workspace_write_file",{{"path","script"},{"text","#!/bin/sh\nprintf updated"}})).at("ok") == true &&
@@ -553,9 +559,7 @@ void protectedArgumentsDoNotChangeToolTargets() {
     const auto invoke = [](Json arguments) {
         return call("mcp_call_tool",{{"server","fixture"},{"name","lookup"},{"arguments",std::move(arguments)}});
     };
-    auto sensitivePath = writeFile(marker + ".txt");
-    sensitivePath.reason = "Write " + marker;
-    const auto steps = f.batch({sensitivePath,invoke({{"query",{{marker,"protected key"},{"[redacted]","public key"}}}}),
+    const auto steps = f.batch({writeFile(marker + ".txt"),invoke({{"query",{{marker,"protected key"},{"[redacted]","public key"}}}}),
                                 writeFile("public-arguments.txt")});
     check(steps.size() == 3 && steps[0].at("result").at("ok") == false && steps[1].at("result").at("ok") == false &&
           steps[2].at("result").at("ok") == true && f.mcp->calls == calls &&
