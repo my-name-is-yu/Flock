@@ -804,18 +804,35 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         tools.insert(tools.end(),botToolNames().begin(),botToolNames().end());
     }
     if (!message.channelScope.empty()) tools.insert(tools.end(),channelTools.begin(),channelTools.end());
+    bool currentCheck = true;
+    if (gitHost && notification) {
+        const auto& event = message.routing.at("gitEvent");
+        if (field(event,"followup") == "failed_check") {
+            bool shouldVerify = false;
+            {
+                std::lock_guard lock(mutex);
+                if (canReceiveGitWebhook(message.bot,event)) {
+                    const auto followup = gitPrFollowup(message,intake);
+                    shouldVerify = followup && followup->status != GitPrFollowup::Status::attempted;
+                }
+            }
+            currentCheck = shouldVerify && currentGitPrCheck(*gitHost,message);
+        }
+    }
     const auto available = [&] {
         auto offered = tools;
         auto machines = Json::array();
         std::string_view followupStatus;
         if (notification) {
-            if (const auto followup = gitHost ? gitPrFollowup(message) : std::nullopt) {
+            if (const auto followup = gitHost ? gitPrFollowup(message,intake) : std::nullopt) {
                 switch (followup->status) {
                 case GitPrFollowup::Status::available:
-                    offered.push_back("fix_pull_request");
+                    if (currentCheck) offered.push_back("fix_pull_request");
                     break;
                 case GitPrFollowup::Status::attempted: followupStatus = "already_requested"; break;
-                case GitPrFollowup::Status::limitReached: followupStatus = "limit_reached"; break;
+                case GitPrFollowup::Status::limitReached:
+                    if (currentCheck) followupStatus = "limit_reached";
+                    break;
                 }
             }
         } else {

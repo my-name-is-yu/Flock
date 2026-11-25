@@ -2,7 +2,8 @@
 
 namespace flockv0 {
 
-std::optional<Store::Impl::GitPrFollowup> Store::Impl::gitPrFollowup(const conversation::Message& message) {
+std::optional<Store::Impl::GitPrFollowup> Store::Impl::gitPrFollowup(
+    const conversation::Message& message, const IntakeResolver& intake) {
     using enum conversation::PrincipalSource;
     if (message.principalSource != gitWebhook) return std::nullopt;
     const auto& event = message.routing.at("gitEvent");
@@ -12,7 +13,7 @@ std::optional<Store::Impl::GitPrFollowup> Store::Impl::gitPrFollowup(const conve
     const auto taskId = event.at("taskId").get<Id>();
     const auto task = load(taskId);
     try {
-        const auto config = automationIntake ? automationIntake(message.bot,{}).config : task.at("config");
+        const auto config = intake ? intake(message.bot,{}).config : task.at("config");
         if (!config.value("fixPullRequests",true)) return std::nullopt;
     } catch (const std::exception&) {
         return std::nullopt;
@@ -20,9 +21,7 @@ std::optional<Store::Impl::GitPrFollowup> Store::Impl::gitPrFollowup(const conve
 
     auto pr = query(R"SQL(
 SELECT o.operation_id,o.head_repo,o.head_ref,o.url,r.environment_id,r.thread_id,
-       coalesce(json_extract(o.run,'$.gatewayEnvironmentId'),''),
-       (SELECT h.head_sha FROM git_pr_heads h WHERE (h.host,h.repo,h.pr_number)=(w.host,w.repo,w.pr_number)
-        ORDER BY h.event_cursor DESC LIMIT 1)
+       coalesce(json_extract(o.run,'$.gatewayEnvironmentId'),'')
 FROM git_pr_watches w JOIN git_pr_operations o
  ON (o.host,o.base_repo,o.pr_number,o.task_id,o.bot_id)=(w.host,w.repo,w.pr_number,w.task_id,w.bot_id)
 JOIN runs r ON r.task_id=o.task_id AND r.thread_id=json_extract(o.run,'$.threadId')
@@ -40,8 +39,8 @@ LIMIT 2
     const auto operation = pr.string(0);
     Json target{{"url",pr.string(3)},{"headRepository",pr.string(1)},{"headBranch",pr.string(2)}};
     if (kind == "failed_check") {
-        const auto head = pr.string(7);
-        if (head.empty() || head != field(event,"headSha")) return std::nullopt;
+        const auto head = field(event,"headSha");
+        if (head.empty()) return std::nullopt;
         target["headSha"] = head;
     }
     const auto& connectionEnvironment = destination.gatewayEnvironmentId.empty()
@@ -89,6 +88,17 @@ FROM journal WHERE task_id=? AND kind='git_pr_followup_requested' AND json_extra
         {message.bot,"git-pr/" + operation,std::move(requester),anchor,message.id,taskId,
             task.value("currentRevision",Id{}),task.at("generation"),true},
         operation,std::move(target),status};
+}
+
+bool Store::Impl::currentGitPrCheck(GitHost& host, const conversation::Message& message) {
+    const auto& event = message.routing.at("gitEvent");
+    const Decision status{"git_pr_status",
+        {{"host",event.at("host")},{"repo",event.at("repo")},{"prNumber",event.at("prNumber")}},{}};
+    // Webhook receipt order is not branch update order. Use the host's current head.
+    const auto result = gitConversationTool(&host,message,status,"git-pr-head/" + std::to_string(message.id));
+    if (!result.value("ok",false)) return false;
+    const auto& pr = result.at("data");
+    return field(pr,"state") == "open" && field(pr,"headSha") == field(event,"headSha");
 }
 
 std::string Store::Impl::gitPrFollowupInstruction(

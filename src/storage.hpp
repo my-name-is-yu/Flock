@@ -269,7 +269,8 @@ struct Store::Impl {
         Json target;
         Status status;
     };
-    std::optional<GitPrFollowup> gitPrFollowup(const conversation::Message&);
+    std::optional<GitPrFollowup> gitPrFollowup(const conversation::Message&, const IntakeResolver&);
+    bool currentGitPrCheck(GitHost&, const conversation::Message&);
     std::string gitPrFollowupInstruction(const conversation::Message&, const GitPrFollowup&, const Decision&) const;
     void recordGitPrFollowup(const conversation::Message&, const GitPrFollowup&);
     bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
@@ -405,7 +406,7 @@ struct Store::Impl {
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                   bool hasWebEvidence, T3&, std::stop_token);
+                                   const ConversationCallContext&);
     CallOutcome cancelDestinationRun(const conversation::Message&, int step, const Decision&, std::string_view key,
                                      bool offered, bool hasWebEvidence, std::stop_token);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&,
