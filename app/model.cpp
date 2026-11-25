@@ -551,11 +551,10 @@ user's language and refer to work by description, never by task, message, revisi
         "decision or fact cannot be resolved from the available context or through Session work. Answer a "
         "Session question with the exact current requestId and field IDs when the needed facts are available. "
         "A question for the user refers to work by its description and never cites task, run, or revision IDs.";
-    if (conversationRequest) instructions = conversationInstructions;
-    if (std::ranges::find(input.tools,"review_preference") != input.tools.end()) instructions += R"PROMPT(
-If the person directly states a lasting preference, correction, convention, or decision in event.text
-without explicitly asking you to remember it, call review_preference first. Continue handling the
-message after the review. Flock shows any automatic save in the conversation.
+    if (conversationRequest) instructions = std::string(conversationInstructions) + R"PROMPT(
+When review_preference is offered, call it before handling a lasting preference, correction, convention,
+or decision the person states directly in event.text without explicitly asking for a memory edit.
+Continue handling the message after the review. Flock shows any automatic save in the conversation.
 )PROMPT";
     if (input.event.value("kind","") == "private_memory_review") instructions = R"PROMPT(
 Decide whether the person's current message, event.text, by itself states a preference, correction,
