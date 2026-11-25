@@ -375,6 +375,23 @@ Bot Bots::get(std::string_view id) const {
     return configuredBot(id,readBotConfig(path(id) / "config.json"));
 }
 
+std::optional<Bot> Bots::tryGet(std::string_view id) const {
+    try {
+        return get(id);
+    } catch (const Conflict&) {
+        return std::nullopt;
+    } catch (const std::filesystem::filesystem_error&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<Store::PlannerModel> Bots::plannerModel(std::string_view id) const {
+    const auto bot = tryGet(id);
+    if (!bot) return std::nullopt;
+    return Store::PlannerModel{bot->settings.at("model").get<std::string>(),
+                               bot->settings.at("modelProvider").get<std::string>()};
+}
+
 std::string Bots::soul(std::string_view id) const {
     return readText(path(id) / "SOUL.md",maxBotRoleBytes,true);
 }
@@ -384,20 +401,11 @@ std::string Bots::initialMemory(std::string_view id) const {
 }
 
 std::vector<PeerBot> Bots::peers(std::string_view id) const {
-    const auto tryGetConfiguredBot = [this](std::string_view botId) -> std::optional<Bot> {
-        try {
-            return get(botId);
-        } catch (const Conflict&) {
-            return std::nullopt;
-        } catch (const std::filesystem::filesystem_error&) {
-            return std::nullopt;
-        }
-    };
-    const auto sender = tryGetConfiguredBot(id);
+    const auto sender = tryGet(id);
     if (!sender) return {};
     std::vector<PeerBot> result;
     for (const auto& peerId : sender->allowedBots) {
-        if (const auto peer = tryGetConfiguredBot(peerId))
+        if (const auto peer = tryGet(peerId))
             result.push_back({peer->name,peer->intake(""),peer->role});
     }
     return result;
