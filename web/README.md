@@ -157,13 +157,19 @@ The creator owns the Bot. A root identity can manage all Bots. Shared members
 can view and talk to their Bot and answer its Decision Inbox items. With Web
 identities configured, the owner manages members in Bot settings.
 
+In the Bot's settings, edit **How it runs** to choose **Reasoning effort**.
+The options follow the selected model and include **Model default**.
+
 `GET /api/bot-settings?bot=ID` returns settings visible to that person.
-`GET /api/settings/models?bot=ID` returns `{models: [{slug, displayName}]}`
-for the Bot owner and installation roots. An unavailable catalog returns
-`503` with `{"error":"models_unavailable"}`.
+`GET /api/settings/models?bot=ID` returns `models` and `fallbackReasoningEfforts`
+for the Bot owner and installation roots. Each model has `slug` and `displayName`,
+with `reasoningEfforts` when ChatGPT lists supported levels. An unavailable
+catalog returns `503` with `error: "models_unavailable"` and `fallbackReasoningEfforts`.
 `POST /api/bots/profile` accepts `botId` and any of `environmentId`,
-`projectId`, or `model` in one request. Omitted fields are preserved and an
-empty string clears the supplied field. Name, avatar, and role are saved separately.
+`projectId`, `model`, or `reasoningEffort` in one request. Omitted fields are
+preserved. An empty string clears the supplied field. Changing the model uses
+**Model default** unless the request also supplies an effort for the new model.
+Name, avatar, and role are saved separately.
 `POST /api/bot-settings/members` takes `botId`, `person` and boolean `add`.
 `POST /api/bot-settings/secret` accepts `botId`, `requestId` and `value`.
 Mutations use the usual same-origin JSON headers. Fulfilled secret values
