@@ -212,6 +212,10 @@ when available.
 
 ## Memory and automation
 
+If the Bot's local configuration enables `shareMemoryWithSessions`, T3 Sessions
+receive notes from the Bot's memory. Anyone with read access to the Session
+can see the notes in its history.
+
 When you tell a Bot you manage about a lasting preference, correction,
 convention, or decision, it can update its private memory. The memory review
 sees only your direct message and the Bot's existing private memory.

@@ -94,6 +94,12 @@ playbooks use an explicit document ID and the applicable `shared_memory` rules.
 
 Ask a Bot in its conversation to manage a schedule or reminder or follow up on a webhook.
 
+Set `"shareMemoryWithSessions": true` in a Bot's `config.json` to send its memory
+with work instructions. Session history retains the notes and makes them
+available to anyone with read access to that Session. Flock redacts protected
+values and trims the notes to fit after the work instruction. Follow-ups
+include changed notes or a longer excerpt when more space is available.
+
 ## Connect and run
 
 ```sh
