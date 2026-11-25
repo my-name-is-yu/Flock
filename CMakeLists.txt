@@ -99,6 +99,8 @@ if(BUILD_TESTING)
     "An unreadable Bot's notes wait held the shared project slot")
   flock_replay_model(automation_notes_retry_historical verify-automation-routing --historical=notes-retry
     "A retried notes wait overtook work already active in the shared project")
+  flock_replay_model(automation_notes_edit_historical verify-automation-routing --historical=notes-edit
+    "An edited automation stayed outside the queue after the project became idle")
 
   add_executable(flock_workflow_context tests/workflow_context.cpp)
   target_link_libraries(flock_workflow_context PRIVATE flock_core)

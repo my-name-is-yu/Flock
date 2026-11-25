@@ -102,8 +102,10 @@ def delivery_failure(_before, after):
 
 class Phase(Enum):
     QUEUED = auto()
+    EDIT_QUEUED = auto()
     DECIDING = auto()
     NOTES_WAIT = auto()
+    EDIT_WAIT = auto()
     MODEL_FAILURE_WAIT = auto()
     DISPATCH_UNCONFIRMED = auto()
     RUNNING = auto()
@@ -119,9 +121,9 @@ class Project:
 
 
 def project_owner(state):
-    candidates = [(phase == Phase.QUEUED, order, bot)
+    candidates = [(phase in (Phase.QUEUED, Phase.EDIT_QUEUED), order, bot)
                   for order, (bot, phase) in enumerate(((Bot.AFFECTED, state.affected), (Bot.HEALTHY, state.healthy)))
-                  if phase not in (Phase.NOTES_WAIT, Phase.SETTLED)]
+                  if phase not in (Phase.NOTES_WAIT, Phase.EDIT_WAIT, Phase.SETTLED)]
     return min(candidates)[2] if candidates else None
 
 
@@ -135,6 +137,11 @@ def project_steps(state, historical):
             yield "Retry the older task directly into planning", replace(state, affected=Phase.DECIDING)
         else:
             yield "Retry the older task through the project queue", replace(state, affected=Phase.QUEUED)
+        if state.notes_readable:
+            if historical == "notes-edit":
+                yield "Save the edit while leaving the older task outside the queue", replace(state, affected=Phase.EDIT_WAIT)
+            else:
+                yield "Save the edit and requeue the older task", replace(state, affected=Phase.EDIT_QUEUED)
 
     owner = project_owner(state)
     if owner is None:
@@ -155,6 +162,7 @@ def project_steps(state, historical):
     if phase == Phase.MODEL_FAILURE_WITH_RUN and state.notes_readable:
         yield "Retry the active Run's question without releasing its slot", replace(state, affected=Phase.RUNNING)
     transition = {
+        Phase.EDIT_QUEUED: ("Apply the saved edit before planning", Phase.QUEUED),
         Phase.QUEUED: ("Start planning", Phase.DECIDING),
         Phase.DECIDING: ("Send work without confirmed acceptance", Phase.DISPATCH_UNCONFIRMED),
         Phase.DISPATCH_UNCONFIRMED: ("Confirm a Run", Phase.RUNNING),
@@ -167,6 +175,8 @@ def project_steps(state, historical):
 
 def project_failure(before, after):
     owner = project_owner(after)
+    if after.affected in (Phase.EDIT_WAIT, Phase.EDIT_QUEUED) and after.healthy == Phase.SETTLED and owner != Bot.AFFECTED:
+        return "An edited automation stayed outside the queue after the project became idle"
     if after.affected in (Phase.NOTES_WAIT, Phase.MODEL_FAILURE_WAIT):
         expected = None if after.healthy == Phase.SETTLED else Bot.HEALTHY
         if owner != expected:
@@ -200,7 +210,7 @@ def explore(name, initial, steps, failure):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--historical", choices=("workspace", "scheduler", "webhook", "notes", "notes-retry"))
+    parser.add_argument("--historical", choices=("workspace", "scheduler", "webhook", "notes", "notes-retry", "notes-edit"))
     historical = parser.parse_args().historical
     if historical in (None, "workspace"):
         if result := explore("workspace save", Workspace(), lambda state: workspace_steps(state, bool(historical)),
@@ -212,7 +222,7 @@ def main():
         if result := explore(kind, Delivery(), lambda state: delivery_steps(state, bool(historical), kind == "scheduler"),
                              delivery_failure):
             return result
-    if historical in (None, "notes", "notes-retry"):
+    if historical in (None, "notes", "notes-retry", "notes-edit"):
         return explore("shared project notes recovery", Project(), lambda state: project_steps(state, historical),
                        project_failure)
     return 0
