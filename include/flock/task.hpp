@@ -1,5 +1,8 @@
 #pragma once
 
+#include "flock/outbox_instruction.hpp"
+#include "flock/run_report.hpp"
+#include "flock/session_ref.hpp"
 #include "flock/wait.hpp"
 
 #include <nlohmann/json.hpp>
@@ -24,6 +27,20 @@ struct PendingDestination {
     bool pinned;
 };
 
+enum class RunStopIntent { cancel, replan };
+
+struct RunStop {
+    RunStopIntent intent;
+    std::optional<AssignedRun> run;
+    std::optional<std::int64_t> retryAt{}, reconcileAt{};
+};
+
+struct PendingRunReport {
+    SettledRunReport report;
+    std::int64_t retryAt;
+    int attempts;
+};
+
 struct TaskData {
     std::int64_t id = 0, generation = 0;
     TaskState state = TaskState::queued;
@@ -31,6 +48,19 @@ struct TaskData {
     std::optional<std::string> gatewayEnvironmentId{};
     std::optional<PendingDestination> pendingDestination{};
     std::optional<std::int64_t> currentRevision{};
+    std::string actionId{};
+    std::int64_t eventId = 0, deadline = 0;
+    std::optional<AssignedRun> activeRun{}, lastRun{};
+    std::optional<RunStop> runStop{};
+    bool replanning = false, queuedInT3 = false, cancelledByBotPause = false;
+    std::optional<std::string> replanningDetail{}, cancellationDetail{};
+    std::vector<OutboxInstruction> cancelledInstructions{};
+    std::optional<PendingRunReport> pendingRunReport{};
+    std::optional<std::int64_t> pendingStageReport{}, sessionReconcileAt{}, workflowReconcileAt{};
+    std::optional<WorkSession> selectedSession{};
+    std::optional<SessionOrigin> sessionOrigin{};
+    bool newSessionRequired = false, freshContextRequested = false;
+    std::optional<std::string> launchWarning{};
     nlohmann::json config = nlohmann::json::object();
     nlohmann::json rest = nlohmann::json::object();
 };

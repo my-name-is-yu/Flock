@@ -16,4 +16,11 @@ struct RunAssignment {
     std::optional<std::int64_t> revisionId;
     bool operator==(const RunAssignment&) const = default;
 };
+
+struct AssignedRun {
+    RunRef ref;
+    std::string environmentId;
+    RunAssignment assignment;
+    bool operator==(const AssignedRun&) const = default;
+};
 }

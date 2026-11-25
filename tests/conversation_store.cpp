@@ -151,7 +151,7 @@ struct RuntimeFixture {
 
     void finish(Store& store, Id id, std::string result) {
         reach(store, id, "running");
-        const auto run = store.task(id).task.rest.at("activeRun").at("runId").get<std::string>();
+        const auto run = store.task(id).task.activeRun.value().ref.runId;
         t3.observations[run] = {.kind = Observation::Kind::Finished,
                                 .status = "completed",
                                 .report = std::move(result),
@@ -321,10 +321,10 @@ void missingToolCannotBeAddedAfterInferenceStarts() {
     store.setRootPeople({localOwner.id});
     const auto id = task(store, "Prepare a local Session");
     execution.reach(store, id, "running");
-    const auto run = store.task(id).task.rest.at("activeRun");
+    const auto run = store.task(id).task.activeRun.value().ref;
     const Decision request{"request_local_machine_connection",
-                           {{"threadId", run.at("threadId")},
-                            {"runId", run.at("runId")},
+                           {{"threadId", run.threadId},
+                            {"runId", run.runId},
                             {"machineId", "fixture-machine"},
                             {"rules", Json::array({{{"operation", "read_file"}, {"path", fixture.database().string()}}})}},
                            "Request local access"};
@@ -692,8 +692,8 @@ void shutdownLeavesAnUnsentRunReadyForRestart() {
         allow.set_value();
         check(ready, "The task worker did not reach preflight");
     }
-    check(store.task(id).task.state == TaskState::sending && store.task(id).task.rest["activeRun"].is_null(),
-          "A blocked worker launched a Run after shutdown");
+    const auto pending = store.task(id).task;
+    check(pending.state == TaskState::sending && !pending.activeRun, "A blocked worker launched a Run after shutdown");
     RuntimeFixture execution(store);
     execution.reach(store, id, "running");
     check(execution.t3.launches == 1, "The unsent action could not launch once after restart");

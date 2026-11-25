@@ -94,6 +94,12 @@ Json runView(const Json& run, std::string_view environment) {
     return runView(environment, field(run, "threadId"), field(run, "runId"), field(run, "link"));
 }
 
+Json runView(const std::optional<AssignedRun>& run, std::string_view environment) {
+    if (!run) return nullptr;
+    if (!run->environmentId.empty()) environment = run->environmentId;
+    return runView(environment, run->ref.threadId, run->ref.runId, run->ref.link);
+}
+
 Json avatarView(const Json& source, std::string_view botId) {
     Json view = Json::object();
     copyFields(view, source, {"kind", "example", "icon", "color", "eyeColor", "filename", "version"});
@@ -260,13 +266,14 @@ std::string_view displayState(TaskState state, bool replanning = false, bool que
 }
 
 std::string_view displayState(const TaskData& task) {
-    return displayState(task.state, task.rest.value("replanning", false), task.rest.value("queuedInT3", false));
+    return displayState(task.state, task.replanning, task.queuedInT3);
 }
 
 Json taskSummary(const TaskData& task) {
     Json result = {{"state", displayState(task)}, {"id", task.id}, {"request", task.request}, {"generation", task.generation}};
     if (task.currentRevision) result["currentRevision"] = *task.currentRevision;
-    copyFields(result, task.rest, {"deadline", "createdAt", "workflowId", "stageId", "inputArtifactVersion"});
+    result["deadline"] = task.deadline;
+    copyFields(result, task.rest, {"createdAt", "workflowId", "stageId", "inputArtifactVersion"});
     return result;
 }
 
@@ -296,7 +303,7 @@ Json currentWait(const TaskData& task, const Wait& wait) {
             std::ranges::find_if(results, [&](const Json& item) { return field(item, "actionId") == verification->actionId; });
         if (saved != results.end()) run = runView(*saved, env);
     }
-    if (run.is_null()) run = runView(task.rest.at("lastRun"), env);
+    if (run.is_null()) run = runView(task.lastRun, env);
     return result;
 }
 
@@ -304,7 +311,7 @@ Json sessionGroup(const TaskView& view) {
     const auto& task = view.task;
     auto sessions = Json::array();
     const auto& env = task.environmentId;
-    const auto& activeRun = task.rest.at("activeRun");
+    const auto& activeRun = task.activeRun;
     const auto& runs = view.runs;
     std::set<std::pair<std::string, std::string>> seen;
     for (auto run = runs.rbegin(); run != runs.rend(); ++run) {
@@ -312,7 +319,7 @@ Json sessionGroup(const TaskView& view) {
         if (session.is_null()) continue;
         const auto thread = field(session, "threadId");
         if (!seen.emplace(field(session, "environmentId"), thread).second) continue;
-        const bool active = field(*run, "runId") == field(activeRun, "runId") && thread == field(activeRun, "threadId") &&
+        const bool active = activeRun && field(*run, "runId") == activeRun->ref.runId && thread == activeRun->ref.threadId &&
                             field(session, "environmentId") == env;
         session["state"] = active ? displayState(task) : run->value("status", "ended");
         if (task.rest.contains("runResults")) {
@@ -383,7 +390,7 @@ Json activity(const std::vector<Store::ActiveTask>& activeTasks, std::string_vie
             }
             result["parallelTasks"].push_back({{"id", task.id}, {"runs", std::move(checks)}});
         }
-        auto active = runView(task.rest.at("activeRun"), task.environmentId);
+        auto active = runView(task.activeRun, task.environmentId);
         if (!active.is_null()) {
             active["taskId"] = task.id;
             active["request"] = task.request;

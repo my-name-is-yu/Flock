@@ -1,6 +1,7 @@
 #pragma once
 
 #include "flock/core.hpp"
+#include "flock/outbox_instruction.hpp"
 
 namespace flockv0 {
 enum class OutboxPhase { ready, started, accepted, closed, superseded };
@@ -31,28 +32,6 @@ struct OutboxCommit {
 struct OutboxContext {
     std::optional<Id> answerEventId, sourceMessageId;
     std::optional<std::string> peerMessageId;
-};
-
-struct OutboxSourceRun {
-    std::string threadId, runId;
-    std::optional<std::string> environmentId, gatewayEnvironmentId, link, itemId, status;
-    std::optional<RunAssignment> assignment;
-};
-
-struct OutboxSource {
-    Id taskId, messageId;
-    std::optional<Id> revisionId;
-    std::optional<std::string> text, stageId, artifactVersion, resultRunId;
-    std::optional<OutboxSourceRun> run;
-};
-
-struct OutboxInstruction {
-    Id messageId;
-    int step;
-    std::string text;
-    std::optional<Id> revisionId;
-    bool conflicting;
-    std::optional<OutboxSource> source;
 };
 
 struct SessionMemory {

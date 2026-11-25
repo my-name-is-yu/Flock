@@ -305,7 +305,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
         throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
     if (selectedSession) {
         if (!environment.empty() || resume) throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
-        destinations.primary = {selectedSession->environmentId, selectedSession->projectId, {}};
+        destinations.primary = {selectedSession->target.environmentId, selectedSession->projectId, {}};
     } else
         destinations.primary = environment.empty() ? taskRoute(bot, routing, environment) : routeForName(environment);
     if (destinations.primary.environmentId.empty())

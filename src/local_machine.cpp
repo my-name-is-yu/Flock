@@ -251,10 +251,10 @@ FROM local_machine_connections c JOIN tasks t ON t.id=c.task_id WHERE c.id=?
     if (approve) {
         const auto machine = p_->localMachines.find(row.string(1));
         const auto task = decodeTaskRow(row, 6);
-        const auto& active = task.rest.at("activeRun");
+        const auto& active = task.activeRun;
         if (machine == p_->localMachines.end() || machine->second->owner() != actor.id ||
-            (task.state != TaskState::running && task.state != TaskState::waiting) || field(active, "threadId") != row.string(4) ||
-            field(active, "runId").empty() || task.environmentId != row.string(5))
+            (task.state != TaskState::running && task.state != TaskState::waiting) || !active || active->ref.threadId != row.string(4) ||
+            active->ref.runId.empty() || task.environmentId != row.string(5))
             throw Conflict("Session or machine is no longer active");
     }
     p_->exec("UPDATE local_machine_connections SET status=?,decided_by=?,decided_at=? WHERE id=?",

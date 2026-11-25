@@ -408,12 +408,12 @@ void replannedTaskDropsPriorRun() {
     check(mcp.success(statusTool, task).at("sessionLink") == releaseLink, "The initial Run was not active");
     store.receive(localOwner, cb.intake("release", ""), "revise-scope", "Include internal changes too");
     runtime.runConversations();
-    check(store.task(model.taskId).task.rest.value("replanning", false) && mcp.success(statusTool, task).at("sessionLink").is_null(),
+    check(store.task(model.taskId).task.replanning && mcp.success(statusTool, task).at("sessionLink").is_null(),
           "The old Run was still linked during replanning");
     t3.observations["thread-release"] = {.kind = Observation::Kind::Finished, .status = "stopped", .report = "Stopped"};
     tick(runtime, 2);
     const auto current = store.task(model.taskId).task;
-    check(!current.rest.value("replanning", false) && current.rest.at("lastRun").at("revisionId") != current.currentRevision.value() &&
+    check(!current.replanning && current.lastRun.value().assignment.revisionId != current.currentRevision &&
               mcp.success(statusTool, task).at("sessionLink").is_null(),
           "A settled Run for the old revision was linked");
 }
@@ -428,7 +428,6 @@ void hostedSessionLinks() {
 
     const Json loopbackSession{{"environmentId", "build.prod"}, {"threadId", "loopback~nightly"}, {"link", loopbackUrl}};
     TaskView task;
-    task.task.rest["activeRun"] = nullptr;
     task.runs = Json::array({loopbackSession, hostedSession});
     const std::vector tasks{std::move(task)};
     TestDirectory dir;

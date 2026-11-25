@@ -296,7 +296,7 @@ public:
             return {};
         }
         if (!metadata) return {};
-        WorkSession result{target.environmentId, target.threadId, std::move(metadata->projectId)};
+        WorkSession result{{target.environmentId, target.threadId, {}}, std::move(metadata->projectId)};
         std::lock_guard lock(store_.mutex);
         if (!permitted(*session) || !store_.permitsWorkSession(message_, result)) return {};
         return result;
@@ -709,17 +709,18 @@ std::optional<WorkSession> Store::Impl::resolveWorkSession(const conversation::M
 }
 
 bool Store::Impl::permitsWorkSession(const conversation::Message& message, const WorkSession& session) {
-    if (!humanSessionRequest(message) || session.projectId.empty() || session.threadId.empty()) return false;
+    const auto& environment = session.target.environmentId;
+    const auto& thread = session.target.threadId;
+    if (!humanSessionRequest(message) || session.projectId.empty() || thread.empty()) return false;
     std::lock_guard lock(mutex);
     Policy policy(*this);
     if (!policy.allows(turnActor(message), Action::bot_decide, message.bot) ||
-        !policy.allows(message.bot, Action::environment_inspect, session.environmentId) ||
-        !policy.allows(message.bot, Resource::sessionRead(session.environmentId, session.threadId)) ||
-        !query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {session.environmentId}).next())
+        !policy.allows(message.bot, Action::environment_inspect, environment) ||
+        !policy.allows(message.bot, Resource::sessionRead(environment, thread)) ||
+        !query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next())
         return false;
-    if (connectedSessionAccess(message, {session.environmentId, session.threadId})) return true;
-    return field(message.routing, "projectId") == session.projectId &&
-           configuredSessionEnvironments(message.routing).contains(session.environmentId);
+    if (connectedSessionAccess(message, {environment, thread, {}})) return true;
+    return field(message.routing, "projectId") == session.projectId && configuredSessionEnvironments(message.routing).contains(environment);
 }
 
 bool Store::Impl::permitsWorkSession(Id sourceMessageId, const WorkSession& session) {

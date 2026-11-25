@@ -125,9 +125,8 @@ bool repositoryAccess(const Policy& policy, GitHost& host, const GitContext& con
 }
 
 GitContext taskGitContext(const TaskData& task) {
-    const auto active = task.rest.value("activeRun", Json(nullptr));
-    return {task.id, task.botId, task.environmentId, task.projectId,
-            runRef(active.is_null() ? task.rest.value("lastRun", Json(nullptr)) : active)};
+    const auto& run = task.activeRun ? task.activeRun : task.lastRun;
+    return {task.id, task.botId, task.environmentId, task.projectId, run ? run->ref : RunRef{}};
 }
 
 Json readTarget(const Decision& decision, std::string_view host, std::string_view repo = {}) {

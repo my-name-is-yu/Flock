@@ -344,10 +344,9 @@ const std::vector<std::pair<std::string, Scenario>> scenarios{
      [](Scene& s) {
          s.task("Inventory test fixtures", "inventory");
          const auto id = s.task("Compare three rollout plans", "plans");
-         s.t3.finish(s.store.task(id).task.rest.at("activeRun").at("runId").get<std::string>(),
-                     "1. Use rollout_global for a big bang release\n"
-                     "2. Use rollout_canary for 5% of users for a day, then everyone\n"
-                     "3. Use rollout_team to enable one team at a time");
+         s.t3.finish(s.store.task(id).task.activeRun.value().ref.runId, "1. Use rollout_global for a big bang release\n"
+                                                                        "2. Use rollout_canary for 5% of users for a day, then everyone\n"
+                                                                        "3. Use rollout_team to enable one team at a time");
          s.reach(id, "completed");
          const auto turn = s.send("Explain the second option in more detail and include its rollout flag name");
          checkActions(s, turn, {});

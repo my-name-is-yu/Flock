@@ -573,7 +573,7 @@ void missingStageReportCannotAdvanceWorkflow() {
         f.ticks(1);
         const auto pending = f.status();
         const Id task = pending["stages"][0]["taskId"];
-        require(f.store->task(task).task.rest["activeRun"].is_null() && pending["stages"][0]["lastConfirmedState"] == "completed" &&
+        require(!f.store->task(task).task.activeRun && pending["stages"][0]["lastConfirmedState"] == "completed" &&
                     pending["stages"][0]["needsAttention"] == true && pending["stages"][1]["taskId"] == 0 && pending["artifacts"].empty(),
                 "workflow either lost settlement or advanced without the stage report");
         if (recover)

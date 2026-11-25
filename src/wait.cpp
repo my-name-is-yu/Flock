@@ -78,18 +78,14 @@ Json waitRunJson(const std::optional<WaitRun>& run) {
     if (!run) return nullptr;
     auto result = runJson(run->run);
     if (run->environmentId) result["environmentId"] = *run->environmentId;
-    encodeRunAssignment(result, run->assignment);
+    if (run->assignment) encodeRunAssignment(result, *run->assignment);
     return result;
 }
 
 std::optional<WaitRun> taskWaitRun(const TaskData& task) {
-    const auto& run = task.rest.at("activeRun");
-    if (run.is_null()) return std::nullopt;
-    const auto revision = run.at("revisionId");
-    return WaitRun{
-        {run.at("threadId"), run.at("runId"), run.at("link"), run.value("gatewayEnvironmentId", std::string{})},
-        run.at("environmentId").get<std::string>(),
-        RunAssignment{run.at("ownerBotId"), run.at("projectId"), revision.is_null() ? std::nullopt : std::optional{revision.get<Id>()}}};
+    if (!task.activeRun) return std::nullopt;
+    const auto& run = *task.activeRun;
+    return WaitRun{run.ref, run.environmentId, run.assignment};
 }
 
 Json to_json(const Wait& wait) {
@@ -195,7 +191,8 @@ WaitDetails readWaitDetails(const RecordDecoder& decoder, const Json& data, Wait
 
 std::optional<WaitRun> decodeRun(const RecordDecoder& decoder, const Json& data) {
     if (data.is_null()) return std::nullopt;
-    WaitRun run{decodeRunRef(data, decoder), decoder.optional<std::string>(data, "environmentId"), decodeRunAssignment(data, decoder)};
+    WaitRun run{decodeRunRef(data, decoder), decoder.optional<std::string>(data, "environmentId"),
+                decodeOptionalRunAssignment(data, decoder)};
     if (run.assignment && !run.environmentId) decoder.fail("environmentId", "missing required key");
     return run;
 }

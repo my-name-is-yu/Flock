@@ -109,14 +109,14 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
             status = "unreachable";
         else if (taskState == TaskState::cancelling)
             status = "stop_requested";
-        const auto active = task ? task->rest.value("activeRun", Json(nullptr)) : Json(nullptr);
-        const auto run = active.is_object() ? active : task ? task->rest.value("lastRun", Json(nullptr)) : Json(nullptr);
+        const bool active = task && task->activeRun;
+        const auto run = task ? assignedRunJson(active ? task->activeRun : task->lastRun) : Json(nullptr);
         const bool exceeded = !closed(status) && rows.number(5) > 0 && (now >= rows.number(5) || rows.number(10));
         const bool outdated = closed(status) && rows.number(14);
         const bool needs = outdated || exceeded || status == "failed" || status == "unreachable" || taskState == TaskState::waiting ||
-                           (task && task->rest.contains("pendingRunReport"));
+                           (task && task->pendingRunReport);
         const bool childSettled = !task || terminal(*task);
-        finished &= closed(status) && childSettled && active.is_null() && !rows.number(16);
+        finished &= closed(status) && childSettled && !active && !rows.number(16);
         attention |= needs;
         failed |= (status == "failed" && !outdated) || status == "stopped";
         stale |= outdated;
@@ -374,8 +374,8 @@ void Store::Impl::stageObservation(const TaskData& task, const Observation& obse
 
 bool Store::Impl::settleStageReport(TaskData& task) {
     if (task.state != TaskState::cancelling && conversationPending(task.botId)) return false;
-    const Id reportId = task.rest.at("pendingStageReport");
-    task.rest.erase("pendingStageReport");
+    const Id reportId = task.pendingStageReport.value();
+    task.pendingStageReport.reset();
     const auto id = task.rest.at("workflowId");
     const auto stage = task.rest.at("stageId");
     auto row = query("SELECT s.spec,s.input,j.data FROM workflow_stages s JOIN journal j ON j.id=? AND j.task_id=s.task_id"
@@ -406,8 +406,7 @@ bool Store::Impl::settleStageReport(TaskData& task) {
         }
     } else if (ok)
         output = pin;
-    if (task.state == TaskState::cancelling || task.rest.value("replanning", false) ||
-        !task.rest.value("pendingInstructions", Json::array()).empty())
+    if (task.state == TaskState::cancelling || task.replanning || !task.rest.value("pendingInstructions", Json::array()).empty())
         return true;
     exec("UPDATE workflow_stages SET status=?,output=?,result_id=? WHERE workflow_id=? AND stage_id=?",
          {ok ? "completed" : "failed", output, reportId, id, stage});

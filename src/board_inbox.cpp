@@ -340,7 +340,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (review.number(2) != (kind == pr_reconciliation) || item.waitId || task.currentRevision.value_or(0) != item.targetRevision ||
             task.generation != item.targetGeneration)
             throw RequestChanged{};
-        if (kind == pr_review && (review.number(0) != item.targetRevision || task.rest.value("replanning", false))) throw RequestChanged{};
+        if (kind == pr_review && (review.number(0) != item.targetRevision || task.replanning)) throw RequestChanged{};
         if (kind == pr_reconciliation)
             p_->decideGitPr(item, decision, data, task);
         else {

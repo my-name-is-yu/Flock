@@ -118,13 +118,6 @@ struct Question {
 std::string_view trimSessionQuestionText(std::string_view text);
 // Validate a model answer against the observed fields and encode it for Session submission.
 Json sessionQuestionAnswers(const Json& fields, const Json& answers);
-struct RunEvidence {
-    enum class Availability { Available, ReportUnavailable, DiagnosticUnavailable };
-    Availability availability = Availability::Available;
-    std::string report, itemId, detail;
-    bool truncated = false;
-    std::string sessionCreatedAt{};
-};
 struct Observation {
     enum class Kind { Running, Question, ExternalInput, Settling, Finished, Unavailable } kind = Kind::Running;
     Question question;
@@ -138,15 +131,6 @@ struct Observation {
 };
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
 
-struct SessionTarget {
-    std::string environmentId, threadId;
-    std::string gatewayEnvironmentId;
-    bool operator==(const SessionTarget&) const = default;
-};
-struct SessionOrigin {
-    SessionTarget target;
-    std::string title;
-};
 enum class CommandTool { none, delegate, start_in_session, follow_up, answer_session_question, message_session };
 std::string_view commandToolName(CommandTool);
 std::optional<CommandTool> commandToolFromName(std::string_view);

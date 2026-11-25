@@ -157,8 +157,7 @@ const char* Store::Impl::questionAnswerError(const TaskData& task, const Message
     if (asked >= message.id) return "That question opened after this message was sent, so this message cannot answer it";
     if (message.replyTo && (!message.question || message.question->messageId != asked))
         return "This message replies to something else, so it can only answer the question it replies to";
-    if (!asked || wait->run != taskWaitRun(task) || wait->eventId != task.rest.value("eventId", Id{0}))
-        return "That question is no longer current";
+    if (!asked || wait->run != taskWaitRun(task) || wait->eventId != task.eventId) return "That question is no longer current";
     if (replanReady(task)) return "The task is replanning, so this question will close. Its Bot asks again if it still needs to know";
     return nullptr;
 }
@@ -170,9 +169,9 @@ Json Store::Impl::taskState(const TaskData& task, const Message& message, bool f
     Json view = {{"generation", task.generation},
                  {"revisionId", task.currentRevision.value_or(0)},
                  {"state", taskStateName(task.state)},
-                 {"replanning", task.rest.value("replanning", false)},
+                 {"replanning", task.replanning},
                  {"wait", std::move(wait)}};
-    if (task.rest.value("queuedInT3", false)) view["queuedInT3"] = true;
+    if (task.queuedInT3) view["queuedInT3"] = true;
     if (task.rest.contains("runTargets") || task.rest.contains("runResults")) {
         if (task.rest.contains("requestedCommit")) view["requestedCommit"] = task.rest.at("requestedCommit");
         if (task.rest.contains("runOutcome")) view["runOutcome"] = task.rest.at("runOutcome");
@@ -195,14 +194,13 @@ Json Store::Impl::taskState(const TaskData& task, const Message& message, bool f
             }
         }
     }
-    const auto taskOrigin = task.rest.value("sessionOrigin", Json::object());
-    const auto turnOrigin = message.routing.value("sessionOrigin", Json::object());
-    if (!taskOrigin.empty() && !turnOrigin.empty() && taskOrigin.at("environmentId") == turnOrigin.at("environmentId") &&
-        taskOrigin.at("threadId") == turnOrigin.at("threadId")) {
-        const auto& run = task.rest.at("activeRun").is_object() ? task.rest.at("activeRun") : task.rest.at("lastRun");
-        if (run.is_object() && !task.rest.contains("selectedSession"))
-            view["session"] = {{"environmentId", run.at("environmentId")}, {"threadId", run.at("threadId")}};
-        if (task.rest.contains("launchWarning")) view["launchWarning"] = task.rest.at("launchWarning");
+    if (const auto origin = message.routing.find("sessionOrigin");
+        task.sessionOrigin && origin != message.routing.end() &&
+        origin->at("environmentId") == Json(task.sessionOrigin->target.environmentId) &&
+        origin->at("threadId") == Json(task.sessionOrigin->target.threadId)) {
+        const auto& run = task.activeRun ? task.activeRun : task.lastRun;
+        if (run && !task.selectedSession) view["session"] = {{"environmentId", run->environmentId}, {"threadId", run->ref.threadId}};
+        if (task.launchWarning) view["launchWarning"] = *task.launchWarning;
     }
     const auto project = [&](const char* key, const std::string& value, std::size_t limit) {
         view[key] = fullContract ? value : bounded(value, limit);
@@ -357,9 +355,8 @@ ORDER BY id DESC LIMIT 1
         const auto task = load(taskId);
         Json view = {{"taskId", taskId}, {"request", bounded(task.request, 800)}, {"environmentId", task.environmentId}};
         view.update(taskState(task, message));
-        if (!localMachines.empty() && task.rest.value("activeRun", Json()).is_object())
-            view["activeSession"] = {{"threadId", field(task.rest.at("activeRun"), "threadId")},
-                                     {"runId", field(task.rest.at("activeRun"), "runId")}};
+        if (!localMachines.empty() && task.activeRun)
+            view["activeSession"] = {{"threadId", task.activeRun->ref.threadId}, {"runId", task.activeRun->ref.runId}};
         if (task.rest.contains("sourceTaskId")) view["sourceTaskId"] = task.rest.at("sourceTaskId");
         if (auto result = latestResult(taskId); !result.is_null()) view["latestResult"] = std::move(result);
         tasks.push_back(std::move(view));

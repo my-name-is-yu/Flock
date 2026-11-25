@@ -27,10 +27,6 @@ struct ModelBudget {
     Id initialLimit;
 };
 
-struct WorkSession {
-    std::string environmentId, threadId, projectId;
-};
-
 class StorageError : public std::runtime_error {
 public:
     explicit StorageError(sqlite3* db);

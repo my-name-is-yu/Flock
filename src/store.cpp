@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "task_storage.hpp"
+#include "outbox_storage.hpp"
 #include "flock/session_settings.hpp"
 
 #include <algorithm>
@@ -102,8 +103,8 @@ RunRef runRef(const Json& data) {
 
 Json questionTarget(const TaskData& task, Id waitId) {
     return {{"waitId", waitId ? Json(waitId) : Json(nullptr)},
-            {"eventId", task.rest.at("eventId")},
-            {"run", task.rest.at("activeRun")},
+            {"eventId", task.eventId},
+            {"run", assignedRunJson(task.activeRun)},
             {"requestId", field(task.rest.at("question"), "requestId")}};
 }
 
@@ -199,7 +200,7 @@ bool Store::Impl::recipientRouteWouldCycle(Id task, std::string_view environment
 }
 
 bool Store::Impl::replanReady(const TaskData& task) const {
-    if (!task.rest.value("replanning", false)) return false;
+    if (!task.replanning) return false;
     std::lock_guard lock(mutex);
     const Id id = task.id;
     const auto peer = peerExchange(id);
@@ -220,14 +221,14 @@ void Store::Impl::requestCancellation(TaskData& task, SessionStop stop) {
     const auto peer = peerExchange(id);
     const bool undispatched = task.state == TaskState::queued || isUndispatchedNotesWait(task);
     if (!task.rest.value("pendingInstructions", Json::array()).empty())
-        task.rest["cancelledInstructions"] = task.rest.at("pendingInstructions");
+        task.cancelledInstructions = taskInstructions(task.rest.at("pendingInstructions"), task.id);
     clearWait(task, "cancel");
     consumeEvent(task);
     journal(id, "cancel_requested",
             stop.participation ? Json{{"sessionParticipationId", stop.participation}, {"sessionStopId", stop.cutoff}} : Json::object());
     if (undispatched && !peer) {
         task.pendingDestination.reset();
-        task.rest.erase("replanning");
+        task.replanning = false;
         task.rest.erase("pendingInstructions");
         task.state = TaskState::cancelled;
         journal(id, "cancelled", Json::object());
@@ -253,11 +254,11 @@ Id Store::Impl::event(TaskData& task, std::string_view key, Json data) {
     exec("INSERT OR IGNORE INTO events(task_id,dedupe,data) VALUES(?,?,?)", {task.id, key, data});
     if (!sqlite3_changes(db)) return 0;
     const auto id = last();
-    task.rest["eventId"] = id;
+    task.eventId = id;
     return id;
 }
 Json Store::Impl::currentEvent(const TaskData& task) const {
-    const auto id = task.rest.value("eventId", Id{0});
+    const auto id = task.eventId;
     auto row = query("SELECT data,failures,retry_at,evidence,consumed FROM events WHERE id=? AND task_id=?", {id, task.id});
     if (!row.next()) return nullptr;
     auto result = row.json(0);
@@ -269,8 +270,8 @@ Json Store::Impl::currentEvent(const TaskData& task) const {
     return result;
 }
 void Store::Impl::consumeEvent(const TaskData& task) {
-    releaseModelCall(takeReservedTaskCall(task.rest.at("eventId")));
-    exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=? AND consumed=0", {task.rest["eventId"], task.id});
+    releaseModelCall(takeReservedTaskCall(task.eventId));
+    exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=? AND consumed=0", {task.eventId, task.id});
 }
 std::optional<Wait> Store::Impl::currentWait(Id task) const {
     auto row = query("SELECT id,data FROM waits WHERE task_id=? AND resolution IS NULL", {task});
@@ -293,13 +294,13 @@ Id Store::Impl::wait(TaskData& task, WaitDetails details, std::string text, std:
 
 Id Store::Impl::wait(TaskData& task, Wait waiting) {
     clearWait(task, "superseded");
-    waiting.eventId = task.rest.value("eventId", Id{});
+    waiting.eventId = task.eventId;
     if (!waiting.run && waiting.reason() == WaitReason::unknown_delivery) {
         const auto action = outbox(task);
         if (action && action->command.candidate && !action->command.candidate->link.empty())
             waiting.run = WaitRun{*action->command.candidate};
     }
-    if (task.rest.contains("actionId")) waiting.actionId = task.rest.at("actionId").get<std::string>();
+    waiting.actionId = task.actionId;
     auto data = to_json(waiting);
     exec("INSERT INTO waits(task_id,data) VALUES(?,?)", {task.id, data});
     const auto id = last();
@@ -493,15 +494,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
                   .projectId = item.projectId,
                   .doneWhen = {},
                   .config = item.config,
-                  .rest = {{"createdAt", unixTime()},
-                           {"remaining", initialWorkAllowance},
-                           {"additionalUsed", 0},
-                           {"eventId", 0},
-                           {"actionId", ""},
-                           {"deadline", 0},
-                           {"activeRun", nullptr},
-                           {"lastRun", nullptr},
-                           {"question", nullptr}}};
+                  .rest = {{"createdAt", unixTime()}, {"remaining", initialWorkAllowance}, {"additionalUsed", 0}, {"question", nullptr}}};
     if (sourceMessageId) task.rest["sourceMessageId"] = sourceMessageId;
     if (!source.is_null()) {
         task.rest["sourceTaskId"] = source.at("taskId");
@@ -625,7 +618,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         task.rest["remaining"] = task.rest["remaining"].get<int>() + initialWorkAllowance;
         journal(id, "budget_granted", {{"waitId", waitId}, {"remaining", task.rest["remaining"]}});
     } else if (operation == "approve" && reason == WaitReason::model_budget) {
-        const Id eventId = task.rest.at("eventId");
+        const Id eventId = task.eventId;
         const auto attempt = approveModelBudget(actor, taskModelBudget(id), "task_decision", 0, id, eventId);
         exec("UPDATE events SET reserved_attempt=? WHERE id=? AND task_id=?", {attempt, eventId, id});
         journal(id, "model_budget_granted", {{"waitId", waitId}, {"attemptId", attempt}});
@@ -635,17 +628,22 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
             failure && failure->code == WaitFailureCode::unsupported_reasoning_effort && automationModel) {
             if (const auto planner = automationModel(bot)) applyPlannerModel(task.config, *planner);
         }
-        exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task.rest["eventId"]});
+        exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task.eventId});
         task.rest.erase("feedback");
         journal(id, "model_retry", {{"waitId", waitId}});
     } else if (operation == "extend" && reason == WaitReason::deadline) {
         if (!data.contains("deadline") || !data["deadline"].is_number_integer() || data["deadline"].get<Seconds>() <= unixTime())
             throw Conflict("The new deadline must be in the future");
-        auto& timed = verification ? destinationRun(task, verification->actionId) : task.rest;
-        if (verification && !destinationRunOutstanding(timed)) throw RequestChanged{};
-        timed["deadline"] = data.at("deadline");
+        const auto deadline = data.at("deadline").get<Seconds>();
+        if (verification) {
+            auto& run = destinationRun(task, verification->actionId);
+            if (!destinationRunOutstanding(run)) throw RequestChanged{};
+            run["deadline"] = deadline;
+        } else {
+            task.deadline = deadline;
+        }
         next = TaskState::running;
-        journal(id, "deadline_extended", {{"deadline", timed.at("deadline")}, {"waitId", waitId}});
+        journal(id, "deadline_extended", {{"deadline", deadline}, {"waitId", waitId}});
     } else if (operation == "reconcile" &&
                (reason == WaitReason::unknown_delivery || reason == WaitReason::auth || reason == WaitReason::settings)) {
         if (data.contains("session")) {
@@ -654,8 +652,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
                 throw Conflict("Session settings can only be corrected before an unsent action");
             task.config["session"] = normalizeSessionSettings(data["session"]);
         }
-        if (field(task.rest, "actionId").empty()) {
-            if (!task.rest["activeRun"].is_null())
+        if (task.actionId.empty()) {
+            if (task.activeRun)
                 next = TaskState::running;
             else if (task.projectId.empty())
                 next = TaskState::queued;
