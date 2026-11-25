@@ -10,19 +10,16 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
     timeout-minutes: 45
     env:
-      CC: clang
-      CXX: clang++
+      HOMEBREW_NO_AUTO_UPDATE: 1
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
       - name: Install development libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libjpeg-dev libpng-dev libseccomp-dev libsqlite3-dev libssl-dev
+        run: brew install jpeg-turbo libpng openssl@3
       - name: Build and verify
         run: ./scripts/verify.sh
