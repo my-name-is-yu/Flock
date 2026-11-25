@@ -8,7 +8,7 @@ if(NOT TARGET tomlplusplus::tomlplusplus)
   FetchContent_MakeAvailable(tomlplusplus)
 endif()
 
-add_library(flock_app_support bots.cpp model.cpp chatgpt.cpp chatgpt_browser.cpp chatgpt_http.cpp chatgpt_oauth.cpp
+add_library(flock_app_support STATIC bots.cpp model.cpp chatgpt.cpp chatgpt_browser.cpp chatgpt_http.cpp chatgpt_oauth.cpp
                              bot_tools.cpp git_github.cpp t3_setup.cpp settings_file.cpp)
 target_include_directories(flock_app_support PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(flock_app_support PUBLIC flock_core
@@ -19,6 +19,8 @@ add_executable(flock main.cpp demo.cpp chatgpt_web.cpp settings_system.cpp setti
                      t3_connection_setup.cpp)
 target_link_libraries(flock PRIVATE flock_app_support CURL::libcurl OpenSSL::Crypto)
 target_compile_options(flock PRIVATE -Wall -Wextra -Wpedantic)
+set_property(TARGET flock PROPERTY INSTALL_RPATH_USE_LINK_PATH TRUE)
+install(TARGETS flock)
 
 if(BUILD_TESTING)
   add_executable(flock_app_settings_access tests/settings_access.cpp settings_access.cpp)
@@ -40,8 +42,6 @@ if(BUILD_TESTING)
   target_compile_options(flock_app_chatgpt_browser PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_app_chatgpt_browser COMMAND flock_app_chatgpt_browser)
   set_tests_properties(flock_app_chatgpt_oauth flock_app_chatgpt_browser PROPERTIES TIMEOUT 15)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  find_program(FLOCK_TEST_OPENSSL openssl)
   if(FLOCK_TEST_OPENSSL)
     add_test(NAME flock_app_chatgpt_tls
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/chatgpt_tls.py"
@@ -54,7 +54,6 @@ if(BUILD_TESTING)
     "${PROJECT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock_app_session_settings>)
   add_test(NAME flock_cli_invalid_port
     COMMAND "${CMAKE_COMMAND}" "-DFLOCK=$<TARGET_FILE:flock>" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_port.cmake")
-  find_program(FLOCK_NODE_EXECUTABLE node)
   if(FLOCK_NODE_EXECUTABLE)
     add_test(NAME flock_app_bot_deletion
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-deletion.mjs"

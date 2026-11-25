@@ -5,6 +5,35 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 include(FetchContent)
+include(CTest)
+option(FLOCK_REQUIRE_ALL_TESTS "Require tools for every Flock test group" OFF)
+if(BUILD_TESTING)
+  find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+  find_program(FLOCK_NODE_EXECUTABLE node NO_CACHE)
+  find_program(FLOCK_CHROME_EXECUTABLE
+    NAMES chromium chromium-browser google-chrome "Google Chrome" Chromium
+    PATHS "/Applications/Google Chrome.app/Contents/MacOS" "/Applications/Chromium.app/Contents/MacOS"
+    NO_CACHE)
+  find_program(FLOCK_TEST_OPENSSL openssl NO_CACHE)
+
+  if(NOT FLOCK_NODE_EXECUTABLE)
+    list(APPEND flock_skipped_test_groups "Node.js and browser DOM tests (node not found)")
+  endif()
+  if(NOT FLOCK_CHROME_EXECUTABLE)
+    list(APPEND flock_skipped_test_groups "browser DOM tests (Chrome/Chromium not found)")
+  endif()
+  if(NOT FLOCK_TEST_OPENSSL)
+    list(APPEND flock_skipped_test_groups "ChatGPT TLS test (openssl CLI not found)")
+  endif()
+  if(flock_skipped_test_groups)
+    list(JOIN flock_skipped_test_groups "\n  " flock_skipped_test_groups)
+    if(FLOCK_REQUIRE_ALL_TESTS)
+      message(FATAL_ERROR "FLOCK_REQUIRE_ALL_TESTS=ON cannot skip test groups:\n  ${flock_skipped_test_groups}")
+    endif()
+    message(STATUS "Skipping Flock test groups:\n  ${flock_skipped_test_groups}")
+  endif()
+endif()
+
 find_package(SQLite3 3.35 REQUIRED)
 find_package(CURL 7.85 REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
@@ -19,6 +48,7 @@ if(NOT nlohmann_json_FOUND)
 endif()
 
 function(flock_fetch_cctz)
+  set(BUILD_SHARED_LIBS OFF)
   set(BUILD_TESTING OFF)
   set(BUILD_TOOLS OFF)
   set(BUILD_EXAMPLES OFF)
@@ -26,20 +56,23 @@ function(flock_fetch_cctz)
     URL https://codeload.github.com/google/cctz/tar.gz/refs/tags/v2.5
     URL_HASH SHA256=47d2d68e7cb5af3296dc7e69b0f4a765589f1b2f4af4b9c42e772414c428b421)
   FetchContent_MakeAvailable(cctz)
+  set_property(DIRECTORY "${cctz_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
 endfunction()
 flock_fetch_cctz()
 
 function(flock_fetch_cmark)
+  set(BUILD_SHARED_LIBS OFF)
   set(BUILD_TESTING OFF)
   set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
   FetchContent_Declare(flock_cmark
     URL https://codeload.github.com/commonmark/cmark/tar.gz/refs/tags/0.31.1
     URL_HASH SHA256=3da93db5469c30588cfeb283d9d62edfc6ded9eb0edc10a4f5bbfb7d722ea802)
   FetchContent_MakeAvailable(flock_cmark)
+  set_property(DIRECTORY "${flock_cmark_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
 endfunction()
 flock_fetch_cmark()
 
-add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
+add_library(flock_core STATIC src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/run_reports.cpp src/project_slots.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
@@ -59,9 +92,7 @@ target_sources(flock_core PRIVATE src/session_question.cpp src/session_settings.
 target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl PNG::PNG JPEG::JPEG OpenSSL::Crypto cmark)
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
-include(CTest)
 if(BUILD_TESTING)
-  find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
   function(flock_verify_model name skill)
     set(model "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py")
     add_test(NAME "flock_verify_${name}" COMMAND "${Python3_EXECUTABLE}" "${model}")
