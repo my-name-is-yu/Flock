@@ -1407,14 +1407,17 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         if (canSend && (!task.contains("selectedSession") || hasSettledRun(task))) tools.push_back("send_bot_message");
         return tools;
     }
-    void recordFailure(Json& task, const Json& event, std::string_view detail, bool transient) {
+    void recordFailure(Json& task, const Json& event, std::string_view detail, bool transient,
+                       ModelErrorCode code = ModelErrorCode::inference_failed) {
         const auto attempts = event["failures"].get<int>() + 1;
         const auto why = bounded(db.redactor(field(task,"botId")).text(std::string(detail)),2048);
         db.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?",
                 {attempts, transient ? options.clock() + (1 << (attempts - 1)) : 0,event["id"]});
         db.journal(task["id"],"model_failure",{{"eventId",event["id"]},{"attempt",attempts},{"text",why}});
         task["feedback"] = why;
-        if (attempts >= 3) db.wait(task,"model_failure",{{"text",why}});
+        if (code == ModelErrorCode::unsupported_reasoning_effort)
+            db.wait(task,"model_failure",{{"text",why},{"failureCode","unsupported_reasoning_effort"}});
+        else if (attempts >= 3) db.wait(task,"model_failure",{{"text",why}});
     }
 
     void failure(const Json& task, const Json& event, std::string_view detail, bool transient) {
@@ -2324,7 +2327,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         if (current.at("state") == "deciding" && current.at("generation") == inference.generation &&
             current.at("eventId") == inference.eventId && revision(current) == inference.revisionId) {
             if (const auto* error = std::get_if<ModelError>(&inference.outcome)) {
-                recordFailure(current,db.currentEvent(current),error->what(),error->transient);
+                recordFailure(current,db.currentEvent(current),error->what(),error->transient,error->code);
                 saveTask(current);
             } else {
                 const auto& call = std::get<ModelCall>(inference.outcome);
