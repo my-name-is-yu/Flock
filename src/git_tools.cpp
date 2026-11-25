@@ -130,9 +130,8 @@ bool gitNotificationToolAllowed(const Decision& call, const Json& event) {
 Json gitToolSchema(std::string_view name, bool conversation) {
     const auto* spec = findSpec(name);
     if (!spec) throw std::out_of_range("Unknown Git tool");
-    Json properties{{"host",{{"type","string"},{"description","Connected Git host, for example github.com."}}},
-                    {"reason",{{"type","string"},{"description","Evidence and reason for the action."}}}};
-    Json required = {"host","reason"};
+    Json properties{{"host",{{"type","string"},{"description","Connected Git host, for example github.com."}}}};
+    Json required = {"host"};
     if (name != "git_find_repos" && name != "git_read_result") {
         properties["repo"] = {{"type","string"},{"description","Exact owner/repo from repository discovery."}};
         required.push_back("repo");
@@ -140,27 +139,37 @@ Json gitToolSchema(std::string_view name, bool conversation) {
             properties["taskId"] = {{"type","integer"},{"minimum",1},{"description","Task owned by this Bot. Required for mutations."}};
     }
     const auto taskIdPosition = required.size();
-    bool mayRead = spec->operation == "read";
+    auto readActions = Json::array();
+    auto writeActions = Json::array();
     for (const auto& param : spec->params) {
         Json property{{"type",param.type},{"description",param.description}};
         if (property["type"] == "integer") property["minimum"] = 1;
         if (property["type"] == "array") property["items"] = {{"type","string"}};
         for (const auto& choice : param.choices) {
             property["enum"].push_back(choice.value);
-            mayRead |= choice.operation == "read";
+            if (choice.operation == "read") readActions.push_back(choice.value);
+            else if (!choice.operation.empty()) writeActions.push_back(choice.value);
         }
         properties[param.name] = std::move(property);
         if (param.required) required.push_back(param.name);
+    }
+    const bool mayRead = spec->operation == "read" || !readActions.empty();
+    if (spec->operation != "read") {
+        properties["reason"] = {{"type","string"},{"minLength",1},{"maxLength",decisionReasonLimit},
+                                {"description","Briefly explain the evidence for making this Git change."}};
+        if (!mayRead) required.push_back("reason");
     }
     if (properties.contains("taskId") && !mayRead) required.insert(required.begin() + taskIdPosition,"taskId");
     if (name == "git_read_ci_logs") properties["maxBytes"]["maximum"] = 16384;
     if (name == "git_manage_issue") properties["page"]["maximum"] = 10000;
     Json parameters{{"type","object"},{"properties",std::move(properties)},
                     {"required",std::move(required)},{"additionalProperties",false}};
-    if (name == "git_manage_issue" && conversation) {
+    if (name == "git_manage_issue") {
+        Json writeRequired = {"reason"};
+        if (conversation) writeRequired.push_back("taskId");
         parameters["oneOf"] = Json::array({
-            {{"properties",{{"action",{{"enum",{"list","read","list_comments"}}}}}}},
-            {{"properties",{{"action",{{"enum",{"create","update"}}}}}},{"required",{"taskId"}}}
+            {{"properties",{{"action",{{"enum",std::move(readActions)}}}}},{"not",{{"required",{"reason"}}}}},
+            {{"properties",{{"action",{{"enum",std::move(writeActions)}}}}},{"required",std::move(writeRequired)}}
         });
     }
     return {{"type","function"},{"name",name},{"description",spec->description},{"strict",false},

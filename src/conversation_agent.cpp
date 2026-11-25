@@ -2,11 +2,13 @@
 #include "conversation_storage.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <set>
 
 namespace flockv0 {
 using conversation_storage::integer;
 using conversation_storage::identifier;
+using conversation_storage::japanese;
 using conversation_storage::text;
 using conversation_storage::ToolError;
 using conversation_storage::messageSize;
@@ -21,7 +23,6 @@ const std::vector<std::string> channelTools{"channel_edit_message","channel_reac
 constexpr int activeTaskLimit = 12;
 constexpr int terminalTaskLimit = 8;
 constexpr int findLimit = 10;
-constexpr int maxSteps = 24;
 constexpr std::size_t resultChunk = 6000;
 constexpr std::size_t sourceSize = 8192;
 
@@ -63,12 +64,6 @@ std::string modelFailureReply(ModelErrorCode code, bool ja) {
                   : "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.";
     return ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
               : "I couldn't process this message. Please send it again.";
-}
-
-bool japanese(std::string_view text) {
-    return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
-        return byte == 0xe3 || (byte >= 0xe4 && byte <= 0xe9);
-    });
 }
 
 Json waitView(const Json& wait) {
@@ -721,21 +716,6 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     }
 }
 
-void Store::Impl::pauseTurn(const Message& message) {
-    const bool ja = japanese(message.text);
-    const Json task = message.principalSource == PrincipalSource::gitWebhook
-        ? message.routing.at("gitEvent").at("taskId") : Json(nullptr);
-    exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
-         {task,unixTime(),message.bot});
-    const auto reply = last();
-    const Json data{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","needs_you"},
-                    {"text",ja ? "モデル呼び出しの上限に達しました。続けるには追加の1回を承認してください。"
-                               : "The model call limit is exhausted. Approve one more model call to continue."}};
-    exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
-    if (!message.channelScope.empty()) queueChannelReply(message.id,reply,data);
-    exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
-}
-
 Person Store::Impl::turnActor(const Message& message) {
     const auto& admitted = message.admittedActor;
     switch (message.principalSource) {
@@ -840,7 +820,8 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     const auto encodeCalls = [](const std::vector<ModelCall>& calls) {
         auto saved = Json::array();
         for (const auto& call : calls) {
-            Json entry{{"tool",call.tool},{"args",call.args},{"reason",call.reason}};
+            Json entry{{"tool",call.tool},{"args",call.args}};
+            if (!call.reason.empty()) entry["reason"] = call.reason;
             if (!call.rejection.empty()) entry["rejection"] = call.rejection;
             saved.push_back(std::move(entry));
         }
@@ -891,7 +872,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         return hasDecision;
     };
     if (!persistModelCheckpoint()) return;
-    for (int step = 1; step <= maxSteps && !shutdown.stop_requested(); ++step) {
+    for (int step = 1; step < std::numeric_limits<int>::max() && !shutdown.stop_requested(); ++step) {
         if (!message.channelScope.empty()) deliverChannels(shutdown);
         std::vector<ModelCall> calls;
         std::string effectType;
@@ -911,7 +892,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                     const auto [offered,machines] = available(step,reviewPreference);
                     bool rejectionChanged = false;
                     for (const auto& saved : row.json(0)) {
-                        Decision call{saved.at("tool"),saved.at("args"),saved.at("reason")};
+                        Decision call{saved.at("tool"),saved.at("args"),field(saved,"reason")};
                         if (auto rejection = saved.value("rejection",std::string{}); !rejection.empty())
                             calls.push_back({std::move(call),std::move(rejection)});
                         else {
@@ -992,9 +973,9 @@ WHERE conversation_steps.result IS NULL
                     input = std::move(*prepared);
                 }
                 if (!query(R"SQL(
-SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
- SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL))
-)SQL",{messageModelBudget(id),id}).next()) {
+SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=call_limit)
+    OR EXISTS(SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL)
+)SQL",{messageModelBudget(id).id,id}).next()) {
                     pauseTurn(message);
                     transaction.commit();
                     return;

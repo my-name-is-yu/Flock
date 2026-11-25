@@ -27,6 +27,12 @@ inline constexpr auto messageSize = 16000;
 inline constexpr std::size_t expandedContextBytes = 8192;
 std::size_t boundExpandedContext(Json& turn);
 void projectToolHistory(Json& turn, const Json& redactionRevision);
+inline bool japanese(std::string_view text) {
+    return std::ranges::any_of(text,[](unsigned char byte) {
+        return byte == 0xe3 || (byte >= 0xe4 && byte <= 0xe9);
+    });
+}
+
 inline bool canRereadToolResult(std::string_view tool) {
     return !tool.empty() && tool != "read_tool_result" && tool != "expand_context";
 }

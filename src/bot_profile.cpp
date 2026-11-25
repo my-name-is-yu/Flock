@@ -108,7 +108,11 @@ const Json& modelReasoningEfforts(const Json& catalog, std::string_view slug) {
     return fallbackReasoningEfforts();
 }
 
-std::string validatedBotRunSetting(std::string_view key, const Json& value) {
+Json validatedBotRunSetting(std::string_view key, const Json& value) {
+    if (key == "modelCallLimit") {
+        try { return modelCallLimit({{"modelCallLimit",value}}); }
+        catch (const Conflict& error) { throw BotProfileError("invalid_model_call_limit",error.what()); }
+    }
     if (key == "reasoningEffort") {
         if (value.is_string()) {
             const auto& effort = value.get_ref<const std::string&>();

@@ -71,7 +71,7 @@ In the Bot's Flock conversation, ask it to verify a full Git commit SHA on both 
 
 Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange. Consultations can run without a T3 connection. For work requests, a Bot without a pinned environment uses the sender's environment if the recipient can use it, or its sole eligible connected environment.
 
-Optional `modelCallLimit` sets the initial allowance per request (20 by default). Each step of the Bot's conversation turn, the tasks it starts, and work or consultations passed to other Bots share that allowance. Failed attempts and retries count. Use **Approve one more model call** on the paused message or task to continue. See the [CLI guide](app/README.md#model-call-allowance) for details.
+In the Bot's settings under **How it runs**, set **Steps per request** (20 by default). The Bot's conversation, work it starts, and work or consultations it passes to other Bots share the request's saved allowance. Failed attempts and retries count. If it pauses, choose **Continue for 20 more steps** in the conversation or **Needs you** to grant another block of the original size. Follow-up work has a separate allowance of three rounds. See the [CLI guide](app/README.md#model-call-allowance) for details.
 
 ### Scheduled requests
 
@@ -127,6 +127,8 @@ build/app/flock answer <task-id> <wait-id> <revision-id> <generation> 'main'
 ```
 
 To check whether a live model applies different completion criteria, run `build/app/flock model acceptance <model-slug>` with an authorized ChatGPT connection. The command prints the decision and rationale for each trial as JSON Lines.
+
+Routine tool calls use only the arguments needed to perform the operation. Task decisions such as completion and requests for more work record their evidence in task history. Git changes record their rationale with the operation.
 
 The Bot normally evaluates the Session's final report. It can retry an unavailable final report once Flock has verified which Run produced it. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime allows up to three evidence reads per event and saves history excerpts of up to 8 KiB each in SQLite.
 

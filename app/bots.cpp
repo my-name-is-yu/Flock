@@ -273,7 +273,7 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
 
     if (const auto effort = config.find("reasoningEffort"); effort != config.end()) {
         auto level = validatedBotRunSetting("reasoningEffort",*effort);
-        if (!level.empty()) bot.settings["reasoningEffort"] = std::move(level);
+        if (level != "") bot.settings["reasoningEffort"] = std::move(level);
     }
     for (const auto key : {"services","mcpServers"}) {
         if (!config.contains(key)) continue;
@@ -401,6 +401,7 @@ std::optional<Store::PlannerModel> Bots::plannerModel(std::string_view id) const
                                 bot->settings.at("modelProvider").get<std::string>(),std::nullopt};
     if (const auto effort = bot->settings.find("reasoningEffort"); effort != bot->settings.end())
         planner.reasoningEffort = effort->get<std::string>();
+    if (bot->settings.contains("modelCallLimit")) planner.modelCallLimit = modelCallLimit(bot->settings);
     return planner;
 }
 
@@ -460,7 +461,9 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     }
 
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
+    try { item["modelCallLimit"] = modelCallLimit(config); } catch (const Conflict&) {}
     for (const std::string_view key : botRunSettingFields) {
+        if (key == "modelCallLimit") continue;
         if (key == "model" || key == "reasoningEffort") {
             const auto provider = config.find("modelProvider");
             if (provider == config.end() || *provider != "chatgpt") continue;
@@ -685,12 +688,12 @@ Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& sett
             if (key == "model") {
                 const auto previous = config.find(key);
                 if (!settings.contains("reasoningEffort") &&
-                    (setting.empty() || previous == config.end() || *previous != setting))
+                    (setting == "" || previous == config.end() || *previous != setting))
                     config.erase("reasoningEffort");
-                if (setting.empty()) config.erase("modelProvider");
+                if (setting == "") config.erase("modelProvider");
                 else config["modelProvider"] = "chatgpt";
             }
-            if (setting.empty()) config.erase(key);
+            if (setting == "") config.erase(key);
             else config[key] = std::move(setting);
         }
         if (config.contains("projectId") && !config.contains("environmentId"))

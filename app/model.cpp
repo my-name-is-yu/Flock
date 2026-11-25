@@ -19,8 +19,8 @@ Json textParameter(std::string description) {
 
 Json toolSchema(const std::string& name, const ModelInput& input) {
     if (isBotTool(name)) return botToolSchema(name);
-    Json fields = {{"reason",textParameter("Briefly explain the evidence and why this action follows.")}};
-    std::vector<std::string> required{"reason"};
+    auto fields = Json::object();
+    std::vector<std::string> required;
     auto text = [&](const char* field, std::string description, bool mandatory = true) {
         fields[field] = textParameter(std::move(description));
         if (mandatory) required.emplace_back(field);
@@ -29,6 +29,11 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         fields[field] = {{"type","integer"},{"minimum",1},{"description",std::move(description)}};
         if (mandatory) required.emplace_back(field);
     };
+    if (recordsTaskDecisionReason(name)) {
+        text("reason","Briefly explain the evidence and why this action follows.");
+        fields["reason"]["minLength"] = 1;
+        fields["reason"]["maxLength"] = decisionReasonLimit;
+    }
     std::string description;
     if (name == "delegate") {
         description = input.task.value("usesSelectedSession",false)
@@ -529,7 +534,7 @@ user's language and refer to work by description, never by task, message, revisi
 )PROMPT";
     std::string instructions =
         "You are the Flock Bot that owns this task. Select exactly one Flock action and provide its arguments "
-        "and a brief evidence-based reason. Use the same language as the requester when practical. "
+        "required by its tool schema. Use the same language as the requester when practical. "
         "Apply the current SOUL and MEMORY when deciding how to work and when writing your report. "
         "The task's nonempty saved doneWhen is authoritative even if current notes suggest a different standard. "
         "For an automated request, use task.trigger to interpret timing, covered intervals and webhook event data. "
@@ -616,15 +621,24 @@ Decision decodeResponseCall(const std::string& name, const std::string& argument
         return true;
     };
     auto args = Json::parse(arguments,checkDepth,false);
-    if (!args.is_object() || !args.contains("reason") || !args["reason"].is_string() ||
-        !nonblank(args["reason"].get_ref<const std::string&>()) || args["reason"].get_ref<const std::string&>().size() > 4000)
-        throw ModelError("Flock decision requires JSON arguments and a brief reason",ModelErrorCode::invalid_tool_arguments);
+    if (!args.is_object())
+        throw ModelError("Flock decision requires a JSON object",ModelErrorCode::invalid_tool_arguments);
+    const auto& properties = schema->at("parameters").at("properties");
     for (const auto& [key,value] : args.items())
-        if (!schema->at("parameters").at("properties").contains(key))
+        if (!properties.contains(key))
             throw ModelError("Unexpected Flock tool argument",ModelErrorCode::invalid_tool_arguments);
-    auto reason = args["reason"].get<std::string>();
-    args.erase("reason");
-    return {name,std::move(args),std::move(reason)};
+    Decision decision{name,std::move(args),{}};
+    const auto reason = decision.args.find("reason");
+    if (properties.contains("reason") && gitOperation(decision) != "read") {
+        if (reason == decision.args.end() || !reason->is_string() ||
+            !validDecisionReason(reason->get_ref<const std::string&>()))
+            throw ModelError("This Flock action requires a brief reason",ModelErrorCode::invalid_tool_arguments);
+        decision.reason = reason->get<std::string>();
+        decision.args.erase(reason);
+    } else if (reason != decision.args.end()) {
+        throw ModelError("Unexpected reason for a read action",ModelErrorCode::invalid_tool_arguments);
+    }
+    return decision;
 }
 }
 
@@ -694,7 +708,7 @@ bool runModelAcceptance(Model& model, const std::string& slug, std::ostream& out
                 const auto field = regression ? "instruction" : "report";
                 const auto value = decision.args.find(field);
                 ok = decision.tool == expected && value != decision.args.end() && value->is_string() &&
-                    nonblank(value->get_ref<const std::string&>());
+                    nonblank(value->get_ref<const std::string&>()) && validDecisionReason(decision.reason);
             } catch (const ModelError& error) {
                 record["error"] = error.what();
             }
