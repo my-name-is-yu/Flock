@@ -5,6 +5,7 @@
 #include "model.hpp"
 #include "../src/workspace_internal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -225,19 +226,20 @@ struct Fixture {
 };
 
 void workspaceFiles(Fixture& f) {
-    f.model.inspectRequest = [](const Json& request) {
-        auto workspaceTools = Json::array();
-        for (const auto& function : request.at("tools").at(0).at("tools")) {
-            const auto& name = function.at("name").get_ref<const std::string&>();
-            if (name.starts_with("workspace_")) workspaceTools.push_back(name);
-        }
-        check(workspaceTools == Json::array({"workspace_read_file","workspace_write_file","workspace_search"}),
-              "The model must receive only file tools for the Bot workspace");
-    };
+    Json request;
+    f.model.inspectRequest = [&](const Json& input) { request = input; };
     const auto normal = call("workspace_write_file",{{"path","allowed.txt"},{"text","workspace-only-marker"}});
     f.block(Action::workspace_write,"alpha");
     check(!f.run(normal).at("ok").get<bool>(),"Workspace write bypassed a Never rule");
     f.model.inspectRequest = {};
+    std::vector<std::string> workspaceTools;
+    for (const auto& function : request.at("tools").at(0).at("tools")) {
+        const auto& name = function.at("name").get_ref<const std::string&>();
+        if (name.starts_with("workspace_")) workspaceTools.push_back(name);
+    }
+    std::ranges::sort(workspaceTools);
+    check(workspaceTools == std::vector<std::string>{"workspace_read_file","workspace_search","workspace_write_file"},
+          "The model must receive only file tools for the Bot workspace");
     f.block(Action::workspace_write,"alpha",false);
     check(f.run(normal).at("ok") == true,"Allowed workspace write failed");
     const auto root = f.home/"workspaces"/"alpha";
