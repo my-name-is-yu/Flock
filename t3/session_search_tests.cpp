@@ -1,9 +1,34 @@
-#include "flock/policy.hpp"
-#include "flock/channels.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/channels.hpp"
+#include "flock/command.hpp"
+#include "flock/decision.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
 #include "flock/t3_connection.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <exception>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 using namespace flockv0;
 

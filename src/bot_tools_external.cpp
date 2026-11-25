@@ -1,11 +1,26 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
 #include "workspace_internal.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/decision.hpp"
 
 #include <algorithm>
 #include <cctype>
-#include <curl/curl.h>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <curl/curl.h>
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

@@ -2,9 +2,19 @@
 #include "../src/storage.hpp"
 
 #include "flock/record_decode_error.hpp"
+#include "flock/command.hpp"
+#include "flock/json.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <array>
+#include <exception>
 #include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 
 using namespace std::literals;
 using namespace flockv0;

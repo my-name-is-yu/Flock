@@ -1,12 +1,25 @@
 #include "git_routes.hpp"
 #include "flock/git_host.hpp"
+#include "flock/json.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <openssl/crypto.h>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 
 #include <charconv>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 
 namespace flockv0::web {
 namespace {

@@ -1,9 +1,22 @@
 #include "chatgpt.hpp"
 #include "chatgpt_recording.hpp"
 #include "flock/bot_profile.hpp"
+#include "flock/detail/traffic_recording.hpp"
+#include "flock/json.hpp"
+#include "flock/model_error.hpp"
 
 #include <curl/curl.h>
+#include <nlohmann/json.hpp>
+
 #include <sys/socket.h>
+
+#include <chrono>
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 
 #ifndef SO_NOSIGPIPE
 #include <pthread.h>

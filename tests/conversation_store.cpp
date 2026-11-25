@@ -1,17 +1,48 @@
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
 #include "task_history.hpp"
+#include "flock/command.hpp"
+#include "flock/decision.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+#include "flock/wait.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <sqlite3.h>
 
 #include <algorithm>
 #include <atomic>
 #include <barrier>
+#include <chrono>
+#include <cstddef>
+#include <cstdlib>
+#include <exception>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 #include <unistd.h>
 
 using namespace flockv0;

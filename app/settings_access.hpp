@@ -1,8 +1,16 @@
 #pragma once
 
 #include "flock/identity.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+
+#include <filesystem>
+#include <functional>
+#include <optional>
+#include <string_view>
 
 namespace flockv0 {
+class Store;
 
 // Manages the Web identities for one installation. The resolver reads current
 // privileges from the Store so queued work observes account changes too.

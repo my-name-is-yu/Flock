@@ -1,13 +1,30 @@
 #include "storage.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/decision.hpp"
+#include "flock/task.hpp"
+#include "flock/run_ref.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstddef>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

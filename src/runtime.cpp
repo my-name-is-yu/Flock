@@ -1,3 +1,4 @@
+#include "flock/runtime.hpp"
 #include "runtime_lifecycle.hpp"
 #include "runtime_maintenance.hpp"
 #include "runtime_outbox_dispatch.hpp"
@@ -11,7 +12,13 @@
 #include "runtime_task_scheduler.hpp"
 #include "runtime_task_turn.hpp"
 #include "runtime_task_updates.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/model.hpp"
+#include "flock/t3.hpp"
+#include "flock/task.hpp"
 
+#include <memory>
 #include <utility>
 
 namespace flockv0 {
@@ -29,20 +36,20 @@ struct Runtime::Impl {
     T3& t3;
     SoulLoader soul;
     RuntimeOptions options;
-    Maintenance maintenance;
-    SessionPrompts prompts;
-    TaskUpdates updates;
-    TaskQuestions questions;
-    SessionHistory history;
-    RunReports reports;
-    PeerExchanges peerExchanges;
-    Workers workers;
-    RunObserver runs;
-    OutboxDispatch dispatch;
-    TaskDecisions decisions;
-    TaskTurn taskTurn;
-    TaskScheduler taskScheduler;
-    DatabaseLock lock;
+    Components::Maintenance maintenance;
+    Components::SessionPrompts prompts;
+    Components::TaskUpdates updates;
+    Components::TaskQuestions questions;
+    Components::SessionHistory history;
+    Components::RunReports reports;
+    Components::PeerExchanges peerExchanges;
+    Components::Workers workers;
+    Components::RunObserver runs;
+    Components::OutboxDispatch dispatch;
+    Components::TaskDecisions decisions;
+    Components::TaskTurn taskTurn;
+    Components::TaskScheduler taskScheduler;
+    Components::DatabaseLock lock;
 
     void runTurn(Id id) {
         db.runTurn(id, model, t3, soul, options.clock, *options.botTools, options.gitHost.get(), options.applyBotChange,
@@ -64,7 +71,7 @@ struct Runtime::Impl {
 
     ~Impl() { workers.drain(taskTurn); }
 
-    void step(const TaskScheduler::Work& work) {
+    void step(const Components::TaskScheduler::Work& work) {
         if (workers.stopToken().stop_requested()) return;
         const auto id = work.taskId;
         auto task = updates.snapshot(id);
@@ -120,9 +127,10 @@ void Runtime::tick() {
     p_->maintenance.fireDueAutomations();
     p_->db.deliverGitWebhooks();
     p_->workers.wakeSessions();
-    for (const auto& [bot, id] : p_->db.pendingConversations(Workers::batchLimit, p_->options.clock())) p_->runTurn(id);
+    for (const auto& [bot, id] : p_->db.pendingConversations(Components::Workers::batchLimit, p_->options.clock())) p_->runTurn(id);
     p_->maintenance.advanceWorkflows();
-    for (const auto& work : p_->taskScheduler.nextBatch(Workers::batchLimit, [this](const auto& job) { return p_->workers.isActive(job); }))
+    for (const auto& work :
+         p_->taskScheduler.nextBatch(Components::Workers::batchLimit, [this](const auto& job) { return p_->workers.isActive(job); }))
         p_->step(work);
     p_->db.deliverChannels(p_->workers.stopToken());
 }

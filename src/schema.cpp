@@ -1,4 +1,8 @@
 #include "storage.hpp"
+#include "flock/types.hpp"
+
+#include <string>
+#include <utility>
 
 namespace flockv0 {
 namespace {

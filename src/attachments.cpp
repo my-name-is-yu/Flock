@@ -1,8 +1,19 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "image_headers.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

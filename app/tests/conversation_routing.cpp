@@ -1,6 +1,27 @@
 #include "fixtures.hpp"
+#include "../bots.hpp"
+#include "flock/decision.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/person.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
 
+#include <nlohmann/json.hpp>
 #include <sqlite3.h>
+
+#include <algorithm>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace flockv0::app::test {
 namespace {

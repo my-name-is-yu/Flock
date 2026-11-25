@@ -1,8 +1,23 @@
 #include "conversation_storage.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/limits.hpp"
+#include "flock/types.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/command.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {
@@ -58,7 +73,7 @@ Json revisionView(const Statement& row) {
 }
 }
 
-BotNotes Store::Impl::loadNotes(std::string_view bot, const Runtime::SoulLoader& soul, Seconds now) {
+BotNotes Store::Impl::loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>& soul, Seconds now) {
     BotNotes notes{soul ? bounded(soul(bot), maxBotRoleBytes) : std::string{}, {}};
     const auto key = privateKey(bot);
     std::lock_guard lock(mutex);

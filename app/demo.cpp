@@ -1,6 +1,19 @@
 #include "demo.hpp"
+#include "flock/command.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <memory>
+#include <string>
+#include <utility>
 
 namespace flockv0::app {
 namespace {

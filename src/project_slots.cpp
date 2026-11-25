@@ -1,4 +1,9 @@
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/task.hpp"
+#include "flock/wait.hpp"
+
+#include <string_view>
 
 namespace flockv0 {
 bool Store::Impl::automationBeforeDispatch(Id task) const {

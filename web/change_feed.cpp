@@ -1,6 +1,22 @@
 #include "change_feed.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cstddef>
+#include <exception>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace flockv0::web {
 using namespace std::chrono_literals;

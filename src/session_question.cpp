@@ -1,7 +1,16 @@
-#include "flock/core.hpp"
+#include "flock/session_question.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <set>
+#include <span>
+#include <string>
+#include <string_view>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 std::string_view trimSessionQuestionText(std::string_view text) {

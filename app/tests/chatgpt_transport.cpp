@@ -2,6 +2,11 @@
 #include "../model.hpp"
 #include "fixtures.hpp"
 #include "flock/base64.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <arpa/inet.h>
 #include <poll.h>
@@ -11,9 +16,20 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <fstream>
 #include <future>
+#include <initializer_list>
 #include <iostream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 using namespace flockv0;
 using namespace flockv0::app::chatgpt;

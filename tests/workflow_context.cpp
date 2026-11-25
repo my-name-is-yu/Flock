@@ -1,10 +1,38 @@
-#include "flock/core.hpp"
+#include "flock/person.hpp"
 #include "flock/policy.hpp"
+#include "flock/command.hpp"
+#include "flock/decision.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/run_report.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/types.hpp"
+#include "flock/wait.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <functional>
 #include <iostream>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 #include <unistd.h>
 
 using namespace flockv0;

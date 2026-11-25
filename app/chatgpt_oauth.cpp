@@ -1,13 +1,27 @@
 #include "chatgpt.hpp"
-
 #include "flock/base64.hpp"
+#include "flock/json.hpp"
+#include "flock/model_error.hpp"
 
 #include <cctz/time_zone.h>
 #include <curl/curl.h>
+#include <nlohmann/json.hpp>
 #include <openssl/bn.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
+
+#include <chrono>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <utility>
+
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 #include <openssl/core_names.h>
 #include <openssl/param_build.h>

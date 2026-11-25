@@ -1,11 +1,30 @@
-#include "flock/policy.hpp"
+#include "flock/person.hpp"
 #include "flock/t3_mcp.hpp"
 #include "live_setup.hpp"
 #include "live_t3_fixture.hpp"
+#include "flock/command.hpp"
+#include "flock/json.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <iostream>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <sys/resource.h>
 
 using namespace flockv0;

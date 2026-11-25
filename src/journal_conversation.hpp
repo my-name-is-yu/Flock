@@ -1,7 +1,13 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
 
+#include <optional>
+#include <string>
+#include <variant>
+
+#include <nlohmann/json.hpp>
 namespace flockv0 {
 struct ConversationInvitationEntry {
     std::string environmentId, threadId, title, inviterBotId, inviterName, note;

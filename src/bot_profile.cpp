@@ -1,9 +1,17 @@
 #include "flock/bot_profile.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <iterator>
+#include <string>
+#include <string_view>
 #include <utility>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

@@ -1,13 +1,25 @@
 #pragma once
 
-#include "flock/policy.hpp"
+#include "flock/person.hpp"
+#include "flock/json.hpp"
+#include "flock/store.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <compare>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
+#include <utility>
 #include <variant>
+#include <vector>
 
 namespace flockv0::web {
 

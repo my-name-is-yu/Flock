@@ -1,6 +1,16 @@
 #pragma once
-#include "flock/core.hpp"
-#include <compare>
+#include "flock/bot_change.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
+
+#include <exception>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace flockv0 {
 bool validBotId(std::string_view);
@@ -51,12 +61,6 @@ std::optional<RuleKind> parseRuleKind(std::string_view);
 std::string_view actionName(Action);
 std::optional<Action> parseAction(std::string_view);
 
-struct Person {
-    std::string id;
-    bool adminRoot = false;
-    auto operator<=>(const Person&) const = default;
-};
-inline const Person localOwner{"local-owner", true};
 struct Resource {
     Action action;
     std::string target;
@@ -69,10 +73,6 @@ struct SecretRef {
     bool valid() const;
 };
 class SecretRedactor;
-
-struct BotChange {
-    std::string operation, target, name, requestKey;
-};
 
 class Policy {
 public:

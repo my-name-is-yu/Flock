@@ -1,9 +1,20 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/json.hpp"
+#include "flock/model_error.hpp"
 
-#include <stop_token>
+#include <nlohmann/json.hpp>
+
 #include <sys/types.h>
+
+#include <chrono>
+#include <functional>
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace flockv0::app::chatgpt {
 inline constexpr std::string_view issuer = "https://auth.openai.com";

@@ -1,18 +1,36 @@
 #include "bot_tools.hpp"
 #include "flock/detail/json_rpc.hpp"
+#include "flock/json.hpp"
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
+#include "flock/types.hpp"
+#include "flock/workspace_tools.hpp"
+
+#include <curl/curl.h>
+#include <nlohmann/json.hpp>
+
+#include <arpa/inet.h>
+#include <sys/socket.h>
 
 #include <algorithm>
-#include <arpa/inet.h>
 #include <cctype>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
-#include <curl/curl.h>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
+#include <map>
+#include <memory>
 #include <mutex>
-#include <sys/socket.h>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace flockv0::app {
 namespace {

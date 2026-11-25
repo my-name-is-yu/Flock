@@ -5,8 +5,22 @@
 #include "outbox_storage.hpp"
 #include "storage.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
+#include "flock/wait.hpp"
 
 #include <algorithm>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

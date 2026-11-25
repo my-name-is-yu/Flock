@@ -2,11 +2,29 @@
 #include "settings_access.hpp"
 #include "settings_system.hpp"
 #include "t3_setup.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/t3_mcp.hpp"
+#include "flock/types.hpp"
+#include "flock/web.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace flockv0::app {
 namespace {

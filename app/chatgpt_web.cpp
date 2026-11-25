@@ -1,6 +1,21 @@
 #include "chatgpt_web.hpp"
 #include "model.hpp"
+#include "settings_access.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/json.hpp"
+#include "flock/model_error.hpp"
+#include "flock/person.hpp"
+#include "flock/web.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <exception>
+#include <mutex>
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <thread>
+#include <utility>
 
 namespace flockv0::app {
 ChatGPTWeb::ChatGPTWeb(ChatGPTModel& model, SettingsAccess& access) : model_(model), access_(access) {}

@@ -1,9 +1,15 @@
 #pragma once
 
-#include "chatgpt.hpp"
-#include "flock/detail/traffic_recording.hpp"
+#include "flock/json.hpp"
+
+#include <vector>
+
+namespace flockv0::recording {
+class Capture;
+}
 
 namespace flockv0::app::chatgpt {
+struct HttpResponse;
 
 class ResponseRecording {
 public:

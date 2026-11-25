@@ -1,9 +1,22 @@
 #pragma once
 
+#include "runtime_components.hpp"
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/runtime.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
+#include "flock/outbox.hpp"
+#include "flock/outbox_instruction.hpp"
+
+#include <cstddef>
+#include <span>
+#include <string>
+#include <vector>
 
 namespace flockv0 {
-class Runtime::SessionPrompts {
+class Runtime::Components::SessionPrompts {
 public:
     explicit SessionPrompts(Store::Impl& db) : db(db) {}
 

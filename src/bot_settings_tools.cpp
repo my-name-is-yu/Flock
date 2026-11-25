@@ -1,5 +1,18 @@
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/person.hpp"
+#include "flock/json.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/decision.hpp"
+#include "flock/command.hpp"
+
 #include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

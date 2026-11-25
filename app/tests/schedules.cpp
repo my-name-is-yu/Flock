@@ -1,6 +1,24 @@
 #include "fixtures.hpp"
+#include "../bots.hpp"
+#include "flock/json.hpp"
+#include "flock/memory_automation.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/task.hpp"
+#include "flock/task_context.hpp"
+#include "flock/types.hpp"
 
+#include <nlohmann/json.hpp>
 #include <sqlite3.h>
+
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
 
 namespace flockv0::app::test {
 namespace {

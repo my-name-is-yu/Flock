@@ -1,8 +1,17 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/types.hpp"
 
+#include <cstddef>
+#include <optional>
 #include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace flockv0 {
+struct Decision;
+}
 
 namespace flockv0::tool_batch {
 enum class CallClass { parallel_read, gated_read, exclusive, terminal };

@@ -1,12 +1,33 @@
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
 #include "task_history.hpp"
+#include "flock/command.hpp"
+#include "flock/decision.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/run_report.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <atomic>
 #include <barrier>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -17,6 +38,15 @@
 #include <thread>
 #include <utility>
 #include <sqlite3.h>
+#include <cstddef>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
 #include <unistd.h>
 
 using namespace flockv0;

@@ -1,9 +1,15 @@
 #include "flock/memory_automation.hpp"
+#include "flock/types.hpp"
 
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
+#include <cstdint>
+#include <optional>
 #include <sstream>
+#include <string>
+#include <string_view>
 
 namespace flockv0 {
 namespace {

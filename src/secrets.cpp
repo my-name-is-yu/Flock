@@ -1,10 +1,21 @@
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
 
 #include <algorithm>
 #include <cerrno>
+#include <cstddef>
+#include <filesystem>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

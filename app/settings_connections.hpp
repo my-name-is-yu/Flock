@@ -1,10 +1,24 @@
 #pragma once
 
-#include "flock/web.hpp"
-#include "flock/workspace_tools.hpp"
+#include "flock/json.hpp"
+#include "flock/types.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <filesystem>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+
+namespace flockv0 {
+class Store;
+struct BotTools;
+struct WebCallbacks;
+}
 
 namespace flockv0::app {
 class SettingsConnections {

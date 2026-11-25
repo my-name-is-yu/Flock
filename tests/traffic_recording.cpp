@@ -1,8 +1,15 @@
 #include "flock/detail/traffic_recording.hpp"
+#include "flock/json.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <unistd.h>
 
 using namespace flockv0;

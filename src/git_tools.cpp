@@ -1,8 +1,16 @@
 #include "flock/git_host.hpp"
 #include "flock/limits.hpp"
+#include "flock/json.hpp"
+#include "flock/decision.hpp"
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

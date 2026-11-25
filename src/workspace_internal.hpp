@@ -1,9 +1,17 @@
 #pragma once
 
 #include "flock/workspace_tools.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+
+#include <cstddef>
+#include <filesystem>
+#include <string>
+#include <string_view>
 
 namespace flockv0 {
 class SecretRedactor;
+struct Decision;
 
 struct ToolContext {
     std::string bot;

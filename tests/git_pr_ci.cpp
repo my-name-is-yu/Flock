@@ -1,12 +1,33 @@
 #include "fake_git.hpp"
 #include "flock/board_inbox.hpp"
 #include "model.hpp"
+#include "flock/decision.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <sqlite3.h>
 #include <spawn.h>
+#include <exception>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 #include <sys/wait.h>
 
 extern char** environ;

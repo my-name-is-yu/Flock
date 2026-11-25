@@ -1,8 +1,29 @@
 #include "fake_git.hpp"
 #include "model.hpp"
 #include "flock/participation.hpp"
+#include "flock/decision.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/runtime.hpp"
+#include "flock/session_ref.hpp"
+#include "flock/store.hpp"
+#include "flock/t3_connection.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <sqlite3.h>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 
 using namespace git_fixture;
 

@@ -1,6 +1,18 @@
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/t3.hpp"
+#include "flock/task.hpp"
+#include "flock/wait.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <map>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace flockv0 {
 std::string Store::Impl::rememberedT3Project(std::string_view bot, std::string_view environment) const {

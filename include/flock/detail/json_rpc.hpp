@@ -1,6 +1,13 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/json.hpp"
+
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0::detail {
 

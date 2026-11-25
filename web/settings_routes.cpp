@@ -1,8 +1,21 @@
 #include "settings_routes.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/session_question.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <exception>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0::web {
 bool hasWebIdentities(const WebCallbacks& callbacks) {

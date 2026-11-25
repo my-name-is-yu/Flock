@@ -7,9 +7,30 @@
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/decision.hpp"
+#include "flock/command.hpp"
+#include "flock/task.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/session_ref.hpp"
+#include "flock/wait.hpp"
+#include "flock/outbox.hpp"
+#include "flock/outbox_instruction.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <optional>
 #include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 using conversation_storage::identifier;

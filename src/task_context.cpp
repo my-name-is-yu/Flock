@@ -1,6 +1,18 @@
 #include "task_context_storage.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
+#include "flock/outbox_instruction.hpp"
+
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

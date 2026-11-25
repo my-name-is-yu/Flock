@@ -1,5 +1,17 @@
 #include "conversation_storage.hpp"
 #include "journal_peer.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/person.hpp"
+#include "flock/json.hpp"
+#include "flock/decision.hpp"
+#include "flock/session_ref.hpp"
+
+#include <optional>
+#include <string>
+#include <utility>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 

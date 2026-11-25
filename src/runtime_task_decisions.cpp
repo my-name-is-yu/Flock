@@ -1,16 +1,29 @@
 #include "runtime_task_decisions.hpp"
-
 #include "runtime_outbox_dispatch.hpp"
 #include "runtime_peer_exchanges.hpp"
 #include "runtime_run_reports.hpp"
 #include "runtime_session_history.hpp"
 #include "runtime_task_state.hpp"
 #include "runtime_task_updates.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/session_question.hpp"
+#include "flock/command.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/outbox_instruction.hpp"
 
 #include <algorithm>
 #include <map>
 #include <set>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <variant>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {
@@ -21,13 +34,13 @@ std::string gitInvocation(const TaskDecision& decision) {
 }
 }
 
-Runtime::TaskDecisions::TaskDecisions(Store::Impl& db, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
-                                      PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead,
-                                      GitHost* gitHost)
+Runtime::Components::TaskDecisions::TaskDecisions(Store::Impl& db, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
+                                                  PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead,
+                                                  GitHost* gitHost)
     : db(db), updates(updates), reports(reports), history(history), peerExchanges(peerExchanges), dispatch(dispatch),
       sessionRead(sessionRead), gitHost(gitHost) {}
 
-bool Runtime::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
+bool Runtime::Components::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
     if (task.replanning) return false;
     if (!task.newSessionRequired && RunReports::hasSettledRun(task) && task.lastRun->assignment.revisionId == task.currentRevision &&
         !reports.sessionReportUnavailable(task))
@@ -38,8 +51,8 @@ bool Runtime::TaskDecisions::canComplete(const TaskData& task, const Json& event
     return task.currentRevision.has_value() || (peer->kind == "consult" && event.at("status") == "completed");
 }
 
-void Runtime::TaskDecisions::rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision, std::string_view message,
-                                            bool replay) {
+void Runtime::Components::TaskDecisions::rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision,
+                                                        std::string_view message, bool replay) {
     updates.change(task, [&](TaskData& current) {
         const bool unknown = replay && isGitTool(decision.tool) && db.gitEffectStarted(gitInvocation(decision), current.id);
         const auto why = unknown ? "The host outcome is unknown. Check the target before retrying." : bounded(message, 2048);
@@ -57,7 +70,8 @@ void Runtime::TaskDecisions::rejectDecision(const TaskData& task, const Json& ev
     });
 }
 
-void Runtime::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, const Json& event, const TaskDecision& decision) {
+void Runtime::Components::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, const Json& event,
+                                                                 const TaskDecision& decision) {
     std::lock_guard lock(db.mutex);
     Transaction transaction(db.db);
     const auto id = snapshot.id;
@@ -74,7 +88,7 @@ void Runtime::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, c
     transaction.commit();
 }
 
-void Runtime::TaskDecisions::complete(TaskData& current, const Json& event, const TaskDecision& decision) {
+void Runtime::Components::TaskDecisions::complete(TaskData& current, const Json& event, const TaskDecision& decision) {
     const auto& pending = current.pendingInstructions;
     auto ids = Json::array();
     for (const auto& item : pending) ids.push_back({{"messageId", item.messageId}, {"step", item.step}});
@@ -93,8 +107,8 @@ void Runtime::TaskDecisions::complete(TaskData& current, const Json& event, cons
     updates.saveTask(current);
 }
 
-void Runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision,
-                                    std::string_view approvedInvocation) {
+void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision,
+                                                std::string_view approvedInvocation) {
     const auto& args = decision.args;
     const auto& tool = decision.tool;
     if (isGitTool(tool)) {
@@ -213,7 +227,7 @@ void Runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
     });
 }
 
-bool Runtime::TaskDecisions::continueStage(const TaskData& task) {
+bool Runtime::Components::TaskDecisions::continueStage(const TaskData& task) {
     if ((!task.workflow && !task.freshContextRequested) || !RunReports::hasSettledRun(task) || task.pendingInstructions.empty())
         return false;
     return updates.change(task, [&](TaskData& current) {
@@ -234,7 +248,7 @@ bool Runtime::TaskDecisions::continueStage(const TaskData& task) {
     });
 }
 
-bool Runtime::TaskDecisions::resumeGitApproval(const TaskData& task) {
+bool Runtime::Components::TaskDecisions::resumeGitApproval(const TaskData& task) {
     Json saved, event;
     {
         std::lock_guard lock(db.mutex);
@@ -251,7 +265,7 @@ bool Runtime::TaskDecisions::resumeGitApproval(const TaskData& task) {
     return true;
 }
 
-CompletionProvenance Runtime::TaskDecisions::completionProvenance(const TaskData& task, const Json& event) {
+CompletionProvenance Runtime::Components::TaskDecisions::completionProvenance(const TaskData& task, const Json& event) {
     if (auto peer = peerExchanges.peerCompletion(task, event)) return std::move(*peer);
     const auto& report = event.contains("sessionResult") ? event.at("sessionResult") : event;
     if (report.is_null()) return std::monostate{};

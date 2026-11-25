@@ -3,9 +3,28 @@
 #include "journal_conversation.hpp"
 #include "flock/base64.hpp"
 #include "flock/markdown.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/decision.hpp"
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

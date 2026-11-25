@@ -1,9 +1,20 @@
 #include "settings_routes.hpp"
 #include "views.hpp"
 #include "flock/memory_automation.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <charconv>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 
 namespace flockv0::web {
 namespace {

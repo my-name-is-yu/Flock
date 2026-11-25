@@ -1,9 +1,21 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
 #include "tool_batch.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/decision.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <future>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 bool allowedAfterWebEvidence(const Decision& call) {

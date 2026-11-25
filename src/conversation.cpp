@@ -4,6 +4,22 @@
 #include "conversation_storage.hpp"
 #include "journal_conversation.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
+#include "flock/session_ref.hpp"
+
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 using conversation_storage::hasText;

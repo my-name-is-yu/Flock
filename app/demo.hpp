@@ -1,6 +1,11 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include <memory>
+
+namespace flockv0 {
+class Model;
+class T3;
+}
 
 namespace flockv0::app {
 std::unique_ptr<Model> makeDemoModel();

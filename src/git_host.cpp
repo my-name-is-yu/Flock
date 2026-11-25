@@ -1,11 +1,25 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/decision.hpp"
+#include "flock/task.hpp"
+#include "flock/run_ref.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

@@ -1,15 +1,38 @@
 #include "internal.hpp"
-#include "flock/limits.hpp"
 #include "../src/commit_check.hpp"
+#include "flock/command.hpp"
+#include "flock/json.hpp"
+#include "flock/limits.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/run_report.hpp"
+#include "flock/session_question.hpp"
 #include "flock/session_read.hpp"
+#include "flock/session_ref.hpp"
 #include "flock/session_settings.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/t3_mcp.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
+#include <filesystem>
+#include <map>
+#include <memory>
+#include <optional>
 #include <set>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace flockv0 {
 namespace t3detail {

@@ -1,10 +1,21 @@
 #include "runtime_outbox_dispatch.hpp"
-
 #include "outbox_storage.hpp"
 #include "runtime_run_observer.hpp"
 #include "runtime_task_state.hpp"
 #include "runtime_task_updates.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/run_report.hpp"
+#include "flock/wait.hpp"
+#include "flock/outbox.hpp"
 
+#include <cstddef>
+#include <optional>
+#include <string>
 #include <utility>
 
 namespace flockv0 {
@@ -12,7 +23,7 @@ namespace {
 constexpr std::size_t maxDestinationEvidenceReads = 3;
 }
 
-bool Runtime::OutboxDispatch::destinationDeadline(TaskData& task, DestinationRun& run, Seconds now) {
+bool Runtime::Components::OutboxDispatch::destinationDeadline(TaskData& task, DestinationRun& run, Seconds now) {
     if (task.state == TaskState::cancelling || !run.outstanding()) return false;
     const auto& action = run.actionId;
     const auto& environment = run.environmentId;
@@ -31,7 +42,7 @@ AND action_id=? ORDER BY id LIMIT 1)SQL",
     return true;
 }
 
-void Runtime::OutboxDispatch::stepDestination(const TaskData& task, const DestinationRun& run) {
+void Runtime::Components::OutboxDispatch::stepDestination(const TaskData& task, const DestinationRun& run) {
     const auto id = task.id;
     const auto& key = run.actionId;
     std::optional<Outbox> action;

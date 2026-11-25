@@ -1,12 +1,20 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "runtime_components.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
+#include "flock/task.hpp"
 
 #include <compare>
+#include <cstddef>
+#include <functional>
+#include <optional>
 #include <stop_token>
+#include <string>
+#include <vector>
 
 namespace flockv0 {
-class Runtime::TaskScheduler {
+class Runtime::Components::TaskScheduler {
 public:
     struct Work {
         Id taskId = 0;

@@ -2,9 +2,26 @@
 #include "flock/limits.hpp"
 #include "journal_conversation.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/decision.hpp"
+#include "flock/task.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

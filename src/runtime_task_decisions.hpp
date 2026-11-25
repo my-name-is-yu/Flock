@@ -1,10 +1,19 @@
 #pragma once
 
+#include "runtime_components.hpp"
 #include "journal_task.hpp"
 #include "storage.hpp"
+#include "flock/store.hpp"
+#include "flock/runtime.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+
+#include <string>
+#include <string_view>
 
 namespace flockv0 {
-class Runtime::TaskDecisions {
+class Runtime::Components::TaskDecisions {
 public:
     TaskDecisions(Store::Impl& db, TaskUpdates& updates, RunReports& reports, SessionHistory& history, PeerExchanges& peerExchanges,
                   OutboxDispatch& dispatch, const std::string& sessionRead, GitHost* gitHost);

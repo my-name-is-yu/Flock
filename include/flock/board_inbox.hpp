@@ -1,5 +1,8 @@
 #pragma once
-#include "flock/policy.hpp"
+#include "flock/types.hpp"
+
+#include <optional>
+#include <string_view>
 
 namespace flockv0 {
 enum class InboxKind {

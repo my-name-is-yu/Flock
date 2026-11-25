@@ -1,9 +1,11 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 

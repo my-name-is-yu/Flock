@@ -1,6 +1,13 @@
 #pragma once
 
-#include "flock/workspace_tools.hpp"
+#include "flock/json.hpp"
+
+#include <filesystem>
+#include <memory>
+
+namespace flockv0 {
+struct BotTools;
+}
 
 namespace flockv0::app {
 std::shared_ptr<const BotTools> loadBotTools(const std::filesystem::path& home);

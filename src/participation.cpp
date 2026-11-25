@@ -1,15 +1,37 @@
 #include "flock/participation.hpp"
+#include "flock/t3_connection.hpp"
 #include "flock/limits.hpp"
 #include "connector_credentials.hpp"
 #include "conversation_storage.hpp"
 #include "journal_conversation.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/decision.hpp"
+#include "flock/task.hpp"
+#include "flock/session_ref.hpp"
 
 #include <algorithm>
 #include <cerrno>
-#include <fcntl.h>
+#include <chrono>
+#include <cstddef>
+#include <filesystem>
+#include <functional>
 #include <future>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

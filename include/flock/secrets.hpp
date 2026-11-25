@@ -1,6 +1,11 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/json.hpp"
+
+#include <cstddef>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace flockv0 {
 class SecretRedactor {

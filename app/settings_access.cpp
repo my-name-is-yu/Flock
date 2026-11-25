@@ -1,12 +1,27 @@
 #include "settings_access.hpp"
-
-#include "flock/base64.hpp"
 #include "../src/storage.hpp"
+#include "flock/base64.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
 
-#include <array>
+#include <nlohmann/json.hpp>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+
+#include <array>
+#include <cstddef>
+#include <filesystem>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0 {
 namespace {

@@ -1,12 +1,28 @@
 #include "flock/web.hpp"
 #include "../../tests/fake_git.hpp"
+#include "flock/decision.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/person.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <httplib.h>
 #include <openssl/hmac.h>
 
+#include <exception>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 
 using namespace git_fixture;
 

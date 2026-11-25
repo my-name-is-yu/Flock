@@ -1,7 +1,16 @@
 #include "tool_batch.hpp"
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/decision.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace flockv0::tool_batch {
 namespace {

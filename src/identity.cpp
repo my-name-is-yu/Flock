@@ -1,7 +1,22 @@
 #include "flock/identity.hpp"
+#include "flock/types.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+
+#include <filesystem>
+#include <functional>
+#include <map>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 ConfiguredIdentities loadIdentities(Store& store, const std::filesystem::path& path) {

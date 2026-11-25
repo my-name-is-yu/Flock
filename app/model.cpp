@@ -1,13 +1,24 @@
 #include "model.hpp"
-#include "flock/git_host.hpp"
-#include "flock/limits.hpp"
-#include "flock/workspace_tools.hpp"
-#include "flock/policy.hpp"
 #include "tool_batch.hpp"
+#include "flock/decision.hpp"
+#include "flock/git_host.hpp"
+#include "flock/json.hpp"
+#include "flock/limits.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/policy.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/workspace_tools.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <ostream>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace flockv0::app {
 namespace {

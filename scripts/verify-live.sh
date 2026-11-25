@@ -6,7 +6,11 @@ cd "$source_dir"
 
 if [ "$#" -eq 1 ] && [ "$1" = --changed-only ]; then
     set -- t3/ ':(glob)app/model*' ':(glob)app/chatgpt*' src/conversation_agent.cpp \
-        src/runtime.cpp include/flock/core.hpp ':(glob)tests/live_*'
+        src/runtime.cpp src/runtime_components.hpp \
+        include/flock/bot_change.hpp include/flock/intake.hpp include/flock/json.hpp \
+        include/flock/model.hpp include/flock/model_error.hpp include/flock/person.hpp include/flock/runtime.hpp \
+        include/flock/session_question.hpp include/flock/store.hpp include/flock/t3.hpp \
+        include/flock/t3_command.hpp include/flock/t3_session.hpp include/flock/types.hpp ':(glob)tests/live_*'
     base=$(git merge-base origin/main HEAD)
     changed=$(git diff --name-only --no-renames "$base" -- "$@")
     if [ -z "$changed" ]; then

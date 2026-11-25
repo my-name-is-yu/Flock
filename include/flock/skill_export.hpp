@@ -1,7 +1,10 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/json.hpp"
+
+#include <filesystem>
 #include <map>
+#include <string>
 
 namespace flockv0 {
 

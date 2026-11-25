@@ -1,8 +1,19 @@
 #include "conversation_storage.hpp"
 #include "journal_conversation.hpp"
 #include "tool_batch.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/decision.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 using conversation::Message;

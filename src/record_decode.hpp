@@ -1,12 +1,23 @@
 #pragma once
 
-#include "flock/core.hpp"
 #include "flock/record_decode_error.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/run_ref.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <optional>
 #include <set>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 template <class Enum, std::size_t N> std::string_view enumName(const std::array<std::pair<Enum, std::string_view>, N>& names, Enum value) {

@@ -4,9 +4,22 @@
 #include "flock/external_mcp.hpp"
 #include "flock/participation.hpp"
 #include "flock/skill_export.hpp"
+#include "flock/json.hpp"
+#include "flock/policy.hpp"
+#include "flock/store.hpp"
+#include "flock/t3_connection.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <limits>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0::web {
 namespace {

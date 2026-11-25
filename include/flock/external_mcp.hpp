@@ -1,9 +1,18 @@
 #pragma once
 
-#include "flock/policy.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/types.hpp"
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace flockv0 {
 
+class Store;
 struct CompletionEntry;
 
 struct ExternalMcpCredential {

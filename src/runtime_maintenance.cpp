@@ -1,11 +1,17 @@
 #include "runtime_maintenance.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+
+#include <functional>
+#include <optional>
+#include <string_view>
 
 namespace flockv0 {
-Runtime::Maintenance::Maintenance(Store::Impl& db, const std::function<Seconds()>& clock, const ErrorReporter& automationError,
-                                  const ErrorReporter& storageContention)
+Runtime::Components::Maintenance::Maintenance(Store::Impl& db, const std::function<Seconds()>& clock, const ErrorReporter& automationError,
+                                              const ErrorReporter& storageContention)
     : db(db), clock(clock), automationError(automationError), storageContention(storageContention) {}
 
-Seconds Runtime::Maintenance::settleApprovals() {
+Seconds Runtime::Components::Maintenance::settleApprovals() {
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
     const auto now = clock();
@@ -14,7 +20,7 @@ Seconds Runtime::Maintenance::settleApprovals() {
     return now;
 }
 
-std::optional<Seconds> Runtime::Maintenance::fireDueAutomations() {
+std::optional<Seconds> Runtime::Components::Maintenance::fireDueAutomations() {
     try {
         const auto now = clock();
         db.fireDueAutomations(now);
@@ -28,13 +34,13 @@ std::optional<Seconds> Runtime::Maintenance::fireDueAutomations() {
     }
 }
 
-Seconds Runtime::Maintenance::advanceWorkflows() {
+Seconds Runtime::Components::Maintenance::advanceWorkflows() {
     const auto now = clock();
     db.advanceWorkflows(now);
     return now;
 }
 
-void Runtime::Maintenance::scanIfChanged(std::optional<ScanStamp>& completed, std::string_view operation, const auto& work) {
+void Runtime::Components::Maintenance::scanIfChanged(std::optional<ScanStamp>& completed, std::string_view operation, const auto& work) {
     const auto now = clock();
     std::optional<ScanStamp> beforeScan;
     deferContendedWork("database change stamp", [&] { beforeScan.emplace(db.changeStamp(), now); });
@@ -45,15 +51,15 @@ void Runtime::Maintenance::scanIfChanged(std::optional<ScanStamp>& completed, st
     });
 }
 
-void Runtime::Maintenance::settleApprovalsIfChanged() {
+void Runtime::Components::Maintenance::settleApprovalsIfChanged() {
     scanIfChanged(approvalsCheckedAt, "policy approvals", [&] { return settleApprovals(); });
 }
 
-void Runtime::Maintenance::fireDueAutomationsIfChanged() {
+void Runtime::Components::Maintenance::fireDueAutomationsIfChanged() {
     scanIfChanged(automationsCheckedAt, "automations", [&] { return fireDueAutomations(); });
 }
 
-void Runtime::Maintenance::advanceWorkflowsIfChanged() {
+void Runtime::Components::Maintenance::advanceWorkflowsIfChanged() {
     scanIfChanged(workflowsCheckedAt, "workflows", [&] { return advanceWorkflows(); });
 }
 }

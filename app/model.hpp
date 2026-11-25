@@ -1,9 +1,15 @@
 #pragma once
 
 #include "chatgpt.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
 
+#include <cstddef>
+#include <filesystem>
+#include <functional>
 #include <iosfwd>
 #include <stop_token>
+#include <string>
 
 namespace flockv0::app {
 using CommitModelLogin = std::function<void(const std::function<void()>&)>;

@@ -1,9 +1,23 @@
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/decision.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <map>
+#include <optional>
 #include <ranges>
 #include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

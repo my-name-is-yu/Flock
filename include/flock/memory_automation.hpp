@@ -1,9 +1,14 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/intake.hpp"
+#include "flock/types.hpp"
 
 #include <bitset>
 #include <chrono>
+#include <optional>
+#include <string>
+#include <string_view>
+
 #include <cctz/time_zone.h>
 
 namespace flockv0 {

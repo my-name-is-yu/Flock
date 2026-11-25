@@ -1,8 +1,11 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/json.hpp"
+#include "flock/wait.hpp"
 
 namespace flockv0 {
+struct TaskData;
 class RecordDecoder;
 class SecretRedactor;
 

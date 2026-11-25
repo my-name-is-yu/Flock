@@ -1,10 +1,21 @@
 #pragma once
 
+#include "runtime_components.hpp"
 #include "storage.hpp"
 #include "journal_peer.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/task.hpp"
+
+#include <cstddef>
+#include <string>
+#include <string_view>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
-class Runtime::SessionHistory {
+class Runtime::Components::SessionHistory {
 public:
     enum class PrefillResult { NotNeeded, Persisted, UnavailableWithSettledReport };
     static constexpr std::size_t maxEvidenceReads = 3;

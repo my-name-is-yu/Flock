@@ -4,6 +4,16 @@
 #include "record_decode.hpp"
 #include "storage.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/outbox_instruction.hpp"
+
+#include <optional>
+#include <string>
+#include <utility>
+#include <variant>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

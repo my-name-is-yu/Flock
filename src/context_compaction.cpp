@@ -1,8 +1,20 @@
 #include "conversation_storage.hpp"
 #include "flock/limits.hpp"
 #include "journal_conversation.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 using conversation_storage::identifier;

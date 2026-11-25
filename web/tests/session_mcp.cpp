@@ -2,12 +2,41 @@
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/t3_mcp.hpp"
+#include "flock/command.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/session_ref.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <chrono>
+#include <exception>
+#include <filesystem>
+#include <functional>
 #include <future>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 using namespace flockv0;
 using namespace flockv0::http_test;

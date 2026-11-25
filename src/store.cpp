@@ -7,15 +7,40 @@
 #include "task_context_storage.hpp"
 #include "outbox_storage.hpp"
 #include "flock/session_settings.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/command.hpp"
+#include "flock/task.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/wait.hpp"
+#include "flock/outbox.hpp"
+#include "flock/outbox_instruction.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <map>
+#include <memory>
+#include <optional>
 #include <random>
 #include <set>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

@@ -1,12 +1,30 @@
-#include "flock/core.hpp"
 #include "flock/t3_mcp.hpp"
 #include "live_setup.hpp"
 #include "live_t3_fixture.hpp"
 #include "model.hpp"
+#include "flock/decision.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <filesystem>
 #include <iostream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 using namespace flockv0;
 
