@@ -13,6 +13,7 @@ Json outboxColumnValues(const Outbox&);
 Outbox decodeOutboxRow(const Statement&);
 std::vector<OutboxInstruction> taskInstructions(const Json&, Id task, std::string_view key = "pendingInstructions");
 Json instructionJson(const OutboxInstruction&);
+OutboxInstruction decodeOutboxInstruction(const Json&, const RecordDecoder&);
 Json instructionsJson(std::span<const OutboxInstruction>);
 void redactInstructions(std::span<OutboxInstruction>, const SecretRedactor&);
 std::vector<OutboxSource> taskResultReferences(const Json&, Id task);

@@ -81,6 +81,7 @@ add_library(flock_core STATIC src/store.cpp src/schema.cpp src/journal.cpp src/t
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp src/git_followup.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
+target_sources(flock_core PRIVATE src/journal_conversation.cpp src/journal_peer.cpp src/journal_task.cpp)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
 else()

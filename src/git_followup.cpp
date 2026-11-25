@@ -1,4 +1,5 @@
 #include "conversation_storage.hpp"
+#include "journal_peer.hpp"
 
 namespace flockv0 {
 
@@ -79,8 +80,8 @@ SELECT coalesce(max(m.id),0) FROM messages m WHERE m.bot_id=? AND m.person_id=? 
     human.next();
     const auto anchor = human.number(0);
     auto attempts = query(R"SQL(
-SELECT coalesce(max(json_extract(data,'$.eventId')=?),0),count(*) FILTER (WHERE id>?)
-FROM journal WHERE task_id=? AND kind='git_pr_followup_requested' AND json_extract(data,'$.operationId')=?
+SELECT coalesce(max(git_event_id=?),0),count(*) FILTER (WHERE id>?)
+FROM journal WHERE task_id=? AND kind='git_pr_followup_requested' AND operation_id=?
 )SQL",
                           {event.at("eventId"), anchor, taskId, operation});
     attempts.next();
@@ -132,7 +133,7 @@ std::string Store::Impl::gitPrFollowupInstruction(const conversation::Message& m
 }
 
 void Store::Impl::recordGitPrFollowup(const conversation::Message& message, const GitPrFollowup& followup) {
-    journal(followup.origin.task, "git_pr_followup_requested",
-            {{"operationId", followup.operation}, {"eventId", message.routing.at("gitEvent").at("eventId")}, {"messageId", message.id}});
+    const auto& eventId = message.routing.at("gitEvent").at("eventId").get_ref<const std::string&>();
+    journal(followup.origin.task, GitPrFollowupEntry{followup.operation, eventId, message.id});
 }
 }

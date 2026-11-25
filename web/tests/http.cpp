@@ -1517,8 +1517,9 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
                 sqlite3_busy_timeout(db.get(), 2000);
                 std::string write;
                 for (const auto* kind : {"instruction_accepted", "instruction_delivered"})
-                    write += "INSERT INTO journal(task_id,time,kind,data) VALUES(" + std::to_string(task) + ",unixepoch(),'" + kind +
-                             "',json_object('messageId'," + std::to_string(message) + ",'step',1));";
+                    write += "INSERT INTO journal(task_id,time,kind,data,message_id,instruction_step) VALUES(" + std::to_string(task) +
+                             ",unixepoch(),'" + kind + "',json_object('messageId'," + std::to_string(message) + ",'step',1)," +
+                             std::to_string(message) + ",1);";
                 check(sqlite3_exec(db.get(), write.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
                       "could not record the historical delivery");
                 return true;
@@ -1574,10 +1575,10 @@ void retryOneBotProjection(const std::filesystem::path& path) {
     sqlite3_busy_timeout(db.get(), 2000);
     const auto event = [&](std::string_view kind) {
         return "(" + std::to_string(task) + ",unixepoch(),'" + std::string(kind) + "',json_object('messageId'," + std::to_string(message) +
-               ",'step',1))";
+               ",'step',1)," + std::to_string(message) + ",1)";
     };
-    const auto write =
-        "INSERT INTO journal(task_id,time,kind,data) VALUES" + event("instruction_accepted") + "," + event("instruction_delivered");
+    const auto write = "INSERT INTO journal(task_id,time,kind,data,message_id,instruction_step) VALUES" + event("instruction_accepted") +
+                       "," + event("instruction_delivered");
     check(sqlite3_exec(db.get(), write.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK, "could not update historical message");
     writer.submit(web.intake("triage", "Healthy Bot request"));
     expectBot(triage, "triage");

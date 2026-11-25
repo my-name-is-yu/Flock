@@ -4,6 +4,8 @@
 
 namespace flockv0 {
 
+struct CompletionEntry;
+
 struct ExternalMcpCredential {
     std::string connectionId, bearerToken;
 };
@@ -30,7 +32,7 @@ private:
         std::string bot;
     };
     OwnedTask authorizeTask(const ExternalMcpConnection&, Id taskId) const;
-    Json completionRun(const OwnedTask&, const Json& completion) const;
+    Json completionRun(const OwnedTask&, const CompletionEntry&) const;
     Store& store_;
 };
 

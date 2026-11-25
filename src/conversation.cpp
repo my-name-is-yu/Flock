@@ -1,6 +1,8 @@
 #include "storage.hpp"
+#include "journal.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
+#include "journal_conversation.hpp"
 #include "task_storage.hpp"
 
 namespace flockv0 {
@@ -41,7 +43,7 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
     task.blocker.reset();
     task.intent = intent;
     task.doneWhen = doneWhen;
-    journal(task.id, "task_revision", {{"revisionId", revision}, {"sourceMessageId", source}});
+    journal(task.id, TaskRevisionEntry{revision, source});
     return revision;
 }
 
@@ -119,7 +121,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
 
 Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
                                     std::string_view clientId, std::string_view text, Id replyTo, const SessionOrigin* origin,
-                                    const Json& invitation) {
+                                    const ConversationInvitationEntry* invitation) {
     if (botPaused(routing.botId)) throw BotPaused{};
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     initialModelCallLimit(routing.config);
@@ -149,16 +151,21 @@ WHERE j.id=?1 AND m.bot_id=?2 AND m.person_id=?3
             if (const auto depth = previous.number(5)) saved["sessionInvitationDepth"] = depth;
         }
     }
-    Json event = Json::object();
-    if (!invitation.is_null()) {
-        event["sessionInvitation"] = scrub.record(invitation);
-        saved["sessionInvitation"] = event.at("sessionInvitation");
-        saved["sessionInvitationDepth"] = invitation.at("depth");
+    ConversationMessageEntry event;
+    if (invitation) {
+        auto publicInvitation = *invitation;
+        publicInvitation.environmentId = scrub.text(publicInvitation.environmentId);
+        publicInvitation.threadId = scrub.text(publicInvitation.threadId);
+        publicInvitation.title = scrub.text(publicInvitation.title);
+        publicInvitation.inviterBotId = scrub.text(publicInvitation.inviterBotId);
+        publicInvitation.inviterName = scrub.text(publicInvitation.inviterName);
+        publicInvitation.note = scrub.text(publicInvitation.note);
+        saved["sessionInvitation"] = encodeConversationInvitation(publicInvitation);
+        saved["sessionInvitationDepth"] = publicInvitation.depth;
+        event.detail = std::move(publicInvitation);
     }
     scrub.requirePublic({routing.botId, actor.id, clientId, saved});
-    exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message',?,?)",
-         {unixTime(), event, routing.botId});
-    const auto id = last();
+    const auto id = journalConversationMessage(routing.botId, event);
     exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=?

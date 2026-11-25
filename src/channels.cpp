@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
+#include "journal_conversation.hpp"
 #include "flock/base64.hpp"
 #include "flock/markdown.hpp"
 
@@ -374,14 +375,13 @@ WHERE a.id=? AND length(CAST(a.html AS BLOB))<=? AND d.state IN ('unknown','acce
     return ChannelResource{row.string(0), "text/html; charset=utf-8", row.string(1)};
 }
 
-void Store::Impl::queueChannelReply(Id source, Id reply, const Json& data) {
+void Store::Impl::queueChannelReply(Id source, Id reply, std::string_view text, const Json& suggestions) {
     exec(R"SQL(
 INSERT INTO channel_deliveries(id,source_id,reply_id,operation,payload)
 SELECT ?,c.message_id,?,'reply',? FROM channel_messages c JOIN messages m ON m.id=c.message_id
 WHERE c.message_id=? AND NOT EXISTS (SELECT 1 FROM bot_pauses p WHERE p.bot=m.bot_id)
 ON CONFLICT(reply_id) DO NOTHING)SQL",
-         {"reply-" + std::to_string(reply) + "-" + actionId(), reply,
-          Json{{"text", data.at("text")}, {"suggestions", data.value("suggestions", Json::array())}}, source});
+         {"reply-" + std::to_string(reply) + "-" + actionId(), reply, Json{{"text", text}, {"suggestions", suggestions}}, source});
 }
 
 void Store::Impl::queueChannelTaskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions) {
@@ -389,7 +389,7 @@ void Store::Impl::queueChannelTaskUpdate(Id task, Id entry, std::string_view tex
     auto source = query("SELECT message_id,t.bot_id FROM channel_tasks c JOIN tasks t ON t.id=c.task_id WHERE t.id=?", {task});
     if (!source.next()) return;
     const auto scrub = redactor(source.string(1));
-    queueChannelReply(source.number(0), entry, scrub.payload({{"text", bounded(text, 8000)}, {"suggestions", Json(suggestions)}}));
+    queueChannelReply(source.number(0), entry, scrub.text(bounded(text, 8000)), scrub.payload(Json(suggestions)));
 }
 
 void Store::Impl::channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies) {
@@ -415,11 +415,8 @@ void Store::Impl::channelNotice(Id source, std::string_view bot, std::string_vie
     if (!sqlite3_changes(db)) return;
     std::string notice(reason);
     if (supportsReplies) notice += followUp;
-    exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_reply','{}',?)", {unixTime(), bot});
-    const auto reply = last();
-    const Json data{{"messageId", reply}, {"replyToMessageId", source}, {"text", notice}, {"status", "done"}};
-    exec("UPDATE journal SET data=? WHERE id=?", {data, reply});
-    if (supportsReplies) queueChannelReply(source, reply, data);
+    const auto reply = journalConversationReply(std::nullopt, bot, {.replyToMessageId = source, .text = notice});
+    if (supportsReplies) queueChannelReply(source, reply, notice);
 }
 
 std::optional<Resource> Store::Impl::channelToolPolicy(Id message, std::string_view tool) {

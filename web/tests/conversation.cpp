@@ -14,6 +14,7 @@
 #include <iostream>
 #include <map>
 #include <ranges>
+#include <sqlite3.h>
 #include <sys/stat.h>
 
 using namespace flockv0;
@@ -923,6 +924,14 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
         check(messages.dump().find("fixture-message-author") == std::string::npos &&
                   shared.dump().find("fixture-shared-reader") == std::string::npos,
               "the DM exposed a person ID");
+        sqlite3* raw = nullptr;
+        const auto opened = sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr);
+        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
+        const auto update = "UPDATE journal SET time=time+1 WHERE id=" + std::to_string(receipt.at("messageId").get<Id>());
+        check(opened == SQLITE_OK && sqlite3_exec(db.get(), update.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
+              "could not change the source timestamp in the provenance fixture");
+        browser.client.set_default_headers({{"Authorization", "Bearer fixture-author"}});
+        check(browser.get(anchored).at("messages") == shared, "a forwarded quote with a mismatched timestamp was attributed to the author");
     }
 }
 void fullModeProfiles(const std::filesystem::path& directory) {

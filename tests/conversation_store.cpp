@@ -907,6 +907,9 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
               afterApproval.at(0).at("id") == beforeApproval.at(0).at("id") &&
               afterApproval.at(1).at("id") == beforeApproval.at(1).at("id"),
           "Approval did not invalidate both entries or consumed a visible page slot");
+    check(reply(reopened, paused).at("status") == "done" &&
+              fixture.count("SELECT count(*) FROM journal WHERE conversation_status='done' AND id=" + std::to_string(waitMessage)) == 1,
+          "Approval did not update the saved pause and its status column together");
     bool rejected = false;
     try {
         store.decideInbox(localOwner, target, "approve");

@@ -1,4 +1,5 @@
 #include "conversation_storage.hpp"
+#include "journal_conversation.hpp"
 #include "tool_batch.hpp"
 
 #include <algorithm>
@@ -215,7 +216,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationReply(const Message& me
             if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
         }
         saveTurnResults(id, step, Json::array({Json{{"ok", true}}}));
-        finishTurn(message, std::move(reply), suggestions, "reply", question);
+        finishTurn(message, std::move(reply), suggestions, ConversationReplyRoute::reply, question);
         transaction.commit();
         return finished;
     } catch (const ToolError& error) {
