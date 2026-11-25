@@ -248,7 +248,8 @@ struct Store::Impl {
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
     void projectTaskGitReads(GitHost&, const Json& task, Json& event);
     Json saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result);
-    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
+    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent,
+                   std::string_view reason);
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
     Id latestGitWebhookId() const;

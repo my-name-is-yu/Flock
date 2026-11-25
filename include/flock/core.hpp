@@ -48,6 +48,9 @@ struct Decision {
     Json args = Json::object();
     std::string reason;
 };
+inline constexpr std::size_t decisionReasonLimit = 4000;
+bool recordsTaskDecisionReason(std::string_view tool);
+bool validDecisionReason(std::string_view reason);
 struct ModelTurn {
     std::vector<Decision> calls;
     Json usage = Json::object();

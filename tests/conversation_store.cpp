@@ -279,7 +279,7 @@ void savedDecisionIsAppliedWithoutAnotherModelCall() {
     const auto message = receive(store,"saved-decision","Write a release note");
     const auto id = std::to_string(message);
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision) VALUES(" + id +
-                ",1,'[{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"},\"reason\":\"Saved\"}]')");
+                ",1,'[{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"}}]')");
     RuntimeFixture execution(store);
     unsigned calls = 0;
     execution.model.conversation = [&](const ModelInput& input) {

@@ -18,6 +18,17 @@ bool sharedMemoryTool(std::string_view tool) {
 }
 }
 
+bool recordsTaskDecisionReason(std::string_view tool) {
+    constexpr std::string_view recorded[]{
+        "delegate","follow_up","complete","ask_user","answer_session_question","send_bot_message","reply_to_bot"
+    };
+    return std::ranges::find(recorded,tool) != std::end(recorded);
+}
+
+bool validDecisionReason(std::string_view reason) {
+    return reason.size() <= decisionReasonLimit && conversation_storage::hasText(reason);
+}
+
 bool modelArgumentsContainProtected(const SecretRedactor& scrub, std::string_view tool, const Json& args) {
     if (!args.is_object()) return scrub.containsProtected(args);
     for (const auto& [key,value] : args.items()) {
@@ -162,7 +173,12 @@ ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const
         }
         if (modelArgumentsContainProtected(scrub,call.tool,call.args))
             rejection = "Tool arguments contain protected material. Use a secret reference where supported.";
-        if (rejection.empty()) call.reason = scrub.text(call.reason);
+        if (rejection.empty()) {
+            const auto operation = gitOperation(call);
+            if (recordsTaskDecisionReason(call.tool) || (!operation.empty() && operation != "read"))
+                call.reason = scrub.text(call.reason);
+            else call.reason.clear();
+        }
     }
     if (!rejection.empty()) {
         call.args = Json::object();

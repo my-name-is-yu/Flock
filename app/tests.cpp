@@ -382,55 +382,55 @@ void responseContract() {
           turnTool("compact_conversation")["required"].back() == "summary" &&
           turnTool("expand_context")["properties"].contains("compactionId") &&
           turnTool("continue_fresh_session")["required"].back() == "taskId" &&
-          turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
-          turnTool("message_session")["required"] == Json::array({"reason","environmentId","threadId","text"}) &&
-          turnTool("invite_bot")["required"] == Json::array({"reason","botId","environmentId","threadId","note"}) &&
-          turnTool("leave_session")["required"] == Json::array({"reason","environmentId","threadId"}) &&
-          turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
+          turnTool("request_secret_input")["required"] == Json::array({"name"}) &&
+          turnTool("message_session")["required"] == Json::array({"environmentId","threadId","text"}) &&
+          turnTool("invite_bot")["required"] == Json::array({"botId","environmentId","threadId","note"}) &&
+          turnTool("leave_session")["required"] == Json::array({"environmentId","threadId"}) &&
+          turnTool("start_task")["required"] == Json::array({"request"}) &&
           turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
           turnTool("start_task")["properties"]["environments"]["minItems"] == 1 &&
           !turnTool("start_task")["properties"]["environments"].contains("maxItems") &&
           turnTool("start_task")["properties"]["commit"]["type"] == "string" &&
-          turnTool("change_task")["required"] == Json::array({"reason","taskId","generation","revisionId","instruction"}) &&
+          turnTool("change_task")["required"] == Json::array({"taskId","generation","revisionId","instruction"}) &&
           turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&
-          turnTool("cancel_task")["required"] == Json::array({"reason","taskId","generation"}) &&
+          turnTool("cancel_task")["required"] == Json::array({"taskId","generation"}) &&
           turnTool("cancel_task")["properties"]["destination"]["type"] == "string" &&
           turnTool("cancel_task")["properties"]["environmentId"]["type"] == "string" &&
           turnTool("cancel_task")["properties"]["projectId"]["type"] == "string" &&
-          turnTool("find_tasks")["required"] == Json::array({"reason"}) &&
+          turnTool("find_tasks")["required"] == Json::array() &&
           turnTool("find_tasks")["properties"]["taskId"]["type"] == "integer" &&
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
           turnTool("reply")["properties"]["suggestions"]["maxItems"] == 4,
           "conversation provider request must offer the conversation tools");
-    check(turnTool("record_task_blocker")["required"] == Json::array({"reason","taskId","generation","blockerReason"}) &&
-          turnTool("withdraw_task_question")["required"] == Json::array({"reason","taskId","generation","waitId"}) &&
+    check(turnTool("record_task_blocker")["required"] == Json::array({"taskId","generation","blockerReason"}) &&
+          turnTool("withdraw_task_question")["required"] == Json::array({"taskId","generation","waitId"}) &&
           turnTool("withdraw_task_question")["properties"]["generation"]["minimum"] == 0,
           "blocker and withdrawal schemas must expose their exact task targets");
     for (auto name : {"list_secrets","list_connections","check_environment_readiness"})
-        check(turnTool(name).at("required")==Json::array({"reason"}),"unexpected mandatory access-tool parameter");
-    check(turnTool("update_bot_settings").at("required")==Json::array({"reason","environmentId","runTimeoutSeconds"}) &&
+        check(turnTool(name).at("required")==Json::array(),"unexpected mandatory access-tool parameter");
+    check(turnTool("update_bot_settings").at("required")==Json::array({"environmentId","runTimeoutSeconds"}) &&
           turnTool("update_bot_settings").at("properties").at("runTimeoutSeconds").at("maximum")==2147483647 &&
-          turnTool("request_bot_change").at("required")==Json::array({"reason","operation","targetBotId","name"}) &&
+          turnTool("request_bot_change").at("required")==Json::array({"operation","targetBotId","name"}) &&
           turnTool("request_bot_change").at("properties").at("operation").at("enum")==Json::array({"create_bot","rename_bot"}),
           "access request and settings schemas do not match dispatch");
     const std::map<std::string,Json> memoryAutomationRequired{
-        {"read_memory",{"reason"}}, {"memory_history",{"reason"}},
-        {"propose_memory_edit",{"reason","baseVersion","content","rationale"}},
-        {"apply_memory_edit",{"reason","baseVersion"}},
-        {"revert_memory_edit",{"reason","baseVersion","revisionId"}},
-        {"create_schedule",{"reason","request","cron","timezone"}}, {"list_schedules",{"reason"}},
-        {"remove_schedule",{"reason","id"}}, {"create_reminder",{"reason","request","fireAt","timezone"}},
-        {"create_trigger",{"reason","request","source"}}};
+        {"read_memory",Json::array()}, {"memory_history",Json::array()},
+        {"propose_memory_edit",{"baseVersion","content","rationale"}},
+        {"apply_memory_edit",{"baseVersion"}},
+        {"revert_memory_edit",{"baseVersion","revisionId"}},
+        {"create_schedule",{"request","cron","timezone"}}, {"list_schedules",Json::array()},
+        {"remove_schedule",{"id"}}, {"create_reminder",{"request","fireAt","timezone"}},
+        {"create_trigger",{"request","source"}}};
     for (const auto& [name,required] : memoryAutomationRequired)
         check(turnTool(name).at("required") == required,"memory or automation schema does not match dispatch");
     check(turnTool("apply_memory_edit")["properties"]["baseVersion"]["minimum"] == 0 &&
           turnTool("create_trigger")["properties"]["eventFilter"]["type"] == "object","incorrect schema constraints");
     const auto& search = turnTool("flock_session_search");
     const auto& events = turnTool("flock_session_events");
-    check(search.at("required") == Json::array({"reason"}) && search.at("properties").size() == 8 &&
-          events.at("required") == Json::array({"reason","operation"}) &&
-          events.at("properties").size() == 13 &&
+    check(search.at("required") == Json::array() && search.at("properties").size() == 7 &&
+          events.at("required") == Json::array({"operation"}) &&
+          events.at("properties").size() == 12 &&
           events.at("properties").at("operation").at("enum") ==
               Json::array({"list","search","read_event","counts","get_attachment"}),
           "Session search and event schemas do not match their contracts");
@@ -444,9 +444,11 @@ void responseContract() {
         return Json::array({{{"type","function_call"},{"name",tool},{"namespace","flock"},{"status","completed"},
                              {"arguments",args.dump()}}});
     };
-    const Json searchArgs{{"reason","Find yesterday’s staging investigation"},{"query","staging"},
+    rejects<ModelError>([&] { responseDecision(modelCall("start_task",{{"request","Start work"},{"reason","Extra"}}),turn); },
+                        "Conversation routing accepted an undeclared rationale");
+    const Json searchArgs{{"query","staging"},
                           {"project","Release"},{"fromTime","2026-11-21T00:00:00Z"},{"limit",2}};
-    const Json eventArgs{{"reason","Read the test log"},{"sessionRef","opaque-session"},{"operation","get_attachment"},
+    const Json eventArgs{{"sessionRef","opaque-session"},{"operation","get_attachment"},
                          {"attachmentRef","opaque-attachment"}};
     check(responseDecision(modelCall("flock_session_search",searchArgs),turn).calls.at(0).args.at("project") == "Release" &&
           responseDecision(modelCall("flock_session_events",eventArgs),turn).calls.at(0).args.at("attachmentRef") == "opaque-attachment",
@@ -461,13 +463,13 @@ void responseContract() {
     const auto batchRequest = responseRequest(batchInput);
     check(batchRequest.at("parallel_tool_calls") == true,"Two batchable reads did not enable parallel calls");
     auto mixedCalls = modelCall("flock_session_search",searchArgs);
-    mixedCalls.push_back(modelCall("check_environment_readiness",{{"reason","Check the connection"}}).front());
+    mixedCalls.push_back(modelCall("check_environment_readiness",Json::object()).front());
     const auto mixed = responseDecision(mixedCalls,batchRequest);
     check(mixed.calls.size() == 2 && mixed.calls[0].tool == "flock_session_search" &&
           mixed.calls[1].tool == "check_environment_readiness" && mixed.rejections.empty(),
           "Mixed Session and readiness reads were not decoded in order");
-    mixedCalls.push_back(modelCall("start_task",{{"reason","Start work"}}).front());
-    mixedCalls.push_back(modelCall("reply",{{"reason","Reply"},{"unexpected","Sensitive data"}}).front());
+    mixedCalls.push_back(modelCall("start_task",{{"request","Start work"}}).front());
+    mixedCalls.push_back(modelCall("reply",{{"unexpected","Sensitive data"}}).front());
     const auto partial = responseDecision(mixedCalls,batchRequest);
     check(partial.calls.size() == 4 && partial.rejections.size() == 2 && partial.rejections.contains(2) &&
           partial.rejections.contains(3) && partial.calls[2].args.empty() && partial.calls[3].args.empty(),
@@ -490,12 +492,12 @@ void responseContract() {
           "conversation instructions must scope Bot notes to the user's authorized request");
     check(turn.dump().find("must-stay-local") == std::string::npos,"conversation adapter config leaked into the prompt");
     const std::map<std::string,Json> requiredChannelArgs{
-        {"channel_edit_message",{"reason","externalMessageId","text"}},
-        {"channel_react",{"reason","reaction"}},
-        {"channel_send_attachment",{"reason"}},
-        {"read_channel_attachment",{"reason","attachmentId"}},
-        {"publish_artifact",{"reason","title","html"}},
-        {"request_local_machine_connection",{"reason","threadId","runId","machineId","rules"}}
+        {"channel_edit_message",{"externalMessageId","text"}},
+        {"channel_react",{"reaction"}},
+        {"channel_send_attachment",Json::array()},
+        {"read_channel_attachment",{"attachmentId"}},
+        {"publish_artifact",{"title","html"}},
+        {"request_local_machine_connection",{"threadId","runId","machineId","rules"}}
     };
     input.tools.clear();
     for (const auto& [name,args] : requiredChannelArgs) input.tools.push_back(name);
@@ -545,7 +547,7 @@ void responseContract() {
         "peer replies must specify their kind and text");
     const auto& evidence = parameters(peerRequest,"read_bot_evidence");
     check(evidence["properties"]["messageId"]["type"] == "string" &&
-        evidence["required"].get<Names>() == Names{"reason","messageId"},
+        evidence["required"].get<Names>() == Names{"messageId"},
         "peer evidence must identify the message that carries it");
     input.needsDoneWhen = false;
     input.task["doneWhen"] = "Saved work acceptance";
@@ -567,6 +569,10 @@ void responseContract() {
     const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),completeRequest).calls.at(0);
     check(valid.tool == "complete" && valid.reason == "Evidence provided" && valid.args == Json{{"report","Done"}},
         "Responses call did not map to core decision");
+    rejects<ModelError>([&] { responseDecision(modelCall("complete",{{"report","Done"}}),completeRequest); },
+                        "Completion without a reason was accepted");
+    rejects<ModelError>([&] { responseDecision(modelCall("complete",{{"report","Done"},{"reason"," \t"}}),completeRequest); },
+                        "Completion with a blank reason was accepted");
     for (const auto* key : {"namespace","status"}) {
         auto incomplete = call;
         incomplete.erase(key);
@@ -612,11 +618,13 @@ void missingChatGPTSignInIsTyped() {
 class AcceptanceModel final : public Model {
 public:
     std::vector<Json> requests;
+    bool withReason = true;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         requests.push_back(responseRequest(input));
         if (input.task["botId"] == "regression") {
-            return {"follow_up",{{"instruction","Cover the reported bug with a new automated check"}},"A regression test is missing."};
+            return {"follow_up",{{"instruction","Cover the reported bug with a new automated check"}},
+                withReason ? "A regression test is missing." : ""};
         }
         return {"complete",{{"report","All existing checks succeeded"}},"The required existing tests passed."};
     }
@@ -638,6 +646,9 @@ void acceptanceRunner() {
             "each trial must record the same report and its rationale");
     }
     check(count == 6,"six trial rows were not recorded");
+    model.withReason = false;
+    std::stringstream missingReason;
+    check(!runModelAcceptance(model,"model-slug",missingReason),"Acceptance passed further work without its rationale");
 }
 
 void fixedDemoWithUserCriteriaAndContinuation() {
@@ -699,6 +710,13 @@ void fixedDemoWithUserCriteriaAndContinuation() {
     const auto runs = store.task(task).at("runs");
     check(runs.size() == 2 && runs[0]["threadId"] == runs[1]["threadId"] && runs[0]["runId"] != runs[1]["runId"],
           "the fixed demo follow-up started another Session");
+    check(std::ranges::any_of(store.history(task),[](const Json& entry) {
+        const auto& data = entry.at("data");
+        return entry.at("kind") == "decision" && data.at("tool") == "follow_up" &&
+            data.at("reason") == "The demo report predates the accepted instructions.";
+    }),"task history lost the reason for further work");
+    check(lastTaskEvent(store,task,"completed").at("data").at("reason") ==
+          "The demo Session reported that it completed the requested work.","task history lost the reason for completion");
     Command followUp;
     followUp.tool = "follow_up";
     followUp.actionId = "persisted-demo-action";

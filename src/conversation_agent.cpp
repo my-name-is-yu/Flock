@@ -813,7 +813,8 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     const auto encodeCalls = [](const std::vector<ModelCall>& calls) {
         auto saved = Json::array();
         for (const auto& call : calls) {
-            Json entry{{"tool",call.tool},{"args",call.args},{"reason",call.reason}};
+            Json entry{{"tool",call.tool},{"args",call.args}};
+            if (!call.reason.empty()) entry["reason"] = call.reason;
             if (!call.rejection.empty()) entry["rejection"] = call.rejection;
             saved.push_back(std::move(entry));
         }
@@ -886,7 +887,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                     const auto [offered,machines] = available();
                     bool rejectionChanged = false;
                     for (const auto& saved : row.json(0)) {
-                        Decision call{saved.at("tool"),saved.at("args"),saved.at("reason")};
+                        Decision call{saved.at("tool"),saved.at("args"),field(saved,"reason")};
                         if (auto rejection = saved.value("rejection",std::string{}); !rejection.empty())
                             calls.push_back({std::move(call),std::move(rejection)});
                         else {
