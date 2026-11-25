@@ -623,7 +623,18 @@ UNION ALL
 SELECT j.id,b.bot,'failure'
 FROM visible_bots b JOIN tasks t ON t.bot_id=b.bot JOIN journal j ON j.task_id=t.id AND j.id>b.after
 WHERE j.conversation_bot_id IS NULL AND (
-  (j.kind='report' AND json_extract(j.data,'$.status') IN ('failed','interrupted','rolled_back'))
+  (j.kind='report' AND (
+    json_extract(j.data,'$.status') IN ('failed','rolled_back')
+    OR (json_extract(j.data,'$.status')='interrupted' AND json_extract(j.data,'$.stopRequested') IS NOT 1
+        AND NOT EXISTS (
+          SELECT 1 FROM journal stop
+          WHERE stop.task_id=j.task_id AND stop.id<j.id AND stop.kind='interrupt_requested'
+            AND (json_extract(stop.data,'$.run.environmentId'),json_extract(stop.data,'$.run.threadId'),
+                 json_extract(stop.data,'$.run.runId'),json_extract(stop.data,'$.run.gatewayEnvironmentId'))
+            IS (json_extract(j.data,'$.environmentId'),json_extract(j.data,'$.run.threadId'),
+                json_extract(j.data,'$.run.runId'),json_extract(j.data,'$.run.gatewayEnvironmentId'))
+        ))
+  ))
   OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='model_failure')
   OR (j.kind='completed' AND json_extract(j.data,'$.workflowOutcome')='failed')
 )
