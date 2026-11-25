@@ -10,6 +10,7 @@
 #include <mutex>
 #include <set>
 #include <sqlite3.h>
+#include <stop_token>
 #include <utility>
 #include <variant>
 
@@ -310,7 +311,6 @@ struct Store::Impl {
     bool settleStageReport(Json& task);
     void initializeConversationSchema();
     void initializeModelBudgetSchema();
-    void initializeWorkspaceSchema();
     void initializeAttachmentsSchema();
     void saveAttachments(Id, const Json&);
     Json inspectAttachment(std::string_view bot, Id throughMessage, const Json&);
@@ -318,11 +318,6 @@ struct Store::Impl {
     Statement scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
     std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
-    void recoverWorkspace();
-    void persistWorkspaceResults();
-    void stopWorkspace();
-    std::map<Id,std::unique_ptr<WorkspaceJob>> workspaceJobs;
-    void validateWorkspace(const ToolContext&, const Decision&);
     Json workspaceTool(const ToolContext&, const Decision&);
     std::optional<Resource> authorizedBotToolScope(std::string_view bot, const Decision&);
     void validateBotTool(const ToolContext&, const Decision&);

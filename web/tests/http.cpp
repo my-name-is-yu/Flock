@@ -1752,6 +1752,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target",""},{"add",true}},400);
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","  "},{"add",true}},400);
     browser.post("/api/settings/rule",{{"kind","never"},{"action","bot.talk"},{"target","release"},{"add",true}},400);
+    browser.post("/api/settings/rule",{{"kind","allow"},{"action","workspace.exec"},{"target","release"},{"add",true}},400);
     check(browser.get("/api/settings").at("rules").empty(),"an invalid addition changed installation rules");
     browser.post("/api/settings/rule",addition);
     const auto added = browser.get("/api/settings").at("rules");
