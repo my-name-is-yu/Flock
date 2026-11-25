@@ -93,6 +93,8 @@ build/app/flock run
 
 In ChatGPT, authorize Flock to use your plan and check that `model status` shows `planUsage: true`. Open the Web UI at the URL printed by the CLI, choose **Flock settings → Connections → Connect local T3**, and approve Operate access in T3. For a T3 server on another machine, use **Use a connection URL** and paste its MCP URL. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
 
+Flock puts the Bot's role and memory first in model input so ChatGPT can reuse the shared beginning of requests. Flock records [cached token counts](app/README.md#model-call-allowance) when ChatGPT reports them.
+
 In a T3 Session, ask for a Bot by name or select `/skill:flock-<bot>` or
 `$flock-<bot>` in the provider's skill menu. The Bot replies in the same Session.
 Open **Flock settings** to see the connected environments and saved loopback port. Use `--port PORT` to change the port.
