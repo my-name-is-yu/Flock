@@ -120,6 +120,7 @@ WHERE result IS NULL AND json_extract(effect,'$.kind')='message_session'
         if (destination == task.at("runResults").end()) continue;
         if (!destinationRunOutstanding(*destination)) {
             (*destination)["status"] = "confirmation_pending";
+            (*destination)["detail"] = "A Session message may have been accepted by T3, but Flock has no receipt to identify its Run. The task remains held.";
             (*destination)["retryAt"] = policyClock() + 5;
         }
     }

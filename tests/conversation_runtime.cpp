@@ -2624,7 +2624,7 @@ void pinnedDestinationFollowupKeepsVerificationContract() {
           "the completed follow-up did not retain the requested commit evidence");
 }
 
-void preparedSavedSessionSendSettlesAfterAccessLoss() {
+void savedSessionSendAfterAccessLoss(std::string_view sendState) {
     Fixture f;
     f.requireT3Connection = true;
     f.restart();
@@ -2645,10 +2645,11 @@ void preparedSavedSessionSendSettlesAfterAccessLoss() {
     sqlite3_stmt* statement = nullptr;
     check(sqlite3_prepare_v2(db.get(),"INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(?,0,'[]',?)",
                              -1,&statement,nullptr) == SQLITE_OK,"could not prepare the persisted Session effect");
-    const auto effect = Json{{"kind","message_session"},{"sendState","prepared"},
-                             {"taskId",taskId},{"actionId",actionId}}.dump();
+    Json effect = {{"kind","message_session"},{"taskId",taskId},{"actionId",actionId}};
+    if (!sendState.empty()) effect["sendState"] = sendState;
+    const auto encodedEffect = effect.dump();
     sqlite3_bind_int64(statement,1,messageId);
-    sqlite3_bind_text(statement,2,effect.c_str(),-1,SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement,2,encodedEffect.c_str(),-1,SQLITE_TRANSIENT);
     check(sqlite3_step(statement) == SQLITE_DONE,"could not persist the prepared Session effect");
     sqlite3_finalize(statement);
     check(sqlite3_prepare_v2(db.get(),"UPDATE messages SET principal_source=4,routing=json_set(routing,'$.sessionOrigin.environmentId','desktop',"
@@ -2675,19 +2676,47 @@ void preparedSavedSessionSendSettlesAfterAccessLoss() {
     f.t3.finish(originalRun,"The task report settled after the unsent follow-up was closed");
     const auto retryAt = destinationRunFor(f.task(taskId),"cloud").value("retryAt",f.now);
     if (retryAt > f.now) f.now = retryAt;
-    try {
-        f.advanceUntil([&] { return f.task(taskId).at("state") == "completed"; },
-                       "lost Session access left a definitely-unsent effect holding the project slot");
-    } catch (const std::exception& error) {
-        throw std::runtime_error(std::string(error.what()) + " diagnostics=" +
-            " response=" + f.response(receipt).dump() + " " +
-            persistedTaskDiagnostics(f,taskId,messageId).dump());
+    if (sendState == "prepared") {
+        try {
+            f.advanceUntil([&] { return f.task(taskId).at("state") == "completed"; },
+                           "lost Session access left a definitely-unsent effect holding the project slot");
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string(error.what()) + " diagnostics=" +
+                " response=" + f.response(receipt).dump() + " " +
+                persistedTaskDiagnostics(f,taskId,messageId).dump());
+        }
+        f.advanceUntil([&] { return f.task(queuedId).at("state") == "running"; },
+                       "the queued task did not acquire the slot after the unsent effect was settled");
+        check(f.task(queuedId).at("state") == "running",
+              "the prepared Session send was dispatched after access closed or kept its sibling blocked");
+    } else {
+        const std::string reason = "A Session message may have been accepted by T3, but Flock has no receipt to identify its Run.";
+        f.advanceUntil([&] {
+            const auto task = f.task(taskId);
+            const auto run = destinationRunFor(task,"cloud");
+            return run.value("status","") == "confirmation_pending" &&
+                   run.value("detail","").find(reason) != std::string::npos;
+        },"the unresolved Session send was not visible as confirmation pending");
+        sqlite3_stmt* result = nullptr;
+        check(sqlite3_prepare_v2(db.get(),"SELECT result FROM conversation_steps WHERE message_id=? AND step=0",
+                                 -1,&result,nullptr) == SQLITE_OK,"could not query the unresolved Session result");
+        sqlite3_bind_int64(result,1,messageId);
+        check(sqlite3_step(result) == SQLITE_ROW && sqlite3_column_type(result,0) == SQLITE_NULL,
+              "an uncertain Session send was incorrectly settled");
+        sqlite3_finalize(result);
+        check(f.task(taskId).at("state") == "running" && f.task(queuedId).at("state") == "queued" &&
+              std::ranges::none_of(f.t3.sent,[](const Command& sent) { return sent.tool == "message_session"; }),
+              "an uncertain Session send released its slot or was resent after access closed");
     }
-    f.advanceUntil([&] { return f.task(queuedId).at("state") == "running"; },
-                   "the queued task did not acquire the slot after the unsent effect was settled");
-    check(std::ranges::none_of(f.t3.sent,[](const Command& sent) { return sent.tool == "message_session"; }) &&
-          f.task(queuedId).at("state") == "running",
-          "the prepared Session send was dispatched after access closed or kept its sibling blocked");
+}
+
+void preparedSavedSessionSendSettlesAfterAccessLoss() {
+    savedSessionSendAfterAccessLoss("prepared");
+}
+
+void uncertainSavedSessionSendRemainsHeldAfterAccessLoss() {
+    savedSessionSendAfterAccessLoss("sending");
+    savedSessionSendAfterAccessLoss("");
 }
 
 void recoveredStopApprovalBelongsToTheStopRequester() {
@@ -3587,6 +3616,11 @@ int main(int argc, char** argv) {
             std::cout << "Prepared saved Session send settlement passed with simulated T3\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "lost-access-uncertain-session-send") {
+            uncertainSavedSessionSendRemainsHeldAfterAccessLoss();
+            std::cout << "Uncertain saved Session sends remain held after access loss\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "recovered-stop-requester") {
             recoveredStopApprovalBelongsToTheStopRequester();
             std::cout << "Recovered stop requester authorization passed\n";
@@ -3667,6 +3701,7 @@ int main(int argc, char** argv) {
         lateSavedDestinationReceiptKeepsTaskAndSlot();
         pinnedDestinationFollowupKeepsVerificationContract();
         preparedSavedSessionSendSettlesAfterAccessLoss();
+        uncertainSavedSessionSendRemainsHeldAfterAccessLoss();
         recoveredStopApprovalBelongsToTheStopRequester();
         recoveredDestinationStopHonorsPolicy();
         startedRunOutboxApprovalIsStale();
