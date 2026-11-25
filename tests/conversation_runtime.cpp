@@ -2704,10 +2704,11 @@ void savedSessionSendAfterAccessLoss(std::string_view sendState) {
         check(sqlite3_step(result) == SQLITE_ROW && sqlite3_column_type(result,0) == SQLITE_NULL,
               "an uncertain Session send was incorrectly settled");
         sqlite3_finalize(result);
-        check(f.task(taskId).at("state") == "running" && f.task(queuedId).at("state") == "queued" &&
-              std::ranges::none_of(f.t3.sent,[](const Command& sent) { return sent.tool == "message_session"; }),
-              "an uncertain Session send released its slot or was resent after access closed");
+        check(f.task(taskId).at("state") == "running" && f.task(queuedId).at("state") == "queued",
+              "an uncertain Session send released its slot after access closed");
     }
+    check(std::ranges::none_of(f.t3.sent,[](const Command& sent) { return sent.tool == "message_session"; }),
+          "a saved Session send was dispatched after access closed");
 }
 
 void preparedSavedSessionSendSettlesAfterAccessLoss() {
