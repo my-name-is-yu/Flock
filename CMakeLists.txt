@@ -70,7 +70,7 @@ function(flock_fetch_cmark)
 endfunction()
 flock_fetch_cmark()
 
-add_library(flock_core STATIC src/store.cpp src/schema.cpp src/wait.cpp src/outbox.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
+add_library(flock_core STATIC src/store.cpp src/schema.cpp src/task_storage.cpp src/wait.cpp src/outbox.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/run_reports.cpp src/project_slots.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
@@ -158,6 +158,9 @@ if(BUILD_TESTING)
   add_executable(flock_wait_records tests/wait_records.cpp)
   target_link_libraries(flock_wait_records PRIVATE flock_core)
   add_test(NAME flock_wait_records COMMAND flock_wait_records)
+  add_executable(flock_task_records tests/task_records.cpp)
+  target_link_libraries(flock_task_records PRIVATE flock_core)
+  add_test(NAME flock_task_records COMMAND flock_task_records)
   add_executable(flock_outbox_records tests/outbox.cpp)
   target_link_libraries(flock_outbox_records PRIVATE flock_core)
   add_test(NAME flock_outbox_records COMMAND flock_outbox_records)

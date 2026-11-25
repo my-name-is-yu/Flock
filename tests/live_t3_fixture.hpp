@@ -142,12 +142,12 @@ inline int pump(Store& store, T3& t3, Id id, std::string_view targetState) {
     using namespace std::chrono_literals;
     TestModel model;
     RuntimeOptions options;
-    if (store.task(id).at("request") == "measurement-read-resume") options.sessionRead = "on_demand";
+    if (store.task(id).task.request == "measurement-read-resume") options.sessionRead = "on_demand";
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string("Validate the acceptance fixture"); }, options);
     std::string previous;
     const auto end = std::chrono::steady_clock::now() + 5min;
     do {
-        const auto task = store.task(id);
+        const auto task = taskJson(store.task(id));
         const auto state = task.at("state").get<std::string>();
         if (previous != state) {
             std::cout << state << " ";

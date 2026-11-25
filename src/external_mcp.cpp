@@ -15,12 +15,13 @@ std::string redactConnectionTokens(std::string text) {
     return connector_credentials::redact(redactT3Tokens(std::move(text)), tokenPrefix, "[External MCP token]");
 }
 
-Json currentRun(const Json& task) {
-    if (task.at("state") == "cancelled" || task.value("replanning", false) || task.value("newSessionRequired", false)) return nullptr;
-    const auto& active = task.at("activeRun");
-    const auto& run = active.is_null() ? task.at("lastRun") : active;
-    if (run.is_null() || run.at("environmentId") != task.at("environmentId") ||
-        run.value("revisionId", Json(nullptr)) != task.value("currentRevision", Json(nullptr)))
+Json currentRun(const TaskData& task) {
+    if (task.state == TaskState::cancelled || task.rest.value("replanning", false) || task.rest.value("newSessionRequired", false))
+        return nullptr;
+    const auto& active = task.rest.at("activeRun");
+    const auto& run = active.is_null() ? task.rest.at("lastRun") : active;
+    if (run.is_null() || run.at("environmentId") != task.environmentId ||
+        run.value("revisionId", Json(nullptr)) != (task.currentRevision ? Json(*task.currentRevision) : Json(nullptr)))
         return nullptr;
     return run;
 }
@@ -164,11 +165,11 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
     const auto task = db.load(taskId);
     const auto scrub = db.redactor(owner.bot);
     const auto publicText = [&](std::string_view text) { return redactConnectionTokens(scrub.text(text)); };
-    Json data{{"taskId", taskId},    {"bot", owner.bot},  {"status", task.at("state")},
+    Json data{{"taskId", taskId},    {"bot", owner.bot},  {"status", taskStateName(task.state)},
               {"question", nullptr}, {"result", nullptr}, {"sessionRun", nullptr}};
     if (const auto wait = db.currentWait(taskId)) {
         data["waitReason"] = waitReasonName(wait->reason());
-        if (task.at("state") == "waiting" && wait->reason() == WaitReason::user_question && db.waitIsActionable(task)) {
+        if (task.state == TaskState::waiting && wait->reason() == WaitReason::user_question && db.waitIsActionable(task)) {
             auto choices = Json::array();
             for (const auto& choice : wait->choices()) choices.push_back(publicText(choice));
             const auto target = TaskTarget::from(task, wait->id);
@@ -180,7 +181,7 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
         }
     }
     Json run;
-    if (task.at("state") == "completed") {
+    if (task.state == TaskState::completed) {
         auto row = db.query("SELECT data FROM journal WHERE task_id=? AND kind='completed'"
                             " ORDER BY id DESC LIMIT 1",
                             {taskId});

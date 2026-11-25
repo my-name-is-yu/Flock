@@ -465,9 +465,8 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && conversationReply(resolved, receipt.at("messageId")).at("actions").at(0).at("tool") == "start_task",
           "the chosen destination did not create a Task");
-    const auto task = store.task(tasks.at(0).at("id"));
-    check(task.at("projectId") == "backup-release" && !task.at("runs").empty() &&
-              task.at("runs").back().at("environmentId") == "backup-env",
+    const auto& task = tasks.front();
+    check(task.task.projectId == "backup-release" && !task.runs.empty() && task.runs.back().at("environmentId") == "backup-env",
           "the chosen destination did not receive the new Run");
 }
 
@@ -534,7 +533,7 @@ void parallelVerificationInView(const std::filesystem::path& path) {
     t3.localFinished = true;
     runtime.tick();
     const auto saved = store.tasks("release").at(0);
-    const auto prior = store.task(saved.at("id")).at("runResults").at(1);
+    const auto& prior = saved.task.rest.at("runResults").at(1);
     now = prior.at("deadline").get<Seconds>() + 1;
     runtime.tick();
     const auto overdue = browser.get("/api/view?bot=release").at("waits").at(0);
@@ -591,7 +590,7 @@ void conversationEntry(const std::filesystem::path& path) {
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished, .status = "completed", .report = proposedOptions, .itemId = "comparison-report"};
     tick(runtime, 2);
-    check(store.task(taskId).at("state") == "completed", "the comparison did not complete");
+    check(store.task(taskId).task.state == TaskState::completed, "the comparison did not complete");
     const auto result = conversationCompletion(browser.get("/api/view?bot=release"), taskId);
     const auto& resultData = result.at("data");
     check(resultData.at("text") == proposedOptions, "the conversation lost the completion report");
@@ -645,7 +644,7 @@ void conversationEntry(const std::filesystem::path& path) {
     check(sessionTasks.size() == 1 && sessionTasks.at(0).at("id") == taskId && sessionTasks.at(0).at("sessions").size() == 1 &&
               sessionTasks.at(0).at("sessions").at(0).at("runId") == reportRun.at("runId") && !sessionTasks.at(0).contains("config"),
           "the Session list omitted the comparison Run or exposed config");
-    const auto runs = store.task(taskId).at("runs");
+    const auto runs = store.task(taskId).runs;
 
     const auto markdownReceipt =
         browser.post("/api/messages", {{"botId", "release"}, {"clientMessageId", "markdown-reply"}, {"text", "markdown fixture"}}, 201);
@@ -678,8 +677,7 @@ void conversationEntry(const std::filesystem::path& path) {
     check(summarized.at("route") == "reply" && summaryText.find("ID で明細の差分を集計") != std::string::npos &&
               summaryText.size() < model.summarySourceSize,
           "The summary did not condense the selected option");
-    check(model.explained == 1 && model.summarized == 1 && store.tasks().size() == 1 && t3.launches == 1 &&
-              store.task(taskId).at("runs") == runs,
+    check(model.explained == 1 && model.summarized == 1 && store.tasks().size() == 1 && t3.launches == 1 && store.task(taskId).runs == runs,
           "Two read-only answers added work or missed the model calls");
 
     const auto estimate =
@@ -695,7 +693,7 @@ void conversationEntry(const std::filesystem::path& path) {
     runtime.runConversations();
     const auto estimateAnswer = conversationReply(browser.get("/api/view?bot=release"), detail.at("messageId"));
     check(estimateAnswer.at("text").get<std::string>().find("100件") != std::string::npos && store.tasks().size() == 1 &&
-              t3.launches == 1 && store.task(taskId).at("runs") == runs,
+              t3.launches == 1 && store.task(taskId).runs == runs,
           "the follow-up answer created work or lost the context");
 
     const Json status = {{"botId", "release"}, {"clientMessageId", "with-invalid-settings"}, {"text", "進捗どうなってる"}};
@@ -868,7 +866,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
 
     tick(runtime, 8);
     if (access == PeerAccess::paused) {
-        const auto sender = store.tasks("ernest").at(0).at("id").get<Id>();
+        const auto sender = store.tasks("ernest").at(0).task.id;
         check(store.tasks("reviewer").empty() && browser.get(dm).at("messages").empty() &&
                   store.history(sender).dump().find(botPausedMessage) != std::string::npos,
               "a paused peer accepted a consultation or gave the requesting Bot no reason");
@@ -1155,12 +1153,12 @@ void chatGPTConversation(const std::filesystem::path& home) {
     check(conversationReply(view(), request).at("actions").at(0).at("tool") == "start_task" && store.tasks().size() == 1,
           "ordinary composer request did not create exactly one Task");
     const auto releaseTask = linkedTask(request);
-    check(store.task(releaseTask).at("state") == "running" && t3.launches == 1, "the Task did not start one Run");
+    check(store.task(releaseTask).task.state == TaskState::running && t3.launches == 1, "the Task did not start one Run");
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished, .status = "completed", .report = signingReport, .itemId = "blockers-report"};
     advance(3);
     const auto completed = store.task(releaseTask);
-    check(completed.at("state") == "completed", "the Session report did not become a completed result");
+    check(completed.task.state == TaskState::completed, "the Session report did not become a completed result");
     const auto result = conversationCompletion(view(), releaseTask);
     check(result.at("data").at("run").at("itemId") == "blockers-report", "the result lost the report item");
     t3.observations.clear();
@@ -1176,7 +1174,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     const auto clarification = conversationReply(view(), missing);
     check(clarification.at("text") == "What is the planned certificate renewal date?",
           "missing evidence did not produce a question for the user");
-    check(store.tasks().size() == 1 && t3.launches == 1 && store.task(releaseTask).at("runs") == completed.at("runs"),
+    check(store.tasks().size() == 1 && t3.launches == 1 && store.task(releaseTask).runs == completed.runs,
           "result follow-ups created a Task or changed Runs");
 
     const auto consult = send("consult-verifier", consultation);
@@ -1194,7 +1192,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
               incoming.at("exchangeId") == outgoing.at("exchangeId") && incoming.at("replyTo") == outgoing.at("messageId") &&
               incoming.at("text") == consultationReply,
           "Verifier's reply did not return to its original exchange");
-    check(store.task(consultTask).at("state") == "completed" && store.tasks("verifier").size() == 1 && t3.launches == 1,
+    check(store.task(consultTask).task.state == TaskState::completed && store.tasks("verifier").size() == 1 && t3.launches == 1,
           "the originating Task did not resume after the consultation");
 
     const auto first = send("notes", notes);
@@ -1202,16 +1200,17 @@ void chatGPTConversation(const std::filesystem::path& home) {
     advance(5);
     const auto firstTask = store.task(linkedTask(first));
     const auto secondTask = store.task(linkedTask(second));
-    const auto& firstRuns = firstTask.at("runs");
-    const auto& secondRuns = secondTask.at("runs");
+    const auto& firstRuns = firstTask.runs;
+    const auto& secondRuns = secondTask.runs;
     check(!firstRuns.empty() && !secondRuns.empty(), "both composer requests must launch a Run");
-    check(firstRuns.back().at("environmentId") == "local-env" && firstTask.at("projectId") == "release" &&
-              secondRuns.back().at("environmentId") == "backup-env" && secondTask.at("projectId") == "backup-release",
+    check(firstRuns.back().at("environmentId") == "local-env" && firstTask.task.projectId == "release" &&
+              secondRuns.back().at("environmentId") == "backup-env" && secondTask.task.projectId == "backup-release",
           "the composer Runs did not keep each request on its own destination");
     const auto active = view().at("activeSessions");
-    check(firstTask.at("state") == "running" && secondTask.at("state") == "running" && active.size() == 2 && t3.launches == 3,
-          "ambiguous-stop fixture requires two active Runs: " + firstTask.at("state").dump() + ", " + secondTask.at("state").dump() +
-              ", active=" + active.dump() + ", launches=" + std::to_string(t3.launches));
+    check(
+        firstTask.task.state == TaskState::running && secondTask.task.state == TaskState::running && active.size() == 2 && t3.launches == 3,
+        "ambiguous-stop fixture requires two active Runs: " + std::string(taskStateName(firstTask.task.state)) + ", " +
+            std::string(taskStateName(secondTask.task.state)) + ", active=" + active.dump() + ", launches=" + std::to_string(t3.launches));
     const auto taskCount = store.tasks().size();
     const auto stop = send("stop", "それ止めて");
     advance(3);
@@ -1223,8 +1222,8 @@ void chatGPTConversation(const std::filesystem::path& home) {
                                   [&](const Json& run) { return std::ranges::find(suggestions, run.at("request")) != suggestions.end(); }),
           "ambiguous stop did not ask the user to choose between both running tasks");
     check(afterStop.at("activeSessions") == active && store.tasks().size() == taskCount && t3.launches == 3 &&
-              store.task(firstTask.at("id")).at("runs") == firstTask.at("runs") &&
-              store.task(secondTask.at("id")).at("runs") == secondTask.at("runs") && t3.interruptions == 0,
+              store.task(firstTask.task.id).runs == firstTask.runs && store.task(secondTask.task.id).runs == secondTask.runs &&
+              t3.interruptions == 0,
           "ambiguous stop changed a Run or created work");
 }
 
@@ -1609,7 +1608,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         pauses = browser.get(view).at("pausedConversations");
         const auto tasks = store.tasks();
         check(pauses.size() == 2 && tasks.size() == 1, "Fixture did not pause two turns after creating one task");
-        taskFromDemotedTurn = tasks.at(0).at("id");
+        taskFromDemotedTurn = tasks.front().task.id;
 
         demotedQueue = send(browser, demoted, "Queued demoted root");
         removedQueue = send(browser, removed, "Queued removed root");
@@ -1671,7 +1670,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
                   store.tasks().size() == 4,
               "Revoked authority survived the pre-effect check");
         tick(runtime, 3);
-        check(t3.launches == 1 && store.task(taskFromDemotedTurn).at("state") == "running",
+        check(t3.launches == 1 && store.task(taskFromDemotedTurn).task.state == TaskState::running,
               "A denied resume consumed the unused model call shared by its existing task");
     }
 }

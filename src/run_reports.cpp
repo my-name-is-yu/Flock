@@ -18,8 +18,8 @@ void setReportEvidence(Json& data, const RunEvidence& evidence) {
     if (evidence.availability == Availability::DiagnosticUnavailable) data["evidenceStatus"] = "diagnostic_unavailable";
 }
 
-Json& destinationRun(Json& task, std::string_view action) {
-    auto& runs = task.at("runResults");
+Json& destinationRun(TaskData& task, std::string_view action) {
+    auto& runs = task.rest.at("runResults");
     const auto entry = std::ranges::find_if(runs, [&](const Json& run) { return field(run, "actionId") == action; });
     if (entry == runs.end()) throw Conflict("The saved Run is outside this task");
     return *entry;
@@ -36,7 +36,7 @@ bool destinationStopRequested(const std::optional<Outbox>& action, const RunRef&
     return !requested || (requested->runId == run.runId && requested->threadId == run.threadId);
 }
 
-bool Store::Impl::advanceDestinationSessionMessageRun(Json& task, Json& run) {
+bool Store::Impl::advanceDestinationSessionMessageRun(TaskData& task, Json& run) {
     auto pending = query(R"SQL(
 SELECT w.environment,w.thread,w.run,w.gateway_environment,w.delivery,w.link
 FROM session_message_waits w
@@ -48,8 +48,8 @@ WHERE w.task_id=? AND w.action_id=?
       AND json_extract(j.data,'$.run.runId')=w.run
       AND json_extract(j.data,'$.run.threadId')=w.thread)
 ORDER BY w.rowid LIMIT 1)SQL",
-                         {task.at("id"), field(run, "actionId"), field(run, "environmentId"), field(run, "threadId"),
-                          field(run, "gatewayEnvironmentId"), task.at("id")});
+                         {task.id, field(run, "actionId"), field(run, "environmentId"), field(run, "threadId"),
+                          field(run, "gatewayEnvironmentId"), task.id});
     if (!pending.next()) return false;
     const auto environment = pending.string(0);
     const auto thread = pending.string(1);
@@ -59,7 +59,7 @@ ORDER BY w.rowid LIMIT 1)SQL",
     const auto link = pending.string(5);
     if (runId == field(run, "runId")) return false;
     exec("UPDATE runs SET thread_id=?,run_id=?,link=? WHERE action_id=? AND task_id=? AND environment_id=?",
-         {thread, runId, link.empty() ? field(run, "link") : link, field(run, "actionId"), task.at("id"), environment});
+         {thread, runId, link.empty() ? field(run, "link") : link, field(run, "actionId"), task.id, environment});
     if (sqlite3_changes(db) != 1) return false;
     run["threadId"] = thread;
     run["runId"] = runId;
@@ -78,12 +78,12 @@ ORDER BY w.rowid LIMIT 1)SQL",
     return true;
 }
 
-bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observation& observed) {
+bool Store::Impl::recordDestinationReport(TaskData& task, Json& run, const Observation& observed) {
     const auto ref = runRef(run);
     auto status = observed.status;
     if (status.empty()) status = "failed";
     auto detail = observed.detail;
-    if (status == "completed" && task.contains("requestedCommit") && observed.checkedCommit != field(task, "requestedCommit")) {
+    if (status == "completed" && task.rest.contains("requestedCommit") && observed.checkedCommit != field(task.rest, "requestedCommit")) {
         status = "failed";
         if (detail.empty()) detail = "The Run did not verify the requested commit.";
     }
@@ -94,12 +94,12 @@ bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observati
                  {"destination", run.at("name")},
                  {"status", status},
                  {"commit", observed.checkedCommit},
-                 {"revisionId", task.value("currentRevision", Json(nullptr))},
+                 {"revisionId", task.currentRevision ? Json(*task.currentRevision) : Json(nullptr)},
                  {"resultRunId", observed.resultRunId.empty() ? ref.runId : observed.resultRunId}};
-    if (task.contains("requestedCommit")) data["requestedCommit"] = task.at("requestedCommit");
+    if (task.rest.contains("requestedCommit")) data["requestedCommit"] = task.rest.at("requestedCommit");
     if (status == "interrupted" || status == "cancelled") {
         const auto action = outbox(task, field(run, "actionId"));
-        data["stopRequested"] = task.at("state") == "cancelling" || destinationStopRequested(action, ref);
+        data["stopRequested"] = task.state == TaskState::cancelling || destinationStopRequested(action, ref);
     }
     setReportEvidence(
         data, {observed.evidence, observed.report, observed.itemId, std::move(detail), observed.truncated, observed.sessionCreatedAt});
@@ -108,32 +108,31 @@ bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observati
     run.erase("retryAt");
     run.erase("stopRetryAt");
     run.erase("evidenceAttempts");
-    const auto wait = currentWait(task.at("id"));
+    const auto wait = currentWait(task.id);
     const auto* deadline = wait ? wait->verification() : nullptr;
     if (deadline && deadline->actionId == field(run, "actionId")) {
         clearWait(task, "run_finished");
-        task["state"] = "running";
+        task.state = TaskState::running;
     }
-    auto priorReport =
-        query("SELECT 1 FROM journal WHERE task_id=? AND kind='report' "
-              "AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run.runId')=? "
-              "AND json_extract(data,'$.run.threadId')=? AND json_extract(data,'$.revisionId') IS ? LIMIT 1",
-              {task.at("id"), run.at("environmentId"), ref.runId, ref.threadId, task.value("currentRevision", Json(nullptr))});
-    if (!priorReport.next()) journal(task.at("id"), "report", data);
+    auto priorReport = query("SELECT 1 FROM journal WHERE task_id=? AND kind='report' "
+                             "AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run.runId')=? "
+                             "AND json_extract(data,'$.run.threadId')=? AND json_extract(data,'$.revisionId') IS ? LIMIT 1",
+                             {task.id, run.at("environmentId"), ref.runId, ref.threadId, data.at("revisionId")});
+    if (!priorReport.next()) journal(task.id, "report", data);
     if (advanceDestinationSessionMessageRun(task, run)) return false;
     auto pendingSends = query(R"SQL(
 SELECT json_extract(effect,'$.actionId') FROM conversation_steps
 WHERE json_extract(effect,'$.kind')='message_session'
   AND json_extract(effect,'$.taskId')=?
 )SQL",
-                              {task.at("id")});
+                              {task.id});
     bool waitingForSend = false;
     while (pendingSends.next()) {
         waitingForSend = true;
         const auto actionId = pendingSends.string(0);
-        const auto destination =
-            std::ranges::find_if(task.at("runResults"), [&](const Json& candidate) { return field(candidate, "actionId") == actionId; });
-        if (destination == task.at("runResults").end()) continue;
+        const auto destination = std::ranges::find_if(task.rest.at("runResults"),
+                                                      [&](const Json& candidate) { return field(candidate, "actionId") == actionId; });
+        if (destination == task.rest.at("runResults").end()) continue;
         if (!destinationRunOutstanding(*destination)) {
             (*destination)["status"] = "confirmation_pending";
             (*destination)["detail"] =
@@ -142,21 +141,21 @@ WHERE json_extract(effect,'$.kind')='message_session'
         }
     }
     if (waitingForSend) return false;
-    const auto& results = task.at("runResults");
+    const auto& results = task.rest.at("runResults");
     if (std::ranges::any_of(results, destinationRunOutstanding)) return false;
-    if (task.at("state") == "cancelling") return true;
+    if (task.state == TaskState::cancelling) return true;
     const auto completed = std::ranges::count_if(results, [](const Json& result) { return result.at("status") == "completed"; });
     const auto count = static_cast<std::size_t>(completed);
-    task["runOutcome"] = count == results.size() ? "all_completed" : count > 0 ? "partial_failure" : "failed";
-    task["state"] = "completed";
+    task.rest["runOutcome"] = count == results.size() ? "all_completed" : count > 0 ? "partial_failure" : "failed";
+    task.state = TaskState::completed;
     auto summary = std::to_string(count) + " of " + std::to_string(results.size()) + " T3 Runs completed";
-    if (task.contains("requestedCommit")) summary += " with a verified commit";
+    if (task.rest.contains("requestedCommit")) summary += " with a verified commit";
     Json completion = {{"text", std::move(summary) + "."},
-                       {"runOutcome", task.at("runOutcome")},
-                       {"doneWhen", task.at("doneWhen")},
+                       {"runOutcome", task.rest.at("runOutcome")},
+                       {"doneWhen", task.doneWhen},
                        {"revisionId", data.at("revisionId")}};
-    if (task.contains("requestedCommit")) completion["requestedCommit"] = task.at("requestedCommit");
-    journal(task.at("id"), "completed", std::move(completion));
+    if (task.rest.contains("requestedCommit")) completion["requestedCommit"] = task.rest.at("requestedCommit");
+    journal(task.id, "completed", std::move(completion));
     return true;
 }
 }

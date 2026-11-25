@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "task_storage.hpp"
 
 #include <algorithm>
 
@@ -30,9 +31,9 @@ std::string title(std::string_view request) {
     return bounded(request.substr(0, request.find_first_of("\r\n")), 160);
 }
 
-std::string taskTitle(const Json& task) {
-    const auto intent = field(task, "intent");
-    return title(intent.empty() ? field(task, "request") : intent);
+std::string taskTitle(const TaskData& task) {
+    const auto intent = task.intent;
+    return title(intent.empty() ? task.request : intent);
 }
 
 Id messageAnchor(const auto& store, std::string_view bot, Id message) {
@@ -115,7 +116,7 @@ UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION S
 
 Statement Store::Impl::actionablePrReviews(std::string_view bot) const {
     return query(R"SQL(
-SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
+SELECT p.id,t.data,t.id,t.state,t.generation,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
 LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
 AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
@@ -167,25 +168,23 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
                 messageAnchor(*p_, id, message), createdAt);
         };
         auto waits = p_->query(R"SQL(
-SELECT t.id,t.generation,t.data,w.id,w.data
+SELECT t.data,t.id,t.state,t.generation,w.id,w.data
 FROM tasks t JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL
 WHERE t.bot_id=? AND t.state='waiting'
 ORDER BY w.id DESC
 )SQL",
                                {id});
         while (waits.next()) {
-            const auto task = waits.json(2);
-            const auto waitId = waits.number(3);
-            const auto wait = from_json(waitId, waits.string(4));
+            const auto task = decodeTaskRow(waits);
+            const auto waitId = waits.number(4);
+            const auto wait = from_json(waitId, waits.string(5));
             const auto reason = wait.reason();
             const auto kind = inboxWaitKind(reason);
             if (!kind || !p_->waitIsActionable(task)) continue;
-            const auto taskId = waits.number(0);
-            Json view{
-                {"requestTitle", taskTitle(task)}, {"request", task.at("request")}, {"prompt", wait.text}, {"choices", wait.choices()}};
-            if (const auto allowance = p_->waitAllowance(taskId, reason); allowance) view["allowance"] = allowance;
-            add({id, *kind, waitId, waitId, taskId, task.value("currentRevision", Id{0}), waits.number(1)}, std::move(view),
-                p_->waitAnchor(taskId, waitId));
+            Json view{{"requestTitle", taskTitle(task)}, {"request", task.request}, {"prompt", wait.text}, {"choices", wait.choices()}};
+            if (const auto allowance = p_->waitAllowance(task.id, reason); allowance) view["allowance"] = allowance;
+            add({id, *kind, waitId, waitId, task.id, task.currentRevision.value_or(0), task.generation}, std::move(view),
+                p_->waitAnchor(task.id, waitId));
         }
         auto turns = p_->query(R"SQL(
 SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
@@ -218,16 +217,16 @@ ORDER BY p.id DESC
                               "Supply a value for " + inputs.string(1), inputs.number(3));
         auto reviews = p_->actionablePrReviews(id);
         while (reviews.next()) {
-            const auto task = reviews.json(3);
-            const auto kind = reviews.number(7) ? pr_reconciliation : pr_review;
-            add({id, kind, reviews.number(0), 0, reviews.number(1), task.value("currentRevision", Id{0}), reviews.number(2)},
+            const auto task = decodeTaskRow(reviews, 1);
+            const auto kind = reviews.number(8) ? pr_reconciliation : pr_review;
+            add({id, kind, reviews.number(0), 0, task.id, task.currentRevision.value_or(0), task.generation},
                 {{"requestTitle", taskTitle(task)},
-                 {"request", task.at("request")},
-                 {"prompt", reviews.string(6)},
-                 {"prTitle", reviews.string(5)},
-                 {"prUrl", reviews.string(4)},
-                 {"candidates", reviews.json(8)}},
-                reviews.number(9));
+                 {"request", task.request},
+                 {"prompt", reviews.string(7)},
+                 {"prTitle", reviews.string(6)},
+                 {"prUrl", reviews.string(5)},
+                 {"candidates", reviews.json(9)}},
+                reviews.number(10));
         }
     }
     snapshot.commit();
@@ -338,10 +337,10 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
                                 {item.itemId, item.taskId});
         if (!review.next()) throw RequestChanged{};
         if (review.string(1) != "pending") throw DecisionUnavailable{};
-        if (review.number(2) != (kind == pr_reconciliation) || item.waitId || task.value("currentRevision", Id{0}) != item.targetRevision ||
-            task.at("generation") != item.targetGeneration)
+        if (review.number(2) != (kind == pr_reconciliation) || item.waitId || task.currentRevision.value_or(0) != item.targetRevision ||
+            task.generation != item.targetGeneration)
             throw RequestChanged{};
-        if (kind == pr_review && (review.number(0) != item.targetRevision || task.value("replanning", false))) throw RequestChanged{};
+        if (kind == pr_review && (review.number(0) != item.targetRevision || task.rest.value("replanning", false))) throw RequestChanged{};
         if (kind == pr_reconciliation)
             p_->decideGitPr(item, decision, data, task);
         else {
@@ -363,7 +362,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
     transaction.commit();
 }
 
-void Store::Impl::insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
+void Store::Impl::insertPrReview(const TaskData& task, std::string_view url, std::string_view title, std::string_view prompt,
                                  std::string_view gitKey, std::string_view operationId, const Json& candidates) {
     if (!(url.starts_with("https://") || url.starts_with("http://")) || url.find_first_of(" \t\r\n") != url.npos ||
         url.find('\0') != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 || prompt.empty() || prompt.size() > 8000)
@@ -374,9 +373,9 @@ void Store::Impl::insertPrReview(const Json& task, std::string_view url, std::st
     const auto savedPrompt = scrub.text(prompt);
     exec("INSERT INTO pr_review_items(task_id,target_revision,url,title,prompt,git_key,operation_id,candidates)"
          " VALUES(?,?,?,?,?,?,?,?)",
-         {task.at("id"), task.value("currentRevision", Id{0}), url, savedTitle, savedPrompt, gitKey.empty() ? Json(nullptr) : Json(gitKey),
+         {task.id, task.currentRevision.value_or(0), url, savedTitle, savedPrompt, gitKey.empty() ? Json(nullptr) : Json(gitKey),
           operationId.empty() ? Json(nullptr) : Json(operationId), candidates});
     if (operationId.empty())
-        journal(task.at("id"), "pr_review_requested", {{"itemId", last()}, {"title", savedTitle}, {"text", savedPrompt}, {"prUrl", url}});
+        journal(task.id, "pr_review_requested", {{"itemId", last()}, {"title", savedTitle}, {"text", savedPrompt}, {"prUrl", url}});
 }
 }

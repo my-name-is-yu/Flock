@@ -87,7 +87,7 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     store.createAutomation(localOwner, saved,
                            {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", now + 1}, {"request", "Check the release"}}, now);
     store.fireDueAutomations(now + 1);
-    const Id id = store.tasks("release").at(0).at("id");
+    const Id id = store.tasks("release").at(0).task.id;
     struct RejectEffort final : Model {
         std::vector<Json> requests;
         ModelTurn decide(const ModelInput& input) override {
@@ -99,9 +99,10 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     } model;
     NotesT3 t3;
     Runtime runtime(store, model, t3, [&](auto bot) { return bots.soul(bot); });
-    for (int tick = 0; tick < 8 && store.task(id).at("state") != "waiting"; ++tick) runtime.tick();
+    for (int tick = 0; tick < 8 && store.task(id).task.state != TaskState::waiting; ++tick) runtime.tick();
     const auto rejected = store.task(id);
-    check(model.requests.size() == 1 && rejected.at("wait").at("failureCode") == "unsupported_reasoning_effort",
+    const auto* failure = std::get_if<ModelFailureWait>(&rejected.wait.value().details);
+    check(model.requests.size() == 1 && failure && failure->code == WaitFailureCode::unsupported_reasoning_effort,
           "The rejected effort did not stop repeat attempts or preserve the failure type");
     bots.updateRunSettings(store, "release",
                            {{"model", "new-model"},
@@ -110,13 +111,13 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
                             {"projectId", "new-project"},
                             {"modelCallLimit", 7}},
                            now + 1, [](auto, auto) {});
-    store.operate(localOwner, TaskTarget::from(rejected, rejected.at("wait").at("id")), "retry");
-    for (int tick = 0; tick < 8 && store.task(id).at("state") != "waiting"; ++tick) runtime.tick();
+    store.operate(localOwner, TaskTarget::from(rejected.task, rejected.wait.value().id), "retry");
+    for (int tick = 0; tick < 8 && store.task(id).task.state != TaskState::waiting; ++tick) runtime.tick();
     const auto retried = store.task(id);
     check(model.requests.size() == 2 && model.requests.back().at("model") == "new-model" &&
-              !model.requests.back().contains("reasoningEffort") && retried.at("wait").at("reason") == "user_question" &&
-              retried.at("environmentId") == saved.environmentId && retried.at("projectId") == saved.projectId &&
-              retried.at("config").at("session") == saved.config.at("session") && retried.at("config").at("modelCallLimit") == 9,
+              !model.requests.back().contains("reasoningEffort") && retried.wait && retried.wait->reason() == WaitReason::user_question &&
+              retried.task.environmentId == saved.environmentId && retried.task.projectId == saved.projectId &&
+              retried.task.config.at("session") == saved.config.at("session") && retried.task.config.at("modelCallLimit") == 9,
           "Retry did not preserve the original task route and allowance while correcting its model");
 }
 
@@ -138,19 +139,19 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery) {
     std::filesystem::create_symlink("release", folder / "release");
     store.fireDueAutomations(due);
 
-    const Id release = store.tasks("release").at(0).at("id");
-    const Id triage = store.tasks("triage").at(0).at("id");
+    const Id release = store.tasks("release").at(0).task.id;
+    const Id triage = store.tasks("triage").at(0).task.id;
     NotesModel model;
     NotesT3 t3;
     RuntimeOptions options;
     options.clock = [&] { return due; };
     Runtime runtime(store, model, t3, [&](std::string_view bot) { return bots.soul(bot); }, options);
     for (int i = 0; i < 10 && t3.commands.empty(); ++i) runtime.tick();
-    check(t3.commands.size() == 1 && t3.commands.front().ownerBotId == "triage" && store.task(triage).at("state") == "running",
+    check(t3.commands.size() == 1 && t3.commands.front().ownerBotId == "triage" && store.task(triage).task.state == TaskState::running,
           "unreadable automation notes prevented a healthy Bot from running in the same project");
     const auto paused = store.task(release);
-    check(paused.at("state") == "waiting" && paused.at("wait").at("reason") == "bot_notes_unavailable" &&
-              paused.at("projectId") == store.task(triage).at("projectId"),
+    check(paused.task.state == TaskState::waiting && paused.wait && paused.wait->reason() == WaitReason::bot_notes_unavailable &&
+              paused.task.projectId == store.task(triage).task.projectId,
           "the unreadable Bot's request lost its workspace or recovery action");
 
     std::filesystem::remove(folder / "release");
@@ -159,13 +160,12 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery) {
         model.editTask = release;
         store.receive(localOwner, bots.get("release").intake(""), "edit-automation", "Check staging instead");
         runtime.runConversations();
-        check(store.task(release).at("intent") == "Check staging instead", "the conversation did not save the edit");
+        check(store.task(release).task.intent == "Check staging instead", "the conversation did not save the edit");
     } else
-        store.operate(localOwner, TaskTarget::from(paused, paused.at("wait").at("id")), "retry");
+        store.operate(localOwner, TaskTarget::from(paused.task, paused.wait.value().id), "retry");
     runtime.tick();
     const auto retried = store.task(release);
-    check(retried.at("state") == "queued" && retried.at("blockedBy").is_object() && retried.at("blockedBy").at("id") == triage &&
-              t3.commands.size() == 1,
+    check(retried.task.state == TaskState::queued && retried.blockedBy && retried.blockedBy->id == triage && t3.commands.size() == 1,
           recovery == NotesRecovery::Edit ? "editing the paused automation did not requeue it behind the active Run"
                                           : "retrying an unreadable Bot's request overtook an active Run");
 
@@ -195,22 +195,22 @@ void notesAndRoutingOnRestart() {
         firstId = store.submit(bots.get("first").intake("Request for first Bot"));
         runtime.tick();
         runtime.tick();
-        check(store.task(firstId)["state"] == "waiting", "fixture did not reach user question");
-        waitId = store.task(firstId)["wait"]["id"];
+        check(store.task(firstId).task.state == TaskState::waiting, "fixture did not reach user question");
+        waitId = store.task(firstId).wait.value().id;
         secondId = store.submit(bots.get("second").intake("Request for second Bot"));
         runtime.tick();
-        check(store.task(secondId)["blockedBy"]["id"] == firstId && t3.commands.empty(), "same-project tasks must queue across Bots");
+        check(store.task(secondId).blockedBy.value().id == firstId && t3.commands.empty(), "same-project tasks must queue across Bots");
     }
     {
         Store store(db, seed);
         Runtime runtime(store, model, t3, soul);
-        store.operate(localOwner, TaskTarget::from(store.task(firstId), waitId), "answer", {{"text", "main"}});
+        store.operate(localOwner, TaskTarget::from(store.task(firstId).task, waitId), "answer", {{"text", "main"}});
         rejects<Conflict>(
-            [&] { store.operate(localOwner, TaskTarget::from(store.task(firstId), waitId), "answer", {{"text", "old answer"}}); },
+            [&] { store.operate(localOwner, TaskTarget::from(store.task(firstId).task, waitId), "answer", {{"text", "old answer"}}); },
             "duplicate answer accepted");
         runtime.tick();
         runtime.tick();
-        check(store.task(firstId)["state"] == "running" && store.task(firstId)["doneWhen"] == "Evidence required before edit",
+        check(store.task(firstId).task.state == TaskState::running && store.task(firstId).task.doneWhen == "Evidence required before edit",
               "answer must reach the old task and initialize saved doneWhen");
         check(t3.commands.size() == 1 && t3.commands[0].environmentId == "env-canonical" && t3.commands[0].projectId == "project-canonical",
               "intake must preserve canonical IDs");
@@ -229,8 +229,8 @@ void notesAndRoutingOnRestart() {
         store.memory({"fixture", true}, "first", "apply_memory_edit", {{"baseVersion", 0}, {"content", "First updated memory"}});
         Runtime runtime(store, model, t3, soul);
         for (int i = 0; i < 4; ++i) runtime.tick();
-        check(store.task(firstId)["state"] == "completed", "first Bot did not complete with its original criterion");
-        check(store.task(secondId)["state"] == "sending", "next task did not begin when the first task closed");
+        check(store.task(firstId).task.state == TaskState::completed, "first Bot did not complete with its original criterion");
+        check(store.task(secondId).task.state == TaskState::sending, "next task did not begin when the first task closed");
         check(model.inputs.size() == 4, "unexpected model calls");
         const auto& afterRestart = model.inputs[2];
         check(afterRestart.task["id"] == firstId && afterRestart.task["doneWhen"] == "Evidence required before edit",
@@ -343,11 +343,11 @@ void notesAcrossConversationAndWork() {
         runtime.runConversations();
         const auto tasks = store.tasks(bot.botId);
         check(tasks.size() == 1, "the request should create one Task for this Bot");
-        const Id task = tasks.at(0).at("id");
-        for (int step = 0; step < 10 && store.task(task).at("state") != "completed"; ++step) runtime.tick();
+        const Id task = tasks.at(0).task.id;
+        for (int step = 0; step < 10 && store.task(task).task.state != TaskState::completed; ++step) runtime.tick();
         const auto result = lastTaskEvent(store, task, "completed");
         check(result.at("kind") == "completed" && result.at("data").at("text") == expectedReport &&
-                  result.at("data").at("doneWhen") == criterion && store.task(task).at("runs").size() == 1,
+                  result.at("data").at("doneWhen") == criterion && store.task(task).runs.size() == 1,
               "the Bot's completion report should apply its notes and preserve the saved criterion");
         check(model.requests.size() == start + 4, "expected two conversation steps, task intake, and completion requests");
         checkRequest(model.requests.at(start), bot, notes, "conversation_turn");
@@ -361,7 +361,7 @@ void notesAcrossConversationAndWork() {
         return store.receive(localOwner, bot, key, "Why does that evidence support the result?", result).at("messageId");
     };
     const auto checkResultAnswer = [&](const Intake& bot, Id task, Id question, const BotNotes& notes, std::string_view expectedReply) {
-        const auto before = store.task(task);
+        const auto before = taskJson(store.task(task));
         const auto taskCount = store.tasks().size();
         const auto commands = t3.commands.size();
         const auto start = model.requests.size();
@@ -385,7 +385,7 @@ void notesAcrossConversationAndWork() {
         check(event != readText.npos && responseText.starts_with(readText.substr(0, event + eventField.size())) &&
                   readText != responseText && expectedTools == respond.at("tools") && read.at("instructions") == respond.at("instructions"),
               "a read-only turn step changed the prompt prefix before event data");
-        check(store.tasks().size() == taskCount && t3.commands.size() == commands && store.task(task) == before,
+        check(store.tasks().size() == taskCount && t3.commands.size() == commands && taskJson(store.task(task)) == before,
               "explaining a result must preserve the Task and its Runs without starting any new work");
     };
 
@@ -424,8 +424,7 @@ void notesAcrossConversationAndWork() {
     store.receive(localOwner, firstIntake, "repaired-notes", "Please retry", failure.at("messageId"));
     runtime.runConversations();
     const auto tasks = store.tasks(firstIntake.botId);
-    check(model.requests.size() == beforeFailure + 2 && tasks.size() == 2 &&
-              tasks.front().at("request").get_ref<const std::string&>().starts_with(originalRequest),
+    check(model.requests.size() == beforeFailure + 2 && tasks.size() == 2 && tasks.front().task.request.starts_with(originalRequest),
           "replying after note repair must let the Bot retry the original request");
 }
 
@@ -868,14 +867,14 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         store.receive(localOwner, intake, "criteria", "Completion criteria: Confirm the output");
         routing.runConversations();
     }
-    check(store.task(task)["doneWhen"] == "" && store.task(task)["requestedDoneWhen"] == "Confirm the output",
+    check(store.task(task).task.doneWhen == "" && store.task(task).task.rest["requestedDoneWhen"] == "Confirm the output",
           "the requested criteria was prematurely marked as fixed");
     {
         Runtime runtime(store, *demo, *t3, notes);
-        tickUntil(runtime, [&] { return store.task(task)["state"] == "running"; }, "the fixed demo never started");
+        tickUntil(runtime, [&] { return store.task(task).task.state == TaskState::running; }, "the fixed demo never started");
     }
     const auto first = store.task(task);
-    check(first["doneWhen"] == "Confirm the output" && first["remaining"] == 3 && first["runs"].size() == 1,
+    check(first.task.doneWhen == "Confirm the output" && first.task.rest.at("remaining") == 3 && first.runs.size() == 1,
           "the fixed demo failed to delegate with the user's provisional criteria");
     {
         Runtime routing(store, changes, *t3, notes);
@@ -886,9 +885,10 @@ void fixedDemoWithUserCriteriaAndContinuation() {
     }
     {
         Runtime runtime(store, *demo, *t3, notes);
-        tickUntil(runtime, [&] { return store.task(task)["state"] == "completed"; }, "the fixed demo did not finish its continuation");
+        tickUntil(
+            runtime, [&] { return store.task(task).task.state == TaskState::completed; }, "the fixed demo did not finish its continuation");
     }
-    const auto runs = store.task(task).at("runs");
+    const auto runs = store.task(task).runs;
     check(runs.size() == 2 && runs[0]["threadId"] == runs[1]["threadId"] && runs[0]["runId"] != runs[1]["runId"],
           "the fixed demo follow-up started another Session");
     check(std::ranges::any_of(store.history(task),
@@ -920,7 +920,7 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
     Runtime runtime(store, *demo, *t3, [](auto) { return std::string{}; });
     const Intake intake{"demo", "Measure the result", "local", "project"};
     const auto task = store.submit(intake);
-    for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
+    for (int i = 0; i < 12 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
     const auto result = lastTaskEvent(store, task, "completed").at("id").get<Id>();
     const auto replyTo = [&](Id message) {
         for (const auto& row : store.conversation("demo"))
@@ -945,18 +945,17 @@ void fixedDemoAnswersAnAnchoredQuestion() {
     Runtime runtime(store, *demo, *t3, [](auto) { return std::string{}; });
     const Intake intake{"demo", "ask: Which dataset should I use?", "local", "project"};
     const auto task = store.submit(intake);
-    for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
-    const auto question = store.task(task).at("wait").at("messageId").get<Id>();
+    for (int i = 0; i < 12 && store.task(task).task.state != TaskState::waiting; ++i) runtime.tick();
+    const auto question = store.task(task).wait.value().messageId.value();
 
     store.receive(localOwner, intake, "dataset-answer", "Use the release dataset", question);
     runtime.runConversations();
-    for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
+    for (int i = 0; i < 12 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
     const auto history = store.history(task);
-    check(store.task(task)["state"] == "completed" && std::ranges::any_of(history,
-                                                                          [](const Json& event) {
-                                                                              return event["kind"] == "user_answer" &&
-                                                                                     event["data"]["text"] == "Use the release dataset";
-                                                                          }),
+    check(store.task(task).task.state == TaskState::completed &&
+              std::ranges::any_of(
+                  history,
+                  [](const Json& event) { return event["kind"] == "user_answer" && event["data"]["text"] == "Use the release dataset"; }),
           "the fixed demo did not pass the anchored answer to its task");
 }
 

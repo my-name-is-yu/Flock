@@ -266,7 +266,7 @@ struct Fixture {
     Id submit(std::string request = "inspect", std::string bot = "alpha", std::string project = "p") {
         return store->submit({bot, request, "e", project, {{"runTimeoutSeconds", 10}}});
     }
-    Json task(Id id) { return store->task(id); }
+    Json task(Id id) { return taskJson(store->task(id)); }
     void reach(Id id, std::string state) {
         for (int i = 0; i < 12; ++i) {
             if (task(id)["state"] == Json(state)) return;
@@ -282,7 +282,7 @@ struct Fixture {
     }
     void rejects(Id id, Id waitId, const char* operation, Json data = Json::object()) {
         try {
-            store->operate(localOwner, TaskTarget::from(store->task(id), waitId), operation, data);
+            store->operate(localOwner, TaskTarget::from(store->task(id).task, waitId), operation, data);
         } catch (const Conflict&) {
             return;
         }
@@ -333,7 +333,7 @@ void selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun() {
     f.runtime->tick();
     check(f.t3.selectedStarts == 1 && f.t3.reconciles == 1 && f.task(task).at("state") == "running",
           "Restart duplicated the send or a confirmed queued Run reached a work deadline");
-    f.store->operate(localOwner, TaskTarget::from(f.task(task), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(task).task, 0), "cancel");
     f.runtime->tick();
     check(f.t3.interruptedRuns.size() == 1 && f.t3.interruptedRuns.front().runId == "run-1" &&
               f.t3.interruptedRuns.front().threadId == "selected-thread",
@@ -382,12 +382,12 @@ void disconnectBlocksSendingAndRetry() {
         check(f.t3.seen.size() == sent && f.logs(id, "send_started") == sent, "A disconnect during preflight admitted a new T3 send");
         f.restart();
         f.t3.onPreflight = [] { throw std::runtime_error("A disconnected environment reached T3 preflight"); };
-        f.store->operate(localOwner, TaskTarget::from(f.task(id), wait), "reconcile");
+        f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "reconcile");
         wait = f.wait(id, "auth");
         check(f.t3.seen.size() == sent && f.t3.reconciles == 0, "Retrying an unsent action after disconnect contacted T3");
         f.t3.onPreflight = {};
         connections.connect("e", localOwner.id, 4173);
-        f.store->operate(localOwner, TaskTarget::from(f.task(id), wait), "reconcile");
+        f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "reconcile");
         f.reach(id, "running");
         check(f.t3.seen.size() == sent + 1 && f.t3.reconciles == 0, "Reconnecting did not permit one send of the waiting action");
     }
@@ -418,12 +418,12 @@ void disconnectKeepsOwnedRunRecovery() {
     f.t3.loseAcknowledgement = true;
     const auto wait = f.wait(id, "unknown_delivery");
     connections.disconnect("e");
-    f.store->operate(localOwner, TaskTarget::from(f.task(id), wait), "reconcile");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "reconcile");
     f.reach(id, "running");
     f.runtime->tick();
     check(f.t3.launches == 1 && f.t3.reconciles == 1 && f.t3.polls > 0,
           "Disconnect blocked reconciliation or observation of already sent work");
-    f.store->operate(localOwner, TaskTarget::from(f.task(id), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, 0), "cancel");
     f.runtime->tick();
     check(f.t3.interruptedRuns.size() == 1 && f.t3.interruptedRuns.front().runId == "run-1",
           "Disconnect blocked interrupting the exact owned Run");
@@ -527,7 +527,7 @@ void invalidDecisions() {
     check(f.model.calls == 5 && f.logs(id, "model_failure") == 3 && f.logs(id, "tool_error") == 2 && f.t3.launches == 0 &&
               f.logs(id, "decision") == 0,
           "invalid initial action executed");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), wait), "retry");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "retry");
     f.rejects(id, wait, "retry");
     f.model.script = [](const ModelInput& input) {
         check(input.feedback.empty() && input.event.at("decisionFeedback").empty(), "retry kept prior errors");
@@ -540,7 +540,7 @@ void invalidDecisions() {
     f.model.script = [](const ModelInput&) { return work(); };
     const auto questionWait = f.wait(id, "model_failure");
     check(f.t3.launches == 1 && f.t3.replies == 0 && f.task(id)["doneWhen"] == Evidence, "invalid in-question action executed");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), questionWait), "retry");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, questionWait), "retry");
     int answerAttempts = 0;
     f.model.script = [&](const ModelInput& input) {
         auto answer = reply();
@@ -580,7 +580,7 @@ void correctInvalidTaskArguments() {
     const auto wait = f.wait(id, "user_question");
     check(f.model.calls == 2 && !f.logs(id, "model_failure") && f.logs(id, "decision") == 1,
           "correcting an invalid tool call consumed a model-failure strike");
-    f.store->operate(localOwner, TaskTarget::from(f.task(id), wait), "answer", {{"text", "main"}});
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "answer", {{"text", "main"}});
     f.model.script = [](const ModelInput& input) {
         check(input.event.at("decisionFeedback").empty(), "validation errors leaked into the user's answer event");
         return work();
@@ -606,8 +606,8 @@ void replayQuestionDecision(std::string_view outage = {}) {
               "reply did not stop between inference and effect");
         f.restart();
         if (outage == "settings") {
-            const auto task = f.task(id);
-            f.store->operate(localOwner, TaskTarget::from(task, task.at("wait").at("id")), "reconcile");
+            const auto task = f.store->task(id);
+            f.store->operate(localOwner, TaskTarget::from(task.task, task.wait.value().id), "reconcile");
         }
         if (stillOpen)
             f.t3.question("run-1");
@@ -643,7 +643,7 @@ void ambiguityAndFailure() {
     check(f.t3.launches == 0 && f.task(next)["state"] == "queued" && f.task(next)["blockedBy"]["id"] == id,
           "ambiguous task delegated or did not hold project order");
     f.restart();
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), wait), "answer", {{"text", "main"}});
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "answer", {{"text", "main"}});
     f.rejects(id, wait, "answer", {{"text", "dev"}});
     f.reach(id, "running");
     f.notes.at("alpha").soul = "Edited SOUL";
@@ -677,7 +677,7 @@ void deadlineApprovalAndCancel() {
     f.wait(id, "deadline");
     f.runtime->tick();
     check(f.model.calls == calls && f.t3.interrupts == 0 && f.t3.launches == 1, "automatic work at deadline");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, 0), "cancel");
     f.runtime->tick();
     check(f.t3.interrupts == 1 && f.task(id)["state"] == "cancelling" && f.task(queued)["state"] == "queued",
           "cancel released project before confirmation");
@@ -714,14 +714,14 @@ void budgetAndStaleWaits() {
     f.t3.finish("run-4");
     const auto question = f.wait(id, "user_question");
     f.rejects(id, question, "approve");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), question), "answer", {{"text", "keep going"}});
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, question), "answer", {{"text", "keep going"}});
     const auto budget = f.wait(id, "budget");
     f.rejects(id, budget, "answer", {{"text", "yes"}});
     check(f.task(id)["wait"]["attempted"] == "follow_up" && f.task(id)["remaining"] == 0 && f.t3.seen.size() == 4,
           "normal answer permitted an extra follow-up");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), budget), "approve");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, budget), "approve");
     f.rejects(id, budget, "approve");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, 0), "cancel");
     f.reach(id, "cancelled");
     f.rejects(id, budget, "approve");
     f.runtime->tick();
@@ -757,7 +757,7 @@ void sessionQuestions() {
             executeSql(f.store->path(), "UPDATE tasks SET data=json_set(data,'$.question.target.eventId',"
                                         "json_extract(data,'$.eventId')) WHERE state='waiting'");
             f.restart();
-            f.store->operate(localOwner, TaskTarget::from(f.store->task(id), wait), "answer", {{"text", "main"}});
+            f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "answer", {{"text", "main"}});
             const auto answered = f.task(id);
             check(answered["question"]["target"]["waitId"].is_null() && answered["question"]["target"]["eventId"] == answered["eventId"] &&
                       answered["eventId"] != task["eventId"],
@@ -820,7 +820,7 @@ void connectionRecoveryRestoresSessionQuestion() {
             check(f.task(id).at("question").at("suspendedWaitId") == old, "connection wait lost the suspended question");
             check(f.store->inbox(localOwner, "alpha").empty(), "question remained actionable during the outage");
             f.rejects(id, old, "answer", {{"text", "dev"}});
-            if (manual) f.store->operate(localOwner, TaskTarget::from(f.task(id), connection), "reconcile");
+            if (manual) f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, connection), "reconcile");
             f.restart();
             f.t3.question("run-1");
             f.runtime->tick();
@@ -831,7 +831,7 @@ void connectionRecoveryRestoresSessionQuestion() {
                   "the live question did not return with its clarification and a fresh target");
             f.rejects(id, old, "answer", {{"text", "dev"}});
             f.rejects(id, connection, "reconcile");
-            f.store->operate(localOwner, TaskTarget::from(f.task(id), restored), "answer", {{"text", "main"}});
+            f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, restored), "answer", {{"text", "main"}});
             f.reach(id, "running");
             check(f.t3.replies == 1 && f.t3.seen.back().target.runId == "run-1" && f.t3.launches == 1 &&
                       f.logs(id, "session_question") == 1 && f.logs(id, "user_answer") == 1,
@@ -922,7 +922,7 @@ void connectionRecoveryRestoresQuestionModelApproval() {
     const auto restored = f.wait(id, "model_budget");
     check(restored != old && f.model.calls == 1, "recovery bypassed the pending model approval");
     f.rejects(id, old, "approve");
-    f.store->operate(localOwner, TaskTarget::from(f.task(id), restored), "approve");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, restored), "approve");
     f.reach(id, "running");
     check(f.model.calls == 2 && f.t3.replies == 1, "restored approval could not resume the open question");
 }
@@ -936,7 +936,7 @@ void failedPreflightIsUnsent() {
     check(f.t3.seen.empty() && f.logs(id, "send_started") == 0, "failed preflight started a delivery");
     f.restart();
     f.t3.onPreflight = {};
-    f.store->operate(localOwner, TaskTarget::from(f.task(id), wait), "reconcile");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "reconcile");
     f.reach(id, "running");
     check(f.t3.launches == 1 && f.t3.reconciles == 0 && f.logs(id, "send_started") == 1,
           "preflight failure did not leave one unsent action");
@@ -962,11 +962,11 @@ void recoveredDelivery() {
         f.restart();
         f.t3.generation = "fresh-oauth-session";
         f.t3.hasReconciledRun = false;
-        f.store->operate(localOwner, TaskTarget::from(f.store->task(id), waiting), "reconcile");
+        f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, waiting), "reconcile");
         waiting = f.wait(id, "unknown_delivery");
         check(f.t3.seen.size() == (launch ? 1ul : 2ul), "unmatched delivery was resent");
         f.t3.hasReconciledRun = true;
-        f.store->operate(localOwner, TaskTarget::from(f.store->task(id), waiting), "reconcile");
+        f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, waiting), "reconcile");
         f.reach(id, "running");
         check(f.t3.reconciles == 2 && f.t3.recovery.back().authGeneration == "same-oauth-session",
               "recovery lost original authentication generation");
@@ -990,7 +990,7 @@ void recoveredDelivery() {
     f.t3.loseAcknowledgement = true;
     const auto wait = f.wait(id, "unknown_delivery");
     f.restart();
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), wait), "reconcile");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "reconcile");
     f.reach(id, "running");
     check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.reconciles == 1 && f.task(id)["additionalUsed"] == 0,
           "recovered answer created duplicate work");
@@ -1008,7 +1008,7 @@ void launchReceiptSurvivesRecovery() {
     f.restart();
     f.t3.hasReconciledRun = false;
     const auto wait = f.wait(id, "unknown_delivery");
-    f.store->operate(localOwner, TaskTarget::from(f.task(id), wait), "reconcile");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "reconcile");
     f.t3.hasReconciledRun = true;
     f.reach(id, "running");
     check(f.t3.recovery.back().launchReceiptThreadId == "thread-1" && !f.t3.recovery.back().candidate && f.t3.launches == 1,
@@ -1033,7 +1033,7 @@ void unsentAnswerRemainsRetryable() {
     f.rejects(id, wait, "reconcile", {{"questionId", "another-question"}});
     check(f.task(id).at("wait").at("id") == wait && f.t3.replies == 0,
           "a mismatched reconciliation hint allowed an unsent answer to proceed");
-    f.store->operate(localOwner, TaskTarget::from(f.task(id), wait), "reconcile", {{"questionId", answer.questionId}});
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "reconcile", {{"questionId", answer.questionId}});
     f.reach(id, "running");
     const auto retry = f.t3.seen.back();
     check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.reconciles == 0 && f.task(id)["activeRun"] == run &&
@@ -1050,7 +1050,7 @@ void cancelDuringDelivery() {
     const auto id = f.submit("Work being cancelled");
     const auto queued = f.submit("Next project task");
     f.model.script = [=](const ModelInput& i) { return i.task["id"] == queued ? ask() : work(); };
-    f.t3.beforeWorkAcknowledgement = [&] { cli.operate(localOwner, TaskTarget::from(cli.task(id), 0), "cancel"); };
+    f.t3.beforeWorkAcknowledgement = [&] { cli.operate(localOwner, TaskTarget::from(cli.task(id).task, 0), "cancel"); };
     for (int i = 0; i < 12 && f.t3.launches < 2; ++i) f.runtime->tick();
     f.t3.beforeWorkAcknowledgement = {};
     f.restart();
@@ -1087,7 +1087,7 @@ void settleWhileAnswerDeliveryIsUnknown() {
         f.restart();
 
         if (cancel) {
-            f.store->operate(localOwner, TaskTarget::from(f.store->task(id), 0), "cancel");
+            f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, 0), "cancel");
             for (int i = 0; i < 12 && f.t3.interruptedRuns.empty(); ++i) f.runtime->tick();
             check(f.task(id)["state"] == "cancelling" && f.t3.interruptedRuns.size() == 1 &&
                       f.t3.interruptedRuns[0].threadId == "thread-1" && f.t3.interruptedRuns[0].runId == "run-1",
@@ -1098,7 +1098,7 @@ void settleWhileAnswerDeliveryIsUnknown() {
             for (int i = 0; i < 12 && f.task(id)["wait"]["id"] == wait; ++i) f.runtime->tick();
             const auto review = f.wait(id, "user_question");
             f.rejects(id, wait, "reconcile");
-            f.store->operate(localOwner, TaskTarget::from(f.store->task(id), review), "cancel");
+            f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, review), "cancel");
         }
         f.reach(id, "cancelled");
         check(f.logs(id, "report") == 1 && f.t3.replies == 1 && f.t3.launches == 1, "settled Run duplicated its answer or report");
@@ -1135,7 +1135,7 @@ void settledReportCanRecoverAfterRestart() {
         observation.detail = secret;
         f.runtime->tick();
         check(f.task(id)["activeRun"].is_null() && f.task(id)["lastRun"]["runId"] == "run-1" &&
-                  f.store->sessionTasks("alpha", 0, 1).at(0).at("runs").at(0).at("status") == "completed" &&
+                  f.store->sessionTasks("alpha", 0, 1).at(0).runs.at(0).at("status") == "completed" &&
                   f.store->history(id).dump().find(secret) == std::string::npos,
               "missing evidence kept the Run active or leaked diagnostics");
         const auto polls = f.t3.polls;
@@ -1217,7 +1217,7 @@ void lateReportCanRestoreCompletion() {
     f.restart();
     f.runtime->tick();
     check(reportReads == 3 && f.task(id).at("wait").at("id") == wait, "waiting repeated terminal report reads");
-    f.store->operate(localOwner, TaskTarget::from(f.task(id), wait), "answer", {{"text", "Try again"}});
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait), "answer", {{"text", "Try again"}});
     f.runtime->tick();
     check(reportReads == 3 && f.logs(id, "tool_error") == 1, "the assigned Run was accepted as the result source");
     setSessionReadJournalFailure(f.store->path(), true);
@@ -1272,7 +1272,7 @@ void lateReportCanRestorePeerResult() {
             "session_read", {{"view", "report"}, {"threadId", "thread-1"}, {"runId", "run-1-result"}}, "Retry the peer's terminal report"};
     };
     f.reach(sender, "peer_waiting");
-    const Id recipient = f.store->tasks("beta").front().at("id");
+    const Id recipient = f.store->tasks("beta").front().task.id;
     f.reach(recipient, "running");
     f.t3.finish("run-1");
     f.t3.runs.at("run-1").evidence = RunEvidence::Availability::ReportUnavailable;
@@ -1299,7 +1299,7 @@ void missingReportDoesNotBlockCancellation() {
         observation.report.clear();
         if (settledBeforeCancel) f.runtime->tick();
         f.restart();
-        f.store->operate(localOwner, TaskTarget::from(f.task(id), 0), "cancel");
+        f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, 0), "cancel");
         f.reach(id, "cancelled");
         f.wait(next, "user_question");
         check(f.t3.interrupts == 0 && f.t3.launches == 1 && f.logs(id, "report") == 1 && f.task(id)["activeRun"].is_null(),
@@ -1379,26 +1379,29 @@ void taskPagesShowProjectOwners() {
     const auto desktopNext = f.submit("Desktop follow-up");
     const auto independent = f.submit("Separate release", "alpha", "another-project");
     const auto cancelled = f.submit("Withdrawn release");
-    f.store->operate(localOwner, TaskTarget::from(f.task(cancelled), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(cancelled).task, 0), "cancel");
     const auto cloudNext = f.store->submit({"alpha", "Cloud follow-up", "cloud", "p"});
     f.restart();
 
-    const auto newest = f.store->tasks("alpha", 0, 2);
+    const auto newest = taskJson(f.store->tasks("alpha", 0, 2));
     const Json cloudOwner = {{"id", cloud}, {"botId", "beta"}, {"request", "Check cloud"}, {"state", "queued"}};
     check(newest.size() == 2 && newest[0].at("id") == cloudNext && newest[0].at("blockedBy") == cloudOwner &&
               newest[1].at("id") == cancelled && newest[1].at("state") == "cancelled" && newest[1].at("blockedBy").is_null(),
           "the newest page lost the off-page cloud owner or blocked cancelled work");
-    const auto older = f.store->tasks("alpha", cancelled, 2);
+    const auto older = taskJson(f.store->tasks("alpha", cancelled, 2));
     const Json desktopOwner = {{"id", desktop}, {"botId", "beta"}, {"request", "Verify main"}, {"state", "running"}};
     check(older.size() == 2 && older[0].at("id") == independent && older[0].at("blockedBy").is_null() && older[1].at("id") == desktopNext &&
               older[1].at("blockedBy") == desktopOwner && f.store->tasks("alpha", desktopNext, 2).empty(),
           "the older page skipped a task, repeated the cursor or mixed up project owners");
     const auto active = f.store->activeTasks("alpha");
-    check(active.size() == 3 && active.front().task.at("id") == cloudNext && active.front().task.at("blockedBy") == cloudOwner &&
-              active.back().task.at("id") == desktopNext && active.back().task.at("blockedBy") == desktopOwner,
+    check(active.size() == 3 && active.front().task.id == cloudNext && active.front().blockedBy && active.front().blockedBy->id == cloud &&
+              active.front().blockedBy->botId == "beta" && active.front().blockedBy->request == "Check cloud" &&
+              active.front().blockedBy->state == TaskState::queued && active.back().task.id == desktopNext && active.back().blockedBy &&
+              active.back().blockedBy->id == desktop && active.back().blockedBy->botId == "beta" &&
+              active.back().blockedBy->request == "Verify main" && active.back().blockedBy->state == TaskState::running,
           "the active task list lost the owners of work in separate environments");
 
-    const auto history = f.store->tasks({}, cloud, 1);
+    const auto history = taskJson(f.store->tasks({}, cloud, 1));
     check(history.size() == 1 && history[0].at("id") == desktop && history[0].at("blockedBy").is_null() &&
               history[0].at("runs").size() == 1 && history[0].at("runs")[0].at("link") == "https://t3.test/thread" &&
               history[0].at("revisions").size() == 1 && history[0].at("revisions")[0].at("doneWhen") == Evidence &&
@@ -1456,7 +1459,7 @@ void peerWorkAndRestart() {
     check(f.task(root)["wait"].is_null() && f.task(root)["doneWhen"] == Evidence,
           "waiting for a peer became a human wait or lost the completion contract");
     f.restart();
-    const auto recipientTasks = f.store->tasks("beta");
+    const auto recipientTasks = taskJson(f.store->tasks("beta"));
     check(recipientTasks.size() == 1, "handoff was not persisted exactly once");
     const auto recipient = recipientTasks.front()["id"].get<Id>();
     check(f.task(recipient)["blockedBy"].is_null(), "recipient was shown as blocked despite having the execution slot");
@@ -1464,7 +1467,7 @@ void peerWorkAndRestart() {
     check(f.task(recipient)["state"] == "peer_waiting" && f.task(unrelated)["state"] == "queued" && f.t3.launches == 0,
           "clarification started unrelated work or launched a Session prematurely");
     f.restart();
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(root), humanWait), "answer", {{"text", "main"}});
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(root).task, humanWait), "answer", {{"text", "main"}});
     f.rejects(root, humanWait, "answer", {{"text", "dev"}});
     f.reach(recipient, "running");
     check(f.t3.launches == 1 && f.t3.seen.back().projectId == "p" && f.t3.seen.back().config.at("model") == "beta-model" &&
@@ -1564,7 +1567,7 @@ void peerWorkSharesBudgetWithDirectT3Work() {
     check(beforeApproval["wait"]["attempted"] == "delegate" && beforeApproval["remaining"] == 0 && beforeApproval["additionalUsed"] == 3 &&
               f.t3.launches == 0 && f.store->tasks("beta").size() == 4,
           "direct T3 work bypassed the allowance exhausted by peer work");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(root), budget), "approve");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(root).task, budget), "approve");
     f.restart();
     f.reach(root, "running");
     check(f.t3.launches == 1 && f.task(root)["remaining"] == 2 && f.task(root)["additionalUsed"] == 4,
@@ -1595,7 +1598,7 @@ void peerCompletionRespectsSessionReadPolicy() {
         return botReply("result", "Verified the PR");
     };
     f.reach(sender, "peer_waiting");
-    const Id recipient = f.store->tasks("beta").front().at("id");
+    const Id recipient = f.store->tasks("beta").front().task.id;
     f.reach(recipient, "running");
     f.store->policy().changeNeverRule({"fixture", true}, Action::session_read, Resource::sessionRead("e", "thread-1").target, true);
     f.t3.finish("run-1");
@@ -1655,12 +1658,12 @@ void checkPeerClarificationAfterRun(std::string_view readMode) {
     };
 
     f.reach(root, "peer_waiting");
-    const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    const auto recipient = f.store->tasks("beta").front().task.id;
     f.reach(recipient, "running");
     const auto initialRun = f.task(recipient)["activeRun"];
     f.t3.finish("run-1");
     const auto waitId = f.wait(root, "user_question");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(root), waitId), "answer", {{"text", "main"}});
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(root).task, waitId), "answer", {{"text", "main"}});
     const auto answerWasDelivered = [&] {
         const auto messages = f.botMessages("beta");
         return !messages.empty() && messages.back().at("messageType") == "answer" && messages.back().at("text") == "Retest main";
@@ -1722,7 +1725,7 @@ void revisionWaitsForPeerClarification(bool direct = false) {
     };
 
     const auto oldWait = f.wait(root, "user_question");
-    const auto old = TaskTarget::from(f.task(root), oldWait);
+    const auto old = TaskTarget::from(f.store->task(root).task, oldWait);
     f.store->receive(localOwner, routing, "move-release-check", "Run Release check on cloud");
     f.runtime->runConversations();
     check(f.task(root).value("replanning", false) && f.task(root).at("pendingDestination").at("environmentId") == "cloud",
@@ -1832,7 +1835,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
     };
 
     f.reach(sender, "peer_waiting");
-    recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    recipient = f.store->tasks("beta").front().task.id;
     f.reach(recipient, "running");
     const std::string revisionText = "Revise Verify release completion criteria to " + std::string(revisedCriteria);
     const Intake betaRouting{"beta", revisionText, "e", "p", {{"runTimeoutSeconds", 10}, {"model", "beta-model"}}};
@@ -1928,7 +1931,7 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
     };
 
     f.reach(sender, "peer_waiting");
-    recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    recipient = f.store->tasks("beta").front().task.id;
     f.reach(recipient, "running");
     f.t3.finish("run-1");
     f.t3.runs.at("run-1").report = "Previous verification found one failing check";
@@ -1951,7 +1954,7 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
               f.task(recipient)["doneWhen"] == revisedCriteria && f.task(sender)["wait"]["reason"] == "user_question",
           "the recipient replanned during the pending peer question");
 
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(sender), waitId), "answer", {{"text", "Use main"}});
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(sender).task, waitId), "answer", {{"text", "Use main"}});
     f.reach(recipient, "running");
     const auto command = f.t3.seen.back();
     if (moves) {
@@ -2019,7 +2022,7 @@ void checkWorkRecipientMove(bool sharesSenderQueue) {
     };
 
     f.reach(sender, "peer_waiting");
-    recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    recipient = f.store->tasks("beta").front().task.id;
     f.reach(recipient, "running");
     unrelated = f.submit("Unrelated verification", "alpha", project);
     if (!sharesSenderQueue) f.reach(unrelated, "running");
@@ -2098,13 +2101,13 @@ void consultationRepliesAfterUserInstructions() {
         };
 
         f.reach(sender, "peer_waiting");
-        recipient = f.store->tasks("beta").front()["id"].get<Id>();
+        recipient = f.store->tasks("beta").front().task.id;
         const auto wait = f.wait(sender, "user_question");
         f.store->receive(localOwner, {"beta", "", "e", "p", Json::object()}, "consultation-instruction", instruction);
         f.runtime->runConversations();
         check(f.logs(recipient, "instruction_accepted") == 1 && f.task(recipient).value("replanning", false) == revise,
               "the instruction did not reach the open consultation");
-        f.store->operate(localOwner, TaskTarget::from(f.store->task(sender), wait), "answer", {{"text", "Use main"}});
+        f.store->operate(localOwner, TaskTarget::from(f.store->task(sender).task, wait), "answer", {{"text", "Use main"}});
         f.reach(recipient, "completed");
         f.reach(sender, "completed");
         check(f.t3.seen.empty() && f.logs(recipient, "model_failure") == 0 && f.botMessages("alpha").size() == 4,
@@ -2125,7 +2128,7 @@ void peerConsultationAndPermission() {
     f.wait(denied, "model_failure");
     check(deniedAttempts == 6 && f.store->tasks().size() == 1 && f.botMessages("alpha").empty(),
           "an unlisted recipient received a message or the available send tool was not exercised");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(denied), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(denied).task, 0), "cancel");
     f.reach(denied, "cancelled");
 
     f.peers.at("alpha").front().intake.projectId = "second";
@@ -2145,7 +2148,7 @@ void peerConsultationAndPermission() {
     f.reach(busy, "running");
     const auto consultation = f.submit("Ask the Verifier about our release policy");
     f.reach(consultation, "peer_waiting");
-    const auto consulting = f.store->tasks("beta", 0, 1);
+    const auto consulting = taskJson(f.store->tasks("beta", 0, 1));
     check(consulting.size() == 1 && consulting[0].at("request") == "What is the release policy?" &&
               consulting[0].at("state") == "deciding" && consulting[0].at("blockedBy").is_null(),
           "the consultation was shown as blocked by the Verifier's running task");
@@ -2180,7 +2183,7 @@ void consultationDoesNotRequireAT3Destination() {
     };
     const auto sender = f.submit();
     f.reach(sender, "completed");
-    const auto tasks = f.store->tasks("beta");
+    const auto tasks = taskJson(f.store->tasks("beta"));
     check(tasks.size() == 1 && tasks[0]["environmentId"] == "" && tasks[0]["projectId"] == "" && tasks[0]["state"] == "completed" &&
               f.t3.seen.empty(),
           "a consultation depended on T3 admission");
@@ -2202,7 +2205,7 @@ void automaticPeerWorkResolvesTheProject() {
     };
     const auto sender = f.submit();
     f.reach(sender, "peer_waiting");
-    const auto recipient = f.store->tasks("beta").front().at("id").get<Id>();
+    const auto recipient = f.store->tasks("beta").front().task.id;
     f.reach(recipient, "running");
     const auto task = f.task(recipient);
     check(task.at("environmentId") == "e" && task.at("projectId") == "verification", "peer work did not retain the selected destination");
@@ -2221,7 +2224,7 @@ void requestedCriteriaApplyToFirstPeerWork() {
         return {"send_bot_message", {{"kind", "work"}, {"text", "Verify the release"}, {"botId", "beta"}}, "Ask the verifier"};
     };
     f.runtime->runConversations();
-    const Id sender = f.store->tasks("alpha").at(0).at("id");
+    const Id sender = f.store->tasks("alpha").at(0).task.id;
     f.reach(sender, "peer_waiting");
     const auto task = f.task(sender);
     check(task.at("doneWhen") == "Confirm the signature" && task.at("remaining") == 3 &&
@@ -2245,10 +2248,10 @@ void modelBudgetFollowsBotConsultation() {
         return complete();
     };
     f.runtime->runConversations();
-    const Id sender = f.store->tasks("alpha").front().at("id");
+    const Id sender = f.store->tasks("alpha").front().task.id;
     check(f.task(sender)["sourceMessageId"] == receipt["messageId"], "routed task lost its originating message");
     f.reach(sender, "peer_waiting");
-    const Id recipient = f.store->tasks("beta").front().at("id");
+    const Id recipient = f.store->tasks("beta").front().task.id;
     const auto recipientWait = f.wait(recipient, "model_budget");
     f.restart();
     for (int i = 0; i < 4; ++i) f.runtime->tick();
@@ -2264,7 +2267,7 @@ UPDATE conversation_turns SET status='paused',pause_id=last_insert_rowid()
 WHERE message_id=(SELECT id FROM messages WHERE bot_id='alpha' ORDER BY id LIMIT 1);
 )SQL");
     check(writer.pausedConversations("alpha").size() == 1, "the shared conversation fixture is not paused");
-    writer.operate(verifier, TaskTarget::from(writer.task(recipient), recipientWait), "approve");
+    writer.operate(verifier, TaskTarget::from(writer.task(recipient).task, recipientWait), "approve");
     check(writer.pausedConversations("alpha").size() == 1, "a member of the receiving Bot resumed a conversation on the originating Bot");
     f.rejects(recipient, recipientWait, "approve");
     f.reach(sender, "completed");
@@ -2292,7 +2295,7 @@ void peerResultWaitsForRecipientTurn() {
     };
     f.reach(root, "peer_waiting");
     for (int i = 0; i < 4 && !noted; ++i) f.runtime->tick();
-    const Id recipient = f.store->tasks("beta").front().at("id");
+    const Id recipient = f.store->tasks("beta").front().task.id;
     check(noted && f.task(recipient)["state"] != "completed" && f.task(root)["state"] == "peer_waiting",
           "the recipient closed the exchange while its own conversation turn was unfinished");
     f.reach(root, "completed");
@@ -2312,13 +2315,13 @@ void cancelledPeerRefundsUnusedModelApproval() {
         return ask();
     };
     f.runtime->runConversations();
-    const Id sender = f.store->tasks("alpha").front().at("id");
+    const Id sender = f.store->tasks("alpha").front().task.id;
     f.reach(sender, "peer_waiting");
-    const Id recipient = f.store->tasks("beta").front().at("id");
+    const Id recipient = f.store->tasks("beta").front().task.id;
     const auto recipientWait = f.wait(recipient, "model_budget");
-    f.store->operate(localOwner, TaskTarget::from(f.task(recipient), recipientWait), "approve");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(recipient).task, recipientWait), "approve");
     check(f.model.calls == 3, "shared approval was not reserved");
-    f.store->operate(localOwner, TaskTarget::from(f.task(recipient), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(recipient).task, 0), "cancel");
     f.reach(recipient, "cancelled");
     f.reach(sender, "waiting");
     const auto wait = f.task(sender).at("wait").at("reason");
@@ -2340,7 +2343,7 @@ void revisedTaskRefundsUnusedModelApproval() {
     f.runtime->tick();
     f.now += 5;
     const auto approval = f.wait(taskId, "model_budget");
-    f.store->operate(localOwner, TaskTarget::from(f.task(taskId), approval), "approve");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(taskId).task, approval), "approve");
     check(f.model.calls == 1, "provider already reached the new approval");
     f.store->receive(localOwner, {"alpha", "", "e", "p", Json::object()}, "revise", "Revise the original request.");
     f.runtime->runConversations();
@@ -2385,14 +2388,14 @@ void modelBudgetCountsFailedAttempts() {
     const auto independent = f.store->submit({"alpha", "Independent request", "e", "other", {{"modelCallLimit", 2}}});
     f.wait(independent, "user_question");
     check(f.model.calls == 3 && f.task(id)["wait"]["id"] == wait, "an independent request needed the paused budget");
-    const auto approval = TaskTarget::from(f.store->task(id), wait);
+    const auto approval = TaskTarget::from(f.store->task(id).task, wait);
     check(f.task(id)["wait"]["allowance"] == 2, "the pause did not show the original allowance");
     f.store->operate(localOwner, approval, "approve");
     f.restart();
     f.rejects(id, wait, "approve");
     for (const auto* answer : {"Use main", "Yes, use main"}) {
         const auto question = f.wait(id, "user_question");
-        f.store->operate(localOwner, TaskTarget::from(f.store->task(id), question), "answer", {{"text", answer}});
+        f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, question), "answer", {{"text", answer}});
     }
     const auto next = f.wait(id, "model_budget");
     check(next != wait && f.model.calls == 5 && f.task(id)["remaining"] == 3,
@@ -2456,7 +2459,7 @@ void modelBudgetAllowsT3ObservationAndRecovery() {
     f.reach(id, "sending");
     f.t3.loseAcknowledgement = true;
     const auto deliveryWait = f.wait(id, "unknown_delivery");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), deliveryWait), "reconcile");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, deliveryWait), "reconcile");
     f.reach(id, "running");
     check(f.model.calls == 1 && f.t3.reconciles == 1 && f.t3.launches == 1, "delivery recovery used a model call or resent the Run");
     f.t3.question("run-1");
@@ -2466,7 +2469,7 @@ void modelBudgetAllowsT3ObservationAndRecovery() {
     f.runtime->tick();
     check(f.t3.polls > polls && f.model.calls == 1 && f.task(id)["wait"]["id"] == modelWait,
           "model approval blocked T3 observation or reset the pending decision");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id), modelWait), "approve");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, modelWait), "approve");
     f.reach(id, "running");
     check(f.model.calls == 2 && f.t3.replies == 1 && f.task(id)["remaining"] == 3,
           "the approved call did not answer the original question");
@@ -2486,7 +2489,7 @@ void unsuccessfulConsultationsDoNotComplete() {
             return ask();
         };
         f.reach(id, "peer_waiting");
-        if (cancel) f.store->operate(localOwner, TaskTarget::from(f.store->task(f.store->tasks("beta").front().at("id")), 0), "cancel");
+        if (cancel) f.store->operate(localOwner, TaskTarget::from(f.store->task(f.store->tasks("beta").front().task.id).task, 0), "cancel");
         f.wait(id, "user_question");
         check(f.logs(id, "completed") == 0 && f.t3.launches == 0, "unsuccessful consultation completed or launched work");
     }
@@ -2518,13 +2521,13 @@ void concurrentPeerHandoff() {
         check(ready(), "concurrent handoff did not advance before its deadline");
     };
     until([&] {
-        const auto recipients = f.store->tasks("beta");
+        const auto recipients = taskJson(f.store->tasks("beta"));
         return recipients.size() == 1 && recipients.front()["state"] == "running";
     });
-    const auto recipient = f.store->tasks("beta").front().at("id").get<Id>();
+    const auto recipient = f.store->tasks("beta").front().task.id;
     check(f.task(source)["state"] == "peer_waiting" && f.task(next)["blockedBy"]["id"] == recipient,
           "the queued Task did not report the active peer as the owner");
-    const auto page = f.store->tasks("alpha", 0, 1);
+    const auto page = taskJson(f.store->tasks("alpha", 0, 1));
     const Json owner = {{"id", recipient}, {"botId", "beta"}, {"request", "Verify the release"}, {"state", "running"}};
     check(page.size() == 1 && page[0].at("id") == next && page[0].at("blockedBy") == owner,
           "the queued task page lost the work recipient that inherited the sender's slot");
@@ -2653,9 +2656,9 @@ void peerCancelWithLateSessionResult() {
         return botReply("result", "Late verification");
     };
     f.reach(root, "peer_waiting");
-    const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    const auto recipient = f.store->tasks("beta").front().task.id;
     f.reach(recipient, "running");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(root), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(root).task, 0), "cancel");
     for (int step = 0; step < 8 && f.t3.interrupts == 0; ++step) f.runtime->tick();
     check(f.t3.interrupts == 1 && f.t3.interruptedRuns.back().threadId == "thread-1" && f.t3.interruptedRuns.back().runId == "run-1" &&
               f.task(unrelated)["state"] == "queued",
@@ -2697,8 +2700,8 @@ void peerProjectCycle() {
     check(f.task(beta)["doneWhen"] == "" && f.store->tasks("alpha").size() == 1 && messagesBeforeCancel.size() == 1 &&
               messagesBeforeCancel.front().at("fromBotId") == "alpha",
           "cross-project cycle was not rejected before creating work or saving a completion contract");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(beta), 0), "cancel");
-    const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(beta).task, 0), "cancel");
+    const auto recipient = f.store->tasks("beta").front().task.id;
     f.reach(recipient, "running");
     check(f.t3.launches == 1 && f.t3.seen.back().projectId == "second",
           "the original work request did not progress on its recipient project after the cycle was prevented");
@@ -2736,7 +2739,7 @@ struct PeerMoveCycleFixture : Fixture {
         };
         desktopSender = submit("Release check");
         reach(desktopSender, "peer_waiting");
-        cloudRecipient = store->tasks("beta").front().at("id");
+        cloudRecipient = store->tasks("beta").front().task.id;
         reach(cloudRecipient, "running");
     }
 
@@ -2768,7 +2771,7 @@ void cyclicPeerMoveIsRejected() {
     PeerMoveCycleFixture f;
     f.startRemoteSender();
     f.reach(f.remoteSender, "peer_waiting");
-    const auto queued = f.store->tasks("alpha").front().at("id").get<Id>();
+    const auto queued = f.store->tasks("alpha").front().task.id;
     const auto originalRun = f.task(f.cloudRecipient).at("activeRun");
     const auto rejected = f.move(f.cloudRecipient, f.pinnedRemote, "remote");
     check(rejected.at("ok") == false && rejected.at("error").get<std::string>().find("project queues") != std::string::npos,
@@ -2847,7 +2850,7 @@ void pendingPeerMovePreventsAnotherMove() {
     PeerMoveCycleFixture f;
     f.startRemoteSender("backup");
     f.reach(f.remoteSender, "peer_waiting");
-    const auto backupRecipient = f.store->tasks("alpha").front().at("id").get<Id>();
+    const auto backupRecipient = f.store->tasks("alpha").front().task.id;
     check(f.move(backupRecipient, f.specialist, "desktop").at("effect") == "replanning",
           "the first move could not reserve the desktop destination");
     check(f.move(f.remoteSender, f.verifier, "backup").at("effect") == "replanning",
@@ -2862,10 +2865,10 @@ void cancelledPeerMoveFreesItsPendingDestination() {
     PeerMoveCycleFixture f;
     f.startRemoteSender("backup");
     f.reach(f.remoteSender, "peer_waiting");
-    const auto backupRecipient = f.store->tasks("alpha").front().at("id").get<Id>();
+    const auto backupRecipient = f.store->tasks("alpha").front().task.id;
     check(f.move(f.cloudRecipient, f.verifier, "remote").at("effect") == "replanning",
           "the first move could not reserve the remote destination");
-    f.store->operate(localOwner, TaskTarget::from(f.task(f.cloudRecipient), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(f.cloudRecipient).task, 0), "cancel");
     check(f.task(f.cloudRecipient).at("state") == "cancelling" &&
               f.move(backupRecipient, f.specialist, "desktop").at("effect") == "replanning",
           "a cancelling recipient retained its abandoned destination");
@@ -2887,10 +2890,10 @@ void peerCancelWhileQueued() {
     };
     f.reach(running, "running");
     f.reach(source, "peer_waiting");
-    const auto queued = f.store->tasks("beta").front()["id"].get<Id>();
+    const auto queued = f.store->tasks("beta").front().task.id;
     check(f.task(queued)["state"] == "queued" && f.task(queued)["blockedBy"]["id"] == running,
           "test did not queue the delegated task behind an active Run");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(queued), 0), "cancel");
+    f.store->operate(localOwner, TaskTarget::from(f.store->task(queued).task, 0), "cancel");
     f.reach(queued, "cancelled");
     f.wait(source, "user_question");
     check(receivedCancellation && f.task(running)["state"] == "running" && f.t3.launches == 1 && f.t3.interrupts == 0,
@@ -2907,11 +2910,11 @@ void peerCancelDuringPreflight() {
         return botRequest("beta", "work", "Verify the second project");
     };
     f.reach(source, "peer_waiting");
-    const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    const auto recipient = f.store->tasks("beta").front().task.id;
     bool cancelledDuringPreflight = false;
     f.t3.onPreflight = [&] {
         Store cli(f.directory / "state.db");
-        cli.operate(localOwner, TaskTarget::from(cli.task(source), 0), "cancel");
+        cli.operate(localOwner, TaskTarget::from(cli.task(source).task, 0), "cancel");
         cancelledDuringPreflight = true;
     };
     for (int step = 0; step < 8 && !cancelledDuringPreflight; ++step) f.runtime->tick();
@@ -2940,7 +2943,7 @@ void inferenceInvalidatedByCancel() {
         std::unique_lock lock(mutex);
         ready.wait(lock, [&] { return inModel; });
         Store cli(f.directory / "state.db");
-        cli.operate(localOwner, TaskTarget::from(cli.task(id), 0), "cancel");
+        cli.operate(localOwner, TaskTarget::from(cli.task(id).task, 0), "cancel");
         cancelled = true;
         ready.notify_one();
     }

@@ -107,7 +107,7 @@ void run() {
         task = store.submit(intake());
         Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(store.task(task).at("state") == "completed" && host->createCalls == 1, "initial watch was not recorded");
+        check(store.task(task).task.state == TaskState::completed && host->createCalls == 1, "initial watch was not recorded");
     }
     Store store(database);
     const auto server = startWeb(store, 0, callbacks());

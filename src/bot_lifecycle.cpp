@@ -58,8 +58,8 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
         while (tasks.next()) openTasks.push_back(tasks.number(0));
         for (const auto id : openTasks) {
             auto task = p_->load(id);
-            if (terminal(task) || task["state"] == "cancelling") continue;
-            task["cancelledByBotPause"] = true;
+            if (terminal(task) || task.state == TaskState::cancelling) continue;
+            task.rest["cancelledByBotPause"] = true;
             p_->requestCancellation(task);
         }
         p_->settlePolicyApprovals();

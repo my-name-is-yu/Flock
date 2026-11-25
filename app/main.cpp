@@ -408,7 +408,7 @@ void operate(const std::filesystem::path& home, const Bots& bots, const std::str
     const auto task = number(args, "task ID");
     auto store = openStore(home);
     const auto status = store.task(task);
-    auto target = TaskTarget::from(status, 0);
+    auto target = TaskTarget::from(status.task, 0);
     if (operation != "cancel" || !args.empty()) {
         target.waitId = number(args, "wait ID");
         target.revision = number(args, "revision ID", 0);
@@ -439,7 +439,7 @@ void operate(const std::filesystem::path& home, const Bots& bots, const std::str
                                            [&](std::string_view id, std::string_view request) { return bots.get(id).intake(request); });
     }
     store.operate(localOwner, target, operation, details);
-    print(store.task(task));
+    print(taskJson(store.task(task)));
 }
 
 void taskCommand(const std::filesystem::path& home, const std::string& command, Arguments& args) {
@@ -464,7 +464,7 @@ void taskCommand(const std::filesystem::path& home, const std::string& command, 
         if (!store.hasTask(task)) throw Conflict("Task does not exist");
         print(store.history(task, cursor, limit));
     } else
-        print(store.tasks(bot, cursor, limit));
+        print(taskJson(store.tasks(bot, cursor, limit)));
 }
 
 void rulesCommand(const std::filesystem::path& home, Arguments& args) {
@@ -537,7 +537,7 @@ int runCli(Arguments& args) {
     } else if (command == "status") {
         const auto id = number(args, "task ID");
         args.end();
-        print(openStore(home).task(id));
+        print(taskJson(openStore(home).task(id)));
     } else if (command == "history" || command == "tasks")
         taskCommand(home, command, args);
     else if (command == "answer" || command == "approve" || command == "retry" || command == "extend" || command == "reconcile" ||

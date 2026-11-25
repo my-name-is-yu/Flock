@@ -174,7 +174,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
     return scrub.record(result, SecretRedactor::Fields::external);
 }
 
-void Store::Impl::decideGitPr(const InboxTarget& item, std::string_view decision, const Json& data, const Json& task) {
+void Store::Impl::decideGitPr(const InboxTarget& item, std::string_view decision, const Json& data, const TaskData& task) {
     auto row = query(R"SQL(
 SELECT o.operation_id,o.host,o.base_repo,o.head_repo,o.base_ref,o.head_ref,o.run,i.candidates,o.event_cursor
 FROM pr_review_items i JOIN git_pr_operations o ON o.operation_id=i.operation_id
@@ -186,7 +186,7 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
     const auto base = GitRepository::parse(row.string(1), row.string(2));
     const auto head = GitRepository::parse(row.string(1), row.string(3));
     const auto run = row.json(6);
-    const GitContext context{item.taskId, item.botId, field(task, "environmentId"), field(task, "projectId"), runRef(run)};
+    const GitContext context{item.taskId, item.botId, task.environmentId, task.projectId, runRef(run)};
     Id number = 0;
     std::string url;
     const bool link = decision == "link_pr";

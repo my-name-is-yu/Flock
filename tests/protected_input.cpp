@@ -88,7 +88,7 @@ void runningSessions(const std::filesystem::path& path) {
         policy.executeSessionResource(
             "env", adapter.running.at(bot), readRepo, [&] { return upstream; },
             [&](Id task) {
-                check(store.task(task).at("botId") == bot, "execution callback received the wrong owner");
+                check(store.task(task).task.botId == bot, "execution callback received the wrong owner");
                 completed.push_back(bot);
             });
     };
@@ -152,7 +152,8 @@ void freshLaunch(const std::filesystem::path& path) {
     auto task = store.submit({"Fresh", "read repository", "env", "project"});
     store.policy().changeNeverRule(owner, Action::environment_launch, "env", true);
     for (int i = 0; i < 6; ++i) runtime.tick();
-    check(adapter.running.empty() && store.task(task).at("wait").at("reason") == "settings", "pending launch permission reached T3");
+    check(adapter.running.empty() && taskJson(store.task(task)).at("wait").at("reason") == "settings",
+          "pending launch permission reached T3");
 }
 
 void freshPendingSecretRequests(const std::filesystem::path& path) {

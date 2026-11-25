@@ -24,24 +24,24 @@ void Store::setWebIdentityResolver(WebIdentityResolver resolver, bool liveIntera
     p_->liveInteractiveRoles = liveInteractiveRoles;
 }
 
-Id Store::Impl::addRevision(Json& task, std::string_view intent, std::string_view doneWhen, Id source) {
+Id Store::Impl::addRevision(TaskData& task, std::string_view intent, std::string_view doneWhen, Id source) {
     if (!hasText(intent) || !hasText(doneWhen)) throw Conflict("Task revision needs intent and completion criteria");
     if (source) {
-        auto row = query("SELECT 1 FROM messages WHERE id=? AND bot_id=?", {source, task["botId"]});
+        auto row = query("SELECT 1 FROM messages WHERE id=? AND bot_id=?", {source, task.botId});
         if (!row.next()) throw Conflict("Task revision must come from this Bot's conversation");
     }
     exec(R"SQL(
 INSERT INTO task_revisions(task_id,number,intent,done_when,source_message_id)
 SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
 )SQL",
-         {task["id"], intent, doneWhen, source ? Json(source) : Json(nullptr), task["id"]});
+         {task.id, intent, doneWhen, source ? Json(source) : Json(nullptr), task.id});
     const auto revision = last();
-    task["currentRevision"] = revision;
-    task.erase("blockerReason");
-    task.erase("blockerWaitId");
-    task["intent"] = intent;
-    task["doneWhen"] = doneWhen;
-    journal(task["id"], "task_revision", {{"revisionId", revision}, {"sourceMessageId", source}});
+    task.currentRevision = revision;
+    task.rest.erase("blockerReason");
+    task.rest.erase("blockerWaitId");
+    task.intent = intent;
+    task.doneWhen = doneWhen;
+    journal(task.id, "task_revision", {{"revisionId", revision}, {"sourceMessageId", source}});
     return revision;
 }
 

@@ -12,7 +12,7 @@ std::optional<Store::Impl::GitPrFollowup> Store::Impl::gitPrFollowup(const conve
     const auto taskId = event.at("taskId").get<Id>();
     const auto task = load(taskId);
     try {
-        const auto config = intake ? intake(message.bot, {}).config : task.at("config");
+        const auto config = intake ? intake(message.bot, {}).config : task.config;
         if (!config.value("fixPullRequests", true)) return std::nullopt;
     } catch (const std::exception&) {
         return std::nullopt;
@@ -50,7 +50,7 @@ LIMIT 2
 
     std::string requester;
     std::string requesterBot = message.bot;
-    if (const auto id = conversation_storage::integer(task, "sourceMessageId")) {
+    if (const auto id = conversation_storage::integer(task.rest, "sourceMessageId")) {
         const auto source = loadTurnMessage(id);
         requesterBot = source.bot;
         if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
@@ -60,7 +60,7 @@ LIMIT 2
                 requester = policyOrigin(source).requester;
         }
     } else {
-        const auto person = field(task, "requester");
+        const auto person = field(task.rest, "requester");
         Person actor{person, person == localOwner.id};
         if (!person.empty() && resolveWebIdentity) {
             const auto role = resolveWebIdentity(person);
@@ -88,7 +88,7 @@ FROM journal WHERE task_id=? AND kind='git_pr_followup_requested' AND json_extra
     const auto status = attempts.number(0) ? attempted : attempts.number(1) >= 2 ? limitReached : available;
     return GitPrFollowup{std::move(destination),
                          {message.bot, "git-pr/" + operation, std::move(requester), anchor, message.id, taskId,
-                          task.value("currentRevision", Id{}), task.at("generation"), true},
+                          task.currentRevision.value_or(0), task.generation, true},
                          operation,
                          std::move(target),
                          status};

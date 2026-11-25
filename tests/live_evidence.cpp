@@ -47,7 +47,7 @@ bool containsMeasurement(std::string_view text, std::string_view marker) {
 }
 
 Recording load(Store& store, T3& t3, Id id, std::string_view commit, bool matches) {
-    const auto task = store.task(id);
+    const auto task = taskJson(store.task(id));
     Json report;
     for (const auto& item : store.history(id)) {
         if (item["kind"] == "report") report = item["data"];

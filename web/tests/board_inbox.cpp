@@ -16,7 +16,7 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     t3.observations["thread-release"].kind = Observation::Kind::Question;
     t3.observations["thread-release"].question = {"scope-question", Json::array({{{"id", "scope"}, {"required", true}}})};
     tick(runtime, 2);
-    const auto before = store.task(release);
+    const auto before = taskJson(store.task(release));
     const auto history = store.history(release);
     for (int i = 0; i < 40; ++i)
         store.receive(owner, {"release", "unused", "local-env", "release"}, "new-" + std::to_string(i), "Later message");
@@ -38,7 +38,7 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     check(inbox.size() == 1 && inbox.at(0).at("itemKind") == "user_question" && inbox.at(0).at("botName") == "Release" &&
               inbox.at(0).at("choices").size() == 2 && inbox.at(0).at("prompt") == "利用者向けの変更だけを載せますか？" &&
               browser.get("/api/inbox?bot=release").at("items") == inbox && browser.get("/api/inbox?bot=triage").at("items").empty() &&
-              store.task(release) == before && store.history(release) == history &&
+              taskJson(store.task(release)) == before && store.history(release) == history &&
               browser.get("/api/inbox/history").at("decisions").empty(),
           "inbox GET failed to preserve the question or changed storage");
     auto answer = inbox.at(0);
@@ -67,7 +67,7 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
           "view-only reader could not load the older question with its surrounding history");
     Browser::checked(browser.client.Get("/api/conversation?bot=triage" + cursor), 403);
     policy.setMember(owner, "release", "reader", false);
-    check(browser.post("/api/inbox/decide", answer, 403).at("error") == "access_denied" && store.task(release) == before &&
+    check(browser.post("/api/inbox/decide", answer, 403).at("error") == "access_denied" && taskJson(store.task(release)) == before &&
               store.history(release) == history,
           "denied Inbox decision advanced the request");
     browser.client.set_default_headers({{"Authorization", "Bearer reviewer"}});

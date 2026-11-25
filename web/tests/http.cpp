@@ -333,9 +333,7 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
         if (i == 0) failed = task;
         if (i == 1) historical = task;
     }
-    const auto allRunsStarted = [&] {
-        return std::ranges::all_of(expectedTasks, [&](Id id) { return cli.task(id).at("runs").size() == 1; });
-    };
+    const auto allRunsStarted = [&] { return std::ranges::all_of(expectedTasks, [&](Id id) { return cli.task(id).runs.size() == 1; }); };
     for (int attempt = 0; attempt < 20 && !allRunsStarted(); ++attempt) runtime.tick();
     check(allRunsStarted(), "session fixtures did not each start one Run");
 
@@ -704,13 +702,13 @@ void conversationRequestApproval(const std::filesystem::path& path) {
     check(receipt.at("status") == "received" && store.tasks().empty(), "HTTP intake did not wait for the conversation turn");
     tick(runtime, 4);
     const auto tasks = store.tasks("release");
-    check(tasks.size() == 1 && tasks.at(0).at("sourceMessageId") == receipt.at("messageId"),
+    check(tasks.size() == 1 && tasks.front().task.rest.at("sourceMessageId") == receipt.at("messageId"),
           "the Task did not retain its conversation message");
-    const auto& task = tasks.at(0);
-    check(task.at("environmentId") == "local-env" && task.at("projectId") == "release" && !task.contains("trigger"),
+    const auto& task = tasks.front().task;
+    check(task.environmentId == "local-env" && task.projectId == "release" && !task.rest.contains("trigger"),
           "the HTTP client changed routing or schedule");
     const auto approvals = browser.get("/api/inbox").at("items");
-    check(approvals.size() == 1 && approvals.at(0).at("taskId") == task.at("id") && approvals.at(0).at("itemKind") == "policy_approval" &&
+    check(approvals.size() == 1 && approvals.at(0).at("taskId") == task.id && approvals.at(0).at("itemKind") == "policy_approval" &&
               approvals.at(0).at("canDecide") == true && approvals.at(0).at("canSaveRule") == false,
           "the message sender could not approve once without access to Flock-wide rules");
     browser.client.set_default_headers({{"Authorization", "Bearer administrator"}});
@@ -810,7 +808,7 @@ void exercise(const std::filesystem::path& path) {
                   {"targetGeneration", visibleWait.at("generation")}};
     browser.post("/api/operations", reply, 404);
     reply["botId"] = "release";
-    cli.operate(localOwner, TaskTarget::from(cli.task(release), waitId), "answer", {{"text", "利用者向けのみ"}});
+    cli.operate(localOwner, TaskTarget::from(cli.task(release).task, waitId), "answer", {{"text", "利用者向けのみ"}});
     const auto answered = browser.get("/api/view?bot=release");
     check(std::any_of(answered["events"].begin(), answered["events"].end(),
                       [&](const Json& row) {
@@ -822,7 +820,7 @@ void exercise(const std::filesystem::path& path) {
     tick(*runtime, 2);
     check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-release" && t3.replies[0].target.runId == "run-release-1" &&
               t3.replies[0].questionId == "scope-question" && t3.replies[0].answers["scope"] == "利用者向けのみ" &&
-              cli.task(next)["state"] == "queued",
+              cli.task(next).task.state == TaskState::queued,
           "stale reply affected the active Run or another task");
     check(browser.get("/api/view?bot=release")["waits"].empty(), "resolved wait stayed selectable");
     const auto resumed = browser.get("/api/bots");
@@ -854,7 +852,7 @@ void exercise(const std::filesystem::path& path) {
                                       {"targetGeneration", settingsWait.at("generation")},
                                       {"session", {{"runtimeMode", "invalid-client-setting"}}}});
     tick(*runtime, 2);
-    check(cli.task(settings)["state"] == "running" && t3.launches["settings"] == 1,
+    check(cli.task(settings).task.state == TaskState::running && t3.launches["settings"] == 1,
           "Web reconciliation did not start the Session with the corrected Bot settings");
     const auto page = reopened.get("/api/view?bot=release");
     check(hasEvent(page["events"], "report", "report", "T3 finished while the browser was closed") &&
@@ -876,7 +874,7 @@ void exercise(const std::filesystem::path& path) {
                    {"targetRevision", external.at("currentRevision")},
                    {"targetGeneration", external.at("generation")}},
                   409);
-    check(cli.task(triage)["state"] == "running", "stale cancellation affected a resumed Run");
+    check(cli.task(triage).task.state == TaskState::running, "stale cancellation affected a resumed Run");
 
     auto& triageQuestion = t3.observations["thread-triage"];
     triageQuestion.kind = Observation::Kind::Question;

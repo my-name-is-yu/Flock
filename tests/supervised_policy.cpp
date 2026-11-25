@@ -341,7 +341,7 @@ void scheduled(const std::filesystem::path& path) {
               std::ranges::none_of(store.inbox(requester), [](const auto& item) { return item.at("itemKind") == "policy_approval"; }) &&
               model.outcome.dump().find("denied by policy") != std::string::npos,
           "unanswerable task received a card or was silently denied");
-    store.operate(requester, TaskTarget::from(store.task(anonymous), 0), "cancel");
+    store.operate(requester, TaskTarget::from(store.task(anonymous).task, 0), "cancel");
     pump();
 
     const auto schedule = [&] {
@@ -357,9 +357,9 @@ void scheduled(const std::filesystem::path& path) {
     check(staleItem.at("taskId") == staleTask && staleItem.at("prompt").dump().find("Build the release") != std::string::npos,
           "pending launch card did not bind the task and its prepared instruction");
     auto stale = target(staleItem);
-    check(store.task(staleTask).at("wait").at("reason") == "policy_approval", "task never entered its durable wait");
+    check(taskJson(store.task(staleTask)).at("wait").at("reason") == "policy_approval", "task never entered its durable wait");
     store.decideInbox(requester, stale, "allow_once");
-    store.operate(requester, TaskTarget::from(store.task(staleTask), 0), "cancel");
+    store.operate(requester, TaskTarget::from(store.task(staleTask).task, 0), "cancel");
     pump();
     check(adapter.sends == 0, "an approved action ran after the task was cancelled");
     rejected([&] { store.decideInbox(requester, stale, "allow_once"); });
@@ -384,7 +384,7 @@ void scheduled(const std::filesystem::path& path) {
     store.decideInbox(localOwner, target(expired), "allow_next_time");
     pump();
     check(adapter.sends == 0 && model.outcome.dump().find("expired") != std::string::npos, "expired action ran or the Bot was never told");
-    store.operate(requester, TaskTarget::from(store.task(item.at("taskId")), 0), "cancel");
+    store.operate(requester, TaskTarget::from(store.task(item.at("taskId")).task, 0), "cancel");
     pump();
     schedule();
     check(adapter.sends == 1 && store.inbox(requester).empty(), "next-time rule did not admit only future work");
@@ -466,7 +466,7 @@ void stopRequesterDecidesCurrentStopApproval(const std::filesystem::path& path) 
     const Person stopRequester{"stop-requester"};
     policy.setMember(localOwner, "release", stopRequester.id, true);
     const auto taskId = store.submit({"release", "Stop the assigned Run", "env", "project"}, &stopRequester);
-    const auto task = store.task(taskId);
+    const auto task = taskJson(store.task(taskId));
     const auto revision = task.value("currentRevision", Id{0});
     const auto generation = task.value("generation", Id{0});
     sqlite3* raw = nullptr;

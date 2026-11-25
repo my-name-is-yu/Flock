@@ -71,23 +71,23 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
     Runtime runtime(store, model, *adapter, {});
     for (int i = 0; i < 3; ++i) runtime.tick();
     const auto waiting = store.task(id);
-    check(waiting.at("state") == "waiting" && waiting.at("wait").at("reason") == "settings",
+    check(waiting.task.state == TaskState::waiting && waiting.wait && waiting.wait->reason() == WaitReason::settings,
           "legacy settings did not leave an actionable settings wait");
     check(effects().empty(), "invalid persisted settings reached T3");
 
-    const Id waitId = waiting.at("wait").at("id");
-    const auto target = TaskTarget::from(waiting, waitId);
+    const Id waitId = waiting.wait.value().id;
+    const auto target = TaskTarget::from(waiting.task, waitId);
     for (const auto& session : malformed) {
         rejects<Conflict>([&] { store.operate(owner, target, "reconcile", {{"session", session}}); },
                           "settings correction accepted " + session.dump());
     }
-    check(store.task(id).at("wait") == waiting.at("wait"), "invalid corrections cleared the settings wait");
+    check(taskJson(store.task(id)).at("wait") == taskJson(waiting).at("wait"), "invalid corrections cleared the settings wait");
 
     createBot(folder / "release", config, "", "");
     store.operate(owner, target, "reconcile", store.reconciliationData(id, waitId, Json::object(), intake));
     for (int i = 0; i < 2; ++i) runtime.tick();
     const auto resumed = store.task(id);
-    check(resumed.at("state") == "running", "corrected task state was " + resumed.at("state").dump());
+    check(resumed.task.state == TaskState::running, "corrected task state was " + std::string(taskStateName(resumed.task.state)));
     const auto observed = effects();
     const auto& launches = observed.at("t3_thread_launch");
     check(launches.size() == 1, "correction should launch exactly one Session");

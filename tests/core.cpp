@@ -63,7 +63,7 @@ void checkSchemaRefusals(const std::filesystem::path& freshDatabase) {
     const auto dir = freshDatabase.parent_path();
     unsupportedSchemaLeavesDatabaseIntact(dir / "unmarked.db", 0, 0, currentVersion);
     unsupportedSchemaLeavesDatabaseIntact(dir / "unrelated.db", 123, currentVersion, currentVersion);
-    for (const int version : {1, 2, 6, 7, 8, 9, 10, currentVersion + 1})
+    for (const int version : {1, 2, 6, 7, 8, 9, 10, 11, currentVersion + 1})
         unsupportedSchemaLeavesDatabaseIntact(dir / ("version-" + std::to_string(version) + ".db"), 0x464c4f43, version, currentVersion);
 }
 
@@ -130,7 +130,7 @@ int main() {
             checkSchemaRefusals(db);
             Runtime runtime(store, model, t3, notes);
             id = store.submit({"release", "Check main", "env", "proj"});
-            tickUntil(runtime, [&] { return store.task(id)["state"] == "running"; }, "delegate did not start");
+            tickUntil(runtime, [&] { return store.task(id).task.state == TaskState::running; }, "delegate did not start");
             const auto callsBeforeIdle = model.calls;
             const auto pollsBeforeIdle = t3.polls;
             for (int i = 0; i < 3; ++i) runtime.tick();
@@ -138,7 +138,7 @@ int main() {
             t3.current.kind = Observation::Kind::Question;
             t3.current.question = {"q1", Json::array({{{"id", "branch"}, {"required", true}}})};
             tickUntil(
-                runtime, [&] { return t3.replies == 1 && store.task(id)["state"] == "running"; },
+                runtime, [&] { return t3.replies == 1 && store.task(id).task.state == TaskState::running; },
                 "did not answer and return to the same Run");
         }
         {
@@ -147,8 +147,8 @@ int main() {
             t3.current.kind = Observation::Kind::Finished;
             t3.current.status = "completed";
             t3.current.report = "main confirmed";
-            tickUntil(runtime, [&] { return store.task(id)["state"] == "completed"; }, "restart did not complete");
-            const auto task = store.task(id);
+            tickUntil(runtime, [&] { return store.task(id).task.state == TaskState::completed; }, "restart did not complete");
+            const auto task = taskJson(store.task(id));
             check(task["runs"].size() == 1 && task["runs"][0]["threadId"] == "thread-1" && task["runs"][0]["runId"] == "run-1" &&
                       task["additionalUsed"] == 0 && t3.launches == 1 && t3.replies == 1,
                   "restart duplicated the Run or consumed additional work");

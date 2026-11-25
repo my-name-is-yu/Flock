@@ -312,8 +312,8 @@ void acceptance() {
           "restart lost scoped references or read access");
 
     const auto task = f.store->submit(f.intake("beta"));
-    for (int i = 0; i < 8 && f.store->task(task).at("state") != "running"; ++i) f.runtime->tick();
-    const auto running = f.store->task(task);
+    for (int i = 0; i < 8 && f.store->task(task).task.state != TaskState::running; ++i) f.runtime->tick();
+    const auto running = taskJson(f.store->task(task));
     check(running.at("state") == "running" && f.t3.writes.size() == 1, "foreign task did not start");
     const auto foreign = Resource::sessionRead(env, "foreign-thread");
     check(f.store->policy().allows("beta", foreign) && f.store->policy().allows("alpha", foreign),

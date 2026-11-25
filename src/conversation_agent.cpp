@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
+#include "task_storage.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -95,8 +96,8 @@ Json waitView(const Wait& wait) {
     return view;
 }
 
-std::string requestName(const Json& task) {
-    const auto request = field(task, "request");
+std::string requestName(const TaskData& task) {
+    const std::string_view request = task.request;
     return bounded(request.substr(0, request.find('\n')), 160);
 }
 
@@ -149,35 +150,35 @@ WHERE target.id=? AND q.id<=target.id AND q.kind='waiting' AND json_extract(q.da
     return message;
 }
 
-const char* Store::Impl::questionAnswerError(const Json& task, const Message& message, const std::optional<Wait>& wait) const {
-    if (task.at("state") != "waiting" || !wait) return "That question is no longer open";
+const char* Store::Impl::questionAnswerError(const TaskData& task, const Message& message, const std::optional<Wait>& wait) const {
+    if (task.state != TaskState::waiting || !wait) return "That question is no longer open";
     if (wait->reason() != WaitReason::user_question) return "Only user_question waits can be answered; approvals use their own controls";
-    const auto asked = waitAnchor(task.at("id"), wait->id);
+    const auto asked = waitAnchor(task.id, wait->id);
     if (asked >= message.id) return "That question opened after this message was sent, so this message cannot answer it";
     if (message.replyTo && (!message.question || message.question->messageId != asked))
         return "This message replies to something else, so it can only answer the question it replies to";
-    if (!asked || wait->run != taskWaitRun(task) || wait->eventId != task.value("eventId", Id{0}))
+    if (!asked || wait->run != taskWaitRun(task) || wait->eventId != task.rest.value("eventId", Id{0}))
         return "That question is no longer current";
     if (replanReady(task)) return "The task is replanning, so this question will close. Its Bot asks again if it still needs to know";
     return nullptr;
 }
 
-Json Store::Impl::taskState(const Json& task, const Message& message, bool fullContract) const {
-    const auto waiting = currentWait(task.at("id"));
+Json Store::Impl::taskState(const TaskData& task, const Message& message, bool fullContract) const {
+    const auto waiting = currentWait(task.id);
     auto wait = waiting ? waitView(*waiting) : Json(nullptr);
     if (waiting) wait["answerable"] = !questionAnswerError(task, message, waiting);
-    Json view = {{"generation", task.at("generation")},
-                 {"revisionId", task.value("currentRevision", Id{0})},
-                 {"state", task.at("state")},
-                 {"replanning", task.value("replanning", false)},
+    Json view = {{"generation", task.generation},
+                 {"revisionId", task.currentRevision.value_or(0)},
+                 {"state", taskStateName(task.state)},
+                 {"replanning", task.rest.value("replanning", false)},
                  {"wait", std::move(wait)}};
-    if (task.value("queuedInT3", false)) view["queuedInT3"] = true;
-    if (task.contains("runTargets") || task.contains("runResults")) {
-        if (task.contains("requestedCommit")) view["requestedCommit"] = task.at("requestedCommit");
-        if (task.contains("runOutcome")) view["runOutcome"] = task.at("runOutcome");
+    if (task.rest.value("queuedInT3", false)) view["queuedInT3"] = true;
+    if (task.rest.contains("runTargets") || task.rest.contains("runResults")) {
+        if (task.rest.contains("requestedCommit")) view["requestedCommit"] = task.rest.at("requestedCommit");
+        if (task.rest.contains("runOutcome")) view["runOutcome"] = task.rest.at("runOutcome");
         auto& results = view["runResults"] = Json::array();
-        if (task.contains("runResults")) {
-            for (const auto& run : task.at("runResults")) {
+        if (task.rest.contains("runResults")) {
+            for (const auto& run : task.rest.at("runResults")) {
                 Json summary = Json::object();
                 for (const auto* key :
                      {"name", "environmentId", "projectId", "status", "commit", "threadId", "runId", "link", "evidenceStatus"})
@@ -187,41 +188,41 @@ Json Store::Impl::taskState(const Json& task, const Message& message, bool fullC
                 results.push_back(std::move(summary));
             }
         } else {
-            for (const auto& target : task.at("runTargets")) {
+            for (const auto& target : task.rest.at("runTargets")) {
                 auto summary = target;
-                summary["status"] = task.at("state") == "cancelled" ? "cancelled" : "queued";
+                summary["status"] = task.state == TaskState::cancelled ? "cancelled" : "queued";
                 results.push_back(std::move(summary));
             }
         }
     }
-    const auto taskOrigin = task.value("sessionOrigin", Json::object());
+    const auto taskOrigin = task.rest.value("sessionOrigin", Json::object());
     const auto turnOrigin = message.routing.value("sessionOrigin", Json::object());
     if (!taskOrigin.empty() && !turnOrigin.empty() && taskOrigin.at("environmentId") == turnOrigin.at("environmentId") &&
         taskOrigin.at("threadId") == turnOrigin.at("threadId")) {
-        const auto& run = task.at("activeRun").is_object() ? task.at("activeRun") : task.at("lastRun");
-        if (run.is_object() && !task.contains("selectedSession"))
+        const auto& run = task.rest.at("activeRun").is_object() ? task.rest.at("activeRun") : task.rest.at("lastRun");
+        if (run.is_object() && !task.rest.contains("selectedSession"))
             view["session"] = {{"environmentId", run.at("environmentId")}, {"threadId", run.at("threadId")}};
-        if (task.contains("launchWarning")) view["launchWarning"] = task.at("launchWarning");
+        if (task.rest.contains("launchWarning")) view["launchWarning"] = task.rest.at("launchWarning");
     }
     const auto project = [&](const char* key, const std::string& value, std::size_t limit) {
         view[key] = fullContract ? value : bounded(value, limit);
         if (view[key].get_ref<const std::string&>().size() < value.size()) view[std::string(key) + "Truncated"] = true;
     };
     project("doneWhen", effectiveDoneWhen(task), 1600);
-    if (task.contains("requestedDoneWhen")) {
+    if (task.rest.contains("requestedDoneWhen")) {
         view["doneWhenSource"] = "requested";
-        if (task.contains("criteriaSourceMessageId")) view["criteriaSourceMessageId"] = task.at("criteriaSourceMessageId");
+        if (task.rest.contains("criteriaSourceMessageId")) view["criteriaSourceMessageId"] = task.rest.at("criteriaSourceMessageId");
     }
-    if (task.contains("workflowId")) {
-        view["workflowId"] = task.at("workflowId");
-        view["stageId"] = task.at("stageId");
+    if (task.rest.contains("workflowId")) {
+        view["workflowId"] = task.rest.at("workflowId");
+        view["stageId"] = task.rest.at("stageId");
     }
-    if (const auto reason = field(task, "blockerReason"); !reason.empty()) view["blockerReason"] = reason;
-    if (const auto intent = taskIntent(task); !intent.empty()) project("intent", intent, 1000);
+    if (const auto reason = field(task.rest, "blockerReason"); !reason.empty()) view["blockerReason"] = reason;
+    if (!task.intent.empty()) project("intent", task.intent, 1000);
     return view;
 }
 
-Json Store::Impl::ownTask(Id taskId, const Message& message) const {
+TaskData Store::Impl::ownTask(Id taskId, const Message& message) const {
     auto row = query(R"SQL(
 SELECT t.id FROM tasks t LEFT JOIN channel_tasks c ON c.task_id=t.id
 WHERE t.id=? AND t.bot_id=? AND (?='' OR c.scope_key=?)
@@ -240,6 +241,8 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
 )SQL",
                      {messageId, message.bot, message.channelScope, message.channelScope});
     if (!row.next()) throw ToolError("No result with messageId " + std::to_string(messageId));
+    const auto taskId = row.number(0);
+    const auto state = decodeTaskState(taskId, row.string(1));
     const auto kind = row.string(2);
     const auto data = row.json(3);
     Json provenance = nullptr;
@@ -250,12 +253,12 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
                       {"itemId", field(data, "itemId")}};
     } else if (data.contains("source"))
         provenance = data.at("source");
-    Json result = {{"taskId", row.number(0)},
+    Json result = {{"taskId", taskId},
                    {"messageId", messageId},
                    {"revisionId", integer(data, "revisionId")},
                    {"text", field(data, kind == "report" ? "report" : "text")},
                    {"kind", kind},
-                   {"taskState", row.string(1)},
+                   {"taskState", taskStateName(state)},
                    {"request", row.string(4)},
                    {"currentRevision", row.number(5)},
                    {"truncated", data.value("truncated", false)}};
@@ -352,13 +355,12 @@ ORDER BY id DESC LIMIT 1
     const auto addTask = [&](Id taskId) {
         if (!listed.insert(taskId).second) return;
         const auto task = load(taskId);
-        Json view = {
-            {"taskId", taskId}, {"request", bounded(field(task, "request"), 800)}, {"environmentId", field(task, "environmentId")}};
+        Json view = {{"taskId", taskId}, {"request", bounded(task.request, 800)}, {"environmentId", task.environmentId}};
         view.update(taskState(task, message));
-        if (!localMachines.empty() && task.value("activeRun", Json()).is_object())
-            view["activeSession"] = {{"threadId", field(task.at("activeRun"), "threadId")},
-                                     {"runId", field(task.at("activeRun"), "runId")}};
-        if (task.contains("sourceTaskId")) view["sourceTaskId"] = task.at("sourceTaskId");
+        if (!localMachines.empty() && task.rest.value("activeRun", Json()).is_object())
+            view["activeSession"] = {{"threadId", field(task.rest.at("activeRun"), "threadId")},
+                                     {"runId", field(task.rest.at("activeRun"), "runId")}};
+        if (task.rest.contains("sourceTaskId")) view["sourceTaskId"] = task.rest.at("sourceTaskId");
         if (auto result = latestResult(taskId); !result.is_null()) view["latestResult"] = std::move(result);
         tasks.push_back(std::move(view));
     };
@@ -408,8 +410,8 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                 replyTo.update(waitView(asked));
                 replyTo.update({{"kind", "task_question"},
                                 {"taskId", taskId},
-                                {"revisionId", task.value("currentRevision", Id{0})},
-                                {"generation", task.at("generation")},
+                                {"revisionId", task.currentRevision.value_or(0)},
+                                {"generation", task.generation},
                                 {"current", current && current->id == asked.id && waitIsActionable(task)}});
                 addTask(taskId);
             } else if (kind == "report" || kind == "completed" || kind == "cancelled") {
@@ -527,9 +529,11 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     if (auto result = localMachineTool(bot, message.channelScope, decision); !result.is_null()) return result;
     if (std::ranges::find(webTools, tool) != webTools.end()) {
         if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
-        const auto freshTask = tool == "continue_fresh_session" ? ownTask(identifier(args, "taskId", true), message) : Json{};
-        if (tool == "continue_fresh_session" && (freshTask.contains("runTargets") || freshTask.contains("runResults")))
-            throw ToolError("Use a new request to run more work across T3 environments");
+        if (tool == "continue_fresh_session") {
+            const auto freshTask = ownTask(identifier(args, "taskId", true), message);
+            if (freshTask.rest.contains("runTargets") || freshTask.rest.contains("runResults"))
+                throw ToolError("Use a new request to run more work across T3 environments");
+        }
         if (tool == "compact_conversation" || tool == "expand_context" || tool == "continue_fresh_session")
             return contextTool(tool, args, message, step);
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" || tool == "stop_workflow_stage" ||
@@ -543,24 +547,23 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         result["ok"] = true;
         return result;
     }
-    const auto expectGeneration = [&](const Json& task) {
+    const auto expectGeneration = [&](const TaskData& task) {
         const auto expected = identifier(args, "generation", true, 0);
-        if (expected != task.at("generation").get<Id>())
-            throw ToolError("stale", {{"applied", 0},
-                                      {"taskId", task.at("id")},
-                                      {"expected", {{"generation", expected}}},
-                                      {"current", taskState(task, message)}});
+        if (expected != task.generation)
+            throw ToolError(
+                "stale",
+                {{"applied", 0}, {"taskId", task.id}, {"expected", {{"generation", expected}}}, {"current", taskState(task, message)}});
     };
-    const auto active = [&](const Json& task) {
-        if (terminal(task) || task.at("state") == "cancelling")
-            throw ToolError("The task is " + task.at("state").get<std::string>(),
-                            {{"taskId", task.at("id")}, {"current", taskState(task, message)}});
+    const auto active = [&](const TaskData& task) {
+        if (terminal(task) || task.state == TaskState::cancelling)
+            throw ToolError("The task is " + std::string(taskStateName(task.state)),
+                            {{"taskId", task.id}, {"current", taskState(task, message)}});
     };
-    const auto source = [&](const Json* target) -> Json {
+    const auto source = [&](const TaskData* target) -> Json {
         const auto sourceId = identifier(args, "sourceResultMessageId", false);
         if (!sourceId) return nullptr;
         const auto result = resultReference(sourceId, message);
-        if (target && (result.at("taskId") != target->at("id") || result.at("revisionId") != target->value("currentRevision", Id{0})))
+        if (target && (result.at("taskId") != target->id || result.at("revisionId") != target->currentRevision.value_or(0)))
             throw ToolError("sourceResultMessageId must be a result of this task's current revision");
         return result;
     };
@@ -578,11 +581,11 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (!doneWhen.empty() || !targets.empty()) {
             auto task = load(id);
             if (!doneWhen.empty()) {
-                task["requestedDoneWhen"] = doneWhen;
-                task["criteriaSourceMessageId"] = message.id;
+                task.rest["requestedDoneWhen"] = doneWhen;
+                task.rest["criteriaSourceMessageId"] = message.id;
             }
-            if (!targets.empty()) task["runTargets"] = std::move(targets);
-            if (!commit.empty()) task["requestedCommit"] = std::move(commit);
+            if (!targets.empty()) task.rest["runTargets"] = std::move(targets);
+            if (!commit.empty()) task.rest["requestedCommit"] = std::move(commit);
             save(task);
         }
         Json receipt{{"ok", true}, {"effect", "started"}, {"taskId", id}};
@@ -593,27 +596,26 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         auto task = ownTask(identifier(args, "taskId", true), message);
         expectGeneration(task);
         active(task);
-        if (tool == "change_task" && (task.contains("runTargets") || task.contains("runResults")))
+        if (tool == "change_task" && (task.rest.contains("runTargets") || task.rest.contains("runResults")))
             throw ToolError("Task-wide changes are not available for tasks with destination Runs yet");
-        if (tool == "send_to_task" && task.contains("runTargets"))
+        if (tool == "send_to_task" && task.rest.contains("runTargets"))
             throw ToolError("A destination Session is unavailable until its T3 Thread is saved");
-        if (tool == "send_to_task" && task.contains("runResults"))
+        if (tool == "send_to_task" && task.rest.contains("runResults"))
             throw ToolError("Send this destination instruction on its own to use the saved T3 Thread");
         const auto instruction = text(args, "instruction", maxBodyBytes, true);
         const auto result = source(&task);
         std::optional<TaskChange> change;
         if (tool == "change_task") {
             const auto revision = identifier(args, "revisionId", true, 0);
-            if (revision != task.value("currentRevision", Id{0}))
-                throw ToolError("stale", {{"applied", 0},
-                                          {"taskId", task.at("id")},
-                                          {"expected", {{"revisionId", revision}}},
-                                          {"current", taskState(task, message)}});
+            if (revision != task.currentRevision.value_or(0))
+                throw ToolError(
+                    "stale",
+                    {{"applied", 0}, {"taskId", task.id}, {"expected", {{"revisionId", revision}}}, {"current", taskState(task, message)}});
             change = taskChange(message, args, task, linked);
         }
         const bool conflicting = acceptInstruction(task, message.id, step, instruction,
                                                    result.is_null() ? Json(nullptr) : sourceRef(result), change ? &*change : nullptr);
-        return {{"ok", true}, {"effect", conflicting ? "replanning" : "accepted"}, {"taskId", task.at("id")}};
+        return {{"ok", true}, {"effect", conflicting ? "replanning" : "accepted"}, {"taskId", task.id}};
     }
     if (tool == "answer_task_question") {
         const auto taskId = identifier(args, "taskId", true);
@@ -622,13 +624,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto answer = text(args, "text", limits::messages::maxWaitAnswerBytes, true);
         const auto wait = currentWait(taskId);
         if (!wait || wait->id != waitId)
-            throw ToolError("That question is no longer open", {{"taskId", task.at("id")}, {"current", taskState(task, message)}});
+            throw ToolError("That question is no longer open", {{"taskId", task.id}, {"current", taskState(task, message)}});
         if (const auto error = questionAnswerError(task, message, wait))
-            throw ToolError(error, {{"taskId", task.at("id")}, {"current", taskState(task, message)}});
-        const TaskTarget target{bot, task.at("id"), waitId, identifier(args, "revisionId", true, 0),
-                                identifier(args, "generation", true, 0)};
+            throw ToolError(error, {{"taskId", task.id}, {"current", taskState(task, message)}});
+        const TaskTarget target{bot, task.id, waitId, identifier(args, "revisionId", true, 0), identifier(args, "generation", true, 0)};
         operate(turnActor(message), target, "answer", {{"text", answer}}, message.id, InboxKind::user_question);
-        return {{"ok", true}, {"effect", "answered"}, {"taskId", task.at("id")}};
+        return {{"ok", true}, {"effect", "answered"}, {"taskId", task.id}};
     }
     if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
         if (!Policy(*this).allows(turnActor(message), Action::bot_decide, bot)) throw DecisionDenied{};
@@ -642,7 +643,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         else
             withdrawTaskQuestion(task, identifier(args, "waitId", true));
         const auto effect = record ? (reason.empty() ? "blocker_cleared" : "blocker_recorded") : "question_withdrawn";
-        return {{"ok", true}, {"effect", effect}, {"taskId", task.at("id")}, {"current", taskState(task, message)}};
+        return {{"ok", true}, {"effect", effect}, {"taskId", task.id}, {"current", taskState(task, message)}};
     }
     if (tool == "cancel_task") {
         if (hasDestinationSelector(args)) throw ToolError("Cancel one destination in a standalone cancel_task action");
@@ -650,8 +651,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         expectGeneration(task);
         active(task);
         operate(turnActor(message), TaskTarget::from(task, 0), "cancel", Json::object());
-        const auto state = load(task.at("id")).at("state");
-        return {{"ok", true}, {"effect", state == "cancelled" ? "cancelled" : "cancelling"}, {"taskId", task.at("id")}};
+        const auto state = load(task.id).state;
+        return {{"ok", true}, {"effect", state == TaskState::cancelled ? "cancelled" : "cancelling"}, {"taskId", task.id}};
     }
     if (tool == "read_result") {
         const auto result = resultReference(identifier(args, "messageId", true), message);
@@ -680,10 +681,9 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         return view;
     }
     if (tool == "find_tasks") {
-        const auto viewTask = [&](const Json& task, bool fullContract) {
-            const Id id = task.at("id");
-            Json view = {
-                {"taskId", id}, {"request", bounded(field(task, "request"), 300)}, {"environmentId", field(task, "environmentId")}};
+        const auto viewTask = [&](const TaskData& task, bool fullContract) {
+            const Id id = task.id;
+            Json view = {{"taskId", id}, {"request", bounded(task.request, 300)}, {"environmentId", task.environmentId}};
             view.update(taskState(task, message, fullContract));
             auto result = query("SELECT id,kind FROM journal WHERE task_id=? AND kind IN ('report','completed','cancelled')"
                                 " ORDER BY id DESC LIMIT 1",

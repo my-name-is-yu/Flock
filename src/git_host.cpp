@@ -124,10 +124,10 @@ bool repositoryAccess(const Policy& policy, GitHost& host, const GitContext& con
     return upstream && !policy.forbidden(context.botId, *action, repo.resource());
 }
 
-GitContext taskGitContext(const Json& task) {
-    const auto active = task.value("activeRun", Json(nullptr));
-    return {task.at("id"), field(task, "botId"), field(task, "environmentId"), field(task, "projectId"),
-            runRef(active.is_null() ? task.value("lastRun", Json(nullptr)) : active)};
+GitContext taskGitContext(const TaskData& task) {
+    const auto active = task.rest.value("activeRun", Json(nullptr));
+    return {task.id, task.botId, task.environmentId, task.projectId,
+            runRef(active.is_null() ? task.rest.value("lastRun", Json(nullptr)) : active)};
 }
 
 Json readTarget(const Decision& decision, std::string_view host, std::string_view repo = {}) {
@@ -209,7 +209,7 @@ Json Store::Impl::saveTaskGitRead(Id task, std::string_view invocation, std::str
     return {{"readId", id}};
 }
 
-void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& event) {
+void Store::Impl::projectTaskGitReads(GitHost& host, const TaskData& task, Json& event) {
     const auto context = taskGitContext(task);
     auto refs = Json::array();
     std::map<Id, std::pair<Decision, Json>> requested;
@@ -312,8 +312,8 @@ private:
     std::optional<std::multiset<GitPrKey>::iterator> claim_;
 };
 
-Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const Json& routing, const Decision& decision,
-                          std::string_view invocation, std::optional<Id> generation, Id turn) {
+Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, std::string_view environment, std::string_view project,
+                          const Decision& decision, std::string_view invocation, std::optional<Id> generation, Id turn) {
     if (decision.tool == "git_read_result" && !generation) throw Conflict("Saved Git reads are available within their task");
     const auto op = validate(decision, !generation.has_value());
     const auto& args = decision.args;
@@ -321,15 +321,15 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     if (hostId != host.name()) throw Conflict("Git host is not connected");
     if (!taskId && args.contains("taskId")) taskId = positiveId(args.at("taskId"));
     if (op != "read" && !taskId) throw Conflict("Select an owned task for the Git mutation");
-    GitContext context{taskId, std::string(bot), field(routing, "environmentId"), field(routing, "projectId"), {}};
+    GitContext context{taskId, std::string(bot), std::string(environment), std::string(project), {}};
     {
         std::lock_guard lock(mutex);
         if (botPaused(bot)) throw BotPaused{};
         if (taskId) {
             const auto task = load(taskId);
-            if (field(task, "botId") != bot) throw Conflict("No task with this ID");
-            if (generation && task.at("generation") != *generation) throw RequestChanged{};
-            if (op != "read" && (task.at("state") == "cancelled" || task.at("state") == "cancelling"))
+            if (task.botId != bot) throw Conflict("No task with this ID");
+            if (generation && task.generation != *generation) throw RequestChanged{};
+            if (op != "read" && (task.state == TaskState::cancelled || task.state == TaskState::cancelling))
                 throw Conflict("The task is cancelled");
             context = taskGitContext(task);
         }
@@ -376,13 +376,13 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
         if (turn) origin = policyOrigin(loadTurnMessage(turn));
         if (taskId) {
             const auto task = load(taskId);
-            if (generation && task.at("generation") != *generation) throw RequestChanged{};
+            if (generation && task.generation != *generation) throw RequestChanged{};
             if (!turn)
                 origin = taskPolicyOrigin(task);
             else {
                 origin.task = taskId;
-                origin.revision = task.value("currentRevision", Id{});
-                origin.generation = task.at("generation");
+                origin.revision = task.currentRevision.value_or(0);
+                origin.generation = task.generation;
             }
         }
         if (turn || origin.task) {
@@ -553,7 +553,8 @@ Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message
                 throw Conflict("Git notification tools must use the watched target");
             call.args["taskId"] = owner;
         }
-        return gitTool(*host, message.bot, 0, message.routing, call, key, {}, message.id);
+        return gitTool(*host, message.bot, 0, field(message.routing, "environmentId"), field(message.routing, "projectId"), call, key, {},
+                       message.id);
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {

@@ -122,8 +122,8 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         Store store(path);
         Runtime runtime(store, model, sessions, soul, options(host));
         retired = store.submit(intake());
-        for (int i = 0; i < 8 && store.task(retired).at("state") != "completed"; ++i) runtime.tick();
-        check(store.task(retired).at("state") == "completed" && host->createCalls == 1, "The original PR task did not finish");
+        for (int i = 0; i < 8 && store.task(retired).task.state != TaskState::completed; ++i) runtime.tick();
+        check(store.task(retired).task.state == TaskState::completed && host->createCalls == 1, "The original PR task did not finish");
         const auto pending = store.inbox(localOwner, "owner");
         check(pending.size() == 1 && pending.at(0).at("prTitle") == "Pull request awaiting review",
               "Expected a pending review on the completed task");
@@ -143,7 +143,7 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
               "The sibling did not start watching another PR at the same commit");
         replacement = store.submit(intake("replacement", "replacement-project"));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(store.task(sibling).at("state") == "completed" && store.task(replacement).at("state") == "completed",
+        check(store.task(sibling).task.state == TaskState::completed && store.task(replacement).task.state == TaskState::completed,
               "The competing PR tasks did not finish setup");
         const auto calls = host->hostCalls;
         const auto blocked = model.runTool(store, runtime, "replacement", "claim-active-watch", mutation(replacement));

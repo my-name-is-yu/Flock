@@ -81,9 +81,9 @@ INSERT INTO git_pr_heads SELECT ?1,?2,value,?3,?4,1 FROM json_each(?5) WHERE tru
     return true;
 }
 
-void Store::Impl::gitInboxItem(const Json& task, std::string_view key, std::string_view url, std::string_view title,
+void Store::Impl::gitInboxItem(const TaskData& task, std::string_view key, std::string_view url, std::string_view title,
                                std::string_view prompt) {
-    const auto id = task.at("id");
+    const auto id = task.id;
     if (!query("SELECT 1 FROM pr_review_items WHERE task_id=? AND git_key=?", {id, key}).next())
         insertPrReview(task, url, title, prompt, key);
 }
@@ -221,8 +221,7 @@ WHERE json_extract(result,'$.data.id')=?1
         if (kind == "pull_request" && (action == "review_requested" || action == "ready_for_review"))
             title = "Pull request awaiting review";
         if (kind == "pull_request" && action == "review_requested" && !reviewer.empty()) {
-            auto receipt =
-                query(R"SQL(
+            auto receipt = query(R"SQL(
 DELETE FROM git_review_receipts WHERE rowid=(
  SELECT r.rowid FROM git_review_receipts r
  LEFT JOIN pr_review_items i ON i.task_id=r.task_id AND i.git_key=r.inbox_key
@@ -231,15 +230,13 @@ DELETE FROM git_review_receipts WHERE rowid=(
  ORDER BY r.after_event,r.rowid LIMIT 1
 ) RETURNING inbox_key
 )SQL",
-                      {taskId, event.at("host"), event.at("repo"), pr, reviewer, delivery, task.value("currentRevision", Id{0})});
+                                 {taskId, event.at("host"), event.at("repo"), pr, reviewer, delivery, task.currentRevision.value_or(0)});
             if (receipt.next()) inboxKey = receipt.string(0);
         }
         if (!title.empty()) gitInboxItem(task, inboxKey, url, title, prompt.empty() ? title : prompt);
 
-        const Json routing{{"environmentId", task.at("environmentId")},
-                           {"projectId", task.at("projectId")},
-                           {"config", task.at("config")},
-                           {"gitEvent", event}};
+        const Json routing{
+            {"environmentId", task.environmentId}, {"projectId", task.projectId}, {"config", task.config}, {"gitEvent", event}};
         exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'git_webhook',?,?)",
              {taskId, unixTime(), scrub.record(event), bot});
         const auto message = last();

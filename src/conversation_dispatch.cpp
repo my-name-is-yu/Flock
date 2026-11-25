@@ -33,7 +33,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& mes
         try {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
-            destinationTask = ownTask(conversation_storage::identifier(decision.args, "taskId", true), message).contains("runResults");
+            destinationTask = ownTask(conversation_storage::identifier(decision.args, "taskId", true), message).rest.contains("runResults");
             transaction.commit();
         } catch (const ToolError&) {
         }
