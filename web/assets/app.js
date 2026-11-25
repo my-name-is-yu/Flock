@@ -384,8 +384,8 @@ function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fro
   const context = view;
   if (context) {
     context.pageRead = Promise.resolve();
-    context.refresh = coalescedRefresh((scroll, liveGeneration) =>
-      readTimeline(context, () => refreshView(context, scroll, liveGeneration)));
+    context.refresh = coalescedRefresh((scroll, animationGeneration) =>
+      readTimeline(context, () => refreshView(context, scroll, animationGeneration)));
     void context.refresh(context.data ? undefined : 'bottom');
     if (context.dm) {
       context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
@@ -2929,11 +2929,11 @@ async function refreshPeerConversation(context, scroll) {
   }
   renderTimeline(scroll);
 }
-async function refreshView(context, scroll, liveGeneration) {
+async function refreshView(context, scroll, animationGeneration) {
   const isCurrent = () => context === view &&
-    (liveGeneration == null || (liveGeneration === visibilityGeneration && !document.hidden));
+    (animationGeneration == null || (animationGeneration === visibilityGeneration && !document.hidden));
   if (!isCurrent()) return;
-  const liveAfterId = liveGeneration == null ? undefined : context.newestEvent;
+  const liveAfterId = animationGeneration == null ? undefined : context.newestEvent;
   try {
     const params = new URLSearchParams({ bot: context.id });
     const eventHistory = eventHistoryForRefresh(context);
