@@ -2,6 +2,7 @@
 #include "http_fixture.hpp"
 #include "../change_feed.hpp"
 #include "../../tests/fake_git.hpp"
+#include "flock/base64.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/policy.hpp"
 
@@ -87,7 +88,7 @@ void boundary(Browser& browser) {
     Browser::checked(browser.client.Post("/api/messages",{{"Origin","null"},{"X-Flock-Action","1"}},draft,"application/json"),403);
     Browser::checked(browser.client.Post("/api/messages",browser.headers(),draft,"text/plain"),415);
     Browser::checked(browser.client.Post("/api/messages",browser.headers(),"{","application/json"),400);
-    Browser::checked(browser.client.Post("/api/messages",browser.headers(),std::string(140000,'x'),"application/json"),413);
+    Browser::checked(browser.client.Post("/api/operations",browser.headers(),std::string(140000,'x'),"application/json"),413);
     const auto preflight = browser.client.Options("/api/messages",{{"Origin","https://other.invalid"}});
     check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
@@ -98,6 +99,79 @@ void boundary(Browser& browser) {
         Browser::checked(browser.client.Get(path+"?bot=missing"),404);
     }
     browser.post("/api/requests",{{"botId","release"},{"clientRequestId","draft"},{"request","test"}},404);
+}
+
+constexpr auto screenshotPixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+std::string screenshotPng(std::size_t size) {
+    auto png = decodeBase64(screenshotPixel,1024);
+    std::string chunk(size - png.size(),'x');
+    const auto writeUint32 = [&](std::size_t offset, std::uint32_t value) {
+        for (unsigned byte = 0; byte < 4; ++byte)
+            chunk[offset + byte] = static_cast<char>(value >> (24 - byte * 8));
+    };
+    writeUint32(0,static_cast<std::uint32_t>(chunk.size() - 12));
+    chunk.replace(4,9,"tEXtNote\0",9);
+    std::uint32_t crc = 0xffffffff;
+    for (const unsigned char byte : std::string_view(chunk).substr(4,chunk.size() - 8)) {
+        crc ^= byte;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+    writeUint32(chunk.size() - 4,~crc);
+    png.insert(png.size() - 12,chunk);
+    return encodeBase64(png);
+}
+
+void messageAttachmentLimits(const std::filesystem::path& path) {
+    constexpr std::size_t imageLimit = 2 * 1024 * 1024;
+    constexpr auto endpoint = "/api/messages";
+    Store store(path);
+    const auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    const Json small{{"name","screenshot.png"},{"mimeType","image/png"},{"dataBase64",screenshotPixel}};
+    const auto message = [](std::string_view key, const Json& attachments) {
+        return Json{{"botId","release"},{"clientMessageId",key},
+            {"text","Look at these screenshots"},{"attachments",attachments}};
+    };
+    const auto submit = [&](std::string_view key, const Json& attachments, int status) {
+        return browser.post(endpoint,message(key,attachments),status);
+    };
+
+    auto large = small;
+    large["dataBase64"] = screenshotPng(imageLimit);
+    const auto four = Json::array({large,large,large,large});
+    const auto receipt = submit("four-screenshots",four,201);
+    check(submit("four-screenshots",four,201) == receipt,"large attachments changed the message receipt on retry");
+
+    submit("too-many",Json::array({small,small,small,small,small}),409);
+    large["dataBase64"] = screenshotPng(imageLimit + 1);
+    submit("too-large",Json::array({large}),409);
+    auto mismatch = small;
+    mismatch["mimeType"] = "image/jpeg";
+    submit("wrong-type",Json::array({mismatch}),409);
+    auto invalidBase64 = small;
+    invalidBase64["dataBase64"] = "!!!!";
+    submit("bad-encoding",Json::array({invalidBase64}),409);
+
+    std::string audio(64 * 1024 + 1,'x');
+    audio.replace(0,3,"ID3");
+    submit("oversized-audio",Json::array({{{"name","clip.mp3"},{"mimeType","audio/mpeg"},
+        {"dataBase64",encodeBase64(audio)}}}),409);
+
+    auto oversized = message("oversized-request",four).dump();
+    oversized.append(256 * 1024,' ');
+    auto headers = browser.headers();
+    headers.emplace("Expect","100-continue");
+    const auto response = browser.client.Post(endpoint,headers,oversized,"application/json");
+    Browser::checked(response,413);
+
+    const auto view = browser.get("/api/view?bot=release");
+    const auto& events = view.at("events");
+    check(events.size() == 1 && events[0].at("id") == receipt.at("messageId") &&
+          events[0].at("data").at("imageAttachmentCount") == 4,
+          "HTTP attachment intake did not save exactly four screenshots on one message");
+    check(!events[0].at("data").contains("attachments"),"HTTP projection exposed attachment payloads");
 }
 
 void messageReceipts(const std::filesystem::path& path) {
@@ -688,12 +762,8 @@ void exercise(const std::filesystem::path& path) {
           "release Bot question or available answers were incorrect");
     check(triagePage["waits"].size() == 1 && triagePage["waits"][0]["id"] == triage,"T3 wait belongs to wrong Bot");
     check(releasePage["bot"]["soul"] == "利用者向けのリリースノートをまとめる。" &&
-          triagePage["bot"]["soul"] == "報告された問題を整理する。" && triagePage["bot"]["cron"].empty(),
+          triagePage["bot"]["soul"] == "報告された問題を整理する。" && !releasePage["bot"].contains("cron"),
           "selected Bots showed incorrect settings");
-    const auto& schedule = releasePage.at("bot").at("cron").at(0);
-    check(schedule == Json{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
-          {"request","前日の変更を確認する"},{"active",false}},
-          "Release's scheduled request was incorrect");
     check(releasePage["sessionTasks"][0]["sessions"][0]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
           triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage" &&
           triagePage["sessionTasks"][0]["sessions"][0]["link"] == "http://localhost:3773/linked%20env/thread-triage",
@@ -905,35 +975,31 @@ void recurringRequestStatus(const std::filesystem::path& path) {
         {"edited","0 8 * * *","Etc/UTC",web.intake("release","Check staging")},
     },now);
     check(errors.size() == 1 && errors.front().id == "invalid","fixture accepted an unsupported weekday");
-    const auto rows = store.automations(owner,"release").at("automations");
-    const auto daily = std::ranges::find_if(rows,[](const Json& row) { return row.at("configId") == "daily"; });
-    check(daily != rows.end(),"fixture did not activate the configured schedule");
-    for (int i = 0; i < 20; ++i) {
-        store.createAutomation(owner,web.intake("release","Check staging"),{
+    for (int i = 0; i < 40; ++i) {
+        const auto reminder = store.createAutomation(owner,web.intake("release","Check staging"),{
             {"kind","reminder"},{"timezone","Etc/UTC"},{"fireAt",now + 60},{"request","Check staging"},
         },now);
+        if (i >= 20) store.cancelAutomation(owner,"release",reminder.at("id").get<Id>());
     }
 
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
-    const auto requests = [&] { return browser.get("/api/view?bot=release").at("bot").at("cron"); };
-    const auto configured = requests();
-    check(configured.at(0).at("active") == true,"newer automations hid an active configured schedule");
-    check(configured.at(1).at("active") == false && configured.at(1).at("schedule") == "0 9 * * Mon" &&
-          configured.at(1).at("timezone") == "Asia/Tokyo","invalid cron lost the original configuration or appeared active");
-    check(configured.at(2).at("active") == false,"an unapplied edit appeared active");
+    const auto pathForActive = std::string("/api/schedules?bot=release&active=1");
+    const auto first = browser.get(pathForActive);
+    check(first.at("canManage") == true && first.at("unscheduledRequests") == Json::array({"Invalid weekday","Check staging"}),
+          "missing or incorrect configured request warnings");
+    const auto& recent = first.at("automations");
+    check(recent.size() == 20 && std::ranges::all_of(recent,[](const Json& row) { return row.at("status") == "active"; }),
+          "canceled entries consumed the active page");
+    const auto second = browser.get(pathForActive + "&before=" + std::to_string(first.at("before").get<Id>()));
+    const auto& older = second.at("automations");
+    check(older.size() == 2 && older.at(1).at("configId") == "daily" && second.at("before") == 0,
+          "newer entries hid an active configured request");
 
-    Browser stream(*server);
-    unsigned updates = 0;
-    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
-        check(change.at("bot") == "release","schedule update invalidated a different Bot");
-        if (updates++ == 0) {
-            Store(path).cancelAutomation(owner,"release",daily->at("id").get<Id>());
-            return true;
-        }
-        check(requests().at(0).at("active") == false,"canceled schedule still appeared active");
-        return false;
-    });
+    Store(path).cancelAutomation(owner,"release",older.at(1).at("id").get<Id>());
+    check(browser.get(pathForActive).at("unscheduledRequests") ==
+          Json::array({"前日の変更を確認する","Invalid weekday","Check staging"}),
+          "canceled configured request still appeared scheduled");
 }
 
 void watchedBotView(const std::filesystem::path& path) {
@@ -1077,7 +1143,6 @@ void eventStream(const std::filesystem::path& path) {
         ++changes;
         return true;
     },[&] {
-        // Wait until the stream has delivered the Git tool's conversation changes.
         if (!approval.empty() && !approved) {
             botsBeforeApproval = browser.get("/api/bots");
             browser.post("/api/inbox/decide",approval);
@@ -1367,6 +1432,21 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     };
     cb.updateBot = [&](std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image) {
         auto& card = profiles.at(std::string(botId));
+        if (profile.contains("soul")) {
+            check(profile.size() == 2 && profile.at("originalSoul") == card.at("soul") && !image,
+                  "role update omitted the original text or forwarded other settings");
+            card["soul"] = profile.at("soul");
+            return card;
+        }
+        if (botRunSettingCount(profile)) {
+            check(!image,"run settings update carried an image");
+            for (const auto& [key, value] : profile.items()) {
+                check(key == "environmentId" || key == "projectId" || key == "model","run settings update forwarded other settings");
+                if (value == "") card.erase(key);
+                else card[key] = value;
+            }
+            return card;
+        }
         if (!profile.contains("avatar")) {
             card["name"] = profile.at("name");
             return card;
@@ -1456,6 +1536,68 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == originalUrl,
           "name-only update changed the avatar");
 
+    const auto noOriginal = browser.post("/api/bots/profile",{{"botId","bot-1"},{"soul","Other role"}},400);
+    check(noOriginal.at("error") == "invalid_profile_update","role update accepted without original text");
+    const auto roleOnly = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"soul"," \tCheck releases.\r\n"},{"originalSoul",""},
+    },200);
+    check(roleOnly.at("soul") == "Check releases." && roleOnly.at("name") == "Scout Name" &&
+          roleOnly.at("avatar").at("imageUrl") == originalUrl,"role-only update lost profile settings");
+    const auto mixed = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"name","Stale Name"},{"soul","Other role"},{"originalSoul",roleOnly.at("soul")},
+    },400);
+    check(mixed.at("error") == "invalid_profile_update","role and name were accepted in the same request");
+    for (const Json& invalid : Json::array({nullptr,std::string("a\0b",3),std::string(maxBotRoleBytes + 1,'x')})) {
+        const auto rejected = browser.post("/api/bots/profile",{
+            {"botId","bot-1"},{"soul",invalid},{"originalSoul",roleOnly.at("soul")},
+        },400);
+        check(rejected.at("error") == "invalid_soul","invalid role was accepted");
+    }
+    const auto secret = store.policy().requestSecret("bot-1",{"fixture-role-token"});
+    store.policy().submitSecret(localOwner,"bot-1",secret,privateValue);
+    const auto credentials = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"soul","Use " + std::string(privateValue)},{"originalSoul",roleOnly.at("soul")},
+    },400);
+    check(credentials.at("error") == "role_contains_secrets","role update accepted a stored secret");
+    const auto nameAfterRole = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Latest"}},200);
+    check(nameAfterRole.at("soul") == "Check releases.","rename or rejected role update changed the role");
+
+    const auto workspace = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"environmentId"," env-1 "},{"projectId","project-1"},{"model"," first-model "},
+    },200);
+    check(workspace.at("name") == "Scout Latest" && workspace.at("soul") == "Check releases." &&
+          workspace.at("avatar").at("imageUrl") == originalUrl && workspace.at("environmentId") == "env-1" &&
+          workspace.at("projectId") == "project-1" && workspace.at("model") == "first-model",
+          "run settings update lost another setting or failed to return the model and destination");
+    for (const auto& extra : {"name","soul","avatar","role","modelProvider"}) {
+        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model","next-model"},{extra,"stale"}},400);
+        check(rejected.at("error") == "invalid_profile_update","model update accepted an unrelated field");
+    }
+    for (const Json& invalid : Json::array({42," \t\n","has space",std::string("a\0b",3),std::string(257,'x')})) {
+        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"projectId",invalid}},400);
+        check(rejected.at("error") == "invalid_workspace","invalid project ID was accepted");
+        const auto badModel = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model",invalid}},400);
+        check(badModel.at("error") == "invalid_model","invalid model was accepted");
+    }
+    const auto partial = browser.post("/api/bots/profile",{{"botId","bot-1"},{"environmentId","env-2"}},200);
+    check(partial.at("environmentId") == "env-2" && partial.at("projectId") == "project-1" &&
+          partial.at("model") == "first-model","partial update replaced the project or model");
+    const auto modelOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model","next-model"}},200);
+    check(modelOnly.at("model") == "next-model" && modelOnly.at("projectId") == "project-1",
+          "model-only update lost the workspace");
+    check(browser.get("/api/view?bot=bot-1").at("bot").at("model") == "next-model","Bot settings view lost its model");
+    const auto clearedModel = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model",""}},200);
+    check(!clearedModel.contains("model") && clearedModel.at("projectId") == "project-1",
+          "clearing the model lost the workspace");
+    const auto clearedProject = browser.post("/api/bots/profile",{{"botId","bot-1"},{"projectId",""}},200);
+    check(!clearedProject.contains("projectId") && clearedProject.at("environmentId") == "env-2",
+          "explicitly clearing a project also cleared the environment");
+
+    const auto cleared = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},{"soul"," \t\n"},{"originalSoul",roleOnly.at("soul")},
+    },200);
+    check(cleared.at("soul") == "" && cleared.at("name") == "Scout Latest","clearing the role changed the name");
+
     // Replace with GIF updates version and content-type.
     const auto replaced = browser.post("/api/bots/profile",{
         {"botId","bot-1"},
@@ -1532,6 +1674,13 @@ void settingsEndpoints(const std::filesystem::path& path) {
     std::atomic<bool> signedOut = false;
     std::atomic<bool> registeredAccount = false;
     std::atomic<unsigned> statusCalls = 0;
+    std::atomic<unsigned> catalogCalls = 0;
+    const auto catalog = Json::array({{{"slug","test-model"},{"displayName","Test model"}}});
+    cb.modelCatalog = [&] {
+        ++catalogCalls;
+        if (unavailable) throw std::runtime_error("private credential detail");
+        return catalog;
+    };
     std::atomic<bool> reconsentRequested = false;
     std::atomic<bool> switchRequested = false;
     cb.modelLogin = [&](const Person& actor, bool reconsent) {
@@ -1557,6 +1706,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
     const auto file = path.parent_path()/"identities.json";
     const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
                                        {{"authorization","Bearer fixture-alice"},{"person","alice"}},
+                                       {{"authorization","Bearer fixture-bot-owner"},{"person","bot-owner"}},
                                        {{"authorization","Bearer fixture-root"},{"person","another-root"},{"adminRoot",true}}});
     std::ofstream(file) << accounts;
     std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
@@ -1569,7 +1719,13 @@ void settingsEndpoints(const std::filesystem::path& path) {
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
     Browser::checked(browser.client.Get("/api/bot-settings?bot=release"),401);
+    const auto modelsRoute = "/api/settings/models?bot=release";
+    check(Browser::checked(browser.client.Get(modelsRoute),401) == Json{{"error","identity_required"}} && !catalogCalls,
+          "unauthenticated request reached the model provider");
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    check(browser.get(modelsRoute) == Json{{"models",catalog}},"root could not fetch the model catalog");
+    check(Browser::checked(browser.client.Get("/api/settings/models"),400) == Json{{"error","invalid_bot"}},
+          "model catalog accepted a missing Bot ID");
     check(browser.get("/api/view?bot=release").at("composerPerson")=="owner","composer identity did not match owner");
     Browser::checked(browser.client.Get("/api/bot-settings?bot=release&bot=triage"),400);
     auto crossOrigin = browser.headers();
@@ -1596,6 +1752,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
     unavailable = true;
     check(browser.get("/api/settings").at("model") == Json{{"unavailable",true}},
           "A failed credential check exposed details or broke the rest of settings");
+    check(Browser::checked(browser.client.Get(modelsRoute),503) == Json{{"error","models_unavailable"}},
+          "model catalog failure leaked provider details or used the wrong error");
     unavailable = false;
     signedOut = true;
     check(!browser.get("/api/settings").at("model").contains("canSwitch"),
@@ -1610,9 +1768,13 @@ void settingsEndpoints(const std::filesystem::path& path) {
     signedOut = false;
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
-    check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&
-          botPage && botPage->status == 200 && botPage->body.find("Sharing and connections") != std::string::npos,
-          "Settings pages did not serve their own content");
+    check(settingsPage && settingsPage->status == 200 &&
+          settingsPage->body.find("data-panel=\"bots\"") != std::string::npos,
+          "Flock settings did not include the Bots section");
+    check(botPage && botPage->status == 200 && botPage->body.find("Access · Flock settings") != std::string::npos &&
+          botPage->body.find("id=\"local-connections\"") != std::string::npos &&
+          botPage->body.find("id=\"channel-senders\"") != std::string::npos,
+          "Bot Access did not include the computer approval and channel sender sections");
     browser.post("/api/settings/mode",{{"mode","supervised"}});
     const auto rule = settings.at("rules").at(0);
     const Json removal{{"kind",rule.at("kind")},{"action",rule.at("action")},{"target",rule.at("target")},{"add",false}};
@@ -1622,6 +1784,13 @@ void settingsEndpoints(const std::filesystem::path& path) {
     check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false &&
           sharedSettings.at("model").is_null() && statusCalls.load() == beforeSharedRead,
           "Shared member lost read-only settings or gained access to model status");
+    check(Browser::checked(browser.client.Get(modelsRoute),403) == Json{{"error","access_denied"}} && catalogCalls == 2,
+          "shared member reached the model provider");
+    store.policy().setOwner(Person{"bot-owner"},"triage");
+    Browser botOwner(*server);
+    botOwner.client.set_default_headers({{"Authorization","Bearer fixture-bot-owner"}});
+    check(botOwner.get("/api/settings/models?bot=triage") == Json{{"models",catalog}},
+          "Bot owner needed installation access to fetch the model catalog");
     browser.post("/api/settings/mode",{{"mode","full"}},403);
     browser.post("/api/settings/rule",removal,403);
     browser.post("/api/settings/model-login",{{"reconsent",true}},403);
@@ -1657,6 +1826,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target",""},{"add",true}},400);
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","  "},{"add",true}},400);
     browser.post("/api/settings/rule",{{"kind","never"},{"action","bot.talk"},{"target","release"},{"add",true}},400);
+    browser.post("/api/settings/rule",{{"kind","allow"},{"action","workspace.exec"},{"target","release"},{"add",true}},400);
     check(browser.get("/api/settings").at("rules").empty(),"an invalid addition changed installation rules");
     browser.post("/api/settings/rule",addition);
     const auto added = browser.get("/api/settings").at("rules");
@@ -1693,6 +1863,7 @@ int main() {
         TestDirectory directory;
         conversationRequestApproval(directory.path / "conversation-approval.db");
         exercise(directory.path / "state.db");
+        messageAttachmentLimits(directory.path / "message-attachments.db");
         messageReceipts(directory.path / "message-receipts.db");
         sidebarReplies(directory.path / "sidebar.db");
         failedCompletion(directory.path / "failed-completion.db");

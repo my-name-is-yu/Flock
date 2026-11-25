@@ -1,12 +1,14 @@
 #include "flock/web.hpp"
 #include "change_feed.hpp"
 #include "embedded_assets.hpp"
+#include "http_payload.hpp"
 #include "views.hpp"
 #include "settings_routes.hpp"
 #include "board_inbox_routes.hpp"
 #include "git_routes.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/base64.hpp"
+#include "flock/message_attachments.hpp"
 #include "channel_routes.hpp"
 #include "mcp_routes.hpp"
 
@@ -27,9 +29,13 @@ using httplib::Request;
 using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
-constexpr std::size_t maxStandardPayload = 128 * 1024;
-constexpr std::size_t maxProfilePayload = 7 * 1024 * 1024 + 128 * 1024;
 enum class Mutation { Message, Operation };
+
+std::size_t requestPayloadLimit(std::string_view path) {
+    if (path == "/api/messages") return message_attachments::maxRequestBytes;
+    if (path == "/api/bots" || path == "/api/bots/profile") return web::maxUploadPayload;
+    return web::maxStandardPayload;
+}
 
 void json(Response& res, int status, const Json& body) {
     res.status = status;
@@ -108,13 +114,26 @@ struct ParsedProfile {
 };
 
 ParsedProfile parseBotProfile(const Json& body, bool creating) {
+    if (!creating && body.contains("soul")) {
+        const auto original = body.find("originalSoul");
+        if (body.size() != 3 || original == body.end() || !original->is_string())
+            throw InputError("invalid_profile_update");
+        return {{{"soul",validatedBotSoul(body.at("soul"))},{"originalSoul",*original}},std::nullopt};
+    }
+    if (const auto fields = creating ? 0 : botRunSettingCount(body); fields) {
+        if (body.size() != fields + 1) throw InputError("invalid_profile_update");
+        Json settings = Json::object();
+        for (const auto* key : botRunSettingFields) {
+            if (const auto value = body.find(key); value != body.end()) settings[key] = validatedBotRunSetting(key,*value);
+        }
+        return {std::move(settings),std::nullopt};
+    }
     Json profile = {{"name",validatedBotName(body)}};
     if (creating && body.contains("role")) {
         if (!body["role"].is_string() || !validBotRole(body["role"].get_ref<const std::string&>()))
             throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
-    // Updates may omit the avatar to rename without touching the stored appearance.
     if (!creating && !body.contains("avatar")) return {std::move(profile),std::nullopt};
     auto avatar = validatedAvatarStyle(body);
     std::optional<AvatarImage> image;
@@ -195,7 +214,7 @@ public:
         store_.protectGitCredential(callbacks_.githubWebhookSecret);
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
         server_.set_address_family(AF_INET)
-            .set_payload_max_length(maxProfilePayload)
+            .set_payload_max_length(std::max(web::maxUploadPayload,message_attachments::maxRequestBytes))
             .set_read_timeout(10)
             .set_write_timeout(10)
             .set_keep_alive_timeout(1)
@@ -437,24 +456,24 @@ private:
         else if (deleting) return HandlerResult::Unhandled;
         else if (req.get_header_value_count("Content-Type") != 1 ||
                  req.get_header_value("Content-Type") != "application/json") error(res,415,"expected_json");
-        else if (req.path != "/api/bots" && req.path != "/api/bots/profile") {
+        else {
             const auto lengthHeader = req.get_header_value("Content-Length");
             std::size_t contentLength = 0;
             if (!lengthHeader.empty()) {
                 const auto parsed = std::from_chars(lengthHeader.data(),lengthHeader.data() + lengthHeader.size(),contentLength);
                 if (parsed.ec == std::errc{} && parsed.ptr == lengthHeader.data() + lengthHeader.size() &&
-                    contentLength > maxStandardPayload) {
+                    contentLength > requestPayloadLimit(req.path)) {
                     error(res,413,"payload_too_large");
                     return HandlerResult::Handled;
                 }
             }
             return HandlerResult::Unhandled;
         }
-        else return HandlerResult::Unhandled;
         return HandlerResult::Handled;
     }
 
     void saveBot(const Request& req, Response& res, bool update) {
+        if (req.body.size() > requestPayloadLimit(req.path)) return error(res,413,"payload_too_large");
         if (update ? !callbacks_.updateBot : !callbacks_.createBot)
             return error(res,501,"bot_management_unavailable");
         const auto body = Json::parse(req.body,nullptr,false);
@@ -465,8 +484,12 @@ private:
                 if (!store_.policy().allows(web::person(callbacks_,req),Action::bot_settings,botId)) return error(res,403,"access_denied");
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
                 auto parsed = parseBotProfile(body,false);
-                if (store_.policy().redactSecrets(botId,parsed.profile) != parsed.profile)
-                    return error(res,400,"invalid_bot_profile");
+                const auto redacted = store_.policy().redactSecrets(botId,parsed.profile);
+                if (const auto original = parsed.profile.find("originalSoul");
+                    original != parsed.profile.end() && redacted.at("originalSoul") != *original)
+                    return error(res,409,"role_changed");
+                if (redacted != parsed.profile)
+                    return error(res,400,parsed.profile.contains("soul") ? "role_contains_secrets" : "invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
                 changes_.rescan();
                 return json(res,200,redactBot(botId,web::botSettings(saved)));
@@ -478,12 +501,12 @@ private:
             changes_.rescan();
             return json(res,201,redactBot(web::field(created,"id"),web::botSettings(created)));
         } catch (const InputError& e) { error(res,400,e.what()); }
-        catch (const BotProfileError& e) { error(res,400,e.code); }
+        catch (const BotProfileError& e) { error(res,e.code == "role_changed" ? 409 : 400,e.code); }
         catch (const Conflict&) { error(res,400,"invalid_bot_profile"); }
     }
 
     void deleteBot(const Request& req, Response& res) {
-        if (req.body.size() > maxStandardPayload) return error(res,413,"payload_too_large");
+        if (req.body.size() > web::maxStandardPayload) return error(res,413,"payload_too_large");
         const auto body = Json::parse(req.body,nullptr,false);
         if (!body.is_object()) return error(res,400,"invalid_json");
         const auto bot = web::field(body,"botId");
@@ -646,7 +669,7 @@ private:
     }
 
     void mutate(const Request& req, Response& res, Mutation mutation) {
-        if (req.body.size() > maxStandardPayload) return error(res,413,"payload_too_large");
+        if (req.body.size() > requestPayloadLimit(req.path)) return error(res,413,"payload_too_large");
         const auto body = Json::parse(req.body,nullptr,false);
         if (!body.is_object()) return error(res,400,"invalid_json");
         try {

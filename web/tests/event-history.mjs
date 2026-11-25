@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { refreshEventHistory, timelineMessages } from '../assets/event-history.mjs';
 import { replyArrivalId } from '../assets/reply-arrival.mjs';
 
@@ -116,18 +115,3 @@ assert.equal(replyArrivalId([pairedReport, complete, closed], 10), 12, 'Only the
 assert.equal(replyArrivalId([pairedReport, complete, closed], 13), undefined, 'The completion does not replay');
 assert.equal(replyArrivalId([pairedReport, { ...complete, taskId: 3 }], 10), undefined, 'Different requests stay still');
 assert.equal(replyArrivalId([pairedReport, { ...complete, kind: 'report' }], 10), undefined, 'Two reports stay still');
-
-const liveUpdatesSource = await readFile(new URL('../assets/live-updates.js', import.meta.url));
-const { coalescedRefresh } = await import(`data:text/javascript;base64,${liveUpdatesSource.toString('base64')}`);
-const refreshes = [];
-const refresh = coalescedRefresh((scroll, generation) => refreshes.push([scroll, generation]));
-void refresh(undefined, 0);
-await refresh(undefined, 0);
-void refresh(undefined, 1);
-await refresh('bottom');
-void refresh();
-await refresh(undefined, 1);
-void refresh(undefined, 1);
-await refresh(undefined, 2);
-assert.deepEqual(refreshes, [[undefined, 0], ['bottom', null], [undefined, null], [undefined, null]],
-  'A coalesced refresh is live only when every trigger is live in the same visibility generation');

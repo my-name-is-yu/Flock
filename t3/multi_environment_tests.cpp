@@ -847,6 +847,26 @@ UPDATE tasks SET data=json_remove(data,'$.activeRun.projectId');
           "existing start_task must use only the default environment");
 }
 
+void cancelledRunWaitsForDelegatedWork(Scenario& fixture) {
+    fixture.start(false);
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "running"; },"single Run did not start");
+    const auto next = fixture.store.submit({bot,"Work after cancellation",fixture.local.id(),fixture.local.project()});
+    fixture.local.configure({{"multiStatus","cancelled"},{"multiHoldSettlement",true}});
+    fixture.cancel();
+    fixture.advanceUntil([](const Json& task) {
+        return task.at("state") == "cancelled" ||
+            task.value("cancellationDetail","") == "Waiting for the remaining work on this request to finish";
+    },"Flock did not observe the cancelled parent Run");
+    check(fixture.task().at("state") == "cancelling" &&
+          fixture.store.task(next).at("blockedBy").at("id") == fixture.taskId,
+          "a cancelled parent freed the project's slot before its delegated work settled");
+
+    fixture.local.configure({{"multiHoldSettlement",false}});
+    fixture.advanceUntil([](const Json& task) { return task.at("state") == "cancelled"; },
+                         "the project should be released once delegated work settles");
+    check(fixture.store.task(next).at("blockedBy").is_null(),"settled cancellation kept the next request blocked");
+}
+
 void recover(Scenario& fixture) {
     const auto originals = fixture.store.tasks(bot);
     check(originals.size() == 1,"a restart must keep the original request");
@@ -930,6 +950,7 @@ int main(int argc, char** argv) {
             cancelUnknownAcceptance(local,mini,directory);
             single(local,mini,directory,commit,false);
             single(local,mini,directory,commit,true);
+            { Scenario fixture(local,mini,directory,commit,"delegated-stop"); cancelledRunWaitsForDelegatedWork(fixture); }
         } else {
             Scenario fixture(local,mini,directory,commit,"recovery");
             if (phase == "crash") {

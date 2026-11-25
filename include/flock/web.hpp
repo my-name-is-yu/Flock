@@ -34,6 +34,8 @@ struct WebCallbacks {
     std::function<Json()> modelStatus = {};
     // Optional: starts ChatGPT sign-in in the background (opens the browser on this machine).
     std::function<bool(const Person&, bool reconsent)> modelLogin = {};
+    // Optional: the models Bots can use, as [{slug, displayName}].
+    std::function<Json()> modelCatalog = {};
     std::function<bool(const Person&, const T3ConnectRequest&)> t3Connect = {};
     std::function<Json(const std::string& environmentId)> t3Connection = {};
     std::function<Json(const Person&)> t3Setup = {};

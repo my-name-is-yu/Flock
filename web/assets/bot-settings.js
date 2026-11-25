@@ -1,107 +1,137 @@
 import { accentColor } from '/avatars.js';
+import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
 
-const [, , botId] = location.pathname.split('/').map(decodeURIComponent);
+const botId = decodeURIComponent(location.pathname.split('/')[2]);
+const botQuery = new URLSearchParams({bot: botId});
 const $ = (id) => document.getElementById(id);
-$('back').href = '/?' + new URLSearchParams({bot: botId});
-fetch('/api/bots').then(r => r.ok ? r.json() : []).then(bots => {
-  const bot = bots.find(item => item.id === botId);
-  $('back-label').textContent = bot?.name || botId;
-  if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
-}).catch(() => { $('back-label').textContent = botId; });
+const status = $('status');
+const navigation = settingsNavigation('/?' + botQuery);
+navigation.get('bots').setAttribute('aria-current', 'page');
+
+function showName(name) {
+  $('crumb-bot').textContent = name;
+  $('sharing-heading').textContent = `Who can use ${name}`;
+  document.title = `${name} access · Flock settings`;
+}
+showName(botId);
+
+async function loadBotName() {
+  const response = await fetch('/api/bots');
+  if (!response.ok) return;
+  const bot = (await response.json()).find(item => item.id === botId);
+  if (!bot) return;
+  showName(bot.name);
+  document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
+}
+void loadBotName().catch(() => {});
+
 function post(url, data) {
   return fetch(url, {
-    method: 'POST', headers: {'Content-Type':'application/json','X-Flock-Action':'1'},
-    body: JSON.stringify(data)
+    method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
+    body: JSON.stringify(data),
   });
 }
-async function submit(path, data) {
+
+async function save(section, url, data, refresh, success) {
+  const controls = $(section).querySelectorAll('button, input');
+  for (const control of controls) control.disabled = true;
   try {
-    const response = await post('/api/bot-settings/' + path, {botId, ...data});
-    if (!response.ok) throw Error();
-    await load();
-    $('status').textContent = 'Saved.';
+    if (!(await post(url, data)).ok) throw new Error();
+    try {
+      await refresh();
+      status.textContent = success;
+    } catch {
+      status.textContent = 'Saved. Reload this page to see the change.';
+    }
     return true;
   } catch {
-    $('status').textContent = 'Could not save this change.';
+    status.textContent = 'Couldn’t save this change.';
     return false;
+  } finally {
+    for (const control of controls) control.disabled = false;
   }
 }
-$('members').onsubmit = (event) => {
+
+function settingsLink(section, text) {
+  const link = element('a', text);
+  link.href = navigation.get(section).href;
+  return link;
+}
+
+async function readAccess() {
+  const response = await fetch('/api/bot-settings?' + botQuery);
+  if (!response.ok) throw new Error('', {cause: response.status});
+  return response.json();
+}
+
+function saveMember(person, add) {
+  return save('sharing', '/api/bot-settings/members', {botId, person, add},
+    async () => renderPeople(await readAccess()), add ? 'Person added.' : 'Person removed.');
+}
+
+const memberForm = $('members');
+memberForm.onsubmit = async (event) => {
   event.preventDefault();
-  void submit('members', {add:true, ...Object.fromEntries(new FormData(event.target))});
+  const person = memberForm.elements.person.value.trim();
+  if (!person) {
+    status.textContent = 'Enter a person’s ID.';
+    return;
+  }
+  if (await saveMember(person, true)) memberForm.reset();
 };
-function row(id, text) {
-  const item = document.createElement('p');
-  item.textContent = text;
-  $(id).append(item);
-  return item;
+
+function renderPeople({canManage, canManageMembers, members}) {
+  const people = $('people');
+  people.replaceChildren();
+  memberForm.hidden = !canManageMembers;
+  if (!canManage) {
+    row(people, rowLabel('Managed by the owner', 'The Bot’s owner decides who else can use it.'));
+  } else if (!members.length) {
+    const detail = canManageMembers ? ['Add a person’s ID below to share this Bot with them.']
+      : ['Enable shared sign-in in ', settingsLink('access', 'Flock settings'), ' to share this Bot.'];
+    row(people, rowLabel('No one added', ...detail));
+  }
+  for (const person of members) {
+    const item = row(people, rowLabel(person));
+    if (canManageMembers) {
+      const remove = actionButton(item, 'Remove', () => void saveMember(person, false));
+      remove.classList.add('quiet-danger');
+      remove.setAttribute('aria-label', `Remove ${person}`);
+    }
+  }
+  $('sharing').hidden = false;
 }
-function button(row, label, action) {
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.textContent = label;
-  b.className = /^(Deny|Decline|Remove|Disconnect)$/.test(label) ? 'button danger' : 'button';
-  b.onclick = action;
-  row.append(b);
-  return b;
-}
-async function load() {
-  const response = await fetch('/api/bot-settings?' + new URLSearchParams({bot:botId}));
-  if (!response.ok) throw Error();
-  const data = await response.json();
-  $('administration').hidden = false;
-  for (const id of ['inputs','people']) $(id).replaceChildren();
-  for (const request of data.secretInputs.filter(x => x.status === 'pending')) {
-    const item = row('inputs',request.name);
-    const input = document.createElement('input');
-    input.setAttribute('aria-label',request.name);
+
+function renderSecrets({secretInputs}) {
+  const inputs = $('inputs');
+  inputs.replaceChildren();
+  for (const {id, name, status} of secretInputs) {
+    if (status !== 'pending') continue;
+    const item = row(inputs, rowLabel(name));
+    const actions = element('form', '', 'row-actions secret-form');
+    const input = element('input');
+    input.setAttribute('aria-label', name);
     input.type = 'password';
     input.autocomplete = 'new-password';
-    item.append(input);
-    button(item,'Save secret',() => {
-      const value = input.value;
-      input.value = '';
-      void submit('secret',{requestId:request.id,value});
-    });
+    input.required = true;
+    const button = element('button', 'Save', 'button primary');
+    actions.append(input, button);
+    actions.onsubmit = async (event) => {
+      event.preventDefault();
+      if (await save('secrets', '/api/bot-settings/secret', {botId, requestId: id, value: input.value},
+        async () => renderSecrets(await readAccess()), 'Secret saved.')) input.value = '';
+    };
+    item.append(actions);
   }
-  $('secrets').hidden = !$('inputs').childElementCount;
-  $('sharing').hidden = false;
-  $('members').hidden = !data.canManageMembers;
-  for (const person of data.members) {
-    const item = row('people',person);
-    if (data.canManageMembers) button(item,'Remove',() => submit('members',{person,add:false}));
-  }
-  if (!data.canManage) {
-    note('people', 'Sharing managed by the owner', 'The Bot’s owner decides who else can use it.');
-  } else if (!data.members.length) {
-    if (data.canManageMembers)
-      note('people', 'No shared members', 'Add a person ID below to share this Bot.');
-    else
-      note('people', 'No shared members', 'Enable shared sign-in in ',
-        settingsLink('access', 'Flock settings'), ', then add the person’s ID here.');
-  }
+  $('secrets').hidden = !inputs.childElementCount;
 }
-function settingsLink(section, text) {
-  const element = document.createElement('a');
-  element.href = '/settings#' + section;
-  element.textContent = text;
-  return element;
+
+async function loadAccess() {
+  const access = await readAccess();
+  renderSecrets(access);
+  renderPeople(access);
 }
-function rowLabel(title, ...detail) {
-  const label = document.createElement('span');
-  label.className = 'row-label';
-  const heading = document.createElement('strong');
-  heading.textContent = title;
-  const sub = document.createElement('small');
-  sub.append(...detail);
-  label.append(heading, sub);
-  return label;
-}
-function note(id, title, ...detail) {
-  const item = document.createElement('p');
-  item.append(rowLabel(title, ...detail));
-  $(id).append(item);
-}
+
 const channelForm = $('channel-sender-form');
 const channelSelect = $('channel-bridge');
 let channelBridges = [];
@@ -110,13 +140,6 @@ let linkSaving = false;
 function bridgeName(bridge) {
   return (bridge.type === 'slack' ? 'Slack' : 'iMessage') + ' · ' + bridge.id;
 }
-function channelRow(title, ...detail) {
-  const item = document.createElement('div');
-  item.className = 'settings-row';
-  item.append(rowLabel(title, ...detail));
-  $('channel-links').append(item);
-  return item;
-}
 function renderChannelLinks(bridges) {
   const selected = channelBridges[channelSelect.value];
   channelBridges = bridges;
@@ -124,12 +147,12 @@ function renderChannelLinks(bridges) {
   channelSelect.replaceChildren();
   channelForm.hidden = !bridges.some(bridge => !bridge.hostManaged);
   if (!bridges.length) {
-    channelRow('No channels connected', 'Set up Slack or iMessage in ',
-      settingsLink('connections', 'Flock settings'), ' to link senders to this Bot.');
+    row('channel-links', rowLabel('No channels connected', 'Set up Slack or iMessage in ',
+      settingsLink('connections', 'Flock settings'), ' to link senders to this Bot.'));
   } else if (channelForm.hidden) {
-    channelRow('Managed on the Flock host', 'Sender links for these channels come from the host configuration.');
+    row('channel-links', rowLabel('Managed by the server', 'Sender links for these channels are set on the computer running Flock.'));
   } else if (!bridges.some(bridge => bridge.senders.length)) {
-    channelRow('No senders linked', 'Link a sender to let them message this Bot from Slack or iMessage.');
+    row('channel-links', rowLabel('No senders linked', 'Link a sender to let them message this Bot from Slack or iMessage.'));
   }
   for (const [index, bridge] of bridges.entries()) {
     if (!bridge.hostManaged) {
@@ -138,15 +161,16 @@ function renderChannelLinks(bridges) {
       channelSelect.add(option);
     }
     for (const sender of bridge.senders) {
-      const item = channelRow(sender.id, bridgeName(bridge), ' · ', sender.personId);
+      const item = row('channel-links', rowLabel(sender.id, bridgeName(bridge), ' · ', sender.personId));
       if (!bridge.hostManaged) {
-        const remove = button(item,'Remove',() => void submitChannelLink('removeSender',bridge,{id:sender.id}));
+        const remove = actionButton(item, 'Remove', () => void submitChannelLink('removeSender', bridge, {id: sender.id}));
+        remove.classList.add('quiet-danger');
         remove.setAttribute('aria-label', 'Remove ' + sender.id + ' from ' + bridgeName(bridge));
       }
     }
   }
   if (bridges.some(bridge => bridge.pending)) {
-    channelRow('Restart required', 'Flock uses the saved channel links after it restarts.');
+    row('channel-links', rowLabel('Restart required', 'Flock uses the saved channel links after it restarts.'));
   }
   $('channel-senders').hidden = false;
 }
@@ -193,44 +217,57 @@ channelForm.onsubmit = (event) => {
 };
 async function loadChannelLinks() {
   const response = await fetch('/api/bot-settings/channels?' + new URLSearchParams({bot:botId}));
-  if (response.ok) renderChannelLinks((await response.json()).bridges);
+  if (response.status === 403 || response.status === 404) return;
+  if (!response.ok) throw new Error();
+  renderChannelLinks((await response.json()).bridges);
 }
+
+function changeMachine(action, data, success) {
+  return save('local-connections', '/api/channels/local-connections/' + action, data, loadMachines, success);
+}
+
+const operationLabels = new Map([['read_file', 'Read'], ['list_directory', 'List']]);
 async function loadMachines() {
   const response = await fetch('/api/channels/local-connections');
-  if (!response.ok) throw Error();
-  const connections = (await response.json()).filter(x =>
-    x.botId === botId && ['pending','approved'].includes(x.status));
-  $('local-connections').hidden = connections.length === 0;
-  $('machines').replaceChildren();
-  for (const connection of connections) {
-    const item = document.createElement('div');
-    $('machines').append(item);
-    const title = document.createElement('p');
-    title.textContent = connection.machineId + ' · ' + connection.threadId;
-    item.append(title);
-    const rules = document.createElement('ul');
-    for (const rule of connection.rules) {
-      const entry = document.createElement('li');
-      entry.textContent = (rule.operation === 'read_file' ? 'Read ' : 'List ') + rule.path;
-      rules.append(entry);
+  if (!response.ok) throw new Error();
+  const connections = (await response.json()).filter(connection => connection.botId === botId &&
+    (connection.status === 'pending' || connection.status === 'approved'));
+  const rows = document.createDocumentFragment();
+  for (const {id, machineId, threadId, rules, status} of connections) {
+    const paths = element('ul', '', 'machine-paths');
+    for (const {operation, path} of rules) {
+      const label = operationLabels.get(operation);
+      if (!label) throw new Error();
+      const entry = element('li', label + ' ');
+      entry.append(element('code', path));
+      paths.append(entry);
     }
-    item.append(rules);
-    const change = async (action, approve) => {
-      try {
-        const result = await post('/api/channels/local-connections/' + action, {id:connection.id, approve});
-        if (!result.ok) throw Error();
-        await loadMachines();
-        $('status').textContent = 'Local connection updated.';
-      } catch { $('status').textContent = 'Could not update this local connection.'; }
-    };
-    if (connection.status === 'pending') {
-      button(item,'Approve',() => change('decide',true));
-      button(item,'Decline',() => change('decide',false));
-    } else button(item,'Disconnect',() => change('disconnect'));
+    const session = `Session ${threadId}`;
+    const label = rowLabel(machineId, session);
+    label.append(paths);
+    const item = row(rows, label);
+    const actions = element('span', '', 'row-actions');
+    actions.setAttribute('role', 'group');
+    actions.setAttribute('aria-label', `${machineId} · ${session}`);
+    if (status === 'pending') {
+      const decline = actionButton(actions, 'Decline', () => void changeMachine('decide', {id, approve: false}, 'Connection declined.'));
+      decline.classList.add('quiet-danger');
+      actionButton(actions, 'Approve', () => void changeMachine('decide', {id, approve: true}, 'Connection approved.'), true);
+    } else {
+      const disconnect = actionButton(actions, 'Disconnect', () => void changeMachine('disconnect', {id}, 'Computer disconnected.'));
+      disconnect.classList.add('quiet-danger');
+    }
+    item.append(actions);
   }
+  $('machines').replaceChildren(rows);
+  $('local-connections').hidden = !connections.length;
   return connections.length;
 }
-const [machines, admin] = await Promise.allSettled([loadMachines(), load(), loadChannelLinks()]);
-if (machines.status === 'rejected') $('status').textContent = 'Could not load local machine connections.';
-else if (admin.status === 'rejected' && !machines.value) $('status').textContent = 'Could not load Bot settings.';
-document.getElementById(location.hash.slice(1))?.scrollIntoView();
+
+const [machines, access, channels] = await Promise.allSettled([loadMachines(), loadAccess(), loadChannelLinks()]);
+if (machines.status === 'rejected') status.textContent = 'Couldn’t load connected computers.';
+else if (access.status === 'rejected' && (access.reason.cause !== 403 || !machines.value)) {
+  status.textContent = 'Couldn’t load this Bot’s access.';
+} else if (channels.status === 'rejected') status.textContent = 'Couldn’t load channel senders.';
+const target = $(location.hash.slice(1));
+if (target && !target.hidden) target.scrollIntoView({block: 'nearest'});

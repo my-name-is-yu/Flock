@@ -15,9 +15,20 @@ function fixtures() {
     if (query === '(prefers-reduced-motion: reduce)') return window.reducedMotionFixture;
     return nativeMatchMedia(query);
   };
-  window.EventSource = undefined;
-  const bot = { id: 'release', name: 'Release' };
+  let stream;
+  window.EventSource = class extends EventTarget {
+    constructor(path) {
+      super();
+      if (path === '/api/events?bot=release') stream = this;
+    }
+    close() {}
+  };
+  const bot = { id: 'release', name: 'Release', peers: [{ id: 'triage' }] };
   const peer = { id: 'triage', name: 'Triage' };
+  window.renameBot = (name) => {
+    bot.name = name;
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   const time = new Date(2026, 10, 20, 13).getTime() / 1000;
   const sessionCreatedAt = new Date(2026, 10, 20, 17, 30).toISOString();
   const RealDate = Date;
@@ -59,6 +70,14 @@ function fixtures() {
       run: { link: `${location.origin}/run`, environmentId: 'local', threadId: 'thread', runId: 'launch' },
     } },
   ];
+  let holdView;
+  window.replyMotionFixture = {
+    ready() { stream.dispatchEvent(new Event('ready')); },
+    change() { stream.dispatchEvent(new MessageEvent('change', { data: '{"bot":"release"}' })); },
+    disconnect() { stream.dispatchEvent(new Event('error')); },
+    reply(id, text) { events.push({ id, kind: 'conversation_reply', time: time + 1000 + id, data: { text } }); },
+    holdNextView() { return new Promise(resolve => { holdView = resolve; }); },
+  };
   window.completeReport = () => {
     events.push({ id: 4, kind: 'completed', time: time + 1001, taskId: 17, data: {
       text: 'Report', revisionId: 1, run: { ...events[2].data.run, runId: 'final' },
@@ -95,10 +114,73 @@ function fixtures() {
     if (path === '/api/bots') return Response.json([bot, peer]);
     if (path.startsWith('/api/peer-conversation?')) return Response.json(path.includes('before=')
       ? { messages: [older], hasOlder: false } : { messages: peerEvents, hasOlder: true });
-    return Response.json({ bot, events, olderBefore: 0, presence: activeSessions.length ? 'working' : 'idle',
+    const response = Response.json({ bot, events, olderBefore: 0, presence: activeSessions.length ? 'working' : 'idle',
       activeSessions, sessionTasks, sessionsBefore: 0, sessionCursor: 0, waits: [],
       canDecide: true, composerPerson: null });
+    if (holdView && path.startsWith('/api/view?')) {
+      const held = holdView;
+      holdView = undefined;
+      await new Promise(resolve => held(resolve));
+    }
+    return response;
   };
+}
+
+async function exerciseReplyMotion() {
+  const conversation = document.getElementById('conversation');
+  const fixture = window.replyMotionFixture;
+  const nextTask = () => new Promise(resolve => setTimeout(resolve, 0));
+
+  const replyBubble = (id) => document.querySelector(`#event-${id} .bubble`);
+  async function showReply(id, text, deliver) {
+    conversation.scrollTop = conversation.scrollHeight;
+    const rendered = new Promise(resolve => {
+      const observer = new MutationObserver(() => {
+        const bubble = replyBubble(id);
+        if (bubble) {
+          observer.disconnect();
+          resolve(bubble);
+        }
+      });
+      observer.observe(conversation, { childList: true, subtree: true });
+    });
+    fixture.reply(id, text);
+    await deliver();
+    const bubble = await rendered;
+    if (!bubble.textContent.includes(text)) throw new Error(`Missing reply text: ${text}`);
+    return bubble;
+  }
+
+  const ready = fixture.holdNextView();
+  fixture.ready();
+  const finishReady = await ready;
+  const live = await showReply(6, 'A live reply', async () => {
+    fixture.change();
+    await nextTask();
+    fixture.change();
+    finishReady();
+  });
+  if (live.getAnimations().length === 0) throw new Error('A foreground live reply did not animate');
+
+  async function withRefreshInFlight(id, text, catchUp) {
+    const held = fixture.holdNextView();
+    fixture.change();
+    const finish = await held;
+    return showReply(id, text, async () => {
+      fixture.change();
+      await nextTask();
+      catchUp();
+      finish();
+    });
+  }
+  const resumed = await withRefreshInFlight(7, 'A reply recovered on return', () => {
+    document.dispatchEvent(new Event('visibilitychange'));
+    fixture.change();
+  });
+  if (resumed.getAnimations().length) throw new Error('A reply animated across visibility generations');
+
+  const caughtUp = await withRefreshInFlight(8, 'A reply recovered after disconnect', () => fixture.disconnect());
+  if (caughtUp.getAnimations().length) throw new Error('A reply animated during a coalesced disconnect catch-up');
 }
 
 async function exercise() {
@@ -292,6 +374,9 @@ async function exercise() {
   document.getElementById('cancel-reply').click();
   check(ghost.hidden && !input.value, 'The suggestion covered a differently worded saved reply draft');
 
+  window.reducedMotionFixture.matches = false;
+  await exerciseReplyMotion();
+
   window.noHoverFixture.matches = true;
   window.noHoverFixture.dispatchEvent(new Event('change'));
   history.pushState(null, '', '?bot=release&peer=triage');
@@ -309,6 +394,9 @@ async function exercise() {
     'The read-only DM lost a centered separator or exposed the composer');
   check(release.tabIndex === 0 && release.querySelectorAll('time').length === 1 && eventTime(release).dateTime,
     'The peer message did not expose a focusable semantic timestamp');
+  const descriptionId = document.getElementById('peer-heading').getAttribute('aria-describedby');
+  check(document.getElementById(descriptionId)?.textContent === 'Read-only conversation between Bots',
+    'The Bot conversation heading lost its read-only description');
 
   const forwardedTime = eventTime(forwarded);
   const source = forwarded.querySelector('.peer-forwarded-message');
@@ -328,6 +416,19 @@ async function exercise() {
     await new Promise(resolve => setTimeout(resolve, 10));
   check(document.getElementById('event-9') === release && release.querySelector('.msg-meta').classList.contains('sr-only') &&
     senders() === 'Release,Triage,Triage,Triage', 'Prepending peer history replaced the loaded row or repeated its sender label');
+
+  document.getElementById('peer-parent-link').click();
+  const picker = document.getElementById('peer-picker');
+  for (let attempt = 0; attempt < 20 && picker.hidden; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(!picker.hidden, 'The Bot conversation picker did not become available');
+  picker.click();
+  const title = document.getElementById('detail-title');
+  check(title.textContent === 'Release talks with', 'The conversation picker did not name the current Bot');
+  window.renameBot('Deploy');
+  for (let attempt = 0; attempt < 20 && title.textContent !== 'Deploy talks with'; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(title.textContent === 'Deploy talks with', 'The open conversation picker kept the old Bot name');
 }
 
 const assets = new URL('../assets/', import.meta.url);
@@ -336,6 +437,7 @@ const index = (await read('/index.html')).toString().replace('<script type="modu
   <script>(${fixtures})();</script>
   <script type="module">
     import '/app.js';
+    ${exerciseReplyMotion}
     try {
       for (let attempt = 0; attempt < 20 && document.querySelectorAll('.event-message').length < 3; attempt++)
         await new Promise(resolve => setTimeout(resolve, 10));

@@ -1,4 +1,4 @@
-import { hasQuestionChoices, questionChoiceForm, updateQuestionChoiceForm } from './question-choices.js';
+import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
 import { actionLabel, approvalSummary } from './action-labels.mjs';
 
 const labels = {
@@ -506,7 +506,7 @@ export function mountBoardInbox({
     const item = current();
     const id = item?.conversationEventId;
     if (item?.itemKind !== 'pr_review' || !item.canDecide || !canCompose() || !Number.isSafeInteger(id) || id <= 0) return null;
-    return { kind: 'message', messageId: id, summary: item.requestTitle };
+    return { kind: 'review', messageId: id, summary: item.prTitle };
   }
 
   function reviewDraft(item, targetHost) {
@@ -540,7 +540,7 @@ export function mountBoardInbox({
         submit(answer) { void submit(item, 'answer', { text: answer }, { choiceAnswer: true }); },
       }));
     }
-    const write = button('Write an answer', 'text-button question-reply', () => {
+    const write = questionReplyButton(() => {
       if (!canCompose()) return;
       focusComposer();
     });
@@ -641,7 +641,7 @@ export function mountBoardInbox({
     const request = historyRequest = new AbortController();
     const sameView = () => request === historyRequest && mode === 'history';
     try {
-      const { decisions } = await api(`inbox/history?${new URLSearchParams({ bot })}`, undefined, request.signal);
+      const { decisions } = await api(`inbox/history?${new URLSearchParams({ bot })}`, undefined, { signal: request.signal });
       if (!sameView()) return;
       const cards = decisions.map(historyCard);
       host.replaceChildren(...cards);

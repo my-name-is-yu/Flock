@@ -521,9 +521,12 @@ void conversationEntry(const std::filesystem::path& path) {
     tick(runtime,2);
     check(store.task(taskId).at("state") == "completed","the comparison did not complete");
     const auto result = conversationCompletion(browser.get("/api/view?bot=release"),taskId);
-    check(result.at("data").at("text") == proposedOptions,"the conversation lost the completion report");
+    const auto& resultData = result.at("data");
+    check(resultData.at("text") == proposedOptions,"the conversation lost the completion report");
+    check(!resultData.contains("reason") && !resultData.contains("doneWhen"),
+          "the completed result exposed internal decision fields");
     model.comparisonResult = result.at("id");
-    const auto& reportRun = result.at("data").at("run");
+    const auto& reportRun = resultData.at("run");
     check(reportRun["threadId"] == "thread-release" && reportRun["runId"] == "run-1" && reportRun["itemId"] == "comparison-report",
           "the conversation did not link the Run and report item that produced the result");
 
@@ -651,6 +654,14 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto question = firstWait.at("messageId").get<Id>();
     const auto otherQuestion = secondWait.at("messageId").get<Id>();
     check(question > 0 && otherQuestion > 0 && question != otherQuestion,"pending questions did not have distinct reply anchors");
+    check(!firstWait.contains("decisionReason") && !secondWait.contains("decisionReason"),
+          "the pending waits exposed the model's rationale");
+    const auto& events = waitPage.at("events");
+    const auto questionEvent = std::ranges::find_if(events,[&](const Json& event) {
+        return event.at("kind") == "waiting" && event.at("id") == question;
+    });
+    check(questionEvent != events.end() && !questionEvent->at("data").contains("decisionReason"),
+          "the conversation omitted the question or exposed the model's rationale");
     const Json reply = {{"botId","triage"},{"clientMessageId","answer-first"},{"text","Status\n\nApprove\n\nseparately: keep this answer together"},{"replyToMessageId",question}};
     const auto answerReceipt = browser.post("/api/messages",reply,201);
     tick(runtime,2);
@@ -1154,6 +1165,69 @@ void botRolePreviewRedactsBeforeBounding(const std::filesystem::path& path) {
           "Bot role preview must redact a multiline secret before splitting or truncating");
 }
 
+void botRoleSavesRequireCompleteOriginal(const std::filesystem::path& home) {
+    const auto botDir = home / "bots" / "release";
+    std::filesystem::create_directories(botDir);
+    std::ofstream(botDir / "config.json") << R"({"name":"Release"})";
+    const auto roleFile = botDir / "SOUL.md";
+    const auto writeRole = [&](const std::string& text) { std::ofstream(roleFile,std::ios::binary) << text; };
+    const auto readRole = [&] {
+        std::ifstream input(roleFile,std::ios::binary);
+        check(static_cast<bool>(input),"could not read role fixture");
+        return std::string(std::istreambuf_iterator<char>(input),{});
+    };
+    app::Bots bots(home / "bots");
+    Store store(home / "flock.db");
+    auto policy = store.policy();
+    const auto request = policy.requestSecret("release",{"fixture-role-token"});
+    policy.submitSecret(localOwner,"release",request,privateValue);
+    auto cb = callbacks();
+    cb.bots = [&] { return bots.cards(); };
+    cb.updateBot = [&](std::string_view bot,const Json& profile,const std::optional<AvatarImage>& image) {
+        return bots.updateProfile(bot,profile,image);
+    };
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    const auto viewRole = [&] { return browser.get("/api/view?bot=release").at("bot").at("soul"); };
+    const auto save = [&](const Json& original,std::string_view edit,int status) {
+        return browser.post("/api/bots/profile",{{"botId","release"},{"soul",edit},{"originalSoul",original}},status);
+    };
+    const auto expectRefused = [&](const Json& original,std::string_view edit,const std::string& unchanged) {
+        check(save(original,edit,409).at("error") == "role_changed" && readRole() == unchanged,
+              "refused role edit changed SOUL.md");
+    };
+
+    const auto withSecret = "Review releases using " + std::string(privateValue);
+    writeRole(withSecret);
+    const auto redacted = viewRole();
+    check(redacted == "Review releases using [redacted]","role settings did not show redacted text");
+    expectRefused(redacted,"Review release candidates",withSecret);
+    expectRefused(withSecret,"Review release candidates",withSecret);
+
+    const auto prefix = std::string(maxBotRoleBytes,'a');
+    const auto oversized = prefix + "Unseen instructions";
+    writeRole(oversized);
+    const auto truncated = viewRole();
+    check(truncated == prefix,"role settings did not show the bounded preview");
+    expectRefused(truncated,"",oversized);
+    expectRefused(prefix + "U","",oversized);
+
+    const std::string original = "Review releases.\r\nCheck the tests.\r\n";
+    writeRole(original);
+    const auto stale = viewRole();
+    check(stale == original,"role settings changed the original line endings");
+    const std::string changed = "Review weekly releases.";
+    writeRole(changed);
+    expectRefused(stale,"Review monthly releases.",changed);
+
+    writeRole(prefix);
+    const auto edited = save(viewRole(),"Review monthly releases.",200);
+    check(edited.at("soul") == "Review monthly releases." && readRole() == "Review monthly releases.",
+          "editing a complete role did not persist the new text");
+    check(save(viewRole(),"",200).at("soul") == "" && !std::filesystem::exists(roleFile),
+          "clearing a complete role did not remove SOUL.md");
+}
+
 void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     Store store(path);
     auto cb = callbacks();
@@ -1570,6 +1644,7 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
         {"timezone","Asia/Tokyo"},{"fireAt",2'000'000'000}},409);
     const auto cancelPath = "/api/schedules?bot=release&id=" + std::to_string(reminder);
     Browser::checked(browser.client.Delete(cancelPath),403);
+    Browser::checked(browser.client.Delete(cancelPath,httplib::Headers{{"X-Flock-Action","1"}}),403);
     check(Browser::checked(browser.client.Delete(cancelPath,browser.headers()),200).at("status") == "canceled",
           "Web schedule cancellation failed");
     const auto trigger = browser.post("/api/schedules",{{"botId","release"},{"kind","trigger"},{"source","deploy"},
@@ -1586,6 +1661,8 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     };
     check(send(webhook("skip","test")).at("tasks").empty(),"Webhook filter did not match exactly");
     browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+    check(browser.get("/api/schedules?bot=release&active=1").at("canManage") == false,
+          "a Bot member was offered schedule controls");
     store.policy().setMember(localOwner,"release","reader",false);
     Browser::checked(browser.client.Post("/api/webhooks/deploy",headers,webhook("event-1","main"),"application/json"),403);
     store.policy().setMember(localOwner,"release","reader",true);
@@ -1624,6 +1701,7 @@ int main(int argc,char** argv) {
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");
+        botRoleSavesRequireCompleteOriginal(directory.path / "role-edit");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         queuedWebAuthority(directory.path / "queued-web-authority.sqlite");
         memoryAutomationEndpoints(directory.path / "automation.sqlite");

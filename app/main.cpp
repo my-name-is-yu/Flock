@@ -230,7 +230,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                 throw Conflict("Session read mode must be off, on_demand or prefill");
         } else throw Conflict("Unknown run option: " + option);
     }
-    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); });
+    const IntakeResolver intake = [&](std::string_view botId, std::string_view request) {
+        return bots.get(botId).intake(request);
+    };
+    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); },
+                [&](std::string_view id) { return bots.plannerModel(id); });
     SettingsSystem system(home,port,sessionRead);
     SettingsConnections connections(home);
     SettingsAccess access(store,home,std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
@@ -264,17 +268,15 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
-    const IntakeResolver intake = [&](std::string_view botId, std::string_view request) {
-        return bots.get(botId).intake(request);
-    };
     options.intake = intake;
     const Runtime::SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
     options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store,*model,*t3,soul,options);
-    bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
+    const auto reportSchedule = [](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
-    });
+    };
+    bots.syncSchedules(store,options.clock(),reportSchedule);
     Json exportedBots;
     // Web callbacks and the filesystem refresh both update the same on-disk skills.
     std::mutex skillMutex;
@@ -304,7 +306,9 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             return created;
         },
         [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
-            auto updated = bots.updateProfile(botId,profile,image);
+            auto updated = botRunSettingCount(profile)
+                ? bots.updateRunSettings(store,botId,profile,options.clock(),reportSchedule)
+                : bots.updateProfile(botId,profile,image);
             syncSkills();
             return updated;
         },
@@ -319,7 +323,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     connections.configureChannels(store,callbacks);
     callbacks.sessionT3 = t3.get();
     if (chatgptWeb) chatgptWeb->configure(callbacks);
-    else callbacks.modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
+    else {
+        callbacks.modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
+        callbacks.modelCatalog = [] { return Json::array({{{"slug","demo"},{"displayName","Demo"}}}); };
+    }
     callbacks.installationSettings = [&](const Person& actor) {
         auto availableConnections = connections.view();
         availableConnections.at("channels")["canManageHost"] = actor == localOwner;

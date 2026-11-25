@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <future>
+#include <thread>
 #include <iostream>
 #include <iterator>
 #include <map>

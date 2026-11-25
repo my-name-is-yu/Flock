@@ -10,6 +10,7 @@
 #include <mutex>
 #include <set>
 #include <sqlite3.h>
+#include <stop_token>
 #include <utility>
 #include <variant>
 
@@ -160,6 +161,7 @@ struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
     const MemorySeed memorySeed;
+    const AutomationModelResolver automationModel;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     class SessionEvidence;
@@ -236,11 +238,14 @@ struct Store::Impl {
                 Seconds now, bool fromBot = false);
     Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
     Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
+    std::vector<ScheduleImportError> stageConfiguredSchedules(
+        std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
     void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
-    Json automations(std::string_view bot, Id before) const;
+    Json automations(std::string_view bot, Id before, bool activeOnly = false) const;
     Json cancelAutomation(std::string_view bot, Id id);
     void fireDueAutomations(Seconds now);
     void fireAutomation(Id, const Statement&, Seconds now);
+    Json automationRoute(std::string_view bot, Json routing) const;
     SecretRedactor sharedRedactor() const;
     void initializeBoardInboxSchema();
     Statement actionablePrReviews(std::string_view bot) const;
@@ -284,7 +289,7 @@ struct Store::Impl {
     bool permitsWorkSession(Id sourceMessageId, const WorkSession&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
-    explicit Impl(std::filesystem::path path, MemorySeed);
+    explicit Impl(std::filesystem::path path, MemorySeed, AutomationModelResolver);
     ~Impl();
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
@@ -312,7 +317,6 @@ struct Store::Impl {
     void initializeConversationSchema();
     void upgradeSessionMessageWaitSchema();
     void initializeModelBudgetSchema();
-    void initializeWorkspaceSchema();
     void initializeAttachmentsSchema();
     void saveAttachments(Id, const Json&);
     Json inspectAttachment(std::string_view bot, Id throughMessage, const Json&);
@@ -320,11 +324,6 @@ struct Store::Impl {
     Statement scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
     std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
-    void recoverWorkspace();
-    void persistWorkspaceResults();
-    void stopWorkspace();
-    std::map<Id,std::unique_ptr<WorkspaceJob>> workspaceJobs;
-    void validateWorkspace(const ToolContext&, const Decision&);
     Json workspaceTool(const ToolContext&, const Decision&);
     std::optional<Resource> authorizedBotToolScope(std::string_view bot, const Decision&);
     void validateBotTool(const ToolContext&, const Decision&);
@@ -427,6 +426,8 @@ struct Store::Impl {
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
     void initializeProjectQueue();
+    bool automationBeforeDispatch(Id task) const;
+    bool isUndispatchedNotesWait(const Json& task) const;
     bool projectRouteReady(Id task, std::string_view action) const;
     std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;
     void rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project);
