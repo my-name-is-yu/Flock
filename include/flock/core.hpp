@@ -40,6 +40,7 @@ using IntakeResolver = std::function<Intake(std::string_view botId, std::string_
 Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake);
 
 struct BotNotes { std::string soul, memory; };
+struct BotNotesUnavailable : Conflict { using Conflict::Conflict; };
 struct PeerBot { std::string name; Intake intake; std::string role = {}; };
 using PeerResolver = std::function<std::vector<PeerBot>(std::string_view)>;
 
@@ -280,10 +281,12 @@ using WebIdentityResolver = std::function<std::optional<bool>(std::string_view p
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
+    struct PlannerModel { std::string model, provider; };
+    using AutomationModelResolver = std::function<std::optional<PlannerModel>(std::string_view botId)>;
     using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&,
                                                        const std::function<void()>&)>;
     using EditConfiguredSchedules = std::function<void(const CommitConfiguredSchedules&)>;
-    explicit Store(std::filesystem::path database, MemorySeed = {}, IntakeResolver automationIntake = {});
+    explicit Store(std::filesystem::path database, MemorySeed = {}, AutomationModelResolver = {});
     ~Store();
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;
