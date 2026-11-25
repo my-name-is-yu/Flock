@@ -10,6 +10,8 @@
 
 using namespace git_fixture;
 
+void testGitPrFollowup();
+
 namespace {
 class Script final : public Model {
 public:
@@ -936,7 +938,7 @@ void notificationCannotControlASession() {
     check(store.receiveGitWebhook({hostName,"session-effect",repoName,"comment","created",{1},sha,"A comment",0}),
           "Could not enqueue comment");
     runtime.runConversations();
-    check(result.value("ok",true) == false && sessions.sessionMessages == 0,
+    check(result.value("ok",true) == false && sessions.sessionSends.empty(),
           "A generic model executed a Session write that the turn did not offer");
 }
 
@@ -1052,6 +1054,7 @@ int main() {
         redaction();
         notificationCannotControlASession();
         notificationBudgetAndRevocation();
+        testGitPrFollowup();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

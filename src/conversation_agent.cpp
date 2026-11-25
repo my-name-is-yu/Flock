@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <set>
+#include <tuple>
 
 namespace flockv0 {
 using conversation_storage::integer;
@@ -794,12 +795,23 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     const auto available = [&] {
         auto offered = tools;
         auto machines = Json::array();
-        if (!notification) {
+        std::string_view followupStatus;
+        if (notification) {
+            if (const auto followup = gitHost ? gitPrFollowup(message) : std::nullopt) {
+                switch (followup->status) {
+                case GitPrFollowup::Status::available:
+                    offered.push_back("fix_pull_request");
+                    break;
+                case GitPrFollowup::Status::attempted: followupStatus = "already_requested"; break;
+                case GitPrFollowup::Status::limitReached: followupStatus = "limit_reached"; break;
+                }
+            }
+        } else {
             for (const auto& [machineId,machine] : localMachines)
                 if (permitsLocalMachineOwner(machine->owner(),message.bot)) machines.push_back(machineId);
             if (!machines.empty()) offered.push_back("request_local_machine_connection");
         }
-        return std::pair{std::move(offered),std::move(machines)};
+        return std::tuple{std::move(offered),std::move(machines),followupStatus};
     };
     const bool ja = japanese(message.text);
     const auto finish = [&](std::string text, std::string_view route) {
@@ -883,7 +895,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                 if (!row.string(1).empty()) continue;
                 effectType = row.string(2);
                 if (!row.string(0).empty()) {
-                    const auto [offered,machines] = available();
+                    const auto [offered,machines,followupStatus] = available();
                     bool rejectionChanged = false;
                     for (const auto& saved : row.json(0)) {
                         Decision call{saved.at("tool"),saved.at("args"),saved.at("reason")};
@@ -959,8 +971,9 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                     return;
                 }
                 std::vector<ModelImage> images;
-                auto [offered,machines] = available();
-                const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
+                auto [offered,machines,followupStatus] = available();
+                auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
+                if (!followupStatus.empty()) context["event"]["gitFollowupStatus"] = followupStatus;
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
                          .images = std::move(images)};

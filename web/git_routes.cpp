@@ -87,34 +87,53 @@ std::optional<GitWebhook> githubEvent(const httplib::Request& request) {
         event.kind = type == "pull_request" ? "pull_request" : type == "pull_request_review" ? "review" : "comment";
         event.headSha = str(pr.at("head"),"sha");
         event.summary = str(pr,"title");
+        const bool open = str(pr,"state") != "closed";
         if (event.kind == "pull_request" && event.action == "review_requested") {
             const auto reviewer = payload.find("requested_reviewer");
             if (reviewer != payload.end() && reviewer->is_object()) event.requestedReviewer = str(*reviewer,"login");
         }
         if (event.kind == "review") {
             const auto& review = payload.at("review");
-            event.summary = str(review,"state") + "\n" + str(review,"body");
+            const auto state = str(review,"state");
+            const auto body = str(review,"body");
+            event.summary = state + "\n" + body;
+            event.feedbackId = number(review,"id");
+            if (event.action == "submitted" && open) {
+                if (state == "changes_requested") event.followup = GitFollowup::changesRequested;
+                if (state == "commented" && !body.empty()) event.followup = GitFollowup::reviewComment;
+            }
         }
-        if (event.kind == "comment") event.summary = str(payload.at("comment"),"body");
+        if (event.kind == "comment") {
+            event.summary = str(payload.at("comment"),"body");
+            if (event.action == "created" && open && !event.summary.empty())
+                event.followup = GitFollowup::reviewComment;
+        }
     } else if (type == "issue_comment") {
         const auto& issue = payload.at("issue");
         if (!issue.contains("pull_request")) return {};
         event.prNumbers.push_back(number(issue,"number"));
         event.kind = "comment";
-        event.summary = str(payload.at("comment"),"body");
+        const auto& comment = payload.at("comment");
+        event.summary = str(comment,"body");
+        event.feedbackId = number(comment,"id");
     } else if (type == "check_run" || type == "check_suite" || type == "workflow_job" || type == "workflow_run") {
+        if (event.action != "completed") return {};
         const auto& check = payload.at(type);
         event.kind = type.starts_with("check_") ? "check" : "ci";
         event.headSha = str(check,"head_sha");
         if (addPulls(event,check,payload.at("repository")) && event.prNumbers.empty()) return {};
-        event.summary = str(check,"name") + " " + str(check,"status") + " " + str(check,"conclusion");
+        const auto conclusion = str(check,"conclusion");
+        event.summary = str(check,"name") + " " + str(check,"status") + " " + conclusion;
         if (type == "workflow_job") event.jobId = number(check,"id");
-        if (event.action != "completed") return {};
+        if ((type == "check_run" || type == "workflow_job") &&
+            (conclusion == "failure" || conclusion == "timed_out" || conclusion == "startup_failure"))
+            event.followup = GitFollowup::failedCheck;
     } else if (type == "status") {
         event.kind = "check";
         event.action = str(payload,"state");
         event.headSha = str(payload,"sha");
         event.summary = str(payload,"context") + " " + str(payload,"description");
+        if (event.action == "failure" || event.action == "error") event.followup = GitFollowup::failedCheck;
     } else if (type == "code_scanning_alert") {
         const auto& alert = payload.at("alert");
         event.kind = "code_scan";

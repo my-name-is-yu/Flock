@@ -5,6 +5,8 @@
 #include <openssl/hmac.h>
 
 #include <iostream>
+#include <map>
+#include <optional>
 
 using namespace git_fixture;
 
@@ -32,6 +34,13 @@ class Bot final : public Model {
 public:
     unsigned received = 0;
     Id reviewTask = 0;
+    std::map<std::string,std::string> followups;
+    std::optional<Decision> conversationAction;
+    const std::string& followup(const std::string& eventId) const {
+        const auto event = followups.find(eventId);
+        check(event != followups.end(),"Missing Git notification " + eventId);
+        return event->second;
+    }
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
@@ -42,6 +51,7 @@ public:
             return {"complete",{{"report","Opened pull request"}},"Report the published PR"};
         }
         if (!event.contains("gitEvent")) {
+            if (event.at("turn").empty() && conversationAction) return *conversationAction;
             if (event.at("turn").empty()) return {"git_request_review",
                 {{"host",hostName},{"repo",repoName},{"taskId",reviewTask},{"prNumber",1},{"reviewers",{"alice","bob"}}},
                 "Request a review for the watched pull request"};
@@ -50,6 +60,7 @@ public:
         const auto& delivery = event.at("gitEvent");
         if (event.at("turn").empty()) {
             ++received;
+            followups.emplace(delivery.at("eventId").get<std::string>(),delivery.value("followup",""));
             if (delivery.at("jobId") == 81) return {"git_read_ci_logs",
                 {{"host",delivery.at("host")},{"repo",delivery.at("repo")},{"jobId",81},{"maxBytes",32}},
                 "Inspect the failed job"};
@@ -115,7 +126,7 @@ void run() {
     check(historyCount(store,task,"git_webhook") == 0,"HTTP intake delivered a webhook");
     Runtime runtime(store,model,sessions,[](std::string_view) { return std::string{}; },options(host));
     runtime.runConversations();
-    check(model.received == 1 && host->logCalls == 1 &&
+    check(model.received == 1 && host->logCalls == 1 && model.followup("job-run-1") == "failed_check" &&
           store.history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
           "authenticated webhook did not wake the persisted task and produce a CI report");
     const std::string newSha(40,'b');
@@ -132,7 +143,7 @@ void run() {
 
     const Json review{{"action","submitted"},{"repository",repository},
         {"pull_request",{{"number",1},{"head",{{"sha",sha}}},{"title","Change"}}},
-        {"review",{{"state","approved"},{"body","Review complete"}}}};
+        {"review",{{"id",201},{"state","approved"},{"body","Review complete"}}}};
     check(post(client,"pull_request_review","review-1",review,202).at("status") == "received","review not enqueued");
     const Json scan{{"action","appeared"},{"repository",repository},{"ref","refs/pull/1/merge"},
         {"alert",{{"html_url","https://github.com/org/flock/security/code-scanning/1"},
@@ -142,6 +153,7 @@ void run() {
     const auto inbox = client.Get("/api/inbox?bot=owner",httplib::Headers{{"Authorization","Basic fixture"}});
     check(inbox && inbox->status == 200 && inbox->body.find("Pull request review submitted") != std::string::npos &&
           inbox->body.find("Code scanning result") != std::string::npos,"review or scan missing in the Web inbox");
+    check(model.followup("review-1").empty(),"An approval was treated as requested changes");
 
     const auto inboxBeforeRequest = store.inbox(localOwner,"owner").size();
     model.reviewTask = task;
@@ -194,6 +206,71 @@ void run() {
     check(store.inbox(localOwner,"owner").size() == inboxBeforeMissingWebhook + 1 &&
           store.history(task).dump().find("review-after-prior-decision") != std::string::npos,
           "A handled review with a missing webhook hid a later request");
+
+    auto changes = review;
+    changes["review"] = {{"id",202},{"state","changes_requested"},{"body","Please check the empty input."}};
+    check(post(client,"pull_request_review","external-changes",changes,202).at("status") == "received",
+          "Changes-requested review was not enqueued");
+    auto reviewFeedback = review;
+    reviewFeedback["review"] = {{"id",204},{"state","commented"},{"body","Please check null values."}};
+    check(post(client,"pull_request_review","review-feedback",reviewFeedback,202).at("status") == "received",
+          "Commented review was not enqueued");
+    const Json inlineComment{{"action","created"},{"repository",repository},{"pull_request",review.at("pull_request")},
+                             {"comment",{{"id",301},{"body","Could you validate this field?"}}}};
+    check(post(client,"pull_request_review_comment","inline-comment",inlineComment,202).at("status") == "received",
+          "Inline review comment was not enqueued");
+    auto editedInline = inlineComment;
+    editedInline["action"] = "edited";
+    check(post(client,"pull_request_review_comment","inline-edit",editedInline,202).at("status") == "received",
+          "Inline review edit was not enqueued");
+    const Json checkRun{{"action","completed"},{"repository",repository},
+        {"check_run",{{"id",401},{"head_sha",newSha},{"name","Test"},{"conclusion","failure"},
+            {"pull_requests",Json::array({{{"number",1},{"base",{{"repo",{{"id",41}}}}}}})}}}};
+    check(post(client,"check_run","failed-check",checkRun,202).at("status") == "received",
+          "Failed check was not enqueued");
+    auto passedCheck = checkRun;
+    passedCheck["check_run"]["name"] = "Diagnose an earlier failure";
+    passedCheck["check_run"]["conclusion"] = "success";
+    check(post(client,"check_run","passed-check",passedCheck,202).at("status") == "received",
+          "Successful check was not enqueued");
+    runtime.runConversations();
+    check(model.followup("external-changes") == "changes_requested" && model.followup("review-feedback") == "review_comment" &&
+          model.followup("inline-comment") == "review_comment" && model.followup("inline-edit").empty() &&
+          model.followup("failed-check") == "failed_check" && model.followup("passed-check").empty(),
+          "Signed notifications did not distinguish actionable events from report-only updates");
+
+    const Json ownComment{{"action","created"},{"repository",repository},{"issue",{{"number",1},{"pull_request",Json::object()}}},
+                          {"comment",{{"id",101},{"body","Please check this."}}}};
+    model.conversationAction = Decision{"git_comment",
+        {{"host",hostName},{"repo",repoName},{"taskId",task},{"target","pr"},{"number",1},{"body","Please check this."}},
+        "Post what the person asked for"};
+    host->beforeCall = [&](const GitContext&) {
+        check(post(client,"issue_comment","own-comment",ownComment,202).at("status") == "received",
+              "Own comment delivery before the host returned was not accepted");
+    };
+    store.receive(localOwner,intake(),"write-comment","Please post the comment");
+    runtime.runConversations();
+    host->beforeCall = {};
+    check(host->comments == 1,"Flock did not author the expected comment");
+    auto foreignComment = ownComment;
+    foreignComment["comment"]["id"] = 102;
+    check(post(client,"issue_comment","foreign-comment",foreignComment,202).at("status") == "received",
+          "Other author's comment was not enqueued");
+
+    model.conversationAction = Decision{"git_submit_review",
+        {{"host",hostName},{"repo",repoName},{"taskId",task},{"prNumber",1},{"verdict","request_changes"},{"body","Use a test."}},
+        "Submit the review the person asked for"};
+    host->result["id"] = 203;
+    store.receive(localOwner,intake(),"write-review","Please submit a review");
+    runtime.runConversations();
+    auto ownReview = changes;
+    ownReview["review"] = {{"id",203},{"state","changes_requested"},{"body","Use a test."}};
+    check(post(client,"pull_request_review","own-review",ownReview,202).at("status") == "received",
+          "Own review was not accepted");
+    runtime.runConversations();
+    check(!model.followups.contains("own-comment") && !model.followups.contains("own-review") &&
+          model.followup("foreign-comment").empty(),
+          "A Flock-authored comment or review was delivered, or a distinct comment was hidden");
 }
 }
 

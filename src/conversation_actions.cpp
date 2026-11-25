@@ -219,12 +219,12 @@ bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
 }
 
 void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt) {
-    const auto& [bot,target,title,delivery] = receipt;
+    const auto& [bot,target,title,delivery,notify] = receipt;
     if (!acceptedSessionSend(target,delivery)) return;
     exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment)"
          " VALUES(?,?,?,?,?,?,?,?)",
          {message,bot,target.environmentId,target.threadId,delivery.run.runId,title,
-          sessionParticipationStopped(bot,target,message) ? 1 : 0,target.gatewayEnvironmentId});
+          !notify || sessionParticipationStopped(bot,target,message) ? 1 : 0,target.gatewayEnvironmentId});
 }
 
 Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
@@ -232,6 +232,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
     using enum CallOutcome;
     const auto id = message.id;
+    const bool fixesPullRequest = decision.tool == "fix_pull_request";
     const auto save = [&](Json result) {
         saveTurnResults(id,step,Json::array({redactor(message.bot).record(std::move(result))}));
     };
@@ -243,8 +244,19 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     bool savedTaskTarget = false;
     Id savedTaskId = 0, savedGeneration = 0;
     std::string savedActionId;
+    std::optional<GitPrFollowup> followup;
     try {
-        if (decision.tool == "send_to_task") {
+        if (fixesPullRequest) {
+            std::lock_guard lock(mutex);
+            followup = gitPrFollowup(message);
+            if (!followup || followup->status != GitPrFollowup::Status::available)
+                throw ToolError("Automatic follow-up is unavailable for this pull request");
+            command.environmentId = followup->session.environmentId;
+            command.gatewayEnvironmentId = followup->session.gatewayEnvironmentId;
+            command.target.threadId = followup->session.threadId;
+            command.target.gatewayEnvironmentId = followup->session.gatewayEnvironmentId;
+            command.instruction = gitPrFollowupInstruction(*followup,decision);
+        } else if (decision.tool == "send_to_task") {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             const auto task = ownTask(conversation_storage::identifier(decision.args,"taskId",true),message);
@@ -279,7 +291,9 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     const Resource resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target};
     const auto saveReceipt = [&](const Delivery& receipt) {
         if (acceptedSessionSend(target,receipt)) {
-            save({{"ok",true},{"delivery",receipt.delivery},{"environmentId",target.environmentId},{"threadId",target.threadId}});
+            Json result{{"ok",true},{"delivery",receipt.delivery}};
+            if (!fixesPullRequest) result.update({{"environmentId",target.environmentId},{"threadId",target.threadId}});
+            save(std::move(result));
         } else {
             auto result = toolFailure(receipt.detail.empty() ? "Could not confirm delivery to T3" : receipt.detail);
             if (!receipt.definitelyUnsent && (receipt.kind == Delivery::Kind::Unknown || receipt.kind == Delivery::Kind::Accepted))
@@ -307,7 +321,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             save(toolFailure(error));
         } else if (Policy(*this).forbidden(message.bot,resource.action,resource.target)) {
             save(toolFailure(approvalError(ApprovalGate::denied)));
-        } else if (!savedTaskTarget && !connectedSessionAccess(message,target)) {
+        } else if (!fixesPullRequest && !savedTaskTarget && !connectedSessionAccess(message,target)) {
             save(toolFailure("This Session is unavailable through your T3 connection"));
         }
         auto result = query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NOT NULL",{id,step});
@@ -322,7 +336,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     try {
         command.authGeneration = t3.authGeneration(
             target.gatewayEnvironmentId.empty() ? target.environmentId : target.gatewayEnvironmentId,command.config);
-        if (!savedTaskTarget) {
+        if (!fixesPullRequest && !savedTaskTarget) {
             if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
             else error = "This Session is unavailable through your T3 connection";
         }
@@ -338,14 +352,25 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             transaction.commit();
             return advance;
         }
-        if (!error.empty() || (!savedTaskTarget && !connectedSessionAccess(message,target))) {
+        if (!error.empty() || (!fixesPullRequest && !savedTaskTarget && !connectedSessionAccess(message,target))) {
             save(toolFailure(error.empty() ? "This Session is unavailable through your T3 connection" : error));
             transaction.commit();
             return advance;
         }
         auto origin = policyOrigin(message);
         Json policyPayload{decision.tool,decision.args,command.authGeneration};
-        if (savedTaskTarget) {
+        if (fixesPullRequest) {
+            const auto current = gitPrFollowup(message);
+            if (!current || current->operation != followup->operation || current->session != target ||
+                current->status != GitPrFollowup::Status::available) {
+                save(toolFailure("Automatic follow-up is unavailable for this pull request"));
+                transaction.commit();
+                return advance;
+            }
+            origin = current->origin;
+            policyPayload = {{"pullRequest",current->target.at("url")},{"diagnosis",decision.args.at("diagnosis")},
+                {"arguments",Json::array({command.instruction,command.authGeneration,target.gatewayEnvironmentId})}};
+        } else if (savedTaskTarget) {
             try {
                 const auto task = ownTask(savedTaskId,message);
                 if (task.at("generation") != savedGeneration)
@@ -385,6 +410,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{Json{{"kind","message_session"}},id,step});
         if (!sqlite3_changes(db)) return stop;
+        if (followup) recordGitPrFollowup(message,*followup);
         const auto read = Resource::sessionRead(target.environmentId,target.threadId);
         if (!message.channelScope.empty() || !Policy(*this).allows(message.bot,read)) title.clear();
         title = bounded(redactT3Tokens(redactor(message.bot).text(title)),512);
@@ -407,7 +433,7 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     std::lock_guard lock(mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
     const auto checkpoint = sessionSendReceipts.insert_or_assign(
-        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt)}).first;
+        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt),!fixesPullRequest}).first;
     Transaction transaction(db);
     recordSessionSendRun(id,checkpoint->second);
     saveReceipt(checkpoint->second.delivery);

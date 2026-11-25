@@ -970,6 +970,32 @@ void botProfilesAndAvatars() {
     std::ifstream bigFile(bigDir / "config.json");
     check(std::string(std::istreambuf_iterator<char>(bigFile),{}) == bigText,"rejected save changed config.json");
 }
+
+void pullRequestSettings() {
+    Sandbox temp;
+    const auto root = temp.path / "bots";
+    const auto folder = root / "release";
+    const auto config = botConfig();
+    createBot(folder,config,"Review releases","");
+    Bots bots(root);
+    check(bots.get("release").settings.value("fixPullRequests",true),"PR follow-ups did not default to on");
+
+    const auto saved = bots.updateProfile("release",{{"fixPullRequests",false}});
+    check(saved.at("fixPullRequests") == false && saved.at("soul") == "Review releases",
+          "turning off PR follow-ups lost the Bot role");
+    std::ifstream file(folder / "config.json");
+    auto expected = config;
+    expected["fixPullRequests"] = false;
+    check(Json::parse(file) == expected && Bots(root).get("release").settings.at("fixPullRequests") == false,
+          "the PR setting was not persisted or an unrelated setting changed");
+
+    expected["fixPullRequests"] = true;
+    write(folder / "config.json",expected.dump());
+    check(bots.get("release").settings.at("fixPullRequests") == true,"the current PR setting was not read from config");
+    expected["fixPullRequests"] = "false";
+    write(folder / "config.json",expected.dump());
+    rejects<Conflict>([&] { bots.get("release"); },"a non-boolean PR setting was accepted");
+}
 }
 
 int main() {
@@ -993,6 +1019,7 @@ int main() {
         fixedDemoFollowUpKeepsTheExplainedResult();
         botCreationCollisionIsRecoverable();
         botProfilesAndAvatars();
+        pullRequestSettings();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

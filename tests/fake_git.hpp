@@ -33,9 +33,14 @@ struct Directory {
 class Sessions final : public T3 {
 public:
     std::string authGeneration(const std::string&, const Json&) override { return "t3-fixture"; }
-    unsigned sessionMessages = 0;
+    std::vector<Command> sessionSends;
     Delivery send(const Command& command) override {
-        if (command.tool == "message_session") ++sessionMessages;
+        if (command.tool == "message_session") {
+            sessionSends.push_back(command);
+            return {Delivery::Kind::Accepted,{command.target.threadId,"followup-" + std::to_string(sessionSends.size()),{},
+                command.gatewayEnvironmentId},
+                {},false,"queued"};
+        }
         return {Delivery::Kind::Accepted,{"thread-" + command.projectId,"run-" + command.projectId,{}},{}};
     }
     Delivery reconcile(const Command&) override { return {}; }
