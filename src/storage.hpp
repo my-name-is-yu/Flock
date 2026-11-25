@@ -142,6 +142,11 @@ private:
     int fd_;
 };
 
+struct SessionMemory {
+    Id version;
+    std::string section;
+};
+
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
 std::string_view approvalError(ApprovalGate);
 enum class GitWatchStart { operationIntent, mutationAdmission };
@@ -225,6 +230,7 @@ struct Store::Impl {
     void initializeAutomationSchema();
     void retireAutomations(const Json& botIds);
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
+    std::optional<SessionMemory> sessionMemory(const Command&, Seconds now);
     void createMemory(std::string_view key, std::string_view bot, std::string_view id,
                       std::string_view content, Seconds now);
     std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);

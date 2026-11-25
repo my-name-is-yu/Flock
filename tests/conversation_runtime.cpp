@@ -128,6 +128,7 @@ struct SimulatedT3 : T3 {
     std::map<std::pair<std::string,std::string>,SessionMetadata> sessions;
     std::map<std::string,std::vector<T3Project>> projectsByEnvironment;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
+    bool deferNextRunId = false;
     std::string login = "original-login";
     InterruptOutcome interruptOutcome = InterruptOutcome::Requested;
 
@@ -161,6 +162,8 @@ struct SimulatedT3 : T3 {
         check(deliveries.emplace(command.actionId,run).second,"the same work was sent twice");
         observations.emplace(run.runId,Observation{});
         if (std::exchange(loseNextSend,false)) return {};
+        if (std::exchange(deferNextRunId,false))
+            return {Delivery::Kind::Unknown,{run.threadId,{},run.link},{}};
         return {Delivery::Kind::Accepted,run,{}};
     }
     Delivery reconcile(const Command& command) override {
@@ -193,9 +196,10 @@ struct Fixture {
     Script model;
     SimulatedT3 t3;
     std::function<void()> beforeNotes;
+    MemorySeed memorySeed;
     Seconds now = unixTime();
 
-    Fixture() {
+    explicit Fixture(MemorySeed seed = {}) : memorySeed(std::move(seed)) {
         char path[] = "/tmp/flock-conversation-runtime-XXXXXX";
         const auto* created = mkdtemp(path);
         if (!created) throw std::runtime_error("cannot create a test directory");
@@ -209,7 +213,7 @@ struct Fixture {
     }
     void restart() {
         runtime.reset();
-        store = std::make_unique<Store>(dir/"state.db");
+        store = std::make_unique<Store>(dir/"state.db",memorySeed);
         runtime = std::make_unique<Runtime>(*store,model,t3,[this](auto) {
             if (beforeNotes) beforeNotes();
             return std::string{};
@@ -2134,7 +2138,7 @@ void conversationCanReadAndChangeTheFullCurrentContract() {
 
 void newSessionsReceivePersistedTaskDecisions() {
     for (const bool explicitFresh : {false,true}) {
-        Fixture f;
+        Fixture f([](std::string_view) { return "Use the performance runner"; });
         const auto intent = "Measure the cold-start fixture, including " + std::string(4800,'i') + " the cache-disabled case";
         const auto criteria = "Report " + std::string(4500,'c') + " p99 and raw samples";
         constexpr auto startText = "Measure the cold-start fixture";
@@ -2178,7 +2182,7 @@ void newSessionsReceivePersistedTaskDecisions() {
               "the replacement did not start a separate Session for the same revision");
         for (const std::string_view text : {std::string_view(intent),std::string_view(criteria),
                 std::string_view(direction),std::string_view(userAnswer),
-                std::string_view(readyDirection)}) {
+                std::string_view(readyDirection),std::string_view("Use the performance runner")}) {
             const auto at = command.instruction.find(text);
             check(at != command.instruction.npos && at == command.instruction.rfind(text),
                   "the new Session lost, shortened or duplicated a task decision");
@@ -2229,24 +2233,59 @@ void revisedSessionDoesNotReplaySupersededDecisions() {
               "a superseded task decision reached the revised Session");
 }
 
-void oversizedAuthoritativeHandoffBlocksDelivery() {
+void authoritativeHandoffFitsBeforeMemory() {
     Fixture f;
+    const std::string protectedValue = "fixture-private-key";
+    std::string memory = "Use fixture credentials: " + protectedValue + "\n";
+    while (memory.size() + std::string_view("界").size() <= 8192) memory += "界";
+    f.store->memory(localOwner,"alpha","apply_memory_edit",{{"baseVersion",0},{"content",memory}});
+    auto policy = f.store->policy();
+    policy.submitSecret(localOwner,"alpha",policy.requestSecret("alpha",{"fixture-key"}),protectedValue);
     const auto id = f.store->submit(f.routing());
     f.reach(id,"running");
+    const auto checkMemory = [&](const Command& command, std::size_t sectionBudget) {
+        const auto& prompt = command.instruction;
+        const auto notes = prompt.find("\n\nNotes from alpha's memory:\n");
+        const auto marker = prompt.find(sessionPrompt(command.actionId,{}));
+        check(notes < marker && marker - notes <= sectionBudget && prompt.size() <= maxSessionPromptBytes &&
+              prompt.find("Use fixture credentials: [redacted]") != prompt.npos &&
+              prompt.find(protectedValue) == prompt.npos && prompt.find("[Bot memory truncated]") < marker,
+              "the Session memory exceeded its budget, lost its truncation notice, or contained a protected value");
+        Json(prompt).dump();
+        return notes;
+    };
+    checkMemory(f.t3.sent.front(),8192);
+    std::vector<std::string> directions;
     for (int i = 0; i < 9; ++i) {
         const auto key = "large-direction-" + std::to_string(i);
-        f.script(key,{send(id,{{"instruction",key + std::string(14000,'x')}})});
+        directions.push_back(key + std::string(14500,'x'));
+        f.script(key,{send(id,{{"instruction",directions.back()}})});
+    }
+    for (int i = 0; i < 8; ++i) {
+        const auto key = "large-direction-" + std::to_string(i);
         f.receive(key,key);
     }
     f.model.onResult = [](const ModelInput&) {
         return Decision{"delegate",{{"instruction","Start an independent Session"}},"Verify independently"};
     };
     f.t3.finish("run-1","Previous Run settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the instructions fit without the full memory section");
+    const auto& tight = f.t3.sent.back();
+    const auto notes = checkMemory(tight,4000);
+    check(tight.instruction.starts_with("Start an independent Session"),"memory displaced the work instruction");
+    for (std::size_t i = 0; i < 8; ++i)
+        check(tight.instruction.find(directions[i]) < notes,"memory displaced an accepted instruction");
+
+    for (int i = 0; i < 9; ++i) {
+        const auto key = "large-direction-" + std::to_string(i);
+        f.receive("next-" + key,key);
+    }
+    f.t3.finish("run-2","Previous Run settled again");
     f.reach(id,"sending");
     f.restart();
     f.reach(id,"waiting");
     const auto task = f.task(id);
-    check(f.t3.sent.size() == 1 && task["pendingInstructions"].size() == 9 &&
+    check(f.t3.sent.size() == 2 && task["pendingInstructions"].size() == 9 &&
           task["wait"]["reason"] == "settings" &&
           task["wait"]["text"].get<std::string>().find("size limit") != std::string::npos,
           "a new Session silently received an incomplete authoritative handoff");
@@ -2346,7 +2385,7 @@ void environmentsResolveByNameOrId() {
           "a canonical ID was shadowed by an alias, an alias was missed, or an unknown environment was accepted");
 }
 void existingSessionStartsNormalWork() {
-    Fixture f;
+    Fixture f([](std::string_view) { return "Prefer integration tests."; });
     T3Connections connector(*f.store);
     connector.connect("desktop",localOwner.id,48123);
     connector.connect("cloud",localOwner.id,48123);
@@ -2392,6 +2431,8 @@ void existingSessionStartsNormalWork() {
               sent.environmentId == (native ? "cloud" : "desktop") &&
               sent.projectId == (native ? "other-project" : "project"),
               "work lost the selected Thread or used the Bot's launch route");
+        check(sent.instruction.find("Prefer integration tests.") != sent.instruction.npos,
+              "work in a Session found by search did not receive the Bot's memory");
         const auto assigned = f.task(taskId).at("activeRun");
         check(assigned.at("runId") != firstRunId && assigned.at("threadId") == sent.target.threadId,
               "Flock tracked earlier work instead of the assigned Run");
@@ -2408,6 +2449,54 @@ void existingSessionStartsNormalWork() {
     check(f.lastTurn().front().at("result").at("ok") == false && f.t3.sent.size() == sentBefore,
           "a raw Thread ID bypassed Session selection");
 }
+
+void sessionMemoryFollowsTheAcceptedVersion() {
+    Fixture f([](std::string_view bot) { return bot == "alpha" ? "Use baseline A." : "Beta's private convention."; });
+    f.store->memory(localOwner,"beta","read_memory",Json::object());
+    f.store->memory(localOwner,"alpha","apply_memory_edit",
+        {{"docId","team/notes.md"},{"baseVersion",0},{"content","Shared playbook."}});
+    f.t3.deferNextRunId = true;
+    f.t3.deliveryVisible = false;
+    auto routing = f.routing();
+    routing.config["botDisplayName"] = "Release";
+    const auto id = f.store->submit(routing);
+    f.advanceUntil([&] { return f.t3.sent.size() == 1; },"the initial Session did not receive work");
+    const auto first = f.t3.sent.front().instruction;
+    check(first.find("\n\nNotes from Release's memory:\nUse baseline A.") != first.npos &&
+          first.find("Beta's private convention.") == first.npos && first.find("Shared playbook.") == first.npos,
+          "the first prompt did not include only the owning Bot's private memory");
+    check(f.task(id).at("pendingAction").dump().find("Use baseline A.") == first.npos,
+          "the pending work details exposed the memory snapshot");
+
+    f.restart();
+    f.t3.deliveryVisible = true;
+    f.reach(id,"running");
+    check(f.t3.sent.size() == 1 && !f.t3.reconciled.empty() && f.t3.reconciled.back().instruction == first,
+          "recovery did not match the original prompt containing memory");
+
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"follow_up",{{"instruction","Retest with the fixture"}},"Verify the prior report"};
+    };
+    const auto follow = [&](int run) {
+        f.t3.finish("run-" + std::to_string(run),"Prior evidence");
+        f.advanceUntil([&] { return f.t3.sent.size() == static_cast<std::size_t>(run + 1); },
+                       "the Session did not receive its follow-up");
+        const auto& next = f.t3.sent.back();
+        check(next.tool == "follow_up" && next.target.threadId == "session-1","work left the existing Session");
+        return next.instruction;
+    };
+    const auto unchanged = follow(1);
+    check(unchanged.find("Notes from") == unchanged.npos,"unchanged seed memory was repeated");
+
+    f.store->memory(localOwner,"alpha","apply_memory_edit",{{"baseVersion",0},{"content","Use baseline B."}});
+    const auto updated = follow(2);
+    check(updated.find("Notes from Release's memory:\nUse baseline B.") != updated.npos &&
+          updated.find("Use baseline A.") == updated.npos,"the follow-up missed the updated memory");
+
+    f.store->memory(localOwner,"alpha","apply_memory_edit",{{"baseVersion",1},{"content",""}});
+    const auto cleared = follow(3);
+    check(cleared.find("Notes from") == cleared.npos,"empty memory added a section to the follow-up");
+}
 }
 
 int main(int argc, char** argv) {
@@ -2419,6 +2508,7 @@ int main(int argc, char** argv) {
         }
         durableInboxAndTargetedRevision();
         existingSessionStartsNormalWork();
+        sessionMemoryFollowsTheAcceptedVersion();
         linkedResultStartsANewSession();
         independentRequestQueuesSeparately();
         followUpCarriesTheReferencedReport();
@@ -2473,7 +2563,7 @@ int main(int argc, char** argv) {
         environmentsResolveByNameOrId();
         newSessionsReceivePersistedTaskDecisions();
         revisedSessionDoesNotReplaySupersededDecisions();
-        oversizedAuthoritativeHandoffBlocksDelivery();
+        authoritativeHandoffFitsBeforeMemory();
         intakeChangeScopesTheFirstSessionAnswers();
         interruptLeavesTheTaskOpen();
         interruptNoOpsDoNotAcknowledgeARequest();
