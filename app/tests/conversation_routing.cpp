@@ -109,6 +109,16 @@ void parallelDestinations() {
     runtime.runConversations();
     check(!model.receipt.value("ok", true) && model.receipt.dump().find("Commit verification is not supported") != std::string::npos,
           "resume must explicitly reject optional commit verification when its saved destination cannot be verified");
+
+    auto follower = intake;
+    follower.request = "Run after verification";
+    for (const auto& target : task.runTargets()) {
+        follower.environmentId = target.route.environmentId;
+        follower.projectId = target.route.projectId;
+        const auto queued = store.task(store.submit(follower));
+        check(queued.blockedBy && queued.blockedBy->id == task.id,
+              "a saved destination must reserve its project before dispatch creates an outbox action");
+    }
 }
 
 void genericDestinationCounts() {
@@ -186,23 +196,18 @@ void destinationWithoutSessionIsUnavailable() {
     Store store(database);
     const auto id = store.submit(intake);
     const auto generation = store.task(id).task.generation;
-    const auto runResults = Json::array({{{"name", "mini"},
-                                          {"environmentId", "mini-env"},
-                                          {"projectId", "mini-project"},
-                                          {"actionId", "saved-action"},
-                                          {"status", "running"}}});
     sqlite3* raw = nullptr;
     const auto opened = sqlite3_open(database.c_str(), &raw);
     const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
     check(opened == SQLITE_OK, "could not reopen the task database");
     sqlite3_stmt* rawStatement = nullptr;
-    const auto prepared =
-        sqlite3_prepare_v2(db.get(), "UPDATE tasks SET data=json_set(json_remove(data,'$.runTargets'),'$.runResults',json(?)) WHERE id=?",
-                           -1, &rawStatement, nullptr);
+    const auto prepared = sqlite3_prepare_v2(db.get(), R"SQL(
+INSERT INTO task_run_destinations(task_id,position,name,environment_id,project_id,action_id,status,data)
+VALUES(?,0,'mini','mini-env','mini-project','saved-action','running','{}')
+)SQL",
+                                             -1, &rawStatement, nullptr);
     const std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(rawStatement, sqlite3_finalize);
-    const auto serialized = runResults.dump();
-    check(prepared == SQLITE_OK && sqlite3_bind_text(statement.get(), 1, serialized.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK &&
-              sqlite3_bind_int64(statement.get(), 2, id) == SQLITE_OK && sqlite3_step(statement.get()) == SQLITE_DONE,
+    check(prepared == SQLITE_OK && sqlite3_bind_int64(statement.get(), 1, id) == SQLITE_OK && sqlite3_step(statement.get()) == SQLITE_DONE,
           "could not persist the destination Run fixture");
 
     RoutingModel model;

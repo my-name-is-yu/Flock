@@ -149,6 +149,6 @@ void redactQuestion(Question& question, const SecretRedactor& scrub) {
 
 void Store::Impl::saveDecisionCheckpoint(TaskData& task, DecisionCheckpoint checkpoint) {
     task.pendingDecision = std::move(checkpoint);
-    exec("UPDATE tasks SET data=? WHERE id=?", {encodeTask(task), task.id});
+    exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?)) WHERE id=?", {checkpointJson(*task.pendingDecision), task.id});
 }
 }

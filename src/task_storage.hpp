@@ -3,12 +3,12 @@
 #include "flock/core.hpp"
 
 namespace flockv0 {
-class Statement;
 class RecordDecoder;
 
+const std::string& taskProjection();
 TaskState decodeTaskState(Id id, std::string_view);
-TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_view data);
-TaskData decodeTaskRow(const Statement&, int col = 0);
+TaskData decodeTaskPayload(TaskData, std::string_view data);
+Json encodeTaskPayload(const TaskData&);
 Json encodeTask(const TaskData&);
 Json runTargetJson(const RunTarget&);
 Json runTargetsJson(std::span<const RunTarget>);

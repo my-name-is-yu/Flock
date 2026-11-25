@@ -270,18 +270,19 @@ WITH slots AS MATERIALIZED (
   WHERE kind='consult' AND state NOT IN ('completed','cancelled')
   UNION
   SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
-  WHERE state='cancelling' AND NOT tasks.has_active_run AND NOT EXISTS (
+  WHERE state='cancelling' AND tasks.active_run IS NULL AND NOT EXISTS (
     SELECT 1 FROM outbox WHERE outbox.id=tasks.action_id AND phase='started'
   )
 )
 SELECT task.id,NULL AS action_id FROM runnable JOIN tasks task ON task.id=runnable.id
-WHERE NOT task.has_run_results AND NOT EXISTS (
+WHERE NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id AND action_id IS NOT NULL)
+AND NOT EXISTS (
   SELECT 1 FROM policy_approvals approval WHERE approval.task=task.id AND turn=0 AND status='pending'
 )
 UNION ALL
 SELECT slot.id,slot.action_id FROM slots slot JOIN tasks task ON task.id=slot.id
 WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR EXISTS (
-  SELECT 1 FROM outbox stop WHERE stop.id=slot.action_id AND json_extract(stop.data,'$.stopRequested')=1
+  SELECT 1 FROM outbox stop WHERE stop.id=slot.action_id AND stop.stop_operation IS NOT NULL
 ) OR (
   slot.blocker_id IS NULL AND NOT EXISTS (
     SELECT 1 FROM policy_approvals WHERE operation=?1 || slot.action_id AND status='pending'
@@ -410,9 +411,10 @@ ORDER BY 1,2)SQL",
         db.clearWait(task, "connection_restored");
         task.state = TaskState::deciding;
         if (waitId) {
-            auto row = db.query("SELECT data FROM waits WHERE id=? AND task_id=? AND resolution='superseded'", {*waitId, task.id});
+            auto row =
+                db.query("SELECT id,reason,data FROM waits WHERE id=? AND task_id=? AND resolution='superseded'", {*waitId, task.id});
             if (row.next()) {
-                auto wait = from_json(*waitId, row.string(0));
+                auto wait = decodeWaitRow(row);
                 const auto reason = wait.reason();
                 const auto* asked = std::get_if<ModelQuestionWait>(&wait.details);
                 if (wait.eventId == target.eventId && wait.run == target.run &&
@@ -1717,7 +1719,7 @@ FROM task_revisions r WHERE r.id=? AND r.task_id=?
         std::set<InstructionId> pendingIds;
         for (const auto& item : pending) pendingIds.emplace(item.messageId, item.step);
         auto rows = db.query(R"SQL(
-SELECT j.id,j.kind,j.data,w.data,
+SELECT j.id,j.kind,j.data,w.id,w.reason,w.data,
        CASE j.kind WHEN 'instruction_accepted' THEN EXISTS (
          SELECT 1 FROM journal d WHERE d.task_id=j.task_id AND d.kind='instruction_delivered'
            AND json_extract(d.data,'$.messageId')=json_extract(j.data,'$.messageId')
@@ -1738,7 +1740,7 @@ ORDER BY j.id
             const auto kind = rows.string(1);
             const auto item = rows.json(2);
             const bool answer = kind == "user_answer";
-            if (kind == "instruction_accepted" && !rows.number(4) && !pendingIds.contains({item.at("messageId"), item.at("step")}))
+            if (kind == "instruction_accepted" && !rows.number(6) && !pendingIds.contains({item.at("messageId"), item.at("step")}))
                 continue;
             if (std::exchange(first, false))
                 instruction += "\n\nUser decisions for this task, oldest first. Apply later directions where they replace "
@@ -1749,7 +1751,7 @@ ORDER BY j.id
             if (item.contains("step")) instruction += ", step " + item.at("step").dump();
             if (answer) instruction += ", wait " + item.at("waitId").dump();
             instruction += "):\n";
-            if (answer) instruction += from_json(item.at("waitId"), rows.string(3)).text + "\nAnswer: ";
+            if (answer) instruction += decodeWaitRow(rows, 3).text + "\nAnswer: ";
             instruction += field(item, "text");
             if (instruction.size() > limits::session_prompt::maxBytes) throw SessionContextLimit{};
             if (item.contains("source")) sources.push_back(decodeOutboxSource(item.at("source"), {"journal", rows.string(0), "source"}));

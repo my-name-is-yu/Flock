@@ -93,10 +93,6 @@ Json readAnswers(const Json& data, const RecordDecoder& row) {
     return data;
 }
 
-SessionMemory readMemory(const Json& data, const RecordDecoder& row) {
-    return {row.get<Id>(data, "version"), row.get<std::string>(data, "section"), row.get<std::size_t>(data, "excerptBytes")};
-}
-
 OutboxStopApproval readStopApproval(const Json& data, const RecordDecoder& row) {
     const auto& policy = row.require(data, "stopPolicy");
     const auto& origin = row.require(data, "stopPolicyOrigin");
@@ -114,22 +110,20 @@ OutboxStopApproval readStopApproval(const Json& data, const RecordDecoder& row) 
             originRow.get<bool>(origin, "background")};
 }
 
-std::optional<OutboxStop> readStop(const Json& data, const RecordDecoder& row) {
+std::optional<OutboxStop> readStop(const Json& data, const RecordDecoder& row, std::optional<std::string> operation) {
     const bool hasRun = data.contains("stopThreadId") || data.contains("stopRunId");
     const bool hasApproval = data.contains("stopPolicy") || data.contains("stopPolicyOrigin");
-    if (!row.optional<bool>(data, "stopRequested").value_or(false)) {
-        if (hasRun || hasApproval || data.contains("stopOperation")) row.fail("stopRequested", "required for a stop request");
+    if (!operation) {
+        if (hasRun || hasApproval) row.fail("stopOperation", "required for a stop request");
         return std::nullopt;
     }
-    OutboxStop stop{row.get<std::string>(data, "stopOperation"), std::nullopt, std::nullopt};
+    OutboxStop stop{std::move(*operation), std::nullopt, std::nullopt};
     if (hasRun) stop.run = OutboxRunIdentity{row.get<std::string>(data, "stopThreadId"), row.get<std::string>(data, "stopRunId")};
     if (hasApproval) stop.approval = readStopApproval(data, row);
     return stop;
 }
 
-void writeStop(Json& data, const OutboxStop& stop) {
-    data["stopRequested"] = true;
-    data["stopOperation"] = stop.operation;
+void writeStopPayload(Json& data, const OutboxStop& stop) {
     if (stop.run) {
         data["stopRunId"] = stop.run->runId;
         data["stopThreadId"] = stop.run->threadId;
@@ -143,6 +137,11 @@ void writeStop(Json& data, const OutboxStop& stop) {
                                     {"background", approval->background}};
     }
 }
+
+constexpr std::string_view outboxColumns = "tool,environment_id,project_id,revision_id,session_participation_id,stop_operation,"
+                                           "instruction,instruction_deferred,memory_version,memory_section,memory_excerpt_bytes,data";
+constexpr std::string_view outboxBindings = "(?,?,?,?,?,?,?,?,?,?,?,?)";
+const auto outboxUpdate = "UPDATE outbox SET (" + std::string(outboxColumns) + ")=" + std::string(outboxBindings);
 }
 
 std::string_view commandToolName(CommandTool tool) {
@@ -250,23 +249,16 @@ OutboxSourceRun decodeOutboxSourceRun(const Json& data, const RecordDecoder& row
     return row.decodeClosed(data, readSourceRun);
 }
 
-Json outboxActionJson(const OutboxAction& outbox) {
+namespace {
+Json outboxPayload(const OutboxAction& outbox) {
     const auto& command = outbox.command;
-    Json data = {{"tool", commandToolName(command.tool)},
-                 {"environmentId", command.environmentId},
-                 {"projectId", command.projectId},
-                 {"target", command.target.threadId.empty() ? Json(nullptr) : runJson(command.target)},
+    Json data = {{"target", command.target.threadId.empty() ? Json(nullptr) : runJson(command.target)},
                  {"questionId", command.questionId},
                  {"answers", command.answers},
-                 {"revisionId", nullableId(outbox.revisionId)},
                  {"instructions", Json::array()},
                  {"contextIds", contextJson(outbox.contextIds)},
                  {"sourceResultRefs", Json::array()},
                  {"chargesBudget", outbox.chargesBudget}};
-    if (outbox.instructionBase)
-        data["instructionBase"] = *outbox.instructionBase;
-    else
-        data["instruction"] = command.instruction;
     if (!command.gatewayEnvironmentId.empty()) data["gatewayEnvironmentId"] = command.gatewayEnvironmentId;
     if (outbox.destinationAction) data["destinationAction"] = true;
     if (outbox.commit) {
@@ -276,36 +268,60 @@ Json outboxActionJson(const OutboxAction& outbox) {
     if (command.candidate) data["candidate"] = runJson(*command.candidate);
     if (!command.candidateQuestionId.empty()) data["candidateQuestionId"] = command.candidateQuestionId;
     if (!command.launchReceiptThreadId.empty()) data["launchReceiptThreadId"] = command.launchReceiptThreadId;
-    writeOptional(data, "sessionParticipationId", outbox.sessionParticipationId);
-    if (outbox.stop) writeStop(data, *outbox.stop);
+    if (outbox.stop) writeStopPayload(data, *outbox.stop);
     for (const auto& item : outbox.instructions) data["instructions"].push_back(instructionJson(item));
     for (const auto& source : outbox.sourceResultRefs) data["sourceResultRefs"].push_back(sourceJson(source));
     return data;
 }
+}
 
-Json to_json(const Outbox& outbox) {
-    auto data = outboxActionJson(outbox);
-    if (const auto& memory = outbox.sessionMemory)
-        data["sessionMemory"] = {{"version", memory->version}, {"section", memory->section}, {"excerptBytes", memory->excerptBytes}};
+Json outboxActionJson(const OutboxAction& outbox) {
+    const auto& command = outbox.command;
+    auto data = outboxPayload(outbox);
+    data["tool"] = commandToolName(command.tool);
+    data["environmentId"] = command.environmentId;
+    data["projectId"] = command.projectId;
+    data["revisionId"] = nullableId(outbox.revisionId);
+    if (outbox.instructionBase)
+        data["instructionBase"] = *outbox.instructionBase;
+    else
+        data["instruction"] = command.instruction;
+    writeOptional(data, "sessionParticipationId", outbox.sessionParticipationId);
+    if (outbox.stop) {
+        data["stopRequested"] = true;
+        data["stopOperation"] = outbox.stop->operation;
+    }
     return data;
 }
 
-Outbox from_json(std::string_view id, std::string_view phase, std::string_view authGeneration, std::string_view text) {
+Json outboxColumnValues(const Outbox& outbox) {
+    const auto& command = outbox.command;
+    const auto& memory = outbox.sessionMemory;
+    return Json::array({commandToolName(command.tool), command.environmentId, command.projectId, nullableId(outbox.revisionId),
+                        nullableId(outbox.sessionParticipationId), outbox.stop ? Json(outbox.stop->operation) : Json(nullptr),
+                        outbox.instructionBase ? *outbox.instructionBase : command.instruction,
+                        static_cast<int>(outbox.instructionBase.has_value()), memory ? Json(memory->version) : Json(nullptr),
+                        memory ? Json(memory->section) : Json(nullptr), memory ? Json(memory->excerptBytes) : Json(nullptr),
+                        outboxPayload(outbox)});
+}
+
+Outbox decodeOutboxRow(const Statement& columns) {
+    const auto id = columns.string(0);
     const RecordDecoder row("outbox", id);
-    const auto storedPhase = enumValue(outboxPhases, phase);
+    const auto storedPhase = enumValue(outboxPhases, columns.string(1));
     if (!storedPhase) row.fail("phase", "unknown outbox phase");
-    const auto data = row.parse(text);
+    const auto data = row.parse(columns.string(14));
     row.object(data);
 
-    const auto tool = commandToolFromName(row.get<std::string>(data, "tool"));
+    const auto tool = commandToolFromName(columns.string(3));
     if (!tool || *tool == CommandTool::message_session) row.fail("tool", "unknown outbox tool");
     Outbox outbox;
     auto& command = outbox.command;
     command.actionId = id;
     command.tool = *tool;
-    command.environmentId = row.get<std::string>(data, "environmentId");
-    command.projectId = row.get<std::string>(data, "projectId");
-    outbox.authGeneration = authGeneration;
+    command.environmentId = columns.string(4);
+    command.projectId = columns.string(5);
+    outbox.authGeneration = columns.string(2);
     command.gatewayEnvironmentId = row.optional<std::string>(data, "gatewayEnvironmentId").value_or("");
     command.questionId = row.get<std::string>(data, "questionId");
     command.answers = readAnswers(row.require(data, "answers"), row.nested("answers"));
@@ -317,14 +333,13 @@ Outbox from_json(std::string_view id, std::string_view phase, std::string_view a
     command.launchReceiptThreadId = row.optional<std::string>(data, "launchReceiptThreadId").value_or("");
 
     outbox.phase = *storedPhase;
-    outbox.revisionId = row.nullable<Id>(data, "revisionId");
-    outbox.instructionBase = row.optional<std::string>(data, "instructionBase");
-    if (outbox.instructionBase) {
-        if (data.contains("instruction")) row.fail("instruction", "unexpected with instructionBase");
+    if (!columns.null(6)) outbox.revisionId = columns.number(6);
+    if (columns.number(10)) {
         if (*tool != CommandTool::delegate && *tool != CommandTool::start_in_session)
             row.fail("instructionBase", "unexpected for this outbox tool");
+        outbox.instructionBase = columns.string(9);
     } else {
-        command.instruction = row.get<std::string>(data, "instruction");
+        command.instruction = columns.string(9);
     }
     outbox.instructions = readArray(row.require(data, "instructions"), row.nested("instructions"), readInstruction);
     outbox.contextIds = readContext(row.require(data, "contextIds"), row.nested("contextIds"));
@@ -333,31 +348,42 @@ Outbox from_json(std::string_view id, std::string_view phase, std::string_view a
     outbox.destinationAction = row.optional<bool>(data, "destinationAction").value_or(false);
     if (data.contains("expectedCommit") || data.contains("markedCommitChecks"))
         outbox.commit = OutboxCommit{row.get<std::string>(data, "expectedCommit"), row.get<bool>(data, "markedCommitChecks")};
-    outbox.sessionParticipationId = row.optional<Id>(data, "sessionParticipationId");
-    if (const auto memory = data.find("sessionMemory"); memory != data.end())
-        outbox.sessionMemory = readMemory(*memory, row.nested("sessionMemory"));
-    outbox.stop = readStop(data, row);
+    if (!columns.null(7)) outbox.sessionParticipationId = columns.number(7);
+    if (!columns.null(11)) {
+        const auto excerptBytes = columns.number(13);
+        if (!std::in_range<std::size_t>(excerptBytes)) row.fail("sessionMemory.excerptBytes", "integer out of range");
+        outbox.sessionMemory = SessionMemory{columns.number(11), columns.string(12), static_cast<std::size_t>(excerptBytes)};
+    }
+    outbox.stop = readStop(data, row, columns.null(8) ? std::nullopt : std::optional{columns.string(8)});
     return outbox;
 }
 
 std::optional<Outbox> Store::Impl::outbox(const TaskData& task, std::string_view actionId) const {
     const auto id = actionId.empty() ? task.actionId : std::string(actionId);
     if (id.empty()) return std::nullopt;
-    auto row = query("SELECT data,phase,auth_generation FROM outbox WHERE id=? AND task_id=?", {id, task.id});
+    static const auto sql = "SELECT id,phase,auth_generation," + std::string(outboxColumns) + " FROM outbox WHERE id=? AND task_id=?";
+    auto row = query(sql.c_str(), {id, task.id});
     if (!row.next()) return std::nullopt;
-    return from_json(id, row.string(1), row.string(2), row.string(0));
+    return decodeOutboxRow(row);
 }
 
 void Store::Impl::insertOutbox(Id task, const Outbox& action) {
-    exec("INSERT INTO outbox(id,task_id,phase,auth_generation,data) VALUES(?,?,?,?,?)",
-         {action.command.actionId, task, outboxPhaseName(action.phase), action.authGeneration, to_json(action)});
+    static const auto sql =
+        "INSERT INTO outbox(" + std::string(outboxColumns) + ",id,task_id,phase,auth_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    auto values = outboxColumnValues(action);
+    values.push_back(action.command.actionId);
+    values.push_back(task);
+    values.push_back(outboxPhaseName(action.phase));
+    values.push_back(action.authGeneration);
+    exec(sql.c_str(), values);
 }
 
 bool Store::Impl::saveOutbox(const Outbox& action, std::optional<OutboxPhase> expected) {
-    if (expected)
-        exec("UPDATE outbox SET data=? WHERE id=? AND phase=?", {to_json(action), action.command.actionId, outboxPhaseName(*expected)});
-    else
-        exec("UPDATE outbox SET data=? WHERE id=?", {to_json(action), action.command.actionId});
+    static const auto sql = outboxUpdate + " WHERE id=? AND phase=coalesce(?,phase)";
+    auto values = outboxColumnValues(action);
+    values.push_back(action.command.actionId);
+    values.push_back(expected ? Json(outboxPhaseName(*expected)) : Json(nullptr));
+    exec(sql.c_str(), values);
     return sqlite3_changes(db) == 1;
 }
 
@@ -370,14 +396,19 @@ bool Store::Impl::setOutboxPhase(std::string_view id, OutboxPhase phase, std::op
 }
 
 bool Store::Impl::startOutbox(const Outbox& action, std::string_view authGeneration) {
-    exec("UPDATE outbox SET phase='started',auth_generation=?,data=? WHERE id=? AND phase='ready'",
-         {authGeneration, to_json(action), action.command.actionId});
+    static const auto sql = outboxUpdate + ",phase='started',auth_generation=? WHERE id=? AND phase='ready'";
+    auto values = outboxColumnValues(action);
+    values.push_back(authGeneration);
+    values.push_back(action.command.actionId);
+    exec(sql.c_str(), values);
     return sqlite3_changes(db) == 1;
 }
 
 bool Store::Impl::prepareOutbox(const Outbox& action) {
-    exec("UPDATE outbox SET data=? WHERE id=? AND phase='ready' AND json_type(data,'$.instruction') IS NULL",
-         {to_json(action), action.command.actionId});
+    static const auto sql = outboxUpdate + " WHERE id=? AND phase='ready' AND instruction_deferred=1";
+    auto values = outboxColumnValues(action);
+    values.push_back(action.command.actionId);
+    exec(sql.c_str(), values);
     return sqlite3_changes(db) == 1;
 }
 }

@@ -240,17 +240,15 @@ FROM local_machine_connections ORDER BY id DESC
 void Store::decideLocalConnection(const Person& actor, Id id, bool approve) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    auto row = p_->query(R"SQL(
-SELECT c.bot_id,c.machine_id,c.machine_owner,c.status,c.thread_id,c.environment_id,t.data,t.id,t.state,t.generation
-FROM local_machine_connections c JOIN tasks t ON t.id=c.task_id WHERE c.id=?
-)SQL",
-                         {id});
+    static const auto sql = "SELECT c.bot_id,c.machine_id,c.machine_owner,c.status,c.thread_id,c.environment_id," + taskProjection() +
+                            " FROM local_machine_connections c JOIN tasks t ON t.id=c.task_id WHERE c.id=?";
+    auto row = p_->query(sql.c_str(), {id});
     if (!row.next() || row.string(2) != actor.id || !Policy(*p_).allows(actor, Action::bot_decide, row.string(0)))
         throw ChannelAccessDenied("Only the machine owner can review this connection");
     if (row.string(3) != "pending") throw Conflict("Local connection is no longer pending");
     if (approve) {
         const auto machine = p_->localMachines.find(row.string(1));
-        const auto task = decodeTaskRow(row, 6);
+        const auto task = p_->readTask(row, 6);
         const auto& active = task.activeRun;
         if (machine == p_->localMachines.end() || machine->second->owner() != actor.id ||
             (task.state != TaskState::running && task.state != TaskState::waiting) || !active || active->ref.threadId != row.string(4) ||

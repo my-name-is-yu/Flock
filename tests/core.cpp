@@ -63,7 +63,7 @@ void checkSchemaRefusals(const std::filesystem::path& freshDatabase) {
     const auto dir = freshDatabase.parent_path();
     unsupportedSchemaLeavesDatabaseIntact(dir / "unmarked.db", 0, 0, currentVersion);
     unsupportedSchemaLeavesDatabaseIntact(dir / "unrelated.db", 123, currentVersion, currentVersion);
-    for (const int version : {1, 2, 6, 7, 8, 9, 10, 11, currentVersion + 1})
+    for (const int version : {1, 2, 6, 7, 8, 9, 10, 11, currentVersion - 1, currentVersion + 1})
         unsupportedSchemaLeavesDatabaseIntact(dir / ("version-" + std::to_string(version) + ".db"), 0x464c4f43, version, currentVersion);
 }
 

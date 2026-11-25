@@ -6,10 +6,11 @@
 namespace flockv0 {
 class RecordDecoder;
 class SecretRedactor;
+class Statement;
 std::string_view outboxPhaseName(OutboxPhase);
 Json outboxActionJson(const OutboxAction&);
-Json to_json(const Outbox&);
-Outbox from_json(std::string_view id, std::string_view phase, std::string_view authGeneration, std::string_view data);
+Json outboxColumnValues(const Outbox&);
+Outbox decodeOutboxRow(const Statement&);
 std::vector<OutboxInstruction> taskInstructions(const Json&, Id task, std::string_view key = "pendingInstructions");
 Json instructionJson(const OutboxInstruction&);
 Json instructionsJson(std::span<const OutboxInstruction>);

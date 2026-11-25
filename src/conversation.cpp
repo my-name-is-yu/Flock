@@ -130,20 +130,23 @@ Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, 
             {"environmentId", origin->target.environmentId}, {"threadId", origin->target.threadId}, {"title", scrub.text(origin->title)}};
     } else if (replyTo && (source == conversation::PrincipalSource::trusted || source == conversation::PrincipalSource::web)) {
         auto previous = query(R"SQL(
-SELECT t.data,t.id,t.state,t.generation,t.has_session_origin,json_extract(m.routing,'$.sessionOrigin'),
-       json_extract(m.routing,'$.sessionInvitationDepth') FROM journal j
+SELECT t.origin_environment_id,t.origin_thread_id,t.origin_gateway_environment_id,t.origin_title,
+       json_extract(m.routing,'$.sessionOrigin'),json_extract(m.routing,'$.sessionInvitationDepth')
+FROM journal j
 LEFT JOIN conversation_turns turn ON turn.reply_id=j.id
 LEFT JOIN tasks t ON t.id=j.task_id AND t.bot_id=?2
 JOIN messages m ON m.id=coalesce(turn.message_id,t.source_message_id,j.id)
 WHERE j.id=?1 AND m.bot_id=?2 AND m.person_id=?3
-  AND (t.has_session_origin OR json_type(m.routing,'$.sessionOrigin')='object')
+  AND (t.origin_environment_id IS NOT NULL OR json_type(m.routing,'$.sessionOrigin')='object')
 )SQL",
                               {replyTo, routing.botId, actor.id});
         if (previous.next()) {
-            auto inherited = previous.number(4) ? sessionOriginJson(decodeTaskRow(previous).sessionOrigin.value()) : previous.json(5);
+            auto inherited = previous.null(0)
+                                 ? previous.json(4)
+                                 : sessionOriginJson({{previous.string(0), previous.string(1), previous.string(2)}, previous.string(3)});
             inherited["title"] = scrub.text(field(inherited, "title"));
             saved["sessionOrigin"] = std::move(inherited);
-            if (const auto depth = previous.number(6)) saved["sessionInvitationDepth"] = depth;
+            if (const auto depth = previous.number(5)) saved["sessionInvitationDepth"] = depth;
         }
     }
     Json event = Json::object();

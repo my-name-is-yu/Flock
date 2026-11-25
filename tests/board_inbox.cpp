@@ -59,9 +59,9 @@ struct Database {
     }
     void pause(Id task, std::string_view reason) {
         const auto id = std::to_string(task);
-        Json wait{{"reason", reason}, {"text", "Fixture approval"}, {"eventId", 0}, {"run", nullptr}};
+        Json wait{{"text", "Fixture approval"}, {"eventId", 0}, {"run", nullptr}};
         if (reason == "budget") wait.update({{"attempted", "follow_up"}, {"decisionReason", ""}, {"usage", Json::object()}});
-        exec("INSERT INTO waits(task_id,data) VALUES(" + id + ",'" + wait.dump() + "')");
+        exec("INSERT INTO waits(task_id,reason,data) VALUES(" + id + ",'" + std::string(reason) + "','" + wait.dump() + "')");
         exec("UPDATE tasks SET state='waiting',generation=generation+1 WHERE id=" + id);
     }
 };

@@ -1,10 +1,11 @@
 #include "../src/task_storage.hpp"
+#include "../src/storage.hpp"
 
 #include "flock/record_decode_error.hpp"
 
 #include <array>
 #include <iostream>
-#include <limits>
+#include <unistd.h>
 
 using namespace flockv0;
 using namespace std::literals;
@@ -16,28 +17,43 @@ void check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
+struct SavedTask {
+    struct Directory {
+        std::filesystem::path path;
+        Directory() {
+            char pattern[] = "/tmp/flock-task-record-XXXXXX";
+            if (const auto* created = mkdtemp(pattern))
+                path = created;
+            else
+                throw std::runtime_error("Cannot create task test directory");
+        }
+        ~Directory() { std::filesystem::remove_all(path); }
+    } directory;
+    Store store{directory.path / "state.db"};
+    Id task = store.submit({.botId = "bot", .request = "Original request", .environmentId = "net", .projectId = "project"});
+
+    void exec(const char* sql, Json args = Json::array()) {
+        sqlite3* raw = nullptr;
+        const auto opened = sqlite3_open(store.path().c_str(), &raw);
+        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
+        check(opened == SQLITE_OK, "Could not open task fixture database");
+        Statement(db.get(), sql, args).next();
+    }
+
+    TaskData load() const { return store.task(task).task; }
+};
+
 Json stored() {
-    return {{"botId", "bot"},
-            {"request", "Original request"},
-            {"intent", "Revised request"},
-            {"environmentId", "net"},
-            {"projectId", "project"},
+    return {{"intent", "Revised request"},
             {"doneWhen", "Provide results"},
             {"config", {{"model", "example"}, {"custom", Json::array({"one", "two"})}}},
-            {"actionId", ""},
             {"eventId", 0},
             {"deadline", 0},
-            {"activeRun", nullptr},
-            {"lastRun", nullptr},
             {"createdAt", 1700000000},
             {"remaining", 3},
             {"additionalUsed", 0},
             {"feedback", "Run is ready"},
             {"question", nullptr}};
-}
-
-Json pendingDestination() {
-    return {{"environmentId", "remote"}, {"projectId", "other"}, {"gatewayEnvironmentId", "other-gateway"}, {"pinned", true}};
 }
 
 void roundTrips() {
@@ -47,44 +63,47 @@ void roundTrips() {
         std::pair{running, "running"sv},       std::pair{waiting, "waiting"sv},     std::pair{peer_waiting, "peer_waiting"sv},
         std::pair{cancelling, "cancelling"sv}, std::pair{completed, "completed"sv}, std::pair{cancelled, "cancelled"sv},
     };
-    const auto base = stored();
-    const auto intake = decodeTask(id, "queued", generation, base.dump());
-    check(!intake.gatewayEnvironmentId && !intake.currentRevision && !intake.pendingDestination && encodeTask(intake) == base,
-          "Task intake encoded optional fields that were absent");
+    SavedTask saved;
+    const auto intake = saved.load();
+    check(intake.botId == "bot" && intake.request == "Original request" && intake.environmentId == "net" && intake.projectId == "project" &&
+              !intake.currentRevision && !intake.pendingDestination,
+          "Task intake columns did not decode");
 
-    auto revised = base;
-    revised.update({{"gatewayEnvironmentId", "gateway"}, {"currentRevision", 23}, {"pendingDestination", pendingDestination()}});
+    auto revised = stored();
+    revised["gatewayEnvironmentId"] = "gateway";
     for (const auto& [state, name] : states) {
-        const auto task = decodeTask(id, name, generation, revised.dump());
-        check(task.id == id && task.generation == generation && task.state == state && taskStateName(task.state) == name,
-              "Task columns did not round-trip");
-        check(task.botId == "bot" && task.request == "Original request" && task.intent == "Revised request" &&
-                  task.environmentId == "net" && task.projectId == "project" && task.doneWhen == "Provide results" &&
-                  task.config == base.at("config") && task.gatewayEnvironmentId == "gateway" && task.currentRevision == 23,
-              "Task routing and revision fields did not decode");
-        check(task.pendingDestination && task.pendingDestination->pinned && task.pendingDestination->route.environmentId == "remote" &&
-                  task.pendingDestination->route.projectId == "other" &&
+        saved.exec(R"SQL(
+UPDATE tasks SET generation=?,state=?,data=?,current_revision=23,pending_environment_id='remote',
+    pending_project_id='other',pending_gateway_environment_id='other-gateway',pending_pinned=1 WHERE id=?
+)SQL",
+                   {generation, name, revised, saved.task});
+        const auto task = saved.load();
+        check(task.id == saved.task && task.generation == generation && task.state == state && taskStateName(task.state) == name,
+              "Task identity columns did not round-trip");
+        check(task.intent == "Revised request" && task.doneWhen == "Provide results" && task.gatewayEnvironmentId == "gateway" &&
+                  task.currentRevision == 23 && task.pendingDestination && task.pendingDestination->pinned &&
+                  task.pendingDestination->route.environmentId == "remote" && task.pendingDestination->route.projectId == "other" &&
                   task.pendingDestination->route.gatewayEnvironmentId == "other-gateway",
-              "Pending destination did not decode");
-        check(task.feedback == "Run is ready" && !task.question && task.createdAt == 1700000000 && task.allowance.remaining == 3 &&
-                  task.allowance.additionalUsed == 0,
-              "Task request state did not decode");
-        check(encodeTask(task) == revised, "Task payload changed on round-trip");
+              "Task routing and revision did not decode");
+        check(encodeTaskPayload(task) == revised, "Task payload changed on round-trip");
     }
 
-    const TaskView view{.task = intake, .revisions = {{23, 2, "Revised request", "Provide results", 33}}};
-    const auto projected = taskJson(view);
+    const auto projected = taskJson(TaskView{.task = intake, .revisions = {{23, 2, "Revised request", "Provide results", 33}}});
     check(
-        projected.at("id") == id && projected.at("generation") == generation && projected.at("state") == "queued" &&
+        projected.at("id") == saved.task && projected.at("generation") == 0 && projected.at("state") == "queued" &&
             projected.at("revisions") ==
                 Json::array(
                     {{{"id", 23}, {"number", 2}, {"intent", "Revised request"}, {"doneWhen", "Provide results"}, {"sourceMessageId", 33}}}),
         "Task view changed the wire shape for columns or revisions");
 }
 
+Json assigned() {
+    return {{"threadId", "session"},  {"runId", "assigned"}, {"link", "t3://session"}, {"gatewayEnvironmentId", "gateway"},
+            {"environmentId", "net"}, {"ownerBotId", "bot"}, {"projectId", "project"}, {"revisionId", nullptr}};
+}
+
 Json storedExecution() {
-    const Json run{{"threadId", "session"},  {"runId", "assigned"}, {"link", "t3://session"}, {"gatewayEnvironmentId", "gateway"},
-                   {"environmentId", "net"}, {"ownerBotId", "bot"}, {"projectId", "project"}, {"revisionId", nullptr}};
+    const auto run = assigned();
     const Json report{{"kind", "result"},
                       {"run", run},
                       {"environmentId", "net"},
@@ -99,12 +118,9 @@ Json storedExecution() {
                       {"evidenceStatus", "report_unavailable"}};
     auto data = stored();
     data.update(
-        {{"actionId", "action"},
-         {"eventId", 51},
+        {{"eventId", 51},
          {"deadline", 100},
-         {"lastRun", run},
          {"runStop", {{"intent", "cancel"}, {"run", nullptr}, {"reconcileAt", 80}}},
-         {"replanning", true},
          {"queuedInT3", true},
          {"cancelledByBotPause", true},
          {"replanningDetail", "Waiting for revised work"},
@@ -115,9 +131,6 @@ Json storedExecution() {
          {"pendingStageReport", 71},
          {"sessionReconcileAt", 95},
          {"workflowReconcileAt", 96},
-         {"selectedSession",
-          {{"environmentId", "net"}, {"threadId", "session"}, {"projectId", "project"}, {"gatewayEnvironmentId", "gateway"}}},
-         {"sessionOrigin", {{"environmentId", "parent"}, {"threadId", "parent-session"}, {"title", "Planning"}}},
          {"newSessionRequired", true},
          {"freshContextRequested", true},
          {"launchWarning", "Session lineage unavailable"}});
@@ -126,7 +139,14 @@ Json storedExecution() {
 
 void executionRoundTrips() {
     auto data = storedExecution();
-    const auto task = decodeTask(id, "cancelling", generation, data.dump());
+    SavedTask saved;
+    saved.exec(R"SQL(
+UPDATE tasks SET state='cancelling',data=?,action_id='action',last_run=?,replanning=1,selected_environment_id='net',
+    selected_thread_id='session',selected_gateway_environment_id='gateway',selected_project_id='project',
+    origin_environment_id='parent',origin_thread_id='parent-session',origin_title='Planning' WHERE id=?
+)SQL",
+               {data, assigned(), saved.task});
+    const auto task = saved.load();
     check(task.actionId == "action" && task.eventId == 51 && task.deadline == 100 && !task.activeRun, "Execution anchors did not decode");
     const auto& run = task.lastRun.value();
     check(run.ref.runId == "assigned" && run.ref.gatewayEnvironmentId == "gateway" && run.environmentId == "net" &&
@@ -149,72 +169,77 @@ void executionRoundTrips() {
               task.sessionOrigin->target == SessionTarget{"parent", "parent-session", ""} && task.sessionOrigin->title == "Planning" &&
               task.newSessionRequired && task.freshContextRequested && task.launchWarning == "Session lineage unavailable",
           "Selected Session or Session origin did not decode");
-    check(encodeTask(task) == data, "Typed execution data changed on round-trip");
-    data["activeRun"] = data.at("lastRun");
-    data["runStop"] = {{"intent", "replan"}, {"run", data.at("activeRun")}, {"retryAt", 94}};
-    const auto stopping = decodeTask(id, "running", generation, data.dump());
+    check(encodeTaskPayload(task) == data, "Reconciliation payload changed on round-trip");
+    auto active = assigned();
+    active.erase("threadId");
+    active.erase("runId");
+    data["runStop"] = {{"intent", "replan"}, {"run", assigned()}, {"retryAt", 94}};
+    saved.exec(R"SQL(
+UPDATE tasks SET state='running',data=?,active_run=?,active_thread_id='session',active_run_id='assigned' WHERE id=?
+)SQL",
+               {data, active, saved.task});
+    const auto stopping = saved.load();
     check(stopping.activeRun && stopping.runStop->run == stopping.activeRun && stopping.runStop->intent == RunStopIntent::replan &&
-              encodeTask(stopping) == data,
+              encodeTaskPayload(stopping) == data,
           "Stop bound to an assigned Run changed on round-trip");
 }
 
 void destinationRoundTrips() {
-    const Json target = {{"name", "Mini"}, {"environmentId", "mini"}, {"projectId", "repo"}};
-    auto data = stored();
-    data["runTargets"] = Json::array({target});
-    const auto queued = decodeTask(id, "queued", generation, data.dump());
-    check(queued.runTargets().size() == 1 && queued.runTargets().front().route.projectId == "repo" && queued.runResults().empty() &&
-              encodeTask(queued) == data,
-          "queued destination did not retain its typed route and wire shape");
+    SavedTask saved;
+    saved.exec(R"SQL(
+INSERT INTO task_run_destinations(task_id,position,name,environment_id,project_id,status,data)
+VALUES(?,0,'Mini','mini','repo','queued','{}')
+)SQL",
+               {saved.task});
+    const auto queued = saved.load();
+    check(queued.runTargets().size() == 1 && queued.runTargets().front().route.projectId == "repo" && queued.runResults().empty(),
+          "Queued destination did not retain its route");
 
-    auto pending = target;
-    pending.update({{"actionId", "send-mini"},
-                    {"status", "confirmation_pending"},
-                    {"threadId", "mini-thread"},
-                    {"link", ""},
-                    {"gatewayEnvironmentId", "local"},
-                    {"deadline", 100},
-                    {"retryAt", 90},
-                    {"stopRetryAt", 95},
-                    {"evidenceAttempts", 1},
-                    {"detail", "Waiting for a receipt"}});
-    const Json settled{{"name", "Local"},
-                       {"environmentId", "local"},
-                       {"projectId", "other"},
-                       {"actionId", "send-local"},
-                       {"status", "rolled_back"},
-                       {"threadId", "local-thread"},
-                       {"runId", "local-run"},
-                       {"link", "t3://local"},
-                       {"gatewayEnvironmentId", ""},
-                       {"ownerBotId", "bot"},
-                       {"revisionId", nullptr},
-                       {"deadline", 120},
-                       {"commit", ""},
-                       {"report", ""},
-                       {"detail", ""},
-                       {"evidenceStatus", "report_unavailable"}};
-    data.erase("runTargets");
-    data["runResults"] = Json::array({pending, settled});
-    const auto running = decodeTask(id, "running", generation, data.dump());
+    const Json progress{{"gatewayEnvironmentId", "local"},
+                        {"threadId", "mini-thread"},
+                        {"link", ""},
+                        {"deadline", 100},
+                        {"retryAt", 90},
+                        {"stopRetryAt", 95},
+                        {"evidenceAttempts", 1},
+                        {"detail", "Waiting for a receipt"}};
+    const Json report{{"threadId", "local-thread"},
+                      {"runId", "local-run"},
+                      {"link", "t3://local"},
+                      {"gatewayEnvironmentId", ""},
+                      {"ownerBotId", "bot"},
+                      {"revisionId", nullptr},
+                      {"commit", ""},
+                      {"report", ""},
+                      {"evidenceStatus", "report_unavailable"}};
+    saved.exec(R"SQL(
+UPDATE task_run_destinations SET action_id='send-mini',status='confirmation_pending',data=? WHERE task_id=? AND position=0
+)SQL",
+               {progress, saved.task});
+    saved.exec(R"SQL(
+INSERT INTO task_run_destinations(task_id,position,name,environment_id,project_id,action_id,status,data)
+VALUES(?,1,'Local','local','other','send-local','rolled_back',?)
+)SQL",
+               {saved.task, report});
+    const auto running = saved.load();
     const auto& result = running.runResults().front();
-    check(result.inPhase(DestinationRunPhase::confirmation_pending) && result.outstanding() && result.ref.threadId == "mini-thread" &&
-              result.ref.runId.empty() && result.deadline == 100 && result.retryAt == 90 && result.stopRetryAt == 95 &&
-              result.evidenceAttempts == 1 && !running.runResults().back().outstanding() && encodeTask(running) == data,
-          "destination progress and settlement changed on round-trip");
+    check(running.runTargets().empty() && running.runResults().size() == 2 && result.inPhase(DestinationRunPhase::confirmation_pending) &&
+              result.ref.threadId == "mini-thread" && result.deadline == 100 && result.retryAt == 90 && result.stopRetryAt == 95 &&
+              result.evidenceAttempts == 1 && !running.runResults().back().outstanding(),
+          "Destination progress and order changed on round-trip");
 
-    data["runResults"] = Json::array({settled});
-    data["runOutcome"] = "failed";
-    const auto completed = decodeTask(id, "completed", generation, data.dump());
-    const auto wire = taskJson(TaskView{.task = completed});
-    check(completed.runOutcome() == RunOutcome::failed && encodeTask(completed) == data && wire.at("runResults") == data.at("runResults") &&
-              wire.at("runOutcome") == "failed",
-          "destination aggregate did not retain its typed outcome and wire shape");
+    saved.exec("UPDATE tasks SET run_outcome='partial_failure' WHERE id=?", {saved.task});
+    const auto wire = taskJson(saved.store.task(saved.task));
+    auto settled = report;
+    settled.update(
+        {{"name", "Local"}, {"environmentId", "local"}, {"projectId", "other"}, {"actionId", "send-local"}, {"status", "rolled_back"}});
+    check(wire.at("runResults").at(1) == settled && wire.at("runOutcome") == "partial_failure",
+          "Destination aggregate changed its public shape");
 }
 
-void rejects(std::string_view record, std::string_view key, std::string_view issue, std::string_view state = "queued") {
+void rejects(std::string_view record, std::string_view key, std::string_view issue) {
     try {
-        decodeTask(id, state, generation, record);
+        decodeTaskPayload(TaskData{.id = id}, record);
     } catch (const RecordDecodeError& error) {
         const auto expected = "tasks row 47, key " + std::string(key) + ": ";
         const std::string_view message(error.what());
@@ -227,15 +252,16 @@ void rejects(std::string_view record, std::string_view key, std::string_view iss
 void decodeErrors() {
     rejects("{", "data", "invalid JSON");
     rejects("[]", "data", "expected an object");
-    rejects(stored().dump(), "state", "unknown task state", "invalid");
-    for (const auto* key : {"botId", "request", "intent", "environmentId", "projectId", "doneWhen"}) {
+    for (const auto* key : {"intent", "doneWhen"}) {
         auto invalid = stored();
         invalid.erase(key);
         rejects(invalid.dump(), key, "missing required key");
         invalid[key] = 42;
         rejects(invalid.dump(), key, "expected a string");
     }
-    for (const auto* key : {"typo", "id", "state", "generation", "revisions", "runs", "pendingAction"}) {
+    for (const auto* key : {"typo", "id", "state", "generation", "request", "actionId", "activeRun", "lastRun", "pendingDestination",
+                            "runTargets", "runResults", "currentRevision", "replanning", "sessionOrigin", "selectedSession",
+                            "sourceMessageId", "workflowId", "trigger", "runOutcome"}) {
         auto invalid = stored();
         invalid[key] = nullptr;
         rejects(invalid.dump(), key, "unknown key");
@@ -252,47 +278,19 @@ void decodeErrors() {
     invalid = stored();
     invalid["gatewayEnvironmentId"] = false;
     rejects(invalid.dump(), "gatewayEnvironmentId", "expected a string");
-    invalid = stored();
-    invalid["currentRevision"] = 2.5;
-    rejects(invalid.dump(), "currentRevision", "expected an integer");
-    invalid["currentRevision"] = std::numeric_limits<Json::number_unsigned_t>::max();
-    rejects(invalid.dump(), "currentRevision", "integer out of range");
-    invalid = stored();
-    invalid["pendingDestination"] = nullptr;
-    rejects(invalid.dump(), "pendingDestination", "expected an object");
-    invalid["pendingDestination"] = pendingDestination();
-    invalid["pendingDestination"]["pinned"] = "true";
-    rejects(invalid.dump(), "pendingDestination.pinned", "expected a boolean");
-    invalid["pendingDestination"] = pendingDestination();
-    invalid["pendingDestination"].erase("projectId");
-    rejects(invalid.dump(), "pendingDestination.projectId", "missing required key");
-    invalid["pendingDestination"] = pendingDestination();
-    invalid["pendingDestination"]["typo"] = nullptr;
-    rejects(invalid.dump(), "pendingDestination.typo", "unknown key");
-    invalid = stored();
-    invalid["runOutcome"] = "failed";
-    rejects(invalid.dump(), "runOutcome", "requires dispatched Runs");
-    invalid.erase("runOutcome");
-    invalid["runTargets"] = Json::array();
-    rejects(invalid.dump(), "runTargets", "expected at least one destination");
-    invalid["runResults"] = Json::array();
-    rejects(invalid.dump(), "runTargets", "cannot coexist with dispatched Runs");
 }
 
 void executionDecodeErrors() {
     const auto base = storedExecution();
     auto invalid = base;
-    invalid["actionId"] = 42;
-    rejects(invalid.dump(), "actionId", "expected a string");
-    invalid = base;
     invalid["eventId"] = nullptr;
     rejects(invalid.dump(), "eventId", "expected an integer");
     invalid = base;
     invalid["deadline"] = "100";
     rejects(invalid.dump(), "deadline", "expected an integer");
     invalid = base;
-    invalid["lastRun"].erase("revisionId");
-    rejects(invalid.dump(), "lastRun.revisionId", "missing required key");
+    invalid["pendingRunReport"]["report"]["run"].erase("revisionId");
+    rejects(invalid.dump(), "pendingRunReport.report.run.revisionId", "missing required key");
     invalid = base;
     invalid["runStop"]["intent"] = "pause";
     rejects(invalid.dump(), "runStop.intent", "unknown Run stop intent");
@@ -305,12 +303,6 @@ void executionDecodeErrors() {
     invalid = base;
     invalid["cancelledInstructions"][0]["conflicting"] = 20;
     rejects(invalid.dump(), "cancelledInstructions.0.conflicting", "expected a boolean");
-    invalid = base;
-    invalid["selectedSession"].erase("threadId");
-    rejects(invalid.dump(), "selectedSession.threadId", "missing required key");
-    invalid = base;
-    invalid["sessionOrigin"]["title"] = 20;
-    rejects(invalid.dump(), "sessionOrigin.title", "expected a string");
 }
 
 void questionAndCheckpointRoundTrip() {
@@ -337,12 +329,12 @@ void questionAndCheckpointRoundTrip() {
     data["pendingDecision"] = decision;
     data["blockerReason"] = "Waiting for a branch";
     data["blockerWaitId"] = 20;
-    const auto task = decodeTask(id, "waiting", generation, data.dump());
+    const auto task = decodeTaskPayload(TaskData{.id = id, .generation = generation, .state = TaskState::waiting}, data.dump());
     check(task.question && task.question->fields.at(0).options.at(0).value == "main" && task.question->target.waitId == 20 &&
               task.question->suspendedWaitId == 20 && task.question->suspendedDecision &&
               task.question->suspendedDecision->decision.attemptId == 25 && task.pendingDecision && !task.pendingDecision->revisionId &&
               task.pendingDecision->decision.tool == "answer_session_question" && task.blocker && task.blocker->waitId == 20 &&
-              encodeTask(task) == data,
+              encodeTaskPayload(task) == data,
           "Question, suspended checkpoint, and blocker changed on round-trip");
 
     data["question"]["suspendedDecision"]["attempt"] = 25;

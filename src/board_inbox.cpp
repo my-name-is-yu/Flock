@@ -115,16 +115,17 @@ UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION S
 }
 
 Statement Store::Impl::actionablePrReviews(std::string_view bot) const {
-    return query(R"SQL(
-SELECT p.id,t.data,t.id,t.state,t.generation,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
+    static const auto sql = R"SQL(
+SELECT p.id,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id,)SQL" +
+                            taskProjection() + R"SQL(
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
 LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
 AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
 WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
     p.target_revision=coalesce(t.current_revision,0)
     AND NOT t.replanning)) ORDER BY p.id DESC
-)SQL",
-                 {bot});
+)SQL";
+    return query(sql.c_str(), {bot});
 }
 
 Json Store::inbox(const Person& actor, std::string_view bot) const {
@@ -167,17 +168,16 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
                  {"prompt", std::move(prompt)}},
                 messageAnchor(*p_, id, message), createdAt);
         };
-        auto waits = p_->query(R"SQL(
-SELECT t.data,t.id,t.state,t.generation,w.id,w.data
+        static const auto waitSql = "SELECT w.id,w.reason,w.data," + taskProjection() + R"SQL(
 FROM tasks t JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL
 WHERE t.bot_id=? AND t.state='waiting'
 ORDER BY w.id DESC
-)SQL",
-                               {id});
+)SQL";
+        auto waits = p_->query(waitSql.c_str(), {id});
         while (waits.next()) {
-            const auto task = decodeTaskRow(waits);
-            const auto waitId = waits.number(4);
-            const auto wait = from_json(waitId, waits.string(5));
+            const auto task = p_->readTask(waits, 3);
+            const auto wait = decodeWaitRow(waits);
+            const auto waitId = wait.id;
             const auto reason = wait.reason();
             const auto kind = inboxWaitKind(reason);
             if (!kind || !p_->waitIsActionable(task)) continue;
@@ -217,16 +217,16 @@ ORDER BY p.id DESC
                               "Supply a value for " + inputs.string(1), inputs.number(3));
         auto reviews = p_->actionablePrReviews(id);
         while (reviews.next()) {
-            const auto task = decodeTaskRow(reviews, 1);
-            const auto kind = reviews.number(8) ? pr_reconciliation : pr_review;
+            const auto task = p_->readTask(reviews, 7);
+            const auto kind = reviews.number(4) ? pr_reconciliation : pr_review;
             add({id, kind, reviews.number(0), 0, task.id, task.currentRevision.value_or(0), task.generation},
                 {{"requestTitle", taskTitle(task)},
                  {"request", task.request},
-                 {"prompt", reviews.string(7)},
-                 {"prTitle", reviews.string(6)},
-                 {"prUrl", reviews.string(5)},
-                 {"candidates", reviews.json(9)}},
-                reviews.number(10));
+                 {"prompt", reviews.string(3)},
+                 {"prTitle", reviews.string(2)},
+                 {"prUrl", reviews.string(1)},
+                 {"candidates", reviews.json(5)}},
+                reviews.number(6));
         }
     }
     snapshot.commit();

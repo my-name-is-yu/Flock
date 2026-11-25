@@ -381,7 +381,7 @@ bool Store::Impl::inviteSessionBot(const conversation::Message& message, int ste
 WITH RECURSIVE ancestry(id,source) AS (
  SELECT t.id,t.source_message_id
  FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
- WHERE t.bot_id=?1 AND r.environment_id=?3 AND r.thread_id=?4 AND json_extract(o.data,'$.tool')='delegate'
+ WHERE t.bot_id=?1 AND r.environment_id=?3 AND r.thread_id=?4 AND o.tool='delegate'
  UNION ALL
  SELECT t.id,t.source_message_id
  FROM ancestry a JOIN peer_exchanges p ON p.recipient_task=a.id JOIN tasks t ON t.id=p.sender_task
@@ -564,7 +564,7 @@ INSERT OR IGNORE INTO session_queue_cancellations(participation_id,run,stop_id)
 SELECT p.id,w.run,?2 FROM stopping s JOIN session_participations p ON p.id=s.id
 JOIN session_message_waits w ON w.bot=p.bot_id AND w.environment=p.environment_id AND w.thread=p.thread_id
 UNION ALL
-SELECT s.id,r.run_id,?2 FROM stopping s JOIN outbox o ON json_extract(o.data,'$.sessionParticipationId')=s.id
+SELECT s.id,r.run_id,?2 FROM stopping s JOIN outbox o ON o.session_participation_id=s.id
 JOIN runs r ON r.action_id=o.id
 )SQL")
              .c_str(),
@@ -605,7 +605,7 @@ JOIN tasks t ON t.bot_id=p.bot_id
 JOIN messages m ON m.id=t.source_message_id AND m.bot_id=p.bot_id AND m.person_id=p.person_id
 WHERE t.origin_environment_id=p.environment_id AND t.origin_thread_id=p.thread_id
   AND t.state NOT IN ('completed','cancelled','cancelling')
-  AND NOT t.has_selected_session
+  AND t.selected_environment_id IS NULL
   AND NOT (t.active_thread_id IS p.thread_id AND t.environment_id=p.environment_id)
 ORDER BY t.id
 )SQL")
@@ -625,7 +625,7 @@ JOIN messages m ON m.id=t.source_message_id
 LEFT JOIN outbox o ON o.id=t.action_id
 WHERE t.selected_environment_id=p.environment_id AND t.selected_thread_id=p.thread_id
   AND t.state NOT IN ('completed','cancelled','cancelling')
-  AND NOT t.has_active_run AND o.phase IS NOT 'started'
+  AND t.active_run IS NULL AND o.phase IS NOT 'started'
 )SQL")
                               .c_str(),
                           {id, cutoff});
@@ -710,7 +710,7 @@ WHERE bot=(SELECT bot_id FROM session_participations WHERE id=?) AND environment
                 auto run = query(R"SQL(
 SELECT r.task_id FROM runs r JOIN outbox o ON o.id=r.action_id
 WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
- AND json_extract(o.data,'$.sessionParticipationId')=?
+ AND o.session_participation_id=?
 )SQL",
                                  {item.target.environmentId, item.target.threadId, item.run, item.participant});
                 if (run.next()) {

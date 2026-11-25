@@ -3,35 +3,28 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 13;
+constexpr Id schemaVersion = 14;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
 CREATE TABLE tasks(
   id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, environment_id TEXT NOT NULL,
-  project_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL,
-  request TEXT AS (json_extract(data,'$.request')),
-  source_message_id INTEGER AS (json_extract(data,'$.sourceMessageId')),
-  current_revision INTEGER AS (json_extract(data,'$.currentRevision')),
-  replanning INTEGER AS (coalesce(json_extract(data,'$.replanning'),0)),
-  pending_environment_id TEXT AS (json_extract(data,'$.pendingDestination.environmentId')),
-  pending_project_id TEXT AS (json_extract(data,'$.pendingDestination.projectId')),
-  pending_pinned INTEGER AS (json_extract(data,'$.pendingDestination.pinned')),
-  active_thread_id TEXT AS (json_extract(data,'$.activeRun.threadId')),
-  active_run_id TEXT AS (json_extract(data,'$.activeRun.runId')),
-  has_active_run INTEGER AS (json_extract(data,'$.activeRun') IS NOT NULL),
-  has_last_run INTEGER AS (json_extract(data,'$.lastRun') IS NOT NULL),
-  has_run_targets INTEGER AS (json_type(data,'$.runTargets') IS NOT NULL),
-  has_run_results INTEGER AS (json_type(data,'$.runResults') IS NOT NULL),
-  action_id TEXT AS (json_extract(data,'$.actionId')),
-  workflow_id INTEGER AS (json_extract(data,'$.workflowId')),
-  has_trigger INTEGER AS (json_type(data,'$.trigger') IS 'object'),
-  has_session_origin INTEGER AS (json_type(data,'$.sessionOrigin') IS 'object'),
-  origin_environment_id TEXT AS (json_extract(data,'$.sessionOrigin.environmentId')),
-  origin_thread_id TEXT AS (json_extract(data,'$.sessionOrigin.threadId')),
-  has_selected_session INTEGER AS (json_type(data,'$.selectedSession') IS NOT NULL),
-  selected_environment_id TEXT AS (json_extract(data,'$.selectedSession.environmentId')),
-  selected_thread_id TEXT AS (json_extract(data,'$.selectedSession.threadId')));
+  project_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL,
+  request TEXT NOT NULL, source_message_id INTEGER, current_revision INTEGER,
+  replanning INTEGER NOT NULL CHECK(replanning IN (0,1)),
+  pending_environment_id TEXT, pending_project_id TEXT, pending_gateway_environment_id TEXT,
+  pending_pinned INTEGER CHECK(pending_pinned IN (0,1)),
+  active_run TEXT, active_thread_id TEXT, active_run_id TEXT, last_run TEXT,
+  action_id TEXT NOT NULL, workflow_id INTEGER, workflow_stage_id TEXT, workflow_artifact_version TEXT, trigger_data TEXT,
+  origin_environment_id TEXT, origin_thread_id TEXT, origin_gateway_environment_id TEXT, origin_title TEXT,
+  selected_environment_id TEXT, selected_thread_id TEXT, selected_gateway_environment_id TEXT, selected_project_id TEXT,
+  run_outcome TEXT, data TEXT NOT NULL);
+CREATE TABLE task_run_destinations(
+  task_id INTEGER NOT NULL REFERENCES tasks(id), position INTEGER NOT NULL,
+  name TEXT NOT NULL, environment_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  action_id TEXT, status TEXT NOT NULL, data TEXT NOT NULL,
+  PRIMARY KEY(task_id,position),
+  CHECK(action_id IS NOT NULL OR status='queued'));
 CREATE INDEX tasks_route ON tasks(environment_id,project_id,id)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX tasks_bot ON tasks(bot_id,id DESC);
@@ -56,11 +49,17 @@ CREATE TABLE bot_t3_projects(
   PRIMARY KEY(bot_id,environment_id));
 CREATE TABLE waits(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
-  data TEXT NOT NULL, resolution TEXT);
+  reason TEXT NOT NULL, data TEXT NOT NULL, resolution TEXT);
 CREATE UNIQUE INDEX waits_open ON waits(task_id) WHERE resolution IS NULL;
 CREATE TABLE outbox(
   id TEXT PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
-  phase TEXT NOT NULL, auth_generation TEXT NOT NULL DEFAULT '', data TEXT NOT NULL);
+  phase TEXT NOT NULL, auth_generation TEXT NOT NULL DEFAULT '', data TEXT NOT NULL,
+  tool TEXT NOT NULL, environment_id TEXT NOT NULL, project_id TEXT NOT NULL, revision_id INTEGER,
+  session_participation_id INTEGER, stop_operation TEXT, instruction TEXT NOT NULL,
+  instruction_deferred INTEGER NOT NULL DEFAULT 0 CHECK(instruction_deferred IN (0,1)),
+  memory_version INTEGER, memory_section TEXT, memory_excerpt_bytes INTEGER,
+  CHECK((memory_version IS NULL)=(memory_section IS NULL) AND (memory_version IS NULL)=(memory_excerpt_bytes IS NULL)));
+CREATE INDEX outbox_task ON outbox(task_id);
 CREATE TABLE runs(
   action_id TEXT PRIMARY KEY REFERENCES outbox(id), task_id INTEGER NOT NULL REFERENCES tasks(id),
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, run_id TEXT NOT NULL, link TEXT NOT NULL,
@@ -412,29 +411,28 @@ CREATE INDEX inbox_decisions_by_bot ON inbox_decisions(bot_id,id);
 
 CREATE VIEW automation_before_dispatch AS
 SELECT task.id FROM tasks task
-WHERE task.project_id<>'' AND task.has_trigger AND NOT task.has_active_run AND NOT task.has_last_run
-  AND NOT task.has_run_targets AND NOT task.has_run_results
+WHERE task.project_id<>'' AND task.trigger_data IS NOT NULL AND task.active_run IS NULL AND task.last_run IS NULL
+  AND NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id)
   AND NOT EXISTS (SELECT 1 FROM outbox WHERE task_id=task.id);
 CREATE VIEW project_route_queue AS
 WITH candidates AS (
   SELECT task.id,task.state AS slot_state,task.project_id,task.environment_id,NULL AS action_id
   FROM tasks task
-  WHERE NOT task.has_run_targets AND NOT task.has_run_results
+  WHERE NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id)
     AND task.project_id<>''
     AND task.state NOT IN ('completed','cancelled')
     AND NOT (task.state='waiting' AND EXISTS (
       SELECT 1 FROM automation_before_dispatch undispatched
       JOIN waits wait ON wait.task_id=undispatched.id AND wait.resolution IS NULL
-      WHERE undispatched.id=task.id AND json_extract(wait.data,'$.reason')='bot_notes_unavailable'
+      WHERE undispatched.id=task.id AND wait.reason='bot_notes_unavailable'
     ))
   UNION ALL
   SELECT task.id,CASE WHEN outbox.phase IN ('started','accepted') THEN task.state ELSE 'queued' END,
-         json_extract(route.value,'$.projectId'),json_extract(route.value,'$.environmentId'),outbox.id
-  FROM tasks task
-  CROSS JOIN json_each(coalesce(json_extract(task.data,'$.runResults'),json_extract(task.data,'$.runTargets'))) route
-  LEFT JOIN outbox ON outbox.task_id=task.id AND outbox.id=json_extract(route.value,'$.actionId')
+         route.project_id,route.environment_id,outbox.id
+  FROM tasks task CROSS JOIN task_run_destinations route ON route.task_id=task.id
+  LEFT JOIN outbox ON outbox.task_id=task.id AND outbox.id=route.action_id
   WHERE task.state NOT IN ('completed','cancelled')
-    AND coalesce(json_extract(route.value,'$.status'),'queued') IN ('queued','running','confirmation_pending')
+    AND route.status IN ('queued','running','confirmation_pending')
 )
 SELECT task.id,task.environment_id,task.project_id,task.action_id,
        ROW_NUMBER() OVER (
