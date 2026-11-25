@@ -1427,7 +1427,7 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
     const auto waiting = browser.get("/api/view?bot=release");
     const auto wait = waiting.at("pausedConversations").at(0);
     const auto reply = conversationReply(waiting,receipt.at("messageId"));
-    check(wait.at("route") == "model_budget" && wait.at("messageId") == reply.at("messageId") &&
+    check(wait.at("route") == "model_budget" && wait.at("allowance") == 2 && wait.at("messageId") == reply.at("messageId") &&
           waiting.at("presence") == "waiting" && model.turns == 2 && model.explained == 0,
           "the third call reached the fixture or the pause was not shown");
     runtime.reset();

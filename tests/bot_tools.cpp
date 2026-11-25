@@ -456,9 +456,9 @@ void externalTools(Fixture& f) {
     f.approve();
     check(f.web->searches == searches+1 && f.web->fetches == fetches+1,
           "Approval did not execute exactly the pending call");
-    f.approve();
-    check(f.model.seen[0].at("result").at("accessRevoked") == true &&
-          f.model.seen[1].at("result").at("ok") == true,"Revoked result reached the resumed model");
+    check(f.store->pausedConversations("alpha").empty() &&
+          f.model.seen[0].at("result").at("accessRevoked") == true &&
+          f.model.seen[1].at("result").at("ok") == true,"The resumed model did not see the pending result and access revocation");
 }
 
 void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
@@ -524,6 +524,7 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
                   steps.back().at("result").at("args").at("path") == "0.txt",
                   "The omitted result was lost, rerun, or resolved to the wrong slot after restart");
             recovered = true;
+            f.runtime->requestStop();
             return {call("read_tool_result",secondRef)};
         }
         check(reread.at("accessRevoked") == true && !reread.contains("text") &&
@@ -537,11 +538,12 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
     write(root/"0.txt","Changed on disk after the original read");
     f.restart();
     f.approve();
+    check(recovered && !revoked && requests == batches+2,"The approved turn did not recover the first result before stopping");
     f.restart();
-    f.approve();
     f.block(Action::workspace_read,"alpha");
-    f.approve();
-    check(recovered && revoked && requests == batches+3,"The paused turn did not finish all recovery checks");
+    f.runtime->runConversations();
+    check(revoked && requests == batches+3 && f.store->pausedConversations("alpha").empty(),
+          "The approved turn did not finish its recovery checks after restart");
     f.model.followStep = {};
     check(f.run(call("read_tool_result",firstRef)).at("ok") == false,"A reference was accepted from another turn");
 }

@@ -74,6 +74,7 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     const auto folder = temp.path / "bots";
     auto config = botConfig("old-model");
     config["reasoningEffort"] = "high";
+    config["modelCallLimit"] = 9;
     createBot(folder / "release",config,"","");
     Bots bots(folder);
     Store store(temp.path / "state.db",{},[&](std::string_view id) {
@@ -101,15 +102,16 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     check(model.requests.size() == 1 && rejected.at("wait").at("failureCode") == "unsupported_reasoning_effort",
           "The rejected effort did not stop repeat attempts or preserve the failure type");
     bots.updateRunSettings(store,"release",{{"model","new-model"},{"reasoningEffort",""},
-        {"environmentId","new-env"},{"projectId","new-project"}},now+1,[](auto, auto) {});
+        {"environmentId","new-env"},{"projectId","new-project"},{"modelCallLimit",7}},now+1,[](auto, auto) {});
     store.operate(localOwner,TaskTarget::from(rejected,rejected.at("wait").at("id")),"retry");
     for (int tick = 0; tick < 8 && store.task(id).at("state") != "waiting"; ++tick) runtime.tick();
     const auto retried = store.task(id);
     check(model.requests.size() == 2 && model.requests.back().at("model") == "new-model" &&
           !model.requests.back().contains("reasoningEffort") && retried.at("wait").at("reason") == "user_question" &&
           retried.at("environmentId") == saved.environmentId && retried.at("projectId") == saved.projectId &&
-          retried.at("config").at("session") == saved.config.at("session"),
-          "Retry did not use the corrected planner settings on the original task route");
+          retried.at("config").at("session") == saved.config.at("session") &&
+          retried.at("config").at("modelCallLimit") == 9,
+          "Retry did not preserve the original task route and allowance while correcting its model");
 }
 
 enum class NotesRecovery { Retry, Edit };

@@ -179,6 +179,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
     });
     createBot(home / "release",config,"Review releases","");
     Bots bots(home);
+    check(bots.cards().at(0).at("modelCallLimit") == 20,"Bot settings did not show the default allowance");
     Store store(temp.path / "tasks.db");
     const auto start = utc(2026,1,1,12,0);
     const auto due = utc(2026,1,2,0,0);
@@ -219,13 +220,18 @@ void runSettingsChangesResyncConfiguredSchedules() {
         due + 1,report,catalog);
     check(model.at("model") == "next-model" && model.at("projectId") == "new-project",
           "model and effort save did not preserve the project");
+    const auto allowance = bots.updateRunSettings(store,"release",{{"modelCallLimit",7}},due + 1,report);
+    check(allowance.at("modelCallLimit") == 7 && allowance.at("model") == "next-model" &&
+          allowance.at("reasoningEffort") == "ultra" && allowance.at("projectId") == "new-project",
+          "saving the allowance changed the model, effort or destination");
     store.fireDueAutomations(due + 1);
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && tasks.at(0).at("environmentId") == "new-environment" && tasks.at(0).at("projectId") == "new-project" &&
           tasks.at(0).at("trigger").at("targetTime") == due,"workspace save lost the due time, kept the old route, or restored a canceled schedule");
     const auto settings = store.task(tasks.at(0).at("id")).at("config");
     check(settings.at("model") == "next-model" && settings.at("modelProvider") == "chatgpt" &&
-          settings.at("reasoningEffort") == "ultra","the scheduled task did not use the saved model and effort");
+          settings.at("reasoningEffort") == "ultra" && settings.at("modelCallLimit") == 7,
+          "the scheduled task did not use the saved planner settings");
 
     const auto cleared = bots.updateRunSettings(store,"release",{{"model",""}},due + 1,report);
     std::ifstream savedConfig(home / "release" / "config.json");
@@ -248,11 +254,13 @@ void runSettingsChangesResyncConfiguredSchedules() {
     check(store.tasks("release").size() == 1,"a configured schedule fired after its destination was cleared");
 }
 
-void automationFiringsUseCurrentPlannerModel() {
+void automationFiringsUseCurrentPlannerSettings() {
     Sandbox temp;
     const auto home = temp.path / "bots";
     const auto folder = home / "release";
-    createBot(folder,botConfig("previous-model"),"","");
+    auto original = botConfig("previous-model");
+    original["modelCallLimit"] = 9;
+    createBot(folder,original,"","");
     Bots bots(home);
     Store store(temp.path / "tasks.db",{},[&](std::string_view id) { return bots.plannerModel(id); });
     const Person owner{"fixture",true};
@@ -273,7 +281,7 @@ void automationFiringsUseCurrentPlannerModel() {
     const auto previousTask = store.tasks("release").at(0).at("id").get<Id>();
     const auto report = [](std::string_view,std::string_view error) { throw std::runtime_error(std::string(error)); };
     bots.updateRunSettings(store,"release",{{"model","current-model"},{"environmentId","current-environment"},
-        {"projectId","current-project"},{"reasoningEffort","low"}},firstDue,report);
+        {"projectId","current-project"},{"reasoningEffort","low"},{"modelCallLimit",7}},firstDue,report);
 
     store.fireDueAutomations(nextDue);
     const auto recurring = store.tasks("release").at(0);
@@ -286,16 +294,18 @@ void automationFiringsUseCurrentPlannerModel() {
     auto currentConfig = saved.config;
     currentConfig["model"] = "current-model";
     currentConfig["modelProvider"] = "chatgpt";
+    currentConfig["modelCallLimit"] = 7;
     currentConfig["reasoningEffort"] = "low";
     const auto checkTask = [&](Id id,const Json& expected) {
         const auto task = store.task(id);
         check(task.at("config") == expected && task.at("environmentId") == saved.environmentId &&
-              task.at("projectId") == saved.projectId,"automation task used the wrong planner model or lost its saved route");
+              task.at("projectId") == saved.projectId,"automation task used the wrong planner settings or lost its saved route");
     };
     checkTask(recurring.at("id").get<Id>(),currentConfig);
     checkTask(webhook.at("tasks").at(0).at("taskId").get<Id>(),currentConfig);
     auto previousConfig = currentConfig;
     previousConfig["model"] = "previous-model";
+    previousConfig["modelCallLimit"] = 9;
     previousConfig.erase("reasoningEffort");
     checkTask(previousTask,previousConfig);
 
@@ -304,6 +314,11 @@ void automationFiringsUseCurrentPlannerModel() {
     store.fireDueAutomations(defaultDue);
     currentConfig.erase("reasoningEffort");
     checkTask(store.tasks("release").at(0).at("id").get<Id>(),currentConfig);
+
+    write(folder / "config.json",botConfig("current-model").dump());
+    const auto reset = store.receiveWebhook(owner,"deploy","event-2",{{"branch","main"}},defaultDue);
+    currentConfig.erase("modelCallLimit");
+    checkTask(reset.at("tasks").at(0).at("taskId").get<Id>(),currentConfig);
 
     const auto fallbackDue = utc(2026,1,5,0,0);
     write(folder / "config.json","invalid");
@@ -477,7 +492,7 @@ void configuredSchedules() {
     cronIntakeAndRestart();
     configuredScheduleLifecycle();
     runSettingsChangesResyncConfiguredSchedules();
-    automationFiringsUseCurrentPlannerModel();
+    automationFiringsUseCurrentPlannerSettings();
     unreadableProfileKeepsAutomationDelivery();
     failedScheduleSyncLeavesWorkspaceUnchanged();
     invalidSessionSettingsPreserveDueTimes();

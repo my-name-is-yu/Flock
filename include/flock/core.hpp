@@ -288,6 +288,7 @@ public:
     struct PlannerModel {
         std::string model, provider;
         std::optional<std::string> reasoningEffort;
+        std::optional<Id> modelCallLimit = std::nullopt;
     };
     using AutomationModelResolver = std::function<std::optional<PlannerModel>(std::string_view botId)>;
     using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&,
