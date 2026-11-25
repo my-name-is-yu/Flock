@@ -5,6 +5,8 @@
 #include "journal_task.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
+#include "runtime_maintenance.hpp"
+#include "runtime_task_scheduler.hpp"
 #include "task_context_storage.hpp"
 #include "task_interaction_storage.hpp"
 #include "task_storage.hpp"
@@ -14,7 +16,6 @@
 #include "flock/participation.hpp"
 
 #include <algorithm>
-#include <compare>
 #include <cstdio>
 #include <chrono>
 #include <fcntl.h>
@@ -119,15 +120,12 @@ struct Runtime::Impl {
     T3& t3;
     SoulLoader soul;
     RuntimeOptions options;
+    Maintenance maintenance;
+    TaskScheduler taskScheduler;
     std::future<void> channelWorker, sessionWakeWorker;
     std::stop_source shutdown;
     int lockFd = -1;
-    struct ScheduledWork {
-        Id taskId = 0;
-        std::optional<std::string> destinationAction;
-        auto operator<=>(const ScheduledWork&) const = default;
-    };
-    std::map<ScheduledWork, std::future<void>> workers;
+    std::map<TaskScheduler::Work, std::future<void>> workers;
     // Keep provider outcomes until the Task decision and attempt usage are committed together.
     std::map<Id, TaskInference> taskInferences;
     struct HistoryUnavailable : ModelError {
@@ -135,63 +133,14 @@ struct Runtime::Impl {
     };
     std::map<std::string, std::future<void>> conversationWorkers;
 
-    struct MaintenanceCheck {
-        std::pair<Id, Id> stamp;
-        Seconds second;
-        bool operator==(const MaintenanceCheck&) const = default;
-    };
-    std::optional<MaintenanceCheck> approvalsCheckedAt, automationsCheckedAt, workflowsCheckedAt;
-
-    Seconds settleApprovals() {
-        std::lock_guard lock(db.mutex);
-        Transaction tx(db.db);
-        const auto now = options.clock();
-        db.settlePolicyApprovals(now);
-        tx.commit();
-        return now;
-    }
-
-    std::optional<Seconds> fireDueAutomations() {
-        try {
-            const auto now = options.clock();
-            db.fireDueAutomations(now);
-            return now;
-        } catch (const StorageError&) {
-            throw;
-        } catch (const std::exception& error) {
-            if (!options.automationError) throw;
-            options.automationError(error.what());
-            return std::nullopt;
-        }
-    }
-
-    void deferContendedWork(std::string_view operation, const auto& work) {
-        try {
-            work();
-        } catch (const StorageError& error) {
-            if (!error.contended()) throw;
-            if (options.storageContention) options.storageContention(std::string(operation) + ": " + error.what());
-        }
-    }
-
-    void runMaintenance(std::optional<MaintenanceCheck>& completed, std::string_view operation, const auto& work) {
-        const auto now = options.clock();
-        std::optional<MaintenanceCheck> beforeScan;
-        deferContendedWork("database change stamp", [&] { beforeScan.emplace(db.changeStamp(), now); });
-        if (beforeScan && beforeScan == completed) return;
-        deferContendedWork(operation, [&] {
-            const std::optional<Seconds> scannedAt = work();
-            if (beforeScan && scannedAt) completed.emplace(beforeScan->stamp, *scannedAt);
-        });
-    }
-
     void runTurn(Id id) {
         db.runTurn(id, model, t3, soul, options.clock, *options.botTools, options.gitHost.get(), options.applyBotChange,
                    options.reconcileBotCreation, options.intake, options.peers, shutdown.get_token());
     }
 
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
-        : db(*store.p_), policy(store.policy()), model(m), t3(adapter), soul(std::move(loader)), options(std::move(opts)) {
+        : db(*store.p_), policy(store.policy()), model(m), t3(adapter), soul(std::move(loader)), options(std::move(opts)),
+          maintenance(db, options.clock, options.automationError, options.storageContention), taskScheduler(db) {
         if (!options.botTools) options.botTools = std::make_shared<BotTools>();
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
         lockFd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
@@ -254,66 +203,7 @@ struct Runtime::Impl {
             saved);
     }
 
-    std::vector<ScheduledWork> eligible() {
-        std::lock_guard lock(db.mutex);
-        auto rows = db.query(R"SQL(
-WITH slots AS MATERIALIZED (
-  SELECT id,action_id,blocker_id FROM project_route_slots
-), runnable AS (
-  SELECT id FROM slots WHERE action_id IS NULL AND blocker_id IS NULL
-  UNION
-  SELECT id FROM tasks WHERE project_id='' AND state NOT IN ('completed','cancelled') AND (
-    state IN ('queued','cancelling') OR replanning=1
-  )
-  UNION
-  SELECT id FROM tasks WHERE state='queued' AND replanning=1
-    AND (pending_environment_id<>environment_id OR (pending_pinned=1 AND pending_project_id<>project_id))
-  UNION
-  SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
-  WHERE kind='consult' AND state NOT IN ('completed','cancelled')
-  UNION
-  SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
-  WHERE state='cancelling' AND tasks.active_run IS NULL AND NOT EXISTS (
-    SELECT 1 FROM outbox WHERE outbox.id=tasks.action_id AND phase='started'
-  )
-)
-SELECT task.id,NULL AS action_id FROM runnable JOIN tasks task ON task.id=runnable.id
-WHERE NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id AND action_id IS NOT NULL)
-AND NOT EXISTS (
-  SELECT 1 FROM policy_approvals approval WHERE approval.task=task.id AND turn=0 AND status='pending'
-)
-UNION ALL
-SELECT slot.id,slot.action_id FROM slots slot JOIN tasks task ON task.id=slot.id
-WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR EXISTS (
-  SELECT 1 FROM outbox stop WHERE stop.id=slot.action_id AND stop.stop_operation IS NOT NULL
-) OR (
-  slot.blocker_id IS NULL AND NOT EXISTS (
-    SELECT 1 FROM policy_approvals WHERE operation=?1 || slot.action_id AND status='pending'
-  )
-))
-ORDER BY 1,2)SQL",
-                             {runOutboxOperation});
-        std::vector<ScheduledWork> result;
-        while (rows.next()) {
-            auto action = rows.string(1);
-            result.push_back({rows.number(0), action.empty() ? std::nullopt : std::optional{std::move(action)}});
-        }
-        return result;
-    }
     static constexpr unsigned batchLimit = 4;
-    ScheduledWork lastScheduled;
-
-    std::vector<ScheduledWork> nextProjects(std::size_t slots) {
-        if (slots == 0) return {};
-        auto jobs = eligible();
-        std::erase_if(jobs, [&](const ScheduledWork& work) { return workers.contains(work); });
-        if (jobs.size() > slots) {
-            std::rotate(jobs.begin(), std::upper_bound(jobs.begin(), jobs.end(), lastScheduled), jobs.end());
-            jobs.resize(slots);
-        }
-        if (!jobs.empty()) lastScheduled = jobs.back();
-        return jobs;
-    }
 
     TaskData snapshot(Id id) {
         std::lock_guard lock(db.mutex);
@@ -2782,7 +2672,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         return true;
     }
 
-    void step(const ScheduledWork& work) {
+    void step(const TaskScheduler::Work& work) {
         if (shutdown.stop_requested()) return;
         const auto id = work.taskId;
         auto task = snapshot(id);
@@ -2838,7 +2728,7 @@ void Runtime::requestStop() {
 }
 void Runtime::runConversations() {
     if (p_->shutdown.stop_requested()) return;
-    p_->settleApprovals();
+    p_->maintenance.settleApprovals();
     p_->db.deliverGitWebhooks();
     p_->db.settleSessionQueueCancellations(p_->t3, p_->shutdown.get_token());
     p_->db.wakeSessionMessages(p_->t3, p_->shutdown.get_token());
@@ -2853,26 +2743,27 @@ void Runtime::runConversations() {
 }
 void Runtime::tick() {
     if (p_->shutdown.stop_requested()) return;
-    p_->settleApprovals();
+    p_->maintenance.settleApprovals();
     p_->persistTaskInferences();
-    p_->fireDueAutomations();
+    p_->maintenance.fireDueAutomations();
     p_->db.deliverGitWebhooks();
     p_->db.settleSessionQueueCancellations(p_->t3, p_->shutdown.get_token());
     p_->db.wakeSessionMessages(p_->t3, p_->shutdown.get_token());
     for (const auto& [bot, id] : p_->db.pendingConversations(Impl::batchLimit, p_->options.clock())) p_->runTurn(id);
-    p_->db.advanceWorkflows(p_->options.clock());
-    for (const auto& work : p_->nextProjects(Impl::batchLimit)) p_->step(work);
+    p_->maintenance.advanceWorkflows();
+    for (const auto& work : p_->taskScheduler.nextBatch(Impl::batchLimit, [this](const auto& job) { return p_->workers.contains(job); }))
+        p_->step(work);
     p_->db.deliverChannels(p_->shutdown.get_token());
 }
 void Runtime::tickConcurrent() {
     if (p_->shutdown.stop_requested()) return;
-    p_->runMaintenance(p_->approvalsCheckedAt, "policy approvals", [&] { return p_->settleApprovals(); });
+    p_->maintenance.settleApprovalsIfChanged();
     const auto collect = [this](auto& workers, std::string_view operation) {
         for (auto it = workers.begin(); it != workers.end();) {
             if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
                 auto result = std::move(it->second);
                 it = workers.erase(it);
-                p_->deferContendedWork(operation, [&] { result.get(); });
+                p_->maintenance.deferContendedWork(operation, [&] { result.get(); });
             } else
                 ++it;
         }
@@ -2880,13 +2771,13 @@ void Runtime::tickConcurrent() {
     collect(p_->conversationWorkers, "conversation worker");
     collect(p_->workers, "task worker");
     if (p_->channelWorker.valid() && p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-        p_->deferContendedWork("channel worker", [&] { p_->channelWorker.get(); });
-    p_->runMaintenance(p_->automationsCheckedAt, "automations", [&] { return p_->fireDueAutomations(); });
-    p_->deferContendedWork("Git webhooks", [&] { p_->db.deliverGitWebhooks(); });
+        p_->maintenance.deferContendedWork("channel worker", [&] { p_->channelWorker.get(); });
+    p_->maintenance.fireDueAutomationsIfChanged();
+    p_->maintenance.deferContendedWork("Git webhooks", [&] { p_->db.deliverGitWebhooks(); });
     if (!p_->channelWorker.valid() && p_->db.channelDeliveryDue())
         p_->channelWorker = std::async(std::launch::async, [db = &p_->db, stop = p_->shutdown.get_token()] { db->deliverChannels(stop); });
     if (p_->sessionWakeWorker.valid() && p_->sessionWakeWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-        p_->deferContendedWork("Session wake worker", [&] { p_->sessionWakeWorker.get(); });
+        p_->maintenance.deferContendedWork("Session wake worker", [&] { p_->sessionWakeWorker.get(); });
     if (!p_->sessionWakeWorker.valid())
         p_->sessionWakeWorker = std::async(std::launch::async, [impl = p_.get()] {
             impl->db.settleSessionQueueCancellations(impl->t3, impl->shutdown.get_token());
@@ -2901,14 +2792,11 @@ void Runtime::tickConcurrent() {
             }
         }
     }
-    p_->runMaintenance(p_->workflowsCheckedAt, "workflows", [&] {
-        const auto now = p_->options.clock();
-        p_->db.advanceWorkflows(now);
-        return now;
-    });
-    p_->deferContendedWork("task scheduling", [&] {
+    p_->maintenance.advanceWorkflowsIfChanged();
+    p_->maintenance.deferContendedWork("task scheduling", [&] {
         p_->persistTaskInferences();
-        for (const auto& work : p_->nextProjects(Impl::batchLimit - p_->workers.size()))
+        for (const auto& work : p_->taskScheduler.nextBatch(Impl::batchLimit - p_->workers.size(),
+                                                            [this](const auto& job) { return p_->workers.contains(job); }))
             p_->workers.emplace(work, std::async(std::launch::async, [impl = p_.get(), work] { impl->step(work); }));
     });
 }

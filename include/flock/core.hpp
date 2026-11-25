@@ -437,6 +437,8 @@ public:
     // Let admitted work settle while stopping further dispatch.
     void requestStop();
 private:
+    class Maintenance;
+    class TaskScheduler;
     struct Impl;
     std::unique_ptr<Impl> p_;
 };
