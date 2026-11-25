@@ -198,6 +198,8 @@ button.settings-row:hover, a.settings-row:hover { background: var(--detail-card-
 button.settings-row:active, a.settings-row:active { background: var(--selected); }
 button.settings-row:focus-visible, a.settings-row:focus-visible { outline-offset: -2px; border-radius: var(--radius-lg); }
 .settings-row-value { margin-left: auto; color: var(--text-2); }
+.settings-row-switch { flex: none; margin-inline-start: auto; inline-size: 1.1rem; block-size: 1.1rem; accent-color: var(--text-2); }
+.settings-row-label .settings-card-feedback { display: block; }
 a.settings-row svg { margin-left: auto; }
 .settings-row svg { width: 1rem; height: 1rem; color: var(--text-3); margin-right: -.25rem; transition: transform .16s cubic-bezier(0.23, 1, 0.32, 1), color .14s ease; }
 @media (hover: hover) and (pointer: fine) {

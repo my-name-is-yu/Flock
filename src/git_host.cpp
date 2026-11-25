@@ -283,26 +283,27 @@ WHERE r.task_id=? AND r.id=? AND a.task=r.task_id AND a.bot=?
 
 class Store::Impl::GitPrMutationClaim {
 public:
-    explicit GitPrMutationClaim(Impl& store) : store_(store) {}
+    GitPrMutationClaim(Impl& store, std::multiset<GitPrKey>& pending) : store_(store), pending_(pending) {}
     GitPrMutationClaim(const GitPrMutationClaim&) = delete;
     GitPrMutationClaim& operator=(const GitPrMutationClaim&) = delete;
     ~GitPrMutationClaim() { release(); }
 
-    void acquire(const GitRepository& repo, Id pr, Id task) {
-        if (store_.gitPrWatchUnavailable(repo,pr,task)) throw Conflict("This pull request belongs to another task");
-        claim_ = store_.gitPrMutationsInFlight.emplace(repo.host,repo.repo,pr).first;
+    void acquire(const GitRepository& repo, Id pr) {
+        claim_ = pending_.emplace(repo.host,repo.repo,pr);
     }
 
     void release() {
         if (!claim_) return;
         std::lock_guard lock(store_.mutex);
-        store_.gitPrMutationsInFlight.erase(*claim_);
+        pending_.erase(*claim_);
         claim_.reset();
+        store_.gitWebhooksDrainedAt.reset();
     }
 
 private:
     Impl& store_;
-    std::optional<std::set<GitPrKey>::iterator> claim_;
+    std::multiset<GitPrKey>& pending_;
+    std::optional<std::multiset<GitPrKey>::iterator> claim_;
 };
 
 Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const Json& routing,
@@ -399,6 +400,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
         return result;
     }
     const bool requestedReview = decision.tool == "git_request_review";
+    const bool submittedReview = decision.tool == "git_submit_review";
     const bool watchPr = decision.tool == "git_update_pr" || requestedReview;
     if (watchPr && args.contains("baseRef")) branch(args,"baseRef");
     if (op == "read") {
@@ -433,11 +435,13 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     auto audit = target;
     audit.erase("body");
     const bool createComment = decision.tool == "git_comment" && !target.contains("commentId");
+    const bool createPrComment = createComment && target.at("target") == "pr";
     const auto key = Json::array({invocation,decision.tool,target}).dump();
     const Json dedupe = createComment ? Json(target.dump()) : Json(nullptr);
     const auto reviewKey = requestedReview ? "review/" + actionId() : std::string{};
     Id eventCursor = 0;
-    GitPrMutationClaim watchMutation(*this);
+    GitPrMutationClaim watchMutation(*this,gitPrMutationsInFlight);
+    GitPrMutationClaim feedbackMutation(*this,gitFeedbackMutationsInFlight);
     {
         std::lock_guard lock(mutex);
         Transaction tx(db);
@@ -448,9 +452,13 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             return {{"ok",false},{"status","unknown"},{"error","The host outcome is unknown. Check the target before retrying."}};
         }
         if (watchPr) {
-            watchMutation.acquire(repo,args.at("prNumber"),taskId);
+            const auto pr = args.at("prNumber").get<Id>();
+            if (gitPrWatchUnavailable(repo,pr,taskId)) throw Conflict("This pull request belongs to another task");
+            watchMutation.acquire(repo,pr);
             eventCursor = latestGitWebhookId();
         }
+        if (submittedReview || createPrComment)
+            feedbackMutation.acquire(repo,args.at(submittedReview ? "prNumber" : "number"));
         if (policy.forbidden(bot,*parseAction("repository." + std::string(op)),repo.resource()))
             throw Conflict("Repository access denied");
         exec("INSERT INTO git_mutations(task_id,invocation,dedupe) VALUES(?,?,?)",{taskId,key,dedupe});
@@ -476,12 +484,13 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
     std::lock_guard lock(mutex);
     Transaction tx(db);
     watchMutation.release();
+    feedbackMutation.release();
     const auto scrub = sharedRedactor();
     if (result.value("ok",false)) result["data"] = scrub.payload(result.at("data"),false,gitResultTextLimit);
     else result["error"] = scrub.text(field(result,"error"));
     if (requestedReview && result.value("status","") == "failed")
         exec("DELETE FROM git_review_receipts WHERE inbox_key=?",{reviewKey});
-    if (result.value("ok",false) && (watchPr || decision.tool == "git_submit_review")) {
+    if (result.value("ok",false) && (watchPr || submittedReview)) {
         const auto pr = args.at("prNumber").get<Id>();
         const auto url = "https://" + repo.resource() + "/pull/" + std::to_string(pr);
         if (watchPr) {
@@ -491,7 +500,7 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
         }
         if (requestedReview && result.at("watchAttached") == true)
             gitInboxItem(load(taskId),reviewKey,url,"Pull request awaiting review","Review requested on the Git host.");
-        else if (decision.tool == "git_submit_review")
+        else if (submittedReview)
             gitInboxItem(load(taskId),"review/" + actionId(),url,"Pull request review submitted",field(args,"verdict"));
     }
     exec("UPDATE git_mutations SET result=?1,dedupe=CASE WHEN json_extract(?1,'$.status')='failed' THEN NULL ELSE dedupe END"

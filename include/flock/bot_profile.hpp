@@ -12,6 +12,7 @@ inline constexpr const char* botRunSettingFields[] = {"environmentId","projectId
 
 std::string validatedBotName(const Json& profile);
 std::string validatedBotSoul(const Json& soul);
+bool validatedBotFixPullRequests(const Json& value);
 std::size_t botRunSettingCount(const Json& profile);
 bool validPlainId(std::string_view id);
 bool validReasoningEffort(std::string_view effort);

@@ -155,6 +155,11 @@ These endpoints require an installation root.
 
 ## Bot settings
 
+In a Bot's **General** settings, **Fix failing checks and review feedback** lets
+the Bot ask the original Session to fix problems on PRs it opened for you. It is
+on by default. Turn it off to keep getting reports. If a fix request needs
+approval, review it in **Needs you**.
+
 Each Bot's **Access** page (Flock settings → Bots → Access) lists who can use
 the Bot, secrets it is waiting for, and connected computers.
 
@@ -176,7 +181,7 @@ Under **How it runs**, set **Steps per request** for future requests. The defaul
 Omitted fields are preserved. An empty string clears a supplied environment,
 project, model, or reasoning effort. Changing the model uses **Model default**
 unless the request also supplies an effort for the new model.
-Name, avatar, and role are saved separately.
+Save boolean `fixPullRequests` on its own with `botId`. Name, avatar, and role are saved separately.
 `POST /api/bot-settings/members` takes `botId`, `person` and boolean `add`.
 `POST /api/bot-settings/secret` accepts `botId`, `requestId` and `value`.
 Mutations use the usual same-origin JSON headers. Fulfilled secret values

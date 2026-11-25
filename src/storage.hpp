@@ -266,9 +266,21 @@ struct Store::Impl {
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
     Id latestGitWebhookId() const;
-    std::set<GitPrKey> gitPrMutationsInFlight;
+    std::multiset<GitPrKey> gitPrMutationsInFlight, gitFeedbackMutationsInFlight;
     class GitPrMutationClaim;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
+    struct GitPrFollowup {
+        enum class Status { available, attempted, limitReached };
+        SessionTarget session;
+        PolicyOrigin origin;
+        std::string operation;
+        Json target;
+        Status status;
+    };
+    std::optional<GitPrFollowup> gitPrFollowup(const conversation::Message&, const IntakeResolver&);
+    bool currentGitPrCheck(GitHost&, const conversation::Message&);
+    std::string gitPrFollowupInstruction(const conversation::Message&, const GitPrFollowup&, const Decision&) const;
+    void recordGitPrFollowup(const conversation::Message&, const GitPrFollowup&);
     bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
     bool watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest&,
                     GitWatchStart = GitWatchStart::operationIntent);
@@ -356,7 +368,13 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
-    struct SessionSendReceipt { std::string bot; SessionTarget target; std::string title; Delivery delivery; };
+    struct SessionSendReceipt {
+        std::string bot;
+        SessionTarget target;
+        std::string title;
+        Delivery delivery;
+        bool notify;
+    };
     std::map<Id,SessionSendReceipt> sessionSendReceipts;
     void recordSessionSendRun(Id, const SessionSendReceipt&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
@@ -391,7 +409,7 @@ struct Store::Impl {
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                   bool hasWebEvidence, T3&, std::stop_token);
+                                   const ConversationCallContext&);
     CallOutcome cancelDestinationRun(const conversation::Message&, int step, const Decision&, std::string_view key,
                                      bool offered, bool hasWebEvidence, std::stop_token);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&,
