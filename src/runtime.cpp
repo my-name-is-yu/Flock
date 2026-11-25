@@ -96,6 +96,13 @@ void includeInstructions(std::string& instruction, const Json& pending) {
     instruction += "\n\nUser instructions accepted for this task, oldest first. Apply later directions where they replace earlier ones:";
     for (const auto& item : pending) instruction += "\n\n" + field(item,"text");
 }
+
+std::string dispatchedWorkPrompt(const Json& action) {
+    auto instruction = field(action,"instruction");
+    if (const auto memory = action.find("sessionMemory"); memory != action.end())
+        instruction += field(*memory,"section");
+    return sessionPrompt(field(action,"id"),instruction);
+}
 }
 
 struct Runtime::Impl {
@@ -758,7 +765,8 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
         c.tool = field(action,"tool");
         c.environmentId = action.at("environmentId");
         c.projectId = action.value("projectId",field(task,"projectId"));
-        c.instruction = field(action,"instruction");
+        c.instruction = action["phase"] == "started" && c.tool != "answer_session_question"
+            ? dispatchedWorkPrompt(action) : field(action,"instruction");
         c.config = task["config"];
         if (action.contains("expectedCommit")) {
             const auto& commit = action.at("expectedCommit");
@@ -1205,6 +1213,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         const bool usesExistingSession = cmd.tool == "follow_up" || cmd.tool == "start_in_session";
         const bool sendsToSession = usesExistingSession || cmd.tool == "answer_session_question";
         const bool preparesTaskContract = cmd.tool == "delegate" || cmd.tool == "start_in_session";
+        const bool sendsWork = preparesTaskContract || usesExistingSession;
         const auto sessionActionAllowed = [&](const Json& current) {
             if (!cmd.sessionOrigin && !sendsToSession) return true;
             std::lock_guard lock(db.mutex);
@@ -1294,17 +1303,19 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},error.what(),true});
                 }
             }
-            if (preparesTaskContract || usesExistingSession) {
+            if (sendsWork) {
                 const auto scrub = db.redactor(cmd.ownerBotId);
                 const auto pin = field(task,"inputArtifactVersion");
                 if (scrub.text(pin) != pin)
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},"The pinned workflow artifact version contains a protected value",true});
                 const auto marker = sessionPrompt(cmd.actionId,{});
                 if (cmd.instruction.ends_with(marker)) cmd.instruction.resize(cmd.instruction.size()-marker.size());
-                cmd.instruction = sessionPrompt(cmd.actionId,scrub.text(cmd.instruction));
+                action.erase("sessionMemory");
+                cmd.instruction = scrub.text(cmd.instruction);
+                action["instruction"] = cmd.instruction;
+                cmd.instruction = sessionPrompt(cmd.actionId,cmd.instruction);
                 if (cmd.instruction.size() > maxSessionPromptBytes)
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},SessionContextLimit{}.what(),true});
-                action["instruction"] = cmd.instruction;
             }
             auto payload = Json{{"tool",cmd.tool},{"instruction",cmd.instruction},{"questionId",cmd.questionId},
                                   {"answers",cmd.answers},{"run",runJson(cmd.target)},{"projectId",cmd.projectId},
@@ -1354,6 +1365,18 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             if (!dispatch && (options.requireT3Connection || sendsToSession || cmd.sessionOrigin))
                 dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
             if (disconnected()) return connectionUnavailable();
+            const auto sharesMemory = [](const Json& config) {
+                return config.value("shareMemoryWithSessions",Json(false)) == true;
+            };
+            bool includeMemory = false;
+            if (sendsWork) {
+                try {
+                    includeMemory = options.intake ? sharesMemory(options.intake(cmd.ownerBotId,{}).config)
+                                                  : sharesMemory(cmd.config);
+                } catch (const std::exception&) {
+                    // An unreadable Bot profile cannot authorize sharing.
+                }
+            }
             auto policyGate = ApprovalGate::allow;
             const auto startSend = [&](Json& current) {
                 if (shutdown.stop_requested()) return false;
@@ -1379,6 +1402,13 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                     if (participant.next() && (participant.string(1) == db.turnActor(source).id ||
                                                db.connectedSessionAccess(source,target)))
                         action["sessionParticipationId"] = participant.number(0);
+                }
+                if (includeMemory) {
+                    if (const auto memory = db.sessionMemory(cmd,options.clock())) {
+                        action["sessionMemory"] = {{"version",memory->version},{"section",memory->section},
+                                                   {"excerptBytes",memory->excerptBytes}};
+                        cmd.instruction = dispatchedWorkPrompt(action);
+                    }
                 }
                 auto payload = action;
                 payload.erase("phase");
@@ -1804,7 +1834,7 @@ ORDER BY j.id
             const auto scrub = db.redactor(field(task,"botId"));
             prompt.pending = scrub.record(std::move(prompt.pending),SecretRedactor::Fields::external);
             instruction += prompt.instruction;
-            instruction = sessionPrompt(action,scrub.text(instruction));
+            instruction = scrub.text(instruction);
         }
         if (tool == "delegate" || tool == "follow_up" || tool == "start_in_session") task["deadline"] = 0;
         const auto& route = destination ? *destination : task;

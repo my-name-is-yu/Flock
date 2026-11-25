@@ -867,7 +867,10 @@ FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
 void Store::Impl::addTaskDetails(Json& result) const {
     const Id id = result.at("id");
     auto pending = outbox(result);
-    if (pending.is_object()) pending.erase("authGeneration");
+    if (pending.is_object()) {
+        pending.erase("authGeneration");
+        pending.erase("sessionMemory");
+    }
     result["pendingAction"] = pending;
     auto revisions = query("SELECT id,number,intent,done_when,source_message_id FROM task_revisions"
                            " WHERE task_id=? ORDER BY number", {id});

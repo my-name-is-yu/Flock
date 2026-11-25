@@ -368,8 +368,15 @@ void notesAcrossConversationAndWork() {
         const std::string_view readText = requestText(read), responseText = requestText(respond);
         constexpr std::string_view eventField = ",\"event\":";
         const auto event = readText.find(eventField);
+        auto expectedTools = read.at("tools");
+        auto& functions = expectedTools.at(0).at("tools");
+        const auto review = std::ranges::find_if(functions,[](const Json& tool) {
+            return tool.at("name") == "review_preference";
+        });
+        check(review != functions.end(),"the first Bot-owner step did not offer preference review");
+        functions.erase(review);
         check(event != readText.npos && responseText.starts_with(readText.substr(0,event + eventField.size())) &&
-              readText != responseText && read.at("tools") == respond.at("tools") &&
+              readText != responseText && expectedTools == respond.at("tools") &&
               read.at("instructions") == respond.at("instructions"),"a read-only turn step changed the prompt prefix before event data");
         check(store.tasks().size() == taskCount && t3.commands.size() == commands && store.task(task) == before,
             "explaining a result must preserve the Task and its Runs without starting any new work");
