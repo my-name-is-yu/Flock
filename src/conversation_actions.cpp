@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "journal.hpp"
+#include "journal_conversation.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 #include "commit_check.hpp"
@@ -872,14 +873,9 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
             origin != routing.end() &&
             !policy.allows(wait.bot, Resource::sessionRead(field(*origin, "environmentId"), field(*origin, "threadId"))))
             (*origin)["title"] = "";
-        routing["sessionWake"] = {{"environmentId", wait.target.environmentId},
-                                  {"threadId", wait.target.threadId},
-                                  {"title", title},
-                                  {"reason", reason},
-                                  {"sourceMessageId", wait.message}};
-        exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message',?,?)",
-             {unixTime(), Json{{"sessionWake", routing.at("sessionWake")}}, wait.bot});
-        const auto id = last();
+        const ConversationWakeEntry wake{wait.target.environmentId, wait.target.threadId, std::move(title), reason, wait.message};
+        routing["sessionWake"] = encodeConversationWake(wake);
+        const auto id = journalConversationMessage(wait.bot, {wake});
         exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,'',?,?,?,? FROM messages WHERE bot_id=?
@@ -942,20 +938,18 @@ WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.
         for (const auto& item : pending) pendingIds.emplace(item.messageId, item.step);
 
         // Excerpt only earlier deliveries. Pending directions follow them in acceptance order.
-        auto rows = query("SELECT data FROM journal WHERE task_id=? AND kind='instruction_accepted'"
+        auto rows = query("SELECT id,data FROM journal WHERE task_id=? AND kind='instruction_accepted'"
                           " ORDER BY id DESC",
                           {priorId});
         std::vector<DeliveredInstruction> delivered;
         constexpr std::size_t maxEarlierInstructionBytes = 8'000, maxEarlierInstructions = 20;
         std::size_t remaining = maxEarlierInstructionBytes;
         while (remaining && delivered.size() < maxEarlierInstructions && rows.next()) {
-            const auto item = rows.json(0);
-            const auto messageId = item.at("messageId").get<Id>();
-            const auto step = item.at("step").get<int>();
-            if (pendingIds.contains({messageId, step})) continue;
-            auto text = bounded(field(item, "text"), remaining);
+            const auto item = decodeAcceptedInstruction(rows.number(0), rows.json(1));
+            if (pendingIds.contains({item.messageId, item.step})) continue;
+            auto text = bounded(item.text, remaining);
             remaining -= text.size();
-            delivered.push_back({messageId, step, std::move(text)});
+            delivered.push_back({item.messageId, item.step, std::move(text)});
         }
         std::reverse(delivered.begin(), delivered.end());
         task.intent = prior.intent;
@@ -963,10 +957,9 @@ WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.
         for (auto item : pending) {
             item.revisionId.reset();
             item.conflicting = false;
-            const auto entry = instructionJson(item);
             if (item.source) rememberSourceResult(task, *item.source);
+            journal(id, item);
             task.pendingInstructions.push_back(std::move(item));
-            journal(id, "instruction_accepted", entry);
         }
     }
     save(task);
@@ -1044,7 +1037,7 @@ bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std:
         }
     }
     if (task.question) task.question->suspendedDecision.reset();
-    journal(task.id, "instruction_accepted", instructionJson(pending));
+    journal(task.id, pending);
     task.pendingInstructions.push_back(std::move(pending));
     save(task);
     return conflicting;

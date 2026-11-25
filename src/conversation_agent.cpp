@@ -2,6 +2,9 @@
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 #include "journal.hpp"
+#include "journal_task.hpp"
+#include "journal_conversation.hpp"
+#include "journal_peer.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "task_storage.hpp"
@@ -30,6 +33,33 @@ constexpr int activeTaskLimit = 12;
 constexpr int terminalTaskLimit = 8;
 constexpr int findLimit = 10;
 constexpr std::size_t resultChunk = 6000;
+
+struct TaskResult {
+    std::string text;
+    Id revisionId = 0;
+    bool truncated = false;
+    Json source;
+};
+
+TaskResult taskResult(Id id, std::string_view kind, const Json& data) {
+    if (kind == "report") {
+        auto report = decodeRunReport(id, data);
+        return {std::move(report.evidence.report),
+                report.revisionId.value_or(0),
+                report.evidence.truncated,
+                {{"environmentId", report.environmentId},
+                 {"threadId", report.run.threadId},
+                 {"runId", report.resultRunId},
+                 {"itemId", report.evidence.itemId}}};
+    }
+    if (kind == "completed") {
+        auto completion = decodeCompletion(id, data);
+        const auto* source = completion.source();
+        return {std::move(completion.text), completion.revisionId.value_or(0), false, source ? sourceRunJson(*source) : Json(nullptr)};
+    }
+    const auto rowId = std::to_string(id);
+    return RecordDecoder("journal", rowId).decodeClosed(data, [](const Json&, const RecordDecoder&) { return TaskResult{}; });
+}
 
 const std::vector<std::string> turnTools{"start_task",
                                          "send_to_task",
@@ -104,12 +134,13 @@ std::string requestName(const TaskData& task) {
     return bounded(request.substr(0, request.find('\n')), 160);
 }
 
-std::string effectStatus(const Json& actions) {
-    std::string status = "done";
+ConversationReplyStatus effectStatus(const Json& actions) {
+    using enum ConversationReplyStatus;
+    auto status = done;
     for (const auto& action : actions) {
         const auto effect = field(action, "effect");
-        if (effect == "replanning" || effect == "cancelling" || effect == "interrupt_requested") return "stopping";
-        if (effect == "started" || effect == "accepted" || effect == "answered" || effect == "delivered") status = "working";
+        if (effect == "replanning" || effect == "cancelling" || effect == "interrupt_requested") return stopping;
+        if (effect == "started" || effect == "accepted" || effect == "answered" || effect == "delivered") status = working;
     }
     return status;
 }
@@ -242,23 +273,17 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
     const auto taskId = row.number(0);
     const auto state = decodeTaskState(taskId, row.string(1));
     const auto kind = row.string(2);
-    const auto data = row.json(3);
-    const auto report = kind == "report" ? std::optional{decodeRunReport(messageId, data)} : std::nullopt;
-    const auto provenance = report ? Json{{"environmentId", report->environmentId},
-                                          {"threadId", report->run.threadId},
-                                          {"runId", report->resultRunId},
-                                          {"itemId", report->evidence.itemId}}
-                                   : data.value("source", Json(nullptr));
+    auto decoded = taskResult(messageId, kind, row.json(3));
     Json result = {{"taskId", taskId},
                    {"messageId", messageId},
-                   {"revisionId", report ? report->revisionId.value_or(0) : integer(data, "revisionId")},
-                   {"text", report ? report->evidence.report : field(data, "text")},
+                   {"revisionId", decoded.revisionId},
+                   {"text", std::move(decoded.text)},
                    {"kind", kind},
                    {"taskState", taskStateName(state)},
                    {"request", row.string(4)},
                    {"currentRevision", row.number(5)},
-                   {"truncated", report ? report->evidence.truncated : data.value("truncated", false)}};
-    if (!provenance.is_null()) result["run"] = provenance;
+                   {"truncated", decoded.truncated}};
+    if (!decoded.source.is_null()) result["run"] = std::move(decoded.source);
     return redactor(message.bot).record(std::move(result));
 }
 
@@ -346,12 +371,9 @@ ORDER BY id DESC LIMIT 1
         if (!row.next()) return nullptr;
         const auto messageId = row.number(0);
         const auto kind = row.string(1);
-        const auto data = row.json(2);
-        const auto report = kind == "report" ? std::optional{decodeRunReport(messageId, data)} : std::nullopt;
-        Json result = {{"messageId", messageId},
-                       {"kind", kind},
-                       {"revisionId", report ? report->revisionId.value_or(0) : integer(data, "revisionId")}};
-        if (messageId > boundary) result["excerpt"] = bounded(scrub.text(report ? report->evidence.report : field(data, "text")), 600);
+        const auto decoded = taskResult(messageId, kind, row.json(2));
+        Json result = {{"messageId", messageId}, {"kind", kind}, {"revisionId", decoded.revisionId}};
+        if (messageId > boundary) result["excerpt"] = bounded(scrub.text(decoded.text), 600);
         return result;
     };
     const auto addTask = [&](Id taskId) {
@@ -394,11 +416,13 @@ ORDER BY t.id DESC LIMIT ?
     Json replyTo = nullptr;
     if (message.replyTo) {
         auto row = query(R"SQL(
-SELECT j.kind,j.task_id,j.data,m.text FROM journal j LEFT JOIN tasks t ON t.id=j.task_id
+SELECT j.kind,j.task_id,j.data,m.text,original.id,original.text,original.reply_to
+FROM journal j LEFT JOIN tasks t ON t.id=j.task_id
 LEFT JOIN messages m ON m.id=j.id
-WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
+LEFT JOIN messages original ON original.id=j.reply_to_message_id AND original.bot_id=?3
+WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
 )SQL",
-                         {message.replyTo, message.id, message.bot, message.bot});
+                         {message.replyTo, message.id, message.bot});
         if (row.next()) {
             const auto kind = row.string(0);
             const Id taskId = row.number(1);
@@ -416,26 +440,26 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                                 {"current", current && current->id == asked.id && waitIsActionable(task)}});
                 addTask(taskId);
             } else if (kind == "report" || kind == "completed" || kind == "cancelled") {
-                const auto text = kind == "report" ? decodeRunReport(message.replyTo, data).evidence.report : field(data, "text");
-                replyTo.update({{"kind", "result"}, {"taskId", taskId}, {"text", bounded(text, 2000)}});
+                const auto decoded = taskResult(message.replyTo, kind, data);
+                replyTo.update({{"kind", "result"}, {"taskId", taskId}, {"text", bounded(decoded.text, 2000)}});
                 addTask(taskId);
             } else if (kind == "pr_review_requested") {
+                const auto review = decodePrReviewRequested(message.replyTo, data);
                 replyTo.update({{"kind", "pr_review"},
                                 {"taskId", taskId},
-                                {"itemId", integer(data, "itemId")},
-                                {"title", scrub.text(field(data, "title"))},
-                                {"text", bounded(scrub.text(field(data, "text")), 2000)},
-                                {"prUrl", scrub.text(field(data, "prUrl"))}});
+                                {"itemId", review.itemId},
+                                {"title", scrub.text(review.title)},
+                                {"text", bounded(scrub.text(review.text), 2000)},
+                                {"prUrl", scrub.text(review.prUrl)}});
                 addTask(taskId);
             } else if (kind == "conversation_reply") {
-                replyTo.update({{"kind", "bot_message"}, {"text", bounded(field(data, "text"), 2000)}});
-                if (data.contains("suggestions")) replyTo["suggestions"] = data.at("suggestions");
+                const auto reply = decodeConversationReply(message.replyTo, data);
+                replyTo.update({{"kind", "bot_message"}, {"text", bounded(reply.text, 2000)}});
+                if (!reply.suggestions.is_null()) replyTo["suggestions"] = reply.suggestions;
                 if (message.question) addTask(message.question->taskId);
-                auto original = query("SELECT id,text,reply_to FROM messages WHERE id=? AND bot_id=?",
-                                      {integer(data, "replyToMessageId"), message.bot});
-                if (original.next()) {
-                    replyTo["inReplyTo"] = {{"messageId", original.number(0)}, {"text", bounded(original.string(1), maxBodyBytes)}};
-                    if (original.number(2)) replyTo["inReplyTo"]["replyToMessageId"] = original.number(2);
+                if (!row.null(4)) {
+                    replyTo["inReplyTo"] = {{"messageId", row.number(4)}, {"text", bounded(row.string(5), maxBodyBytes)}};
+                    if (row.number(6)) replyTo["inReplyTo"]["replyToMessageId"] = row.number(6);
                 }
             } else if (kind == "conversation_message") {
                 replyTo.update({{"kind", "user_message"}, {"text", bounded(row.string(3), 2000)}});
@@ -715,11 +739,12 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
     throw ToolError("Unknown tool " + tool + "; use one of the provided tools");
 }
 
-void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route,
+void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, ConversationReplyRoute route,
                              const conversation::QuestionAnchor* question) {
+    using enum ConversationReplyRoute;
     const auto receipt = sessionSendReceipts.find(message.id);
     if (receipt != sessionSendReceipts.end()) persistSessionSendReceipt(message.id, receipt->second);
-    if (route == "session_access" || route == "access" || route == "channel_access" || route == "bot_paused") {
+    if (route == session_access || route == access || route == channel_access || route == bot_paused) {
         auto pending = query(R"SQL(
 SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
   AND json_extract(effect,'$.kind')='message_session'
@@ -759,7 +784,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
             actions.push_back(std::move(action));
         }
     }
-    if (route == "error" && !actions.empty()) {
+    if (route == error && !actions.empty()) {
         const bool ja = japanese(message.text);
         text += ja ? "\n\nこのメッセージで実行済みの操作:" : "\n\nAlready done for this message:";
         for (const auto& action : actions) {
@@ -773,28 +798,26 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
             }
         }
     }
-    const auto status = effectStatus(actions);
-    const Json linked = message.principalSource == PrincipalSource::gitWebhook ? message.routing.at("gitEvent").at("taskId")
-                        : touched.size() == 1                                  ? Json(*touched.begin())
-                                                                               : Json(nullptr);
-    exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id,task_question_message_id)"
-         " VALUES(?,?,'conversation_reply','{}',?,?)",
-         {linked, unixTime(), message.bot, question ? Json(question->messageId) : Json(nullptr)});
-    const auto reply = last();
-    Json data = {{"messageId", reply},
-                 {"replyToMessageId", message.id},
-                 {"text", redactor(message.bot).text(text)},
-                 {"route", route},
-                 {"status", status},
-                 {"actions", actions}};
-    if (suggestions.is_array() && !suggestions.empty()) data["suggestions"] = redactor(message.bot).payload(suggestions);
-    if (question) data["taskQuestionMessageId"] = question->messageId;
-    if (!artifacts.empty()) data["artifacts"] = std::move(artifacts);
-    if (!message.channelScope.empty() && channelMessageAuthorized(message.id, message.bot)) queueChannelReply(message.id, reply, data);
-    exec("UPDATE journal SET data=? WHERE id=?", {data, reply});
-    exec("UPDATE journal SET task_id=? WHERE id=?", {linked, message.id});
+    std::optional<Id> linked;
+    if (message.principalSource == PrincipalSource::gitWebhook)
+        linked = message.routing.at("gitEvent").at("taskId").get<Id>();
+    else if (touched.size() == 1)
+        linked = *touched.begin();
+    const auto scrub = redactor(message.bot);
+    const ConversationReplyEntry entry{.replyToMessageId = message.id,
+                                       .text = scrub.text(text),
+                                       .status = effectStatus(actions),
+                                       .route = route,
+                                       .taskQuestionMessageId = question ? std::optional{question->messageId} : std::nullopt,
+                                       .actions = std::move(actions),
+                                       .suggestions = suggestions.is_array() && !suggestions.empty() ? scrub.payload(suggestions) : Json(),
+                                       .artifacts = artifacts.empty() ? Json() : std::move(artifacts)};
+    const auto replyId = journalConversationReply(linked, message.bot, entry);
+    if (!message.channelScope.empty() && channelMessageAuthorized(message.id, message.bot))
+        queueChannelReply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
+    exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});
     releaseModelCall(takeReservedConversationCall(message.id));
-    exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {reply, message.id});
+    exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {replyId, message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
     std::erase_if(unpersistedToolResults, [&](const auto& entry) { return entry.first.first == message.id; });
     if (receipt != sessionSendReceipts.end()) sessionSendReceipts.erase(receipt);
@@ -843,7 +866,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
         message.principalSource == PrincipalSource::session || (isWake && message.routing.contains("sessionOrigin"));
     // A wake can be queued before a stop commits and reach this turn after it commits.
     if (stoppedWake || (usesSessionOrigin && !activeSessionOrigin(message))) {
-        finishTurn(message, "The T3 Session participation has ended.", nullptr, "session_access");
+        finishTurn(message, "The T3 Session participation has ended.", nullptr, ConversationReplyRoute::session_access);
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
@@ -852,9 +875,9 @@ bool Store::Impl::authorizeTurn(const Message& message) {
         return true;
     if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(attempt);
     if (message.principalSource == PrincipalSource::channel)
-        finishTurn(message, "This channel connection is no longer authorized.", nullptr, "channel_access");
+        finishTurn(message, "This channel connection is no longer authorized.", nullptr, ConversationReplyRoute::channel_access);
     else
-        finishTurn(message, "You no longer have permission to message this Bot.", nullptr, "access");
+        finishTurn(message, "You no longer have permission to message this Bot.", nullptr, ConversationReplyRoute::access);
     return false;
 }
 
@@ -929,10 +952,10 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         return std::tuple{std::move(offered), std::move(machines), followupStatus};
     };
     const bool ja = japanese(message.text);
-    const auto finish = [&](std::string text, std::string_view route) {
+    const auto finishError = [&](std::string text) {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (authorizeTurn(message)) finishTurn(message, std::move(text), nullptr, route);
+        if (authorizeTurn(message)) finishTurn(message, std::move(text), nullptr, ConversationReplyRoute::error);
         transaction.commit();
     };
     const auto encodeCalls = [](const std::vector<ModelCall>& calls) {
@@ -981,7 +1004,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                     if (error.retryFrom && !isRepair)
                         deferConversation(id, *error.retryFrom);
                     else
-                        finishTurn(message, modelFailureReply(error.code, ja), nullptr, "error");
+                        finishTurn(message, modelFailureReply(error.code, ja), nullptr, ConversationReplyRoute::error);
                 }
             }
         }
@@ -1047,9 +1070,9 @@ LIMIT 1
             } catch (const std::exception& error) {
                 const auto diagnostic =
                     Json::parse(Json(error.what()).dump(-1, ' ', false, Json::error_handler_t::replace)).get<std::string>();
-                finish(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを修正してから、もう一度送ってください。"
-                          : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.",
-                       "error");
+                finishError(ja ? "このBotのノートを読み込めませんでした (" + diagnostic +
+                                     ")。ファイルを修正してから、もう一度送ってください。"
+                               : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.");
                 return;
             }
             const auto linkedDestinations = reviewPreference ? LinkedTaskDestinations{} : discoverLinkedTaskDestinations(t3, message.bot);
@@ -1074,7 +1097,8 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                         // A previous worker claimed the repair, but no result survived.
                         exec("INSERT INTO conversation_model_failures(attempt_id,message_id,step,reason) VALUES(?,?,?,?)",
                              {repair.number(0), id, step, "repair_interrupted"});
-                        finishTurn(message, modelFailureReply(ModelErrorCode::inference_failed, ja), nullptr, "error");
+                        finishTurn(message, modelFailureReply(ModelErrorCode::inference_failed, ja), nullptr,
+                                   ConversationReplyRoute::error);
                         transaction.commit();
                         return;
                     }
@@ -1185,8 +1209,7 @@ SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=ca
         if (outcome != CallOutcome::advance) return;
     }
     if (shutdown.stop_requested()) return;
-    finish(ja ? "このメッセージの処理が長くなりすぎたため中断しました。必要なら、もう一度送ってください。"
-              : "I stopped because handling this message took too many steps. Send it again if needed.",
-           "error");
+    finishError(ja ? "このメッセージの処理が長くなりすぎたため中断しました。必要なら、もう一度送ってください。"
+                   : "I stopped because handling this message took too many steps. Send it again if needed.");
 }
 }

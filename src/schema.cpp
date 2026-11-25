@@ -3,7 +3,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 15;
+constexpr Id schemaVersion = 16;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -35,7 +35,13 @@ CREATE TABLE journal(
   task_question_message_id INTEGER REFERENCES journal(id),
   action_id TEXT, run_environment_id TEXT, run_thread_id TEXT, run_id TEXT, run_gateway_id TEXT,
   result_run_id TEXT, run_status TEXT, revision_id INTEGER, stop_requested INTEGER CHECK(stop_requested IN (0,1)),
-  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
+  message_id INTEGER, instruction_step INTEGER,
+  exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
+  pr_review_item_id INTEGER, git_event_id TEXT, operation_id TEXT,
+  reply_to_message_id INTEGER, wait_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
+  session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER, workflow_outcome TEXT,
+  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL),
+  CHECK(kind<>'pr_review_requested' OR (task_id IS NOT NULL AND pr_review_item_id IS NOT NULL)));
 CREATE INDEX journal_task ON journal(task_id,id);
 CREATE INDEX journal_wait_anchor ON journal(task_id,wait_id,id)
   WHERE kind='waiting' AND conversation_bot_id IS NULL;
@@ -85,7 +91,10 @@ CREATE TABLE peer_exchanges(
   sender_environment TEXT NOT NULL, sender_revision INTEGER);
 CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
 CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN ('run_started','report');
-CREATE INDEX journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id) WHERE kind='bot_message';
+CREATE INDEX journal_peer_message ON journal(task_id,exchange_id,id) WHERE kind='bot_message';
+CREATE INDEX journal_peer_evidence ON journal(task_id,exchange_id,peer_message_id,id) WHERE kind='read_bot_evidence';
+CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,id) WHERE kind='git_pr_followup_requested';
+CREATE INDEX journal_tool_feedback ON journal(task_id,feedback_event_id,id) WHERE kind='tool_error';
 
 CREATE TABLE web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TABLE policy_settings(id INTEGER PRIMARY KEY CHECK(id=1),mode TEXT NOT NULL CHECK(mode IN ('full','supervised')), revision INTEGER NOT NULL);
@@ -120,9 +129,10 @@ CREATE TABLE environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIM
 CREATE INDEX journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
 CREATE INDEX journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
-CREATE INDEX journal_instruction_message ON journal(
-  json_extract(data,'$.messageId'),task_id,json_extract(data,'$.step'))
+CREATE INDEX journal_instruction_message ON journal(message_id,task_id,instruction_step)
   WHERE kind IN ('instruction_accepted','instruction_delivered');
+CREATE INDEX journal_instruction_delivered ON journal(task_id,message_id,instruction_step,revision_id)
+  WHERE kind='instruction_delivered';
 CREATE INDEX conversation_active_tasks ON tasks(bot_id,id DESC)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX conversation_terminal_tasks ON tasks(bot_id,id DESC)
@@ -145,7 +155,7 @@ SELECT t.message_id,
   CASE t.status WHEN 'paused' THEN 'needs_you'
                 WHEN 'policy_waiting' THEN 'needs_you'
                 WHEN 'done' THEN coalesce(
-                  (SELECT json_extract(data,'$.status') FROM journal WHERE id=t.reply_id),'access_revoked')
+                  (SELECT conversation_status FROM journal WHERE id=t.reply_id),'access_revoked')
   END AS status
 FROM conversation_turns t;
 CREATE TABLE conversation_retries(
@@ -284,7 +294,7 @@ CREATE VIEW compactable_messages AS
         SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id) bot_id,j.kind,j.task_id,j.data,j.wait_id,
           CASE j.kind
             WHEN 'conversation_message' THEN j.id
-            WHEN 'conversation_reply' THEN json_extract(j.data,'$.replyToMessageId')
+            WHEN 'conversation_reply' THEN j.reply_to_message_id
             ELSE t.source_message_id
           END source_message_id,
           CASE j.kind
@@ -408,7 +418,7 @@ CREATE TABLE pr_review_items(
     UNIQUE(task_id,git_key), CHECK((git_key IS NULL) <> (operation_id IS NULL)));
 CREATE UNIQUE INDEX pending_pr_reconciliation ON pr_review_items(operation_id) WHERE status='pending';
 CREATE INDEX pr_reviews_by_task ON pr_review_items(task_id,id);
-CREATE UNIQUE INDEX journal_pr_review_anchor ON journal(task_id,json_extract(data,'$.itemId'))
+CREATE UNIQUE INDEX journal_pr_review_anchor ON journal(task_id,pr_review_item_id)
     WHERE kind='pr_review_requested';
 CREATE TABLE inbox_decisions(
     id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, item_kind TEXT NOT NULL, item_id INTEGER NOT NULL,

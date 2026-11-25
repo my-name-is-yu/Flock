@@ -20,11 +20,14 @@ VALUES
     ('index', 'git_task_reads_by_task', 'git_task_reads', 'CREATE INDEX git_task_reads_by_task ON git_task_reads(task_id,id)'),
     ('index', 'inbox_decisions_by_bot', 'inbox_decisions', 'CREATE INDEX inbox_decisions_by_bot ON inbox_decisions(bot_id,id)'),
     ('index', 'journal_bot', 'journal', 'CREATE INDEX journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL'),
-    ('index', 'journal_instruction_message', 'journal', 'CREATE INDEX journal_instruction_message ON journal(
-  json_extract(data,''$.messageId''),task_id,json_extract(data,''$.step''))
+    ('index', 'journal_instruction_delivered', 'journal', 'CREATE INDEX journal_instruction_delivered ON journal(task_id,message_id,instruction_step,revision_id)
+  WHERE kind=''instruction_delivered'''),
+    ('index', 'journal_instruction_message', 'journal', 'CREATE INDEX journal_instruction_message ON journal(message_id,task_id,instruction_step)
   WHERE kind IN (''instruction_accepted'',''instruction_delivered'')'),
-    ('index', 'journal_peer_message', 'journal', 'CREATE INDEX journal_peer_message ON journal(task_id,json_extract(data,''$.exchangeId''),id) WHERE kind=''bot_message'''),
-    ('index', 'journal_pr_review_anchor', 'journal', 'CREATE UNIQUE INDEX journal_pr_review_anchor ON journal(task_id,json_extract(data,''$.itemId''))
+    ('index', 'journal_peer_evidence', 'journal', 'CREATE INDEX journal_peer_evidence ON journal(task_id,exchange_id,peer_message_id,id) WHERE kind=''read_bot_evidence'''),
+    ('index', 'journal_peer_message', 'journal', 'CREATE INDEX journal_peer_message ON journal(task_id,exchange_id,id) WHERE kind=''bot_message'''),
+    ('index', 'journal_pr_followup', 'journal', 'CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,id) WHERE kind=''git_pr_followup_requested'''),
+    ('index', 'journal_pr_review_anchor', 'journal', 'CREATE UNIQUE INDEX journal_pr_review_anchor ON journal(task_id,pr_review_item_id)
     WHERE kind=''pr_review_requested'''),
     ('index', 'journal_report_result', 'journal', 'CREATE INDEX journal_report_result ON journal(task_id,run_environment_id,run_thread_id,result_run_id,id)
   WHERE kind=''report'''),
@@ -35,6 +38,7 @@ VALUES
     ('index', 'journal_task', 'journal', 'CREATE INDEX journal_task ON journal(task_id,id)'),
     ('index', 'journal_task_results', 'journal', 'CREATE INDEX journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN (''completed'',''report'',''cancelled'')'),
+    ('index', 'journal_tool_feedback', 'journal', 'CREATE INDEX journal_tool_feedback ON journal(task_id,feedback_event_id,id) WHERE kind=''tool_error'''),
     ('index', 'journal_wait_anchor', 'journal', 'CREATE INDEX journal_wait_anchor ON journal(task_id,wait_id,id)
   WHERE kind=''waiting'' AND conversation_bot_id IS NULL'),
     ('index', 'local_machine_open_request', 'local_machine_connections', 'CREATE UNIQUE INDEX local_machine_open_request
@@ -274,7 +278,13 @@ VALUES
   task_question_message_id INTEGER REFERENCES journal(id),
   action_id TEXT, run_environment_id TEXT, run_thread_id TEXT, run_id TEXT, run_gateway_id TEXT,
   result_run_id TEXT, run_status TEXT, revision_id INTEGER, stop_requested INTEGER CHECK(stop_requested IN (0,1)),
-  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL))'),
+  message_id INTEGER, instruction_step INTEGER,
+  exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
+  pr_review_item_id INTEGER, git_event_id TEXT, operation_id TEXT,
+  reply_to_message_id INTEGER, wait_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
+  session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER, workflow_outcome TEXT,
+  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL),
+  CHECK(kind<>''pr_review_requested'' OR (task_id IS NOT NULL AND pr_review_item_id IS NOT NULL)))'),
     ('table', 'local_machine_connections', 'local_machine_connections', 'CREATE TABLE local_machine_connections(
       id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
       environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, requested_run_id TEXT NOT NULL,
@@ -479,7 +489,7 @@ WHERE task.project_id<>'''' AND task.trigger_data IS NOT NULL AND task.active_ru
         SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id) bot_id,j.kind,j.task_id,j.data,j.wait_id,
           CASE j.kind
             WHEN ''conversation_message'' THEN j.id
-            WHEN ''conversation_reply'' THEN json_extract(j.data,''$.replyToMessageId'')
+            WHEN ''conversation_reply'' THEN j.reply_to_message_id
             ELSE t.source_message_id
           END source_message_id,
           CASE j.kind
@@ -498,7 +508,7 @@ SELECT t.message_id,
   CASE t.status WHEN ''paused'' THEN ''needs_you''
                 WHEN ''policy_waiting'' THEN ''needs_you''
                 WHEN ''done'' THEN coalesce(
-                  (SELECT json_extract(data,''$.status'') FROM journal WHERE id=t.reply_id),''access_revoked'')
+                  (SELECT conversation_status FROM journal WHERE id=t.reply_id),''access_revoked'')
   END AS status
 FROM conversation_turns t'),
     ('view', 'outdated_workflow_stages', 'outdated_workflow_stages', 'CREATE VIEW outdated_workflow_stages AS

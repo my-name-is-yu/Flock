@@ -1,5 +1,6 @@
 #include "conversation_storage.hpp"
 #include "journal.hpp"
+#include "journal_task.hpp"
 #include "outbox_storage.hpp"
 #include "task_storage.hpp"
 
@@ -418,11 +419,11 @@ bool Store::Impl::settleStageReport(TaskData& task) {
     consumeEvent(task);
     task.state = TaskState::completed;
     const auto& text = reportUnavailable ? evidence.detail : evidence.report;
-    Json completion = {{"text", ok ? text : "Workflow stage failed: " + text},
-                       {"revisionId", task.currentRevision.value()},
-                       {"source", runReportRunJson(report)}};
-    if (status == "completed" || status == "cancelled") completion["workflowOutcome"] = ok ? "completed" : "failed";
-    journal(task.id, "completed", std::move(completion));
+    std::optional<WorkflowCompletionOutcome> outcome;
+    if (status == "completed" || status == "cancelled")
+        outcome = ok ? WorkflowCompletionOutcome::completed : WorkflowCompletionOutcome::failed;
+    journal(task.id, CompletionEntry{ok ? text : "Workflow stage failed: " + text, task.currentRevision.value(),
+                                     WorkflowCompletion{reportSourceRun(report), outcome}});
     return true;
 }
 }

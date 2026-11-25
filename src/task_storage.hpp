@@ -15,6 +15,7 @@ Json runTargetsJson(std::span<const RunTarget>);
 Json destinationRunSummaryJson(const DestinationRun&);
 Json destinationRunJson(const DestinationRun&);
 DestinationRunStatus destinationRunStatusFromName(std::string);
+RunOutcome decodeRunOutcome(std::string_view, const RecordDecoder&);
 std::optional<std::string_view> runEvidenceStatusName(RunEvidence::Availability);
 RunEvidence::Availability decodeReportAvailability(const Json&, const RecordDecoder&);
 Json assignedRunJson(const AssignedRun&);

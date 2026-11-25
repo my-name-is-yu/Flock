@@ -1,5 +1,6 @@
 #include "conversation_storage.hpp"
 #include "flock/limits.hpp"
+#include "journal_conversation.hpp"
 #include "task_storage.hpp"
 
 #include <algorithm>
@@ -159,7 +160,11 @@ WHERE w.resolution IS NULL AND w.task_id<>? AND w.reason='model_budget' AND t.st
         save(task);
     }
 
-    std::vector<std::pair<Id, Id>> messages;
+    struct PausedMessage {
+        std::string bot;
+        Id message, pause;
+    };
+    std::vector<PausedMessage> messages;
     auto paused = query(R"SQL(
 SELECT t.message_id,t.pause_id,m.bot_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
 WHERE t.pause_id IS NOT NULL AND t.status='paused' AND t.message_id<>? ORDER BY t.pause_id
@@ -167,10 +172,11 @@ WHERE t.pause_id IS NOT NULL AND t.status='paused' AND t.message_id<>? ORDER BY 
                         {approvedMessage});
     while (paused.next()) {
         const auto message = paused.number(0);
-        if (policy.allows(actor, Action::bot_decide, paused.string(2)) && messageModelBudget(message).id == budget)
-            messages.emplace_back(message, paused.number(1));
+        auto bot = paused.string(2);
+        if (policy.allows(actor, Action::bot_decide, bot) && messageModelBudget(message).id == budget)
+            messages.push_back({std::move(bot), message, paused.number(1)});
     }
-    for (const auto& [message, pause] : messages) resumeMessageModelCall(message, pause, 0);
+    for (const auto& [bot, message, pause] : messages) resumeMessageModelCall(bot, message, pause, 0);
 }
 
 SecretRedactor Store::Impl::modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args, bool gitNotification) const {
@@ -256,18 +262,16 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
 }
 
 void Store::Impl::pauseTurn(const conversation::Message& message) {
-    const Json task =
-        message.principalSource == conversation::PrincipalSource::gitWebhook ? message.routing.at("gitEvent").at("taskId") : Json(nullptr);
-    exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
-         {task, unixTime(), message.bot});
-    const auto reply = last();
-    const Json data{{"messageId", reply},
-                    {"replyToMessageId", message.id},
-                    {"route", "model_budget"},
-                    {"status", "needs_you"},
-                    {"text", modelBudgetPauseText(message.text)}};
-    exec("UPDATE journal SET data=? WHERE id=?", {data, reply});
-    if (!message.channelScope.empty()) queueChannelReply(message.id, reply, data);
+    const auto task = message.principalSource == conversation::PrincipalSource::gitWebhook
+                          ? std::optional{message.routing.at("gitEvent").at("taskId").get<Id>()}
+                          : std::nullopt;
+    const auto text = modelBudgetPauseText(message.text);
+    const auto reply = journalConversationReply(task, message.bot,
+                                                {.replyToMessageId = message.id,
+                                                 .text = std::string(text),
+                                                 .status = ConversationReplyStatus::needs_you,
+                                                 .route = ConversationReplyRoute::model_budget});
+    if (!message.channelScope.empty()) queueChannelReply(message.id, reply, text);
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?", {reply, message.id});
 }
 
@@ -290,7 +294,7 @@ WHERE t.pause_id IS NOT NULL AND t.status='paused' AND j.conversation_bot_id=? O
     return result;
 }
 
-void Store::Impl::approveMessageModelCall(const Person& actor, Id message, Id waitMessageId) {
+void Store::Impl::approveMessageModelCall(const Person& actor, std::string_view bot, Id message, Id waitMessageId) {
     auto slots = query(R"SQL(
 SELECT json_extract(s.decision,'$[' || slot.key || '].tool')
 FROM conversation_steps s, json_each(s.effect) slot
@@ -301,18 +305,12 @@ WHERE s.message_id=? AND s.result IS NULL AND json_type(s.effect)='array' AND sl
     while (!toolPending && slots.next()) toolPending = isBotTool(slots.string(0));
     const auto attempt =
         approveModelBudget(actor, messageModelBudget(message), toolPending ? "bot_tool" : "conversation_turn", message, 0, 0);
-    resumeMessageModelCall(message, waitMessageId, attempt);
+    resumeMessageModelCall(bot, message, waitMessageId, attempt);
 }
 
-void Store::Impl::resumeMessageModelCall(Id message, Id waitMessageId, Id attempt) {
+void Store::Impl::resumeMessageModelCall(std::string_view bot, Id message, Id waitMessageId, Id attempt) {
     exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
          {attempt ? Json(attempt) : Json(nullptr), message});
-    exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?", {waitMessageId});
-    exec(R"SQL(
-INSERT INTO journal(time,kind,data,conversation_bot_id)
-SELECT ?,'conversation_budget_approved',json_object('messageId',id,'waitMessageId',?),bot_id
-FROM messages WHERE id=?
-)SQL",
-         {unixTime(), waitMessageId, message});
+    journalConversationBudgetApproved(message, waitMessageId, bot);
 }
 }

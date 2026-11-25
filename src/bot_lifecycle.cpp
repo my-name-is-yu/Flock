@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
+#include "journal_conversation.hpp"
 
 namespace flockv0 {
 bool Store::Impl::botDeleted(std::string_view bot) const {
@@ -37,7 +38,8 @@ SELECT id FROM messages WHERE bot_id=? AND id IN (
                                {bot});
         std::vector<Id> openTurns;
         while (turns.next()) openTurns.push_back(turns.number(0));
-        for (const auto id : openTurns) p_->finishTurn(p_->loadTurnMessage(id), botPausedMessage, nullptr, "bot_paused");
+        for (const auto id : openTurns)
+            p_->finishTurn(p_->loadTurnMessage(id), botPausedMessage, nullptr, ConversationReplyRoute::bot_paused);
         p_->exec(R"SQL(
 UPDATE workflows SET stop_requested=1 WHERE bot_id=? AND stop_requested=0 AND EXISTS (
     SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id

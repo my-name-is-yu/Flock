@@ -134,6 +134,11 @@ std::string_view runOutcomeName(RunOutcome outcome) {
     return enumName(runOutcomes, outcome);
 }
 
+RunOutcome decodeRunOutcome(std::string_view value, const RecordDecoder& row) {
+    if (const auto outcome = enumValue(runOutcomes, value)) return *outcome;
+    row.fail("runOutcome", "unknown task Run outcome");
+}
+
 std::optional<std::string_view> runEvidenceStatusName(RunEvidence::Availability availability) {
     if (availability == RunEvidence::Availability::Available) return std::nullopt;
     return enumName(unavailableEvidence, availability);
@@ -574,8 +579,7 @@ FROM task_run_destinations WHERE task_id=? ORDER BY position
     if (!targets.empty() && !results.runs.empty()) decoder.fail("runTargets", "cannot coexist with dispatched Runs");
     if (outcome) {
         if (results.runs.empty()) decoder.fail("runOutcome", "requires dispatched Runs");
-        results.outcome = enumValue(runOutcomes, *outcome);
-        if (!results.outcome) decoder.fail("runOutcome", "unknown task Run outcome");
+        results.outcome = decodeRunOutcome(*outcome, decoder);
     }
     if (!targets.empty()) task.destinations = std::move(targets);
     if (!results.runs.empty()) task.destinations = std::move(results);

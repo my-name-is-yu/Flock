@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "journal_peer.hpp"
 #include "task_storage.hpp"
 
 #include <algorithm>
@@ -120,7 +121,7 @@ SELECT p.id,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id,
                             taskProjection() + R"SQL(
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
 LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
-AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
+AND j.pr_review_item_id=p.id AND p.operation_id IS NULL
 WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
     p.target_revision=coalesce(t.current_revision,0)
     AND NOT t.replanning)) ORDER BY p.id DESC
@@ -326,7 +327,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (!paused.next()) throw DecisionUnavailable{};
         if (item.taskId || item.targetRevision || item.waitId != paused.number(0) || item.targetGeneration != paused.number(0))
             throw RequestChanged{};
-        p_->approveMessageModelCall(actor, item.itemId, item.waitId);
+        p_->approveMessageModelCall(actor, item.botId, item.itemId, item.waitId);
         p_->recordInboxDecision(actor, item, decision);
     } else if (kind == pr_review || kind == pr_reconciliation) {
         if (!policy.allows(actor, Action::bot_decide, item.botId)) throw DecisionDenied{};
@@ -375,7 +376,6 @@ void Store::Impl::insertPrReview(const TaskData& task, std::string_view url, std
          " VALUES(?,?,?,?,?,?,?,?)",
          {task.id, task.currentRevision.value_or(0), url, savedTitle, savedPrompt, gitKey.empty() ? Json(nullptr) : Json(gitKey),
           operationId.empty() ? Json(nullptr) : Json(operationId), candidates});
-    if (operationId.empty())
-        journal(task.id, "pr_review_requested", {{"itemId", last()}, {"title", savedTitle}, {"text", savedPrompt}, {"prUrl", url}});
+    if (operationId.empty()) journal(task.id, PrReviewRequestedEntry{last(), savedTitle, savedPrompt, std::string(url)});
 }
 }

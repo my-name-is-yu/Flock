@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
+#include "journal_task.hpp"
 #include "task_storage.hpp"
 
 #include <algorithm>
@@ -153,10 +154,8 @@ WHERE json_extract(effect,'$.kind')='message_session'
     task.state = TaskState::completed;
     auto summary = std::to_string(count) + " of " + std::to_string(runs.size()) + " T3 Runs completed";
     if (task.requestedCommit) summary += " with a verified commit";
-    Json completion = {
-        {"text", std::move(summary) + "."}, {"runOutcome", runOutcomeName(outcome)}, {"doneWhen", task.doneWhen}, {"revisionId", revision}};
-    if (task.requestedCommit) completion["requestedCommit"] = *task.requestedCommit;
-    journal(task.id, "completed", std::move(completion));
+    journal(task.id, CompletionEntry{std::move(summary) + ".", task.currentRevision,
+                                     FanoutCompletion{task.doneWhen, outcome, task.requestedCommit}});
     return true;
 }
 }

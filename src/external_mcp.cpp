@@ -1,6 +1,8 @@
 #include "flock/external_mcp.hpp"
 #include "flock/limits.hpp"
 #include "connector_credentials.hpp"
+#include "journal_task.hpp"
+#include "outbox_storage.hpp"
 #include "storage.hpp"
 #include "task_storage.hpp"
 
@@ -124,22 +126,25 @@ WHERE r.connection_id=? AND r.task_id=? AND c.token_digest IS NOT NULL
     return {std::move(actor), std::move(bot)};
 }
 
-Json ExternalMcp::completionRun(const OwnedTask& owner, const Json& completion) const {
-    const auto dependency = completion.find("dependency");
-    if (dependency == completion.end()) return completion.value("source", Json(nullptr));
+Json ExternalMcp::completionRun(const OwnedTask& owner, const CompletionEntry& completion) const {
+    if (const auto* source = completion.source()) return sourceRunJson(*source);
+    const auto* task = std::get_if<TaskCompletion>(&completion.details);
+    if (!task) return nullptr;
+    const auto* dependency = std::get_if<PeerCompletion>(&task->provenance);
+    if (!dependency) return nullptr;
 
-    const auto peerBot = field(*dependency, "botId");
-    const auto message = field(*dependency, "messageId");
+    const auto& peerBot = dependency->botId;
+    const auto& message = dependency->messageId;
     const auto policy = store_.policy();
     if (message.empty() || !policy.allows(owner.actor, Action::bot_view, peerBot)) return nullptr;
-    const auto refs = completion.value("evidenceRefs", Json::array());
-    const auto source = std::ranges::find_if(
-        refs, [&](const Json& ref) { return field(ref, "kind") == "peer_report" && field(ref, "messageId") == message; });
-    if (source == refs.end()) return nullptr;
+    const auto source = std::ranges::find_if(dependency->evidence, [&](const CompletionEvidence& ref) {
+        return ref.kind == CompletionEvidenceKind::peer_report && ref.messageId == message;
+    });
+    if (source == dependency->evidence.end()) return nullptr;
 
-    const auto environment = field(*source, "environmentId");
-    const auto thread = field(*source, "threadId");
-    const auto resultRunId = field(*source, "runId");
+    const auto& environment = source->environmentId;
+    const auto& thread = source->threadId;
+    const auto& resultRunId = source->runId;
     if (environment.empty() || thread.empty() || resultRunId.empty() || !policy.allows(peerBot, Resource::sessionRead(environment, thread)))
         return nullptr;
 
@@ -149,7 +154,7 @@ WHERE j.task_id=? AND t.bot_id=? AND j.kind='report' AND j.run_environment_id=?
   AND j.run_thread_id=? AND j.result_run_id=?
 ORDER BY j.id DESC LIMIT 1
 )SQL",
-                                {dependency->at("taskId"), peerBot, environment, thread, resultRunId});
+                                {dependency->taskId, peerBot, environment, thread, resultRunId});
     if (!row.next()) return nullptr;
     return {{"environmentId", environment}, {"threadId", thread}, {"link", row.string(0)}};
 }
@@ -179,12 +184,12 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
     }
     Json run;
     if (task.state == TaskState::completed) {
-        auto row = db.query("SELECT data FROM journal WHERE task_id=? AND kind='completed'"
+        auto row = db.query("SELECT id,data FROM journal WHERE task_id=? AND kind='completed'"
                             " ORDER BY id DESC LIMIT 1",
                             {taskId});
         if (row.next()) {
-            const auto completion = row.json(0);
-            data["result"] = {{"text", publicText(field(completion, "text"))}};
+            const auto completion = decodeCompletion(row.number(0), row.json(1));
+            data["result"] = {{"text", publicText(completion.text)}};
             run = completionRun(owner, completion);
         }
     } else

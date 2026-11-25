@@ -1,6 +1,8 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
+#include "journal_peer.hpp"
+#include "journal_task.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "task_context_storage.hpp"
@@ -370,7 +372,7 @@ ORDER BY 1,2)SQL",
         task.cancelledInstructions = std::exchange(task.pendingInstructions, {});
         task.activeRun.reset();
         task.state = TaskState::cancelled;
-        db.journal(task.id, "cancelled", Json::object());
+        db.journalCancelled(task.id);
         if (const auto peer = db.peerExchange(task.id); peer && peer->recipient == task.id)
             finishPeer(*peer, task, db.load(peer->sender), "cancelled",
                        task.cancelledByBotPause ? "The receiving Bot is paused." : "The receiving Bot's task was cancelled.", actionId());
@@ -827,13 +829,7 @@ ORDER BY 1,2)SQL",
             const auto copy = std::ranges::find_if(
                 pending, [&](const OutboxInstruction& p) { return p.messageId == item.messageId && p.step == item.step; });
             if (copy != pending.end()) pending.erase(copy);
-            db.journal(task.id, "instruction_delivered",
-                       {{"actionId", action.command.actionId},
-                        {"messageId", item.messageId},
-                        {"step", item.step},
-                        {"revisionId", action.revisionId ? Json(*action.revisionId) : Json(nullptr)},
-                        {"run", assignedRunJson(task.activeRun)},
-                        {"source", item.source ? sourceJson(*item.source) : Json(nullptr)}});
+            db.journal(task.id, DeliveredInstructionEntry{action.command.actionId, item, action.revisionId, task.activeRun});
         }
     }
 
@@ -1573,14 +1569,13 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         change(task, [&](TaskData& current) {
             const bool unknown = replay && isGitTool(decision.tool) && db.gitEffectStarted(gitInvocation(decision), current.id);
             const auto why = unknown ? "The host outcome is unknown. Check the target before retrying." : bounded(message, 2048);
-            Json entry = {{"tool", bounded(decision.tool, 128)}, {"result", {{"ok", false}, {"error", why}}}, {"eventId", event.at("id")}};
-            if (unknown) entry["result"]["delivery"] = "unknown";
+            ToolErrorEntry entry{event.at("id").get<Id>(), bounded(decision.tool, 128), why, unknown, {}};
             const auto args = decision.args.dump();
             if (args.size() <= 2048)
-                entry["args"] = decision.args;
+                entry.arguments = decision.args;
             else
-                entry["argumentsExcerpt"] = bounded(args, 2048);
-            db.journal(current.id, "tool_error", entry);
+                entry.arguments = bounded(args, 2048);
+            db.journal(current.id, entry);
             db.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {event["id"]});
             current.feedback.reset();
             if (event.at("decisionFeedback").size() + 1 >= maxToolErrors) db.wait(current, ModelFailureWait{}, why);
@@ -1594,7 +1589,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         return args.value("offset", std::size_t{0});
     }
 
-    Json readExcerpt(std::string_view bot, const ReadRequest& req) {
+    SessionExcerptEntry readExcerpt(std::string_view bot, const ReadRequest& req) {
         const auto scrub = db.redactor(bot);
         const auto excerpt = [&] {
             try {
@@ -1611,15 +1606,15 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         const auto redacted = scrub.text(excerpt.text);
         auto text = bounded(redacted, limits::session_evidence::maxHistoryExcerptBytes);
         const bool clipped = text.size() < redacted.size();
-        return {{"environmentId", req.environmentId},
-                {"threadId", req.threadId},
-                {"runId", req.runId},
-                {"itemId", excerpt.itemId},
-                {"text", std::move(text)},
-                {"more", excerpt.more || clipped},
-                {"itemTruncated", excerpt.nextOffset > req.offset || clipped},
-                {"nextCursor", excerpt.nextCursor},
-                {"nextOffset", excerpt.nextOffset}};
+        return {req.environmentId,
+                req.threadId,
+                req.runId,
+                excerpt.itemId,
+                std::move(text),
+                excerpt.nextCursor,
+                excerpt.nextOffset,
+                excerpt.more || clipped,
+                excerpt.nextOffset > req.offset || clipped};
     }
 
     bool readEvidence(const TaskData& task, const Json& event, const Json& args, const Json& usage = Json::object()) {
@@ -1652,23 +1647,24 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         if (req.threadId.empty() || req.runId.empty()) throw Conflict("History reference does not belong to this task");
         if (!policy.allows(task.botId, Resource::sessionRead(req.environmentId, req.threadId)))
             throw Conflict("Session read access required");
-        return persistExcerpt(task, event, readExcerpt(task.botId, req), "session_read", usage);
-    }
-
-    bool persistExcerpt(const TaskData& task, const Json& event, Json entry, std::string_view kind, const Json& usage) {
+        auto entry = encodeSessionExcerpt(readExcerpt(task.botId, req));
         return change(task, [&](TaskData& current) {
-            recordEvidenceRead(current, event, std::move(entry), kind, usage);
+            recordSessionRead(current, event, std::move(entry), usage);
             return true;
         });
     }
 
-    void recordEvidenceRead(const TaskData& task, const Json& event, Json entry, std::string_view kind, const Json& usage) {
+    void appendEventEvidence(const TaskData& task, const Json& event, const Json& entry) {
         auto evidence = event.at("evidence");
         if (evidence.size() >= maxEvidenceReads) throw Conflict("History read allowance exhausted");
         evidence.push_back(entry);
         db.exec("UPDATE events SET evidence=? WHERE id=? AND task_id=?", {evidence, event["id"], task.id});
+    }
+
+    void recordSessionRead(const TaskData& task, const Json& event, Json entry, const Json& usage) {
+        appendEventEvidence(task, event, entry);
         if (!usage.empty()) entry["usage"] = usage;
-        db.journal(task.id, kind, entry);
+        db.journal(task.id, "session_read", entry);
     }
 
     enum class PrefillResult { NotNeeded, Persisted, UnavailableWithSettledReport };
@@ -1706,7 +1702,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
 SELECT r.intent,r.done_when,
        coalesce((SELECT max(j.id) FROM journal j WHERE j.task_id=r.task_id AND
          ((r.number=1 AND j.kind='task_contract_changed') OR
-          (r.number>1 AND j.kind='task_revision' AND json_extract(j.data,'$.revisionId')=r.id))),
+          (r.number>1 AND j.kind='task_revision' AND j.revision_id=r.id))),
          r.source_message_id,0)
 FROM task_revisions r WHERE r.id=? AND r.task_id=?
 )SQL",
@@ -1717,16 +1713,14 @@ FROM task_revisions r WHERE r.id=? AND r.task_id=?
 
     std::vector<OutboxSource> appendSessionDirections(std::string& instruction, const TaskData& task,
                                                       std::span<const OutboxInstruction> pending, Id answersAfter) {
-        using InstructionId = std::pair<Id, Id>;
+        using InstructionId = std::pair<Id, int>;
         std::set<InstructionId> pendingIds;
         for (const auto& item : pending) pendingIds.emplace(item.messageId, item.step);
         auto rows = db.query(R"SQL(
 SELECT j.id,j.kind,j.data,w.id,w.reason,w.data,
        CASE j.kind WHEN 'instruction_accepted' THEN EXISTS (
          SELECT 1 FROM journal d WHERE d.task_id=j.task_id AND d.kind='instruction_delivered'
-           AND json_extract(d.data,'$.messageId')=json_extract(j.data,'$.messageId')
-           AND json_extract(d.data,'$.step')=json_extract(j.data,'$.step')
-           AND json_extract(d.data,'$.revisionId')=?2)
+           AND d.message_id=j.message_id AND d.instruction_step=j.instruction_step AND d.revision_id=?2)
        ELSE 0 END
 FROM journal j
 LEFT JOIN waits w ON j.kind='user_answer' AND w.id=j.wait_id AND w.task_id=j.task_id
@@ -1739,28 +1733,26 @@ ORDER BY j.id
         std::vector<OutboxSource> sources;
         bool first = true;
         while (rows.next()) {
-            const auto kind = rows.string(1);
-            const auto item = rows.json(2);
             const auto recordId = rows.number(0);
-            const auto answer = kind == "user_answer" ? std::optional{decodeUserAnswer(recordId, item)} : std::nullopt;
-            if (!answer && !rows.number(6) && !pendingIds.contains({item.at("messageId"), item.at("step")})) continue;
+            const bool isAnswer = rows.string(1) == "user_answer";
+            const auto accepted = isAnswer ? std::nullopt : std::optional{decodeAcceptedInstruction(recordId, rows.json(2))};
+            if (accepted && !rows.number(6) && !pendingIds.contains({accepted->messageId, accepted->step})) continue;
             if (std::exchange(first, false))
                 instruction += "\n\nUser decisions for this task, oldest first. Apply later directions where they replace "
                                "earlier ones, under the current task intent and completion criteria above.";
-            instruction += answer ? "\n\nUser answer" : "\n\nAccepted instruction";
+            instruction += isAnswer ? "\n\nUser answer" : "\n\nAccepted instruction";
             instruction += " (record " + std::to_string(recordId);
-            if (answer) {
-                if (answer->messageId) instruction += ", message " + std::to_string(*answer->messageId);
-                instruction += ", wait " + std::to_string(answer->waitId) + "):\n";
-                instruction += decodeWaitRow(rows, 3).text + "\nAnswer: " + answer->text;
+            if (accepted) {
+                instruction += ", message " + std::to_string(accepted->messageId) + ", step " + std::to_string(accepted->step) + "):\n" +
+                               accepted->text;
             } else {
-                if (item.contains("messageId")) instruction += ", message " + item.at("messageId").dump();
-                if (item.contains("step")) instruction += ", step " + item.at("step").dump();
-                instruction += "):\n" + field(item, "text");
+                const auto answer = decodeUserAnswer(recordId, rows.json(2));
+                if (answer.messageId) instruction += ", message " + std::to_string(*answer.messageId);
+                instruction += ", wait " + std::to_string(answer.waitId) + "):\n";
+                instruction += decodeWaitRow(rows, 3).text + "\nAnswer: " + answer.text;
             }
             if (instruction.size() > limits::session_prompt::maxBytes) throw SessionContextLimit{};
-            if (!answer && item.contains("source"))
-                sources.push_back(decodeOutboxSource(item.at("source"), {"journal", rows.string(0), "source"}));
+            if (accepted && accepted->source) sources.push_back(*accepted->source);
         }
         return sources;
     }
@@ -1976,59 +1968,56 @@ ORDER BY j.id
         return *peer;
     }
 
-    Json peerMessage(const PeerExchange& peer, const TaskData& from, const TaskData& to, std::string_view type, std::string_view body,
-                     std::string_view messageId) {
-        Json message = {{"exchangeId", peer.id}, {"messageId", messageId}, {"fromBotId", from.botId},
-                        {"toBotId", to.botId},   {"messageType", type},    {"requestKind", peer.kind},
-                        {"text", body}};
-        if (!peer.lastMessage.empty()) message["replyTo"] = peer.lastMessage;
-        return message;
+    BotMessageEntry peerMessage(const PeerExchange& peer, const TaskData& from, const TaskData& to, std::string_view type,
+                                std::string_view body, std::string_view messageId) {
+        return {.exchangeId = peer.id,
+                .messageId = std::string(messageId),
+                .fromBotId = from.botId,
+                .toBotId = to.botId,
+                .messageType = std::string(type),
+                .requestKind = peer.kind,
+                .text = std::string(body),
+                .replyTo = peer.lastMessage.empty() ? std::nullopt : std::optional{peer.lastMessage}};
     }
 
     // The caller owns the transaction and saves the acting task. This writes the other participant.
-    void transitionPeer(const PeerExchange& peer, TaskData& actor, TaskData& task, Json message) {
-        const auto type = field(message, "messageType");
-        const bool closing = message.contains("status");
+    void transitionPeer(const PeerExchange& peer, TaskData& actor, TaskData& task, const BotMessageEntry& message,
+                        std::optional<Id> forwardedSource = {}) {
+        const auto& type = message.messageType;
+        const bool closing = message.status.has_value();
         const auto kind = closing ? "bot_result" : "bot_" + type;
         const auto phase = closing ? "closed" : type == "question" ? "question" : "working";
         if (type == "request")
             db.exec("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task,"
                     "sender_environment,sender_revision) VALUES(?,?,?,?,?,?,?,?)",
-                    {peer.id, peer.kind, phase, message["messageId"], peer.sender, peer.recipient, actor.environmentId,
+                    {peer.id, peer.kind, phase, message.messageId, peer.sender, peer.recipient, actor.environmentId,
                      revisionJson(actor.currentRevision)});
         else
-            db.exec("UPDATE peer_exchanges SET phase=?,last_message=? WHERE id=?", {phase, message["messageId"], peer.id});
-        db.peerMessage(peer, message);
+            db.exec("UPDATE peer_exchanges SET phase=?,last_message=? WHERE id=?", {phase, message.messageId, peer.id});
+        db.peerMessage(peer, message, forwardedSource);
         consumeEvent(actor);
         if (!closing) actor.state = TaskState::peer_waiting;
         if (terminal(task) || task.state == TaskState::cancelling) return;
         if (closing) db.clearWait(task, kind);
         consumeEvent(task);
-        if (message.contains("evidence")) {
-            message["references"] = std::move(message["evidence"]);
-            message.erase("evidence");
+        auto event = encodeBotMessage(message);
+        if (event.contains("evidence")) {
+            event["references"] = std::move(event["evidence"]);
+            event.erase("evidence");
         }
-        message["kind"] = kind;
-        const auto key = "bot/" + field(message, "messageId");
-        db.event(task, key, std::move(message));
+        event["kind"] = kind;
+        db.event(task, "bot/" + message.messageId, std::move(event));
         if (task.state != TaskState::queued) task.state = TaskState::deciding;
         saveTask(task);
     }
 
     void recordDecision(const TaskData& task, const Json& event, const TaskDecision& decision, std::string_view action) {
-        db.journal(task.id, "decision",
-                   {{"actionId", action},
-                    {"tool", decision.tool},
-                    {"args", decision.args},
-                    {"reason", decision.reason},
-                    {"eventId", event["id"]},
-                    {"evidence", event["evidence"]},
-                    {"usage", decision.usage},
-                    {"revisionId", revisionJson(task.currentRevision)}});
+        db.journal(task.id, DecisionEntry{event.at("id").get<Id>(), task.currentRevision, std::string(action), decision,
+                                          event.at("evidence"), decision.usage});
     }
 
-    Json forwardableUserMessage(const TaskData& task) const {
-        if (!task.sourceMessageId || !task.sourceMessageCoversFullRequest.value_or(false)) return nullptr;
+    std::optional<ForwardedPeerMessage> forwardableUserMessage(const TaskData& task) const {
+        if (!task.sourceMessageId || !task.sourceMessageCoversFullRequest.value_or(false)) return std::nullopt;
         const auto sourceId = *task.sourceMessageId;
         // A compound or clarified request may not represent one complete user message.
         auto row = db.query(R"SQL(
@@ -2036,8 +2025,8 @@ SELECT m.text,j.time FROM messages m JOIN journal j ON j.id=m.id
 WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
 )SQL",
                             {sourceId, task.botId});
-        if (!row.next()) return nullptr;
-        return {{"text", row.string(0)}, {"time", row.number(1)}};
+        if (!row.next()) return std::nullopt;
+        return ForwardedPeerMessage{row.string(0), row.number(1)};
     }
 
     void sendPeer(TaskData& sender, const Json& event, const TaskDecision& decision, PeerBot peer, const std::string& action) {
@@ -2045,10 +2034,10 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (db.peerExchange(sender.id)) throw Conflict("Finish the current Bot exchange first");
         const auto& args = decision.args;
         const auto note = field(args, "text");
-        Json forwarded;
+        std::optional<ForwardedPeerMessage> forwarded;
         if (args.value("forwardUserMessage", false)) {
             forwarded = forwardableUserMessage(sender);
-            if (forwarded.is_null()) throw Conflict("This task has no complete user message to forward");
+            if (!forwarded) throw Conflict("This task has no complete user message to forward");
         }
         const auto kind = field(decision.args, "kind");
         const bool work = kind == "work";
@@ -2063,15 +2052,15 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             if (!admitWork(sender, decision, charge)) return;
             establishCriteria(sender, args);
         }
-        peer.intake.request = note.empty() ? field(forwarded, "text") : note;
+        peer.intake.request = note.empty() && forwarded ? forwarded->text : note;
         const auto source = work ? TaskSource::handoff : TaskSource::consultation;
         const auto id = db.submit(peer.intake, 0, nullptr, source);
         auto recipient = db.load(id);
         const PeerExchange exchange{action, kind, "working", "", sender.id, id};
         auto message = peerMessage(exchange, sender, recipient, "request", note, action);
-        message["chargesBudget"] = charge;
-        if (!forwarded.is_null()) message["forwardedMessage"] = std::move(forwarded);
-        transitionPeer(exchange, sender, recipient, std::move(message));
+        message.chargesBudget = charge;
+        message.forwarded = std::move(forwarded);
+        transitionPeer(exchange, sender, recipient, message, message.forwarded ? sender.sourceMessageId : std::nullopt);
         recordDecision(sender, event, decision, action);
     }
 
@@ -2161,14 +2150,14 @@ AND revision_id IS ?
                     db.exec("UPDATE events SET data=? WHERE id=? AND task_id=?", {data, latest.at("id"), current.id});
                 }
             }
-            recordEvidenceRead(current, latest,
-                               {{"environmentId", env},
-                                {"threadId", thread},
-                                {"runId", target->data.resultRunId},
-                                {"view", "report"},
-                                {"reportAvailable", available},
-                                {"text", bounded(evidence.detail, 2048)}},
-                               "session_read", decision.usage);
+            recordSessionRead(current, latest,
+                              {{"environmentId", env},
+                               {"threadId", thread},
+                               {"runId", target->data.resultRunId},
+                               {"view", "report"},
+                               {"reportAvailable", available},
+                               {"text", bounded(evidence.detail, 2048)}},
+                              decision.usage);
             return true;
         });
     }
@@ -2187,13 +2176,13 @@ AND revision_id IS ?
                     const std::string& action) {
         const auto type = status == "completed" ? std::string_view{"result"} : status;
         auto message = peerMessage(exchange, recipient, sender, type, text, action);
-        message["status"] = status;
+        message.status = status;
         if (const auto report = status != "cancelled" ? settledSessionReport(recipient) : std::nullopt) {
             const auto& data = report->data;
-            message["evidence"] =
-                Json::array({sessionResultReference(data.run, data.environmentId, data.resultRunId, data.evidence.itemId, data.status)});
+            message.evidence.push_back(
+                {data.environmentId, data.run.threadId, data.resultRunId, data.evidence.itemId, data.run.link, data.status});
         }
-        transitionPeer(exchange, recipient, sender, std::move(message));
+        transitionPeer(exchange, recipient, sender, message);
     }
 
     Json replyKinds(const TaskData& task, const PeerExchange& peer) const {
@@ -2265,10 +2254,12 @@ AND revision_id IS ?
         if (req.threadId.empty() || req.runId.empty()) throw Conflict("The Bot result has no readable Run");
         if (!policy.allows(task.botId, Resource::sessionRead(req.environmentId, req.threadId)))
             throw Conflict("Session read access required");
-        auto entry = readExcerpt(task.botId, req);
-        entry["messageId"] = messageId;
-        entry["exchangeId"] = event["exchangeId"];
-        persistExcerpt(task, event, std::move(entry), "read_bot_evidence", decision.usage);
+        const PeerEvidenceEntry entry{event.at("exchangeId").get<std::string>(), messageId, readExcerpt(task.botId, req)};
+        change(task, [&](TaskData& current) {
+            appendEventEvidence(current, event, encodePeerEvidence(entry));
+            db.journal(current.id, entry, decision.usage);
+            return true;
+        });
     }
 
     void acceptReplyOrCompletion(const TaskData& snapshot, const Json& event, const TaskDecision& decision) {
@@ -2288,43 +2279,63 @@ AND revision_id IS ?
         transaction.commit();
     }
 
-    void addCompletionProvenance(Json& completion, const TaskData& task, const Json& event) {
+    CompletionProvenance completionProvenance(const TaskData& task, const Json& event) {
         const auto peer = peerResult(task, event);
         if (!peer) {
             const auto& report = event.contains("sessionResult") ? event.at("sessionResult") : event;
-            if (report.is_null()) return;
+            if (report.is_null()) return std::monostate{};
             const auto run = runRef(report.value("run", Json(nullptr)));
-            if (hasRun(run))
-                completion["source"] = sessionResultReference(run, report.at("environmentId"), field(report, "resultRunId"),
-                                                              field(report, "itemId"), field(report, "status"));
-            return;
+            if (!hasRun(run)) return std::monostate{};
+            return OutboxSourceRun{.threadId = run.threadId,
+                                   .runId = field(report, "resultRunId"),
+                                   .environmentId = report.at("environmentId").get<std::string>(),
+                                   .link = run.link,
+                                   .itemId = field(report, "itemId"),
+                                   .status = field(report, "status")};
         }
 
-        completion["dependency"] = {
-            {"exchangeId", event.at("exchangeId")}, {"messageId", event.at("messageId")}, {"taskId", peer->taskId},
-            {"botId", event.at("fromBotId")},       {"requestKind", peer->kind},          {"status", event.at("status")}};
+        PeerCompletion result{peer->taskId,
+                              event.at("exchangeId").get<std::string>(),
+                              event.at("messageId").get<std::string>(),
+                              field(event, "fromBotId"),
+                              peer->kind,
+                              event.at("status").get<std::string>(),
+                              {}};
         const auto allowed = peersFor(task.botId);
-        const auto peerBot = field(event, "fromBotId");
-        const bool peerAllowed = std::ranges::any_of(allowed, [&](const PeerBot& candidate) { return candidate.intake.botId == peerBot; });
-        auto refs = Json::array();
-        const auto addRef = [&](const Json& record, std::string_view kind, bool fromPeer) {
-            const auto environment = field(record, "environmentId"), thread = field(record, "threadId"), run = field(record, "runId");
-            if ((fromPeer && !peerAllowed) || run.empty() || !policy.allows(task.botId, Resource::sessionRead(environment, thread))) return;
-            Json ref = {{"environmentId", environment}, {"threadId", thread}, {"runId", run}, {"kind", kind}};
-            if (const auto item = field(record, "itemId"); !item.empty()) ref["itemId"] = item;
-            if (fromPeer) ref["messageId"] = event.at("messageId");
-            if (std::ranges::find(refs, ref) == refs.end()) refs.push_back(std::move(ref));
+        const bool peerAllowed =
+            std::ranges::any_of(allowed, [&](const PeerBot& candidate) { return candidate.intake.botId == result.botId; });
+        const auto addRef = [&](CompletionEvidence ref, bool fromPeer) {
+            if ((fromPeer && !peerAllowed) || ref.runId.empty() ||
+                !policy.allows(task.botId, Resource::sessionRead(ref.environmentId, ref.threadId)))
+                return;
+            if (ref.itemId && ref.itemId->empty()) ref.itemId.reset();
+            if (fromPeer) ref.messageId = result.messageId;
+            if (std::ranges::find(result.evidence, ref) == result.evidence.end()) result.evidence.push_back(std::move(ref));
         };
-        for (const auto& record : event.value("references", Json::array())) addRef(record, "peer_report", true);
+        const auto addEventRef = [&](const Json& record, CompletionEvidenceKind kind, bool fromPeer) {
+            addRef({field(record, "environmentId"), field(record, "threadId"), field(record, "runId"), kind, field(record, "itemId"), {}},
+                   fromPeer);
+        };
+        for (const auto& record : event.value("references", Json::array())) addEventRef(record, CompletionEvidenceKind::peer_report, true);
         auto reads = db.query(R"SQL(
-SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
-  AND json_extract(data,'$.exchangeId')=? AND json_extract(data,'$.messageId')=? ORDER BY id
+SELECT id,data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
+  AND exchange_id=? AND peer_message_id=? ORDER BY id
 )SQL",
-                              {task.id, event.at("exchangeId"), event.at("messageId")});
-        while (reads.next()) addRef(reads.json(0), "session_read", true);
+                              {task.id, result.exchangeId, result.messageId});
+        while (reads.next()) {
+            auto record = decodePeerEvidence(reads.number(0), reads.json(1));
+            auto& excerpt = record.excerpt;
+            addRef({std::move(excerpt.environmentId),
+                    std::move(excerpt.threadId),
+                    std::move(excerpt.runId),
+                    CompletionEvidenceKind::session_read,
+                    std::move(excerpt.itemId),
+                    {}},
+                   true);
+        }
         for (const auto& record : event.at("evidence"))
-            if (!record.contains("exchangeId")) addRef(record, "session_read", false);
-        completion["evidenceRefs"] = std::move(refs);
+            if (!record.contains("exchangeId")) addEventRef(record, CompletionEvidenceKind::session_read, false);
+        return result;
     }
 
     void complete(TaskData& current, const Json& event, const TaskDecision& decision) {
@@ -2341,12 +2352,8 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         current.pendingInstructions.clear();
         current.newSessionRequired = false;
         current.state = TaskState::completed;
-        Json completion = {{"text", field(decision.args, "report")},
-                           {"reason", decision.reason},
-                           {"doneWhen", current.doneWhen},
-                           {"revisionId", revisionJson(current.currentRevision)}};
-        addCompletionProvenance(completion, current, event);
-        db.journal(current.id, "completed", completion);
+        db.journal(current.id, CompletionEntry{field(decision.args, "report"), current.currentRevision,
+                                               TaskCompletion{decision.reason, current.doneWhen, completionProvenance(current, event)}});
         saveTask(current);
     }
 
@@ -2562,8 +2569,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         if (!choices.empty()) summary["peers"] = std::move(choices);
         if (std::ranges::find(tools, "send_bot_message") != tools.end()) {
             std::lock_guard lock(db.mutex);
-            auto forwarded = forwardableUserMessage(task);
-            if (!forwarded.is_null()) summary["forwardableUserMessage"] = std::move(forwarded);
+            if (auto forwarded = forwardableUserMessage(task)) summary["forwardableUserMessage"] = encodeForwardedPeerMessage(*forwarded);
         }
         if (peer)
             summary["peer"] = {{"exchangeId", peer->id},
@@ -2637,12 +2643,12 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
                 if (!views.empty()) event["sessionReadViews"] = std::move(views);
             }
             auto errors = db.query(R"SQL(
-SELECT data FROM journal WHERE task_id=? AND kind='tool_error' AND json_extract(data,'$.eventId')=?
+SELECT id,data FROM journal WHERE task_id=? AND kind='tool_error' AND feedback_event_id=?
 AND id>coalesce((SELECT max(id) FROM journal WHERE task_id=? AND kind='model_retry'),0) ORDER BY id
 )SQL",
                                    {task.id, event["id"], task.id});
             event["decisionFeedback"] = Json::array();
-            while (errors.next()) event["decisionFeedback"].push_back(errors.json(0));
+            while (errors.next()) event["decisionFeedback"].push_back(encodeToolError(decodeToolError(errors.number(0), errors.json(1))));
             if (!decision) {
                 auto rows = db.query(R"SQL(
 SELECT id,kind,data,json_extract(data,'$.run.threadId'),json_extract(data,'$.resultRunId'),
@@ -2654,9 +2660,12 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 while (rows.next() && remaining > 100) {
                     const auto data = rows.string(2);
                     const auto excerpt = bounded(data, std::min<std::size_t>(remaining, 5000));
-                    if (data.size() == excerpt.size())
-                        history.push_back({{"id", rows.number(0)}, {"kind", rows.string(1)}, {"data", Json::parse(data)}});
-                    else
+                    if (data.size() == excerpt.size()) {
+                        auto record = Json::parse(data);
+                        const auto kind = rows.string(1);
+                        if (kind == "decision") record = encodeJournalDecision(decodeJournalDecision(rows.number(0), record));
+                        history.push_back({{"id", rows.number(0)}, {"kind", kind}, {"data", std::move(record)}});
+                    } else
                         history.push_back({{"id", rows.number(0)},
                                            {"kind", rows.string(1)},
                                            {"excerpt", excerpt},

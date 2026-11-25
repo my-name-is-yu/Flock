@@ -195,6 +195,10 @@ Json instructionJson(const OutboxInstruction& item) {
     return data;
 }
 
+OutboxInstruction decodeOutboxInstruction(const Json& data, const RecordDecoder& row) {
+    return row.decodeClosed(data, readInstruction);
+}
+
 void redactSource(OutboxSource& source, const SecretRedactor& scrub) {
     const auto redact = [&](std::optional<std::string>& value) {
         if (value) *value = scrub.text(*value);

@@ -2,6 +2,7 @@
 #include "flock/limits.hpp"
 #include "connector_credentials.hpp"
 #include "conversation_storage.hpp"
+#include "journal_conversation.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -120,7 +121,8 @@ SELECT m.id FROM messages m JOIN conversation_turns t ON t.message_id=m.id WHERE
                          {environment});
     std::vector<Id> wakes;
     while (rows.next()) wakes.push_back(rows.number(0));
-    for (const auto wake : wakes) db.finishTurn(db.loadTurnMessage(wake), "The T3 connection was disconnected.", nullptr, "session_access");
+    for (const auto wake : wakes)
+        db.finishTurn(db.loadTurnMessage(wake), "The T3 connection was disconnected.", nullptr, ConversationReplyRoute::session_access);
     db.exec(R"SQL(
 UPDATE session_message_waits SET notified=1 WHERE notified=0 AND (environment=?1 OR message_id IN (
  SELECT id FROM messages WHERE json_extract(routing,'$.sessionOrigin.environmentId')=?1
@@ -460,15 +462,10 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO UPDATE SET state='active' WHERE 
             const auto invitee = admit(bot);
             const auto key = "session-invite:" + std::to_string(message.id) + ":" + std::to_string(step);
             const SessionOrigin origin{target, title};
-            const Json invitation{{"environmentId", target.environmentId},
-                                  {"threadId", target.threadId},
-                                  {"title", title},
-                                  {"inviterBotId", message.bot},
-                                  {"inviterName", inviterName},
-                                  {"note", safeNote},
-                                  {"depth", sender.depth}};
+            const ConversationInvitationEntry invitation{target.environmentId, target.threadId, title,       message.bot,
+                                                         inviterName,          safeNote,        sender.depth};
             const auto invited = enqueueConversation(sender.actor, routing, conversation::PrincipalSource::session, key, description, 0,
-                                                     &origin, invitation);
+                                                     &origin, &invitation);
             exec("INSERT INTO session_invitations VALUES(?,?,?,?,?,?)", {message.id, step, inviter, invitee, sender.depth, invited});
             return Json{{"ok", true}, {"messageId", invited}, {"depth", sender.depth}};
         });
@@ -596,7 +593,7 @@ WHERE t.status IN ('paused','policy_waiting') AND (
     std::vector<Id> closedTurns;
     while (turns.next()) closedTurns.push_back(turns.number(0));
     for (const auto turn : closedTurns)
-        finishTurn(loadTurnMessage(turn), "The T3 Session participation has ended.", nullptr, "session_access");
+        finishTurn(loadTurnMessage(turn), "The T3 Session participation has ended.", nullptr, ConversationReplyRoute::session_access);
     // Persist each cancellation intent with the stop. Runtime recovers in-flight launches and
     // interrupts their own assigned Runs through the ordinary task cancellation path.
     auto children = query((stopCascade + R"SQL(
@@ -755,7 +752,7 @@ SELECT state,count(*) FROM session_queue_cancellations WHERE stop_id=?2 AND part
     }
     auto children = query((stopCascade + R"SQL(
 SELECT count(*) FROM journal WHERE kind='cancel_requested'
- AND json_extract(data,'$.sessionStopId')=?2 AND json_extract(data,'$.sessionParticipationId') IN stopping
+ AND session_stop_id=?2 AND session_participation_id IN stopping
 )SQL")
                               .c_str(),
                           {stop.participation, stop.cutoff});
@@ -799,7 +796,7 @@ bool Store::Impl::leaveSession(const conversation::Message& message, int step, c
     saveTurnResults(message.id, step, Json::array({result}));
     // A Session-origin turn cannot take another model step once its own origin stops.
     if (message.principalSource == conversation::PrincipalSource::session && !activeSessionOrigin(message) && isNextTurn(message.id)) {
-        finishTurn(message, stopped.summary(), nullptr, "session_left");
+        finishTurn(message, stopped.summary(), nullptr, ConversationReplyRoute::session_left);
         transaction.commit();
         return false;
     }

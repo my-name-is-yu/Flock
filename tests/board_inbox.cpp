@@ -481,6 +481,11 @@ void reviewReply(const std::filesystem::path& path) {
     check(firstAnchor != anchor, "two PR reviews of the same task shared a reply target");
 
     Database db(path);
+    const auto anchoredRow = " FROM journal WHERE id=" + std::to_string(anchor.get<Id>());
+    check(db.exec("SELECT pr_review_item_id" + anchoredRow) == second.get<Id>(), "PR review anchor did not save the item lookup key");
+    db.exec("INSERT OR IGNORE INTO journal(task_id,time,kind,data,pr_review_item_id)"
+            " SELECT task_id,time,kind,'{}',pr_review_item_id" +
+            anchoredRow);
     Store restarted(path);
     check(row(restarted.inbox(owner, "report"), "itemId", second) == review &&
               db.exec("SELECT count(*) FROM journal WHERE kind='pr_review_requested'") == 2,

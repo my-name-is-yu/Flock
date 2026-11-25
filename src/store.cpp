@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
+#include "journal_peer.hpp"
 #include "task_storage.hpp"
 #include "task_interaction_storage.hpp"
 #include "task_context_storage.hpp"
@@ -149,10 +150,7 @@ Id Store::Impl::waitAllowance(Id task, WaitReason reason) const {
 
 Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
     exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
-    const auto entry = last();
-    if (kind == "completed") queueChannelTaskUpdate(id, entry, field(data, "text"));
-    if (kind == "cancelled") queueChannelTaskUpdate(id, entry, "The task was cancelled.");
-    return entry;
+    return last();
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
     auto rows = query("SELECT id,kind,phase,last_message,sender_task,recipient_task FROM peer_exchanges"
@@ -207,11 +205,6 @@ bool Store::Impl::waitIsActionable(const TaskData& task) const {
     return !replanReady(task);
 }
 
-void Store::Impl::peerMessage(const PeerExchange& exchange, const Json& message) {
-    journal(exchange.sender, "bot_message", message);
-    journal(exchange.recipient, "bot_message", message);
-}
-
 void Store::Impl::requestCancellation(TaskData& task, SessionStop stop) {
     const Id id = task.id;
     const auto peer = peerExchange(id);
@@ -219,14 +212,13 @@ void Store::Impl::requestCancellation(TaskData& task, SessionStop stop) {
     if (!task.pendingInstructions.empty()) task.cancelledInstructions = task.pendingInstructions;
     clearWait(task, "cancel");
     consumeEvent(task);
-    journal(id, "cancel_requested",
-            stop.participation ? Json{{"sessionParticipationId", stop.participation}, {"sessionStopId", stop.cutoff}} : Json::object());
+    journalCancelRequested(id, stop);
     if (undispatched && !peer) {
         task.pendingDestination.reset();
         task.replanning = false;
         task.pendingInstructions.clear();
         task.state = TaskState::cancelled;
-        journal(id, "cancelled", Json::object());
+        journalCancelled(id);
     } else
         task.state = TaskState::cancelling;
     save(task);
@@ -350,12 +342,12 @@ Store::ConversationChanges Store::conversationChangesSince(std::optional<Id> aft
     if (!after || *after >= changes.through) return changes;
     auto rows = p_->query(R"SQL(
 SELECT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
-  WHEN 'conversation_reply' THEN json_extract(j.data,'$.replyToMessageId') ELSE json_extract(j.data,'$.messageId') END
+  WHEN 'conversation_reply' THEN j.reply_to_message_id ELSE j.message_id END
 WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
   AND j.kind IN ('conversation_reply','instruction_accepted','instruction_delivered',
                  'conversation_budget_approved')
 UNION
-SELECT j.conversation_bot_id,json_extract(j.data,'$.waitMessageId') FROM journal j
+SELECT j.conversation_bot_id,j.wait_message_id FROM journal j
 WHERE j.id>?1 AND j.id<=?2 AND j.kind='conversation_budget_approved'
   AND (?3='' OR j.conversation_bot_id=?3)
 ORDER BY 1,2
@@ -388,9 +380,9 @@ Store::NotificationEvents Store::notificationEventsSince(const Person& viewer, c
 WITH visible_bots AS (SELECT key AS bot,value AS after FROM json_each(?1)),
 events(id,bot,kind) AS (
 SELECT j.id,b.bot,
-       CASE WHEN json_extract(j.data,'$.route')='error' THEN 'failure' ELSE 'reply' END
+       CASE WHEN j.conversation_route='error' THEN 'failure' ELSE 'reply' END
 FROM visible_bots b JOIN journal j ON j.conversation_bot_id=b.bot AND j.id>b.after
-WHERE j.kind='conversation_reply' AND json_extract(j.data,'$.route') IS NOT 'model_budget'
+WHERE j.kind='conversation_reply' AND j.conversation_route IS NOT 'model_budget'
 UNION ALL
 SELECT j.id,b.bot,'failure'
 FROM visible_bots b JOIN tasks t ON t.bot_id=b.bot JOIN journal j ON j.task_id=t.id AND j.id>b.after
@@ -409,7 +401,7 @@ WHERE j.conversation_bot_id IS NULL AND (
         ))
   ))
   OR (j.kind='waiting' AND j.wait_reason='model_failure')
-  OR (j.kind='completed' AND json_extract(j.data,'$.workflowOutcome')='failed')
+  OR (j.kind='completed' AND j.workflow_outcome='failed')
 )
 )
 )SQL";
@@ -710,9 +702,7 @@ WITH visible AS NOT MATERIALIZED (
       OR (conversation_bot_id IS NULL
         AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')
-        AND (kind!='user_answer' OR user_answer_conversation IS NOT 1)
-        AND (kind!='bot_message' OR (json_extract(data,'$.initiator') IS NOT 'user'
-          AND json_extract(data,'$.recipient') IS NOT 'user'))))
+        AND (kind!='user_answer' OR user_answer_conversation IS NOT 1)))
 ), bot_page AS (
   SELECT id FROM visible WHERE conversation_bot_id=?1 ORDER BY id DESC LIMIT ?4
 ), page_ids AS MATERIALIZED (
@@ -740,10 +730,9 @@ SELECT page.id,page.task_id,page.time,page.kind,
               WHERE a.message_id=m.id AND json_extract(a.metadata,'$.kind')='image'),
             'deliveredToT3',json(CASE WHEN (
               WITH instructions AS (
-                SELECT kind,task_id,json_extract(data,'$.step') AS step
+                SELECT kind,task_id,instruction_step AS step
                 FROM journal WHERE kind IN ('instruction_accepted','instruction_delivered')
-                -- Unary + prevents SQLite from coercing JSON values and lets it use the expression index.
-                AND json_extract(data,'$.messageId')=+m.id
+                AND message_id=m.id
               )
               SELECT min(EXISTS (
                 SELECT 1 FROM instructions d WHERE d.kind='instruction_delivered'
@@ -773,28 +762,23 @@ ORDER BY page.id DESC)SQL",
 Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from,
                              std::string_view viewer) const {
     std::lock_guard lock(p_->mutex);
-    // The sending task keeps its original source message even as its revisions change.
-    // Match the saved quote as well, so missing or unverified provenance falls back to a generic label.
     const auto sql = std::string(R"SQL(
-SELECT j.id,j.task_id,j.time,j.kind,j.data,
-  CASE WHEN ?5<>'' AND json_type(j.data,'$.forwardedMessage')='object' THEN EXISTS(
-    SELECT 1 FROM messages m JOIN journal original ON original.id=m.id
-    WHERE m.id=sender.source_message_id AND m.bot_id=sender.bot_id
-      AND original.kind='conversation_message' AND m.person_id=?5
-      AND m.text=json_extract(j.data,'$.forwardedMessage.text')
-      AND original.time=json_extract(j.data,'$.forwardedMessage.time')
-  ) ELSE 0 END
+SELECT j.id,j.task_id,j.time,j.kind,j.data,m.text,original.time
 FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
-JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
-  -- Unary + removes TEXT affinity so SQLite can use the exchange ID in the JSON expression index.
-  AND json_extract(j.data,'$.exchangeId') = +p.id
+JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message' AND j.exchange_id=p.id
+LEFT JOIN messages m ON ?5<>'' AND m.id=j.forwarded_source_message_id
+  AND m.id=sender.source_message_id AND m.bot_id=sender.bot_id AND m.person_id=?5
+LEFT JOIN journal original ON original.id=m.id AND original.kind='conversation_message'
 WHERE ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
 )SQL") + (from ? " AND j.id>=?3 ORDER BY j.id ASC LIMIT ?4" : " AND (?3=0 OR j.id<?3) ORDER BY j.id DESC LIMIT ?4");
     auto rows = p_->query(sql.c_str(), {bot, peer, from ? from : before, std::clamp(limit, 1u, 200u), viewer});
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
-        if (rows.number(5)) event["forwardedFromViewer"] = true;
+        if (!rows.null(6)) {
+            const auto forwarded = decodeBotMessage(rows.number(0), event.at("data")).forwarded;
+            if (forwarded && forwarded->text == rows.string(5) && forwarded->time == rows.number(6)) event["forwardedFromViewer"] = true;
+        }
         result.push_back(std::move(event));
     }
     if (!from) std::reverse(result.begin(), result.end());
@@ -807,11 +791,10 @@ Id Store::peerMessageAnchor(std::string_view bot, std::string_view peer, Id even
     auto row = p_->query(R"SQL(
 SELECT j.id
 FROM journal source
-JOIN peer_exchanges p ON p.id=json_extract(source.data,'$.exchangeId')
+JOIN peer_exchanges p ON p.id=source.exchange_id
 JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
 JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
-  AND json_extract(j.data,'$.exchangeId')=+p.id
-  AND json_extract(j.data,'$.messageId')=json_extract(source.data,'$.messageId')
+  AND j.exchange_id=p.id AND j.peer_message_id=source.peer_message_id
 WHERE source.id=?3 AND source.kind='bot_message' AND source.task_id IN (p.sender_task,p.recipient_task)
   AND ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
 LIMIT 1

@@ -1,5 +1,7 @@
 #include "../src/task_storage.hpp"
 #include "../src/journal.hpp"
+#include "../src/journal_task.hpp"
+#include "../src/outbox_storage.hpp"
 #include "../src/storage.hpp"
 
 #include "flock/record_decode_error.hpp"
@@ -334,6 +336,81 @@ void journalRunReportRoundTrips() {
     throw std::runtime_error("Run report accepted an unknown Run field");
 }
 
+void acceptedInstructionRoundTrips() {
+    Json data = storedExecution().at("cancelledInstructions").at(0);
+    data["source"] = {{"taskId", 12}, {"messageId", 31}, {"run", {{"threadId", "thread"}, {"runId", "run"}}}};
+    const auto instruction = decodeAcceptedInstruction(id, data);
+    check(instruction.source && instruction.source->run && instruction.source->run->runId == "run" && instructionJson(instruction) == data,
+          "Accepted instruction lost its source or changed its journal representation");
+
+    data["step"] = "1";
+    try {
+        (void)decodeAcceptedInstruction(id, data);
+    } catch (const RecordDecodeError& error) {
+        const std::string_view message = error.what();
+        check(message.find("step") != message.npos && message.find("expected an integer") != message.npos,
+              "Accepted instruction error did not identify the malformed step");
+        return;
+    }
+    throw std::runtime_error("Accepted instruction accepted a noninteger step");
+}
+
+void completionAndFeedbackRoundTrips() {
+    const Json assignedRun = storedExecution().at("pendingRunReport").at("report").at("run");
+    const Json workflow{{"text", "Stage failed"}, {"revisionId", 7}, {"source", assignedRun}, {"workflowOutcome", "failed"}};
+    const auto stage = decodeCompletion(id, workflow);
+    check(stage.source() && stage.source()->assignment && encodeCompletion(stage) == workflow,
+          "Workflow completion lost its assigned Run or its outcome");
+
+    const Json fanout{{"text", "One of two finished"},
+                      {"revisionId", nullptr},
+                      {"doneWhen", "Compare results"},
+                      {"runOutcome", "partial_failure"},
+                      {"requestedCommit", "checked"}};
+    const auto runs = decodeCompletion(id, fanout);
+    check(std::get<FanoutCompletion>(runs.details).outcome == RunOutcome::partial_failure && encodeCompletion(runs) == fanout,
+          "Fan-out completion changed its outcome or requested commit");
+
+    const Json dependency{{"taskId", 70},    {"exchangeId", "exchange"}, {"messageId", "result"},
+                          {"botId", "peer"}, {"requestKind", "work"},    {"status", "completed"}};
+    const Json evidence{
+        {"environmentId", "env"}, {"threadId", "thread"}, {"runId", "run"}, {"kind", "peer_report"}, {"messageId", "result"}};
+    Json peer{{"text", "Done"},
+              {"revisionId", nullptr},
+              {"doneWhen", "Compare results"},
+              {"reason", "Peer verified"},
+              {"dependency", dependency},
+              {"evidenceRefs", Json::array({evidence})}};
+    check(encodeCompletion(decodeCompletion(id, peer)) == peer, "Peer completion changed its dependencies or evidence");
+
+    Json failure{{"eventId", 38}, {"tool", "follow_up"}, {"args", nullptr}, {"result", {{"ok", false}, {"error", "Unavailable"}}}};
+    check(encodeToolError(decodeToolError(id, failure)) == failure, "Feedback lost null tool arguments");
+    failure.erase("args");
+    failure["argumentsExcerpt"] = "[bounded excerpt]";
+    failure["result"]["delivery"] = "unknown";
+    check(encodeToolError(decodeToolError(id, failure)) == failure, "Feedback lost the excerpt or unknown delivery status");
+
+    const Json decision{{"eventId", 38},
+                        {"revisionId", 7},
+                        {"actionId", "send"},
+                        {"tool", "follow_up"},
+                        {"reason", "Continue"},
+                        {"args", {{"instruction", "Compare results"}}},
+                        {"evidence", Json::array()},
+                        {"usage", {{"total_tokens", 19}}}};
+    check(encodeJournalDecision(decodeJournalDecision(id, decision)) == decision, "Decision changed its recorded usage or arguments");
+
+    peer["evidenceRefs"][0].erase("messageId");
+    try {
+        (void)decodeCompletion(id, peer);
+    } catch (const RecordDecodeError& error) {
+        check(std::string_view(error.what()).find("evidenceRefs.0.messageId") != std::string_view::npos,
+              "Malformed peer evidence did not identify its missing message anchor");
+        return;
+    }
+    throw std::runtime_error("Peer report completion accepted evidence with no message anchor");
+}
+
 void questionAndCheckpointRoundTrip() {
     const Json decision{{"generation", generation},
                         {"eventId", 15},
@@ -379,6 +456,8 @@ int main() {
         decodeErrors();
         executionDecodeErrors();
         journalRunReportRoundTrips();
+        acceptedInstructionRoundTrips();
+        completionAndFeedbackRoundTrips();
         questionAndCheckpointRoundTrip();
         return 0;
     } catch (const std::exception& error) {

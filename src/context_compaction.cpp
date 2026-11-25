@@ -1,5 +1,6 @@
 #include "conversation_storage.hpp"
 #include "flock/limits.hpp"
+#include "journal_conversation.hpp"
 
 #include <algorithm>
 
@@ -99,25 +100,32 @@ ORDER BY entry.id DESC LIMIT 24
                       {message.bot, boundary, message.id, message.channelScope, message.channelScope});
     while (rows.next()) {
         const auto kind = rows.string(2);
-        const auto data = rows.json(3);
-        const bool system = kind == "conversation_message" && (data.contains("sessionWake") || data.contains("sessionInvitation"));
-        const bool user = !system && (kind == "conversation_message" || kind == "user_answer");
-        const bool reply = kind == "conversation_reply";
-        const char* role = system ? "system" : user ? "user" : reply ? "bot" : "task";
-        Json entry = {{"messageId", rows.number(0)}, {"kind", kind}, {"role", role}, {"text", ""}};
-        for (const auto* key : {"sessionWake", "sessionInvitation"})
-            if (system && data.contains(key)) entry[key] = scrub.record(data.at(key));
-        if (rows.number(1)) entry["taskId"] = rows.number(1);
-        if (kind == "conversation_message" && message.channelScope.empty()) {
-            auto media = attachmentViews(rows.number(0));
-            if (!media.empty()) entry["attachments"] = std::move(media);
+        const auto id = rows.number(0);
+        Json entry = {{"messageId", id}, {"kind", kind}, {"text", ""}};
+        const bool isReply = kind == "conversation_reply";
+        bool system = false;
+        if (kind == "conversation_message") {
+            const auto decoded = decodeConversationMessage(id, rows.json(3));
+            system = !std::holds_alternative<std::monostate>(decoded.detail);
+            if (const auto* wake = std::get_if<ConversationWakeEntry>(&decoded.detail))
+                entry["sessionWake"] = scrub.record(encodeConversationWake(*wake));
+            else if (const auto* invite = std::get_if<ConversationInvitationEntry>(&decoded.detail))
+                entry["sessionInvitation"] = scrub.record(encodeConversationInvitation(*invite));
+            if (message.channelScope.empty()) {
+                auto media = attachmentViews(id);
+                if (!media.empty()) entry["attachments"] = std::move(media);
+            }
         }
-        if (kind == "conversation_reply") {
-            for (const auto* key : {"actions", "suggestions"})
-                if (data.contains(key)) entry[key] = scrub.record(data.at(key));
+        const bool user = !system && (kind == "conversation_message" || kind == "user_answer");
+        entry["role"] = system ? "system" : user ? "user" : isReply ? "bot" : "task";
+        if (rows.number(1)) entry["taskId"] = rows.number(1);
+        if (isReply) {
+            const auto reply = decodeConversationReply(id, rows.json(3));
+            if (!reply.actions.is_null()) entry["actions"] = scrub.record(reply.actions);
+            if (!reply.suggestions.is_null()) entry["suggestions"] = scrub.record(reply.suggestions);
         } else if (!rows.null(5))
             entry["waitId"] = rows.number(5);
-        const std::size_t limit = user ? 4000 : reply ? 1500 : 700;
+        const std::size_t limit = user ? 4000 : isReply ? 1500 : 700;
         const auto bytes = entry.dump().size() + (history.empty() && summary.is_null() ? 0 : 1);
         if (bytes > remaining) break;
         entry["text"] = boundedJsonText(scrub.text(rows.string(4)), limit, remaining - bytes);
