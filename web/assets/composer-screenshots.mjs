@@ -29,7 +29,15 @@ function canvasBlob(canvas, type, quality) {
   return new Promise((resolve) => canvas.toBlob(resolve, type, quality));
 }
 
-async function compressScreenshot(bitmap, longestEdge) {
+function hasTransparency(context, { width, height }) {
+  const { data } = context.getImageData(0, 0, width, height);
+  for (let alpha = 3; alpha < data.length; alpha += 4) {
+    if (data[alpha] !== 255) return true;
+  }
+  return false;
+}
+
+async function compressScreenshot(bitmap, longestEdge, mimeType) {
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d');
   for (let edge = Math.min(longestEdge, maxPreparedEdge); edge >= 1; edge = Math.floor(edge * 0.75)) {
@@ -39,10 +47,8 @@ async function compressScreenshot(bitmap, longestEdge) {
     context.imageSmoothingQuality = 'high';
     context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     const png = await canvasBlob(canvas, 'image/png');
-    context.globalCompositeOperation = 'destination-over';
-    context.fillStyle = '#fff';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    const jpeg = await canvasBlob(canvas, 'image/jpeg', 0.85);
+    const opaque = mimeType === 'image/jpeg' || !hasTransparency(context, canvas);
+    const jpeg = opaque ? await canvasBlob(canvas, 'image/jpeg', 0.85) : null;
     const smallest = jpeg && (!png || jpeg.size < png.size) ? jpeg : png;
     if (smallest?.size <= maxPreparedBytes) return smallest;
   }
@@ -61,7 +67,7 @@ export async function resizeScreenshot(file) {
   try {
     const edge = Math.max(bitmap.width, bitmap.height);
     if (edge <= maxPreparedEdge && file.size <= maxPreparedBytes) return file.type ? file : file.slice(0, file.size, mimeType);
-    return await compressScreenshot(bitmap, edge);
+    return await compressScreenshot(bitmap, edge, mimeType);
   } finally {
     bitmap.close();
   }

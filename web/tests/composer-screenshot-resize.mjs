@@ -46,6 +46,19 @@ async function exercise(resizeScreenshot, stageScreenshots) {
   const tall = await picture(1800, 3200, 'image/jpeg');
   check(await dimensions(await resizeScreenshot(tall)) === '1152x2048', 'A tall JPEG should scale down');
 
+  const transparent = new OffscreenCanvas(3840, 2160);
+  const transparentContext = transparent.getContext('2d');
+  transparentContext.fillStyle = 'white';
+  transparentContext.fillRect(0, 0, 100, 100);
+  const transparentFile = new File([await transparent.convertToBlob()], 'Transparent.png', { type: 'image/png' });
+  const transparentResult = await resizeScreenshot(transparentFile);
+  const transparentBitmap = await createImageBitmap(transparentResult);
+  const sample = new OffscreenCanvas(100, 100).getContext('2d');
+  sample.drawImage(transparentBitmap, 0, 0);
+  transparentBitmap.close();
+  check(transparentResult.type === 'image/png' && sample.getImageData(0, 0, 1, 1).data[3] === 255 &&
+    sample.getImageData(90, 90, 1, 1).data[3] === 0, 'Resizing must preserve opaque and transparent pixels');
+
   const dense = await picture(2048, 2048, 'image/png', true);
   check(dense.size > 2 * 1024 * 1024 && dense.size < 20 * 1024 * 1024, 'Dense source must exercise the byte limit');
   const prepared = await resizeScreenshot(dense);
