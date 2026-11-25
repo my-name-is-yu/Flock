@@ -269,13 +269,19 @@ AND json_extract(decision,'$[0].tool')='review_preference' AND json_extract(resu
 )SQL",{id}).next();
 }
 
-ModelInput Store::Impl::preferenceReviewInput(const conversation::Message& message, std::vector<std::string> tools,
-                                             std::string feedback, Seconds now) {
-    const auto current = memory(message.bot,turnActor(message),"read_memory",Json::object(),now);
-    return {.task = Json::object(),
+std::optional<ModelInput> Store::Impl::preferenceReviewInput(
+    const conversation::Message& message, std::vector<std::string> tools, std::string feedback, Seconds now) {
+    if (!canReviewPreference(message)) return std::nullopt;
+    try {
+        const auto current = memory(message.bot,turnActor(message),"read_memory",Json::object(),now);
+        return ModelInput{
+            .task = Json::object(),
             .event = {{"kind","private_memory_review"},{"text",message.text},{"baseVersion",current.at("version")}},
             .history = Json::array(),.notes = {{},field(current,"content")},.tools = std::move(tools),
             .feedback = std::move(feedback),.config = message.routing.at("config")};
+    } catch (const Conflict&) {
+        return std::nullopt;
+    }
 }
 
 Json Store::Impl::rememberPreference(const conversation::Message& message, int step, const Json& args, Seconds now) {

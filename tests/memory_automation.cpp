@@ -296,6 +296,27 @@ void proactiveMemory(const std::filesystem::path& db) {
           "Undo did not persist the restored memory and identify the reverted edit");
 }
 
+void unavailablePreferenceReviewStillReplies(const std::filesystem::path& db) {
+    Store store(db,[](auto) { return "Prefer CSV."; });
+    auto policy = store.policy();
+    policy.submitSecret(owner,alpha.botId,policy.requestSecret(alpha.botId,{"fixture-token"}),"memory");
+    Script model;
+    Adapter adapter;
+    Runtime runtime(store,model,adapter,{});
+    model.choices = {{"review_preference",Json::object(),"Review a lasting preference"},reply()};
+    const auto receipt = store.receive(localOwner,alpha,"unavailable-review","I prefer short release notes.");
+    runtime.runConversations();
+
+    const auto events = store.conversation(alpha.botId);
+    check(model.choices.empty() && model.inputs.size() == 2 &&
+          model.inputs.back().event.at("kind") == "conversation_turn" &&
+          std::ranges::any_of(events,[&](const auto& event) {
+              return event.at("kind") == "conversation_reply" &&
+                  event.at("data").at("replyToMessageId") == receipt.at("messageId") &&
+                  event.at("data").at("text") == "Done";
+          }),"Unavailable preference review interrupted the ordinary reply");
+}
+
 void memoryRedactionLimit(const std::filesystem::path& db) {
     Store store(db,[](auto) { return "Original"; });
     auto policy = store.policy();
@@ -624,6 +645,7 @@ int main() {
         Directory temp;
         memoryFlow(temp.path / "memory.sqlite3");
         proactiveMemory(temp.path / "proactive-memory.sqlite3");
+        unavailablePreferenceReviewStillReplies(temp.path / "unavailable-review.sqlite3");
         memoryRedactionLimit(temp.path / "memory-limit.sqlite3");
         configuredRequestLimit(temp.path / "schedule-limit.sqlite3");
         downtime(temp.path / "downtime.sqlite3");

@@ -964,6 +964,22 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                                "Reason: " + repair.string(2) + ". Return offered tools with valid arguments. "
                                "Batch independent reads, and propose replies or actions that make changes on their own.";
                 }
+                auto [offered,machines] = available(step,reviewPreference);
+                if (reviewPreference) {
+                    auto prepared = preferenceReviewInput(message,std::move(offered),std::move(feedback),now);
+                    if (!prepared) {
+                        const std::vector<ModelCall> skipped{
+                            ModelCall{Decision{"skip_preference",Json::object(),{}},{}}};
+                        exec(R"SQL(
+INSERT INTO conversation_steps(message_id,step,decision,result) VALUES(?,?,?,?)
+ON CONFLICT(message_id,step) DO UPDATE SET decision=excluded.decision,result=excluded.result
+WHERE conversation_steps.result IS NULL
+)SQL",{id,step,encodeCalls(skipped),Json::array({{{"ok",true}}})});
+                        transaction.commit();
+                        continue;
+                    }
+                    input = std::move(*prepared);
+                }
                 if (!query(R"SQL(
 SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
  SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL))
@@ -972,10 +988,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                     transaction.commit();
                     return;
                 }
-                auto [offered,machines] = available(step,reviewPreference);
-                if (reviewPreference) {
-                    input = preferenceReviewInput(message,std::move(offered),std::move(feedback),now);
-                } else {
+                if (!reviewPreference) {
                     std::vector<ModelImage> images;
                     const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
                     input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),

@@ -232,8 +232,8 @@ struct Store::Impl {
                 Seconds now, bool fromBot = false);
     bool canReviewPreference(const conversation::Message&);
     bool preferenceReviewPending(Id message, int step) const;
-    ModelInput preferenceReviewInput(const conversation::Message&, std::vector<std::string>, std::string feedback,
-                                     Seconds now);
+    std::optional<ModelInput> preferenceReviewInput(const conversation::Message&, std::vector<std::string>,
+                                                    std::string feedback, Seconds now);
     Json rememberPreference(const conversation::Message&, int step, const Json&, Seconds now);
     void projectMemoryNotice(std::string_view bot, Json& data) const;
     Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
