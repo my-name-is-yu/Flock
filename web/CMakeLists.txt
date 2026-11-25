@@ -18,7 +18,7 @@ add_custom_command(OUTPUT "${flock_web_asset_header}"
   DEPENDS ${flock_web_assets} "${CMAKE_CURRENT_SOURCE_DIR}/embed.cmake"
   VERBATIM)
 
-add_library(flock_web server.cpp settings_routes.cpp board_inbox_routes.cpp memory_automation_routes.cpp git_routes.cpp identity.cpp views.cpp change_feed.cpp
+add_library(flock_web STATIC server.cpp settings_routes.cpp board_inbox_routes.cpp memory_automation_routes.cpp git_routes.cpp identity.cpp views.cpp change_feed.cpp
                       channel_routes.cpp channel_bridge.cpp mcp_routes.cpp "${flock_web_asset_header}")
 target_include_directories(flock_web PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(flock_web SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
@@ -31,9 +31,6 @@ if(BUILD_TESTING)
   target_link_libraries(flock_web_git_webhooks PRIVATE flock_web Threads::Threads OpenSSL::Crypto)
   target_compile_options(flock_web_git_webhooks PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_web_git_webhooks COMMAND flock_web_git_webhooks)
-  find_program(FLOCK_NODE_EXECUTABLE node)
-  find_program(FLOCK_CHROME_EXECUTABLE NAMES chromium chromium-browser google-chrome "Google Chrome"
-    PATHS "/Applications/Google Chrome.app/Contents/MacOS")
   if(FLOCK_NODE_EXECUTABLE AND FLOCK_CHROME_EXECUTABLE)
     add_test(NAME flock_web_browser_notification_navigation COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/browser-notification-navigation.mjs" "${FLOCK_CHROME_EXECUTABLE}")

@@ -36,6 +36,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-cmake -S "$source_dir" -B "$build_dir" -DBUILD_TESTING=ON
+cmake --preset dev -S "$source_dir" -B "$build_dir"
 cmake --build "$build_dir" --config Debug
 ctest --test-dir "$build_dir" --build-config Debug --output-on-failure --no-tests=error
