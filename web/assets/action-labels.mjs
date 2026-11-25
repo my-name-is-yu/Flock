@@ -23,7 +23,6 @@ export const actionLabels = {
   'shared_memory.write': 'Write to shared memory',
   'workspace.read': 'Read workspace files',
   'workspace.write': 'Write workspace files',
-  'workspace.exec': 'Run workspace commands',
   'web.search': 'Search the web',
   'web.fetch': 'Open web pages',
   'skill.list': 'List skills',

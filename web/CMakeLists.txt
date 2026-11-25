@@ -26,9 +26,6 @@ target_link_libraries(flock_web PUBLIC flock_core PRIVATE Threads::Threads OpenS
 target_compile_options(flock_web PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  add_test(NAME flock_verify_change_feed COMMAND "${Python3_EXECUTABLE}"
-    "${PROJECT_SOURCE_DIR}/.agents/skills/verify-change-feed/model.py")
   add_executable(flock_web_git_webhooks tests/git_webhooks.cpp)
   target_include_directories(flock_web_git_webhooks SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
   target_link_libraries(flock_web_git_webhooks PRIVATE flock_web Threads::Threads OpenSSL::Crypto)

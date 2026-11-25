@@ -52,7 +52,6 @@ constexpr std::pair<Action,std::string_view> actions[] = {
     {Action::shared_memory_write,"shared_memory.write"},
     {Action::workspace_read,"workspace.read"},
     {Action::workspace_write,"workspace.write"},
-    {Action::workspace_exec,"workspace.exec"},
     {Action::web_search,"web.search"},
     {Action::web_fetch,"web.fetch"},
     {Action::skill_list,"skill.list"},
@@ -273,16 +272,10 @@ void Policy::writeRule(const Person& actor, RuleKind kind, Action action, std::s
     db_.sharedRedactor().requirePublic({actor.id,target});
     const auto name = actionName(action), type = ruleName(kind);
     if (add) {
-        if (db_.query("SELECT 1 FROM policy_rules WHERE kind=? AND action=? AND target=?",{type,name,target}).next())
-            return;
-        auto count = db_.query("SELECT count(*) FROM policy_rules WHERE kind=?",{type});
-        count.next();
-        if (kind != RuleKind::never && count.number(0) >= 20) {
-            if (!fromCard || kind != RuleKind::allow) throw Conflict("Policy rule limit reached");
-            db_.exec("DELETE FROM policy_rules WHERE id=(SELECT min(id) FROM policy_rules WHERE kind='allow')");
-        }
-        db_.exec("INSERT INTO policy_rules(kind,action,target,created_at,exact) VALUES(?,?,?,?,?)",
+        db_.exec("INSERT INTO policy_rules(kind,action,target,created_at,exact) VALUES(?,?,?,?,?)"
+                 " ON CONFLICT(kind,action,target) DO NOTHING",
                  {type,name,target,unixTime(),fromCard});
+        if (!sqlite3_changes(db_.db)) return;
     } else db_.exec("DELETE FROM policy_rules WHERE kind=? AND action=? AND target=?",{type,name,target});
     audit(actor,"",add ? "rule_added" : "rule_removed",{{"kind",type},{"action",name},{"target",target}});
 }

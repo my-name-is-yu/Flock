@@ -11,7 +11,7 @@ bool allowedAfterWebEvidence(const Decision& call) {
         return true;
     constexpr std::string_view readOnly[]{
         "reply","web_search","web_fetch","workspace_read_file",
-        "workspace_search","workspace_command_status","mcp_discover","mcp_read_resource",
+        "workspace_search","mcp_discover","mcp_read_resource",
         "skill_list","skill_read","inspect_attachment","expand_context"
     };
     return std::ranges::find(readOnly,call.tool) != std::end(readOnly);

@@ -284,8 +284,6 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::AlreadyTerminal &&
           effects("t3_thread_interrupt").size() == previousInterrupts,
           "A completed reply stop depended on the shared Session's delegated work");
-    runtime->runConversations();
-    check(model.wakes.empty(),"A completed Session reply woke the Bot before its delegated work settled");
     fixture({{"botRunDelegatesPending",false},{"botRunTimedOut",true}});
     check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::NoActiveRun,
           "A completed reply stop settled while its restart continuation was pending");

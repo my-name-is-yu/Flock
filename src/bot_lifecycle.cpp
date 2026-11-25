@@ -86,7 +86,6 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
             p_->requestCancellation(task);
         }
         p_->settlePolicyApprovals();
-        p_->exec("UPDATE workspace_commands SET state='stop_requested' WHERE bot=? AND state='running'",{bot});
         p_->stopPausedBotParticipation(bot);
         p_->dropPausedBotDeliveries(bot);
     } else {
@@ -111,7 +110,6 @@ SELECT 1 WHERE
              WHERE m.bot_id=?1 AND t.status<>'done')
   OR EXISTS (SELECT 1 FROM workflows w JOIN workflow_stages s ON s.workflow_id=w.id
              WHERE w.bot_id=?1 AND w.stop_requested=0 AND s.task_id IS NULL AND s.status='pending')
-  OR EXISTS (SELECT 1 FROM workspace_commands WHERE bot=?1 AND state IN ('running','stop_requested'))
   OR EXISTS (SELECT 1 FROM session_message_waits WHERE bot=?1 AND (notified=0 OR interrupt_at IS NOT NULL))
   OR EXISTS (SELECT 1 FROM messages m JOIN session_message_sends s ON s.message_id=m.id
              WHERE m.bot_id=?1 AND s.interrupt_at IS NOT NULL)
