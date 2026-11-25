@@ -1383,6 +1383,10 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     };
     cb.updateBot = [&](std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image) {
         auto& card = profiles.at(std::string(botId));
+        if (profile.contains("fixPullRequests")) {
+            card["fixPullRequests"] = profile.at("fixPullRequests");
+            return card;
+        }
         if (profile.contains("soul")) {
             check(profile.size() == 2 && profile.at("originalSoul") == card.at("soul") && !image,
                   "role update omitted the original text or forwarded other settings");
@@ -1446,6 +1450,15 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     check(created.at("id") == "bot-1" && created.at("name") == "Scout" && created.at("role") == "reviewer" &&
           created.at("avatar").at("kind") == "shape" && created.at("avatar").at("example") == "sprout",
           "POST /api/bots did not return sanitized created Bot");
+    check(created.at("fixPullRequests") == true,"a new Bot did not default to fixing pull requests");
+    const auto disabled = browser.post("/api/bots/profile",{{"botId","bot-1"},{"fixPullRequests",false}});
+    check(disabled.at("fixPullRequests") == false &&
+          browser.get("/api/view?bot=bot-1").at("bot").at("fixPullRequests") == false,
+          "turning off PR follow-ups did not update the Bot settings view");
+    for (const auto& invalid : Json::array({"true",1,nullptr})) {
+        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"fixPullRequests",invalid}},400);
+        check(rejected.at("error") == "invalid_pull_request_setting","a non-boolean PR setting was accepted");
+    }
 
     const auto uploaded = browser.post("/api/bots/profile",{
         {"botId","bot-1"},

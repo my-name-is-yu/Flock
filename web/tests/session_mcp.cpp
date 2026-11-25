@@ -255,7 +255,7 @@ void pausedBotStopsSessionMessages() {
                   command.target.threadId == unconfirmed->target.threadId,
                   "Pause reconciled a different send instead of its saved request");
             if (!recoveryVisible) return {};
-            return {Delivery::Kind::Accepted,{command.target.threadId,"bot-reply-3",{},{}},{}};
+            return {Delivery::Kind::Accepted,{command.target.threadId,"bot-reply-3",{},{}},{},false,"queued"};
         }
         std::string sessionMessageWake(const SessionTarget&, const RunRef& run) override {
             ++observations;

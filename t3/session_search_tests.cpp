@@ -256,16 +256,17 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     reconcile.target.threadId = thread;
     reconcile.instruction = "Ernest: Check the fixture output";
     reconcile.actionId = requestId;
-    const auto checkRecoveredSend = [&] {
+    const auto checkRecoveredSend = [&](std::string_view delivery) {
         const auto recovered = t3.reconcile(reconcile);
         check(recovered.kind == Delivery::Kind::Accepted && recovered.run.threadId == thread &&
-              recovered.run.runId == "bot-run-" + std::to_string(sends()) && sends() == before + 1,
+              recovered.run.runId == "bot-run-" + std::to_string(sends()) && sends() == before + 1 &&
+              recovered.delivery == delivery,
               "Session send reconciliation missed the exact Run or resent work");
     };
     fixture({{"reconcileSessionSend",true}});
-    checkRecoveredSend();
+    checkRecoveredSend("queued");
     fixture({{"botRunStatus","running"}});
-    checkRecoveredSend();
+    checkRecoveredSend("started");
     fixture({{"directStopReadError","run_not_found"}});
     check(t3.reconcile(reconcile).kind == Delivery::Kind::Unknown,
           "A missing Run incorrectly cleared a Session send with lost receipt");

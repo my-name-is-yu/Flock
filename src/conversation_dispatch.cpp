@@ -42,9 +42,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
             return sendSessionMessage(message,step,decision,tool_batch::turnCallKey(message.id,step),
                                       ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
     }
-    if (calls.size() == 1 && tool == "cancel_task" && decision.args.is_object() &&
-        (decision.args.contains("destination") || decision.args.contains("environmentId") ||
-         decision.args.contains("projectId")))
+    if (calls.size() == 1 && tool == "cancel_task" && hasDestinationSelector(decision.args))
         return cancelDestinationRun(message,step,decision,tool_batch::turnCallKey(message.id,step),
                                     decision.rejection.empty(),ctx.hasWebEvidence,ctx.shutdown);
     if (effectType == "array" || calls.size() > 1 || isBotTool(tool) ||
@@ -55,7 +53,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     const auto key = tool_batch::turnCallKey(message.id,step);
     const bool offered = decision.rejection.empty();
     if (offered || effectType == "object") {
-        if (tool == "message_session")
+        if (tool == "message_session" || tool == "fix_pull_request")
             return sendSessionMessage(message,step,decision,key,ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
         if (tool == "interrupt_session")
             return runSessionEffect(message,step,decision,key,offered,ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
@@ -255,7 +253,7 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(
             result = toolFailure("The selected T3 Session could not be verified. Search for it again.");
         }
     }
-    if (decision.tool == "start_task" && !selectedSession && result.is_null())
+    if ((decision.tool == "start_task" || decision.tool == "change_task") && !selectedSession && result.is_null())
         linked = discoverLinkedTaskDestinations(ctx.t3,message.bot);
     std::lock_guard lock(mutex);
     Transaction transaction(db);

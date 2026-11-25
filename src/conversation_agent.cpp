@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <set>
+#include <tuple>
 
 namespace flockv0 {
 using conversation_storage::integer;
@@ -535,7 +536,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             if (revision != task.value("currentRevision",Id{0}))
                 throw ToolError("stale",{{"applied",0},{"taskId",task.at("id")},
                     {"expected",{{"revisionId",revision}}},{"current",taskState(task,message)}});
-            change = taskChange(message,args,task);
+            change = taskChange(message,args,task,linked);
         }
         const bool conflicting = acceptInstruction(task,message.id,step,
             instruction,result.is_null() ? Json(nullptr) : sourceRef(result),change ? &*change : nullptr);
@@ -569,7 +570,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                 {"taskId",task.at("id")},{"current",taskState(task,message)}};
     }
     if (tool == "cancel_task") {
-        if (args.contains("destination") || args.contains("environmentId") || args.contains("projectId"))
+        if (hasDestinationSelector(args))
             throw ToolError("Cancel one destination in a standalone cancel_task action");
         const auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
@@ -637,6 +638,21 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
 
 void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route,
                              const conversation::QuestionAnchor* question) {
+    const auto receipt = sessionSendReceipts.find(message.id);
+    if (receipt != sessionSendReceipts.end()) persistSessionSendReceipt(message.id,receipt->second);
+    if (route == "session_access" || route == "access" || route == "channel_access" || route == "bot_paused") {
+        auto pending = query(R"SQL(
+SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
+  AND json_extract(effect,'$.kind')='message_session'
+  AND json_extract(effect,'$.sendState')='prepared'
+)SQL",{message.id});
+        std::vector<int> steps;
+        while (pending.next()) steps.push_back(static_cast<int>(pending.number(0)));
+        for (const auto step : steps)
+            saveTurnResults(message.id,step,Json::array({redactor(message.bot).record({
+                {"ok",false},{"delivery","not_accepted"},
+                {"error","The turn ended before the T3 Session message was sent."}})}));
+    }
     Json actions = Json::array();
     std::set<Id> touched;
     Json artifacts = Json::array();
@@ -692,10 +708,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
     std::erase_if(unpersistedToolResults,[&](const auto& entry) { return entry.first.first == message.id; });
-    if (const auto receipt = sessionSendReceipts.find(message.id); receipt != sessionSendReceipts.end()) {
-        recordSessionSendRun(message.id,receipt->second);
-        sessionSendReceipts.erase(receipt);
-    }
+    if (receipt != sessionSendReceipts.end()) sessionSendReceipts.erase(receipt);
 }
 
 void Store::Impl::pauseTurn(const Message& message) {
@@ -794,12 +807,23 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     const auto available = [&] {
         auto offered = tools;
         auto machines = Json::array();
-        if (!notification) {
+        std::string_view followupStatus;
+        if (notification) {
+            if (const auto followup = gitHost ? gitPrFollowup(message) : std::nullopt) {
+                switch (followup->status) {
+                case GitPrFollowup::Status::available:
+                    offered.push_back("fix_pull_request");
+                    break;
+                case GitPrFollowup::Status::attempted: followupStatus = "already_requested"; break;
+                case GitPrFollowup::Status::limitReached: followupStatus = "limit_reached"; break;
+                }
+            }
+        } else {
             for (const auto& [machineId,machine] : localMachines)
                 if (permitsLocalMachineOwner(machine->owner(),message.bot)) machines.push_back(machineId);
             if (!machines.empty()) offered.push_back("request_local_machine_connection");
         }
-        return std::pair{std::move(offered),std::move(machines)};
+        return std::tuple{std::move(offered),std::move(machines),followupStatus};
     };
     const bool ja = japanese(message.text);
     const auto finish = [&](std::string text, std::string_view route) {
@@ -883,7 +907,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                 if (!row.string(1).empty()) continue;
                 effectType = row.string(2);
                 if (!row.string(0).empty()) {
-                    const auto [offered,machines] = available();
+                    const auto [offered,machines,followupStatus] = available();
                     bool rejectionChanged = false;
                     for (const auto& saved : row.json(0)) {
                         Decision call{saved.at("tool"),saved.at("args"),saved.at("reason")};
@@ -959,8 +983,9 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                     return;
                 }
                 std::vector<ModelImage> images;
-                auto [offered,machines] = available();
-                const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
+                auto [offered,machines,followupStatus] = available();
+                auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
+                if (!followupStatus.empty()) context["event"]["gitFollowupStatus"] = followupStatus;
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
                          .images = std::move(images)};

@@ -148,6 +148,11 @@ These endpoints require an installation root.
 
 ## Bot settings
 
+In a Bot's **General** settings, **Fix failing checks and review feedback** lets
+the Bot ask the original Session to fix problems on PRs it opened for you. It is
+on by default. Turn it off to keep getting reports. If a fix request needs
+approval, review it in **Needs you**.
+
 Each Bot's **Access** page (Flock settings → Bots → Access) lists who can use
 the Bot, secrets it is waiting for, and connected computers.
 
@@ -179,7 +184,8 @@ for the Bot owner and installation roots. An unavailable catalog returns
 `503` with `{"error":"models_unavailable"}`.
 `POST /api/bots/profile` accepts `botId` and any of `environmentId`,
 `projectId`, or `model` in one request. Omitted fields are preserved and an
-empty string clears the supplied field. Name, avatar, and role are saved separately.
+empty string clears the supplied field. Save boolean `fixPullRequests` on its
+own with `botId`. Name, avatar, and role are saved separately.
 `POST /api/bot-settings/members` takes `botId`, `person` and boolean `add`.
 `POST /api/bot-settings/secret` accepts `botId`, `requestId` and `value`.
 Mutations use the usual same-origin JSON headers. Fulfilled secret values

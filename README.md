@@ -45,6 +45,7 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
   },
   "runTimeoutSeconds": 1800,
   "modelCallLimit": 20,
+  "fixPullRequests": true,
   "session": {
     "runtimeMode": "approval-required"
   }
@@ -206,6 +207,13 @@ sends the instruction to that Session and tracks the new Run, whether the Sessio
 was started in T3 or by a Bot. If the Session is busy, T3 queues the work.
 The normal T3 send policy and T3's Operate permission apply.
 
+Saved task operations are authorized against the task's Bot and conversation scope;
+they also check its current generation, and `change_task` checks the current
+revision. A follow-up to a saved destination additionally validates its recorded
+environment, project, gateway, action and Run, then applies the normal T3 send
+policy and the saved gateway's T3 Operate permission. A linked target does not
+need its own Flock connection record: the saved gateway is the authorized route.
+
 Session search scans up to 64 candidates per page with a shared two-second
 deadline for candidate reads. A cursor after a matched Session first rechecks
 that Session's readability with its own two-second deadline. Follow `nextCursor`
@@ -242,6 +250,17 @@ Also subscribe to reviews, comments, checks, workflow jobs, and code scanning
 as needed. Events with a matching watch go to the owning Bot, which needs
 `read` on the repository. A workflow job event without a PR number is matched
 by its commit SHA using the current watch and recorded PR synchronization events.
+
+When a Bot opens a PR you requested, it can ask the Session that prepared it
+to fix a failing check or address actionable review feedback on the same branch.
+The Bot cites comments and logs as evidence and reports whether it sent a fix
+request. The installation's Session-send policy applies. Supervised mode can
+ask for approval in Flock. The Bot makes up to two automatic requests per PR
+until it receives another message from the original requester, then reports the
+problem and asks how to proceed. Other watched PRs receive reports.
+
+Use **Fix failing checks and review feedback** in the Bot's **General** settings
+to turn this off. It is on by default.
 
 A lost PR creation response leaves a durable operation. Asking the Bot to retry
 with the same exact repository and branch pair checks for the original PR

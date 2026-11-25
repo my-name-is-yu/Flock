@@ -2,6 +2,7 @@
 #include "flock/board_inbox.hpp"
 #include "flock/participation.hpp"
 #include "flock/t3_connection.hpp"
+#include "flock/channels.hpp"
 #include "task_history.hpp"
 #include <sqlite3.h>
 #include <algorithm>
@@ -14,7 +15,9 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <string_view>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 
@@ -122,23 +125,43 @@ struct Script : Model {
 };
 
 struct SimulatedT3 : T3 {
+    std::mutex stateMutex;
+    std::function<void(const Command&)> beforeSend;
+    std::function<void(const RunRef&)> beforeObserve;
     std::vector<Command> sent, reconciled;
     std::vector<std::pair<std::string,std::string>> interrupted;
+    std::vector<RunRef> interruptedRuns, observedRuns;
+    std::vector<std::pair<SessionTarget,RunRef>> sessionWakeCalls;
     std::map<std::string,RunRef> deliveries;
     std::map<std::string,Observation> observations;
     std::map<std::pair<std::string,std::string>,SessionMetadata> sessions;
     std::map<std::string,std::vector<T3Project>> projectsByEnvironment;
+    std::map<std::string,T3EnvironmentLinks> linksByGateway;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
+    bool queueNextMessage = false, waitForSessionRuns = false;
+    std::string loseSendForEnvironment;
     std::string login = "original-login";
     InterruptOutcome interruptOutcome = InterruptOutcome::Requested;
 
+    void setBeforeObserve(std::function<void(const RunRef&)> callback) {
+        std::lock_guard lock(stateMutex);
+        beforeObserve = std::move(callback);
+    }
+
     std::vector<T3Project> projects(std::string_view environment) override {
+        std::lock_guard lock(stateMutex);
         const auto found = projectsByEnvironment.find(std::string(environment));
         return found == projectsByEnvironment.end() ? std::vector<T3Project>{{"project","Fixture Project",{}}} : found->second;
+    }
+    T3EnvironmentLinks linkedEnvironments(std::string_view gateway) override {
+        std::lock_guard lock(stateMutex);
+        const auto found = linksByGateway.find(std::string(gateway));
+        return found == linksByGateway.end() ? T3EnvironmentLinks{} : found->second;
     }
 
     std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
         std::string_view environment, std::string_view project, Id, SessionReadDeadline) override {
+        std::lock_guard lock(stateMutex);
         std::vector<std::string> threads;
         for (const auto& [target,metadata] : sessions)
             if (target.first == environment && (project.empty() || project == metadata.projectId))
@@ -146,44 +169,111 @@ struct SimulatedT3 : T3 {
         return {std::move(threads),std::nullopt};
     }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
+        std::lock_guard lock(stateMutex);
         const auto item = sessions.find({target.environmentId,target.threadId});
         return item == sessions.end() ? std::nullopt : std::optional(item->second);
     }
     std::string authGeneration(const std::string&,const Json&) override {
+        std::lock_guard lock(stateMutex);
         return login;
     }
+    std::string sessionMessageWake(const SessionTarget& target, const RunRef& run) override {
+        std::lock_guard lock(stateMutex);
+        sessionWakeCalls.emplace_back(target,run);
+        const auto observation = observations.find(run.runId);
+        if (waitForSessionRuns && observation != observations.end() &&
+            observation->second.kind == Observation::Kind::Running) return {};
+        return "finished";
+    }
     Delivery send(const Command& command) override {
-        sent.push_back(command);
-        check(!command.actionId.empty(),"T3 received work without a request ID");
-        check(command.authGeneration == login,"a dispatched instruction lacks its authentication generation");
-        const auto suffix = std::to_string(sent.size());
-        const RunRef run{command.tool == "delegate" ? "session-" + suffix : command.target.threadId,
-                         "run-" + suffix,"https://example.test/session-" + suffix};
-        check(deliveries.emplace(command.actionId,run).second,"the same work was sent twice");
-        observations.emplace(run.runId,Observation{});
-        if (std::exchange(loseNextSend,false)) return {};
-        return {Delivery::Kind::Accepted,run,{}};
+        std::function<void(const Command&)> gate;
+        Delivery result;
+        {
+            std::lock_guard lock(stateMutex);
+            sent.push_back(command);
+            check(!command.actionId.empty(),"T3 received work without a request ID");
+            check(command.authGeneration == login,"a dispatched instruction lacks its authentication generation");
+            const auto suffix = std::to_string(sent.size());
+            auto run = RunRef{command.tool == "delegate" ? "session-" + suffix : command.target.threadId,
+                              "run-" + suffix,"https://example.test/session-" + suffix};
+            run.gatewayEnvironmentId = command.gatewayEnvironmentId;
+            check(deliveries.emplace(command.actionId,run).second,"the same work was sent twice");
+            auto observation = Observation{};
+            const bool queued = command.tool == "message_session" && std::exchange(queueNextMessage,false);
+            if (queued) observation.status = "queued";
+            observations.emplace(run.runId,std::move(observation));
+            const bool lostReceipt = std::exchange(loseNextSend,false) || command.environmentId == loseSendForEnvironment;
+            if (command.environmentId == loseSendForEnvironment) loseSendForEnvironment.clear();
+            if (lostReceipt) return {};
+            const auto delivery = command.tool != "message_session" ? "" : queued ? "queued" : "started";
+            result = {Delivery::Kind::Accepted,run,{},false,delivery};
+            gate = beforeSend;
+        }
+        if (gate) gate(command);
+        return result;
     }
     Delivery reconcile(const Command& command) override {
+        std::lock_guard lock(stateMutex);
         reconciled.push_back(command);
         if (!deliveryVisible || !deliveries.contains(command.actionId)) return {};
-        return {Delivery::Kind::Accepted,deliveries.at(command.actionId),{}};
+        const auto& run = deliveries.at(command.actionId);
+        const auto delivery = command.tool != "message_session" ? "" :
+            observations.at(run.runId).status == "queued" ? "queued" : "started";
+        return {Delivery::Kind::Accepted,run,{},false,delivery};
     }
     Observation observe(const std::string&,const Json&,const RunRef& run) override {
-        return observations.at(run.runId);
+        std::function<void(const RunRef&)> gate;
+        Observation result;
+        {
+            std::lock_guard lock(stateMutex);
+            observedRuns.push_back(run);
+            result = observations.at(run.runId);
+            gate = beforeObserve;
+        }
+        if (gate) gate(run);
+        return result;
     }
     InterruptOutcome interrupt(const std::string& environment,const Json&,const RunRef& run) override {
+        std::lock_guard lock(stateMutex);
         interrupted.emplace_back(environment,run.runId);
+        interruptedRuns.push_back(run);
         if (std::exchange(loseNextStop,false)) throw std::runtime_error("simulated interrupted acknowledgement");
         return interruptOutcome;
     }
-    void finish(std::string_view run, std::string text, bool settled = true) {
+    void finish(std::string_view run, std::string text, bool settled = true,
+                std::string status = "completed", std::string checkedCommit = {}) {
+        std::lock_guard lock(stateMutex);
         auto& report = observations.at(std::string(run));
         report.kind = settled ? Observation::Kind::Finished : Observation::Kind::Settling;
-        report.status = "completed";
+        report.status = std::move(status);
         report.report = std::move(text);
         report.resultRunId = run;
         report.itemId = "report-" + std::string(run);
+        report.checkedCommit = std::move(checkedCommit);
+    }
+    RunRef delivered(std::string_view action) {
+        std::lock_guard lock(stateMutex);
+        return deliveries.at(std::string(action));
+    }
+    bool observedVia(std::string_view run, std::string_view gateway) {
+        std::lock_guard lock(stateMutex);
+        return std::ranges::any_of(observedRuns,[&](const RunRef& item) {
+            return item.runId == run && item.gatewayEnvironmentId == gateway;
+        });
+    }
+    bool wokenVia(const SessionTarget& target, std::string_view run) {
+        std::lock_guard lock(stateMutex);
+        return std::ranges::any_of(sessionWakeCalls,[&](const auto& call) {
+            return call.first.environmentId == target.environmentId &&
+                   call.first.gatewayEnvironmentId == target.gatewayEnvironmentId &&
+                   call.second.runId == run;
+        });
+    }
+    bool interruptedOnlyVia(std::string_view environment, std::string_view run, std::string_view gateway) {
+        std::lock_guard lock(stateMutex);
+        return interrupted.size() == 1 && interrupted.front().first == environment &&
+               interruptedRuns.size() == 1 && interruptedRuns.front().runId == run &&
+               interruptedRuns.front().gatewayEnvironmentId == gateway;
     }
 };
 
@@ -195,12 +285,36 @@ struct Fixture {
     SimulatedT3 t3;
     std::function<void()> beforeNotes;
     Seconds now = unixTime();
+    bool requireT3Connection = false;
 
-    Fixture() {
+    explicit Fixture(bool legacySessionWaits = false) {
         char path[] = "/tmp/flock-conversation-runtime-XXXXXX";
         const auto* created = mkdtemp(path);
         if (!created) throw std::runtime_error("cannot create a test directory");
         dir = created;
+        if (legacySessionWaits) {
+            restart();
+            runtime.reset();
+            store.reset();
+            sqlite3* database = nullptr;
+            if (sqlite3_open((dir/"state.db").c_str(),&database) != SQLITE_OK)
+                throw std::runtime_error("cannot create the legacy Session wait database");
+            const auto* schema = R"SQL(PRAGMA foreign_keys=OFF;
+DROP TABLE session_message_waits;
+CREATE TABLE session_message_waits(
+  message_id INTEGER NOT NULL REFERENCES messages(id),bot TEXT NOT NULL,
+  environment TEXT NOT NULL,thread TEXT NOT NULL,run TEXT NOT NULL,title TEXT NOT NULL,
+  gateway_environment TEXT NOT NULL DEFAULT '',notified INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(message_id,environment,thread,run)))SQL";
+            char* error = nullptr;
+            if (sqlite3_exec(database,schema,nullptr,nullptr,&error) != SQLITE_OK) {
+                const std::string detail = error ? error : sqlite3_errmsg(database);
+                sqlite3_free(error);
+                sqlite3_close(database);
+                throw std::runtime_error(detail);
+            }
+            sqlite3_close(database);
+        }
         restart();
     }
     ~Fixture() {
@@ -211,10 +325,13 @@ struct Fixture {
     void restart() {
         runtime.reset();
         store = std::make_unique<Store>(dir/"state.db");
+        RuntimeOptions options;
+        options.clock = [this] { return now; };
+        options.requireT3Connection = requireT3Connection;
         runtime = std::make_unique<Runtime>(*store,model,t3,[this](auto) {
             if (beforeNotes) beforeNotes();
             return std::string{};
-        },RuntimeOptions{[this] { return now; }});
+        },std::move(options));
     }
     Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop",
                    std::string project = "project") {
@@ -241,6 +358,14 @@ struct Fixture {
         for (int i = 0; i < 16; ++i) {
             if (reached()) return;
             tick();
+        }
+        if (!reached()) throw std::runtime_error(why);
+    }
+    void advanceConcurrentlyUntil(const std::function<bool()>& reached, const std::string& why) {
+        for (int i = 0; i < 256; ++i) {
+            if (reached()) return;
+            runtime->tickConcurrent();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         if (!reached()) throw std::runtime_error(why);
     }
@@ -1863,6 +1988,1193 @@ void nonDefaultProjectMoveKeepsCanonicalGateway() {
           "the next T3 instruction silently fell back to the target ID as gateway");
 }
 
+void sameEnvironmentMoveKeepsGateway() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    const Json aliases = {{"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},
+                                              {"gatewayEnvironmentId","desktop"}}}};
+    auto initial = f.routing("Start this work");
+    initial.config["conversationEnvironments"] = aliases;
+    const auto request = "Start linked cloud work";
+    f.script(request,{start({{"request",request},{"environment","cloud-target"}})});
+    f.store->receive(localOwner,initial,"same-environment-start",request);
+    f.runtime->runConversations();
+    const auto moving = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(moving,"running");
+    check(f.task(moving).at("environmentId") == "cloud" && f.task(moving).at("gatewayEnvironmentId") == "desktop",
+          "the linked task did not retain its gateway before the same-environment edit");
+
+    const auto text = "Edit the linked cloud work";
+    f.script(text,{change(moving,{{"environment","cloud"}})});
+    auto intake = f.routing(text,"alpha","desktop","project");
+    intake.config["conversationEnvironments"] = aliases;
+    f.store->receive(localOwner,intake,"same-environment-change",text);
+    f.runtime->runConversations();
+    f.t3.finish("run-1","Old linked destination settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the same-environment edit was not relaunched");
+    check(f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().projectId == "cloud-project" &&
+          f.t3.sent.back().gatewayEnvironmentId == "desktop" &&
+          !f.task(moving).contains("pendingDestination"),
+          "the same-environment edit silently changed its saved route or destination");
+}
+
+void productionGatewayOnlyLaunch() {
+    Fixture f;
+    f.requireT3Connection = true;
+    f.restart();
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    auto route = f.routing("Start linked cloud work");
+    route.config["conversationEnvironments"]["cloud-target"] = {
+        {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}};
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    constexpr auto request = "Start linked cloud work";
+    f.script(request,{start({{"environment","cloud-target"}})});
+    f.store->receive(localOwner,route,"gateway-only-launch",request);
+    f.runtime->runConversations();
+    const auto id = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(id,"running");
+    const auto& command = f.t3.sent.back();
+    check(f.t3.sent.size() == 1 && command.environmentId == "cloud" &&
+          command.projectId == "cloud-project" && command.gatewayEnvironmentId == "desktop",
+          "production connection validation rejected the connected gateway or used the unregistered target");
+}
+
+void discoveredLinkedNameMoveKeepsRoute() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.linksByGateway["desktop"].links.push_back({
+        {"cloud","desktop"},"Cloud via desktop",T3EnvironmentLink::Status::reachable});
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    const auto id = f.store->submit(f.routing("Start on desktop"));
+    f.reach(id,"running");
+    constexpr auto text = "Move to the discovered cloud Session";
+    f.script(text,{[id,text](const ModelInput& input) {
+        const auto task = listed(input,id);
+        const auto environments = input.task.at("environments");
+        const auto found = std::ranges::find_if(environments,[](const Json& environment) {
+            return environment.value("linked",false) && environment.value("environmentId","") == "cloud";
+        });
+        check(found != environments.end(),"the discovered linked destination name was not offered");
+        return Decision{"change_task",{{"taskId",id},{"generation",task.at("generation")},
+            {"revisionId",task.at("revisionId")},{"instruction",text},{"environment",found->at("name")}},
+            "Move this task to the discovered route"};
+    }});
+    f.receive("discovered-route-move",text);
+    check(f.task(id).at("pendingDestination") == Json{{"environmentId","cloud"},
+          {"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"},{"pinned",true}},
+          "change_task did not reserve the discovered environment, project, and gateway together");
+    f.t3.finish("run-1","Desktop work settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the discovered route was not launched");
+    const auto& command = f.t3.sent.back();
+    check(command.environmentId == "cloud" && command.projectId == "cloud-project" &&
+          command.gatewayEnvironmentId == "desktop",
+          "the next command did not use the discovered linked destination tuple");
+}
+
+Id twoLinkedDestinationTask(Fixture& f) {
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    auto route = f.routing("Start work on both linked targets");
+    route.config["conversationEnvironments"] = {
+        {"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}}},
+        {"other-target",{{"environmentId","other"},{"projectId","other-project"},{"gatewayEnvironmentId","desktop"}}}};
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    f.t3.projectsByEnvironment["other"] = {{"other-project","Other fixture",{}}};
+    constexpr auto request = "Start work on both linked targets";
+    f.script(request,{start({{"environments",{"cloud-target","other-target"}}})});
+    f.store->receive(localOwner,route,"two-linked-targets",request);
+    f.runtime->runConversations();
+    const auto id = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"both linked destinations were not dispatched");
+    return id;
+}
+
+Json destinationRunFor(const Json& task, std::string_view environment) {
+    const auto& runs = task.at("runResults");
+    const auto found = std::ranges::find_if(runs,[&](const Json& run) {
+        return run.value("environmentId","") == environment;
+    });
+    if (found == runs.end()) throw std::runtime_error("the requested destination was not saved");
+    return *found;
+}
+
+Json inspectTask(Fixture& f, Id id, std::string_view key) {
+    const auto text = "Inspect task " + std::to_string(id);
+    f.script(text,{[id](const ModelInput&) {
+        return Decision{"find_tasks",{{"taskId",id}},"Show current task status"};
+    }});
+    f.receive(key,text);
+    return f.lastTurn().front().at("result").at("tasks").front();
+}
+
+Step sendCloudFollowup(Id id) {
+    return send(id,{{"environmentId","cloud"},{"projectId","cloud-project"},
+                    {"gatewayEnvironmentId","desktop"}});
+}
+
+void savedDestinationFollowupsRemainTaskWork() {
+    Fixture f(true);
+    f.requireT3Connection = true;
+    f.restart();
+    f.t3.waitForSessionRuns = true;
+    const auto id = twoLinkedDestinationTask(f);
+    f.advanceUntil([&] {
+        const auto task = f.task(id);
+        return destinationRunFor(task,"cloud").value("status","") == "running" &&
+               destinationRunFor(task,"other").value("status","") == "running";
+    },"the original linked destination Runs did not become active");
+    const auto original = f.task(id);
+    const auto cloudOriginal = destinationRunFor(original,"cloud").at("runId").get<std::string>();
+    const auto siblingOriginal = destinationRunFor(original,"other").at("runId").get<std::string>();
+
+    constexpr auto firstInstruction = "Add the first cloud instruction";
+    f.script(firstInstruction,{sendCloudFollowup(id)});
+    f.receive("first-cloud-followup",firstInstruction);
+    const auto firstRun = f.t3.deliveries.at(f.t3.sent.back().actionId);
+
+    f.t3.queueNextMessage = true;
+    constexpr auto secondInstruction = "Queue the second cloud instruction";
+    f.script(secondInstruction,{sendCloudFollowup(id)});
+    f.receive("second-cloud-followup",secondInstruction);
+    const auto secondRun = f.t3.deliveries.at(f.t3.sent.back().actionId);
+    f.tick(2);
+
+    f.t3.finish(cloudOriginal,"Original cloud Run complete");
+    f.t3.finish(siblingOriginal,"Original sibling Run complete");
+    f.advanceUntil([&] {
+        const auto task = f.task(id);
+        const auto cloud = destinationRunFor(task,"cloud");
+        return task.at("state") == "running" && cloud.value("status","") == "running" &&
+               cloud.value("runId","") == firstRun.runId;
+    },"the completed destination Run settled the task before its follow-up");
+    const auto active = inspectTask(f,id,"first-followup-status");
+    const auto activeCloud = destinationRunFor(active,"cloud");
+    check(active.at("state") == "running" && activeCloud.at("status") == "running" &&
+          activeCloud.at("runId") == firstRun.runId &&
+          destinationRunFor(active,"other").at("status") == "completed",
+          "the task projection did not show the active destination follow-up");
+    const auto wakeCountBeforeRestart = f.t3.sessionWakeCalls.size();
+    f.restart();
+    f.tick();
+    const auto restarted = inspectTask(f,id,"restarted-followup-status");
+    check(restarted.at("state") == "running" &&
+          destinationRunFor(restarted,"cloud").at("status") == "running" &&
+          destinationRunFor(restarted,"cloud").at("runId") == firstRun.runId &&
+          destinationRunFor(restarted,"other").at("status") == "completed",
+          "the active follow-up was not restored after restart");
+    check(f.t3.sessionWakeCalls.size() > wakeCountBeforeRestart &&
+          std::ranges::any_of(f.t3.sessionWakeCalls,[&](const auto& call) {
+              return call.first.environmentId == "cloud" && call.first.gatewayEnvironmentId == "desktop" &&
+                     call.second.runId == firstRun.runId;
+          }),"the linked follow-up was not woken through its registered gateway");
+    check(std::ranges::any_of(f.t3.observedRuns,[&](const RunRef& run) {
+              return run.runId == firstRun.runId && run.gatewayEnvironmentId == "desktop";
+          }),"the linked follow-up was not observed through its registered gateway");
+
+    f.t3.finish(firstRun.runId,"First cloud follow-up complete");
+    f.advanceUntil([&] {
+        const auto cloud = destinationRunFor(f.task(id),"cloud");
+        return cloud.value("runId","") == secondRun.runId && cloud.value("status","") == "queued";
+    },"the next queued Session instruction was lost after the prior follow-up settled");
+    const auto queued = inspectTask(f,id,"second-followup-status");
+    check(queued.at("state") == "running" && destinationRunFor(queued,"cloud").at("runId") == secondRun.runId &&
+          destinationRunFor(queued,"cloud").at("status") == "queued",
+          "the queued follow-up was not reflected in the destination projection");
+
+    f.t3.finish(secondRun.runId,"Second cloud follow-up complete");
+    f.advanceUntil([&] { return f.task(id).at("state") == "completed"; },
+                   "the task did not settle after all destination follow-ups completed");
+}
+
+void savedDestinationFollowupStopTargetsOnlyItsRun() {
+    Fixture f;
+    f.requireT3Connection = true;
+    f.restart();
+    f.t3.waitForSessionRuns = true;
+    const auto id = twoLinkedDestinationTask(f);
+    f.advanceUntil([&] {
+        const auto task = f.task(id);
+        return destinationRunFor(task,"cloud").value("status","") == "running" &&
+               destinationRunFor(task,"other").value("status","") == "running";
+    },"the original linked destination Runs did not become active");
+    const auto cloudOriginal = destinationRunFor(f.task(id),"cloud").at("runId").get<std::string>();
+    f.t3.finish(cloudOriginal,"Original cloud Run complete");
+    f.advanceUntil([&] {
+        const auto task = f.task(id);
+        return destinationRunFor(task,"cloud").value("status","") == "completed" && task.at("state") == "running";
+    },"the original cloud Run did not settle while its sibling remained active");
+
+    constexpr auto instruction = "Add a cloud operation that can be stopped";
+    f.script(instruction,{sendCloudFollowup(id)});
+    f.receive("stoppable-cloud-followup",instruction);
+    const auto followupRun = f.t3.deliveries.at(f.t3.sent.back().actionId);
+    f.tick(2);
+    f.restart();
+    f.tick();
+    const auto restarted = inspectTask(f,id,"restarted-stoppable-followup");
+    check(destinationRunFor(restarted,"cloud").at("runId") == followupRun.runId &&
+          destinationRunFor(restarted,"cloud").at("status") == "running" &&
+          destinationRunFor(restarted,"other").at("status") == "running",
+          "the stoppable follow-up was not restored after restart");
+    f.store->policy().setMode(localOwner,"supervised");
+
+    constexpr auto stopRequest = "Stop only the cloud follow-up";
+    f.script(stopRequest,{[id](const ModelInput& input) {
+        const auto task = listed(input,id);
+        return Decision{"cancel_task",{{"taskId",id},{"generation",task.at("generation")},
+            {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}},
+            "Stop the selected destination Run"};
+    }});
+    f.receive("stop-cloud-followup",stopRequest);
+    const auto approvals = f.store->inbox(localOwner);
+    check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" &&
+          f.t3.interrupted.empty(),"stopping the follow-up bypassed its existing T3 policy approval");
+    f.store->decideInbox(localOwner,{approvals.front().at("botId"),InboxKind::policy_approval,
+        approvals.front().at("itemId"),approvals.front().at("waitId"),approvals.front().at("taskId"),
+        approvals.front().at("targetRevision"),approvals.front().at("targetGeneration")},"allow_once");
+    f.runtime->runConversations();
+    f.tick();
+    check(f.t3.interrupted.size() == 1 && f.t3.interrupted.front().first == "cloud" &&
+          f.t3.interrupted.front().second == followupRun.runId &&
+          f.t3.interruptedRuns.front().gatewayEnvironmentId == "desktop" &&
+          destinationRunFor(f.task(id),"other").at("status") == "running",
+          "the target-specific stop missed the live follow-up or affected its sibling");
+}
+
+Id oneLinkedDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    auto route = f.routing(std::string(request));
+    route.config["conversationEnvironments"]["cloud-target"] = {
+        {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}};
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    f.script(request,{start({{"environments",{"cloud-target"}}})});
+    f.store->receive(localOwner,route,key,request);
+    f.runtime->runConversations();
+    return f.lastTurn().front().at("result").at("taskId").get<Id>();
+}
+
+Json persistedTaskDiagnostics(Fixture& f, Id taskId, Id messageId = 0) {
+    Json result{{"now",f.now},{"task",f.task(taskId)}};
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open task diagnostics");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_busy_timeout(db.get(),1000);
+    const auto rows = [&](std::string_view sql, Id parameter = 0) {
+        sqlite3_stmt* rawStatement = nullptr;
+        const std::string query(sql);
+        check(sqlite3_prepare_v2(db.get(),query.c_str(),-1,&rawStatement,nullptr) == SQLITE_OK,
+              "could not prepare task diagnostics");
+        const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(rawStatement,sqlite3_finalize);
+        if (sqlite3_bind_parameter_count(statement.get()) > 0)
+            sqlite3_bind_int64(statement.get(),1,parameter ? parameter : taskId);
+        Json values = Json::array();
+        while (sqlite3_step(statement.get()) == SQLITE_ROW) {
+            Json row = Json::array();
+            for (int column = 0; column < sqlite3_column_count(statement.get()); ++column) {
+                if (sqlite3_column_type(statement.get(),column) == SQLITE_INTEGER)
+                    row.push_back(sqlite3_column_int64(statement.get(),column));
+                else if (sqlite3_column_type(statement.get(),column) == SQLITE_TEXT)
+                    row.push_back(reinterpret_cast<const char*>(sqlite3_column_text(statement.get(),column)));
+                else row.push_back(nullptr);
+            }
+            values.push_back(std::move(row));
+        }
+        return values;
+    };
+    result["outbox"] = rows("SELECT id,phase,data FROM outbox WHERE task_id=? ORDER BY id");
+    result["runs"] = rows("SELECT action_id,environment_id,thread_id,run_id FROM runs WHERE task_id=? ORDER BY action_id");
+    result["session_message_waits"] = rows("SELECT action_id,environment,thread,run,gateway_environment,delivery FROM session_message_waits WHERE task_id=? ORDER BY rowid");
+    result["allSessionMessageWaits"] = rows("SELECT message_id,environment,thread,run,gateway_environment,task_id,action_id,delivery FROM session_message_waits ORDER BY rowid");
+    result["sendSteps"] = rows("SELECT message_id,step,effect,result FROM conversation_steps WHERE json_extract(effect,'$.taskId')=? ORDER BY message_id,step");
+    result["turnSteps"] = messageId ? rows("SELECT message_id,step,decision,effect,result FROM conversation_steps WHERE message_id=? ORDER BY step",messageId) : Json::array();
+    result["turnStatus"] = messageId ? rows("SELECT message_id,status,reply_id FROM conversation_turns WHERE message_id=?",messageId) : Json::array();
+    result["turnMessage"] = messageId ? rows("SELECT principal_source,routing,person_id FROM messages WHERE id=?",messageId) : Json::array();
+    result["connectedEnvironments"] = rows("SELECT environment_id FROM t3_connected_environments ORDER BY environment_id");
+    result["sessionParticipations"] = rows("SELECT bot_id,environment_id,thread_id,person_id,state FROM session_participations ORDER BY id");
+    result["reports"] = rows("SELECT data FROM journal WHERE task_id=? AND kind='report' ORDER BY id");
+    result["approvals"] = rows("SELECT requester,operation,status FROM policy_approvals WHERE task=? ORDER BY id");
+    Json observations = Json::array();
+    {
+        std::lock_guard lock(f.t3.stateMutex);
+        for (const auto& [run,observation] : f.t3.observations)
+            observations.push_back({{"run",run},{"kind",static_cast<int>(observation.kind)},
+                {"status",observation.status},{"resultRunId",observation.resultRunId},
+                {"checkedCommit",observation.checkedCommit}});
+        result["observedRuns"] = Json::array();
+        for (const auto& run : f.t3.observedRuns)
+            result["observedRuns"].push_back({{"runId",run.runId},{"threadId",run.threadId},
+                {"gateway",run.gatewayEnvironmentId}});
+        result["interrupts"] = f.t3.interrupted;
+        result["sentCommands"] = Json::array();
+        for (const auto& command : f.t3.sent)
+            result["sentCommands"].push_back({{"tool",command.tool},{"actionId",command.actionId},
+                {"environment",command.environmentId},{"threadId",command.target.threadId}});
+    }
+    result["mockObservations"] = std::move(observations);
+    result["runtimeWorkerState"] = "not exposed by Runtime";
+    return result;
+}
+
+void lateSavedDestinationReceiptKeepsTaskAndSlot() {
+    Fixture f;
+    f.requireT3Connection = true;
+    f.restart();
+    f.t3.waitForSessionRuns = true;
+    constexpr auto parentRequest = "Start linked work before a delayed instruction";
+    const Id taskId = oneLinkedDestinationTask(f,"late-receipt-parent",parentRequest);
+    f.advanceUntil([&] {
+        const auto task = f.task(taskId);
+        return task.contains("runResults") && destinationRunFor(task,"cloud").value("status","") == "running";
+    },"the original linked Run did not start");
+    const auto originalRun = destinationRunFor(f.task(taskId),"cloud").at("runId").get<std::string>();
+
+    constexpr auto queuedRequest = "Queue a sibling behind the linked task";
+    const Id queuedId = oneLinkedDestinationTask(f,"late-receipt-queued",queuedRequest);
+    f.tick();
+
+    std::promise<Command> enteredSend;
+    auto enteredSendFuture = enteredSend.get_future();
+    std::promise<void> releaseSend;
+    auto releaseSendFuture = releaseSend.get_future().share();
+    f.t3.beforeSend = [&](const Command& command) {
+        if (command.tool == "message_session") {
+            enteredSend.set_value(command);
+            releaseSendFuture.wait();
+        }
+    };
+    constexpr auto instruction = "Add linked follow-up while the original finishes";
+    f.script(instruction,{sendCloudFollowup(taskId)});
+    const auto receipt = f.enqueue("late-linked-followup",instruction);
+    f.runtime->tickConcurrent();
+    if (enteredSendFuture.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        releaseSend.set_value();
+        throw std::runtime_error("the linked follow-up did not reach the controlled T3 send");
+    }
+    const auto command = enteredSendFuture.get();
+    const auto followupRun = f.t3.delivered(command.actionId);
+    constexpr auto originalReport = "Original linked Run report with its own commit";
+    f.t3.finish(originalRun,originalReport,true,"completed","old-commit");
+
+    bool originalSettledBeforeReceipt = false;
+    try {
+        for (int i = 0; i < 256 && !originalSettledBeforeReceipt; ++i) {
+            f.runtime->tickConcurrent();
+            const auto current = f.task(taskId);
+            const auto run = destinationRunFor(current,"cloud");
+            const auto report = lastTaskEvent(*f.store,taskId,"report");
+            originalSettledBeforeReceipt = current.at("state") == "running" &&
+                run.value("status","") == "confirmation_pending" && !report.is_null() &&
+                report.at("data").at("run").at("runId") == originalRun;
+            if (!originalSettledBeforeReceipt) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    } catch (...) {
+        releaseSend.set_value();
+        throw;
+    }
+    const auto beforeReceipt = f.task(taskId);
+    const auto queuedBeforeReceipt = f.task(queuedId);
+    const auto originalHistory = lastTaskEvent(*f.store,taskId,"report");
+
+    std::promise<void> pollEntered;
+    auto pollEnteredFuture = pollEntered.get_future();
+    std::promise<void> releasePoll;
+    auto releasePollFuture = releasePoll.get_future().share();
+    std::atomic_bool pausePoll = true;
+    f.t3.setBeforeObserve([&](const RunRef& observed) {
+        if (observed.runId == originalRun && pausePoll.exchange(false)) {
+            pollEntered.set_value();
+            releasePollFuture.wait();
+        }
+    });
+    f.now += 5;
+    f.runtime->tickConcurrent();
+    if (pollEnteredFuture.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        releasePoll.set_value();
+        releaseSend.set_value();
+        throw std::runtime_error("the original Run poll did not reach its controlled observation");
+    }
+    releaseSend.set_value();
+
+    try {
+        f.advanceConcurrentlyUntil([&] {
+            const auto current = f.task(taskId);
+            return !f.response(receipt).is_null() && current.at("state") == "running" &&
+                destinationRunFor(current,"cloud").value("runId","") == followupRun.runId;
+        },"the accepted receipt did not promote the follow-up while the original Run poll was in flight");
+    } catch (...) {
+        releasePoll.set_value();
+        throw;
+    }
+    releasePoll.set_value();
+    f.t3.setBeforeObserve({});
+    f.t3.beforeSend = {};
+    f.advanceConcurrentlyUntil([&] {
+        const auto current = f.task(taskId);
+        const auto run = destinationRunFor(current,"cloud");
+        return !f.response(receipt).is_null() && current.at("state") == "running" &&
+            run.value("status","") == "running" && run.value("runId","") == followupRun.runId &&
+            f.t3.observedVia(followupRun.runId,"desktop") &&
+            f.t3.wokenVia({"cloud",followupRun.threadId,"desktop"},followupRun.runId);
+    },"the accepted follow-up was not restored, observed, and woken through its linked gateway");
+    const auto visible = inspectTask(f,taskId,"late-followup-visible");
+    const auto currentRun = destinationRunFor(visible,"cloud");
+    check(originalSettledBeforeReceipt && beforeReceipt.at("state") == "running" &&
+          destinationRunFor(beforeReceipt,"cloud").at("status") == "confirmation_pending" &&
+          queuedBeforeReceipt.at("state") == "queued" && f.task(queuedId).at("state") == "queued",
+          "a delayed follow-up receipt released the task or its queued project sibling");
+    check(visible.at("state") == "running" && currentRun.at("status") == "running" &&
+          currentRun.at("runId") == followupRun.runId &&
+          !currentRun.contains("commit") && !currentRun.contains("report"),
+          "the current destination did not show the follow-up Run without the original Run's result");
+    check(originalHistory.at("data").at("run").at("runId") == originalRun &&
+          originalHistory.at("data").at("commit") == "old-commit" &&
+          originalHistory.at("data").at("report") == originalReport,
+          "the original Run report and commit were not retained in task history");
+
+    f.t3.queueNextMessage = true;
+    constexpr auto queuedInstruction = "Queue another operation behind the stopped follow-up";
+    f.script(queuedInstruction,{sendCloudFollowup(taskId)});
+    const auto queuedReceipt = f.receive("queue-after-stopped-followup",queuedInstruction);
+    const auto nextRun = f.t3.delivered(f.t3.sent.back().actionId);
+    f.advanceConcurrentlyUntil([&] { return !f.response(queuedReceipt).is_null(); },
+                               "the queued follow-up receipt was not durably acknowledged before stopping its predecessor");
+
+    f.store->policy().setMode(localOwner,"supervised");
+    constexpr auto stopRequest = "Stop only the delayed linked follow-up";
+    f.script(stopRequest,{[taskId](const ModelInput& input) {
+        const auto task = listed(input,taskId);
+        return Decision{"cancel_task",{{"taskId",taskId},{"generation",task.at("generation")},
+            {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}},
+            "Stop the accepted linked follow-up"};
+    }});
+    f.receive("stop-late-linked-followup",stopRequest);
+    const auto approvals = f.store->inbox(localOwner);
+    check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" &&
+          f.t3.interrupted.empty(),"the late follow-up stop bypassed the saved T3 policy");
+    f.store->decideInbox(localOwner,{approvals.front().at("botId"),InboxKind::policy_approval,
+        approvals.front().at("itemId"),approvals.front().at("waitId"),approvals.front().at("taskId"),
+        approvals.front().at("targetRevision"),approvals.front().at("targetGeneration")},"allow_once");
+    f.runtime->runConversations();
+    f.advanceConcurrentlyUntil([&] {
+        return f.t3.interruptedOnlyVia("cloud",followupRun.runId,"desktop");
+    },"the approved stop did not interrupt the live follow-up through its linked gateway");
+    const auto afterStopRequest = f.task(taskId);
+    const auto queuedAfterStopRequest = f.task(queuedId);
+    check(f.t3.interruptedOnlyVia("cloud",followupRun.runId,"desktop") &&
+          afterStopRequest.at("state") == "running" && queuedAfterStopRequest.at("state") == "queued",
+          "the target-specific stop missed the live follow-up or released its queued sibling early");
+
+    f.t3.finish(followupRun.runId,"The linked follow-up was stopped",true,"cancelled");
+    f.now += 5;
+    try {
+        f.advanceConcurrentlyUntil([&] {
+            const auto report = lastTaskEvent(*f.store,taskId,"report");
+            return !report.is_null() && report.at("data").at("run").at("runId") == followupRun.runId &&
+                   report.at("data").value("status","") == "cancelled";
+        },"the stopped follow-up did not settle in its destination journal");
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string(error.what()) + " diagnostics=" +
+                                 persistedTaskDiagnostics(f,taskId).dump());
+    }
+    const auto afterStopSettlement = f.task(taskId);
+    const auto stoppedFollowupReport = lastTaskEvent(*f.store,taskId,"report");
+    check(afterStopSettlement.at("state") == "running" &&
+          destinationRunFor(afterStopSettlement,"cloud").value("runId","") == nextRun.runId &&
+          destinationRunFor(afterStopSettlement,"cloud").value("status","") == "queued" &&
+          stoppedFollowupReport.at("data").at("run").at("runId") == followupRun.runId &&
+          stoppedFollowupReport.at("data").value("status","") == "cancelled" &&
+          f.task(queuedId).at("state") == "queued",
+          "the stopped Run was not retained in history while its queued follow-up became current");
+    f.advanceConcurrentlyUntil([&] { return f.t3.observedVia(nextRun.runId,"desktop"); },
+                               "the promoted follow-up was not observed after the prior stop settled");
+    check(f.t3.interruptedOnlyVia("cloud",followupRun.runId,"desktop") &&
+          destinationRunFor(f.task(taskId),"cloud").at("runId") == nextRun.runId &&
+          f.task(queuedId).at("state") == "queued",
+          "the prior Run's stop intent carried over to the next follow-up or released its sibling");
+    f.t3.finish(nextRun.runId,"The queued follow-up completed");
+    f.advanceConcurrentlyUntil([&] { return f.task(taskId).at("state") == "completed"; },
+                               "the queued follow-up did not settle the parent task");
+    f.advanceConcurrentlyUntil([&] { return f.task(queuedId).at("state") == "running"; },
+                               "the queued sibling did not acquire the project slot after the stopped follow-up settled");
+    const auto settledParent = f.task(taskId);
+    const auto queuedSibling = f.task(queuedId);
+    if (queuedSibling.at("state") != "running")
+        throw std::runtime_error("the queued sibling did not acquire the project slot after the stopped follow-up settled: parent=" +
+            settledParent.dump() + " sibling=" + queuedSibling.dump());
+}
+
+Id otherAndCloudDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    auto route = f.routing(std::string(request));
+    route.config["conversationEnvironments"] = {
+        {"cloud-target",{{"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}}},
+        {"other-target",{{"environmentId","other"},{"projectId","other-project"},{"gatewayEnvironmentId","desktop"}}}};
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    f.t3.projectsByEnvironment["other"] = {{"other-project","Other fixture",{}}};
+    f.script(request,{start({{"environments",{"other-target","cloud-target"}}})});
+    f.store->receive(localOwner,route,key,request);
+    f.runtime->runConversations();
+    return f.lastTurn().front().at("result").at("taskId").get<Id>();
+}
+
+void gatewayOnlyCancelDoesNotCancelTask() {
+    Fixture f;
+    const auto id = twoLinkedDestinationTask(f);
+    const auto before = f.task(id).at("runResults");
+    const auto text = "Stop only the gateway destination";
+    f.script(text,{[id](const ModelInput& input) {
+        return Decision{"cancel_task",{{"taskId",id},{"generation",listed(input,id).at("generation")},
+                                        {"gatewayEnvironmentId","desktop"}},"Select one destination"};
+    }});
+    f.receive("gateway-only-cancel",text);
+    check(f.task(id).at("state") == "running" && f.t3.interrupted.empty() &&
+          f.task(id).at("runResults") == before &&
+          f.lastTurn().front().at("result").at("ok") == false,
+          "a gateway-only cancel selector changed the whole task or a sibling destination");
+}
+
+void reviseReportReference(Fixture& f, Id message, Id revision) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the task database");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    const auto sql = "UPDATE journal SET data=json_set(data,'$.revisionId'," + std::to_string(revision) +
+                     ") WHERE id=" + std::to_string(message);
+    check(sqlite3_exec(db.get(),sql.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
+          "could not revise the fixture report provenance");
+}
+
+Step sendDestinationWithSource(Id taskId, Id sourceId, std::string environment,
+                               std::string project, std::string instruction) {
+    return [=](const ModelInput& input) {
+        const auto task = listed(input,taskId);
+        return Decision{"send_to_task",{{"taskId",taskId},{"generation",task.at("generation")},
+            {"instruction",instruction},{"sourceResultMessageId",sourceId},
+            {"environmentId",environment},{"projectId",project},{"gatewayEnvironmentId","desktop"}},
+            "Continue from the current destination report"};
+    };
+}
+
+void destinationFollowupValidatesAndRedactsSourceReport() {
+    Fixture f;
+    const auto task = twoLinkedDestinationTask(f);
+    constexpr auto secret = "synthetic-report-secret";
+    const auto secretRef = SecretRef{"report-secret"};
+    auto policy = f.store->policy();
+    policy.submitSecret(localOwner,"alpha",policy.requestSecret("alpha",secretRef),secret);
+    f.t3.finish("run-1",std::string("Measured latency with ") + secret + " and found a stable result.");
+    f.advanceUntil([&] { return !lastTaskEvent(*f.store,task,"report").is_null(); },
+                   "the first destination report was not recorded");
+    const auto reportEvent = lastTaskEvent(*f.store,task,"report");
+    const Id reportId = reportEvent.at("id");
+    const auto revision = reportEvent.at("data").at("revisionId").get<Id>();
+
+    const auto otherTask = f.store->submit(f.routing("Create an unrelated source result"));
+    f.reach(otherTask,"running");
+    const auto otherRun = f.task(otherTask).at("activeRun").at("runId").get<std::string>();
+    f.t3.finish(otherRun,"Unrelated report");
+    f.reach(otherTask,"completed");
+    const Id unrelatedId = lastTaskEvent(*f.store,otherTask,"completed").at("id");
+
+    const auto sentBefore = f.t3.sent.size();
+    constexpr auto wrongTaskText = "Reject another task's report";
+    f.script(wrongTaskText,{sendDestinationWithSource(task,unrelatedId,"other","other-project","Use the report")});
+    f.receive("wrong-source-task",wrongTaskText);
+    check(f.lastTurn().front().at("result").at("ok") == false && f.t3.sent.size() == sentBefore,
+          "a source report from another task reached a destination Session");
+
+    reviseReportReference(f,reportId,revision + 100);
+    constexpr auto wrongRevisionText = "Reject a stale report revision";
+    f.script(wrongRevisionText,{sendDestinationWithSource(task,reportId,"other","other-project","Use the report")});
+    f.receive("wrong-source-revision",wrongRevisionText);
+    check(f.lastTurn().front().at("result").at("ok") == false && f.t3.sent.size() == sentBefore,
+          "a report from another revision reached a destination Session");
+    reviseReportReference(f,reportId,revision);
+
+    f.store->policy().setMode(localOwner,"supervised");
+    constexpr auto followupText = "Continue using the valid report";
+    f.script(followupText,{sendDestinationWithSource(task,reportId,"other","other-project",followupText)});
+    f.receive("valid-source-report",followupText);
+    const auto approvals = f.store->inbox(localOwner);
+    check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" &&
+          approvals.front().at("prompt").get<std::string>().find("stable result") != std::string::npos &&
+          approvals.front().at("prompt").get<std::string>().find(secret) == std::string::npos &&
+          approvals.front().at("prompt").get<std::string>().find("[redacted]") != std::string::npos &&
+          f.t3.sent.size() == sentBefore,
+          "the approved preview omitted valid source context or exposed its synthetic secret");
+    f.store->decideInbox(localOwner,{approvals.front().at("botId"),InboxKind::policy_approval,
+        approvals.front().at("itemId"),approvals.front().at("waitId"),approvals.front().at("taskId"),
+        approvals.front().at("targetRevision"),approvals.front().at("targetGeneration")},"allow_once");
+    f.runtime->runConversations();
+    const auto& sent = f.t3.sent.back();
+    check(f.t3.sent.size() == sentBefore + 1 && sent.tool == "message_session" &&
+          sent.instruction.find("stable result") != std::string::npos &&
+          sent.instruction.find("[redacted]") != std::string::npos &&
+          sent.instruction.find(secret) == std::string::npos,
+          "the approved destination follow-up lost report context or sent its synthetic secret");
+}
+
+void stopDestinationByName(Fixture& f, Id id, std::string_view key, std::string_view text) {
+    f.script(text,{[id](const ModelInput& input) {
+        const auto task = listed(input,id);
+        const auto found = std::ranges::find_if(task.at("runResults"),[](const Json& run) {
+            return run.value("environmentId","") == "cloud";
+        });
+        check(found != task.at("runResults").end(),"the uncertain cloud destination was not offered");
+        return Decision{"cancel_task",{{"taskId",id},{"generation",task.at("generation")},
+            {"destination",found->at("name")}},"Stop the selected destination"};
+    }});
+    f.receive(key,text);
+}
+
+Json destinationResult(const Json& task, std::string_view environment) {
+    const auto& runs = task.at("runResults");
+    const auto found = std::ranges::find_if(runs,[&](const Json& run) {
+        return run.value("environmentId","") == environment;
+    });
+    if (found == runs.end()) throw std::runtime_error("the requested destination was not saved");
+    return *found;
+}
+
+void pinnedDestinationFollowupKeepsVerificationContract() {
+    Fixture f;
+    f.requireT3Connection = true;
+    f.restart();
+    f.t3.waitForSessionRuns = true;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    constexpr auto request = "Start pinned linked work";
+    constexpr auto commit = "0123456789abcdef0123456789abcdef01234567";
+    auto route = f.routing(request);
+    route.config["conversationEnvironments"]["cloud-target"] = {
+        {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}};
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
+    f.script(request,{start({{"environments",{"cloud-target"}},{"commit",commit}})});
+    f.store->receive(localOwner,route,"pinned-followup-parent",request);
+    f.runtime->runConversations();
+    const auto taskId = f.lastTurn().front().at("result").at("taskId").get<Id>();
+    f.advanceUntil([&] {
+        const auto task = f.task(taskId);
+        return task.contains("runResults") && destinationRunFor(task,"cloud").value("status","") == "running";
+    },
+                   "the pinned destination Run did not start");
+    const auto originalRun = destinationRunFor(f.task(taskId),"cloud").at("runId").get<std::string>();
+    check(f.t3.sent.back().instruction.find("git -c flock.check=before rev-parse --verify HEAD") != std::string::npos &&
+          f.t3.sent.back().instruction.find("git -c flock.check=after rev-parse --verify HEAD") != std::string::npos,
+          "the initial pinned Run did not receive its verification contract");
+
+    constexpr auto instruction = "Apply the requested pinned follow-up";
+    f.script(instruction,{sendCloudFollowup(taskId)});
+    f.receive("pinned-followup",instruction);
+    const auto followup = f.t3.delivered(f.t3.sent.back().actionId);
+    const auto& command = f.t3.sent.back();
+    check(command.instruction.find(commit) != std::string::npos &&
+          command.instruction.find("git -c flock.check=before rev-parse --verify HEAD") != std::string::npos &&
+          command.instruction.find("git -c flock.check=after rev-parse --verify HEAD") != std::string::npos,
+          "the pinned follow-up omitted its report verification contract");
+
+    f.t3.finish(originalRun,"Pinned original report",true,"completed",commit);
+    f.advanceUntil([&] {
+        const auto run = destinationRunFor(f.task(taskId),"cloud");
+        return run.value("runId","") == followup.runId && run.value("status","") == "running";
+    },"the pinned follow-up was not promoted after the original Run settled");
+    f.t3.finish(followup.runId,"Pinned follow-up report",true,"completed",commit);
+    f.advanceUntil([&] { return f.task(taskId).at("state") == "completed"; },
+                   "the verified pinned follow-up did not settle successfully");
+    check(f.event(taskId,"completed").value("requestedCommit","") == commit,
+          "the completed follow-up did not retain the requested commit evidence");
+}
+
+void savedSessionSendAfterAccessLoss(std::string_view sendState, std::string_view closeRoute = "session_access") {
+    Fixture f;
+    f.requireT3Connection = true;
+    f.restart();
+    const auto taskId = oneLinkedDestinationTask(f,"access-loss-parent","Start before Session access closes");
+    f.advanceUntil([&] {
+        const auto task = f.task(taskId);
+        return task.contains("runResults") && destinationRunFor(task,"cloud").value("status","") == "running";
+    },
+                   "the destination Run did not start before the pending send");
+    const auto originalRun = destinationRunFor(f.task(taskId),"cloud").at("runId").get<std::string>();
+    const auto queuedId = oneLinkedDestinationTask(f,"access-loss-sibling","Queue behind the unresolved send");
+    const auto actionId = destinationRunFor(f.task(taskId),"cloud").at("actionId").get<std::string>();
+    const Person accessMember{"access-loss-member",false};
+    Json receipt;
+    if (closeRoute == "session_access") {
+        receipt = f.enqueue("prepared-session-send","Send a follow-up before access closes");
+    } else if (closeRoute == "access") {
+        f.store->policy().setMember(localOwner,"alpha",accessMember.id,true);
+        Store writer(f.dir/"state.db");
+        receipt = writer.receive(accessMember,f.routing(),"prepared-session-send","Send a follow-up before access closes");
+    } else if (closeRoute == "channel_access") {
+        struct Transport final : ChannelTransport {
+            ChannelDelivery send(std::string_view, const ChannelOrigin&, std::string_view, const Json&) override {
+                return {ChannelDelivery::State::accepted,"fixture-reply"};
+            }
+            ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
+        };
+        f.store->policy().setMember(localOwner,"alpha",accessMember.id,true);
+        f.store->connectChannel({ChannelKind::slack,channelCapabilities(ChannelKind::slack),
+            [](std::string_view credential,std::string_view workspace) {
+                return credential == "fixture-auth" && workspace == "workspace";
+            },[accessMember](std::string_view workspace,std::string_view sender) -> std::optional<ChannelSender> {
+                if (workspace == "workspace" && sender == "channel-user")
+                    return ChannelSender{"alpha",accessMember.id};
+                return std::nullopt;
+            },std::make_shared<Transport>()});
+        receipt = f.store->receiveChannel(ChannelKind::slack,"fixture-auth",
+            {{"workspaceId","workspace"},{"threadRef","access-loss-thread"},
+             {"externalMessageId","prepared-session-send"},{"senderId","channel-user"},
+             {"text","Send a follow-up before access closes"}},
+            [&](std::string_view bot,std::string_view text) { return f.routing(std::string(text),std::string(bot)); });
+    } else {
+        throw std::runtime_error("unknown access-loss route");
+    }
+    const auto messageId = receipt.at("messageId").get<Id>();
+    sqlite3* raw = nullptr;
+    check(sqlite3_open((f.dir/"state.db").c_str(),&raw) == SQLITE_OK,"could not open the pending-send fixture database");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_stmt* statement = nullptr;
+    check(sqlite3_prepare_v2(db.get(),"INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(?,0,'[]',?)",
+                             -1,&statement,nullptr) == SQLITE_OK,"could not prepare the persisted Session effect");
+    Json effect = {{"kind","message_session"},{"taskId",taskId},{"actionId",actionId}};
+    if (!sendState.empty()) effect["sendState"] = sendState;
+    const auto encodedEffect = effect.dump();
+    sqlite3_bind_int64(statement,1,messageId);
+    sqlite3_bind_text(statement,2,encodedEffect.c_str(),-1,SQLITE_TRANSIENT);
+    check(sqlite3_step(statement) == SQLITE_DONE,"could not persist the prepared Session effect");
+    sqlite3_finalize(statement);
+    if (closeRoute == "session_access") {
+        check(sqlite3_prepare_v2(db.get(),"UPDATE messages SET principal_source=4,routing=json_set(routing,'$.sessionOrigin.environmentId','desktop',"
+                                 "'$.sessionOrigin.threadId','closed-thread') WHERE id=?",-1,&statement,nullptr) == SQLITE_OK,
+              "could not prepare the Session access fixture");
+        sqlite3_bind_int64(statement,1,messageId);
+        check(sqlite3_step(statement) == SQLITE_DONE,"could not mark the Session-origin turn");
+        sqlite3_finalize(statement);
+        check(sqlite3_prepare_v2(db.get(),"INSERT OR IGNORE INTO session_participations(bot_id,environment_id,thread_id,person_id,state) "
+                                 "VALUES('alpha','desktop','closed-thread',?,'active')",-1,&statement,nullptr) == SQLITE_OK,
+              "could not prepare the active Session participation fixture");
+        sqlite3_bind_text(statement,1,localOwner.id.c_str(),-1,SQLITE_TRANSIENT);
+        check(sqlite3_step(statement) == SQLITE_DONE,"could not persist the active Session participation fixture");
+        sqlite3_finalize(statement);
+    } else if (closeRoute == "access") {
+        f.store->policy().setMember(localOwner,"alpha",accessMember.id,false);
+    }
+
+    f.restart();
+    if (closeRoute == "session_access") T3Connections(*f.store).disconnect("desktop");
+    f.runtime->runConversations();
+    f.advanceConcurrentlyUntil([&] { return !f.response(receipt).is_null(); },
+                               "the restarted turn did not close after access loss");
+    check(f.response(receipt).value("route","") == closeRoute &&
+          f.task(taskId).at("state") == "running",
+          "lost access did not close the prepared-send turn while the original Run kept the task active");
+    f.t3.finish(originalRun,"The task report settled after the unsent follow-up was closed");
+    const auto retryAt = destinationRunFor(f.task(taskId),"cloud").value("retryAt",f.now);
+    if (retryAt > f.now) f.now = retryAt;
+    if (sendState == "prepared") {
+        try {
+            f.advanceUntil([&] { return f.task(taskId).at("state") == "completed"; },
+                           "lost Session access left a definitely-unsent effect holding the project slot");
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string(error.what()) + " diagnostics=" +
+                " response=" + f.response(receipt).dump() + " " +
+                persistedTaskDiagnostics(f,taskId,messageId).dump());
+        }
+        f.advanceUntil([&] { return f.task(queuedId).at("state") == "running"; },
+                       "the queued task did not acquire the slot after the unsent effect was settled");
+        check(f.task(queuedId).at("state") == "running",
+              "the prepared Session send was dispatched after access closed or kept its sibling blocked");
+    } else {
+        const std::string reason = "A Session message may have been accepted by T3, but Flock has no receipt to identify its Run.";
+        f.advanceUntil([&] {
+            const auto task = f.task(taskId);
+            const auto run = destinationRunFor(task,"cloud");
+            return run.value("status","") == "confirmation_pending" &&
+                   run.value("detail","").find(reason) != std::string::npos;
+        },"the unresolved Session send was not visible as confirmation pending");
+        sqlite3_stmt* result = nullptr;
+        check(sqlite3_prepare_v2(db.get(),"SELECT result FROM conversation_steps WHERE message_id=? AND step=0",
+                                 -1,&result,nullptr) == SQLITE_OK,"could not query the unresolved Session result");
+        sqlite3_bind_int64(result,1,messageId);
+        check(sqlite3_step(result) == SQLITE_ROW && sqlite3_column_type(result,0) == SQLITE_NULL,
+              "an uncertain Session send was incorrectly settled");
+        sqlite3_finalize(result);
+        check(f.task(taskId).at("state") == "running" && f.task(queuedId).at("state") == "queued",
+              "an uncertain Session send released its slot after access closed");
+    }
+    check(std::ranges::none_of(f.t3.sent,[](const Command& sent) { return sent.tool == "message_session"; }),
+          "a saved Session send was dispatched after access closed");
+}
+
+void preparedSavedSessionSendSettlesAfterAccessLoss() {
+    savedSessionSendAfterAccessLoss("prepared");
+}
+
+void uncertainSavedSessionSendRemainsHeldAfterAccessLoss() {
+    savedSessionSendAfterAccessLoss("sending");
+    savedSessionSendAfterAccessLoss("");
+}
+
+void terminalAccessRoutesSettleOnlyPreparedSessionSends() {
+    for (const auto closeRoute : {std::string_view{"access"},std::string_view{"channel_access"}}) {
+        savedSessionSendAfterAccessLoss("prepared",closeRoute);
+        savedSessionSendAfterAccessLoss("sending",closeRoute);
+        savedSessionSendAfterAccessLoss("",closeRoute);
+    }
+}
+
+void savedFollowupHoldsSlotUntilItsReceiptAndRunSettle() {
+    for (const bool losesReceipt : {false,true}) {
+        Fixture f;
+        f.t3.waitForSessionRuns = true;
+        const auto taskId = oneLinkedDestinationTask(f,"receipt-parent","Start linked work");
+        f.advanceUntil([&] {
+            const auto task = f.task(taskId);
+            return task.contains("runResults") && destinationRunFor(task,"cloud").value("status","") == "running";
+        },"the destination Run did not start");
+        const auto originalRun = destinationRunFor(f.task(taskId),"cloud").at("runId").get<std::string>();
+        const auto queuedId = oneLinkedDestinationTask(f,"receipt-sibling","Queue behind linked work");
+
+        const Person member{"receipt-member",false};
+        f.store->policy().setMember(localOwner,"alpha",member.id,true);
+        sqlite3* writer = nullptr;
+        check(sqlite3_open((f.dir/"state.db").c_str(),&writer) == SQLITE_OK,"could not open the receipt fixture database");
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writerGuard(writer,sqlite3_close);
+        bool locked = false;
+        f.t3.loseNextSend = losesReceipt;
+        if (!losesReceipt) f.t3.beforeSend = [&](const Command& command) {
+            if (command.tool == "message_session")
+                locked = sqlite3_exec(writer,"BEGIN IMMEDIATE; DELETE FROM bot_members "
+                                      "WHERE bot='alpha' AND person='receipt-member'",nullptr,nullptr,nullptr) == SQLITE_OK;
+        };
+        constexpr auto instruction = "Send a follow-up in the saved destination";
+        f.script(instruction,{sendCloudFollowup(taskId)});
+        const auto receipt = f.store->receive(member,f.routing(),"receipt-followup",instruction);
+        bool contended = false;
+        try { f.runtime->runConversations(); }
+        catch (const std::exception& error) {
+            if (!locked || std::string_view(error.what()).find("database is locked") == std::string_view::npos) throw;
+            contended = true;
+        }
+        if (!losesReceipt) {
+            check(locked && contended,"the accepted send did not lose its first receipt write to contention");
+            check(sqlite3_exec(writer,"COMMIT",nullptr,nullptr,nullptr) == SQLITE_OK,"could not commit access revocation");
+            f.t3.beforeSend = {};
+            f.runtime->runConversations();
+            check(f.response(receipt).value("route","") == "access","the pending turn did not close on revoked access");
+        }
+        check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == "message_session",
+              "the saved follow-up did not reach T3 exactly once");
+        const auto followup = f.t3.delivered(f.t3.sent.back().actionId);
+        f.t3.finish(originalRun,"The original destination Run finished");
+        if (losesReceipt) {
+            f.advanceUntil([&] {
+                const auto run = destinationRunFor(f.task(taskId),"cloud");
+                return run.value("status","") == "confirmation_pending";
+            },"an ambiguous T3 receipt did not leave the destination pending");
+            check(f.task(taskId).at("state") == "running" && f.task(queuedId).at("state") == "queued",
+                  "an ambiguous receipt let the task release its project slot");
+        } else {
+            f.advanceUntil([&] {
+                return destinationRunFor(f.task(taskId),"cloud").value("runId","") == followup.runId;
+            },"the access-closed turn did not record its accepted follow-up");
+            check(f.task(queuedId).at("state") == "queued","the queued task started before the known follow-up settled");
+            f.t3.finish(followup.runId,"The accepted follow-up finished");
+            f.reach(taskId,"completed");
+            f.reach(queuedId,"running");
+        }
+    }
+}
+
+void pauseRecoversTheRetainedSavedFollowup() {
+    Fixture f;
+    const auto taskId = oneLinkedDestinationTask(f,"pause-recovery-parent","Start linked work before Pause");
+    f.advanceUntil([&] {
+        return destinationRunFor(f.task(taskId),"cloud").value("status","") == "running";
+    },"the original destination Run did not start");
+    const auto original = destinationRunFor(f.task(taskId),"cloud").at("runId").get<std::string>();
+    f.t3.loseNextSend = true;
+    f.t3.queueNextMessage = true;
+    f.t3.deliveryVisible = false;
+    constexpr auto instruction = "Queue another Run in the saved destination";
+    f.script(instruction,{sendCloudFollowup(taskId)});
+    const auto receipt = f.receive("pause-recovery-send",instruction);
+    const auto messageId = receipt.at("messageId").get<Id>();
+    check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == "message_session","the follow-up did not reach T3");
+    const auto request = f.t3.sent.back().actionId;
+    const auto followup = f.t3.delivered(request);
+    f.t3.finish(original,"Original report stopped holding the destination");
+    f.advanceUntil([&] {
+        return destinationRunFor(f.task(taskId),"cloud").value("status","") == "confirmation_pending";
+    },"the lost receipt did not hold the destination");
+    f.store->setBotPaused(localOwner,"alpha",true);
+    f.restart();
+    f.runtime->runConversations();
+    const auto pending = persistedTaskDiagnostics(f,taskId,messageId);
+    const auto effect = Json::parse(pending.at("sendSteps").at(0).at(2).get<std::string>());
+    check(f.task(taskId).at("state") == "cancelling" && effect.at("requestId") == request &&
+          f.t3.reconciled.size() == 1 && f.t3.reconciled.front().actionId == request,
+          "Pause released an unresolved send, or recovered a different request");
+    f.t3.deliveryVisible = true;
+    f.now += 5;
+    f.runtime->runConversations();
+    const auto recovered = persistedTaskDiagnostics(f,taskId,messageId);
+    const auto run = destinationRunFor(f.task(taskId),"cloud");
+    check(run.at("runId") == followup.runId && run.at("gatewayEnvironmentId") == "desktop" &&
+          run.at("status") == "queued" && recovered.at("sendSteps").empty() &&
+          f.t3.interruptedOnlyVia("cloud",followup.runId,"desktop") && f.t3.sent.size() == 2,
+          "Pause did not clear the matching effect and stop the exact recovered Run: " + recovered.dump());
+    f.store->setBotPaused(localOwner,"alpha",false,[&] { return f.now; });
+    const auto sibling = oneLinkedDestinationTask(f,"pause-recovery-sibling","Queue behind the recovered Run");
+    f.tick();
+    check(f.task(sibling).at("state") == "queued","the recovered Run released the project before settlement");
+    f.t3.finish(followup.runId,"The recovered Run was stopped",true,"cancelled");
+    f.reach(taskId,"cancelled");
+    f.reach(sibling,"running");
+}
+
+void recoveredStopApprovalBelongsToTheStopRequester() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.loseSendForEnvironment = "cloud";
+    const Person taskRequester{"task-requester"}, stopRequester{"stop-requester"};
+    f.store->policy().setMember(localOwner,"alpha",taskRequester.id,true);
+    f.store->policy().setMember(localOwner,"alpha",stopRequester.id,true);
+    f.t3.deliveryVisible = false;
+    constexpr auto startText = "Start work whose Run receipt is delayed";
+    auto route = f.routing(startText);
+    route.config["conversationEnvironments"]["cloud-target"] = {
+        {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}};
+    f.script(startText,{start({{"environments",{"cloud-target"}}})});
+    f.store->receive(taskRequester,route,"requester-bound-stop-task",startText);
+    f.runtime->runConversations();
+    const auto taskId = f.lastTurn().front().at("result").at("taskId").get<Id>();
+    f.advanceUntil([&] {
+        const auto task = f.task(taskId);
+        return !f.t3.sent.empty() && task.contains("runResults") &&
+               destinationRunFor(task,"cloud").value("threadId","").empty() &&
+               destinationRunFor(task,"cloud").value("runId","").empty();
+    },"the original destination did not enter its unknown-receipt state");
+    const auto action = destinationRunFor(f.task(taskId),"cloud").at("actionId").get<std::string>();
+    const auto actualRun = f.t3.deliveries.at(action);
+    f.store->policy().setMode(localOwner,"supervised");
+
+    constexpr auto stopText = "Stop the Run whose receipt is delayed";
+    f.script(stopText,{[taskId](const ModelInput& input) {
+        const auto saved = listed(input,taskId);
+        return Decision{"cancel_task",{{"taskId",taskId},{"generation",saved.at("generation")},
+            {"environmentId","cloud"},{"projectId","cloud-project"},{"gatewayEnvironmentId","desktop"}},
+            "Stop the recovered destination Run"};
+    }});
+    f.store->receive(stopRequester,route,"requester-bound-stop",stopText);
+    f.runtime->runConversations();
+    f.t3.deliveryVisible = true;
+    auto stopCards = f.store->inbox(stopRequester,"alpha");
+    for (int attempt = 0; attempt < 4 && stopCards.empty(); ++attempt) {
+        const auto retryAt = destinationRunFor(f.task(taskId),"cloud").value("retryAt",f.now);
+        if (retryAt > f.now) f.now = retryAt;
+        f.tick();
+        stopCards = f.store->inbox(stopRequester,"alpha");
+    }
+    const auto taskOwnerCards = f.store->inbox(taskRequester,"alpha");
+    if (!(stopCards.size() == 1 && stopCards.front().at("canDecide") == true &&
+          stopCards.front().at("canSaveRule") == false &&
+          (taskOwnerCards.empty() || taskOwnerCards.front().at("canDecide") == false) &&
+          f.t3.interrupted.empty()))
+        throw std::runtime_error("recovered-stop approval was not assigned to the actor who requested the stop: stopCards=" +
+            stopCards.dump() + " taskOwnerCards=" + taskOwnerCards.dump() + " task=" +
+            persistedTaskDiagnostics(f,taskId).dump());
+    try {
+        f.store->decideInbox(stopRequester,{stopCards.front().at("botId"),InboxKind::policy_approval,
+            stopCards.front().at("itemId"),stopCards.front().at("waitId"),stopCards.front().at("taskId"),
+            stopCards.front().at("targetRevision"),stopCards.front().at("targetGeneration")},"allow_once");
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string(error.what()) + " actor=" + stopRequester.id +
+            " botDecision=" + std::to_string(f.store->policy().allows(stopRequester,Action::bot_decide,"alpha")) +
+            " card=" + stopCards.front().dump() + " taskRequester=" + taskRequester.id +
+            " diagnostics=" + persistedTaskDiagnostics(f,taskId).dump());
+    }
+    f.t3.deliveryVisible = true;
+    f.runtime->runConversations();
+    f.now += 5;
+    f.advanceUntil([&] { return f.t3.interruptedOnlyVia("cloud",actualRun.runId,"desktop"); },
+                   "the stop requester’s approved recovered stop did not interrupt the exact Run");
+}
+
+void recoveredDestinationStopHonorsPolicy() {
+    {
+        Fixture f;
+        f.t3.loseSendForEnvironment = "cloud";
+        const auto id = twoLinkedDestinationTask(f);
+        const auto unknown = destinationResult(f.task(id),"cloud");
+        check(unknown.value("threadId","").empty() && unknown.value("runId","").empty(),
+              ("the fixture did not preserve a started destination with unknown receipt IDs: " + unknown.dump()).c_str());
+        const auto actualRun = f.t3.deliveries.at(unknown.at("actionId").get<std::string>());
+        f.store->policy().changeRule(localOwner,RuleKind::never,Action::t3_send,
+            Resource::sessionRead("cloud",actualRun.threadId).target,true);
+        stopDestinationByName(f,id,"deny-recovered-stop","Stop the uncertain cloud destination");
+        for (int i = 0; i < 6; ++i) {
+            f.now += 5;
+            f.tick();
+        }
+        const auto result = destinationResult(f.task(id),"cloud");
+        check(!f.t3.reconciled.empty() && f.t3.interrupted.empty() && result.value("status","") == "running" &&
+              !f.event(id,"policy_denied").is_null(),
+              ("reconciliation interrupted a Run whose recovered stop was denied by policy: " +
+               result.dump() + " reconciled=" + std::to_string(f.t3.reconciled.size()) +
+               " interrupted=" + std::to_string(f.t3.interrupted.size())).c_str());
+    }
+    {
+        Fixture f;
+        f.t3.loseSendForEnvironment = "cloud";
+        const auto id = twoLinkedDestinationTask(f);
+        const auto unknown = destinationResult(f.task(id),"cloud");
+        check(unknown.value("threadId","").empty() && unknown.value("runId","").empty(),
+              ("the approval fixture did not start with unknown Run IDs: " + unknown.dump()).c_str());
+        const auto actualRun = f.t3.deliveries.at(unknown.at("actionId").get<std::string>());
+        f.store->policy().setMode(localOwner,"supervised");
+        stopDestinationByName(f,id,"approve-recovered-stop","Stop the uncertain cloud destination");
+        f.now += 5;
+        f.tick();
+        f.now += 5;
+        f.tick();
+        auto cards = f.store->inbox(localOwner);
+        check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" &&
+              f.t3.interrupted.empty(),
+              "the recovered Run stop bypassed its required approval or failed to create a card");
+        f.store->decideInbox(localOwner,{cards.front().at("botId"),InboxKind::policy_approval,
+            cards.front().at("itemId"),cards.front().at("waitId"),cards.front().at("taskId"),
+            cards.front().at("targetRevision"),cards.front().at("targetGeneration")},"deny");
+        f.now += 5;
+        f.tick();
+        const auto denied = destinationResult(f.task(id),"cloud");
+        check(f.t3.interrupted.empty() && denied.value("status","") == "running",
+              "denying a recovered stop still interrupted the Run or left it awaiting the denied approval");
+        stopDestinationByName(f,id,"retry-recovered-stop","Request a fresh approval to stop the uncertain Run");
+        auto retryCards = f.store->inbox(localOwner);
+        check(retryCards.size() == 1 && retryCards.front().at("status") == "pending" &&
+              f.t3.interrupted.empty(),"a denied recovered stop could not request a fresh approval");
+        f.store->decideInbox(localOwner,{retryCards.front().at("botId"),InboxKind::policy_approval,
+            retryCards.front().at("itemId"),retryCards.front().at("waitId"),retryCards.front().at("taskId"),
+            retryCards.front().at("targetRevision"),retryCards.front().at("targetGeneration")},"allow_once");
+        f.runtime->runConversations();
+        f.now += 5;
+        f.tick();
+        check(f.t3.reconciled.size() >= 1 && f.t3.interrupted ==
+              std::vector{std::pair<std::string,std::string>{"cloud",actualRun.runId}},
+              "approval settlement did not allow exactly the recovered Run interrupt");
+    }
+}
+
+std::string latestApprovalStatus(Fixture& f) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the task database");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_stmt* rawStatement = nullptr;
+    check(sqlite3_prepare_v2(db.get(),"SELECT status FROM policy_approvals ORDER BY id DESC LIMIT 1",-1,
+                             &rawStatement,nullptr) == SQLITE_OK,"could not read policy approval status");
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(rawStatement,sqlite3_finalize);
+    return sqlite3_step(statement.get()) == SQLITE_ROW
+        ? reinterpret_cast<const char*>(sqlite3_column_text(statement.get(),0)) : "";
+}
+
+std::string latestApprovalOperation(Fixture& f) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the task database");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_stmt* rawStatement = nullptr;
+    check(sqlite3_prepare_v2(db.get(),"SELECT operation FROM policy_approvals ORDER BY id DESC LIMIT 1",-1,
+                             &rawStatement,nullptr) == SQLITE_OK,"could not read policy approval operation");
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(rawStatement,sqlite3_finalize);
+    return sqlite3_step(statement.get()) == SQLITE_ROW
+        ? reinterpret_cast<const char*>(sqlite3_column_text(statement.get(),0)) : "";
+}
+
+void setOutboxPhase(Fixture& f, std::string_view actionId, std::string_view phase) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open the task database");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_stmt* rawStatement = nullptr;
+    check(sqlite3_prepare_v2(db.get(),"UPDATE outbox SET phase=? WHERE id=?",-1,&rawStatement,nullptr) == SQLITE_OK,
+          "could not prepare the outbox phase update");
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(rawStatement,sqlite3_finalize);
+    sqlite3_bind_text(statement.get(),1,phase.data(),static_cast<int>(phase.size()),SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(),2,actionId.data(),static_cast<int>(actionId.size()),SQLITE_TRANSIENT);
+    check(sqlite3_step(statement.get()) == SQLITE_DONE && sqlite3_changes(db.get()) == 1,
+          "could not advance the approved launch outbox phase");
+}
+
+void startedRunOutboxApprovalIsStale() {
+    Fixture f;
+    f.store->policy().setMode(localOwner,"supervised");
+    oneLinkedDestinationTask(f,"stale-outbox-approval","Wait for linked launch approval");
+    f.advanceUntil([&] { return !f.store->inbox(localOwner).empty(); },
+                   "the linked launch did not request approval");
+    const auto cards = f.store->inbox(localOwner);
+    check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" && f.t3.sent.empty(),
+          "the linked launch did not remain gated on its approval");
+    const auto operation = latestApprovalOperation(f);
+    constexpr std::string_view outboxPrefix = "run-outbox/";
+    check(operation.starts_with(outboxPrefix),"the pending launch did not use an outbox approval");
+    setOutboxPhase(f,operation.substr(outboxPrefix.size()),"started");
+    const auto remaining = f.store->inbox(localOwner);
+    check(latestApprovalStatus(f) == "stale" && remaining.empty() && f.t3.sent.empty(),
+          "a launch approval remained live after its outbox had started");
+}
+
+void queuedDestinationStopsReleaseSlots() {
+    {
+        Fixture f;
+        T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+        const auto blocker = f.store->submit(f.routing("Hold the cloud project","alpha","cloud","cloud-project"));
+        f.reach(blocker,"running");
+        const auto destination = otherAndCloudDestinationTask(f,"queued-stop","Queue linked cloud work");
+        f.advanceUntil([&] { return f.task(destination).contains("runResults") &&
+                                    destinationResult(f.task(destination),"cloud").at("status") == "queued" &&
+                                    destinationResult(f.task(destination),"other").at("status") == "running"; },
+            ("the linked cloud destination was not queued behind its blocker: " + f.task(destination).dump()).c_str());
+        const auto queuedTask = f.task(destination);
+        check(f.t3.sent.size() == 2 && destinationResult(queuedTask,"other").at("status") == "running",
+              ("the linked destination did not remain queued behind the project slot: sent=" +
+               std::to_string(f.t3.sent.size()) + " task=" + queuedTask.dump()).c_str());
+        const auto follower = oneLinkedDestinationTask(f,"after-queued","Run after the queued cancellation");
+        const auto sentBeforeStop = f.t3.sent.size();
+        stopDestinationByName(f,destination,"stop-behind-slot","Stop the queued cloud destination");
+        f.tick();
+        check(f.t3.sent.size() == sentBeforeStop && f.t3.interrupted.empty() &&
+              destinationResult(f.task(destination),"cloud").at("status") == "cancelled" &&
+              destinationResult(f.task(destination),"other").at("status") == "running",
+              "a ready queued stop dispatched T3 or failed to settle locally");
+        f.t3.finish("run-1","Project slot released");
+        f.reach(blocker,"completed");
+        f.advanceUntil([&] { return f.t3.sent.size() == sentBeforeStop + 1; },
+                       "the follower did not acquire the released cloud project slot");
+        check(f.t3.sent.size() == sentBeforeStop + 1 && f.t3.sent.back().instruction.find("Run after") != std::string::npos,
+              "the cancelled destination retained its slot or launched after release");
+    }
+    {
+        Fixture f;
+        f.store->policy().setMode(localOwner,"supervised");
+        const auto destination = oneLinkedDestinationTask(f,"approval-stop","Wait for linked launch approval");
+        f.advanceUntil([&] { return !f.store->inbox(localOwner).empty(); },
+                       "the linked launch did not request approval");
+        const auto cards = f.store->inbox(localOwner);
+        check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" && f.t3.sent.empty(),
+              "the destination launch did not hold its slot for approval");
+        const auto follower = oneLinkedDestinationTask(f,"after-approval-stop","Run after approval cancellation");
+        stopDestinationByName(f,destination,"cancel-pending-launch","Cancel the pending linked launch");
+        f.tick();
+        f.tick();
+        check(f.t3.sent.empty() && destinationResult(f.task(destination),"cloud").at("status") == "cancelled" &&
+              latestApprovalStatus(f) == "stale" && f.store->inbox(localOwner).empty(),
+              "cancelling a pending launch did not settle its approval locally");
+        f.store->policy().setMode(localOwner,"full");
+        f.advanceUntil([&] { return f.t3.sent.size() == 1; },
+                       "the follower did not acquire the slot after pending-approval cancellation");
+        check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find("Run after approval") != std::string::npos,
+              "the cancelled pending launch held its slot or launched after settlement");
+    }
+}
+
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
     rememberCloudProject(f);
@@ -2472,6 +3784,91 @@ int main(int argc, char** argv) {
             std::cout << "Non-default-project move acceptance passed with simulated T3\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "same-environment-route") {
+            sameEnvironmentMoveKeepsGateway();
+            std::cout << "Same-environment route acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "gateway-only-launch") {
+            productionGatewayOnlyLaunch();
+            std::cout << "Production gateway-only launch acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "discovered-route-move") {
+            discoveredLinkedNameMoveKeepsRoute();
+            std::cout << "Discovered linked route move acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "gateway-only-cancel") {
+            gatewayOnlyCancelDoesNotCancelTask();
+            std::cout << "Gateway-only standalone cancel acceptance passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "destination-followup-report") {
+            destinationFollowupValidatesAndRedactsSourceReport();
+            std::cout << "Destination source report acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "followup-settlement") {
+            savedDestinationFollowupsRemainTaskWork();
+            std::cout << "Saved destination follow-up settlement passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "followup-late-receipt") {
+            lateSavedDestinationReceiptKeepsTaskAndSlot();
+            std::cout << "Late saved destination follow-up receipt passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "pinned-commit-followup") {
+            pinnedDestinationFollowupKeepsVerificationContract();
+            std::cout << "Pinned destination follow-up verification passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "lost-access-session-send") {
+            preparedSavedSessionSendSettlesAfterAccessLoss();
+            std::cout << "Prepared saved Session send settlement passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "lost-access-uncertain-session-send") {
+            uncertainSavedSessionSendRemainsHeldAfterAccessLoss();
+            std::cout << "Uncertain saved Session sends remain held after access loss\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "lost-access-other-reasons") {
+            terminalAccessRoutesSettleOnlyPreparedSessionSends();
+            std::cout << "Terminal access routes settle only definitely-unsent Session sends\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "recovered-stop-requester") {
+            recoveredStopApprovalBelongsToTheStopRequester();
+            std::cout << "Recovered stop requester authorization passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "followup-stop") {
+            savedDestinationFollowupStopTargetsOnlyItsRun();
+            std::cout << "Saved destination follow-up stop passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "pause-recovered-followup") {
+            pauseRecoversTheRetainedSavedFollowup();
+            std::cout << "Pause recovered and stopped its saved destination follow-up\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "recovered-stop-policy") {
+            recoveredDestinationStopHonorsPolicy();
+            std::cout << "Recovered destination stop policy acceptance passed with simulated T3\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "stale-outbox-approval") {
+            startedRunOutboxApprovalIsStale();
+            std::cout << "Started outbox approval stale-state acceptance passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "queued-destination-stop") {
+            queuedDestinationStopsReleaseSlots();
+            std::cout << "Queued destination stop acceptance passed with simulated T3\n";
+            return 0;
+        }
         pauseCancelsOpenWorkAcrossRestart();
         pauseDiscardsInFlightModelResult();
         durableInboxAndTargetedRevision();
@@ -2519,6 +3916,24 @@ int main(int argc, char** argv) {
         cloudDestinationWaitsForItsProject();
         canonicalMoveKeepsProjectAndGateway();
         nonDefaultProjectMoveKeepsCanonicalGateway();
+        sameEnvironmentMoveKeepsGateway();
+        gatewayOnlyCancelDoesNotCancelTask();
+        productionGatewayOnlyLaunch();
+        discoveredLinkedNameMoveKeepsRoute();
+        destinationFollowupValidatesAndRedactsSourceReport();
+        savedDestinationFollowupsRemainTaskWork();
+        savedDestinationFollowupStopTargetsOnlyItsRun();
+        lateSavedDestinationReceiptKeepsTaskAndSlot();
+        pinnedDestinationFollowupKeepsVerificationContract();
+        preparedSavedSessionSendSettlesAfterAccessLoss();
+        uncertainSavedSessionSendRemainsHeldAfterAccessLoss();
+        terminalAccessRoutesSettleOnlyPreparedSessionSends();
+        savedFollowupHoldsSlotUntilItsReceiptAndRunSettle();
+        pauseRecoversTheRetainedSavedFollowup();
+        recoveredStopApprovalBelongsToTheStopRequester();
+        recoveredDestinationStopHonorsPolicy();
+        startedRunOutboxApprovalIsStale();
+        queuedDestinationStopsReleaseSlots();
         moveAsksForTheDestinationProjectAfterSettlement();
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();

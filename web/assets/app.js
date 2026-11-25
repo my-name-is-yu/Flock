@@ -1045,7 +1045,7 @@ function renderActivity() {
     const rows = pending.map((item) => {
       const status = decisionKindLabels[item.itemKind] ?? 'Needs you';
       const title = item.itemKind === 'policy_approval' && item.action
-        ? [actionLabel(item.action), item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
+        ? [actionLabel(item.action), item.displayTarget ?? item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
       const row = activityRow('button', 'wait-row', title, status, 'waiting');
       row.type = 'button';
       row.title = item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title;
@@ -2500,6 +2500,34 @@ function settingsRow(label, value, click) {
   if (click) row.insertAdjacentHTML('beforeend', chevron);
   return row;
 }
+function pullRequestSetting(bot) {
+  const row = node('label', 'settings-row');
+  const label = node('span', 'settings-row-label', 'Fix failing checks and review feedback');
+  const toggle = node('input', 'settings-row-switch');
+  const feedback = node('span', 'settings-card-feedback error');
+  feedback.setAttribute('role', 'status');
+  toggle.type = 'checkbox';
+  toggle.checked = bot.fixPullRequests;
+  toggle.disabled = !bot.canDelete;
+  toggle.addEventListener('change', async () => {
+    const fixPullRequests = toggle.checked;
+    toggle.disabled = true;
+    feedback.textContent = '';
+    try {
+      const saved = await api('bots/profile', { botId: bot.id, fixPullRequests });
+      toggle.checked = saved.fixPullRequests;
+      if (view?.id === bot.id) void view.refresh();
+    } catch {
+      toggle.checked = !fixPullRequests;
+      feedback.textContent = 'Couldn’t save this change. Try again.';
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+  label.append(feedback);
+  row.append(label, toggle);
+  return row;
+}
 let reopenSettingsOnClose = false;
 const botEditor = createBotEditor(elements['bot-editor'], {
   api,
@@ -2683,6 +2711,7 @@ function generalContent(bot) {
   renderNameDisplay();
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
+  rows.append(pullRequestSetting(bot));
   const requests = settingsRow('Recurring requests', '', () => selectSection('recurring', true));
   requests.querySelector('.settings-row-value').append(recurringRequests.count);
   rows.append(requests);

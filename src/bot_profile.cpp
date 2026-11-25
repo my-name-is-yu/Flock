@@ -83,6 +83,12 @@ std::size_t botRunSettingCount(const Json& profile) {
     return std::ranges::count_if(botRunSettingFields,[&](const char* key) { return profile.contains(key); });
 }
 
+bool validatedBotFixPullRequests(const Json& value) {
+    if (!value.is_boolean())
+        throw BotProfileError("invalid_pull_request_setting","fixPullRequests must be a boolean");
+    return value.get<bool>();
+}
+
 bool validPlainId(std::string_view id) {
     return !id.empty() && id.size() <= 256 &&
         std::ranges::none_of(id,[](unsigned char ch) { return ch <= 32 || ch == 127; });

@@ -955,7 +955,7 @@ def test_peer_recovery(server, runner, temp):
     assert server.state["launches"] == [action_id], "recovery resent the launch"
 
 
-def test_multi_environment(local, runner, temp):
+def test_multi_environment(local, runner, temp, linked_routes=False):
     commit = "0123456789abcdef0123456789abcdef01234567"
     with ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as mini:
         mini.origin = f"http://127.0.0.1:{mini.server_port}"
@@ -969,6 +969,9 @@ def test_multi_environment(local, runner, temp):
         threading.Thread(target=mini.serve_forever, daemon=True).start()
         command = [runner, local.origin, mini.origin, temp + "/creds", commit]
         try:
+            if linked_routes:
+                subprocess.run(command + ["linked-routes"], timeout=30, check=True)
+                return
             subprocess.run(command + ["normal"], timeout=30, check=True)
             local.launch_accepted.clear()
             mini.launch_accepted.clear()
@@ -1354,7 +1357,7 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     server.state = {}
     server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
     server.stock_thread = sys.argv[2:] == ["pinned-workspace"]
-    server.multi_environment = sys.argv[2:] == ["multi-environment"]
+    server.multi_environment = sys.argv[2:] in (["multi-environment"], ["multi-environment-links"])
     if server.stock_thread:
         root = temp + "/project"
         good = temp + "/worker"
@@ -1381,7 +1384,7 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
             test_peer_recovery(server, sys.argv[1], temp)
             code = 0
         elif server.multi_environment:
-            test_multi_environment(server, sys.argv[1], temp)
+            test_multi_environment(server, sys.argv[1], temp, sys.argv[2:] == ["multi-environment-links"])
             code = 0
         elif sys.argv[2:] == ["connection-setup"]:
             test_connection_setup(server, sys.argv[1], temp)

@@ -13,6 +13,16 @@ bool identifier(std::string_view word) {
     return !word.empty() && word.size() <= 128 &&
         word.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == word.npos;
 }
+
+std::string_view followupType(GitFollowup followup) {
+    switch (followup) {
+    case GitFollowup::failedCheck: return "failed_check";
+    case GitFollowup::changesRequested: return "changes_requested";
+    case GitFollowup::reviewComment: return "review_comment";
+    case GitFollowup::none: return {};
+    }
+    throw std::invalid_argument("Invalid Git follow-up type");
+}
 }
 
 bool Store::receiveGitWebhook(const GitWebhook& event) {
@@ -21,7 +31,7 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
     const auto& digest = event.payloadDigest;
     if ((!digest.empty() && (digest.size() != 64 || digest.find_first_not_of("0123456789abcdef") != digest.npos)) ||
         !webhookKind(event.kind) || !identifier(event.eventId) || !identifier(event.action) ||
-        event.prNumbers.size() > 100 || event.jobId < 0 ||
+        event.prNumbers.size() > 100 || event.jobId < 0 || event.feedbackId < 0 ||
         (!sha.empty() && ((sha.size() != 40 && sha.size() != 64) ||
                           sha.find_first_not_of("0123456789abcdef") != sha.npos)) ||
         std::ranges::any_of(event.prNumbers,[](Id number) { return number <= 0; }) ||
@@ -33,6 +43,17 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
     Json data{{"kind",event.kind},{"action",event.action},{"prNumbers",event.prNumbers},
         {"headSha",sha},{"summary",bounded(scrub.text(event.summary),4000)},{"jobId",event.jobId}};
     if (!event.requestedReviewer.empty()) data["requestedReviewer"] = bounded(scrub.text(event.requestedReviewer),100);
+    if (const auto followup = followupType(event.followup); !followup.empty()) data["followup"] = followup;
+    if (event.feedbackId) data["feedbackId"] = event.feedbackId;
+    if (event.reviewLocation) {
+        const auto& [comment,path,side,line,original] = *event.reviewLocation;
+        if (event.kind != "comment" || comment <= 0 || line < 0)
+            throw std::invalid_argument("Invalid Git review comment location");
+        Json location{{"commentId",comment},{"path",bounded(redactT3Tokens(scrub.text(path)),600)}};
+        if (line) location.update({{"line",line},{"originalLine",original}});
+        if (side == "LEFT" || side == "RIGHT") location["side"] = side;
+        data["reviewLocation"] = std::move(location);
+    }
     Transaction transaction(p_->db);
     p_->exec("INSERT INTO git_webhook_events(host,event_id,repo,data,payload_digest) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
              {repo.host,event.eventId,repo.repo,data,digest.empty() ? Json(nullptr) : Json(digest)});
@@ -129,22 +150,45 @@ ORDER BY id,pr_number LIMIT ?
     for (auto& event : deliveries) {
         const auto delivery = event.at("deliveryId");
         const auto pr = event.at("prNumber");
+        const auto feedback = event.value("feedbackId",Id{});
+        const auto kind = field(event,"kind");
+        const auto host = field(event,"host");
+        const auto repo = field(event,"repo");
+        if (feedback && gitFeedbackMutationsInFlight.contains({host,repo,pr.get<Id>()})) continue;
         exec("INSERT INTO git_webhook_deliveries VALUES(?,?)",{delivery,pr});
+        if (feedback && query(R"SQL(
+SELECT 1 FROM git_mutations
+WHERE json_extract(result,'$.data.id')=?1
+  AND json_extract(invocation,'$[2].host')=?2
+  AND json_extract(invocation,'$[2].repo')=?3
+  AND ((?5='review' AND json_extract(invocation,'$[1]')='git_submit_review'
+        AND json_extract(invocation,'$[2].prNumber')=?4)
+    OR (?5='comment' AND json_extract(invocation,'$[1]')='git_comment'
+        AND json_extract(invocation,'$[2].target')='pr'
+        AND json_extract(invocation,'$[2].number')=?4
+        AND json_type(invocation,'$[2].commentId') IS NULL))
+)SQL",{feedback,host,repo,pr,kind}).next()) continue;
         const auto taskId = event.at("taskId").get<Id>();
         const auto bot = field(event,"botId");
         if (!canReceiveGitWebhook(bot,event)) continue;
         const auto task = load(taskId);
         event.erase("botId");
         event.erase("deliveryId");
+        event.erase("feedbackId");
         const auto reviewer = field(event,"requestedReviewer");
         event.erase("requestedReviewer");
-        const auto kind = field(event,"kind");
         const auto action = field(event,"action");
         const auto scrub = sharedRedactor();
         event["summary"] = bounded(scrub.text(field(event,"summary")),4000);
         const auto key = "webhook/" + std::to_string(delivery.get<Id>()) + "/" + std::to_string(pr.get<Id>());
         auto inboxKey = key;
         const auto url = field(event,"url");
+        if (const auto location = event.find("reviewLocation"); location != event.end()) {
+            const auto commentId = location->at("commentId").get<Id>();
+            location->erase("commentId");
+            (*location)["url"] = url + "#discussion_r" + std::to_string(commentId);
+            *location = scrub.record(std::move(*location));
+        }
         const auto prompt = field(event,"summary");
         std::string title;
         if (kind == "review" && action == "submitted") title = "Pull request review submitted";

@@ -443,6 +443,66 @@ void channel(const std::filesystem::path& path) {
     check(transport->reactions==1 && store.inbox(localOwner).empty(),"reacting in the asking conversation needed approval");
 }
 
+void stopRequesterDecidesCurrentStopApproval(const std::filesystem::path& path) {
+    Store store(path);
+    auto policy = store.policy();
+    policy.setMode(localOwner,"supervised");
+    const Person stopRequester{"stop-requester"};
+    policy.setMember(localOwner,"release",stopRequester.id,true);
+    const auto taskId = store.submit({"release","Stop the assigned Run","env","project"},&stopRequester);
+    const auto task = store.task(taskId);
+    const auto revision = task.value("currentRevision",Id{0});
+    const auto generation = task.value("generation",Id{0});
+    sqlite3* raw = nullptr;
+    check(sqlite3_open(path.c_str(),&raw)==SQLITE_OK,"could not open the isolated stop-approval fixture");
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    sqlite3_stmt* statement = nullptr;
+    check(sqlite3_prepare_v2(db.get(),"UPDATE tasks SET state='running' WHERE id=?",-1,&statement,nullptr)==SQLITE_OK,
+          "could not prepare the current stop task");
+    sqlite3_bind_int64(statement,1,taskId);
+    check(sqlite3_step(statement)==SQLITE_DONE,"could not activate the stop task");
+    sqlite3_finalize(statement);
+    const Json outbox = {{"stopRequested",true},{"stopOperation","stop-request-1"}};
+    check(sqlite3_prepare_v2(db.get(),"INSERT INTO outbox(id,task_id,phase,auth_generation,data) VALUES('destination-action',?,'started','',?)",
+                             -1,&statement,nullptr)==SQLITE_OK,"could not prepare the started destination outbox");
+    sqlite3_bind_int64(statement,1,taskId);
+    const auto outboxText = outbox.dump();
+    sqlite3_bind_text(statement,2,outboxText.c_str(),-1,SQLITE_TRANSIENT);
+    check(sqlite3_step(statement)==SQLITE_DONE,"could not persist the started destination outbox");
+    sqlite3_finalize(statement);
+    check(sqlite3_prepare_v2(db.get(),"SELECT revision FROM policy_settings WHERE id=1",-1,&statement,nullptr)==SQLITE_OK &&
+          sqlite3_step(statement)==SQLITE_ROW,"could not read the current policy revision");
+    const auto modeRevision = sqlite3_column_int64(statement,0);
+    sqlite3_finalize(statement);
+    check(sqlite3_prepare_v2(db.get(),R"SQL(
+INSERT INTO policy_approvals(operation,bot,action,target,fingerprint,preview,scope,requester,anchor,turn,task,
+ revision,generation,created_at,expires_at,mode_revision,status,wait_id,card_generation,resume_state)
+VALUES('run-stop/stop-request-1','release','t3_send','cloud:thread','fixture','Stop the assigned Run',?,?,?,?,?,?,?, ?,0,?,'pending',0,3,'')
+)SQL",-1,&statement,nullptr)==SQLITE_OK,"could not prepare the stop-requester approval");
+    const auto scope = "task/"+std::to_string(taskId);
+    sqlite3_bind_text(statement,1,scope.c_str(),-1,SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement,2,stopRequester.id.c_str(),-1,SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement,3,0);
+    sqlite3_bind_int64(statement,4,0);
+    sqlite3_bind_int64(statement,5,taskId);
+    sqlite3_bind_int64(statement,6,revision);
+    sqlite3_bind_int64(statement,7,generation);
+    sqlite3_bind_int64(statement,8,unixTime());
+    sqlite3_bind_int64(statement,9,modeRevision);
+    check(sqlite3_step(statement)==SQLITE_DONE,"could not persist the stop-requester approval");
+    sqlite3_finalize(statement);
+
+    const auto cards = store.inbox(stopRequester,"release");
+    check(cards.size()==1 && cards.at(0).at("canDecide")==true && cards.at(0).at("canSaveRule")==false &&
+          cards.at(0).at("taskId")==taskId,"the stop requester did not receive the current one-shot approval");
+    store.decideInbox(stopRequester,target(cards.at(0)),"allow_once");
+    check(sqlite3_prepare_v2(db.get(),"SELECT status FROM policy_approvals WHERE operation='run-stop/stop-request-1'",
+                             -1,&statement,nullptr)==SQLITE_OK && sqlite3_step(statement)==SQLITE_ROW &&
+          std::string_view(reinterpret_cast<const char*>(sqlite3_column_text(statement,0)))=="approved",
+          "Store::decideInbox did not accept the authorized stop requester");
+    sqlite3_finalize(statement);
+}
+
 void secrets(const std::filesystem::path& path) {
     Store store(path);
     auto policy = store.policy();
@@ -481,6 +541,7 @@ int main() {
         turns(root/"turns.db");
         downstreamApproval(root/"one-shot.db");
         scheduled(root/"scheduled.db");
+        stopRequesterDecidesCurrentStopApproval(root/"stop-requester.db");
         secrets(root/"secrets.db");
         channel(root/"channel.db");
     } catch (const std::exception& error) {

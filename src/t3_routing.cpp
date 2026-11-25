@@ -200,7 +200,7 @@ std::string Store::Impl::taskEnvironment(std::string_view bot, const Json& routi
 }
 
 TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std::string_view name,
-                                const Json* movingTask) {
+                                const Json* movingTask, const LinkedTaskDestinations* linked) {
     const auto configured = field(routing,"environmentId");
     const auto resolved = [&](std::string environment, std::string project = {}, std::string gateway = {}) -> TaskRoute {
         if (environment.empty()) return {};
@@ -218,8 +218,21 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
     };
     if (name.empty()) return resolved(defaultT3Environment(bot,configured,
         field(routing.value("sessionOrigin",Json::object()),"environmentId")));
-    if (name == configured || (movingTask && name == field(*movingTask,"environmentId")))
-        return resolved(std::string(name));
+    if (name == configured || (movingTask && name == field(*movingTask,"environmentId"))) {
+        auto gateway = movingTask && name == field(*movingTask,"environmentId")
+            ? field(*movingTask,"gatewayEnvironmentId") : std::string{};
+        return resolved(std::string(name),{},std::move(gateway));
+    }
+    if (movingTask && linked) {
+        std::vector<const LinkedTaskDestination*> matches;
+        for (const auto& choice : linked->choices)
+            if (choice.name == name || choice.route.environmentId == name) matches.push_back(&choice);
+        if (matches.size() > 1)
+            throw conversation_storage::ToolError("This T3 environment is linked through more than one gateway. Choose the destination name that identifies its gateway.");
+        if (!matches.empty())
+            return resolved(matches.front()->route.environmentId,matches.front()->route.projectId,
+                            matches.front()->route.gatewayEnvironmentId);
+    }
     if (movingTask && movingTask->at("projectId") != routing.at("projectId")) {
         const auto& config = movingTask->at("config");
         if (auto route = configuredTaskRoute(config,name))
@@ -327,7 +340,8 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
     return destinations;
 }
 
-TaskChange Store::Impl::taskChange(const conversation::Message& message, const Json& args, const Json& task) {
+TaskChange Store::Impl::taskChange(const conversation::Message& message, const Json& args, const Json& task,
+                                   const LinkedTaskDestinations& linked) {
     using conversation_storage::text;
     using conversation_storage::ToolError;
     TaskChange change{text(args,"intent",8000,false),text(args,"doneWhen",8000,false),{}};
@@ -335,7 +349,7 @@ TaskChange Store::Impl::taskChange(const conversation::Message& message, const J
     if (change.intent.empty() && change.doneWhen.empty() && environment.empty())
         throw ToolError("change_task needs intent, doneWhen, or environment; use send_to_task for other instructions");
     if (!environment.empty()) {
-        change.route = taskRoute(message.bot,message.routing,environment,&task);
+        change.route = taskRoute(message.bot,message.routing,environment,&task,&linked);
         if (change.route.environmentId.empty())
             throw ToolError("Unknown environment " + environment + "; use one of task.environments");
         redactor(message.bot).requirePublic({change.route.environmentId,change.route.projectId,

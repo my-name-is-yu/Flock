@@ -145,6 +145,11 @@ void Store::Impl::openSchema() {
         initialize.commit();
     }
     initializeProjectQueue();
+    {
+        Transaction migration(db);
+        upgradeSessionMessageWaitSchema();
+        migration.commit();
+    }
     initializeBotPauseSchema();
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_review_receipts(

@@ -92,15 +92,27 @@ bool Store::Impl::currentPolicyApproval(Id turn, Id task, Id revision, Id genera
     if (turn && !query("SELECT 1 FROM conversation_turns WHERE message_id=? AND status IN ('policy_waiting','running')",
                        {turn}).next()) return false;
     if (!task) return true;
-    if (operation.starts_with(runOutboxOperation))
+    if (operation.starts_with(runOutboxOperation) || operation.starts_with(runStopOperation)) {
+        const bool stopOperation = operation.starts_with(runStopOperation);
+        const auto prefix = stopOperation ? runStopOperation : runOutboxOperation;
+        if (stopOperation)
+            return query(R"SQL(
+SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
+WHERE t.id=? AND (o.id=? OR json_extract(o.data,'$.stopOperation')=?)
+  AND o.phase IN ('started','accepted') AND json_extract(o.data,'$.stopRequested')=1
+  AND t.state IN ('running','waiting')
+  AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
+)SQL",{task,operation.substr(prefix.size()),operation.substr(prefix.size()),revision}).next();
         return query(R"SQL(
 SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
-WHERE o.id=? AND t.id=? AND o.phase='ready' AND t.state IN ('running','waiting')
+WHERE o.id=? AND t.id=? AND o.phase='ready'
+  AND t.state IN ('running','waiting')
   AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
-)SQL",{operation.substr(runOutboxOperation.size()),task,revision}).next();
+)SQL",{operation.substr(prefix.size()),task,revision}).next();
+    }
     return query("SELECT 1 FROM tasks WHERE id=? AND generation=?"
                  " AND coalesce(json_extract(data,'$.currentRevision'),0)=?"
-                 " AND state NOT IN ('cancelling','cancelled') AND (? OR state<>'completed')",{task,generation,revision,turn != 0}).next();
+                 " AND state NOT IN ('cancelling','cancelled') AND (? OR state<>'completed')",{task,generation,revision,turn ? 1 : 0}).next();
 }
 
 void Store::Impl::releasePolicyTurn(Id turn) {
@@ -172,7 +184,8 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.operation=?
         if (row.string(1) != action || row.string(2) != resource.target || row.string(3) != fingerprint(payload) ||
             !row.number(5) || row.number(7) != origin.turn || row.number(8) != origin.task ||
             row.number(9) != origin.revision ||
-            (!operation.starts_with(runOutboxOperation) && row.number(10) != origin.generation) ||
+            (!operation.starts_with(runOutboxOperation) && !operation.starts_with(runStopOperation) &&
+             row.number(10) != origin.generation) ||
             !currentPolicyApproval(origin.turn,origin.task,origin.revision,origin.generation,operation)) return ApprovalGate::stale;
         if (status == "expired" || status == "rule_saved" ||
             (status == "pending" && row.number(6) && row.number(6) <= now))
@@ -269,8 +282,10 @@ AND 'channel-task-update/' || id=(SELECT operation FROM policy_approvals WHERE i
 
 Json Store::Impl::policyApprovalCards(const Person& actor, std::string_view bot) {
     auto rows = query(R"SQL(
-SELECT id,action,target,preview,requester,anchor,task,revision,generation,created_at,expires_at,status,scope,turn,wait_id,card_generation,operation
-FROM policy_approvals WHERE bot=? AND status IN ('pending','expired') ORDER BY id DESC
+SELECT a.id,a.action,a.target,a.preview,a.requester,a.anchor,a.task,a.revision,a.generation,a.created_at,a.expires_at,
+       a.status,a.scope,a.turn,a.wait_id,a.card_generation,a.operation,o.url
+FROM policy_approvals a LEFT JOIN git_pr_operations o ON a.scope GLOB 'git-pr/*' AND o.operation_id=substr(a.scope,8)
+WHERE a.bot=? AND a.status IN ('pending','expired') ORDER BY a.id DESC
 )SQL",{bot});
     const Policy policy(*this);
     const auto currentActor = currentApprovalActor(policy,resolveWebIdentity,liveInteractiveRoles,actor);
@@ -287,6 +302,7 @@ FROM policy_approvals WHERE bot=? AND status IN ('pending','expired') ORDER BY i
             {"botName",bot},{"requestTitle",label},{"action",rows.string(1)},{"target",rows.string(2)},
             {"prompt",rows.string(3)},{"status",rows.string(11)},
             {"canDecide",canDecide},{"canSaveRule",canSaveRule},{"createdAt",rows.number(9)},{"expiresAt",rows.number(10)}};
+        if (const auto pr = rows.string(17); !pr.empty()) item["displayTarget"] = pr;
         if (!canSaveRule && !requester && !policy.allows(currentActor,Action::bot_view,bot)) continue;
         if (rows.number(5)) {
             auto source = query("SELECT bot_id FROM messages m JOIN journal j ON j.id=m.id"

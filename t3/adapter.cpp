@@ -629,7 +629,8 @@ Delivery reconcileWork(Client& client, const Command& command) {
     if (destination.empty() && !hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end())
         threads.push_back(hint);
     const auto expected = sessionPrompt(command.actionId,command.instruction);
-    std::map<std::pair<std::string, std::string>, RunRef> matches;
+    struct Match { RunRef run; bool queued; };
+    std::map<std::pair<std::string, std::string>, Match> matches;
     bool incomplete = false;
     for (const auto& threadId : threads) {
         scan.step();
@@ -641,7 +642,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
             std::set<std::string> queued;
             queuedMatches(client,scan,threadId,expected,queued);
             for (const auto& run : queued)
-                matches[{threadId,run}] = {threadId,run,str(thread,"link"),command.target.gatewayEnvironmentId};
+                matches[{threadId,run}] = {{threadId,run,str(thread,"link"),command.target.gatewayEnvironmentId},true};
         }
         walkThreadHistoryForward(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
             if (str(item, "type") != "user_message" || !localItem(item, threadId)) return true;
@@ -654,7 +655,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
                 const bool exact = full && *full == expected;
                 if (!full || (runId.empty() && exact)) incomplete = true;
                 if (exact && !runId.empty() && (launch || runId != command.target.runId))
-                    matches[{threadId, runId}] = {threadId, runId, str(thread, "link"),command.target.gatewayEnvironmentId};
+                    matches[{threadId,runId}] = {{threadId,runId,str(thread,"link"),command.target.gatewayEnvironmentId},false};
             }
             // This is a launch, so only its initial local user message could have created the Thread.
             return !launch && matches.size() < 2;
@@ -664,11 +665,13 @@ Delivery reconcileWork(Client& client, const Command& command) {
     if (incomplete || matches.size() != 1)
         return result(Outcome::Unknown, matches.size() > 1 ? "More than one T3 Run matches the saved action" :
                       "T3 history did not establish exactly one Run for the saved action");
-    const auto& match = matches.begin()->second;
+    const auto& [match,queued] = matches.begin()->second;
     if ((!hint.empty() && hint != match.threadId) ||
         (!command.candidate.runId.empty() && command.candidate.runId != match.runId))
         return result(Outcome::Unknown, "The supplied T3 Run does not match the saved action");
-    return result(Outcome::Accepted, {}, match);
+    auto recovered = result(Outcome::Accepted, {}, match);
+    if (direct) recovered.delivery = queued ? "queued" : "started";
+    return recovered;
 }
 
 struct Report {
@@ -1004,7 +1007,7 @@ public:
                     invoked = true;
                     auto delivery = launchPinned(client,command,std::move(launchArguments.parameters),launchArguments.pin,launchWarning);
                     delivery.launchWarning = std::move(launchWarning);
-                    useLocalThreadLink(delivery.run,gateway,origin);
+                    useLocalThreadLink(delivery.run,command.environmentId,origin);
                     return delivery;
                 }
                 invoked = true;
@@ -1036,7 +1039,7 @@ public:
             }
             RunRef run{str(reply, "threadId"), str(reply, "runId"), str(reply, "link"),
                        command.target.gatewayEnvironmentId};
-            useLocalThreadLink(run,gateway,origin);
+            useLocalThreadLink(run,command.environmentId,origin);
             auto delivery = hasRun(run) ? result(Outcome::Accepted,{},std::move(run))
                 : result(Outcome::Unknown,"T3 has not returned the assigned Run ID yet",std::move(run));
             delivery.launchWarning = std::move(launchWarning);
@@ -1087,7 +1090,7 @@ public:
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                     }
                 }
-                useLocalThreadLink(recovered.run,gateway,origin);
+                useLocalThreadLink(recovered.run,command.environmentId,origin);
                 return recovered;
             }
             if ((!command.candidate.threadId.empty() && command.candidate.threadId != command.target.threadId) ||
