@@ -6,6 +6,11 @@ The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`
 
 The Bot's name and **needs you** count above its chat open the items waiting on you. The Bot list also shows a count shortcut. A question card uses the composer to answer its exact target through `POST /api/inbox/decide`. A pull request review card uses the composer to send a message to the Bot through `POST /api/messages`, with the review as the reply target. The review stays in **Needs you** until you respond. **History**, in the conversation controls and the Bot's menu, lists what you have already answered or approved.
 
+When a request uses its step allowance, approve another block in the conversation
+or **Needs you**. The button shows the original allowance, such as **Continue for
+20 more steps**. **Continue for 3 more rounds** renews the separate allowance for
+follow-up work.
+
 The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `sessionCursor` as `sessionsAfter` on the next view request to receive the groups that recorded a new Run. Each returned group includes its full list of Sessions. To continue paging backwards, pass the last page’s `sessionsBefore` to `GET /api/sessions?bot=...&before=...`.
 
 ## Dependencies
@@ -156,9 +161,12 @@ identities configured, the owner manages members in Bot settings.
 `GET /api/settings/models?bot=ID` returns `{models: [{slug, displayName}]}`
 for the Bot owner and installation roots. An unavailable catalog returns
 `503` with `{"error":"models_unavailable"}`.
-`POST /api/bots/profile` accepts `botId` and any of `environmentId`,
-`projectId`, or `model` in one request. Omitted fields are preserved and an
-empty string clears the supplied field. Name, avatar, and role are saved separately.
+Under **How it runs**, set **Steps per request** for future requests. The
+default is 20. `POST /api/bots/profile` accepts `botId` and any of
+`environmentId`, `projectId`, `model`, or the positive integer
+`modelCallLimit` in one request. Omitted fields are preserved. An empty string
+clears a supplied environment, project, or model. Name, avatar, and role are
+saved separately.
 `POST /api/bot-settings/members` takes `botId`, `person` and boolean `add`.
 `POST /api/bot-settings/secret` accepts `botId`, `requestId` and `value`.
 Mutations use the usual same-origin JSON headers. Fulfilled secret values

@@ -1,3 +1,7 @@
+export function continuationLabel(allowance, unit = 'step') {
+  return `Continue for ${allowance} more ${unit}${allowance === 1 ? '' : 's'}`;
+}
+
 export const actionLabels = {
   'bot.view': 'View Bot conversations',
   'bot.talk': 'Talk to Bots',

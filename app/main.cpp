@@ -54,6 +54,7 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   model models
   model acceptance MODEL_SLUG
 
+Approve continues a paused request for another full allowance.
 State defaults to $FLOCK_HOME or ~/.config/flock. Quote messages and answers
 containing spaces. Run --fixed uses local demo adapters for both model and T3.
 )";

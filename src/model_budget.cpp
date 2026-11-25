@@ -16,6 +16,11 @@ bool sharedMemoryTool(std::string_view tool) {
     return tool == "read_memory" || tool == "memory_history" || tool == "propose_memory_edit" ||
            tool == "apply_memory_edit" || tool == "revert_memory_edit";
 }
+
+std::string_view modelBudgetPauseText(std::string_view request) {
+    return conversation_storage::japanese(request) ? "この依頼に使えるステップの上限に達しました。"
+                                                  : "I’ve used the steps available for this request.";
+}
 }
 
 bool modelArgumentsContainProtected(const SecretRedactor& scrub, std::string_view tool, const Json& args) {
@@ -51,12 +56,7 @@ CREATE TABLE IF NOT EXISTS model_attempts(
 )SQL");
 }
 
-std::string Store::Impl::ensureModelBudget(std::string key, const Json& config) {
-    exec("INSERT OR IGNORE INTO model_budgets(id,call_limit) VALUES(?,?)",{key,modelCallLimit(config)});
-    return key;
-}
-
-std::string Store::Impl::messageModelBudget(Id messageId) {
+ModelBudget Store::Impl::messageModelBudget(Id messageId) const {
     for (;;) {
         auto row = query(R"SQL(
 SELECT m.routing,i.source_message_id FROM messages m
@@ -66,13 +66,13 @@ LEFT JOIN session_invitations i ON i.message_id=m.id WHERE m.id=?
         const auto routing = row.json(0);
         const auto wake = routing.find("sessionWake");
         const auto source = wake == routing.end() ? row.number(1) : wake->at("sourceMessageId").get<Id>();
-        if (!source) return ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
+        if (!source) return {"message/" + std::to_string(messageId),modelCallLimit(routing.at("config"))};
         if (source >= messageId) throw Conflict("Invalid model budget ancestry");
         messageId = source;
     }
 }
 
-std::string Store::Impl::taskModelBudget(const Json& task) {
+ModelBudget Store::Impl::taskModelBudget(Id taskId) const {
     auto ancestor = query(R"SQL(
 WITH RECURSIVE ancestry(id) AS (
   SELECT ? UNION ALL
@@ -80,19 +80,20 @@ WITH RECURSIVE ancestry(id) AS (
   WHERE p.sender_task<a.id
 )
 SELECT t.id,t.data FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1
-)SQL",{task.at("id")});
+)SQL",{taskId});
     if (!ancestor.next()) throw Conflict("The originating task is missing");
     const auto root = ancestor.json(1);
     if (const auto source = root.value("sourceMessageId",Id{0}); source) return messageModelBudget(source);
-    return ensureModelBudget("task/" + std::to_string(ancestor.number(0)),root.at("config"));
+    return {"task/" + std::to_string(ancestor.number(0)),modelCallLimit(root.at("config"))};
 }
 
-Id Store::Impl::reserveModelCall(std::string_view budget, std::string_view purpose,
+Id Store::Impl::reserveModelCall(const ModelBudget& budget, std::string_view purpose,
                                 Id messageId, Id taskId, Id eventId) {
-    exec("UPDATE model_budgets SET attempts=attempts+1 WHERE id=? AND attempts<call_limit",{budget});
+    exec("INSERT OR IGNORE INTO model_budgets(id,call_limit) VALUES(?,?)",{budget.id,budget.initialLimit});
+    exec("UPDATE model_budgets SET attempts=attempts+1 WHERE id=? AND attempts<call_limit",{budget.id});
     if (!sqlite3_changes(db)) return 0;
     exec("INSERT INTO model_attempts(budget_id,purpose,time,message_id,task_id,event_id) VALUES(?,?,?,?,?,?)",
-         {budget,purpose,unixTime(),messageId ? Json(messageId) : Json(nullptr),
+         {budget.id,purpose,unixTime(),messageId ? Json(messageId) : Json(nullptr),
           taskId ? Json(taskId) : Json(nullptr),eventId ? Json(eventId) : Json(nullptr)});
     return last();
 }
@@ -126,10 +127,10 @@ void Store::Impl::releaseModelCall(Id attempt) {
     exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?",{budget});
 }
 
-Id Store::Impl::reserveExtraModelCall(std::string_view budget, std::string_view purpose,
-                                     Id messageId, Id taskId, Id eventId) {
-    exec("UPDATE model_budgets SET call_limit=call_limit+1 WHERE id=? AND call_limit<?",
-         {budget,std::numeric_limits<Id>::max()});
+Id Store::Impl::reserveApprovedModelCall(const ModelBudget& budget, std::string_view purpose,
+                                        Id messageId, Id taskId, Id eventId) {
+    exec("UPDATE model_budgets SET call_limit=call_limit+? WHERE id=? AND call_limit<=?",
+         {budget.initialLimit,budget.id,std::numeric_limits<Id>::max() - budget.initialLimit});
     if (!sqlite3_changes(db)) throw Conflict("Cannot increase this model call limit");
     const auto attempt = reserveModelCall(budget,purpose,messageId,taskId,eventId);
     if (!attempt) throw Conflict("The approved model call could not be reserved");
@@ -211,15 +212,34 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
     return checked;
 }
 
+void Store::Impl::pauseTurn(const conversation::Message& message) {
+    const Json task = message.principalSource == conversation::PrincipalSource::gitWebhook
+        ? message.routing.at("gitEvent").at("taskId") : Json(nullptr);
+    exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
+         {task,unixTime(),message.bot});
+    const auto reply = last();
+    const Json data{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","needs_you"},
+                    {"text",modelBudgetPauseText(message.text)}};
+    exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
+    if (!message.channelScope.empty()) queueChannelReply(message.id,reply,data);
+    exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
+}
+
 Json Store::pausedConversations(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
 -- Seek the populated pause IDs instead of visiting all journal entries for the Bot.
-SELECT j.data FROM conversation_turns t CROSS JOIN journal j ON j.id=t.pause_id
+SELECT j.data,t.message_id,m.text FROM conversation_turns t CROSS JOIN journal j ON j.id=t.pause_id
+CROSS JOIN messages m ON m.id=t.message_id
 WHERE t.pause_id IS NOT NULL AND t.status='paused' AND j.conversation_bot_id=? ORDER BY t.pause_id DESC
 )SQL",{bot});
     auto result = Json::array();
-    while (rows.next()) result.push_back(rows.json(0));
+    while (rows.next()) {
+        auto turn = rows.json(0);
+        turn["text"] = modelBudgetPauseText(rows.string(2));
+        turn["allowance"] = p_->messageModelBudget(rows.number(1)).initialLimit;
+        result.push_back(std::move(turn));
+    }
     return result;
 }
 
@@ -231,7 +251,8 @@ WHERE s.message_id=? AND s.result IS NULL AND json_type(s.effect)='array' AND sl
 )SQL",{message});
     bool toolPending = false;
     while (!toolPending && slots.next()) toolPending = isBotTool(slots.string(0));
-    const auto attempt = reserveExtraModelCall(messageModelBudget(message),toolPending ? "bot_tool" : "conversation_turn",message,0,0);
+    const auto attempt = reserveApprovedModelCall(messageModelBudget(message),
+        toolPending ? "bot_tool" : "conversation_turn",message,0,0);
     exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
              {attempt,message});
     exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?",{waitMessageId});

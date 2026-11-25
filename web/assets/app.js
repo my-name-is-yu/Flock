@@ -1,6 +1,6 @@
 import { handleComposerEnter, isComposerSuggestionKey } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
-import { actionLabel, approvalSummary } from '/action-labels.mjs';
+import { actionLabel, approvalSummary, continuationLabel } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
@@ -90,10 +90,9 @@ const stateLabels = {
 // Bot's own first-person wording for its conversation bubble.
 const waitLabels = {
   user_question: ['Question from $BOT', '$BOT is waiting for your answer.', 'I’m waiting for your answer.'],
-  budget: ['Approval for one more run', 'This request used all of its runs. Approving lets $BOT start one more run, which can use more model and T3 usage.',
-    'This request used all of its runs. If you approve, I can start one more run, which can use more model and T3 usage.'],
+  budget: ['Follow-up allowance used', 'This request used its allowance for follow-up work.'],
   policy_approval: ['Approval needed', '$BOT is waiting for your approval before it continues.', 'I need your approval before I continue.'],
-  model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
+  model_budget: ['Step allowance used', 'This request used its step allowance.'],
   model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
     'I couldn’t choose my next step after several attempts. Try again to continue.'],
   t3_input: ['Action in T3', 'Open the Session in T3 to approve or answer.'],
@@ -104,7 +103,7 @@ const waitLabels = {
 };
 // Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
 const pendingActionLabels = {
-  budget: 'Approve one more run…', model_budget: 'Approve another model call…', model_failure: 'Try again…',
+  budget: 'Continue…', model_budget: 'Continue…', model_failure: 'Try again…',
   deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
 };
 const closedLabels = {
@@ -1003,10 +1002,10 @@ const decisionKindLabels = {
   user_question: 'Question for you',
   pr_review: 'Review requested',
   pr_reconciliation: 'Confirm the pull request',
-  extra_run: 'Approve one more run',
+  extra_run: 'Follow-up allowance used',
   deadline: 'Deadline reached',
-  model_budget: 'Approve another model call',
-  conversation_model_budget: 'Approve another model call',
+  model_budget: 'Step allowance used',
+  conversation_model_budget: 'Step allowance used',
   unknown_delivery: 'Message to T3 unconfirmed',
   protected_input: 'Secret needed',
   policy_approval: 'Approval needed',
@@ -1198,7 +1197,7 @@ function pausedActions(turn) {
   const context = view;
   const item = pausedDecision(context.id, turn);
   const actions = node('div', 'event-actions');
-  const approve = button('Approve one more model call', 'button', () => {
+  const approve = button(continuationLabel(turn.allowance), 'button', () => {
     const current = context.data?.pausedConversations?.find((entry) => entry.messageId === item.waitId);
     void submitConversationDecision(context, item, current && pausedDecision(context.id, current), 'approve');
   });
@@ -1548,13 +1547,14 @@ function eventCard(event, context, place, report) {
       }
     }
   } else if (event.kind === 'conversation_reply') {
-    if (typeof data.textHtml === 'string') {
+    const paused = context.paused.get(data.messageId);
+    if (paused) text.textContent = copy = paused.text;
+    else if (typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
       text.innerHTML = data.textHtml;
     } else text.textContent = data.text ?? '';
     text.classList.add('foldable-text');
     bubble.append(text);
-    const paused = context.paused.get(data.messageId);
     if (paused && context.canDecide) extras.push(pausedActions(paused));
     else if (data.suggestions?.length) {
       if (context.canDecide) extras.push(suggestionActions(event));
@@ -2726,9 +2726,9 @@ function waitContent(context, task, deadlineDraft) {
   }
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
-  } else if (wait.reason === 'budget') primary.append(action('Approve one more run', 'approve'));
-  else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
-  else if (wait.reason === 'model_failure') primary.append(action('Try again', 'retry'));
+  } else if (wait.reason === 'budget' || wait.reason === 'model_budget') {
+    primary.append(action(continuationLabel(wait.allowance, wait.reason === 'budget' ? 'round' : 'step'), 'approve'));
+  } else if (wait.reason === 'model_failure') primary.append(action('Try again', 'retry'));
   else if (wait.reason === 'deadline') {
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
       type: 'datetime-local', value: deadlineDraft ?? localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
@@ -2797,11 +2797,11 @@ function renderDetail() {
     const bot = view.data.bot;
     labelDetail(`${bot.name} settings`);
     renderDetailNav(settingsTabs, detail.section);
-    const { soul, environmentId, projectId, model, ...settings } = bot;
+    const { soul, environmentId, projectId, model, modelCallLimit, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
     const canEdit = bot.canDelete === true;
     detailRole?.update(soul, canEdit);
-    detailWorkspace?.update({ environmentId, projectId, model }, canEdit);
+    detailWorkspace?.update({ environmentId, projectId, model, modelCallLimit }, canEdit);
     return;
   }
   labelDetail(null);

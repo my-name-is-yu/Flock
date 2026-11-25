@@ -1783,7 +1783,7 @@ ORDER BY j.id
             "SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1",{task["id"]}).next();
         if (!charge) return true;
         if (task["remaining"] == 0) {
-            db.wait(task,"budget",{{"text","The additional work allowance is exhausted"},{"attempted",decision.tool},
+            db.wait(task,"budget",{{"text","This request used its allowance for follow-up work."},{"attempted",decision.tool},
                                   {"decisionReason",decision.reason},{"usage",decision.usage}});
             return false;
         }
@@ -2395,10 +2395,10 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
                 revision(current) != revision(task) || current["state"] != "deciding")
                 return std::nullopt;
             attempt = db.takeReservedTaskCall(event["id"]);
-            if (!attempt) attempt = db.reserveModelCall(db.taskModelBudget(current),"task_decision",0,task["id"],event["id"]);
+            if (!attempt) attempt = db.reserveModelCall(db.taskModelBudget(task["id"]),"task_decision",0,task["id"],event["id"]);
             if (!attempt) {
                 db.wait(current,"model_budget",{{"text",
-                    "The model call limit is exhausted. Approve one more model call to continue."}});
+                    "This request used its step allowance."}});
                 saveTask(current);
             }
             transaction.commit();

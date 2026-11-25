@@ -432,7 +432,8 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     }
 
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
-    for (const std::string_view key : botRunSettingFields) {
+    try { item["modelCallLimit"] = modelCallLimit(config); } catch (const Conflict&) {}
+    for (const std::string_view key : {"environmentId","projectId","model"}) {
         if (key == "model") {
             const auto provider = config.find("modelProvider");
             if (provider == config.end() || *provider != "chatgpt") continue;
@@ -654,7 +655,7 @@ Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& sett
         auto config = parseBotConfig(original);
         for (const auto& [key,value] : settings.items()) {
             auto setting = validatedBotRunSetting(key,value);
-            if (setting.empty()) {
+            if (setting == "") {
                 config.erase(key);
                 if (key == "model") config.erase("modelProvider");
             } else {

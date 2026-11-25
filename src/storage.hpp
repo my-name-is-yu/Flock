@@ -16,6 +16,11 @@
 namespace flockv0 {
 namespace conversation { struct Message; struct QuestionAnchor; }
 
+struct ModelBudget {
+    std::string id;
+    Id initialLimit;
+};
+
 struct WorkSession {
     std::string environmentId, threadId, projectId;
 };
@@ -330,14 +335,14 @@ struct Store::Impl {
     void saveTurnResults(Id, int step, const Json& results);
     class ToolBatch;
     std::map<std::pair<Id,int>,std::map<std::size_t,ToolCallResult>> unpersistedToolResults;
-    std::string messageModelBudget(Id messageId);
-    std::string taskModelBudget(const Json& task);
-    std::string ensureModelBudget(std::string key, const Json& config);
-    Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    ModelBudget messageModelBudget(Id messageId) const;
+    ModelBudget taskModelBudget(Id taskId) const;
+    Id waitAllowance(Id taskId, std::string_view reason) const;
+    Id reserveModelCall(const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Id takeReservedConversationCall(Id messageId);
     Id takeReservedTaskCall(Id event);
     void releaseModelCall(Id attempt);
-    Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    Id reserveApprovedModelCall(const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                      bool gitNotification) const;
     ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered,

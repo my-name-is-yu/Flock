@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <barrier>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -828,19 +829,24 @@ void longResultsAreReadInChunks() {
 void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     Fixture fixture;
     Store store(fixture.database());
-    RuntimeFixture execution(store);
     auto limited = Fixture::bot();
-    limited.config["modelCallLimit"] = 1;
-    execution.model.conversation = [&](const ModelInput& input) -> Decision {
+    limited.config["modelCallLimit"] = 14;
+    int calls = 0;
+    const auto script = [&](const ModelInput& input) -> Decision {
         if (input.event["text"] == "Thanks") return say("You're welcome.");
-        if (turn(input).empty()) return {"find_tasks",Json::object(),"Look"};
+        if (++calls <= 27) return {"find_tasks",Json::object(),"Look"};
         return say("Nothing yet.");
     };
     const auto paused = receive(store,"limited","What is running?",0,limited);
     const auto later = receive(store,"later","Thanks");
-    execution.runtime.runConversations();
+    {
+        RuntimeFixture execution(store);
+        execution.model.conversation = script;
+        execution.runtime.runConversations();
+    }
     const auto pauses = store.pausedConversations("alpha");
-    check(pauses.size() == 1 && pauses[0]["route"] == "model_budget" && reply(store,paused)["route"] == "model_budget" &&
+    check(calls == 14 && pauses.size() == 1 && pauses[0]["allowance"] == 14 && pauses[0]["route"] == "model_budget" &&
+          reply(store,paused)["route"] == "model_budget" &&
           reply(store,later)["text"] == "You're welcome.","A paused turn blocked a later message or was not reported");
     const auto waitMessage = pauses[0]["messageId"].get<Id>();
     const InboxTarget target{"alpha",InboxKind::conversation_model_budget,pauses.at(0).at("replyToMessageId"),
@@ -852,7 +858,15 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
           "Reopening the journal lost a persisted pause");
     const auto beforeApproval = reopened.conversation("alpha",0,2);
     const auto cursor = reopened.conversationChangesSince(std::nullopt,"alpha").through;
-    reopened.decideInbox(localOwner,target,"approve");
+    std::barrier ready(2);
+    const auto approve = [&](Store& connection) {
+        ready.arrive_and_wait();
+        try { connection.decideInbox(localOwner,target,"approve"); return true; }
+        catch (const DecisionUnavailable&) { return false; }
+    };
+    auto first = std::async(std::launch::async,[&] { return approve(store); });
+    const auto second = approve(reopened);
+    check(second != first.get(),"The same pause was accepted twice or both approvals failed");
     const auto changes = reopened.conversationChangesSince(cursor,"alpha");
     const auto afterApproval = reopened.conversation("alpha",0,2);
     check(changes.through > cursor && changes.messages.at("alpha") == std::vector<Id>{paused,waitMessage} &&
@@ -863,15 +877,18 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     try { store.decideInbox(localOwner,target,"approve"); }
     catch (const Conflict&) { rejected = true; }
     check(rejected && store.pausedConversations("alpha").empty(),"The same pause was approved twice");
-    execution.runtime.runConversations();
+    Store afterRestart(fixture.database());
+    RuntimeFixture resumed(afterRestart);
+    resumed.model.conversation = script;
+    resumed.runtime.runConversations();
     Json answered;
     for (const auto& row : store.conversation("alpha",0,200))
         if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == paused && row["data"]["route"] == "reply")
             answered = row["data"];
-    check(answered["text"] == "Nothing yet." &&
-          fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(paused)) == 2 &&
-          fixture.count("SELECT attempts FROM model_budgets WHERE id='message/" + std::to_string(paused) + "'") == 2,
-          "The approved call did not resume the paused turn exactly once");
+    check(answered["text"] == "Nothing yet." && calls == 28 &&
+          fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(paused)) == 28 &&
+          fixture.count("SELECT call_limit FROM model_budgets WHERE id='message/" + std::to_string(paused) + "'") == 28,
+          "The full renewed allowance did not survive restart or was granted twice");
 }
 
 void notesFailureReleasesUnusedApproval() {

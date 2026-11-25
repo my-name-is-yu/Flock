@@ -179,6 +179,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
     });
     createBot(home / "release",config,"Review releases","");
     Bots bots(home);
+    check(bots.cards().at(0).at("modelCallLimit") == 20,"Bot settings did not show the default allowance");
     Store store(temp.path / "tasks.db");
     const auto start = utc(2026,1,1,12,0);
     const auto due = utc(2026,1,2,0,0);
@@ -213,13 +214,16 @@ void runSettingsChangesResyncConfiguredSchedules() {
     const auto model = bots.updateRunSettings(store,"release",{{"model"," next-model "}},due + 1,report);
     check(model.at("model") == "next-model" && model.at("projectId") == "new-project",
           "model-only save did not preserve the project");
+    const auto allowance = bots.updateRunSettings(store,"release",{{"modelCallLimit",7}},due + 1,report);
+    check(allowance.at("modelCallLimit") == 7 && allowance.at("model") == "next-model" &&
+          allowance.at("projectId") == "new-project","saving the allowance changed the model or destination");
     store.fireDueAutomations(due + 1);
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && tasks.at(0).at("environmentId") == "new-environment" && tasks.at(0).at("projectId") == "new-project" &&
           tasks.at(0).at("trigger").at("targetTime") == due,"workspace save lost the due time, kept the old route, or restored a canceled schedule");
     const auto settings = store.task(tasks.at(0).at("id")).at("config");
-    check(settings.at("model") == "next-model" && settings.at("modelProvider") == "chatgpt",
-          "the scheduled task did not use the saved model and provider");
+    check(settings.at("model") == "next-model" && settings.at("modelProvider") == "chatgpt" && settings.at("modelCallLimit") == 7,
+          "the scheduled task did not use the saved model, provider, and allowance");
 
     const auto cleared = bots.updateRunSettings(store,"release",{{"model",""}},due + 1,report);
     std::ifstream savedConfig(home / "release" / "config.json");

@@ -10,6 +10,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     <p class="settings-workspace-missing">Choose a model before this Bot can start work.</p>
     <dl class="settings-workspace-facts" hidden>
       <dt>Model</dt><dd></dd>
+      <dt>Steps per request</dt><dd></dd>
       <dt>Environment</dt><dd></dd>
       <dt>Project</dt><dd></dd>
     </dl>
@@ -18,6 +19,10 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
         <select name="model" required aria-describedby="settings-model-feedback"></select>
       </label>
       <p class="settings-workspace-hint" id="settings-model-feedback" role="status" hidden></p>
+      <label class="settings-workspace-field">Steps per request
+        <input name="modelCallLimit" type="number" min="1" max="2147483647" required aria-describedby="settings-steps-hint">
+      </label>
+      <p class="settings-workspace-hint" id="settings-steps-hint">Each request starts with this many steps. You can approve more as needed.</p>
       <label class="settings-workspace-field">Environment
         <input name="environmentId" list="settings-t3-environments" maxlength="256" autocomplete="off" spellcheck="false">
       </label>
@@ -36,12 +41,10 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   const edit = element.querySelector('.settings-card-edit');
   const missing = element.querySelector('.settings-workspace-missing');
   const facts = element.querySelector('.settings-workspace-facts');
-  const [modelText, environmentText, projectText] = facts.querySelectorAll('dd');
+  const [modelText, allowanceText, environmentText, projectText] = facts.querySelectorAll('dd');
   const form = element.querySelector('form');
-  const [environment, project] = form.querySelectorAll('input');
-  const model = form.elements.model;
+  const { model, modelCallLimit: allowance, environmentId: environment, projectId: project } = form.elements;
   const modelFeedback = form.querySelector('#settings-model-feedback');
-  const fields = [model, environment, project];
   const suggestions = form.querySelector('datalist');
   const cancel = form.querySelector('button[type="button"]');
   const save = form.querySelector('button[type="submit"]');
@@ -61,14 +64,15 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     facts.hidden = !!draft || !configured;
     missing.hidden = !!draft || configured;
     modelText.textContent = catalog.find(({ slug }) => slug === workspace.model)?.displayName ?? workspace.model;
+    allowanceText.textContent = workspace.modelCallLimit || 'Not set';
     environmentText.textContent = workspace.environmentId || 'Not set';
     projectText.textContent = workspace.projectId || 'Not set';
   }
-  function update({ model = '', environmentId = '', projectId = '' }, canEdit = editable) {
+  function update({ model = '', modelCallLimit = '', environmentId = '', projectId = '' }, canEdit = editable) {
     if (editable === canEdit && workspace?.model === model && workspace.environmentId === environmentId &&
-        workspace.projectId === projectId) return;
+        workspace.projectId === projectId && workspace.modelCallLimit === modelCallLimit) return;
     editable = canEdit;
-    workspace = { model, environmentId, projectId };
+    workspace = { model, modelCallLimit, environmentId, projectId };
     if (!editable) draft = null;
     showView();
   }
@@ -114,6 +118,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     if (!editable) return;
     draft = { initial: workspace };
     showModelOptions([], workspace.model, 'Loading models…');
+    allowance.value = workspace.modelCallLimit;
     modelFeedback.hidden = true;
     for (const field of [environment, project]) {
       field.value = workspace[field.name];
@@ -151,26 +156,28 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     project.setCustomValidity(!projectId && project.value ? 'Enter the project ID shown in T3.' : '');
     if (!form.reportValidity()) return;
     const patch = {};
-    for (const [key, value] of Object.entries({ model: model.value.trim(), environmentId, projectId })) {
+    const edits = { model: model.value.trim(), modelCallLimit: allowance.valueAsNumber, environmentId, projectId };
+    for (const [key, value] of Object.entries(edits)) {
       if (value !== draft.initial[key]) patch[key] = value;
     }
     if (!Object.keys(patch).length) {
       finishEditing();
       return;
     }
-    const controls = [...fields, save, cancel];
-    for (const control of controls) control.disabled = true;
+    for (const control of form.elements) control.disabled = true;
     showFeedback('');
     try {
       update(await saveSettings(patch));
       finishEditing();
       showFeedback('Settings saved.');
     } catch (error) {
-      showFeedback(error.message === 'invalid_workspace'
-        ? 'Check the environment and project IDs shown in T3.'
-        : 'Couldn’t save these settings. Try again.', true);
+      const message = {
+        invalid_workspace: 'Check the environment and project IDs shown in T3.',
+        invalid_model_call_limit: 'Enter a whole number between 1 and 2,147,483,647.',
+      }[error.message];
+      showFeedback(message ?? 'Couldn’t save these settings. Try again.', true);
     } finally {
-      for (const control of controls) control.disabled = false;
+      for (const control of form.elements) control.disabled = false;
       if (draft && document.activeElement === document.body) project.focus();
     }
   });

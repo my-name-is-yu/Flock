@@ -88,7 +88,11 @@ bool validPlainId(std::string_view id) {
         std::ranges::none_of(id,[](unsigned char ch) { return ch <= 32 || ch == 127; });
 }
 
-std::string validatedBotRunSetting(std::string_view key, const Json& value) {
+Json validatedBotRunSetting(std::string_view key, const Json& value) {
+    if (key == "modelCallLimit") {
+        try { return modelCallLimit({{"modelCallLimit",value}}); }
+        catch (const Conflict& error) { throw BotProfileError("invalid_model_call_limit",error.what()); }
+    }
     if (value.is_string()) {
         const auto& text = value.get_ref<const std::string&>();
         const auto id = trimProfileText(text);

@@ -180,13 +180,17 @@ ORDER BY w.id DESC
         while (waits.next()) {
             const auto task = waits.json(2);
             const auto wait = waits.json(4);
-            const auto kind = inboxWaitKind(field(wait,"reason"));
+            const auto reason = field(wait,"reason");
+            const auto kind = inboxWaitKind(reason);
             if (!kind || !p_->waitIsActionable(task)) continue;
             const auto waitId = waits.number(3);
-            add({id,*kind,waitId,waitId,waits.number(0),task.value("currentRevision",Id{0}),waits.number(1)},
-                {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",field(wait,"text")},
-                 {"choices",*kind == user_question ? wait.value("choices",Json::array()) : Json::array()}},
-                p_->waitAnchor(waits.number(0),waitId));
+            const auto taskId = waits.number(0);
+            Json view{{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",field(wait,"text")},
+                      {"choices",*kind == user_question ? wait.value("choices",Json::array()) : Json::array()}};
+            if (const auto allowance = p_->waitAllowance(taskId,reason); allowance)
+                view["allowance"] = allowance;
+            add({id,*kind,waitId,waitId,taskId,task.value("currentRevision",Id{0}),waits.number(1)},
+                std::move(view),p_->waitAnchor(taskId,waitId));
         }
         auto turns = p_->query(R"SQL(
 SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
@@ -196,8 +200,11 @@ CROSS JOIN messages m ON m.id=t.message_id CROSS JOIN journal j ON j.id=t.pause_
 WHERE t.pause_id IS NOT NULL AND t.status='paused' AND m.bot_id=? ORDER BY t.pause_id DESC
 )SQL",{id});
         while (turns.next()) {
-            add({id,conversation_model_budget,turns.number(0),turns.number(2),0,0,turns.number(2)},
-                {{"requestTitle",title(turns.string(1))},{"request",turns.string(1)},{"prompt",field(turns.json(3),"text")}},
+            const auto message = turns.number(0);
+            const auto request = turns.string(1);
+            add({id,conversation_model_budget,message,turns.number(2),0,0,turns.number(2)},
+                {{"requestTitle",title(request)},{"request",request},{"prompt",field(turns.json(3),"text")},
+                 {"allowance",p_->messageModelBudget(message).initialLimit}},
                 turns.number(4) ? turns.number(2) : 0);
         }
         auto inputs = p_->query(R"SQL(

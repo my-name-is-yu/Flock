@@ -160,7 +160,7 @@ private:
         return reserved;
     }
 
-    bool reserveBotCall(std::size_t slot, ProviderState provider, const PolicyOrigin& origin, std::string_view budget) {
+    bool reserveBotCall(std::size_t slot, ProviderState provider, const PolicyOrigin& origin, const ModelBudget& budget) {
         const auto& call = calls_[slot];
         auto resource = store_.authorizedBotToolScope(tools_.bot,call);
         if (!resource) {

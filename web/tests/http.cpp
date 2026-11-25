@@ -1368,7 +1368,8 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         if (botRunSettingCount(profile)) {
             check(!image,"run settings update carried an image");
             for (const auto& [key, value] : profile.items()) {
-                check(key == "environmentId" || key == "projectId" || key == "model","run settings update forwarded other settings");
+                check(key == "environmentId" || key == "projectId" || key == "model" || key == "modelCallLimit",
+                      "run settings update forwarded other settings");
                 if (value == "") card.erase(key);
                 else card[key] = value;
             }
@@ -1512,7 +1513,18 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     const auto modelOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model","next-model"}},200);
     check(modelOnly.at("model") == "next-model" && modelOnly.at("projectId") == "project-1",
           "model-only update lost the workspace");
-    check(browser.get("/api/view?bot=bot-1").at("bot").at("model") == "next-model","Bot settings view lost its model");
+    const auto allowance = browser.post("/api/bots/profile",{{"botId","bot-1"},{"modelCallLimit",12}},200);
+    check(allowance.at("modelCallLimit") == 12 && allowance.at("model") == "next-model" && allowance.at("projectId") == "project-1",
+          "saving the allowance changed the model or destination");
+    for (const auto& invalid : Json::array({nullptr,"15",true,-1,0,1.5,2147483648LL})) {
+        const auto rejected = browser.post("/api/bots/profile",{
+            {"botId","bot-1"},{"modelCallLimit",invalid},{"model","other-model"},
+        },400);
+        check(rejected.at("error") == "invalid_model_call_limit","invalid allowance was accepted");
+    }
+    const auto settingsView = browser.get("/api/view?bot=bot-1").at("bot");
+    check(settingsView.at("modelCallLimit") == 12 && settingsView.at("model") == "next-model",
+          "the Bot settings view lost saved settings or an invalid update changed them");
     const auto clearedModel = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model",""}},200);
     check(!clearedModel.contains("model") && clearedModel.at("projectId") == "project-1",
           "clearing the model lost the workspace");
