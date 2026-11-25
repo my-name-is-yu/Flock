@@ -30,8 +30,7 @@ struct ChannelDelivery {
 class ChannelTransport {
 public:
     virtual ~ChannelTransport() = default;
-    virtual ChannelDelivery send(std::string_view key, const ChannelOrigin&, std::string_view operation,
-                                 const Json& payload) = 0;
+    virtual ChannelDelivery send(std::string_view key, const ChannelOrigin&, std::string_view operation, const Json& payload) = 0;
     virtual ChannelDelivery reconcile(std::string_view key, const ChannelOrigin&) = 0;
 };
 
@@ -57,7 +56,9 @@ struct VerifiedChannelMessage {
     std::vector<ChannelResource> attachments;
 };
 
-struct ChannelAccessDenied : Conflict { using Conflict::Conflict; };
+struct ChannelAccessDenied : Conflict {
+    using Conflict::Conflict;
+};
 
 class LocalMachine {
 public:

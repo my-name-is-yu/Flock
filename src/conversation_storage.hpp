@@ -28,9 +28,7 @@ inline constexpr std::size_t expandedContextBytes = 8192;
 std::size_t boundExpandedContext(Json& turn);
 void projectToolHistory(Json& turn, const Json& redactionRevision);
 inline bool japanese(std::string_view text) {
-    return std::ranges::any_of(text,[](unsigned char byte) {
-        return byte == 0xe3 || (byte >= 0xe4 && byte <= 0xe9);
-    });
+    return std::ranges::any_of(text, [](unsigned char byte) { return byte == 0xe3 || (byte >= 0xe4 && byte <= 0xe9); });
 }
 
 inline bool canRereadToolResult(std::string_view tool) {
@@ -43,8 +41,7 @@ inline bool hasText(std::string_view value) {
 
 struct ToolError : std::runtime_error {
     Json details;
-    explicit ToolError(const std::string& message, Json extra = Json::object())
-        : std::runtime_error(message), details(std::move(extra)) {}
+    explicit ToolError(const std::string& message, Json extra = Json::object()) : std::runtime_error(message), details(std::move(extra)) {}
 };
 
 inline std::string text(const Json& args, std::string_view key, std::size_t limit, bool required) {
@@ -59,8 +56,7 @@ inline std::string text(const Json& args, std::string_view key, std::size_t limi
         if (required) throw ToolError(std::string(key) + " must not be empty");
         return {};
     }
-    if (result.size() > limit)
-        throw ToolError(std::string(key) + " exceeds " + std::to_string(limit) + " bytes");
+    if (result.size() > limit) throw ToolError(std::string(key) + " exceeds " + std::to_string(limit) + " bytes");
     return result;
 }
 

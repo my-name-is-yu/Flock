@@ -20,7 +20,6 @@ public:
     Person person(const T3Connection&) const;
     Id ask(const T3Connection&, const SessionAsk&, const IntakeResolver&);
     SessionStopResult stop(const T3Connection&, std::string_view bot, std::string_view threadId);
-
 private:
     Store& store_;
     T3& t3_;

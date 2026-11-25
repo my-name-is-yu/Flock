@@ -5,7 +5,8 @@ void Store::Impl::initializeProjectQueue() {
     const auto projectQueueInstalled = [this] {
         return query("SELECT 1 FROM sqlite_schema WHERE type='view'"
                      " AND name IN ('task_project_slots','automation_before_dispatch')"
-                     " GROUP BY type HAVING count(*)=2").next();
+                     " GROUP BY type HAVING count(*)=2")
+            .next();
     };
     if (projectQueueInstalled()) return;
     Transaction install(db);
@@ -68,21 +69,20 @@ CREATE VIEW IF NOT EXISTS task_project_slots AS
 SELECT id,CASE WHEN count(blocker_id)=count(*) THEN min(blocker_id) END AS blocker_id
 FROM project_route_slots GROUP BY id;
 )SQL";
-    if (sqlite3_exec(db,sql,nullptr,nullptr,nullptr) != SQLITE_OK) throw StorageError(db);
+    if (sqlite3_exec(db, sql, nullptr, nullptr, nullptr) != SQLITE_OK) throw StorageError(db);
     install.commit();
 }
 
 bool Store::Impl::automationBeforeDispatch(Id task) const {
-    return query("SELECT 1 FROM automation_before_dispatch WHERE id=?",{task}).next();
+    return query("SELECT 1 FROM automation_before_dispatch WHERE id=?", {task}).next();
 }
 
 bool Store::Impl::isUndispatchedNotesWait(const Json& task) const {
-    return task.at("state") == "waiting" && field(task.at("wait"),"reason") == "bot_notes_unavailable" &&
-        automationBeforeDispatch(task.at("id"));
+    return task.at("state") == "waiting" && field(task.at("wait"), "reason") == "bot_notes_unavailable" &&
+           automationBeforeDispatch(task.at("id"));
 }
 
 bool Store::Impl::projectRouteReady(Id task, std::string_view action) const {
-    return query("SELECT 1 FROM project_route_slots WHERE id=? AND action_id=? AND blocker_id IS NULL",
-                 {task,action}).next();
+    return query("SELECT 1 FROM project_route_slots WHERE id=? AND action_id=? AND blocker_id IS NULL", {task, action}).next();
 }
 }

@@ -24,20 +24,19 @@ public:
         std::string bot, peer;
         auto operator<=>(const DirectMessage&) const = default;
     };
-    using Target = std::variant<BotList,BotView,DirectMessage>;
+    using Target = std::variant<BotList, BotView, DirectMessage>;
     struct Scope {
         Person person;
         Target target;
         auto operator<=>(const Scope&) const = default;
     };
-    using Cursor = std::map<Scope,std::uint64_t>;
+    using Cursor = std::map<Scope, std::uint64_t>;
     struct BotVersion {
         Store::BotViewStamp stamp;
         Json descriptor;
     };
     struct Projection {
-        Projection(Json data, std::optional<BotVersion> version = std::nullopt)
-            : data(std::move(data)), botVersion(std::move(version)) {}
+        Projection(Json data, std::optional<BotVersion> version = std::nullopt) : data(std::move(data)), botVersion(std::move(version)) {}
         Json data;
         std::optional<BotVersion> botVersion;
     };
@@ -51,7 +50,6 @@ public:
     std::shared_ptr<const Projection> cachedBotView(const Person&, const std::string& bot, const Json& descriptor);
     void rescan();
     void stop();
-
 private:
     enum class Refresh { None, Projection, History };
     struct Watched {
@@ -67,7 +65,7 @@ private:
     Load load_;
     std::mutex mutex_;
     std::condition_variable changed_;
-    std::map<Scope,Watched> watched_;
+    std::map<Scope, Watched> watched_;
     std::size_t subscribers_ = 0;
     std::uint64_t revision_ = 0;
     bool scanRequested_ = false;

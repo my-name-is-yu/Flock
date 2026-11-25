@@ -3,7 +3,7 @@
 
 namespace flockv0 {
 void configureWebIdentities(Store& store, const std::filesystem::path& path, WebCallbacks& callbacks) {
-    auto identities = loadIdentities(store,path);
+    auto identities = loadIdentities(store, path);
     callbacks.authenticate = std::move(identities.authenticate);
     callbacks.resolveIdentity = std::move(identities.resolveRoot);
     callbacks.configuredPerson = std::move(identities.resolvePerson);

@@ -19,7 +19,9 @@ public:
     virtual Json fetch(std::string_view url) = 0;
 };
 
-struct ToolOutcomeUnknown : Conflict { using Conflict::Conflict; };
+struct ToolOutcomeUnknown : Conflict {
+    using Conflict::Conflict;
+};
 
 enum class McpCollection { tools, resources };
 
@@ -39,7 +41,7 @@ public:
 };
 
 struct BotTools {
-    std::map<std::string,std::filesystem::path,std::less<>> skills;
+    std::map<std::string, std::filesystem::path, std::less<>> skills;
     std::shared_ptr<WebTools> web;
     std::shared_ptr<McpTools> mcp;
 };

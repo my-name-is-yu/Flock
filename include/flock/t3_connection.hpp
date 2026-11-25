@@ -29,7 +29,6 @@ public:
     std::optional<T3ConnectionSettings> settings(std::string_view person, bool installationRoot = false) const;
     unsigned port() const;
     bool configured() const;
-
 private:
     Store& store_;
 };

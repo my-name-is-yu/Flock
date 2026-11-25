@@ -13,31 +13,34 @@
 
 using namespace flockv0;
 namespace {
-const Person root{"root",true}, owner{"fixture-user",false};
-const std::string image = decodeAttachment(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==",128);
+const Person root{"root", true}, owner{"fixture-user", false};
+const std::string image =
+    decodeAttachment("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==", 128);
 
 void check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
 void rejects(const std::function<void()>& action) {
-    try { action(); }
-    catch (const Conflict&) { return; }
+    try {
+        action();
+    } catch (const Conflict&) {
+        return;
+    }
     throw std::runtime_error("Expected rejection");
 }
 
 void attachmentEncoding() {
-    check(decodeAttachment("YQ==",1) == "a" && decodeAttachment("YWI=",2) == "ab" &&
-          decodeAttachment("YWJj",3) == "abc","Channel attachment decoding changed with padding");
-    for (auto malformed : {"", "YQ", "YQ=A", "YQ==YQ==", "YR==", "YWJ="})
-        rejects([&] { decodeAttachment(malformed,16); });
-    rejects([] { decodeAttachment("YWI=",1); });
+    check(decodeAttachment("YQ==", 1) == "a" && decodeAttachment("YWI=", 2) == "ab" && decodeAttachment("YWJj", 3) == "abc",
+          "Channel attachment decoding changed with padding");
+    for (auto malformed : {"", "YQ", "YQ=A", "YQ==YQ==", "YR==", "YWJ="}) rejects([&] { decodeAttachment(malformed, 16); });
+    rejects([] { decodeAttachment("YWI=", 1); });
 }
 
 struct Temp {
-    std::filesystem::path path = std::filesystem::temp_directory_path() / ("flock-channels-" + std::to_string(unixTime()) +
-        "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::path path =
+        std::filesystem::temp_directory_path() / ("flock-channels-" + std::to_string(unixTime()) + "-" +
+                                                  std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Temp() { std::filesystem::create_directory(path); }
     ~Temp() { std::filesystem::remove_all(path); }
 };
@@ -49,8 +52,8 @@ struct SessionAdapter final : T3 {
     std::string authGeneration(const std::string&, const Json&) override { return "auth"; }
     Delivery send(const Command& command) override {
         ++launches;
-        const auto thread = command.tool == "follow_up" ? command.target.threadId : "thread-"+std::to_string(launches);
-        return {Delivery::Kind::Accepted,{thread,"run-"+std::to_string(launches),""},{}};
+        const auto thread = command.tool == "follow_up" ? command.target.threadId : "thread-" + std::to_string(launches);
+        return {Delivery::Kind::Accepted, {thread, "run-" + std::to_string(launches), ""}, {}};
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&, const Json&, const RunRef& run) override {
@@ -58,20 +61,20 @@ struct SessionAdapter final : T3 {
     }
     InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
     bool listBackground = false;
-    std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
-        std::string_view, std::string_view, Id, SessionReadDeadline) override {
+    std::pair<std::vector<std::string>, std::optional<Id>> projectSessions(std::string_view, std::string_view, Id,
+                                                                           SessionReadDeadline) override {
         if (!listBackground) return {};
         std::vector<std::string> threads;
         for (int i = 0; i < 65; ++i) threads.push_back("background-" + std::to_string(i));
-        return {std::move(threads),std::nullopt};
+        return {std::move(threads), std::nullopt};
     }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
         evidenceReads.push_back(target);
-        return SessionMetadata{target.threadId,"Project","project","running",{},{},{},false};
+        return SessionMetadata{target.threadId, "Project", "project", "running", {}, {}, {}, false};
     }
     std::optional<SessionCounts> sessionCounts(const SessionTarget& target) override {
         evidenceReads.push_back(target);
-        return SessionCounts{2,1};
+        return SessionCounts{2, 1};
     }
 };
 
@@ -81,13 +84,13 @@ public:
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         if (input.event.at("kind") == "intake")
-            return {"delegate",{{"instruction","Prepare work"},{"doneWhen","Work is prepared"}},"The work needs a Session"};
+            return {"delegate", {{"instruction", "Prepare work"}, {"doneWhen", "Work is prepared"}}, "The work needs a Session"};
         return decideNext(input);
     }
 };
 
 struct RecordedTransport final : ChannelTransport {
-    std::map<std::string,std::string> sent;
+    std::map<std::string, std::string> sent;
     std::vector<Json> effects;
     int reconciliations = 0;
     int notSentSlackReplies = 0;
@@ -95,60 +98,65 @@ struct RecordedTransport final : ChannelTransport {
     ChannelDelivery send(std::string_view key, const ChannelOrigin& origin, std::string_view action, const Json& payload) override {
         if (notSentSlackReplies > 0 && origin.kind == ChannelKind::slack && action == "reply") {
             --notSentSlackReplies;
-            effects.push_back({{"origin",origin.json()},{"action",action},{"payload",payload},
-                               {"externalMessageId",""},{"idempotencyKey",key}});
-            return {ChannelDelivery::State::notSent,{}};
+            effects.push_back(
+                {{"origin", origin.json()}, {"action", action}, {"payload", payload}, {"externalMessageId", ""}, {"idempotencyKey", key}});
+            return {ChannelDelivery::State::notSent, {}};
         }
-        const auto [item,inserted] = sent.emplace(key,"out-"+std::to_string(sent.size()+1));
-        check(inserted,"Duplicate outbound call");
-        effects.push_back({{"origin",origin.json()},{"action",action},{"payload",payload},
-                           {"externalMessageId",item->second},{"idempotencyKey",key}});
+        const auto [item, inserted] = sent.emplace(key, "out-" + std::to_string(sent.size() + 1));
+        check(inserted, "Duplicate outbound call");
+        effects.push_back({{"origin", origin.json()},
+                           {"action", action},
+                           {"payload", payload},
+                           {"externalMessageId", item->second},
+                           {"idempotencyKey", key}});
         if (loseNextSlackReply && origin.kind == ChannelKind::slack && action == "reply") {
             loseNextSlackReply = false;
             return {};
         }
-        return {ChannelDelivery::State::accepted,item->second};
+        return {ChannelDelivery::State::accepted, item->second};
     }
     ChannelDelivery reconcile(std::string_view key, const ChannelOrigin&) override {
         ++reconciliations;
         const auto found = sent.find(std::string(key));
         if (found == sent.end()) return {};
-        return {ChannelDelivery::State::accepted,found->second};
+        return {ChannelDelivery::State::accepted, found->second};
     }
 };
 
 Intake intake(std::string_view bot, std::string_view text) {
-    return {std::string(bot),std::string(text),"env","project",{{"modelCallLimit",20}}};
+    return {std::string(bot), std::string(text), "env", "project", {{"modelCallLimit", 20}}};
 }
 
 void shareBot(Store& store, std::string_view bot) {
-    store.policy().setMember(root,bot,owner.id,true);
+    store.policy().setMember(root, bot, owner.id, true);
 }
 
 void connect(Store& store, const std::shared_ptr<RecordedTransport>& transport) {
-    const auto authenticate = [](auto credential,auto workspace) {
-        return credential == "fixture-auth" && workspace == "workspace";
-    };
+    const auto authenticate = [](auto credential, auto workspace) { return credential == "fixture-auth" && workspace == "workspace"; };
     const auto sender = [](auto workspace, auto identity) -> std::optional<ChannelSender> {
-        if (workspace == "workspace" && identity == "linked-user")
-            return ChannelSender{"release",owner.id};
+        if (workspace == "workspace" && identity == "linked-user") return ChannelSender{"release", owner.id};
         return std::nullopt;
     };
-    store.connectChannel({ChannelKind::slack,channelCapabilities(ChannelKind::slack),authenticate,sender,transport});
-    store.connectChannel({ChannelKind::imessage,{true,false,false,false,{"image/png"},100},authenticate,sender,transport});
+    store.connectChannel({ChannelKind::slack, channelCapabilities(ChannelKind::slack), authenticate, sender, transport});
+    store.connectChannel({ChannelKind::imessage, {true, false, false, false, {"image/png"}, 100}, authenticate, sender, transport});
 }
 
 Json event(std::string thread, std::string id, std::string text) {
-    return {{"workspaceId","workspace"},{"threadRef",thread},{"externalMessageId",id},{"senderId","linked-user"},{"text",text}};
+    return {{"workspaceId", "workspace"}, {"threadRef", thread}, {"externalMessageId", id}, {"senderId", "linked-user"}, {"text", text}};
 }
 
 Decision reply(std::string text) {
-    return {"reply",{{"text",text},{"suggestions",{"Start here","Show me more"}}},{}};
+    return {"reply", {{"text", text}, {"suggestions", {"Start here", "Show me more"}}}, {}};
 }
 
 Decision answerQuestion(const Json& task, std::string_view text) {
-    return {"answer_task_question",{{"taskId",task.at("id")},{"waitId",task.at("wait").at("id")},
-        {"revisionId",task.at("currentRevision")},{"generation",task.at("generation")},{"text",text}},{}};
+    return {"answer_task_question",
+            {{"taskId", task.at("id")},
+             {"waitId", task.at("wait").at("id")},
+             {"revisionId", task.at("currentRevision")},
+             {"generation", task.at("generation")},
+             {"text", text}},
+            {}};
 }
 
 Observation finished() {
@@ -165,10 +173,10 @@ void channels(const std::filesystem::path& database) {
     auto transport = std::make_shared<RecordedTransport>();
     const auto notes = [](auto) { return std::string{}; };
     const auto slack = ChannelKind::slack, imessage = ChannelKind::imessage;
-    auto screenshot = event("slack-thread","same-id","What is in this screenshot?");
-    screenshot["attachments"] = Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},
-                                               {"contentBase64",encodeAttachment(image)}}});
-    const auto linkedText = event("imessage-thread","same-id","Hello from iMessage");
+    auto screenshot = event("slack-thread", "same-id", "What is in this screenshot?");
+    screenshot["attachments"] =
+        Json::array({{{"name", "screenshot.png"}, {"mimeType", "image/png"}, {"contentBase64", encodeAttachment(image)}}});
+    const auto linkedText = event("imessage-thread", "same-id", "Hello from iMessage");
     Id attachment = 0;
     int calls = 0;
     model.decideNext = [&](const ModelInput& input) {
@@ -176,177 +184,187 @@ void channels(const std::filesystem::path& database) {
         const auto& channel = input.event.at("channel");
         if (channel.at("channelKind") == "slack") {
             const auto& file = input.event.at("attachments").at(0);
-            check(file.at("name") == "screenshot.png" && file.at("size") == image.size(),"Missing screenshot metadata");
+            check(file.at("name") == "screenshot.png" && file.at("size") == image.size(), "Missing screenshot metadata");
             attachment = file.at("id");
-            check(input.images.size() == 1 && input.images[0].mimeType == "image/png" && input.images[0].dataBase64 == encodeAttachment(image),"Model cannot read screenshot");
+            check(input.images.size() == 1 && input.images[0].mimeType == "image/png" &&
+                      input.images[0].dataBase64 == encodeAttachment(image),
+                  "Model cannot read screenshot");
         } else {
-            check(input.history.empty() && !input.event.contains("earlierAttachments"),"Slack content leaked into iMessage");
+            check(input.history.empty() && !input.event.contains("earlierAttachments"), "Slack content leaked into iMessage");
         }
         return reply("Thread reply");
     };
     {
         Store store(database);
-        connect(store,transport);
-        shareBot(store,"release");
-        rejects([&] { store.receiveChannel(slack,"bad",screenshot,intake); });
-        const auto target = channelPolicyTarget({slack,"workspace","",""});
-        store.policy().changeNeverRule(root,Action::channel_read,target,true);
-        rejects([&] { store.receiveChannel(slack,"fixture-auth",screenshot,intake); });
-        store.policy().changeNeverRule(root,Action::channel_read,target,false);
-        const auto a = store.receiveChannel(slack,"fixture-auth",screenshot,intake);
-        const auto b = store.receiveChannel(imessage,"fixture-auth",linkedText,intake);
-        check(a != b,"Channel keys collided");
-        Runtime runtime(store,model,t3,notes);
+        connect(store, transport);
+        shareBot(store, "release");
+        rejects([&] { store.receiveChannel(slack, "bad", screenshot, intake); });
+        const auto target = channelPolicyTarget({slack, "workspace", "", ""});
+        store.policy().changeNeverRule(root, Action::channel_read, target, true);
+        rejects([&] { store.receiveChannel(slack, "fixture-auth", screenshot, intake); });
+        store.policy().changeNeverRule(root, Action::channel_read, target, false);
+        const auto a = store.receiveChannel(slack, "fixture-auth", screenshot, intake);
+        const auto b = store.receiveChannel(imessage, "fixture-auth", linkedText, intake);
+        check(a != b, "Channel keys collided");
+        Runtime runtime(store, model, t3, notes);
         runtime.runConversations();
-        check(calls == 2 && transport->effects.size() == 2,"Expected one reply in each channel");
-        check(store.receiveChannel(slack,"fixture-auth",screenshot,intake) == a &&
-              store.receiveChannel(imessage,"fixture-auth",linkedText,intake) == b,"Replay changed receipts");
+        check(calls == 2 && transport->effects.size() == 2, "Expected one reply in each channel");
+        check(store.receiveChannel(slack, "fixture-auth", screenshot, intake) == a &&
+                  store.receiveChannel(imessage, "fixture-auth", linkedText, intake) == b,
+              "Replay changed receipts");
         auto changed = screenshot;
         changed["attachments"][0]["name"] = "other.png";
-        rejects([&] { store.receiveChannel(slack,"fixture-auth",changed,intake); });
+        rejects([&] { store.receiveChannel(slack, "fixture-auth", changed, intake); });
         runtime.runConversations();
-        check(calls == 2 && transport->effects.size() == 2,"Replay ran model or sent another reply");
+        check(calls == 2 && transport->effects.size() == 2, "Replay ran model or sent another reply");
         const auto history = store.conversation("release");
         check(history.size() == 4 && history[0]["data"]["channel"]["threadRef"] == "slack-thread",
               "Channel events did not enter conversation history");
-        check(store.attachment(owner,attachment)->bytes == image && !store.attachment({"outsider",false},attachment),
+        check(store.attachment(owner, attachment)->bytes == image && !store.attachment({"outsider", false}, attachment),
               "Attachment missing or exposed to another person");
-        for (const auto& effect : transport->effects)
-            check(effect["payload"]["suggestions"].size() == 2,"Channel reply lost suggestions");
+        for (const auto& effect : transport->effects) check(effect["payload"]["suggestions"].size() == 2, "Channel reply lost suggestions");
     }
     std::this_thread::sleep_for(std::chrono::seconds(5));
     Store store(database);
-    connect(store,transport);
+    connect(store, transport);
     store.artifactBaseUrl("https://previews.example.com");
-    Runtime runtime(store,model,t3,notes);
+    Runtime runtime(store, model, t3, notes);
     runtime.runConversations();
-    check(transport->reconciliations == 1 && transport->effects.size() == 2,"Lost reply was not reconciled on restart");
+    check(transport->reconciliations == 1 && transport->effects.size() == 2, "Lost reply was not reconciled on restart");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
         const auto& results = input.event.at("turn");
         for (const auto& entry : results) {
             const auto& result = entry.at("result");
-            check(result.at("ok") == false && result.at("unsupported") == true && result.contains("reason") &&
-                  !result.contains("delivery"),"Expected explicit unsupported result");
+            check(result.at("ok") == false && result.at("unsupported") == true && result.contains("reason") && !result.contains("delivery"),
+                  "Expected explicit unsupported result");
         }
         switch (results.size()) {
-        case 0: return {"channel_edit_message",{{"externalMessageId","out-2"},{"text","Edited"}},{}};
-        case 1: return {"channel_react",{{"reaction","thumbsup"}},{}};
-        case 2: return {"channel_send_attachment",{{"name","large.png"},{"mimeType","image/png"},
-                            {"contentBase64",encodeAttachment(image+std::string(100,'x'))}},{}};
-        case 3: return {"channel_send_attachment",{{"name","test.txt"},{"mimeType","text/plain"},
-                            {"contentBase64",encodeAttachment("test")}},{}};
-        case 4: return {"publish_artifact",{{"title","Preview"},{"html","<p>Preview</p>"}},{}};
+        case 0: return {"channel_edit_message", {{"externalMessageId", "out-2"}, {"text", "Edited"}}, {}};
+        case 1: return {"channel_react", {{"reaction", "thumbsup"}}, {}};
+        case 2:
+            return {"channel_send_attachment",
+                    {{"name", "large.png"}, {"mimeType", "image/png"}, {"contentBase64", encodeAttachment(image + std::string(100, 'x'))}},
+                    {}};
+        case 3:
+            return {"channel_send_attachment",
+                    {{"name", "test.txt"}, {"mimeType", "text/plain"}, {"contentBase64", encodeAttachment("test")}},
+                    {}};
+        case 4: return {"publish_artifact", {{"title", "Preview"}, {"html", "<p>Preview</p>"}}, {}};
         default: return reply("Available when you’re ready.");
         }
     };
-    const auto unsupported = event("imessage-thread","unsupported","Try the channel actions");
-    store.receiveChannel(imessage,"fixture-auth",unsupported,intake);
+    const auto unsupported = event("imessage-thread", "unsupported", "Try the channel actions");
+    store.receiveChannel(imessage, "fixture-auth", unsupported, intake);
     runtime.runConversations();
-    check(transport->effects.size() == 8,"Expected five limitation notices and a normal reply");
+    check(transport->effects.size() == 8, "Expected five limitation notices and a normal reply");
     for (std::size_t i = 2; i < transport->effects.size(); ++i) {
         const auto& effect = transport->effects[i];
-        check(effect["action"] == "reply" && effect["origin"]["threadRef"] == "imessage-thread","Unsupported action reached transport");
-        if (i < 7) check(effect["payload"]["text"].get<std::string>().find("normal follow-up") != std::string::npos,
-                         "No available alternative was offered");
+        check(effect["action"] == "reply" && effect["origin"]["threadRef"] == "imessage-thread", "Unsupported action reached transport");
+        if (i < 7)
+            check(effect["payload"]["text"].get<std::string>().find("normal follow-up") != std::string::npos,
+                  "No available alternative was offered");
     }
-    store.receiveChannel(imessage,"fixture-auth",unsupported,intake);
+    store.receiveChannel(imessage, "fixture-auth", unsupported, intake);
     runtime.runConversations();
-    check(transport->effects.size() == 8,"Unsupported notices were repeated on replay");
+    check(transport->effects.size() == 8, "Unsupported notices were repeated on replay");
 
     std::string artifact, attachmentPost, artifactPost;
     model.decideNext = [&](const ModelInput& input) -> Decision {
         const auto& results = input.event.at("turn");
         switch (results.size()) {
         case 0:
-            check(!input.event["channel"]["sentMessages"].empty(),"Reconciled message ID missing");
-            return {"channel_edit_message",{{"externalMessageId","out-1"},{"text","Updated"}},{}};
-        case 1: return {"channel_react",{{"reaction","thumbsup"}},{}};
-        case 2: return {"channel_send_attachment",{{"attachmentId",attachment}},{}};
-        case 3: return {"publish_artifact",{{"title","Preview"},{"html","<p>Preview</p>"}},{}};
+            check(!input.event["channel"]["sentMessages"].empty(), "Reconciled message ID missing");
+            return {"channel_edit_message", {{"externalMessageId", "out-1"}, {"text", "Updated"}}, {}};
+        case 1: return {"channel_react", {{"reaction", "thumbsup"}}, {}};
+        case 2: return {"channel_send_attachment", {{"attachmentId", attachment}}, {}};
+        case 3: return {"publish_artifact", {{"title", "Preview"}, {"html", "<p>Preview</p>"}}, {}};
         default: {
-            for (const auto& entry : results) check(entry["result"]["delivery"] == "accepted","Channel action was not sent");
+            for (const auto& entry : results) check(entry["result"]["delivery"] == "accepted", "Channel action was not sent");
             artifact = results.back()["result"]["url"];
             attachmentPost = results.at(2).at("result").at("externalMessageId");
             artifactPost = results.at(3).at("result").at("externalMessageId");
             const auto& sent = input.event.at("channel").at("sentMessages");
-            check(sent.back().at("text") == "Updated","Accepted edit is missing from sent-message context");
+            check(sent.back().at("text") == "Updated", "Accepted edit is missing from sent-message context");
             return reply("Actions completed.");
         }
         }
     };
-    store.receiveChannel(slack,"fixture-auth",event("slack-thread","actions","Perform the supported actions"),intake);
+    store.receiveChannel(slack, "fixture-auth", event("slack-thread", "actions", "Perform the supported actions"), intake);
     runtime.runConversations();
     check(transport->effects.size() == 13 && transport->effects[10]["payload"]["contentBase64"] == encodeAttachment(image),
           "Supported actions or attachment payload missing");
-    const auto artifactId = artifact.substr(artifact.find_last_of('/')+1);
+    const auto artifactId = artifact.substr(artifact.find_last_of('/') + 1);
     check(artifact.starts_with("https://previews.example.com/") && store.artifact(artifactId)->bytes == "<p>Preview</p>",
           "Artifact publication needs an absolute URL and persisted HTML");
     model.decideNext = [&](const ModelInput& input) -> Decision {
         const auto& earlier = input.event.at("earlierAttachments");
         const auto& results = input.event.at("turn");
-        check(earlier.at(0).at("id") == attachment,"Earlier screenshot was not discoverable in-thread");
+        check(earlier.at(0).at("id") == attachment, "Earlier screenshot was not discoverable in-thread");
         switch (results.size()) {
         case 0: {
             const auto& sent = input.event.at("channel").at("sentMessages");
-            for (const auto& id : {attachmentPost,artifactPost})
-                check(std::ranges::any_of(sent,[&](const Json& post) { return post.at("externalMessageId") == id; }),
+            for (const auto& id : {attachmentPost, artifactPost})
+                check(std::ranges::any_of(sent, [&](const Json& post) { return post.at("externalMessageId") == id; }),
                       "Accepted non-reply post is missing from sent-message context");
-            return {"channel_edit_message",{{"externalMessageId",attachmentPost},{"text","Updated attachment"}},{}};
+            return {"channel_edit_message", {{"externalMessageId", attachmentPost}, {"text", "Updated attachment"}}, {}};
         }
         case 1:
-            check(results.at(0).at("result").at("delivery") == "accepted","Attachment post edit was rejected");
-            return {"channel_edit_message",{{"externalMessageId",artifactPost},{"text","Updated preview"}},{}};
+            check(results.at(0).at("result").at("delivery") == "accepted", "Attachment post edit was rejected");
+            return {"channel_edit_message", {{"externalMessageId", artifactPost}, {"text", "Updated preview"}}, {}};
         case 2:
-            check(results.at(1).at("result").at("delivery") == "accepted","Artifact post edit was rejected");
-            check(input.images.empty(),"Earlier screenshot was injected without selecting it");
-            return {"read_channel_attachment",{{"attachmentId",attachment}},{}};
+            check(results.at(1).at("result").at("delivery") == "accepted", "Artifact post edit was rejected");
+            check(input.images.empty(), "Earlier screenshot was injected without selecting it");
+            return {"read_channel_attachment", {{"attachmentId", attachment}}, {}};
         default:
-            check(input.images.size() == 1 && input.images[0].mimeType == "image/png" && input.images[0].dataBase64 == encodeAttachment(image) &&
-                  results.at(2).at("result").at("imageIncluded") == true,"Earlier screenshot did not reach the model");
+            check(input.images.size() == 1 && input.images[0].mimeType == "image/png" &&
+                      input.images[0].dataBase64 == encodeAttachment(image) && results.at(2).at("result").at("imageIncluded") == true,
+                  "Earlier screenshot did not reach the model");
             return reply("I can still see the screenshot.");
         }
     };
-    store.receiveChannel(slack,"fixture-auth",event("slack-thread","followup","Look at the screenshot again"),intake);
+    store.receiveChannel(slack, "fixture-auth", event("slack-thread", "followup", "Look at the screenshot again"), intake);
     runtime.runConversations();
-    check(transport->effects.size() == 16,"Non-reply edits or screenshot follow-up did not reach the originating thread");
-    store.policy().changeNeverRule(root,Action::channel_read,channelPolicyTarget({slack,"workspace","",""}),true);
-    check(!store.attachment(owner,attachment),"Attachment download ignored revocation");
+    check(transport->effects.size() == 16, "Non-reply edits or screenshot follow-up did not reach the originating thread");
+    store.policy().changeNeverRule(root, Action::channel_read, channelPolicyTarget({slack, "workspace", "", ""}), true);
+    check(!store.attachment(owner, attachment), "Attachment download ignored revocation");
     bool denied = false;
     model.decideNext = [&](const ModelInput& input) {
         const auto& results = input.event.at("turn");
-        if (results.empty()) return Decision{"channel_send_attachment",{{"attachmentId",attachment}},{}};
+        if (results.empty()) return Decision{"channel_send_attachment", {{"attachmentId", attachment}}, {}};
         denied = results[0]["result"]["ok"] == false;
         return reply("The screenshot is unavailable.");
     };
-    store.receiveChannel(slack,"fixture-auth",event("slack-thread","revoked","Forward the screenshot"),intake);
+    store.receiveChannel(slack, "fixture-auth", event("slack-thread", "revoked", "Forward the screenshot"), intake);
     runtime.runConversations();
-    check(denied && transport->effects.size() == 17,"Bot attachment reference ignored revocation");
-    store.policy().changeNeverRule(root,Action::channel_use,channelPolicyTarget({slack,"workspace","",""}),true);
-    check(!store.artifact(artifactId),"Public preview survived source channel revocation");
-    check(ChannelOrigin{slack,"a:b","c","d"}.key() != ChannelOrigin{slack,"a","b:c","d"}.key(),"Dedupe delimiters collide");
+    check(denied && transport->effects.size() == 17, "Bot attachment reference ignored revocation");
+    store.policy().changeNeverRule(root, Action::channel_use, channelPolicyTarget({slack, "workspace", "", ""}), true);
+    check(!store.artifact(artifactId), "Public preview survived source channel revocation");
+    check(ChannelOrigin{slack, "a:b", "c", "d"}.key() != ChannelOrigin{slack, "a", "b:c", "d"}.key(), "Dedupe delimiters collide");
 }
 
 std::vector<Json> persistedReplyPayloads(const std::filesystem::path& database) {
     sqlite3* raw = nullptr;
-    check(sqlite3_open_v2(database.c_str(),&raw,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,"Could not open the channel outbox");
-    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    check(sqlite3_open_v2(database.c_str(), &raw, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK, "Could not open the channel outbox");
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
     sqlite3_stmt* statementRaw = nullptr;
-    check(sqlite3_prepare_v2(db.get(),"SELECT payload FROM channel_deliveries WHERE operation='reply' ORDER BY rowid",
-                             -1,&statementRaw,nullptr) == SQLITE_OK,"Could not read channel reply outbox");
-    std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(statementRaw,sqlite3_finalize);
+    check(sqlite3_prepare_v2(db.get(), "SELECT payload FROM channel_deliveries WHERE operation='reply' ORDER BY rowid", -1, &statementRaw,
+                             nullptr) == SQLITE_OK,
+          "Could not read channel reply outbox");
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(statementRaw, sqlite3_finalize);
     std::vector<Json> result;
     while (sqlite3_step(statement.get()) == SQLITE_ROW) {
-        const auto* bytes = reinterpret_cast<const char*>(sqlite3_column_text(statement.get(),0));
-        const auto size = sqlite3_column_bytes(statement.get(),0);
-        result.push_back(Json::parse(std::string(bytes,static_cast<std::size_t>(size))));
+        const auto* bytes = reinterpret_cast<const char*>(sqlite3_column_text(statement.get(), 0));
+        const auto size = sqlite3_column_bytes(statement.get(), 0);
+        result.push_back(Json::parse(std::string(bytes, static_cast<std::size_t>(size))));
     }
     return result;
 }
 
 void markdownDelivery(const std::filesystem::path& database) {
     const std::string source = "**完了**：[結果を見る](https://example.com/result)\n\nNotify <!here> <@U123> @channel `**literal** <tag>`";
-    const std::string slackText = "*完了*：<https://example.com/result|結果を見る>\n\nNotify &lt;!here&gt; &lt;@U123&gt; @channel `**literal** &lt;tag&gt;`";
+    const std::string slackText =
+        "*完了*：<https://example.com/result|結果を見る>\n\nNotify &lt;!here&gt; &lt;@U123&gt; @channel `**literal** &lt;tag&gt;`";
     const std::string imessageText = "完了：結果を見る（https://example.com/result）\n\nNotify <!here> <@U123> @channel **literal** <tag>";
     Script model;
     model.decideNext = [&](const ModelInput&) { return reply(source); };
@@ -357,43 +375,43 @@ void markdownDelivery(const std::filesystem::path& database) {
     const auto notes = [](auto) { return std::string{}; };
     {
         Store store(database);
-        connect(store,transport);
-        shareBot(store,"release");
-        store.policy().setMode(root,"full");
-        store.receiveChannel(ChannelKind::slack,"fixture-auth",event("slack-markdown","slack-markdown","hello"),intake);
-        store.receiveChannel(ChannelKind::imessage,"fixture-auth",event("imessage-markdown","imessage-markdown","hello"),intake);
-        Runtime runtime(store,model,t3,notes);
+        connect(store, transport);
+        shareBot(store, "release");
+        store.policy().setMode(root, "full");
+        store.receiveChannel(ChannelKind::slack, "fixture-auth", event("slack-markdown", "slack-markdown", "hello"), intake);
+        store.receiveChannel(ChannelKind::imessage, "fixture-auth", event("imessage-markdown", "imessage-markdown", "hello"), intake);
+        Runtime runtime(store, model, t3, notes);
         runtime.runConversations();
-        check(transport->effects.size() == 2,"Channel replies were not both attempted");
-        const auto slack = std::ranges::find_if(transport->effects,[](const Json& item) {
-            return item["origin"]["threadRef"] == "slack-markdown";
-        });
-        const auto imessage = std::ranges::find_if(transport->effects,[](const Json& item) {
-            return item["origin"]["threadRef"] == "imessage-markdown";
-        });
-        check(slack != transport->effects.end() && imessage != transport->effects.end(),"Channel-specific replies were missing");
+        check(transport->effects.size() == 2, "Channel replies were not both attempted");
+        const auto slack =
+            std::ranges::find_if(transport->effects, [](const Json& item) { return item["origin"]["threadRef"] == "slack-markdown"; });
+        const auto imessage =
+            std::ranges::find_if(transport->effects, [](const Json& item) { return item["origin"]["threadRef"] == "imessage-markdown"; });
+        check(slack != transport->effects.end() && imessage != transport->effects.end(), "Channel-specific replies were missing");
         check(slack->at("payload").at("text") == slackText &&
-              slack->at("payload").at("deliveryMetadata") == Json({{"mrkdwn",true},{"parse","none"},
-                  {"link_names",false},{"disableAutoMentions",true}}),
+                  slack->at("payload").at("deliveryMetadata") ==
+                      Json({{"mrkdwn", true}, {"parse", "none"}, {"link_names", false}, {"disableAutoMentions", true}}),
               "Slack reply did not escape notification text or disable automatic mentions");
         check(imessage->at("payload").at("text") == imessageText && !imessage->at("payload").contains("deliveryMetadata"),
               "iMessage reply did not preserve plain text and link destinations");
-        check(slack->at("payload").at("suggestions") == Json::array({"Start here","Show me more"}) &&
-              imessage->at("payload").at("suggestions") == Json::array({"Start here","Show me more"}),
+        check(slack->at("payload").at("suggestions") == Json::array({"Start here", "Show me more"}) &&
+                  imessage->at("payload").at("suggestions") == Json::array({"Start here", "Show me more"}),
               "Channel formatting changed reply suggestions");
         const auto conversation = store.conversation("release");
-        check(std::ranges::any_of(conversation,[&](const Json& item) {
-            return item["kind"] == "conversation_reply" && item["data"]["text"] == source;
-        }),"Conversation journal did not retain canonical Markdown");
+        check(std::ranges::any_of(conversation,
+                                  [&](const Json& item) { return item["kind"] == "conversation_reply" && item["data"]["text"] == source; }),
+              "Conversation journal did not retain canonical Markdown");
     }
 
     const auto outbox = persistedReplyPayloads(database);
-    check(outbox.size() == 2 && std::ranges::all_of(outbox,[&](const Json& item) {
-        return item["text"] == source && item["suggestions"] == Json::array({"Start here","Show me more"});
-    }),"Channel outbox persisted rendered text instead of canonical Markdown");
-    const auto firstSlack = std::ranges::find_if(transport->effects,[](const Json& item) {
-        return item["origin"]["threadRef"] == "slack-markdown";
-    });
+    check(outbox.size() == 2 && std::ranges::all_of(outbox,
+                                                    [&](const Json& item) {
+                                                        return item["text"] == source &&
+                                                               item["suggestions"] == Json::array({"Start here", "Show me more"});
+                                                    }),
+          "Channel outbox persisted rendered text instead of canonical Markdown");
+    const auto firstSlack =
+        std::ranges::find_if(transport->effects, [](const Json& item) { return item["origin"]["threadRef"] == "slack-markdown"; });
     check(firstSlack != transport->effects.end() && firstSlack->at("externalMessageId") == "",
           "The retry fixture did not record a not-sent Slack attempt");
     const auto slackKey = firstSlack->at("idempotencyKey");
@@ -401,25 +419,23 @@ void markdownDelivery(const std::filesystem::path& database) {
     std::this_thread::sleep_for(std::chrono::seconds(6));
     {
         Store reopened(database);
-        connect(reopened,transport);
-        Runtime runtime(reopened,model,t3,notes);
+        connect(reopened, transport);
+        Runtime runtime(reopened, model, t3, notes);
         runtime.runConversations();
-        check(transport->effects.size() == 3,"The pending Slack reply was not retried after reload");
+        check(transport->effects.size() == 3, "The pending Slack reply was not retried after reload");
         const auto retry = transport->effects.back();
-        check(retry["origin"]["threadRef"] == "slack-markdown" &&
-              retry["payload"]["text"] == slackText && retry["payload"]["deliveryMetadata"]["parse"] == "none" &&
-              retry["payload"]["suggestions"] == Json::array({"Start here","Show me more"}) &&
-              retry["idempotencyKey"] == slackKey,
+        check(retry["origin"]["threadRef"] == "slack-markdown" && retry["payload"]["text"] == slackText &&
+                  retry["payload"]["deliveryMetadata"]["parse"] == "none" &&
+                  retry["payload"]["suggestions"] == Json::array({"Start here", "Show me more"}) && retry["idempotencyKey"] == slackKey,
               "Reloaded retry changed Slack output, metadata, suggestions, or idempotency key");
-        check(std::ranges::any_of(reopened.conversation("release"),[&](const Json& item) {
-            return item["kind"] == "conversation_reply" && item["data"]["text"] == source;
-        }),"Reloaded conversation projection changed canonical Markdown");
+        check(std::ranges::any_of(reopened.conversation("release"),
+                                  [&](const Json& item) { return item["kind"] == "conversation_reply" && item["data"]["text"] == source; }),
+              "Reloaded conversation projection changed canonical Markdown");
     }
 }
 
 void markdownFallbackDelivery(const std::filesystem::path& database) {
-    const std::string source =
-        "Before **bold** and ``literal ` ** _ <tag> >`` after [search](https://example.com/search?q=a&lang=en)";
+    const std::string source = "Before **bold** and ``literal ` ** _ <tag> >`` after [search](https://example.com/search?q=a&lang=en)";
     const std::string expected =
         "Before bold and literal ` ** _ &lt;tag&gt; &gt; after search (https://example.com/search?q=a&amp;lang=en)";
     Script model;
@@ -428,15 +444,15 @@ void markdownFallbackDelivery(const std::filesystem::path& database) {
     auto transport = std::make_shared<RecordedTransport>();
     transport->loseNextSlackReply = false;
     Store store(database);
-    connect(store,transport);
-    shareBot(store,"release");
-    store.policy().setMode(root,"full");
-    store.receiveChannel(ChannelKind::slack,"fixture-auth",event("slack-code-fallback","slack-code-fallback","hello"),intake);
-    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    connect(store, transport);
+    shareBot(store, "release");
+    store.policy().setMode(root, "full");
+    store.receiveChannel(ChannelKind::slack, "fixture-auth", event("slack-code-fallback", "slack-code-fallback", "hello"), intake);
+    Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
     runtime.runConversations();
     check(transport->effects.size() == 1 && transport->effects[0].at("payload").at("text") == expected &&
-          transport->effects[0].at("payload").at("deliveryMetadata") == Json({{"mrkdwn",false},{"parse","none"},
-              {"link_names",false},{"disableAutoMentions",true}}),
+              transport->effects[0].at("payload").at("deliveryMetadata") ==
+                  Json({{"mrkdwn", false}, {"parse", "none"}, {"link_names", false}, {"disableAutoMentions", true}}),
           "Slack delivery did not send escaped fallback text with mrkdwn disabled");
 }
 
@@ -446,57 +462,57 @@ void taskUpdates(const std::filesystem::path& database) {
     Script model;
     auto transport = std::make_shared<RecordedTransport>();
     transport->loseNextSlackReply = false;
-    connect(store,transport);
-    shareBot(store,"release");
+    connect(store, transport);
+    shareBot(store, "release");
     const auto channel = ChannelKind::slack;
-    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
     store.setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
         if (person == owner.id) return false;
         return std::nullopt;
     });
-    auto original = event("private-origin","start","Start the private release task");
-    auto publish = event("private-origin","publish","Publish the preview");
+    auto original = event("private-origin", "start", "Start the private release task");
+    auto publish = event("private-origin", "publish", "Publish the preview");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
         if (input.event.at("text") == "Publish the preview") {
-            if (input.event.at("turn").empty()) return {"publish_artifact",{{"title","test"},{"html","<p>test</p>"}},{}};
+            if (input.event.at("turn").empty()) return {"publish_artifact", {{"title", "test"}, {"html", "<p>test</p>"}}, {}};
             check(input.event.at("turn").at(0).at("result").at("unsupported") == true,
                   "Missing preview origin wasn't reported as unsupported");
             return reply("Preview unavailable.");
         }
-        if (input.event.at("turn").empty()) return {"start_task",{{"request","A private release task"}},{}};
+        if (input.event.at("turn").empty()) return {"start_task", {{"request", "A private release task"}}, {}};
         return reply("Task started.");
     };
-    store.receiveChannel(channel,"fixture-auth",publish,intake);
+    store.receiveChannel(channel, "fixture-auth", publish, intake);
     runtime.runConversations();
     check(transport->effects.size() == 2 && transport->effects.at(0).at("action") == "reply" &&
-          transport->effects.at(0).at("payload").at("text").get<std::string>().find("preview URL") != std::string::npos,
+              transport->effects.at(0).at("payload").at("text").get<std::string>().find("preview URL") != std::string::npos,
           "Publishing without a preview origin reached transport or did not explain the limitation");
-    auto screenshot = event("private-origin","screenshot","Inspect a screenshot");
-    screenshot["attachments"] = Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},
-                                               {"contentBase64",encodeAttachment(image)}}});
-    const auto channelTarget = channelPolicyTarget({channel,"workspace","",""});
-    store.policy().setMode(root,"supervised");
-    store.policy().changeRule(root,RuleKind::ask,Action::channel_read,channelTarget,true);
+    auto screenshot = event("private-origin", "screenshot", "Inspect a screenshot");
+    screenshot["attachments"] =
+        Json::array({{{"name", "screenshot.png"}, {"mimeType", "image/png"}, {"contentBase64", encodeAttachment(image)}}});
+    const auto channelTarget = channelPolicyTarget({channel, "workspace", "", ""});
+    store.policy().setMode(root, "supervised");
+    store.policy().changeRule(root, RuleKind::ask, Action::channel_read, channelTarget, true);
     bool inspected = false;
     auto taskModel = model.decideNext;
     model.decideNext = [&](const ModelInput& input) {
-        check(input.images.empty() && input.event.at("attachments").size()==1,
+        check(input.images.empty() && input.event.at("attachments").size() == 1,
               "Ask-first exposed image bytes or hid the attachment identifier");
         inspected = true;
         return reply("I need approval to inspect it.");
     };
-    store.receiveChannel(channel,"fixture-auth",screenshot,intake);
+    store.receiveChannel(channel, "fixture-auth", screenshot, intake);
     runtime.runConversations();
-    check(inspected && transport->effects.size()==3,"Image approval was not exercised");
-    store.policy().changeRule(root,RuleKind::ask,Action::channel_read,channelTarget,false);
-    store.policy().setMode(root,"full");
+    check(inspected && transport->effects.size() == 3, "Image approval was not exercised");
+    store.policy().changeRule(root, RuleKind::ask, Action::channel_read, channelTarget, false);
+    store.policy().setMode(root, "full");
     model.decideNext = std::move(taskModel);
-    const auto receipt = store.receiveChannel(channel,"fixture-auth",original,intake);
+    const auto receipt = store.receiveChannel(channel, "fixture-auth", original, intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
     const auto taskId = store.activeTasks("release").at(0).at("id").get<Id>();
     const auto active = store.task(taskId).at("activeRun");
-    check(active.is_object(),"Channel task did not start a Session");
+    check(active.is_object(), "Channel task did not start a Session");
     t3.observeRun = [](const RunRef&) {
         Observation observed;
         observed.kind = Observation::Kind::Question;
@@ -505,63 +521,63 @@ void taskUpdates(const std::filesystem::path& database) {
     };
     model.decideNext = [](const ModelInput& input) -> Decision {
         if (input.event.at("kind") == "question")
-            return {"ask_user",{{"question","Which private target?"},{"choices",{"Preview","Production"}}},
-                    "The release needs a target"};
+            return {
+                "ask_user", {{"question", "Which private target?"}, {"choices", {"Preview", "Production"}}}, "The release needs a target"};
         return reply("Unexpected turn");
     };
-    const auto target = channelPolicyTarget({channel,"workspace","",""});
-    store.policy().setMode(root,"supervised");
-    store.policy().changeRule(root,RuleKind::ask,Action::channel_post,target,true);
+    const auto target = channelPolicyTarget({channel, "workspace", "", ""});
+    store.policy().setMode(root, "supervised");
+    store.policy().changeRule(root, RuleKind::ask, Action::channel_post, target, true);
     for (int i = 0; i < 4; ++i) runtime.tick();
-    check(transport->effects.size() == 4,"Task question sent before Ask-first approval");
+    check(transport->effects.size() == 4, "Task question sent before Ask-first approval");
     const auto items = store.inbox(owner);
-    const auto card = std::ranges::find_if(items,[](const auto& item) { return item.at("itemKind")=="policy_approval"; });
-    check(card != items.end(),"Task question did not create an approval");
-    store.decideInbox(owner,{card->at("botId"),InboxKind::policy_approval,card->at("itemId"),0,0,0,0},"allow_once");
+    const auto card = std::ranges::find_if(items, [](const auto& item) { return item.at("itemKind") == "policy_approval"; });
+    check(card != items.end(), "Task question did not create an approval");
+    store.decideInbox(owner, {card->at("botId"), InboxKind::policy_approval, card->at("itemId"), 0, 0, 0, 0}, "allow_once");
     const auto allowed = store.decisionHistory(owner).at(0);
-    check(allowed.at("action") == "channel.post" && allowed.at("target") == card->at("target") &&
-          allowed.at("decidedByYou") == true,"History did not say which approval the person allowed");
-    store.policy().changeRule(root,RuleKind::ask,Action::channel_post,target,false);
+    check(allowed.at("action") == "channel.post" && allowed.at("target") == card->at("target") && allowed.at("decidedByYou") == true,
+          "History did not say which approval the person allowed");
+    store.policy().changeRule(root, RuleKind::ask, Action::channel_post, target, false);
     runtime.tick();
 
     check(transport->effects.size() == 5 && transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
-          transport->effects.back().at("payload").at("suggestions") == Json::array({"Preview","Production"}),
+              transport->effects.back().at("payload").at("suggestions") == Json::array({"Preview", "Production"}),
           "Task question was not delivered to the originating thread");
-    store.policy().setMode(root,"full");
+    store.policy().setMode(root, "full");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
-        check(input.task.at("tasks").empty() && input.history.empty(),"Another thread received private task context");
+        check(input.task.at("tasks").empty() && input.history.empty(), "Another thread received private task context");
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return {"cancel_task",{{"taskId",taskId},{"generation",store.task(taskId).at("generation")}},{}};
-        check(steps.at(0).at("result").at("ok") == false,"Another thread could address a private task by ID");
+        if (steps.empty()) return {"cancel_task", {{"taskId", taskId}, {"generation", store.task(taskId).at("generation")}}, {}};
+        check(steps.at(0).at("result").at("ok") == false, "Another thread could address a private task by ID");
         return reply("No task in this thread.");
     };
-    store.receiveChannel(channel,"fixture-auth",event("other-thread","ask","What is the release target?"),intake);
+    store.receiveChannel(channel, "fixture-auth", event("other-thread", "ask", "What is the release target?"), intake);
     runtime.runConversations();
-    check(store.task(taskId).at("state") == "waiting","Another thread cancelled a private task");
+    check(store.task(taskId).at("state") == "waiting", "Another thread cancelled a private task");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
         if (input.event.at("kind") == "result")
-            return {"complete",{{"report","Private release completed."}},"The Session confirmed the release"};
+            return {"complete", {{"report", "Private release completed."}}, "The Session confirmed the release"};
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return answerQuestion(store.task(taskId),"Preview");
-        check(steps.at(0).at("result").at("ok") == true,"Originating thread could not answer its question");
+        if (steps.empty()) return answerQuestion(store.task(taskId), "Preview");
+        check(steps.at(0).at("result").at("ok") == true, "Originating thread could not answer its question");
         return reply("Answer received.");
     };
-    const auto answer = event("private-origin","answer","Preview");
-    store.receiveChannel(channel,"fixture-auth",answer,intake);
+    const auto answer = event("private-origin", "answer", "Preview");
+    store.receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
-    check(store.decisionHistory(root).at(0).at("decidedBy") == owner.id,"Channel decision lost the verified sender");
+    check(store.decisionHistory(root).at(0).at("decidedBy") == owner.id, "Channel decision lost the verified sender");
     t3.observeRun = [](const RunRef&) { return finished(); };
     for (int i = 0; i < 5; ++i) runtime.tick();
     check(store.task(taskId).at("state") == "completed" && transport->effects.size() == 8 &&
-          transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
-          transport->effects.back().at("payload").at("text") == "Private release completed.",
+              transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
+              transport->effects.back().at("payload").at("text") == "Private release completed.",
           "Task completion was not delivered to the originating thread");
-    check(store.receiveChannel(channel,"fixture-auth",original,intake) == receipt,"Task-start event changed on replay");
-    store.receiveChannel(channel,"fixture-auth",answer,intake);
+    check(store.receiveChannel(channel, "fixture-auth", original, intake) == receipt, "Task-start event changed on replay");
+    store.receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
-    check(transport->effects.size() == 8,"Task replay repeated a channel update");
+    check(transport->effects.size() == 8, "Task replay repeated a channel update");
 }
 
 void workflowContextIsWebScoped(const std::filesystem::path& database) {
@@ -570,56 +586,54 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
     Script model;
     auto transport = std::make_shared<RecordedTransport>();
     transport->loseNextSlackReply = false;
-    connect(store,transport);
-    shareBot(store,"release");
+    connect(store, transport);
+    shareBot(store, "release");
     const auto channel = ChannelKind::slack;
-    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
 
     model.decideNext = [](const ModelInput&) { return reply("Recorded in Web"); };
-    const auto original = store.receive(owner,intake("release",""),"web-original","Original Web evidence").at("messageId");
+    const auto original = store.receive(owner, intake("release", ""), "web-original", "Original Web evidence").at("messageId");
     runtime.runConversations();
 
     Json compaction, workflow;
     model.decideNext = [&](const ModelInput& input) -> Decision {
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return {"compact_conversation",{{"endMessageId",original},{"summary","Web summary"}},{}};
+        if (steps.empty()) return {"compact_conversation", {{"endMessageId", original}, {"summary", "Web summary"}}, {}};
         if (steps.size() == 1) {
             compaction = steps.at(0).at("result").at("compaction").at("compactionId");
-            return {"start_workflow",{{"request","Web-only workflow"}},{}};
+            return {"start_workflow", {{"request", "Web-only workflow"}}, {}};
         }
         workflow = steps.at(1).at("result").at("workflowId");
         return reply("Started in Web");
     };
-    store.receive(owner,intake("release",""),"web-workflow","Summarize and start a workflow");
+    store.receive(owner, intake("release", ""), "web-workflow", "Summarize and start a workflow");
     runtime.runConversations();
-    check(compaction.is_number() && workflow.is_number(),"Web workflow or compaction tool failed");
+    check(compaction.is_number() && workflow.is_number(), "Web workflow or compaction tool failed");
 
     bool webContext = false;
     model.decideNext = [&](const ModelInput& input) {
-        webContext = input.history.at(0).at("compactionId") == compaction &&
-                     input.task.at("workflows").at(0).at("workflowId") == workflow;
+        webContext = input.history.at(0).at("compactionId") == compaction && input.task.at("workflows").at(0).at("workflowId") == workflow;
         return reply("Loaded in Web");
     };
-    store.receive(owner,intake("release",""),"web-context","Check the workflow");
+    store.receive(owner, intake("release", ""), "web-context", "Check the workflow");
     runtime.runConversations();
-    check(webContext,"Web turn lost the workflow or compacted summary");
+    check(webContext, "Web turn lost the workflow or compacted summary");
 
     bool channelContextIsolated = false;
     model.decideNext = [&](const ModelInput& input) -> Decision {
-        check(input.history.empty() && !input.task.contains("workflows"),"Channel received Bot-wide Web context");
-        for (const auto* tool : {"compact_conversation","expand_context","continue_fresh_session","start_workflow",
-                                 "workflow_status","instruct_workflow_stage","stop_workflow_stage","stop_workflow"})
-            check(std::ranges::find(input.tools,tool) == input.tools.end(),"Channel advertised a Web tool");
+        check(input.history.empty() && !input.task.contains("workflows"), "Channel received Bot-wide Web context");
+        for (const auto* tool : {"compact_conversation", "expand_context", "continue_fresh_session", "start_workflow", "workflow_status",
+                                 "instruct_workflow_stage", "stop_workflow_stage", "stop_workflow"})
+            check(std::ranges::find(input.tools, tool) == input.tools.end(), "Channel advertised a Web tool");
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return {"expand_context",{{"compactionId",compaction}},{}};
-        if (steps.size() == 1) return {"workflow_status",{{"workflowId",workflow}},{}};
-        channelContextIsolated = !steps.at(0).at("result").at("ok").get<bool>() &&
-                                 !steps.at(1).at("result").at("ok").get<bool>();
+        if (steps.empty()) return {"expand_context", {{"compactionId", compaction}}, {}};
+        if (steps.size() == 1) return {"workflow_status", {{"workflowId", workflow}}, {}};
+        channelContextIsolated = !steps.at(0).at("result").at("ok").get<bool>() && !steps.at(1).at("result").at("ok").get<bool>();
         return reply("Channel reply");
     };
-    store.receiveChannel(channel,"fixture-auth",event("scope","probe","What is in my context?"),intake);
+    store.receiveChannel(channel, "fixture-auth", event("scope", "probe", "What is in my context?"), intake);
     runtime.runConversations();
-    check(channelContextIsolated,"Channel called Web tools by ID or received Web context");
+    check(channelContextIsolated, "Channel called Web tools by ID or received Web context");
 }
 
 void sessionEvidence(const std::filesystem::path& database) {
@@ -628,80 +642,76 @@ void sessionEvidence(const std::filesystem::path& database) {
     Script model;
     auto transport = std::make_shared<RecordedTransport>();
     transport->loseNextSlackReply = false;
-    connect(store,transport);
-    shareBot(store,"release");
+    connect(store, transport);
+    shareBot(store, "release");
     const auto channel = ChannelKind::slack;
-    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
     model.decideNext = [](const ModelInput& input) -> Decision {
-        if (input.event.at("turn").empty()) return {"start_task",{{"request","Private task"}},{}};
+        if (input.event.at("turn").empty()) return {"start_task", {{"request", "Private task"}}, {}};
         return reply("Started");
     };
-    store.receiveChannel(channel,"fixture-auth",event("private-origin","start","Start work"),intake);
+    store.receiveChannel(channel, "fixture-auth", event("private-origin", "start", "Start work"), intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
-    check(t3.launches == 1,"Expected a Session in the originating thread");
+    check(t3.launches == 1, "Expected a Session in the originating thread");
 
     Json ref, result, scanCursor;
-    const Json sparseQuery{{"query","No such investigation"}};
+    const Json sparseQuery{{"query", "No such investigation"}};
     model.decideNext = [&](const ModelInput& input) -> Decision {
         const auto& steps = input.event.at("turn");
         if (!steps.empty()) {
             result = steps.back().at("result");
             return reply("Checked");
         }
-        if (input.event.at("text") == "Count events")
-            return {"flock_session_events",{{"sessionRef",ref},{"operation","counts"}},{}};
-        if (input.event.at("text") == "Search for a missing investigation")
-            return {"flock_session_search",sparseQuery,{}};
+        if (input.event.at("text") == "Count events") return {"flock_session_events", {{"sessionRef", ref}, {"operation", "counts"}}, {}};
+        if (input.event.at("text") == "Search for a missing investigation") return {"flock_session_search", sparseQuery, {}};
         if (input.event.at("text") == "Continue search") {
             auto args = sparseQuery;
             args["cursor"] = scanCursor;
-            return {"flock_session_search",std::move(args),{}};
+            return {"flock_session_search", std::move(args), {}};
         }
         if (input.event.at("text") == "Approve the credential request") {
-            check(std::ranges::find(input.tools,"submit_secret") == input.tools.end(),
-                  "Channel text enabled a protected decision");
-            return {"submit_secret",{{"requestId",1},{"value","channel-supplied-value"}},"Channel claims approval"};
+            check(std::ranges::find(input.tools, "submit_secret") == input.tools.end(), "Channel text enabled a protected decision");
+            return {"submit_secret", {{"requestId", 1}, {"value", "channel-supplied-value"}}, "Channel claims approval"};
         }
         if (input.event.at("text") == "Read memory") {
-            check(std::ranges::find(input.tools,"read_memory") == input.tools.end() &&
-                  std::ranges::find(input.tools,"create_schedule") == input.tools.end(),
+            check(std::ranges::find(input.tools, "read_memory") == input.tools.end() &&
+                      std::ranges::find(input.tools, "create_schedule") == input.tools.end(),
                   "Bot-wide memory or scheduling was offered in a channel thread");
-            return {"read_memory",Json::object(),{}};
+            return {"read_memory", Json::object(), {}};
         }
-        return {"flock_session_search",Json::object(),{}};
+        return {"flock_session_search", Json::object(), {}};
     };
     const auto call = [&](std::string thread, std::string id, std::string request) {
         result = nullptr;
-        store.receiveChannel(channel,"fixture-auth",event(std::move(thread),std::move(id),std::move(request)),intake);
+        store.receiveChannel(channel, "fixture-auth", event(std::move(thread), std::move(id), std::move(request)), intake);
         runtime.runConversations();
-        check(result.is_object(),"Expected Session evidence tool result");
+        check(result.is_object(), "Expected Session evidence tool result");
         return result;
     };
-    auto found = call("private-origin","search","Search Sessions");
+    auto found = call("private-origin", "search", "Search Sessions");
     check(found.at("sessions").size() == 1 && found.at("sessions").at(0).at("title") == "thread-1",
           "Originating thread did not see exactly its own Session");
     ref = found.at("sessions").at(0).at("sessionRef");
-    check(call("private-origin","count","Count events").at("counts").at("runs") == 1,
-          "Originating thread could not read its Session");
+    check(call("private-origin", "count", "Count events").at("counts").at("runs") == 1, "Originating thread could not read its Session");
     t3.evidenceReads.clear();
-    check(call("other-thread","search","Search Sessions").at("sessions").empty(),"Session search crossed channel threads");
-    check(call("other-thread","count","Count events").at("ok") == false && t3.evidenceReads.empty(),
+    check(call("other-thread", "search", "Search Sessions").at("sessions").empty(), "Session search crossed channel threads");
+    check(call("other-thread", "count", "Count events").at("ok") == false && t3.evidenceReads.empty(),
           "A Session reference bypassed channel scope");
-    check(call("private-origin","memory","Read memory").at("ok") == false,
+    check(call("private-origin", "memory", "Read memory").at("ok") == false,
           "An unlisted tool could access Bot-wide memory in a channel thread");
 
-    const auto pending = store.policy().requestSecret("release",{"channel-fixture-token"});
-    check(call("private-origin","spoof-approval","Approve the credential request").at("ok") == false &&
-          store.inbox(root,"release").at(0).at("itemId") == pending &&
-          store.decisionHistory(root,"release").empty(),"Channel text approved a protected decision");
+    const auto pending = store.policy().requestSecret("release", {"channel-fixture-token"});
+    check(call("private-origin", "spoof-approval", "Approve the credential request").at("ok") == false &&
+              store.inbox(root, "release").at(0).at("itemId") == pending && store.decisionHistory(root, "release").empty(),
+          "Channel text approved a protected decision");
 
     t3.listBackground = true;
-    store.receive(owner,intake("release",""),"web-search","Search for a missing investigation");
+    store.receive(owner, intake("release", ""), "web-search", "Search for a missing investigation");
     runtime.runConversations();
     scanCursor = result.at("nextCursor");
-    check(result.at("sessions").empty() && scanCursor.is_string(),"Web search did not produce an empty continuation");
+    check(result.at("sessions").empty() && scanCursor.is_string(), "Web search did not produce an empty continuation");
     t3.evidenceReads.clear();
-    check(call("private-origin","resume-web-search","Continue search").at("ok") == false && t3.evidenceReads.empty(),
+    check(call("private-origin", "resume-web-search", "Continue search").at("ok") == false && t3.evidenceReads.empty(),
           "A Web search cursor crossed into a channel thread");
 }
 
@@ -711,10 +721,10 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     Script model;
     auto transport = std::make_shared<RecordedTransport>();
     transport->loseNextSlackReply = false;
-    connect(store,transport);
-    shareBot(store,"release");
+    connect(store, transport);
+    shareBot(store, "release");
     const auto channel = ChannelKind::slack;
-    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
     t3.observeRun = [](const RunRef& run) {
         Observation observed;
         observed.kind = Observation::Kind::Question;
@@ -723,106 +733,106 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     };
     model.decideNext = [](const ModelInput& input) -> Decision {
         if (input.event.at("kind") == "question")
-            return {"ask_user",{{"question","Continue?"},{"choices",{"Yes","No"}}},"The Session needs approval to continue"};
-        if (input.event.at("turn").empty()) return {"start_task",{{"request",input.event.at("text")}},{}};
+            return {"ask_user", {{"question", "Continue?"}, {"choices", {"Yes", "No"}}}, "The Session needs approval to continue"};
+        if (input.event.at("turn").empty()) return {"start_task", {{"request", input.event.at("text")}}, {}};
         return reply("Task started.");
     };
     const auto start = [&](const std::string& project) {
-        store.receiveChannel(channel,"fixture-auth",event("choice-thread",project,project),
-            [&](std::string_view bot, std::string_view text) {
-                auto route = intake(bot,text);
-                route.projectId = project;
-                return route;
-            });
+        store.receiveChannel(channel, "fixture-auth", event("choice-thread", project, project),
+                             [&](std::string_view bot, std::string_view text) {
+                                 auto route = intake(bot, text);
+                                 route.projectId = project;
+                                 return route;
+                             });
         for (int i = 0; i < 8; ++i) runtime.tick();
         const auto task = store.activeTasks("release").at(0);
-        check(task.at("state") == "waiting" && transport->effects.back().at("payload").at("suggestions") == Json::array({"Yes","No"}),
+        check(task.at("state") == "waiting" && transport->effects.back().at("payload").at("suggestions") == Json::array({"Yes", "No"}),
               "The task question was not posted");
-        return std::pair{task,transport->effects.back().at("externalMessageId")};
+        return std::pair{task, transport->effects.back().at("externalMessageId")};
     };
-    const auto [first,firstPost] = start("first");
-    const auto [second,secondPost] = start("second");
+    const auto [first, firstPost] = start("first");
+    const auto [second, secondPost] = start("second");
     check(first.at("id") != second.at("id") && firstPost != secondPost && store.task(first.at("id")).at("state") == "waiting",
           "Both questions must be open at the same time");
-    auto answer = event("choice-thread","answer-first","Yes");
+    auto answer = event("choice-thread", "answer-first", "Yes");
     answer["replyToExternalMessageId"] = firstPost;
     auto wrongThread = answer;
     wrongThread["threadRef"] = "another-thread";
-    rejects([&] { store.receiveChannel(channel,"fixture-auth",wrongThread,intake); });
+    rejects([&] { store.receiveChannel(channel, "fixture-auth", wrongThread, intake); });
 
     const auto recordedChoice = [&](const Json& task, const Json& receipt) {
-        return std::ranges::any_of(store.history(task.at("id"),0,200),[&](const Json& event) {
+        return std::ranges::any_of(store.history(task.at("id"), 0, 200), [&](const Json& event) {
             const auto& data = event.at("data");
-            return event.at("kind") == "user_answer" && data.at("text") == "Yes" &&
-                   data.at("messageId") == receipt.at("messageId") && data.at("waitId") == task.at("wait").at("id");
+            return event.at("kind") == "user_answer" && data.at("text") == "Yes" && data.at("messageId") == receipt.at("messageId") &&
+                   data.at("waitId") == task.at("wait").at("id");
         });
     };
     model.decideNext = [&](const ModelInput& input) -> Decision {
-        if (input.event.at("turn").empty()) return answerQuestion(second,"No");
-        if (input.event.at("turn").size() == 1) return answerQuestion(first,"Yes");
+        if (input.event.at("turn").empty()) return answerQuestion(second, "No");
+        if (input.event.at("turn").size() == 1) return answerQuestion(first, "Yes");
         return reply("Done.");
     };
-    const auto receipt = store.receiveChannel(channel,"fixture-auth",answer,intake);
+    const auto receipt = store.receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
-    check(recordedChoice(first,receipt) && store.task(second.at("id")).at("wait") == second.at("wait"),
+    check(recordedChoice(first, receipt) && store.task(second.at("id")).at("wait") == second.at("wait"),
           "Only the selected question should receive the exact choice");
-    check(store.receiveChannel(channel,"fixture-auth",answer,intake) == receipt,"Choice replay changed the receipt");
+    check(store.receiveChannel(channel, "fixture-auth", answer, intake) == receipt, "Choice replay changed the receipt");
     answer["replyToExternalMessageId"] = secondPost;
-    rejects([&] { store.receiveChannel(channel,"fixture-auth",answer,intake); });
+    rejects([&] { store.receiveChannel(channel, "fixture-auth", answer, intake); });
 
-    auto clarification = event("choice-thread","clarify-second","What happens if I say yes?");
+    auto clarification = event("choice-thread", "clarify-second", "What happens if I say yes?");
     clarification["replyToExternalMessageId"] = secondPost;
     model.decideNext = [](const ModelInput&) {
         auto clarification = reply("The Session continues. Shall it proceed?");
         clarification.args["continuesQuestion"] = true;
         return clarification;
     };
-    store.receiveChannel(channel,"fixture-auth",clarification,intake);
+    store.receiveChannel(channel, "fixture-auth", clarification, intake);
     runtime.runConversations();
-    auto followup = event("choice-thread","answer-clarification","Yes");
+    auto followup = event("choice-thread", "answer-clarification", "Yes");
     followup["replyToExternalMessageId"] = transport->effects.back().at("externalMessageId");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
-        if (input.event.at("turn").empty()) return answerQuestion(second,"Yes");
+        if (input.event.at("turn").empty()) return answerQuestion(second, "Yes");
         return reply("Done.");
     };
-    const auto followed = store.receiveChannel(channel,"fixture-auth",followup,intake);
+    const auto followed = store.receiveChannel(channel, "fixture-auth", followup, intake);
     runtime.runConversations();
-    check(recordedChoice(second,followed) && store.task(second.at("id")).at("wait").is_null(),
+    check(recordedChoice(second, followed) && store.task(second.at("id")).at("wait").is_null(),
           "Reply to a Bot clarification could not answer its original question");
 }
 
 void local(const std::filesystem::path& database, const std::string& path) {
     Store store(database);
-    shareBot(store,"release");
-    shareBot(store,"peer");
-    store.connectLocalMachine("laptop",hostLocalMachine(owner.id));
+    shareBot(store, "release");
+    shareBot(store, "peer");
+    store.connectLocalMachine("laptop", hostLocalMachine(owner.id));
     Script model;
     SessionAdapter t3;
-    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
     int project = 0;
     const auto session = [&](auto bot) {
-        auto route = intake(bot,"Prepare");
+        auto route = intake(bot, "Prepare");
         route.projectId += std::to_string(++project);
         const auto task = store.submit(route);
         for (int i = 0; i < 3; ++i) runtime.tick();
         auto run = store.task(task).at("activeRun");
-        check(run.is_object(),"Fixture Session did not start");
+        check(run.is_object(), "Fixture Session did not start");
         return run;
     };
     auto a = session("release");
     const auto b = session("release"), peer = session("peer");
     const auto args = [&](const Json& run) {
-        return Json{{"threadId",run.at("threadId")},{"runId",run.at("runId")},{"machineId","laptop"}};
+        return Json{{"threadId", run.at("threadId")}, {"runId", run.at("runId")}, {"machineId", "laptop"}};
     };
     const auto request = [&](const Json& run) {
         auto data = args(run);
-        data["rules"] = Json::array({{{"operation","read_file"},{"path",path}}});
-        return Decision{"request_local_machine_connection",data,{}};
+        data["rules"] = Json::array({{{"operation", "read_file"}, {"path", path}}});
+        return Decision{"request_local_machine_connection", data, {}};
     };
     const auto operation = [&](const Json& run, std::string_view op, const std::string& file) {
-        const RunRef ref{run.at("threadId"),run.at("runId"),""};
-        return store.runLocalMachineOperation("env",ref,"laptop",op,file);
+        const RunRef ref{run.at("threadId"), run.at("runId"), ""};
+        return store.runLocalMachineOperation("env", ref, "laptop", op, file);
     };
     unsigned count = 0;
     const auto turn = [&](auto bot, const Decision& action, bool success) {
@@ -831,62 +841,62 @@ void local(const std::filesystem::path& database, const std::string& path) {
             const auto& steps = input.event.at("turn");
             if (steps.empty()) return action;
             const auto& result = steps.at(0).at("result");
-            check(result.at("ok") == success,"Unexpected local operation authorization");
+            check(result.at("ok") == success, "Unexpected local operation authorization");
             observed = true;
             return reply("Chat is available");
         };
-        store.receive(localOwner,intake(bot,""),std::to_string(++count),"Local connection");
+        store.receive(localOwner, intake(bot, ""), std::to_string(++count), "Local connection");
         runtime.runConversations();
-        check(observed,"Local tool result was not delivered");
+        check(observed, "Local tool result was not delivered");
     };
     const auto environments = store.policy().rules();
-    turn("release",request(a),true);
+    turn("release", request(a), true);
     const auto id = store.localConnections(owner).at(0).at("id").get<Id>();
-    rejects([&] { store.decideLocalConnection(root,id,true); });
-    rejects([&] { operation(a,"read_file",path); });
+    rejects([&] { store.decideLocalConnection(root, id, true); });
+    rejects([&] { operation(a, "read_file", path); });
     const auto originalRun = a;
     const auto originalRunId = originalRun.at("runId").get<std::string>();
     t3.observeRun = [&](const RunRef& run) { return run.runId == originalRunId ? finished() : Observation{}; };
     model.decideNext = [](const ModelInput&) {
-        return Decision{"follow_up",{{"instruction","Continue in this Session"}},"The work needs one more Run"};
+        return Decision{"follow_up", {{"instruction", "Continue in this Session"}}, "The work needs one more Run"};
     };
     for (int i = 0; i < 5; ++i) runtime.tick();
     for (const auto& task : store.activeTasks("release")) {
         const auto active = store.task(task.at("id")).at("activeRun");
         if (active.is_object() && active.at("threadId") == originalRun.at("threadId")) a = active;
     }
-    check(a.at("runId") != originalRun.at("runId"),"Fixture did not start a follow-up Run in Session A");
-    store.decideLocalConnection(owner,id,true);
-    rejects([&] { operation(originalRun,"read_file",path); });
-    check(operation(a,"read_file",path).at("text") == "fixture text","Wrong machine data");
-    rejects([&] { operation(a,"read_file",path+".forbidden"); });
-    rejects([&] { operation(a,"list_directory",path); });
-    rejects([&] { operation(b,"read_file",path); });
-    rejects([&] { operation(peer,"read_file",path); });
-    turn("release",{"run_local_machine_operation",args(a),{}},false);
+    check(a.at("runId") != originalRun.at("runId"), "Fixture did not start a follow-up Run in Session A");
+    store.decideLocalConnection(owner, id, true);
+    rejects([&] { operation(originalRun, "read_file", path); });
+    check(operation(a, "read_file", path).at("text") == "fixture text", "Wrong machine data");
+    rejects([&] { operation(a, "read_file", path + ".forbidden"); });
+    rejects([&] { operation(a, "list_directory", path); });
+    rejects([&] { operation(b, "read_file", path); });
+    rejects([&] { operation(peer, "read_file", path); });
+    turn("release", {"run_local_machine_operation", args(a), {}}, false);
     const auto original = path + ".original";
-    std::filesystem::rename(path,original);
-    std::filesystem::create_symlink(original,path);
-    rejects([&] { operation(a,"read_file",path); });
+    std::filesystem::rename(path, original);
+    std::filesystem::create_symlink(original, path);
+    rejects([&] { operation(a, "read_file", path); });
     std::filesystem::remove(path);
-    std::filesystem::rename(original,path);
-    store.disconnectLocalConnection(owner,id);
-    rejects([&] { operation(a,"read_file",path); });
-    turn("release",request(b),true);
-    store.decideLocalConnection(owner,store.localConnections(owner).at(0).at("id"),false);
-    rejects([&] { operation(b,"read_file",path); });
-    check(store.policy().rules() == environments,"Local approval created reusable policy rules");
+    std::filesystem::rename(original, path);
+    store.disconnectLocalConnection(owner, id);
+    rejects([&] { operation(a, "read_file", path); });
+    turn("release", request(b), true);
+    store.decideLocalConnection(owner, store.localConnections(owner).at(0).at("id"), false);
+    rejects([&] { operation(b, "read_file", path); });
+    check(store.policy().rules() == environments, "Local approval created reusable policy rules");
     bool unchanged = false;
     model.decideNext = [&](const ModelInput& input) {
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return Decision{"list_connections",Json::object(),{}};
-        unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId","env"},{"runTimeoutSeconds",1800}}});
+        if (steps.empty()) return Decision{"list_connections", Json::object(), {}};
+        unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId", "env"}, {"runTimeoutSeconds", 1800}}});
         return reply("Chat is available");
     };
-    store.receive(localOwner,intake("release",""),std::to_string(++count),"List reusable environments");
+    store.receive(localOwner, intake("release", ""), std::to_string(++count), "List reusable environments");
     runtime.runConversations();
-    check(unchanged,"Local connections added a reusable environment");
-    check(store.conversation("release").back()["data"]["text"] == "Chat is available","Chat disabled after local decline");
+    check(unchanged, "Local connections added a reusable environment");
+    check(store.conversation("release").back()["data"]["text"] == "Chat is available", "Chat disabled after local decline");
 }
 }
 
@@ -903,6 +913,9 @@ int main() {
         workflowContextIsWebScoped(temp.path / "workflow-context-scope.db");
         sessionEvidence(temp.path / "session-evidence.db");
         taskQuestionChoices(temp.path / "task-question-choices.db");
-        local(temp.path / "local.db",std::filesystem::canonical(path).string());
-    } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+        local(temp.path / "local.db", std::filesystem::canonical(path).string());
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
 }

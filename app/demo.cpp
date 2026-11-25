@@ -6,59 +6,64 @@ namespace flockv0::app {
 namespace {
 class DemoModel final : public Model {
     ModelTurn decide(const ModelInput& in) override {
-        const auto event = in.event.value("kind","");
+        const auto event = in.event.value("kind", "");
         if (event == "conversation_turn") {
             const auto& turn = in.event.at("turn");
             if (!turn.empty()) {
                 const auto& last = turn.back();
-                const bool ok = last.at("result").value("ok",false);
-                const auto tool = last.value("tool","");
-                std::string text = !ok ? "The demo could not apply that request."
-                    : tool == "answer_task_question" ? "I passed your answer to the task."
-                    : tool == "read_result" ? "The demo result records successful completion of simulated work. "
-                                              "It contains no implementation details."
-                    : "I queued your request.";
-                return {{{"reply",{{"text",text}}, {}}}};
+                const bool ok = last.at("result").value("ok", false);
+                const auto tool = last.value("tool", "");
+                std::string text = !ok                              ? "The demo could not apply that request."
+                                   : tool == "answer_task_question" ? "I passed your answer to the task."
+                                   : tool == "read_result"          ? "The demo result records successful completion of simulated work. "
+                                                                      "It contains no implementation details."
+                                                                    : "I queued your request.";
+                return {{{"reply", {{"text", text}}, {}}}};
             }
             const auto& reply = in.event.at("replyTo");
-            if (reply.is_object() && reply.value("kind","") == "task_question" && reply.value("current",false)) {
-                return {{{"answer_task_question",{{"taskId",reply["taskId"]},{"waitId",reply["waitId"]},
-                    {"revisionId",reply["revisionId"]},{"generation",reply["generation"]},
-                    {"text",in.event.value("text","")}}, {}}}};
+            if (reply.is_object() && reply.value("kind", "") == "task_question" && reply.value("current", false)) {
+                return {{{"answer_task_question",
+                          {{"taskId", reply["taskId"]},
+                           {"waitId", reply["waitId"]},
+                           {"revisionId", reply["revisionId"]},
+                           {"generation", reply["generation"]},
+                           {"text", in.event.value("text", "")}},
+                          {}}}};
             }
-            if (reply.is_object() && reply.value("kind","") == "result")
-                return {{{"read_result",{{"messageId",reply["messageId"]}}, {}}}};
-            if (reply.is_object() && reply.value("kind","") == "bot_message") {
-                const auto source = reply.value("inReplyTo",Json::object()).value("replyToMessageId",Json(nullptr));
-                if (!source.is_null())
-                    return {{{"read_result",{{"messageId",source}}, {}}}};
+            if (reply.is_object() && reply.value("kind", "") == "result")
+                return {{{"read_result", {{"messageId", reply["messageId"]}}, {}}}};
+            if (reply.is_object() && reply.value("kind", "") == "bot_message") {
+                const auto source = reply.value("inReplyTo", Json::object()).value("replyToMessageId", Json(nullptr));
+                if (!source.is_null()) return {{{"read_result", {{"messageId", source}}, {}}}};
             }
-            return {{{"start_task",{{"request",in.event.value("text","")}}, {}}}};
+            return {{{"start_task", {{"request", in.event.value("text", "")}}, {}}}};
         }
         if (event == "result" && in.task.contains("userInstructions")) {
-            const bool follow = std::ranges::find(in.tools,"follow_up") != in.tools.end();
-            return {{{follow ? "follow_up" : "delegate",{{"instruction","Apply the pending user instructions."}},
-                "The demo report predates the accepted instructions."}}};
+            const bool follow = std::ranges::find(in.tools, "follow_up") != in.tools.end();
+            return {{{follow ? "follow_up" : "delegate",
+                      {{"instruction", "Apply the pending user instructions."}},
+                      "The demo report predates the accepted instructions."}}};
         }
-        if (event == "result" && std::ranges::find(in.tools,"complete") != in.tools.end()) {
-            return {{{"complete",{{"report",in.event.value("report","")}},
-                "The demo Session reported that it completed the requested work."}}};
+        if (event == "result" && std::ranges::find(in.tools, "complete") != in.tools.end()) {
+            return {{{"complete",
+                      {{"report", in.event.value("report", "")}},
+                      "The demo Session reported that it completed the requested work."}}};
         }
-        if (std::ranges::find(in.tools,"delegate") != in.tools.end()) {
+        if (std::ranges::find(in.tools, "delegate") != in.tools.end()) {
             std::string answer;
             for (const auto& row : in.history)
-                if (row.value("kind","") == "user_answer") answer = row.value("data",Json::object()).value("text","");
-            const auto request = in.task.value("request","");
+                if (row.value("kind", "") == "user_answer") answer = row.value("data", Json::object()).value("text", "");
+            const auto request = in.task.value("request", "");
             if (answer.empty() && request.starts_with("ask:")) {
                 auto question = request.substr(4);
                 if (question.find_first_not_of(" \t\r\n") == std::string::npos) question = "What should the demo Session focus on?";
-                return {{{"ask_user",{{"question",question}},"The demo request calls for a user answer before work begins."}}};
+                return {{{"ask_user", {{"question", question}}, "The demo request calls for a user answer before work begins."}}};
             }
-            Json args = {{"instruction",request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
+            Json args = {{"instruction", request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
             if (in.needsDoneWhen) args["doneWhen"] = "The demo Session returns a completion report.";
-            return {{{"delegate",std::move(args),"A demo Session can handle this request."}}};
+            return {{{"delegate", std::move(args), "A demo Session can handle this request."}}};
         }
-        throw ModelError("No fixed demo decision for this event",false);
+        throw ModelError("No fixed demo decision for this event", false);
     }
 };
 
@@ -67,17 +72,15 @@ class DemoT3 final : public T3 {
 
     RunRef run(const Command& command) {
         const auto thread = command.tool == "follow_up" ? command.target.threadId : "demo-thread-" + command.actionId;
-        return {thread,"demo-run-" + command.actionId,""};
+        return {thread, "demo-run-" + command.actionId, ""};
     }
 
-    Delivery send(const Command& command) override {
-        return {Delivery::Kind::Accepted,run(command),""};
-    }
+    Delivery send(const Command& command) override { return {Delivery::Kind::Accepted, run(command), ""}; }
 
     Delivery reconcile(const Command& command) override {
         const auto reference = run(command);
         // The demo Run is a pure function of the previously persisted action.
-        return {Delivery::Kind::Accepted,reference,""};
+        return {Delivery::Kind::Accepted, reference, ""};
     }
 
     Observation observe(const std::string&, const Json&, const RunRef& run) override {
@@ -93,6 +96,10 @@ class DemoT3 final : public T3 {
 };
 } // namespace
 
-std::unique_ptr<Model> makeDemoModel() { return std::make_unique<DemoModel>(); }
-std::unique_ptr<T3> makeDemoT3() { return std::make_unique<DemoT3>(); }
+std::unique_ptr<Model> makeDemoModel() {
+    return std::make_unique<DemoModel>();
+}
+std::unique_ptr<T3> makeDemoT3() {
+    return std::make_unique<DemoT3>();
+}
 } // namespace flockv0::app

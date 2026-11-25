@@ -7,11 +7,12 @@
 #include <cctz/time_zone.h>
 
 namespace flockv0 {
-struct AccessDenied : Conflict { using Conflict::Conflict; };
+struct AccessDenied : Conflict {
+    using Conflict::Conflict;
+};
 
-inline constexpr Seconds lastAutomationTime = std::chrono::sys_seconds{
-    std::chrono::sys_days{std::chrono::year{2200}/1/1}
-}.time_since_epoch().count() - 1;
+inline constexpr Seconds lastAutomationTime =
+    std::chrono::sys_seconds{std::chrono::sys_days{std::chrono::year{2200} / 1 / 1}}.time_since_epoch().count() - 1;
 void validateTimezone(std::string_view);
 
 class Cron {

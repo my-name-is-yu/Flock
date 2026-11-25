@@ -6,26 +6,30 @@ namespace flockv0::web {
 using namespace std::chrono_literals;
 
 namespace {
-void invalidate(Json& update, const ChangeFeed::BotList&) { update["list"] = true; }
-void invalidate(Json& update, const ChangeFeed::BotView& view) { update["bot"] = view.bot; }
+void invalidate(Json& update, const ChangeFeed::BotList&) {
+    update["list"] = true;
+}
+void invalidate(Json& update, const ChangeFeed::BotView& view) {
+    update["bot"] = view.bot;
+}
 void invalidate(Json& update, const ChangeFeed::DirectMessage& dm) {
-    update["dm"] = {{"bot",dm.bot},{"peer",dm.peer}};
+    update["dm"] = {{"bot", dm.bot}, {"peer", dm.peer}};
 }
 }
 
-ChangeFeed::ChangeFeed(Store& store, Load load)
-    : store_(store), load_(std::move(load)), worker_([this] { monitor(); }) {}
+ChangeFeed::ChangeFeed(Store& store, Load load) : store_(store), load_(std::move(load)), worker_([this] { monitor(); }) {}
 
-ChangeFeed::~ChangeFeed() { stop(); }
+ChangeFeed::~ChangeFeed() {
+    stop();
+}
 
 std::optional<ChangeFeed::Cursor> ChangeFeed::subscribe(const Scope& view) {
     std::lock_guard lock(mutex_);
     constexpr std::size_t maxSubscribers = 3;
     if (stopping_ || subscribers_ >= maxSubscribers) return std::nullopt;
-    Cursor cursor{{Scope{view.person,BotList{}},0},{view,0}};
-    if (const auto* dm = std::get_if<DirectMessage>(&view.target))
-        cursor.emplace(Scope{view.person,BotView{dm->bot}},0);
-    for (auto& [scope,revision] : cursor) {
+    Cursor cursor{{Scope{view.person, BotList{}}, 0}, {view, 0}};
+    if (const auto* dm = std::get_if<DirectMessage>(&view.target)) cursor.emplace(Scope{view.person, BotView{dm->bot}}, 0);
+    for (auto& [scope, revision] : cursor) {
         auto& watched = watched_[scope];
         ++watched.subscribers;
         revision = watched.revision;
@@ -38,7 +42,7 @@ std::optional<ChangeFeed::Cursor> ChangeFeed::subscribe(const Scope& view) {
 
 void ChangeFeed::release(const Cursor& cursor) {
     std::lock_guard lock(mutex_);
-    for (const auto& [scope,revision] : cursor) {
+    for (const auto& [scope, revision] : cursor) {
         auto item = watched_.find(scope);
         if (--item->second.subscribers == 0) watched_.erase(item);
     }
@@ -47,27 +51,27 @@ void ChangeFeed::release(const Cursor& cursor) {
 
 std::optional<Json> ChangeFeed::next(Cursor& cursor) {
     std::unique_lock lock(mutex_);
-    changed_.wait_for(lock,1s,[&] {
+    changed_.wait_for(lock, 1s, [&] {
         if (stopping_) return true;
-        for (const auto& [scope,revision] : cursor)
+        for (const auto& [scope, revision] : cursor)
             if (watched_.at(scope).revision != revision) return true;
         return false;
     });
     if (stopping_) return std::nullopt;
     Json update = Json::object();
-    for (auto& [scope,revision] : cursor) {
+    for (auto& [scope, revision] : cursor) {
         const auto next = watched_.at(scope).revision;
         if (revision == next) continue;
         revision = next;
-        std::visit([&](const auto& target) { invalidate(update,target); },scope.target);
+        std::visit([&](const auto& target) { invalidate(update, target); }, scope.target);
     }
     return update;
 }
 
 std::shared_ptr<const ChangeFeed::Projection> ChangeFeed::cachedBotView(const Person& person, const std::string& bot,
-                                                                      const Json& descriptor) {
+                                                                        const Json& descriptor) {
     std::lock_guard lock(mutex_);
-    const auto item = watched_.find({person,BotView{bot}});
+    const auto item = watched_.find({person, BotView{bot}});
     if (item == watched_.end()) return {};
     const auto& snapshot = item->second.snapshot;
     if (!snapshot || !snapshot->botVersion || snapshot->botVersion->descriptor != descriptor) return {};
@@ -90,15 +94,17 @@ void ChangeFeed::stop() {
 }
 
 void ChangeFeed::refresh(const std::vector<Scope>& scopes, const Store::ConversationChanges& changes) {
-    std::map<Scope,std::shared_ptr<const Projection>> snapshots;
+    std::map<Scope, std::shared_ptr<const Projection>> snapshots;
     for (const auto& scope : scopes) {
         auto& snapshot = snapshots[scope];
-        try { snapshot = std::make_shared<const Projection>(load_(scope)); }
-        catch (const std::exception&) {}
+        try {
+            snapshot = std::make_shared<const Projection>(load_(scope));
+        } catch (const std::exception&) {
+        }
     }
     std::lock_guard lock(mutex_);
     const auto previousRevision = revision_;
-    for (auto& [scope,snapshot] : snapshots) {
+    for (auto& [scope, snapshot] : snapshots) {
         const auto item = watched_.find(scope);
         if (item == watched_.end()) continue;
         auto& watched = item->second;
@@ -108,7 +114,7 @@ void ChangeFeed::refresh(const std::vector<Scope>& scopes, const Store::Conversa
             if (watched.pending == Refresh::None) watched.pending = Refresh::Projection;
             continue;
         }
-        const bool historyChanged = std::exchange(watched.pending,Refresh::None) == Refresh::History && !snapshot->data.is_null();
+        const bool historyChanged = std::exchange(watched.pending, Refresh::None) == Refresh::History && !snapshot->data.is_null();
         const bool projectionChanged = !watched.snapshot || watched.snapshot->data != snapshot->data;
         watched.snapshot = std::move(snapshot);
         if (projectionChanged || historyChanged) watched.revision = ++revision_;
@@ -124,26 +130,25 @@ void ChangeFeed::monitor() {
     while (!stopping_) {
         if (watched_.empty()) {
             journalCursor.reset();
-            changed_.wait(lock,[&] { return stopping_ || !watched_.empty(); });
+            changed_.wait(lock, [&] { return stopping_ || !watched_.empty(); });
             continue;
         }
-        const bool requested = std::exchange(scanRequested_,false);
+        const bool requested = std::exchange(scanRequested_, false);
         const bool profileCheck = std::chrono::steady_clock::now() >= checkProfiles;
         std::vector<Scope> scopes;
         std::vector<Scope> pending;
-        for (const auto& [scope,watched] : watched_) {
+        for (const auto& [scope, watched] : watched_) {
             scopes.push_back(scope);
             if (watched.pending != Refresh::None) pending.push_back(scope);
         }
         lock.unlock();
         try {
             const auto stamp = store_.changeStamp();
-            if (!requested && !profileCheck && stamp == lastStamp)
-                scopes = std::move(pending);
+            if (!requested && !profileCheck && stamp == lastStamp) scopes = std::move(pending);
             if (!scopes.empty()) {
-                Store::ConversationChanges changes{journalCursor.value_or(0),{}};
+                Store::ConversationChanges changes{journalCursor.value_or(0), {}};
                 if (!journalCursor || stamp != lastStamp) changes = store_.conversationChangesSince(journalCursor);
-                refresh(scopes,changes);
+                refresh(scopes, changes);
                 journalCursor = changes.through;
             }
             lastStamp = stamp;
@@ -152,7 +157,7 @@ void ChangeFeed::monitor() {
             lastStamp.reset();
         }
         lock.lock();
-        changed_.wait_for(lock,150ms,[&] { return stopping_ || scanRequested_; });
+        changed_.wait_for(lock, 150ms, [&] { return stopping_ || scanRequested_; });
     }
 }
 

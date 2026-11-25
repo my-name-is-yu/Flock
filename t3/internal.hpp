@@ -8,21 +8,29 @@ namespace flockv0::t3detail {
 
 inline constexpr auto ProtocolVersion = "2025-06-18";
 inline Json initializeParams() {
-    return {{"protocolVersion", ProtocolVersion}, {"capabilities", Json::object()},
-            {"clientInfo", {{"name", "Flock"}, {"version", "0.1.0"}}}};
+    return {
+        {"protocolVersion", ProtocolVersion}, {"capabilities", Json::object()}, {"clientInfo", {{"name", "Flock"}, {"version", "0.1.0"}}}};
 }
 
 struct Failure : std::runtime_error {
     enum class Kind { Auth, Settings, Wire, Rpc, Tool };
-    enum class Reason { Other, QuestionGone, WorkSettings, ThreadNotFound, HistoryNotFound, ProjectNotFound, Timeout,
-                        DelegatedFromRejected, CredentialExpired, LinkedEnvironmentUnavailable };
+    enum class Reason {
+        Other,
+        QuestionGone,
+        WorkSettings,
+        ThreadNotFound,
+        HistoryNotFound,
+        ProjectNotFound,
+        Timeout,
+        DelegatedFromRejected,
+        CredentialExpired,
+        LinkedEnvironmentUnavailable
+    };
     Kind kind;
     Reason reason;
     explicit Failure(Kind category, std::string message, Reason reason = Reason::Other)
         : std::runtime_error(std::move(message)), kind(category), reason(reason) {}
-    bool missingHistory() const {
-        return reason == Reason::ThreadNotFound || reason == Reason::HistoryNotFound;
-    }
+    bool missingHistory() const { return reason == Reason::ThreadNotFound || reason == Reason::HistoryNotFound; }
 };
 
 using Headers = std::map<std::string, std::string>;
@@ -31,10 +39,12 @@ struct HttpResponse {
     Headers headers;
     std::string body;
 };
-struct Url { std::string full, origin, path; };
+struct Url {
+    std::string full, origin, path;
+};
 Url checkedUrl(const std::string& value);
-HttpResponse http(const std::string& url, std::string_view method, const Headers& headers = {},
-                  const std::string& body = {}, long timeoutMs = 6000);
+HttpResponse http(const std::string& url, std::string_view method, const Headers& headers = {}, const std::string& body = {},
+                  long timeoutMs = 6000);
 std::string encode(std::string_view value);
 std::string decode(std::string_view value);
 std::string trim(std::string_view value);
@@ -48,12 +58,12 @@ inline const Json& member(const Json& object, const char* key) {
     return *field;
 }
 inline const Json& array(const Json& object, const char* key) {
-    const auto& field = member(object,key);
+    const auto& field = member(object, key);
     if (!field.is_array()) invalidResponse();
     return field;
 }
 inline bool boolean(const Json& object, const char* key) {
-    const auto& field = member(object,key);
+    const auto& field = member(object, key);
     if (!field.is_boolean()) invalidResponse();
     return field.get<bool>();
 }
@@ -63,7 +73,7 @@ inline Id position(const Json& value) {
     return value.get<Id>();
 }
 inline bool localItem(const Json& item, std::string_view threadId) {
-    return str(item,"sourceThreadId") == threadId && str(item,"visibility") == "local";
+    return str(item, "sourceThreadId") == threadId && str(item, "visibility") == "local";
 }
 
 struct Credential {
@@ -95,8 +105,8 @@ private:
     unsigned nextId_ = 0;
 };
 
-Json readThread(Client&, std::string_view threadId, std::string_view view, unsigned limit, int chars,
-                Json args = Json::object(), int runLimit = 1);
+Json readThread(Client&, std::string_view threadId, std::string_view view, unsigned limit, int chars, Json args = Json::object(),
+                int runLimit = 1);
 void advancePosition(const Json&, Id&);
 bool gitCommit(std::string_view sha);
 bool loopbackGitHost(std::string_view origin);
@@ -107,7 +117,7 @@ std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path&, con
 std::optional<SessionEventPage> sessionEvents(const std::filesystem::path&, const SessionTarget&, const SessionEventFilter&);
 std::optional<SessionEvent> sessionEvent(const std::filesystem::path&, const SessionTarget&, std::string_view itemId);
 std::optional<SessionCounts> sessionCounts(const std::filesystem::path&, const SessionTarget&);
-std::optional<SessionAttachment> sessionAttachment(const std::filesystem::path&, const SessionTarget&,
-                                                   std::string_view itemId, std::string_view attachmentId);
+std::optional<SessionAttachment> sessionAttachment(const std::filesystem::path&, const SessionTarget&, std::string_view itemId,
+                                                   std::string_view attachmentId);
 
 }

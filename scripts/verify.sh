@@ -12,6 +12,8 @@ if [ "$#" -ne 0 ]; then
 fi
 
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+"$source_dir/scripts/format.sh" --check
+
 temp_root=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
 build_dir=$(mktemp -d "$temp_root/flock-verify.XXXXXXXX")
 

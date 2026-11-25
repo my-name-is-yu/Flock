@@ -18,6 +18,10 @@ cmake --build build -j
 Run `./scripts/verify.sh` to configure a fresh build with tests, build it, and
 run CTest.
 
+C++ formatting uses clang-format 21: run `./scripts/format.sh` to apply it.
+`git config blame.ignoreRevsFile .git-blame-ignore-revs` skips the formatting
+commit in blame.
+
 ## Get your first Bot reply
 
 1. Start Flock with `build/app/flock run` and open the printed Web URL.

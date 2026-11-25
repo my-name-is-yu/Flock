@@ -21,11 +21,9 @@ public:
     void disconnect(std::string_view connectionId);
     std::optional<ExternalMcpConnection> authenticate(std::string_view bearer) const;
 
-    Id submit(const ExternalMcpConnection&, std::string_view bot, std::string_view requestId,
-              std::string_view text, const IntakeResolver&);
+    Id submit(const ExternalMcpConnection&, std::string_view bot, std::string_view requestId, std::string_view text, const IntakeResolver&);
     Json status(const ExternalMcpConnection&, Id taskId) const;
     void answer(const ExternalMcpConnection&, Id taskId, Id waitId, Id revision, Id generation, std::string_view text);
-
 private:
     struct OwnedTask {
         Person actor;

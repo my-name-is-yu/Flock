@@ -1,0 +1,17 @@
+BasedOnStyle: LLVM
+AccessModifierOffset: -4
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+BreakBeforeBraces: Attach
+BreakStringLiterals: false
+ColumnLimit: 140
+EmptyLineBeforeAccessModifier: Never
+FixNamespaceComments: false
+IndentWidth: 4
+PointerAlignment: Left
+ReflowComments: Never
+SortIncludes: Never
+SortUsingDeclarations: Never
+Standard: c++20
