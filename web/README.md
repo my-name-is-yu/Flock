@@ -4,6 +4,8 @@ The executable serves the embedded UI on its IPv4 loopback listener. The Web UI 
 
 The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. For the same person and Bot, retrying the same payload with the same `clientMessageId` returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Select a task question's choice and press **Send answer** to answer directly through `POST /api/operations`. Written replies to questions go through the Bot.
 
+Bots can read, write, and search files in their own workspaces. Requests to run commands, scripts, builds, or tests go to T3 Sessions. If a Session needs a file it cannot access, the Bot asks you to make it available in the selected T3 project.
+
 The Bot's name and **needs you** count above its chat open the items waiting on you. The Bot list also shows a count shortcut. A question card uses the composer to answer its exact target through `POST /api/inbox/decide`. A pull request review card uses the composer to send a message to the Bot through `POST /api/messages`, with the review as the reply target. The review stays in **Needs you** until you respond. **History**, in the conversation controls and the Bot's menu, lists what you have already answered or approved.
 
 When a request uses its step allowance, approve another block in the conversation
@@ -102,7 +104,8 @@ Use **Appearance** to set the theme for the current browser. Use **Permissions**
 to set the installation's permission mode and rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
-[category defaults](../README.md#installation-policy).
+[category defaults](../README.md#installation-policy). Rules added here or
+from an approval card stay in the list until an administrator removes them.
 
 Installation administrators manage ChatGPT, T3, and other integrations in
 **Connections**. Local discovery and URL connections both use T3 OAuth.
@@ -157,16 +160,21 @@ The creator owns the Bot. A root identity can manage all Bots. Shared members
 can view and talk to their Bot and answer its Decision Inbox items. With Web
 identities configured, the owner manages members in Bot settings.
 
+In the Bot's settings, edit **How it runs** to choose **Reasoning effort**.
+The options follow the selected model and include **Model default**.
+
 `GET /api/bot-settings?bot=ID` returns settings visible to that person.
-`GET /api/settings/models?bot=ID` returns `{models: [{slug, displayName}]}`
-for the Bot owner and installation roots. An unavailable catalog returns
-`503` with `{"error":"models_unavailable"}`.
-Under **How it runs**, set **Steps per request** for future requests. The
-default is 20. `POST /api/bots/profile` accepts `botId` and any of
-`environmentId`, `projectId`, `model`, or the positive integer
-`modelCallLimit` in one request. Omitted fields are preserved. An empty string
-clears a supplied environment, project, or model. Name, avatar, and role are
-saved separately.
+`GET /api/settings/models?bot=ID` returns `models` and `fallbackReasoningEfforts`
+for the Bot owner and installation roots. Each model has `slug` and `displayName`,
+with `reasoningEfforts` when ChatGPT lists supported levels. An unavailable
+catalog returns `503` with `error: "models_unavailable"` and `fallbackReasoningEfforts`.
+Under **How it runs**, set **Steps per request** for future requests. The default is 20.
+`POST /api/bots/profile` accepts `botId` and any of `environmentId`, `projectId`,
+`model`, `reasoningEffort`, or the positive integer `modelCallLimit` in one request.
+Omitted fields are preserved. An empty string clears a supplied environment,
+project, model, or reasoning effort. Changing the model uses **Model default**
+unless the request also supplies an effort for the new model.
+Name, avatar, and role are saved separately.
 `POST /api/bot-settings/members` takes `botId`, `person` and boolean `add`.
 `POST /api/bot-settings/secret` accepts `botId`, `requestId` and `value`.
 Mutations use the usual same-origin JSON headers. Fulfilled secret values
@@ -186,6 +194,10 @@ shows the number of images attached. Bot inspection follows the `attachment.insp
 in the current page and are cleared on reload.
 
 ## Memory and automation
+
+Model input starts with the Bot's role, private memory, and earlier conversation
+history. Flock puts the current event and tool results near the end to lengthen
+the prefix shared by requests for the same Bot.
 
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared
 document, for example `team%2Fstaging.md`. `GET /api/memory/history` accepts the

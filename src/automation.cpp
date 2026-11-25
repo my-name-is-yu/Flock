@@ -357,22 +357,21 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
     }
 }
 
+void Store::Impl::applyPlannerModel(Json& config, const PlannerModel& planner) {
+    config["model"] = planner.model;
+    config["modelProvider"] = planner.provider;
+    if (planner.reasoningEffort) config["reasoningEffort"] = *planner.reasoningEffort;
+    else config.erase("reasoningEffort");
+}
+
 Json Store::Impl::automationRoute(std::string_view bot, Json routing) const {
-    if (!automationIntake) return routing;
-    try {
-        const auto current = automationIntake(bot,{}).config;
+    if (!automationModel) return routing;
+    if (const auto current = automationModel(bot)) {
         auto& config = routing.at("config");
-        if (current.contains("modelCallLimit"))
-            config["modelCallLimit"] = modelCallLimit(current);
-        else
-            config.erase("modelCallLimit");
-        const auto model = field(current,"model");
-        const auto provider = field(current,"modelProvider");
-        if (!model.empty() && !provider.empty()) {
-            config["model"] = model;
-            config["modelProvider"] = provider;
-        }
-    } catch (const Conflict&) {}
+        applyPlannerModel(config,*current);
+        if (current->modelCallLimit) config["modelCallLimit"] = *current->modelCallLimit;
+        else config.erase("modelCallLimit");
+    }
     return routing;
 }
 

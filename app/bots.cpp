@@ -266,6 +266,10 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if (!bot.projectId.empty() && bot.environmentId.empty())
         throw Conflict("A pinned T3 project needs its environmentId");
     bot.settings = {{"botDisplayName",bot.name},{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
+    if (const auto effort = config.find("reasoningEffort"); effort != config.end()) {
+        auto level = validatedBotRunSetting("reasoningEffort",*effort);
+        if (level != "") bot.settings["reasoningEffort"] = std::move(level);
+    }
     for (const auto key : {"services","mcpServers"}) {
         if (!config.contains(key)) continue;
         if (!config[key].is_array()) throw Conflict("Connection names must be an array");
@@ -375,29 +379,49 @@ Bot Bots::get(std::string_view id) const {
     return configuredBot(id,readBotConfig(path(id) / "config.json"));
 }
 
+std::optional<Bot> Bots::tryGet(std::string_view id) const {
+    try {
+        return get(id);
+    } catch (const Conflict&) {
+        return std::nullopt;
+    } catch (const std::filesystem::filesystem_error&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<Store::PlannerModel> Bots::plannerModel(std::string_view id) const {
+    const auto bot = tryGet(id);
+    if (!bot) return std::nullopt;
+    Store::PlannerModel planner{bot->settings.at("model").get<std::string>(),
+                                bot->settings.at("modelProvider").get<std::string>(),std::nullopt};
+    if (const auto effort = bot->settings.find("reasoningEffort"); effort != bot->settings.end())
+        planner.reasoningEffort = effort->get<std::string>();
+    if (bot->settings.contains("modelCallLimit")) planner.modelCallLimit = modelCallLimit(bot->settings);
+    return planner;
+}
+
+std::string Bots::readOptionalNotes(std::string_view id, std::string_view filename, std::size_t limit) const try {
+    return readText(path(id) / filename,limit,true);
+} catch (const Conflict& error) {
+    throw BotNotesUnavailable(error.what());
+} catch (const std::filesystem::filesystem_error& error) {
+    throw BotNotesUnavailable(error.what());
+}
+
 std::string Bots::soul(std::string_view id) const {
-    return readText(path(id) / "SOUL.md",maxBotRoleBytes,true);
+    return readOptionalNotes(id,"SOUL.md",maxBotRoleBytes);
 }
 
 std::string Bots::initialMemory(std::string_view id) const {
-    return readText(path(id) / "MEMORY.md",8192,true);
+    return readOptionalNotes(id,"MEMORY.md",8192);
 }
 
 std::vector<PeerBot> Bots::peers(std::string_view id) const {
-    const auto tryGetConfiguredBot = [this](std::string_view botId) -> std::optional<Bot> {
-        try {
-            return get(botId);
-        } catch (const Conflict&) {
-            return std::nullopt;
-        } catch (const std::filesystem::filesystem_error&) {
-            return std::nullopt;
-        }
-    };
-    const auto sender = tryGetConfiguredBot(id);
+    const auto sender = tryGet(id);
     if (!sender) return {};
     std::vector<PeerBot> result;
     for (const auto& peerId : sender->allowedBots) {
-        if (const auto peer = tryGetConfiguredBot(peerId))
+        if (const auto peer = tryGet(peerId))
             result.push_back({peer->name,peer->intake(""),peer->role});
     }
     return result;
@@ -433,8 +457,9 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
 
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",maxBotRoleBytes,true)},{"cron",schedules}};
     try { item["modelCallLimit"] = modelCallLimit(config); } catch (const Conflict&) {}
-    for (const std::string_view key : {"environmentId","projectId","model"}) {
-        if (key == "model") {
+    for (const std::string_view key : botRunSettingFields) {
+        if (key == "modelCallLimit") continue;
+        if (key == "model" || key == "reasoningEffort") {
             const auto provider = config.find("modelProvider");
             if (provider == config.end() || *provider != "chatgpt") continue;
         }
@@ -644,7 +669,7 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
 }
 
 Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& settings, Seconds now,
-                             const ScheduleReporter& report) {
+                             const ScheduleReporter& report, const Json& modelCatalog) {
     if (!settings.is_object() || settings.empty() || settings.size() != botRunSettingCount(settings))
         throw BotProfileError("invalid_profile_update","Save how the Bot runs separately from its profile");
     std::vector<std::string> configErrors;
@@ -655,16 +680,30 @@ Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& sett
         auto config = parseBotConfig(original);
         for (const auto& [key,value] : settings.items()) {
             auto setting = validatedBotRunSetting(key,value);
-            if (setting == "") {
-                config.erase(key);
-                if (key == "model") config.erase("modelProvider");
-            } else {
-                config[key] = std::move(setting);
-                if (key == "model") config["modelProvider"] = "chatgpt";
+            if (key == "model") {
+                const auto previous = config.find(key);
+                if (!settings.contains("reasoningEffort") &&
+                    (setting == "" || previous == config.end() || *previous != setting))
+                    config.erase("reasoningEffort");
+                if (setting == "") config.erase("modelProvider");
+                else config["modelProvider"] = "chatgpt";
             }
+            if (setting == "") config.erase(key);
+            else config[key] = std::move(setting);
         }
         if (config.contains("projectId") && !config.contains("environmentId"))
             throw BotProfileError("invalid_workspace","A pinned T3 project needs its environmentId");
+        if (settings.contains("reasoningEffort") && config.contains("reasoningEffort")) {
+            const auto& effort = config.at("reasoningEffort");
+            const auto model = config.find("model");
+            const auto provider = config.find("modelProvider");
+            const auto slug = model != config.end() && model->is_string()
+                ? std::string_view(model->get_ref<const std::string&>()) : std::string_view{};
+            const auto& levels = modelReasoningEfforts(modelCatalog,slug);
+            if (!validPlainId(slug) || provider == config.end() || *provider != "chatgpt" ||
+                std::find(levels.begin(),levels.end(),effort) == levels.end())
+                throw BotProfileError("invalid_reasoning_effort","Choose an effort this model supports or use Model default");
+        }
         const auto updated = profileText(config);
         const auto schedules = configuredSchedules(id,config,configErrors);
         bool published = false;

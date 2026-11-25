@@ -9,7 +9,13 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
   const body = document.querySelector('main');
   const patches = [];
-  const choices = [{ slug: 'next-model', displayName: 'Next model' }];
+  const catalog = {
+    models: [
+      { slug: 'next-model', displayName: 'Next model', reasoningEfforts: ['low', 'ultra'] },
+      { slug: 'no-reasoning', displayName: 'No reasoning', reasoningEfforts: [] },
+    ],
+    fallbackReasoningEfforts: ['low', 'medium', 'high'],
+  };
   let catalogCalls = 0;
   let saved = { environmentId: 'new-environment', model: 'new-saved-model', modelCallLimit: 20 };
   const card = createBotWorkspaceCard(async (patch) => {
@@ -19,12 +25,18 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     return saved;
   }, async () => [{ environmentId: 'suggested-environment', authorization: null }], async () => {
     if (++catalogCalls === 1) throw new Error('models_unavailable');
-    return choices;
+    return catalog;
   });
   const edit = card.element.querySelector('.settings-card-edit');
   const form = card.element.querySelector('form');
   const model = form.elements.model;
   const allowance = form.elements.modelCallLimit;
+  const effort = form.elements.reasoningEffort;
+  const effortOptions = () => Array.from(effort.options, (option) => option.value).join(',');
+  const chooseModel = (value) => {
+    model.value = value;
+    model.dispatchEvent(new Event('change'));
+  };
   const environment = form.elements.environmentId;
   const project = form.elements.projectId;
   const save = form.querySelector('button[type="submit"]');
@@ -61,6 +73,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   check(catalogCalls === 3 && model.value === 'unlisted-model' &&
     Array.from(model.options).some((option) => option.value === 'next-model'),
     'Reopening did not retry the catalog or preserve the saved model outside the catalog');
+  check(effortOptions() === ',low,medium,high', 'A model without catalog metadata did not offer fallback efforts');
   project.value = 'draft-project';
   project.focus();
   placeRows(body, [document.createElement('header'), card.element]);
@@ -82,12 +95,13 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   check(patches.length === 2 && patches.every((patch) => JSON.stringify(patch) === '{"projectId":"draft-project"}'),
     'Save sent an unchanged field or did not trim the draft');
   const facts = card.element.querySelectorAll('dd');
-  check(form.hidden && facts[0].textContent === 'new-saved-model' && facts[1].textContent === '20' &&
-    facts[2].textContent === 'new-environment' && facts[3].textContent === 'draft-project', 'Save did not show the current settings');
+  check(form.hidden && facts[0].textContent === 'new-saved-model' && facts[1].textContent === 'Model default' &&
+    facts[2].textContent === '20' && facts[3].textContent === 'new-environment' && facts[4].textContent === 'draft-project',
+    'Save did not show the current settings');
 
   edit.click();
   await settle();
-  model.value = 'next-model';
+  chooseModel('next-model');
   model.focus();
   placeRows(body, [document.createElement('header'), card.element]);
   card.update({ ...saved, model: 'external-model' });
@@ -111,7 +125,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   card.update(saved);
   edit.click();
   await settle();
-  model.value = 'next-model';
+  chooseModel('next-model');
   project.value = 'project-without-environment';
   save.click();
   await settle();
@@ -134,8 +148,26 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   allowance.value = '12';
   save.click();
   await settle();
-  check(JSON.stringify(patches[4]) === '{"modelCallLimit":12}' && form.hidden && facts[1].textContent === '12',
+  check(JSON.stringify(patches[4]) === '{"modelCallLimit":12}' && form.hidden && facts[2].textContent === '12',
     'An allowance-only save changed other fields or did not show the saved value');
+  edit.click();
+  await settle();
+  check(effortOptions() === ',low,ultra', 'Advertised efforts were replaced by the fallback list');
+  effort.value = 'ultra';
+  save.click();
+  await settle();
+  check(JSON.stringify(patches[5]) === '{"reasoningEffort":"ultra"}' && facts[1].textContent === 'Ultra',
+    'Saving a reasoning effort changed another field or failed to show it');
+
+  edit.click();
+  await settle();
+  check(effort.value === 'ultra', 'Reopening did not show the saved effort');
+  chooseModel('no-reasoning');
+  check(effortOptions() === '' && effort.value === '', 'A model with no advertised levels offered an override');
+  save.click();
+  await settle();
+  check(JSON.stringify(patches[6]) === '{"model":"no-reasoning","reasoningEffort":""}' &&
+    facts[1].textContent === 'Model default', 'Changing the model left an unsupported effort saved');
 }
 
 const directory = mkdtempSync(join(tmpdir(), 'flock-bot-workspace-'));

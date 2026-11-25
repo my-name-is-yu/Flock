@@ -396,7 +396,7 @@ std::string externalSessionLink(const Json& run) {
 Json botSettings(const Json& bot) {
     auto view = botSummary(bot);
     view["soul"] = field(bot,"soul");
-    copyFields(view,bot,{"environmentId","projectId","model","modelCallLimit"});
+    copyFields(view,bot,{"environmentId","projectId","model","reasoningEffort","modelCallLimit"});
     return view;
 }
 

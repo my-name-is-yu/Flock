@@ -515,7 +515,7 @@ void concurrentWorkerRecoversFromWriterContention(bool repairResponse) {
             reported = true;
         }
     });
-    execution.model.usage = {{"input_tokens",7}};
+    execution.model.usage = {{"input_tokens",7},{"input_tokens_details",{{"cached_tokens",3}}}};
     execution.model.conversation = [&](const ModelInput& input) {
         if (input.event.at("text") == "Wait for SQLite") {
             const auto previous = turn(input);
@@ -526,7 +526,7 @@ void concurrentWorkerRecoversFromWriterContention(bool repairResponse) {
                 }
                 if (repairResponse) {
                     if (input.feedback.empty()) {
-                        throw ModelError("Unexpected batch",false,{{"input_tokens",7}},ModelErrorCode::invalid_tool_count);
+                        throw ModelError("Unexpected batch",false,execution.model.usage,ModelErrorCode::invalid_tool_count);
                     }
                     check(input.feedback.find("invalid_tool_count") != std::string::npos,
                           "The contended repair lost its reason");
@@ -559,6 +559,8 @@ void concurrentWorkerRecoversFromWriterContention(bool repairResponse) {
           reply(store,other,"beta")["text"] == "Done." &&
           fixture.count("SELECT json_extract(usage,'$.input_tokens') FROM model_attempts WHERE message_id=" +
                         std::to_string(blocked) + " ORDER BY id LIMIT 1") == 7 &&
+          fixture.count("SELECT json_extract(usage,'$.input_tokens_details.cached_tokens') FROM model_attempts WHERE message_id=" +
+                        std::to_string(blocked) + " ORDER BY id LIMIT 1") == 3 &&
           fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(blocked)) == 2,
           "A contended worker stopped the Runtime or left a Bot without a reply");
     if (repairResponse)

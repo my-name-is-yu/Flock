@@ -88,10 +88,37 @@ bool validPlainId(std::string_view id) {
         std::ranges::none_of(id,[](unsigned char ch) { return ch <= 32 || ch == 127; });
 }
 
+bool validReasoningEffort(std::string_view effort) {
+    return !effort.empty() && effort.size() <= 32 &&
+        effort.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_-") == effort.npos;
+}
+
+const Json& fallbackReasoningEfforts() {
+    static const auto levels = Json::array({"none","minimal","low","medium","high","xhigh","max"});
+    return levels;
+}
+
+const Json& modelReasoningEfforts(const Json& catalog, std::string_view slug) {
+    for (const auto& model : catalog) {
+        if (model.value("slug","") != slug) continue;
+        const auto levels = model.find("reasoningEfforts");
+        if (levels != model.end() && levels->is_array()) return *levels;
+        break;
+    }
+    return fallbackReasoningEfforts();
+}
+
 Json validatedBotRunSetting(std::string_view key, const Json& value) {
     if (key == "modelCallLimit") {
         try { return modelCallLimit({{"modelCallLimit",value}}); }
         catch (const Conflict& error) { throw BotProfileError("invalid_model_call_limit",error.what()); }
+    }
+    if (key == "reasoningEffort") {
+        if (value.is_string()) {
+            const auto& effort = value.get_ref<const std::string&>();
+            if (effort.empty() || validReasoningEffort(effort)) return effort;
+        }
+        throw BotProfileError("invalid_reasoning_effort","Choose a reasoning effort from the list");
     }
     if (value.is_string()) {
         const auto& text = value.get_ref<const std::string&>();

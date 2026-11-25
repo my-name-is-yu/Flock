@@ -160,16 +160,6 @@ try {
   const history = cli('history', String(waiting.id));
   assert.ok(history.some(({ kind }) => kind === 'cancelled'));
 
-  for (const workspaceCommandState of ['running', 'stop_requested', 'exited']) {
-    sqlite(`
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as db:
-    db.execute("INSERT INTO workspace_commands(id,bot,started_at,state) VALUES(1,'release',0,?) "
-               "ON CONFLICT(id) DO UPDATE SET state=excluded.state", (sys.argv[2],))
-`, workspaceCommandState);
-    if (workspaceCommandState !== 'exited') assert.deepEqual(await deleteBot(botId, { status: 409 }), { error: 'bot_busy' });
-  }
-
   assert.deepEqual(await deleteBot(botId), { ok: true });
   assert.deepEqual(botIds(await api('bots')), [replacement.id]);
   assert.deepEqual(botIds(cli('bots')), [replacement.id]);

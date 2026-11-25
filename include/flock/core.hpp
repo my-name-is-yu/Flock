@@ -40,6 +40,7 @@ using IntakeResolver = std::function<Intake(std::string_view botId, std::string_
 Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake);
 
 struct BotNotes { std::string soul, memory; };
+struct BotNotesUnavailable : Conflict { using Conflict::Conflict; };
 struct PeerBot { std::string name; Intake intake; std::string role = {}; };
 using PeerResolver = std::function<std::vector<PeerBot>(std::string_view)>;
 
@@ -67,7 +68,8 @@ struct ModelInput {
     bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
 };
-enum class ModelErrorCode { inference_failed, authentication_required, invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
+enum class ModelErrorCode { inference_failed, authentication_required, unsupported_reasoning_effort,
+                            invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
 struct ModelError : std::runtime_error {
     ModelError(std::string message, bool retryable, Json measurements = Json::object(),
                ModelErrorCode failureCode = ModelErrorCode::inference_failed)
@@ -280,10 +282,16 @@ using WebIdentityResolver = std::function<std::optional<bool>(std::string_view p
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
+    struct PlannerModel {
+        std::string model, provider;
+        std::optional<std::string> reasoningEffort;
+        std::optional<Id> modelCallLimit = std::nullopt;
+    };
+    using AutomationModelResolver = std::function<std::optional<PlannerModel>(std::string_view botId)>;
     using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&,
                                                        const std::function<void()>&)>;
     using EditConfiguredSchedules = std::function<void(const CommitConfiguredSchedules&)>;
-    explicit Store(std::filesystem::path database, MemorySeed = {}, IntakeResolver automationIntake = {});
+    explicit Store(std::filesystem::path database, MemorySeed = {}, AutomationModelResolver = {});
     ~Store();
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;
