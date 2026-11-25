@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
+#include "commit_check.hpp"
 
 #include <algorithm>
 #include <set>
@@ -255,7 +256,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     std::string error;
     bool savedTaskTarget = false;
     Id savedTaskId = 0, savedGeneration = 0;
-    std::string savedActionId;
+    std::string savedActionId, expectedCommit;
     Json source = nullptr;
     try {
         if (decision.tool == "send_to_task") {
@@ -282,6 +283,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             savedTaskId = task.at("id");
             savedGeneration = task.at("generation");
             savedActionId = selected.actionId;
+            expectedCommit = field(task,"requestedCommit");
             command.instruction = conversation_storage::text(decision.args,"instruction",conversation_storage::messageSize,true);
             transaction.commit();
         } else {
@@ -293,6 +295,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         command.instruction = name + ": " + command.instruction;
         if (!source.is_null())
             command.instruction += "\n\n(reference only):\n" + bounded(field(source,"text"),8192);
+        if (!expectedCommit.empty()) command.instruction = commit_check::instructions(std::move(command.instruction),expectedCommit);
         if (decision.tool == "message_session" &&
             (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
             throw ToolError("Use the Session identifiers");
@@ -404,7 +407,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             transaction.commit();
             return gate == ApprovalGate::waiting ? waiting : advance;
         }
-        Json effect{{"kind","message_session"}};
+        Json effect{{"kind","message_session"},{"sendState","prepared"}};
         if (savedTaskTarget) {
             effect["taskId"] = savedTaskId;
             effect["actionId"] = savedActionId;
@@ -420,6 +423,21 @@ INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,sta
 SELECT ?,?,?,person_id,'active' FROM t3_connector WHERE singleton=1
 ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
 )SQL",{message.bot,target.environmentId,target.threadId});
+        transaction.commit();
+    }
+
+    {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (!authorizeTurn(message)) { transaction.commit(); return stop; }
+        auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
+                         {id,step});
+        if (!row.next()) { transaction.commit(); return stop; }
+        auto effect = row.json(0);
+        if (effect.value("sendState",std::string{}) != "prepared") { transaction.commit(); return stop; }
+        effect["sendState"] = "sending";
+        exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL",
+             {effect,id,step});
         transaction.commit();
     }
 
@@ -529,9 +547,18 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(
             auto updated = action;
             updated["stopRequested"] = true;
             updated["stopOperation"] = key;
+            if (!selected.run.value("runId",std::string{}).empty()) {
+                updated["stopRunId"] = selected.run.at("runId");
+                updated["stopThreadId"] = selected.run.at("threadId");
+            }
             if (phase == "started" && (selected.threadId.empty() || selected.runId.empty()))
+            {
+                const auto origin = policyOrigin(message);
                 updated["stopPolicy"] = {{"tool",decision.tool},{"args",decision.args},
-                                          {"generation",generation},{"revisionId",task.value("currentRevision",Id{})}};
+                    {"generation",generation},{"revisionId",task.value("currentRevision",Id{})}};
+                updated["stopPolicyOrigin"] = {{"scope",origin.scope},{"requester",origin.requester},
+                    {"anchor",origin.anchor},{"turn",0},{"background",origin.background}};
+            }
             updated.erase("phase");
             updated.erase("authGeneration");
             exec("UPDATE outbox SET data=? WHERE id=? AND task_id=? AND phase=?",

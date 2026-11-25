@@ -95,13 +95,20 @@ bool Store::Impl::currentPolicyApproval(Id turn, Id task, Id revision, Id genera
     if (operation.starts_with(runOutboxOperation) || operation.starts_with(runStopOperation)) {
         const bool stopOperation = operation.starts_with(runStopOperation);
         const auto prefix = stopOperation ? runStopOperation : runOutboxOperation;
-        return query(R"SQL(
+        if (stopOperation)
+            return query(R"SQL(
 SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
-WHERE o.id=? AND t.id=? AND ((? AND o.phase='ready') OR (? AND o.phase IN ('started','accepted')))
+WHERE t.id=? AND (o.id=? OR json_extract(o.data,'$.stopOperation')=?)
+  AND o.phase IN ('started','accepted') AND json_extract(o.data,'$.stopRequested')=1
   AND t.state IN ('running','waiting')
   AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
-)SQL",{operation.substr(prefix.size()),task,static_cast<int>(!stopOperation),
-         static_cast<int>(stopOperation),revision}).next();
+)SQL",{task,operation.substr(prefix.size()),operation.substr(prefix.size()),revision}).next();
+        return query(R"SQL(
+SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
+WHERE o.id=? AND t.id=? AND o.phase='ready'
+  AND t.state IN ('running','waiting')
+  AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
+)SQL",{operation.substr(prefix.size()),task,revision}).next();
     }
     return query("SELECT 1 FROM tasks WHERE id=? AND generation=?"
                  " AND coalesce(json_extract(data,'$.currentRevision'),0)=?"

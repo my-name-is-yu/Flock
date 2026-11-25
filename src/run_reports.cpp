@@ -59,6 +59,12 @@ ORDER BY w.rowid LIMIT 1)SQL",
     run["gatewayEnvironmentId"] = gateway;
     if (!link.empty()) run["link"] = link;
     run["status"] = delivery == "queued" ? "queued" : "running";
+    auto action = outbox(task,field(run,"actionId"));
+    if (action.value("stopRequested",false)) {
+        for (const auto* key : {"stopRequested","stopOperation","stopRunId","stopThreadId","stopPolicy","stopPolicyOrigin"})
+            action.erase(key);
+        exec("UPDATE outbox SET data=? WHERE id=?",{action,field(run,"actionId")});
+    }
     for (const auto* key : {"commit","report","detail","evidenceStatus","sessionCreatedAt"}) run.erase(key);
     run.erase("retryAt");
     run.erase("stopRetryAt");
