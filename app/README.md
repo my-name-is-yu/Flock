@@ -84,11 +84,11 @@ decisions from then on. Use the memory tools or Web API to edit it. Shared
 playbooks and text documents use an explicit document ID and follow the installation policy
 for the requested `shared_memory` operation.
 
-When a Bot starts work in a T3 Session, Flock appends a section with the Bot's
-current private memory. Flock redacts protected values and trims the section to
-fit the Session prompt, preserving the work instruction. The section indicates
-when notes were shortened. Follow-ups include the section when the memory
-changes.
+Set `"shareMemoryWithSessions": true` in a Bot's `config.json` to send its memory
+with work instructions. Session history retains the notes and makes them
+available to anyone with read access to that Session. Flock redacts protected
+values and trims the notes to fit after the work instruction. Follow-ups
+include changed notes or a longer excerpt when more space is available.
 
 ## Connect and run
 

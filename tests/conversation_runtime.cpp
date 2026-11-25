@@ -196,10 +196,11 @@ struct Fixture {
     Script model;
     SimulatedT3 t3;
     std::function<void()> beforeNotes;
-    MemorySeed memorySeed;
+    Store::MemorySeed memorySeed;
+    bool shareMemoryWithSessions = false;
     Seconds now = unixTime();
 
-    explicit Fixture(MemorySeed seed = {}) : memorySeed(std::move(seed)) {
+    explicit Fixture(Store::MemorySeed seed = {}) : memorySeed(std::move(seed)) {
         char path[] = "/tmp/flock-conversation-runtime-XXXXXX";
         const auto* created = mkdtemp(path);
         if (!created) throw std::runtime_error("cannot create a test directory");
@@ -222,7 +223,8 @@ struct Fixture {
     Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop",
                    std::string project = "project") {
         return {std::move(bot),std::move(request),std::move(environment),std::move(project),
-            {{"conversationEnvironments",{{"クラウドMac","cloud"},{"ローカルMac","desktop"}}}}};
+            {{"conversationEnvironments",{{"クラウドMac","cloud"},{"ローカルMac","desktop"}}},
+             {"shareMemoryWithSessions",shareMemoryWithSessions}}};
     }
     Json enqueue(std::string_view key,std::string_view text,Id replyTo = 0) {
         Store httpWriter(dir/"state.db");
@@ -2139,6 +2141,7 @@ void conversationCanReadAndChangeTheFullCurrentContract() {
 void newSessionsReceivePersistedTaskDecisions() {
     for (const bool explicitFresh : {false,true}) {
         Fixture f([](std::string_view) { return "Use the performance runner"; });
+        f.shareMemoryWithSessions = true;
         const auto intent = "Measure the cold-start fixture, including " + std::string(4800,'i') + " the cache-disabled case";
         const auto criteria = "Report " + std::string(4500,'c') + " p99 and raw samples";
         constexpr auto startText = "Measure the cold-start fixture";
@@ -2235,6 +2238,7 @@ void revisedSessionDoesNotReplaySupersededDecisions() {
 
 void authoritativeHandoffFitsBeforeMemory() {
     Fixture f;
+    f.shareMemoryWithSessions = true;
     const std::string protectedValue = "fixture-private-key";
     std::string memory = "Use fixture credentials: " + protectedValue + "\n";
     while (memory.size() + std::string_view("界").size() <= 8192) memory += "界";
@@ -2276,16 +2280,29 @@ void authoritativeHandoffFitsBeforeMemory() {
     for (std::size_t i = 0; i < 8; ++i)
         check(tight.instruction.find(directions[i]) < notes,"memory displaced an accepted instruction");
 
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"follow_up",{{"instruction","Check the baseline again"}},"Verify the prior report"};
+    };
+    f.t3.finish("run-2","Previous Run settled again");
+    f.advanceUntil([&] { return f.t3.sent.size() == 3; },"the Session did not receive its follow-up");
+    const auto& roomier = f.t3.sent.back();
+    check(roomier.target.threadId == "session-2" && roomier.instruction.size() > 8192,
+          "a shorter follow-up omitted the longer excerpt of the same memory version");
+    checkMemory(roomier,8192);
+
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"delegate",{{"instruction","Start an independent Session"}},"Verify independently"};
+    };
     for (int i = 0; i < 9; ++i) {
         const auto key = "large-direction-" + std::to_string(i);
         f.receive("next-" + key,key);
     }
-    f.t3.finish("run-2","Previous Run settled again");
+    f.t3.finish("run-3","Previous Run settled once more");
     f.reach(id,"sending");
     f.restart();
     f.reach(id,"waiting");
     const auto task = f.task(id);
-    check(f.t3.sent.size() == 2 && task["pendingInstructions"].size() == 9 &&
+    check(f.t3.sent.size() == 3 && task["pendingInstructions"].size() == 9 &&
           task["wait"]["reason"] == "settings" &&
           task["wait"]["text"].get<std::string>().find("size limit") != std::string::npos,
           "a new Session silently received an incomplete authoritative handoff");
@@ -2386,6 +2403,7 @@ void environmentsResolveByNameOrId() {
 }
 void existingSessionStartsNormalWork() {
     Fixture f([](std::string_view) { return "Prefer integration tests."; });
+    f.shareMemoryWithSessions = true;
     T3Connections connector(*f.store);
     connector.connect("desktop",localOwner.id,48123);
     connector.connect("cloud",localOwner.id,48123);
@@ -2452,6 +2470,7 @@ void existingSessionStartsNormalWork() {
 
 void sessionMemoryFollowsTheAcceptedVersion() {
     Fixture f([](std::string_view bot) { return bot == "alpha" ? "Use baseline A." : "Beta's private convention."; });
+    f.shareMemoryWithSessions = true;
     f.store->memory(localOwner,"beta","read_memory",Json::object());
     f.store->memory(localOwner,"alpha","apply_memory_edit",
         {{"docId","team/notes.md"},{"baseVersion",0},{"content","Shared playbook."}});
@@ -2497,6 +2516,25 @@ void sessionMemoryFollowsTheAcceptedVersion() {
     const auto cleared = follow(3);
     check(cleared.find("Notes from") == cleared.npos,"empty memory added a section to the follow-up");
 }
+
+void privateMemoryStaysInFlockByDefault() {
+    Fixture f([](std::string_view) { return "Private convention in a project other Bots can read."; });
+    auto routing = f.routing();
+    routing.config.erase("shareMemoryWithSessions");
+    f.reach(f.store->submit(routing),"running");
+    check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find("Private convention") == std::string::npos,
+          "a Session received private memory without an explicit opt-in");
+
+    f.t3.finish("run-1","Prior request completed");
+    RuntimeOptions options;
+    options.intake = [&](std::string_view, std::string_view) { return f.routing(); };
+    f.runtime.reset();
+    f.runtime = std::make_unique<Runtime>(*f.store,f.model,f.t3,Runtime::SoulLoader{},options);
+    routing.config["shareMemoryWithSessions"] = true;
+    f.reach(f.store->submit(routing),"running");
+    check(f.t3.sent.size() == 2 && f.t3.sent.back().instruction.find("Private convention") == std::string::npos,
+          "a queued task sent private memory after the Bot disabled sharing");
+}
 }
 
 int main(int argc, char** argv) {
@@ -2509,6 +2547,7 @@ int main(int argc, char** argv) {
         durableInboxAndTargetedRevision();
         existingSessionStartsNormalWork();
         sessionMemoryFollowsTheAcceptedVersion();
+        privateMemoryStaysInFlockByDefault();
         linkedResultStartsANewSession();
         independentRequestQueuesSeparately();
         followUpCarriesTheReferencedReport();

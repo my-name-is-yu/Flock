@@ -1301,6 +1301,17 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             if (!dispatch && (options.requireT3Connection || sendsToSession || cmd.sessionOrigin))
                 dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
             if (disconnected()) return connectionUnavailable();
+            const auto sharesMemory = [](const Json& config) {
+                return config.value("shareMemoryWithSessions",Json(false)) == true;
+            };
+            bool includeMemory = sendsWork && sharesMemory(cmd.config);
+            if (includeMemory && options.intake) {
+                try {
+                    includeMemory = sharesMemory(options.intake(cmd.ownerBotId,{}).config);
+                } catch (const std::exception&) {
+                    includeMemory = false;
+                }
+            }
             auto policyGate = ApprovalGate::allow;
             const auto startSend = [&](Json& current) {
                 if (shutdown.stop_requested()) return false;
@@ -1327,9 +1338,10 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                                                db.connectedSessionAccess(source,target)))
                         action["sessionParticipationId"] = participant.number(0);
                 }
-                if (sendsWork) {
+                if (includeMemory) {
                     if (const auto memory = db.sessionMemory(cmd,options.clock())) {
-                        action["sessionMemory"] = {{"version",memory->version},{"section",memory->section}};
+                        action["sessionMemory"] = {{"version",memory->version},{"section",memory->section},
+                                                   {"excerptBytes",memory->excerptBytes}};
                         cmd.instruction = dispatchedWorkPrompt(action);
                     }
                 }

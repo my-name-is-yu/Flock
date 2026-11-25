@@ -130,7 +130,8 @@ void reopenDirectTask(const std::filesystem::path& path) {
         store.policy().setOwner(requester,"release");
         store.policy().setMode(localOwner,"supervised");
         store.memory(requester,"release","apply_memory_edit",{{"baseVersion",0},{"content","Use the old signing process."}});
-        task = store.submit({"release","Build the release","env","project"},&requester);
+        task = store.submit({"release","Build the release","env","project",{{"shareMemoryWithSessions",true}}},
+                            &requester);
     }
     {
         sqlite3* handle = nullptr;

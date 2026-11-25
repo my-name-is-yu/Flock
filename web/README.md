@@ -179,9 +179,9 @@ in the current page and are cleared on reload.
 
 ## Memory and automation
 
-T3 Sessions receive notes from the Bot's private memory when the Bot starts
-work. Follow-ups include updated notes when the memory changes, subject to the
-Session prompt limit.
+If the Bot's local configuration enables `shareMemoryWithSessions`, T3 Sessions
+receive notes from the Bot's memory. Anyone with read access to the Session
+can see the notes in its history.
 
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared
 document, for example `team%2Fstaging.md`. `GET /api/memory/history` accepts the

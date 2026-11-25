@@ -266,6 +266,10 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     if (!bot.projectId.empty() && bot.environmentId.empty())
         throw Conflict("A pinned T3 project needs its environmentId");
     bot.settings = {{"botDisplayName",bot.name},{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
+    if (const auto sharing = config.find("shareMemoryWithSessions"); sharing != config.end()) {
+        if (!sharing->is_boolean()) throw Conflict("shareMemoryWithSessions must be a boolean");
+        bot.settings["shareMemoryWithSessions"] = *sharing;
+    }
     for (const auto key : {"services","mcpServers"}) {
         if (!config.contains(key)) continue;
         if (!config[key].is_array()) throw Conflict("Connection names must be an array");

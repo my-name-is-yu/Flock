@@ -100,32 +100,38 @@ std::optional<SessionMemory> Store::Impl::sessionMemory(const Command& command, 
     const auto doc = findMemory(db,key);
     const auto version = doc ? doc->version : Id{0};
     const auto scrub = redactor(bot);
-    const auto content = doc ? scrub.text(doc->content) : seedPrivateMemory(key,bot,scrub,now);
-    if (content.find_first_not_of(" \t\r\n") == content.npos) return std::nullopt;
-    if (command.tool == "follow_up" && query(R"SQL(
-SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
-WHERE r.environment_id=? AND r.thread_id=? AND t.bot_id=?
-  AND json_extract(o.data,'$.sessionMemory.version')=?
-LIMIT 1
-)SQL",{command.environmentId,command.target.threadId,bot,version}).next())
-        return std::nullopt;
-
+    auto excerpt = doc ? scrub.text(doc->content) : seedPrivateMemory(key,bot,scrub,now);
+    if (excerpt.find_first_not_of(" \t\r\n") == excerpt.npos) return std::nullopt;
     const auto marker = sessionPrompt(command.actionId,{});
     const auto bytes = std::min(memoryBytes,maxSessionPromptBytes - command.instruction.size());
     const auto label = field(command.config,"botDisplayName");
     const auto heading = "\n\nNotes from " + bounded(scrub.text(label.empty() ? bot : label),128) + "'s memory:\n";
     constexpr std::string_view truncation = "\n[Bot memory truncated]";
-    auto section = heading + content;
-    if (section.size() > bytes) {
+    const bool truncated = heading.size() + excerpt.size() > bytes;
+    if (truncated) {
         if (bytes <= heading.size() + truncation.size()) return std::nullopt;
-        const auto excerpt = bounded(content,bytes - heading.size() - truncation.size());
+        excerpt = bounded(excerpt,bytes - heading.size() - truncation.size());
         if (excerpt.empty()) return std::nullopt;
-        section = heading + excerpt;
-        section += truncation;
+    }
+    auto section = heading + excerpt;
+    if (truncated) section += truncation;
+    if (command.tool == "follow_up") {
+        auto prior = query(R"SQL(
+SELECT json_extract(o.data,'$.sessionMemory.section'),json_extract(o.data,'$.sessionMemory.excerptBytes')
+FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
+WHERE r.environment_id=? AND r.thread_id=? AND t.bot_id=?
+  AND json_extract(o.data,'$.sessionMemory.version')=?
+)SQL",{command.environmentId,command.target.threadId,bot,version});
+        const auto prefix = std::string_view(section).substr(0,heading.size() + excerpt.size());
+        while (prior.next()) {
+            const auto saved = prior.string(0);
+            if (saved == section || (prior.number(1) >= static_cast<Id>(excerpt.size()) && saved.starts_with(prefix)))
+                return std::nullopt;
+        }
     }
     const auto base = command.instruction.substr(0,command.instruction.size() - marker.size());
     if (scrub.containsProtectedText(base + section + marker)) return std::nullopt;
-    return SessionMemory{version,std::move(section)};
+    return SessionMemory{version,std::move(section),excerpt.size()};
 }
 
 void Store::Impl::createMemory(std::string_view key, std::string_view bot, std::string_view id,

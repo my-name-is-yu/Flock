@@ -44,9 +44,9 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 
 In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
 
-When a Bot starts work in a new or existing T3 Session, Flock uses the
-remaining prompt space to add notes from that Bot's private memory.
-Follow-ups in the same Session include updated notes when the memory changes.
+Set `"shareMemoryWithSessions": true` in a Bot's `config.json` to include its
+memory when it starts work in T3. These notes become part of the Session
+history and are visible to anyone who can read that Session.
 
 Flock uses the sole connected T3 environment when the Bot starts work. It uses the sole active project, or asks which project to use and remembers the choice for that Bot and environment. You can pin a destination with `environmentId` and `projectId` in the Bot configuration. Optional `conversationEnvironments` entries name other connected environments for requests such as “Run the measurement on the cloud Mac.” Each environment has its own project selection.
 

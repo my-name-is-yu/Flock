@@ -145,6 +145,7 @@ private:
 struct SessionMemory {
     Id version;
     std::string section;
+    std::size_t excerptBytes;
 };
 
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
