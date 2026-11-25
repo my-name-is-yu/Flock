@@ -32,7 +32,7 @@ bool validExternalId(std::string_view id) {
 Json route(const Intake& intake) {
     if (!validBotId(intake.botId) || intake.environmentId.empty() || intake.projectId.empty() || !intake.config.is_object())
         throw Conflict("Automation requires a configured Bot");
-    modelCallLimit(intake.config);
+    initialModelCallLimit(intake.config);
     return {{"environmentId", intake.environmentId}, {"projectId", intake.projectId}, {"config", intake.config}};
 }
 

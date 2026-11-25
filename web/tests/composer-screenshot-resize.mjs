@@ -7,6 +7,7 @@ import { join } from 'node:path';
 
 async function exercise(resizeScreenshot, stageScreenshots) {
   const check = (value, message) => { if (!value) throw new Error(message); };
+  const attachmentLimit = 4;
   async function picture(width, height, type, noisy = false) {
     const canvas = new OffscreenCanvas(width, height);
     const context = canvas.getContext('2d', { alpha: false });
@@ -69,13 +70,13 @@ async function exercise(resizeScreenshot, stageScreenshots) {
   const corrupt = new File([await small.slice(0, 16).arrayBuffer()], 'corrupt.png', { type: 'image/png' });
   for (const file of [mismatch, corrupt]) {
     const draft = { images: [] };
-    await stageScreenshots(draft, [file], () => true);
+    await stageScreenshots(draft, [file], attachmentLimit, () => true);
     check(draft.images.length === 0 && draft.error, 'Invalid image should not be staged');
   }
 
   const draft = { images: [] };
   const unnamedType = new File([small], '画'.repeat(55) + '.png');
-  await stageScreenshots(draft, [dense, wide, tall, unnamedType, small], () => true);
+  await stageScreenshots(draft, [dense, wide, tall, unnamedType, small], attachmentLimit, () => true);
   check(draft.images.length === 4 && draft.error === 'Attach up to 4 screenshots per message.', 'Composer should keep four images');
   const { attachment, preview } = draft.images[0];
   const previewBlob = await fetch(preview).then((response) => response.blob());
@@ -88,7 +89,7 @@ async function exercise(resizeScreenshot, stageScreenshots) {
 
   const stale = { images: [] };
   let current = true;
-  const staging = stageScreenshots(stale, [small], () => current);
+  const staging = stageScreenshots(stale, [small], attachmentLimit, () => current);
   current = false;
   await staging;
   check(stale.images.length === 0 && !stale.error, 'An image should be dropped when its draft changes');

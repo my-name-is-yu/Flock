@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 
 #include <algorithm>
@@ -335,7 +336,8 @@ TaskChange Store::Impl::taskChange(const conversation::Message& message, const J
                                    const LinkedTaskDestinations& linked) {
     using conversation_storage::text;
     using conversation_storage::ToolError;
-    TaskChange change{text(args, "intent", 8000, false), text(args, "doneWhen", 8000, false), {}};
+    using limits::session_prompt::maxDecisionTextBytes;
+    TaskChange change{text(args, "intent", maxDecisionTextBytes, false), text(args, "doneWhen", maxDecisionTextBytes, false), {}};
     const auto environment = text(args, "environment", 256, false);
     if (change.intent.empty() && change.doneWhen.empty() && environment.empty())
         throw ToolError("change_task needs intent, doneWhen, or environment; use send_to_task for other instructions");

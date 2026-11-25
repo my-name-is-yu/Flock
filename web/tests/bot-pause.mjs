@@ -22,6 +22,7 @@ function fixtures() {
     if (path.startsWith('/api/view?')) return Response.json({
       bot, events: [], olderBefore: 0, presence: 'idle', activeSessions: [], sessionTasks: [], sessionsBefore: 0,
       sessionCursor: 0, waits: [], canDecide: true, composerPerson: 'local-owner',
+      limits: { messageBytes: 16000, waitAnswerBytes: 8000, attachments: 4 },
     });
     if (path === '/api/bots/pause') {
       const change = JSON.parse(body);

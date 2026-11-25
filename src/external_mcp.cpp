@@ -1,4 +1,5 @@
 #include "flock/external_mcp.hpp"
+#include "flock/limits.hpp"
 #include "connector_credentials.hpp"
 #include "storage.hpp"
 
@@ -64,8 +65,8 @@ Id ExternalMcp::submit(const ExternalMcpConnection& connection, std::string_view
                        const IntakeResolver& intake) {
     if (!validBotId(bot) || requestId.empty() || requestId.size() > 128 ||
         requestId.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-") != requestId.npos ||
-        redactConnectionTokens(std::string(requestId)) != requestId || text.size() > 8192 || text.find('\0') != text.npos ||
-        text.find_first_not_of(" \t\r\n") == text.npos)
+        redactConnectionTokens(std::string(requestId)) != requestId || text.size() > limits::mcp::maxRequestTextBytes ||
+        text.find('\0') != text.npos || text.find_first_not_of(" \t\r\n") == text.npos)
         throw Conflict("Invalid task request");
 
     auto& db = *store_.p_;

@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -326,7 +326,8 @@ function liveFixture() {
   const wait = {id: 2, reason: 'policy_approval', text: approval.requestTitle};
   const stopWait = { id: 9, reason: 'model_failure', text: 'The last attempt failed.' };
   const stopTask = { id: 3, currentRevision: 5, generation: 7, request: 'Check the release', wait: stopWait };
-  const fixture = window.inboxFixture = { bot, decision, review, reads: 0, approvalReady: false, updated: false, failed: false,
+  const limits = { messageBytes: 45, waitAnswerBytes: 33, attachments: 1 };
+  const fixture = window.inboxFixture = { bot, decision, review, limits, reads: 0, approvalReady: false, updated: false, failed: false,
     showStop: false, canDecide: true, stopRequests: [], answers: [] };
   window.EventSource = class extends EventTarget {
     constructor(path) {
@@ -370,7 +371,7 @@ function liveFixture() {
         events.push({ id: wait.messageId, taskId, time: 4, kind: 'waiting', data: wait });
       }
       return Response.json({ bot, events, olderBefore: 0, presence: 'idle', sessionTasks: [],
-        waits, historyCursor: 0, sessionCursor: 0, canDecide: fixture.canDecide, composerPerson: 'viewer' }, { headers });
+        waits, historyCursor: 0, sessionCursor: 0, canDecide: fixture.canDecide, composerPerson: 'viewer', limits }, { headers });
     }
     if (path === '/api/inbox') {
       fixture.reads++;
@@ -409,6 +410,39 @@ async function exerciseLiveRetry() {
   const stream = fixture.stream;
   await waitFor(() => document.getElementById('event-4'), 'The pending wait did not appear');
   const byId = (id) => document.getElementById(id);
+  const { messageBytes, waitAnswerBytes, attachments } = fixture.limits;
+  const message = byId('message');
+  const send = byId('send');
+  const notice = byId('notice');
+  const editMessage = (value) => {
+    message.value = value;
+    message.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const expectComposerLimit = (maxBytes) => {
+    const atLimit = '界'.repeat(Math.floor(maxBytes / 3)) + 'x'.repeat(maxBytes % 3);
+    editMessage(atLimit);
+    if (send.disabled) throw new Error(`The composer rejected ${maxBytes} bytes at its limit`);
+    editMessage(atLimit + 'x');
+    if (!send.disabled || !notice.textContent.includes(`${maxBytes} bytes`))
+      throw new Error(`The composer ignored the ${maxBytes}-byte limit from the view`);
+    editMessage('');
+  };
+  expectComposerLimit(messageBytes);
+  const canvas = new OffscreenCanvas(1, 1);
+  canvas.getContext('2d').fillRect(0, 0, 1, 1);
+  const screenshot = await canvas.convertToBlob();
+  const clipboardData = new DataTransfer();
+  for (let index = 0; index <= attachments; index++) {
+    clipboardData.items.add(new File([screenshot], `Screenshot-${index}.png`, { type: screenshot.type }));
+  }
+  message.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+  const previews = byId('screenshot-previews');
+  await waitFor(() => previews.childElementCount && byId('attach-screenshots').getAttribute('aria-disabled') === 'false',
+    'Pasted screenshots did not finish staging');
+  if (previews.childElementCount !== attachments || !notice.textContent.includes(`Attach up to ${attachments}`))
+    throw new Error('The composer ignored the attachment limit from the view');
+  previews.querySelector('.remove-screenshot').click();
+
   const expectComposer = ({ inbox = false, label, summary, placeholder, send }) => {
     const chip = byId(inbox ? 'decision-reply-context' : 'reply-context');
     const target = chip.querySelector('.reply-summary');
@@ -426,6 +460,7 @@ async function exerciseLiveRetry() {
   if (write?.textContent !== 'Write an answer') throw new Error('The Inbox question did not offer to write an answer');
   write.click();
   expectComposer({ ...answerCopy, inbox: true });
+  expectComposerLimit(waitAnswerBytes);
   const prompt = fixture.decision.prompt;
   fixture.decision.prompt = '';
   stream.dispatchEvent(new MessageEvent('change', { data: '{"list":true,"bot":"release"}' }));
@@ -439,6 +474,7 @@ async function exerciseLiveRetry() {
   if (writeInline?.textContent !== 'Write an answer') throw new Error('The conversation question did not offer to write an answer');
   writeInline.click();
   expectComposer(answerCopy);
+  expectComposerLimit(waitAnswerBytes);
   document.querySelector('#event-2 button[aria-label="Answer this question"]').click();
   expectComposer(answerCopy);
   document.querySelector('#event-3 button[aria-label="Reply to this review"]').click();
@@ -606,52 +642,70 @@ const boardPage = async () => withScript(index.replace(/<link\b[^>]*>/g, ''), `
     }
   </script>`);
 const livePage = withScript(index, `
-  <script>(${liveFixture})();</script>
+  <script>
+    const reportBrowserResult = window.fetch.bind(window);
+    (${liveFixture})();
+  </script>
   <script type="module">
-    import '/app.js';
     try {
+      await import('/app.js');
       await (${exerciseLiveRetry})();
-      document.documentElement.dataset.flockResult = 'pass';
+      await reportBrowserResult('/result?passed');
     } catch (error) {
-      document.documentElement.dataset.flockResult = error.message;
+      await reportBrowserResult('/result?error=' + encodeURIComponent(error.message));
     }
   </script>`);
 const contentTypes = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
-const serveLivePage = () => createServer(async (request, response) => {
-  const { pathname } = new URL(request.url, 'http://localhost');
-  try {
-    if (pathname === '/') {
-      response.setHeader('Content-Type', 'text/html');
-      response.end(livePage);
-    } else {
-      const asset = await read('.' + pathname);
-      response.setHeader('Content-Type', contentTypes[extname(pathname)] ?? 'application/octet-stream');
-      response.end(asset);
+async function testLive(browserArgs) {
+  const server = createServer(async (request, response) => {
+    const { pathname, searchParams } = new URL(request.url, 'http://localhost');
+    if (pathname === '/result') {
+      response.writeHead(204).end();
+      server.emit('browserResult', searchParams.get('error'));
+      return;
     }
-  } catch {
-    response.writeHead(404).end();
-  }
-});
-const directory = await mkdtemp(join(tmpdir(), 'flock-board-inbox-dom-'));
-const live = process.argv[3] === 'live';
-let server;
-try {
-  let url;
-  if (live) {
-    server = serveLivePage().listen(0, '127.0.0.1');
+    if (pathname === '/') return response.writeHead(200, { 'Content-Type': 'text/html' }).end(livePage);
+    try {
+      const asset = await read('.' + pathname);
+      response.writeHead(200, { 'Content-Type': contentTypes[extname(pathname)] ?? 'application/octet-stream' }).end(asset);
+    } catch {
+      response.writeHead(404).end();
+    }
+  });
+  let chrome;
+  try {
+    server.listen(0, '127.0.0.1');
     await once(server, 'listening');
-    url = `http://127.0.0.1:${server.address().port}/?bot=release`;
+    const url = `http://127.0.0.1:${server.address().port}/?bot=release`;
+    chrome = spawn(process.argv[2], [...browserArgs, url], { stdio: 'ignore' });
+    const result = once(server, 'browserResult', { signal: AbortSignal.timeout(20_000) });
+    const exited = once(chrome, 'exit').then(([code]) => { throw new Error(`Chrome exited before the report (${code})`); });
+    const [failure] = await Promise.race([result, exited]);
+    if (failure) throw new Error(failure);
+  } finally {
+    if (chrome?.pid && chrome.exitCode === null && !chrome.signalCode) {
+      const closed = once(chrome, 'exit');
+      chrome.kill();
+      await closed;
+    }
+    server.closeAllConnections();
+    server.close();
+  }
+}
+
+const directory = await mkdtemp(join(tmpdir(), 'flock-board-inbox-dom-'));
+const browserArgs = ['--headless', '--disable-gpu', '--no-first-run', '--disable-background-networking', `--user-data-dir=${directory}`];
+try {
+  if (process.argv[3] === 'live') {
+    await testLive(browserArgs);
   } else {
     const fixture = join(directory, 'index.html');
     await writeFile(fixture, await boardPage());
-    url = pathToFileURL(fixture).href;
+    const { stdout } = await promisify(execFile)(process.argv[2], [...browserArgs, '--allow-file-access-from-files',
+      '--virtual-time-budget=3000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });
+    const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
+    if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the DOM checks');
   }
-  const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', '--allow-file-access-from-files', `--user-data-dir=${directory}`,
-    `--virtual-time-budget=${live ? 5000 : 3000}`, '--dump-dom', url], { encoding: 'utf8', timeout: 25000 });
-  const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the DOM checks');
 } finally {
-  server?.close();
   await rm(directory, { recursive: true, force: true });
 }

@@ -35,8 +35,7 @@ struct BotPaused : Conflict {
     BotPaused() : Conflict(botPausedMessage) {}
 };
 
-// Initial allowance from an intake's saved config. Each approval adds one attempt.
-Id modelCallLimit(const Json& config);
+Id initialModelCallLimit(const Json& config);
 
 // Routing and execution settings are saved at intake. Current instructions are loaded for each turn.
 struct Intake {
@@ -65,7 +64,6 @@ struct Decision {
     Json args = Json::object();
     std::string reason;
 };
-inline constexpr std::size_t decisionReasonLimit = 4000;
 bool recordsTaskDecisionReason(std::string_view tool);
 bool validDecisionReason(std::string_view reason);
 struct ModelTurn {
@@ -142,7 +140,6 @@ struct Observation {
     std::string checkedCommit{};
     bool commitEvidenceUnavailable = false;
 };
-inline constexpr std::size_t maxSessionPromptBytes = 120000;
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
 
 struct SessionTarget {

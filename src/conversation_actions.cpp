@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 #include "commit_check.hpp"
 
@@ -490,16 +491,18 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                 savedGeneration = task.at("generation");
                 savedActionId = selected.actionId;
                 expectedCommit = field(task, "requestedCommit");
-                command.instruction = conversation_storage::text(decision.args, "instruction", conversation_storage::messageSize, true);
+                command.instruction = conversation_storage::text(decision.args, "instruction", limits::messages::maxBodyBytes, true);
             } else {
                 command.environmentId = conversation_storage::text(decision.args, "environmentId", 256, true);
                 command.target.threadId = conversation_storage::text(decision.args, "threadId", 256, true);
-                command.instruction = conversation_storage::text(decision.args, "text", conversation_storage::messageSize, true);
+                command.instruction = conversation_storage::text(decision.args, "text", limits::messages::maxBodyBytes, true);
             }
             const auto name = message.routing.at("config").value("botDisplayName", message.bot);
             command.instruction = name + ": " + command.instruction;
             includesSavedContent = !source.is_null() || !expectedCommit.empty();
-            if (!source.is_null()) command.instruction += "\n\n(reference only):\n" + bounded(field(source, "text"), 8192);
+            if (!source.is_null())
+                command.instruction +=
+                    "\n\n(reference only):\n" + bounded(field(source, "text"), limits::session_prompt::maxQuoteTextBytes);
             if (!expectedCommit.empty()) command.instruction = commit_check::instructions(std::move(command.instruction), expectedCommit);
             command.instruction = redactor(message.bot).text(command.instruction);
             if (decision.tool == "message_session" &&
@@ -961,8 +964,9 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
                           " ORDER BY id DESC",
                           {priorId});
         Json delivered = Json::array();
-        std::size_t remaining = 8000;
-        while (remaining && delivered.size() < 20 && rows.next()) {
+        constexpr std::size_t maxEarlierInstructionBytes = 8'000, maxEarlierInstructions = 20;
+        std::size_t remaining = maxEarlierInstructionBytes;
+        while (remaining && delivered.size() < maxEarlierInstructions && rows.next()) {
             const auto item = rows.json(0);
             if (pendingIds.contains({item.at("messageId").get<Id>(), item.at("step").get<int>()})) continue;
             const auto text = bounded(field(item, "text"), remaining);

@@ -1,4 +1,5 @@
 #include "conversation_storage.hpp"
+#include "flock/limits.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -31,7 +32,7 @@ bool recordsTaskDecisionReason(std::string_view tool) {
 }
 
 bool validDecisionReason(std::string_view reason) {
-    return reason.size() <= decisionReasonLimit && conversation_storage::hasText(reason);
+    return reason.size() <= limits::model::maxDecisionReasonBytes && conversation_storage::hasText(reason);
 }
 
 bool modelArgumentsContainProtected(const SecretRedactor& scrub, std::string_view tool, const Json& args) {
@@ -43,11 +44,12 @@ bool modelArgumentsContainProtected(const SecretRedactor& scrub, std::string_vie
     return false;
 }
 
-Id modelCallLimit(const Json& config) {
+Id initialModelCallLimit(const Json& config) {
     const auto limit = config.find("modelCallLimit");
-    if (limit == config.end()) return 20;
-    if (!limit->is_number_integer() || limit->get<long double>() < 1 || limit->get<long double>() > std::numeric_limits<int>::max())
-        throw Conflict("modelCallLimit must be a positive integer up to 2147483647");
+    constexpr Id defaultLimit = 20, maxLimit = std::numeric_limits<int>::max();
+    if (limit == config.end()) return defaultLimit;
+    if (!limit->is_number_integer() || limit->get<long double>() < 1 || limit->get<long double>() > maxLimit)
+        throw Conflict("modelCallLimit must be a positive integer up to " + std::to_string(maxLimit));
     return limit->get<Id>();
 }
 
@@ -62,7 +64,7 @@ LEFT JOIN session_invitations i ON i.message_id=m.id WHERE m.id=?
         const auto routing = row.json(0);
         const auto wake = routing.find("sessionWake");
         const auto source = wake == routing.end() ? row.number(1) : wake->at("sourceMessageId").get<Id>();
-        if (!source) return {"message/" + std::to_string(messageId), modelCallLimit(routing.at("config"))};
+        if (!source) return {"message/" + std::to_string(messageId), initialModelCallLimit(routing.at("config"))};
         if (source >= messageId) throw Conflict("Invalid model budget ancestry");
         messageId = source;
     }
@@ -81,7 +83,7 @@ SELECT t.id,t.data FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1
     if (!ancestor.next()) throw Conflict("The originating task is missing");
     const auto root = ancestor.json(1);
     if (const auto source = root.value("sourceMessageId", Id{0}); source) return messageModelBudget(source);
-    return {"task/" + std::to_string(ancestor.number(0)), modelCallLimit(root.at("config"))};
+    return {"task/" + std::to_string(ancestor.number(0)), initialModelCallLimit(root.at("config"))};
 }
 
 Id Store::Impl::reserveModelCall(const ModelBudget& budget, std::string_view purpose, Id messageId, Id taskId, Id eventId) {

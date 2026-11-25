@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/limits.hpp"
 #include "flock/session_settings.hpp"
 
 #include <algorithm>
@@ -551,14 +552,15 @@ Id Store::Impl::submitRequest(const Intake& item, const Person* requester) {
 
 Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& source, TaskSource sourceKind, const Json& trigger) {
     const bool consultation = sourceKind == TaskSource::consultation;
-    if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos || item.request.size() > 16000 ||
-        (!consultation && item.environmentId.empty()) || !item.config.is_object())
-        throw Conflict("Bot, nonempty request (up to 16,000 bytes), and environment are required");
+    if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
+        item.request.size() > limits::messages::maxBodyBytes || (!consultation && item.environmentId.empty()) || !item.config.is_object())
+        throw Conflict("Bot, nonempty request (up to " + std::to_string(limits::messages::maxBodyBytes) +
+                       " bytes), and environment are required");
     if (botDeleted(item.botId)) throw Conflict("Bot has been deleted");
     if (botPaused(item.botId)) throw BotPaused{};
     const auto scrub = redactor(item.botId);
     scrub.requirePublic({item.botId, item.environmentId, item.projectId, item.config});
-    modelCallLimit(item.config);
+    initialModelCallLimit(item.config);
     const auto request = scrub.text(item.request);
     Json data = {{"botId", item.botId},
                  {"request", request},
@@ -667,8 +669,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         const auto& owner = task["question"].is_object() ? task["question"] : wait;
         if (owner.at("target") != questionTarget(task)) throw RequestChanged{};
         const auto answer = field(data, "text");
-        if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > 8000)
-            throw Conflict("A nonempty answer (up to 8,000 bytes) is required");
+        if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > limits::messages::maxWaitAnswerBytes)
+            throw Conflict("A nonempty answer (up to " + std::to_string(limits::messages::maxWaitAnswerBytes) + " bytes) is required");
         auto answerKind = "user_answer";
         if (const auto projects = wait.find("projectChoices"); projects != wait.end()) {
             const auto choice = projects->find(answer);

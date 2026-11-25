@@ -1,4 +1,5 @@
 #include "flock/participation.hpp"
+#include "flock/limits.hpp"
 #include "connector_credentials.hpp"
 #include "conversation_storage.hpp"
 
@@ -13,7 +14,7 @@ namespace flockv0 {
 namespace {
 
 constexpr std::string_view tokenPrefix = "flock-t3-";
-constexpr std::size_t maxRequestBytes = 8192;
+constexpr std::size_t maxInvitationNoteBytes = 8'192;
 using connector_credentials::digest;
 
 // An invitation gives the inviter's stop authority over the invitee in this Session.
@@ -211,7 +212,7 @@ Person SessionParticipation::person(const T3Connection& connection) const {
 
 Id SessionParticipation::ask(const T3Connection& connection, const SessionAsk& request, const IntakeResolver& intake) {
     const auto& [bot, text, thread, requestId] = request;
-    if (!validBotId(bot) || !validId(thread, 256) || text.size() > maxRequestBytes || text.find('\0') != text.npos ||
+    if (!validBotId(bot) || !validId(thread, 256) || text.size() > limits::mcp::maxRequestTextBytes || text.find('\0') != text.npos ||
         !conversation_storage::hasText(text) || requestId.empty() || requestId.size() > 128 ||
         requestId.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-") != requestId.npos)
         throw Conflict("Invalid flock_ask arguments");
@@ -336,7 +337,7 @@ bool Store::Impl::inviteSessionBot(const conversation::Message& message, int ste
         if (!args.is_object() || args.size() != 4) throw Conflict("Invalid invite_bot arguments");
         const auto bot = text(args, "botId", 128, true);
         const SessionTarget target{text(args, "environmentId", 256, true), text(args, "threadId", 256, true)};
-        const auto note = text(args, "note", maxRequestBytes, true);
+        const auto note = text(args, "note", maxInvitationNoteBytes, true);
         if (!validBotId(bot) || !validId(target.environmentId, 256) || !validId(target.threadId, 256) || note.find('\0') != note.npos)
             throw Conflict("Invalid invite_bot arguments");
         if (bot == message.bot) throw Conflict("A Bot cannot invite itself");

@@ -1,12 +1,15 @@
 #include "conversation_storage.hpp"
+#include "flock/limits.hpp"
 
 #include <algorithm>
 
 namespace flockv0 {
 using conversation_storage::identifier;
-using conversation_storage::expandedContextBytes;
+using limits::conversation_context::maxExpandedBytes;
 
 namespace {
+constexpr std::size_t maxSummaryBytes = 4'000;
+
 std::string boundedJsonText(std::string_view text, std::size_t limit, std::size_t bytes) {
     auto prefix = bounded(text, std::min(limit, bytes));
     if (Json(prefix).dump().size() - 2 <= bytes) return prefix;
@@ -37,7 +40,7 @@ std::size_t conversation_storage::boundExpandedContext(Json& turn) {
             result.erase(revision);
         }
         const auto bytes = result.dump().size();
-        if (expandedBytes + bytes > expandedContextBytes) {
+        if (expandedBytes + bytes > maxExpandedBytes) {
             result.erase("messages");
             result["evidenceOmitted"] = true;
         } else
@@ -57,7 +60,7 @@ Json Store::Impl::compactions(std::string_view bot, Id before, unsigned limit, I
         result.push_back({{"compactionId", rows.number(0)},
                           {"startMessageId", rows.number(1)},
                           {"endMessageId", rows.number(2)},
-                          {"summary", boundedJsonText(scrub.text(rows.string(3)), 4000, expandedContextBytes - 2)},
+                          {"summary", boundedJsonText(scrub.text(rows.string(3)), maxSummaryBytes, maxExpandedBytes - 2)},
                           {"originalCount", rows.number(4)},
                           {"createdAt", rows.number(5)},
                           {"createdBy", rows.string(6)}});
@@ -71,7 +74,7 @@ Json Store::compactions(std::string_view bot, Id before, unsigned limit) const {
 
 Json Store::Impl::conversationHistory(const conversation::Message& message, const Json& summaries, std::size_t expandedBytes) const {
     const auto scrub = redactor(message.bot);
-    std::size_t remaining = 24000 - expandedBytes - 2;
+    std::size_t remaining = limits::conversation_context::maxBytes - expandedBytes - limits::conversation_context::emptyHistoryBytes;
     Json history = Json::array();
     Id boundary = 0;
     Json summary;
@@ -132,8 +135,9 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
     if (tool == "continue_fresh_session") {
         auto task = ownTask(identifier(args, "taskId", true), message);
         if (terminal(task) || task.at("state") == "cancelling") throw Conflict("Task is closed or stopping");
-        const auto instruction = args.contains("instruction") ? conversation_storage::text(args, "instruction", 8000, true)
-                                                              : "Continue with the same completion criteria.";
+        const auto instruction = args.contains("instruction")
+                                     ? conversation_storage::text(args, "instruction", limits::session_prompt::maxDecisionTextBytes, true)
+                                     : "Continue with the same completion criteria.";
         task["newSessionRequired"] = true;
         task["freshContextRequested"] = true;
         task["replanning"] = true;
@@ -146,8 +150,8 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
     const Id boundary = latest.empty() ? 0 : latest.front().at("endMessageId").get<Id>();
     if (tool == "compact_conversation") {
         const auto end = identifier(args, "endMessageId", true);
-        const auto summary = redactor(bot).text(conversation_storage::text(args, "summary", 4000, true));
-        if (summary.size() > 4000 || Json(summary).dump().size() > expandedContextBytes)
+        const auto summary = redactor(bot).text(conversation_storage::text(args, "summary", maxSummaryBytes, true));
+        if (summary.size() > maxSummaryBytes || Json(summary).dump().size() > maxExpandedBytes)
             throw Conflict("Escaped summary exceeds the context budget");
         if (end <= boundary || end >= message.id)
             throw Conflict("Use a boundary after the previous summary and before the current message");
@@ -225,12 +229,12 @@ DO UPDATE SET byte_offset=excluded.byte_offset RETURNING id
             if (offset) throw Conflict("Cursor message does not match this search");
             continue;
         }
-        if (result["messages"].size() >= limit || expandedContextBytes - used < cursorBytes) {
+        if (result["messages"].size() >= limit || maxExpandedBytes - used < cursorBytes) {
             continueAt(rows.number(0), 0);
             break;
         }
         Json entry = {{"messageId", rows.number(0)}, {"kind", rows.string(1)}, {"text", ""}};
-        const auto available = expandedContextBytes - used - entry.dump().size() - 1;
+        const auto available = maxExpandedBytes - used - entry.dump().size() - 1;
         const auto tail = std::string_view(body).substr(offset);
         auto chunk = bounded(tail, chunkBytes);
         if (Json(chunk).dump().size() - 2 > available) chunk = bounded(tail, available / 6);

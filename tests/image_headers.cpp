@@ -1,5 +1,4 @@
 #include "../src/image_headers.hpp"
-#include "flock/message_attachments.hpp"
 
 #include <array>
 #include <initializer_list>
@@ -71,8 +70,7 @@ void checkPng() {
     check(!pngHeaderSize(pngHeader(0, 19, 0x31ab9b70)) && !pngHeaderSize(pngHeader(37, 0, 0x1d9d23d1)), "zero-size PNG was accepted");
     check(!pngHeaderSize(pngHeader(8193, 1, 0x16ebdc09)) && !pngHeaderSize(pngHeader(1, 8193, 0x5fca6a42)), "PNG edge limit was exceeded");
     check(!pngHeaderSize(pngHeader(8192, 513, 0x6eb6a61e)), "PNG pixel limit was exceeded");
-    checkSize(pngHeaderSize(pngHeader(8192, 512, 0xa5ea75bb)), maxImageEdge, maxImagePixels / maxImageEdge,
-              "PNG at the edge and pixel limits was rejected");
+    checkSize(pngHeaderSize(pngHeader(8192, 512, 0xa5ea75bb)), 8192, 512, "PNG at the edge and pixel limits was rejected");
 }
 
 void checkJpeg() {
@@ -108,8 +106,7 @@ void checkJpeg() {
     check(!jpegHeaderSize(soi + jpegFrame(0xc0, 8193, 1)) && !jpegHeaderSize(soi + jpegFrame(0xc0, 1, 8193)),
           "JPEG edge limit was exceeded");
     check(!jpegHeaderSize(soi + jpegFrame(0xc0, 8192, 513)), "JPEG pixel limit was exceeded");
-    checkSize(jpegHeaderSize(soi + jpegFrame(0xc0, 8192, 512)), maxImageEdge, maxImagePixels / maxImageEdge,
-              "JPEG at the edge and pixel limits was rejected");
+    checkSize(jpegHeaderSize(soi + jpegFrame(0xc0, 8192, 512)), 8192, 512, "JPEG at the edge and pixel limits was rejected");
 }
 }
 

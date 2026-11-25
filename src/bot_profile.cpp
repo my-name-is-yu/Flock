@@ -105,7 +105,7 @@ const Json& modelReasoningEfforts(const Json& catalog, std::string_view slug) {
 Json validatedBotRunSetting(std::string_view key, const Json& value) {
     if (key == "modelCallLimit") {
         try {
-            return modelCallLimit({{"modelCallLimit", value}});
+            return initialModelCallLimit({{"modelCallLimit", value}});
         } catch (const Conflict& error) {
             throw BotProfileError("invalid_model_call_limit", error.what());
         }

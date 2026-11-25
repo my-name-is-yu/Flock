@@ -1,4 +1,5 @@
 #include "flock/git_host.hpp"
+#include "flock/limits.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -194,7 +195,7 @@ Json gitToolSchema(std::string_view name, bool conversation) {
     if (spec->operation != "read") {
         properties["reason"] = {{"type", "string"},
                                 {"minLength", 1},
-                                {"maxLength", decisionReasonLimit},
+                                {"maxLength", limits::model::maxDecisionReasonBytes},
                                 {"description", "Briefly explain the evidence for making this Git change."}};
         if (!mayRead) required.push_back("reason");
     }

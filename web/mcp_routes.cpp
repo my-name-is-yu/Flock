@@ -1,4 +1,5 @@
 #include "mcp_routes.hpp"
+#include "flock/limits.hpp"
 #include "views.hpp"
 #include "flock/external_mcp.hpp"
 #include "flock/participation.hpp"
@@ -10,7 +11,6 @@
 namespace flockv0::web {
 namespace {
 constexpr std::size_t maxPayload = 64 * 1024;
-constexpr std::size_t maxRequestText = 8192;
 constexpr std::string_view askTool = "flock_ask";
 constexpr std::string_view listTool = "flock_bots";
 constexpr std::string_view stopTool = "flock_stop";
@@ -18,7 +18,6 @@ constexpr std::string_view submitTool = "flock_submit_task";
 constexpr std::string_view statusTool = "flock_get_task";
 constexpr std::string_view answerTool = "flock_answer_question";
 constexpr std::string_view mcpProtocol = "2025-11-25";
-constexpr std::size_t maxAnswerText = 8000;
 
 struct InvalidToolArguments {
     std::string message = "Invalid tool arguments";
@@ -43,7 +42,7 @@ std::string identifier(const Json& object, std::string_view field, std::size_t m
     return text;
 }
 
-std::string requestText(const Json& object, std::string_view field, std::size_t maxBytes = maxRequestText) {
+std::string requestText(const Json& object, std::string_view field, std::size_t maxBytes = limits::mcp::maxRequestTextBytes) {
     const auto value = object.find(field);
     if (value == object.end() || !value->is_string()) throw InvalidToolArguments{};
     const auto& text = value->get_ref<const std::string&>();
@@ -103,7 +102,7 @@ Json sessionToolDefinitions() {
              {{"bot", bot},
               {"threadId", thread},
               {"requestId", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}, {"pattern", "^[A-Za-z0-9._:-]+$"}}},
-              {"text", byteLimitedString(maxRequestText)}}}}}},
+              {"text", byteLimitedString(limits::mcp::maxRequestTextBytes)}}}}}},
          {{"name", stopTool},
           {"description", "Remove this Bot and its invitees from the T3 Session. Cancel their queued messages "
                           "and report any that already started. Stop child Sessions they launched from here. The person's work continues. "
@@ -130,7 +129,7 @@ Json externalToolDefinitions() {
           {"annotations", {{"idempotentHint", true}}},
           {"inputSchema",
            schema({{"bot", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}, {"pattern", "^[A-Za-z0-9][A-Za-z0-9._-]*$"}}},
-                   {"text", byteLimitedString(maxRequestText)},
+                   {"text", byteLimitedString(limits::mcp::maxRequestTextBytes)},
                    {"requestId", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}, {"pattern", "^[A-Za-z0-9._:-]+$"}}}},
                   {"bot", "text", "requestId"})}},
          {{"name", statusTool},
@@ -144,7 +143,7 @@ Json externalToolDefinitions() {
                                   {"waitId", id},
                                   {"targetRevision", version},
                                   {"targetGeneration", version},
-                                  {"text", byteLimitedString(maxAnswerText)}},
+                                  {"text", byteLimitedString(limits::messages::maxWaitAnswerBytes)}},
                                  {"taskId", "waitId", "targetRevision", "targetGeneration", "text"})}}});
 }
 
@@ -169,7 +168,7 @@ Json callExternalTool(const WebCallbacks& callbacks, ExternalMcp& external, cons
         if (arguments.size() != 5) throw InvalidToolArguments{};
         external.answer(connection, taskInteger(arguments, "taskId", 1), taskInteger(arguments, "waitId", 1),
                         taskInteger(arguments, "targetRevision", 0), taskInteger(arguments, "targetGeneration", 0),
-                        requestText(arguments, "text", maxAnswerText));
+                        requestText(arguments, "text", limits::messages::maxWaitAnswerBytes));
         return structuredResult({{"accepted", true}});
     }
     return nullptr;

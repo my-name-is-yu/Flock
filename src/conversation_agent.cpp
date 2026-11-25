@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 
 #include <algorithm>
@@ -12,7 +13,7 @@ using conversation_storage::identifier;
 using conversation_storage::japanese;
 using conversation_storage::text;
 using conversation_storage::ToolError;
-using conversation_storage::messageSize;
+using limits::messages::maxBodyBytes;
 
 namespace {
 using conversation::Message;
@@ -25,7 +26,6 @@ constexpr int activeTaskLimit = 12;
 constexpr int terminalTaskLimit = 8;
 constexpr int findLimit = 10;
 constexpr std::size_t resultChunk = 6000;
-constexpr std::size_t sourceSize = 8192;
 
 const std::vector<std::string> turnTools{"start_task",
                                          "send_to_task",
@@ -270,7 +270,7 @@ Json sourceRef(const Json& result) {
     Json source = {{"taskId", result.at("taskId")},
                    {"messageId", result.at("messageId")},
                    {"revisionId", result.at("revisionId")},
-                   {"text", bounded(field(result, "text"), sourceSize)}};
+                   {"text", bounded(field(result, "text"), limits::session_prompt::maxQuoteTextBytes)}};
     if (result.contains("run")) source["run"] = result.at("run");
     return source;
 }
@@ -436,7 +436,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                 auto original = query("SELECT id,text,reply_to FROM messages WHERE id=? AND bot_id=?",
                                       {integer(data, "replyToMessageId"), message.bot});
                 if (original.next()) {
-                    replyTo["inReplyTo"] = {{"messageId", original.number(0)}, {"text", bounded(original.string(1), messageSize)}};
+                    replyTo["inReplyTo"] = {{"messageId", original.number(0)}, {"text", bounded(original.string(1), maxBodyBytes)}};
                     if (original.number(2)) replyTo["inReplyTo"]["replyToMessageId"] = original.number(2);
                 }
             } else if (kind == "conversation_message") {
@@ -571,8 +571,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     };
 
     if (tool == "start_task") {
-        const auto request = text(args, "request", messageSize, true);
-        const auto doneWhen = text(args, "doneWhen", 8000, false);
+        const auto request = text(args, "request", maxBodyBytes, true);
+        const auto doneWhen = text(args, "doneWhen", limits::session_prompt::maxDecisionTextBytes, false);
         const bool resume = args.value("resume", false);
         auto [destination, targets, commit] = startDestinations(message, args, resume, selectedSession, linked);
         const auto result = source(nullptr);
@@ -604,7 +604,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             throw ToolError("A destination Session is unavailable until its T3 Thread is saved");
         if (tool == "send_to_task" && task.contains("runResults"))
             throw ToolError("Send this destination instruction on its own to use the saved T3 Thread");
-        const auto instruction = text(args, "instruction", messageSize, true);
+        const auto instruction = text(args, "instruction", maxBodyBytes, true);
         const auto result = source(&task);
         std::optional<TaskChange> change;
         if (tool == "change_task") {
@@ -624,7 +624,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto taskId = identifier(args, "taskId", true);
         const auto waitId = identifier(args, "waitId", true);
         const auto task = ownTask(taskId, message);
-        const auto answer = text(args, "text", 8000, true);
+        const auto answer = text(args, "text", limits::messages::maxWaitAnswerBytes, true);
         if (integer(task.at("wait"), "id") != waitId)
             throw ToolError("That question is no longer open", {{"taskId", task.at("id")}, {"current", taskState(task, message)}});
         if (const auto error = questionAnswerError(task, message))
