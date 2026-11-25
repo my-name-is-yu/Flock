@@ -1,4 +1,5 @@
 #include "channel_routes.hpp"
+#include "http_payload.hpp"
 #include "settings_routes.hpp"
 #include "flock/channels.hpp"
 
@@ -31,6 +32,7 @@ bool artifactPreview(std::string_view path) {
 
 void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
     server.Post(R"(/api/channels/(slack|imessage)/events)",[&](const auto& req, auto& res) {
+        if (req.body.size() > maxUploadPayload) return reply(res,413,{{"error","payload_too_large"}});
         const auto kind = req.matches[1].str() == "slack" ? ChannelKind::slack : ChannelKind::imessage;
         if (req.get_header_value_count("Authorization") != 1)
             return reply(res,401,{{"error","channel_identity_required"}});

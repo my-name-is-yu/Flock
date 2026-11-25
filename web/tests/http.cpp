@@ -2,6 +2,7 @@
 #include "http_fixture.hpp"
 #include "../change_feed.hpp"
 #include "../../tests/fake_git.hpp"
+#include "flock/base64.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/policy.hpp"
 
@@ -87,7 +88,7 @@ void boundary(Browser& browser) {
     Browser::checked(browser.client.Post("/api/messages",{{"Origin","null"},{"X-Flock-Action","1"}},draft,"application/json"),403);
     Browser::checked(browser.client.Post("/api/messages",browser.headers(),draft,"text/plain"),415);
     Browser::checked(browser.client.Post("/api/messages",browser.headers(),"{","application/json"),400);
-    Browser::checked(browser.client.Post("/api/messages",browser.headers(),std::string(140000,'x'),"application/json"),413);
+    Browser::checked(browser.client.Post("/api/operations",browser.headers(),std::string(140000,'x'),"application/json"),413);
     const auto preflight = browser.client.Options("/api/messages",{{"Origin","https://other.invalid"}});
     check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
@@ -98,6 +99,79 @@ void boundary(Browser& browser) {
         Browser::checked(browser.client.Get(path+"?bot=missing"),404);
     }
     browser.post("/api/requests",{{"botId","release"},{"clientRequestId","draft"},{"request","test"}},404);
+}
+
+constexpr auto screenshotPixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+std::string screenshotPng(std::size_t size) {
+    auto png = decodeBase64(screenshotPixel,1024);
+    std::string chunk(size - png.size(),'x');
+    const auto writeUint32 = [&](std::size_t offset, std::uint32_t value) {
+        for (unsigned byte = 0; byte < 4; ++byte)
+            chunk[offset + byte] = static_cast<char>(value >> (24 - byte * 8));
+    };
+    writeUint32(0,static_cast<std::uint32_t>(chunk.size() - 12));
+    chunk.replace(4,9,"tEXtNote\0",9);
+    std::uint32_t crc = 0xffffffff;
+    for (const unsigned char byte : std::string_view(chunk).substr(4,chunk.size() - 8)) {
+        crc ^= byte;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+    writeUint32(chunk.size() - 4,~crc);
+    png.insert(png.size() - 12,chunk);
+    return encodeBase64(png);
+}
+
+void messageAttachmentLimits(const std::filesystem::path& path) {
+    constexpr std::size_t imageLimit = 2 * 1024 * 1024;
+    constexpr auto endpoint = "/api/messages";
+    Store store(path);
+    const auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    const Json small{{"name","screenshot.png"},{"mimeType","image/png"},{"dataBase64",screenshotPixel}};
+    const auto message = [](std::string_view key, const Json& attachments) {
+        return Json{{"botId","release"},{"clientMessageId",key},
+            {"text","Look at these screenshots"},{"attachments",attachments}};
+    };
+    const auto submit = [&](std::string_view key, const Json& attachments, int status) {
+        return browser.post(endpoint,message(key,attachments),status);
+    };
+
+    auto large = small;
+    large["dataBase64"] = screenshotPng(imageLimit);
+    const auto four = Json::array({large,large,large,large});
+    const auto receipt = submit("four-screenshots",four,201);
+    check(submit("four-screenshots",four,201) == receipt,"large attachments changed the message receipt on retry");
+
+    submit("too-many",Json::array({small,small,small,small,small}),409);
+    large["dataBase64"] = screenshotPng(imageLimit + 1);
+    submit("too-large",Json::array({large}),409);
+    auto mismatch = small;
+    mismatch["mimeType"] = "image/jpeg";
+    submit("wrong-type",Json::array({mismatch}),409);
+    auto invalidBase64 = small;
+    invalidBase64["dataBase64"] = "!!!!";
+    submit("bad-encoding",Json::array({invalidBase64}),409);
+
+    std::string audio(64 * 1024 + 1,'x');
+    audio.replace(0,3,"ID3");
+    submit("oversized-audio",Json::array({{{"name","clip.mp3"},{"mimeType","audio/mpeg"},
+        {"dataBase64",encodeBase64(audio)}}}),409);
+
+    auto oversized = message("oversized-request",four).dump();
+    oversized.append(256 * 1024,' ');
+    auto headers = browser.headers();
+    headers.emplace("Expect","100-continue");
+    const auto response = browser.client.Post(endpoint,headers,oversized,"application/json");
+    Browser::checked(response,413);
+
+    const auto view = browser.get("/api/view?bot=release");
+    const auto& events = view.at("events");
+    check(events.size() == 1 && events[0].at("id") == receipt.at("messageId") &&
+          events[0].at("data").at("imageAttachmentCount") == 4,
+          "HTTP attachment intake did not save exactly four screenshots on one message");
+    check(!events[0].at("data").contains("attachments"),"HTTP projection exposed attachment payloads");
 }
 
 void messageReceipts(const std::filesystem::path& path) {
@@ -1802,6 +1876,7 @@ int main() {
         TestDirectory directory;
         conversationRequestApproval(directory.path / "conversation-approval.db");
         exercise(directory.path / "state.db");
+        messageAttachmentLimits(directory.path / "message-attachments.db");
         messageReceipts(directory.path / "message-receipts.db");
         sidebarReplies(directory.path / "sidebar.db");
         failedCompletion(directory.path / "failed-completion.db");
