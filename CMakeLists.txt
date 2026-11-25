@@ -72,6 +72,23 @@ target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
+  find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+  function(flock_verify_model name skill)
+    set(model "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py")
+    add_test(NAME "flock_verify_${name}" COMMAND "${Python3_EXECUTABLE}" "${model}")
+  endfunction()
+  function(flock_replay_model name skill variant expected)
+    add_test(NAME "flock_verify_${name}" COMMAND "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/scripts/verify-model-replay.py"
+      "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py" "${variant}" "${expected}")
+  endfunction()
+  flock_verify_model(change_feed verify-change-feed)
+  flock_replay_model(change_feed_historical verify-change-feed --historical
+    "The Bot view recovered, but the history invalidation was lost")
+  flock_verify_model(run_settlement verify-run-settlement)
+  flock_replay_model(run_settlement_historical verify-run-settlement --historical
+    "Flock released the Run while its delegated work was active")
+
   add_executable(flock_workflow_context tests/workflow_context.cpp)
   target_link_libraries(flock_workflow_context PRIVATE flock_core)
   target_compile_options(flock_workflow_context PRIVATE -Wall -Wextra -Wpedantic)
@@ -130,7 +147,6 @@ add_subdirectory(web)
 target_link_libraries(flock PRIVATE flock_web flock_t3)
 
 if(BUILD_TESTING)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME flock_t3_connection_setup COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock> connection-setup)
   set_tests_properties(flock_t3_connection_setup PROPERTIES TIMEOUT 45)
@@ -157,7 +173,6 @@ if(BUILD_TESTING)
   target_compile_options(flock_bot_tools_sandbox PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_bot_tools_sandbox COMMAND flock_bot_tools_sandbox)
   add_test(NAME flock_tool_history_projection COMMAND flock_bot_tools_sandbox --tool-history)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME flock_bot_tools_mcp COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot_tools_mcp.py" $<TARGET_FILE:flock_bot_tools_sandbox>)
 endif()
