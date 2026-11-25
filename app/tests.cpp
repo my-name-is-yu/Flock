@@ -58,6 +58,53 @@ public:
     InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
+void unavailableAutomationNotesDoNotOwnTheProject() {
+    Sandbox temp;
+    const auto folder = temp.path / "bots";
+    createBot(folder / "release",botConfig(),"Release role","");
+    createBot(folder / "triage",botConfig(),"Triage role","");
+    const Bots bots(folder);
+    Store store(temp.path / "tasks.db",[&](std::string_view bot) { return bots.initialMemory(bot); },
+                [&](std::string_view bot) { return bots.plannerModel(bot); });
+    const auto due = utc(2026,1,2,0,0);
+    const Json schedule = {{"kind","schedule"},{"cron","0 0 * * *"},{"timezone","Etc/UTC"},{"request","Daily check"}};
+    for (const auto* bot : {"release","triage"})
+        store.createAutomation(localOwner,bots.get(bot).intake(""),schedule,due - 60);
+    std::filesystem::rename(folder / "release",folder / "release.saved");
+    std::filesystem::create_symlink("release",folder / "release");
+    store.fireDueAutomations(due);
+
+    const Id release = store.tasks("release").at(0).at("id");
+    const Id triage = store.tasks("triage").at(0).at("id");
+    NotesModel model;
+    NotesT3 t3;
+    RuntimeOptions options;
+    options.clock = [&] { return due; };
+    Runtime runtime(store,model,t3,[&](std::string_view bot) { return bots.soul(bot); },options);
+    for (int i = 0; i < 10 && t3.commands.empty(); ++i) runtime.tick();
+    check(t3.commands.size() == 1 && t3.commands.front().ownerBotId == "triage" &&
+          store.task(triage).at("state") == "running",
+          "unreadable automation notes prevented a healthy Bot from running in the same project");
+    const auto paused = store.task(release);
+    check(paused.at("state") == "waiting" && paused.at("wait").at("reason") == "bot_notes_unavailable" &&
+          paused.at("projectId") == store.task(triage).at("projectId"),
+          "the unreadable Bot's request lost its workspace or recovery action");
+
+    std::filesystem::remove(folder / "release");
+    std::filesystem::rename(folder / "release.saved",folder / "release");
+    store.operate(localOwner,TaskTarget::from(paused,paused.at("wait").at("id")),"retry");
+    runtime.tick();
+    const auto retried = store.task(release);
+    check(retried.at("state") == "queued" && retried.at("blockedBy").is_object() &&
+          retried.at("blockedBy").at("id") == triage && t3.commands.size() == 1,
+          "retrying an unreadable Bot's request overtook an active Run");
+
+    t3.finished = true;
+    for (int i = 0; i < 10 && t3.commands.size() == 1; ++i) runtime.tick();
+    check(t3.commands.size() == 2 && t3.commands.back().ownerBotId == "release" &&
+          model.inputs.back().notes.soul == "Release role", "the repaired Bot did not resume with its restored role");
+}
+
 void notesAndRoutingOnRestart() {
     Sandbox temp;
     const auto folder = temp.path / "bots";
@@ -975,6 +1022,7 @@ void botProfilesAndAvatars() {
 int main() {
     try {
         configuredSchedules();
+        unavailableAutomationNotesDoNotOwnTheProject();
         pinnedConversationDestinations();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();

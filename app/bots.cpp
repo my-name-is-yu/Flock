@@ -392,12 +392,20 @@ std::optional<Store::PlannerModel> Bots::plannerModel(std::string_view id) const
                                bot->settings.at("modelProvider").get<std::string>()};
 }
 
+std::string Bots::readOptionalNotes(std::string_view id, std::string_view filename, std::size_t limit) const try {
+    return readText(path(id) / filename,limit,true);
+} catch (const Conflict& error) {
+    throw BotNotesUnavailable(error.what());
+} catch (const std::filesystem::filesystem_error& error) {
+    throw BotNotesUnavailable(error.what());
+}
+
 std::string Bots::soul(std::string_view id) const {
-    return readText(path(id) / "SOUL.md",maxBotRoleBytes,true);
+    return readOptionalNotes(id,"SOUL.md",maxBotRoleBytes);
 }
 
 std::string Bots::initialMemory(std::string_view id) const {
-    return readText(path(id) / "MEMORY.md",8192,true);
+    return readOptionalNotes(id,"MEMORY.md",8192);
 }
 
 std::vector<PeerBot> Bots::peers(std::string_view id) const {

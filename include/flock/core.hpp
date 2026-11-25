@@ -40,6 +40,7 @@ using IntakeResolver = std::function<Intake(std::string_view botId, std::string_
 Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake);
 
 struct BotNotes { std::string soul, memory; };
+struct BotNotesUnavailable : Conflict { using Conflict::Conflict; };
 struct PeerBot { std::string name; Intake intake; std::string role = {}; };
 using PeerResolver = std::function<std::vector<PeerBot>(std::string_view)>;
 

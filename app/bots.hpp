@@ -42,6 +42,7 @@ private:
     mutable std::mutex mutex_;
     std::optional<Bot> tryGet(std::string_view id) const;
     std::filesystem::path path(std::string_view id) const;
+    std::string readOptionalNotes(std::string_view id, std::string_view filename, std::size_t limit) const;
     Json cardLocked(std::string_view id) const;
     Json cardFromDirectory(std::string_view id, const std::filesystem::path&) const;
     void syncBotSchedules(Store&, std::string_view id, Seconds now, const ScheduleReporter&) const;
