@@ -1,9 +1,10 @@
 #include "storage.hpp"
+#include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 
 namespace flockv0 {
 using conversation_storage::hasText;
-using conversation_storage::messageSize;
+using limits::messages::maxBodyBytes;
 
 namespace {
 bool reservedMessageId(std::string_view id) {
@@ -91,7 +92,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
                     conversation::PrincipalSource source, const VerifiedChannelMessage* channel, const std::function<Intake()>& route,
                     const Json& attachments) {
     if (!channel && reservedMessageId(clientId)) throw Conflict("This client message ID is reserved");
-    if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) || !hasText(text) || text.size() > messageSize ||
+    if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) || !hasText(text) || text.size() > maxBodyBytes ||
         replyTo < 0)
         throw Conflict("Bot, client message ID and nonempty text are required");
     Json receipt;
@@ -121,7 +122,7 @@ Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, 
                                     const Json& invitation) {
     if (botPaused(routing.botId)) throw BotPaused{};
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
-    modelCallLimit(routing.config);
+    initialModelCallLimit(routing.config);
     Json saved{{"environmentId", routing.environmentId}, {"projectId", routing.projectId}, {"config", routing.config}};
     const auto scrub = redactor(routing.botId);
     if (origin) {

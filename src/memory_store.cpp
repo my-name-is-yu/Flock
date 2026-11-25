@@ -1,11 +1,11 @@
 #include "conversation_storage.hpp"
+#include "flock/bot_profile.hpp"
+#include "flock/limits.hpp"
 
 #include <algorithm>
 
 namespace flockv0 {
 namespace {
-constexpr std::size_t memoryBytes = 8192;
-
 struct MemoryDocument {
     std::string content;
     Id version = 0;
@@ -59,7 +59,7 @@ Json revisionView(const Statement& row) {
 }
 
 BotNotes Store::Impl::loadNotes(std::string_view bot, const Runtime::SoulLoader& soul, Seconds now) {
-    BotNotes notes{soul ? bounded(soul(bot), memoryBytes) : std::string{}, {}};
+    BotNotes notes{soul ? bounded(soul(bot), maxBotRoleBytes) : std::string{}, {}};
     const auto key = privateKey(bot);
     std::lock_guard lock(mutex);
     if (auto doc = findMemory(db, key)) {
@@ -76,7 +76,7 @@ BotNotes Store::Impl::loadNotes(std::string_view bot, const Runtime::SoulLoader&
 }
 
 std::optional<SessionMemory> Store::Impl::sessionMemory(const Command& command, Seconds now) {
-    if (command.instruction.size() >= maxSessionPromptBytes) return std::nullopt;
+    if (command.instruction.size() >= limits::session_prompt::maxBytes) return std::nullopt;
     const auto& bot = command.ownerBotId;
     const auto key = privateKey(bot);
     const auto doc = findMemory(db, key);
@@ -85,7 +85,7 @@ std::optional<SessionMemory> Store::Impl::sessionMemory(const Command& command, 
     auto excerpt = doc ? scrub.text(doc->content) : seedPrivateMemory(key, bot, scrub, now);
     if (excerpt.find_first_not_of(" \t\r\n") == excerpt.npos) return std::nullopt;
     const auto marker = sessionPrompt(command.actionId, {});
-    const auto bytes = std::min(memoryBytes, maxSessionPromptBytes - command.instruction.size());
+    const auto bytes = std::min(limits::memory::maxDocumentBytes, limits::session_prompt::maxBytes - command.instruction.size());
     const auto label = field(command.config, "botDisplayName");
     const auto heading = "\n\nNotes from " + bounded(scrub.text(label.empty() ? bot : label), 128) + "'s memory:\n";
     constexpr std::string_view truncation = "\n[Bot memory truncated]";
@@ -125,7 +125,7 @@ VALUES(?,?,?,?,?,0,?)
 }
 
 std::string Store::Impl::seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor& scrub, Seconds now) {
-    auto content = memorySeed ? bounded(scrub.text(memorySeed(bot)), memoryBytes) : std::string{};
+    auto content = memorySeed ? bounded(scrub.text(memorySeed(bot)), limits::memory::maxDocumentBytes) : std::string{};
     createMemory(key, bot, "memory", content, now);
     return content;
 }
@@ -252,13 +252,14 @@ FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 2
         updated = row.string(1);
     } else {
         if (!args.contains("content") || !args.at("content").is_string() ||
-            args.at("content").get_ref<const std::string&>().size() > memoryBytes)
-            throw Conflict("Memory content must be text up to 8,192 bytes");
+            args.at("content").get_ref<const std::string&>().size() > limits::memory::maxDocumentBytes)
+            throw Conflict("Memory content must be text up to " + std::to_string(limits::memory::maxDocumentBytes) + " bytes");
         updated = field(args, "content");
     }
 
     updated = scrub.text(updated);
-    if (updated.size() > memoryBytes) throw Conflict("Redacted memory content exceeds 8,192 bytes");
+    if (updated.size() > limits::memory::maxDocumentBytes)
+        throw Conflict("Redacted memory content exceeds " + std::to_string(limits::memory::maxDocumentBytes) + " bytes");
     if (remembering && updated == content) return {{"version", version}, {"unchanged", true}};
     const auto summary = diffSummary(content, updated);
     if (!doc) createMemory(key, {}, id, {}, now);
@@ -320,7 +321,7 @@ std::optional<ModelInput> Store::Impl::preferenceReviewInput(const conversation:
 }
 
 Json Store::Impl::rememberPreference(const conversation::Message& message, int step, const Json& args, Seconds now) {
-    const auto quote = conversation_storage::text(args, "sourceQuote", conversation_storage::messageSize, true);
+    const auto quote = conversation_storage::text(args, "sourceQuote", limits::messages::maxBodyBytes, true);
     const auto summary = conversation_storage::text(args, "summary", 240, true);
     if (!preferenceReviewPending(message.id, step) || !canReviewPreference(message) || message.text.find(quote) == std::string::npos)
         throw Conflict("Use only words stated by the person in their current message");

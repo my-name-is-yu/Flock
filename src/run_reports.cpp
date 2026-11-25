@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/limits.hpp"
 
 #include <algorithm>
 
@@ -6,7 +7,7 @@ namespace flockv0 {
 void setReportEvidence(Json& data, const RunEvidence& evidence) {
     using Availability = RunEvidence::Availability;
     const bool missing = evidence.availability == Availability::ReportUnavailable;
-    const auto report = missing ? std::string{} : bounded(evidence.report, 8192);
+    const auto report = missing ? std::string{} : bounded(evidence.report, limits::session_evidence::maxReportBytes);
     data["report"] = report;
     data["truncated"] = !missing && (evidence.truncated || report.size() < evidence.report.size());
     data["detail"] = bounded(evidence.detail, 2048);

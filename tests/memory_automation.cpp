@@ -355,7 +355,7 @@ void memoryRedactionLimit(const std::filesystem::path& db) {
     const std::string suffix(8192 - 10, 'x');
     const Json tooLong{{"baseVersion", 0}, {"content", "z9q7" + suffix + "tail"}};
     rejectsWithConflict([&] { store.memory(owner, alpha.botId, "apply_memory_edit", tooLong); },
-                        "Redacted memory content exceeds 8,192 bytes");
+                        "Redacted memory content exceeds 8192 bytes");
     const auto current = store.memory(owner, alpha.botId, "read_memory", Json::object());
     const auto history = store.memory(owner, alpha.botId, "memory_history", Json::object());
     check(current.at("version") == 0 && current.at("content") == "Original" && history.at("revisions").empty(),

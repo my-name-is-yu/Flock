@@ -2213,7 +2213,8 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
 }
-const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
+const composerLimit = (limits, reply, decision) =>
+  decision || reply?.kind === 'wait' ? limits.waitAnswerBytes : limits.messageBytes;
 const activeReply = (composer) => decisions.reviewReply() ?? composer.reply;
 const screenshotAnchor = (reply) => reply?.messageId ?? 0;
 const screenshotsFor = (composer) => screenshotDrafts.get(composer);
@@ -2242,7 +2243,7 @@ async function addScreenshots(context, composer, reply, files) {
   draft.error = '';
   notices.delete(context.id);
   renderComposer();
-  try { await stageScreenshots(draft, files, isCurrent); }
+  try { await stageScreenshots(draft, files, context.data.limits.attachments, isCurrent); }
   finally {
     draft.loading = false;
     if (showingComposer(context.id)) renderComposer();
@@ -2398,7 +2399,7 @@ function renderComposer() {
   renderScreenshots(screenshots, busy || !!screenshots?.loading);
   elements.composer.setAttribute('aria-busy', String(busy));
   elements.send.disabled = busy || !!composition || closedReply || !!decision?.blocked || !!screenshots?.loading ||
-    !body.trim() || byteLength(body) > (decision ? 8000 : composerLimit(reply));
+    !body.trim() || byteLength(body) > composerLimit(context.data.limits, reply, decision);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   const screenshotError = !busy && !closedReply && screenshots?.error;
   elements.notice.textContent = notice?.isError ? notice.text :
@@ -3506,7 +3507,7 @@ function updateDraft() {
   else view.composer.edit(elements.message.value, reply);
   fitMessage();
   notices.delete(view.id);
-  const limit = decision ? 8000 : composerLimit(reply);
+  const limit = composerLimit(view.data.limits, reply, decision);
   if (byteLength(elements.message.value) > limit) setNotice(view, `Messages can be up to ${limit.toLocaleString('en')} bytes.`, true);
   else renderComposer();
 }

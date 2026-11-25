@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "flock/limits.hpp"
 #include "flock/session_settings.hpp"
 
 #include <algorithm>
@@ -275,7 +276,7 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
             if (!name.is_string() || !validPlainId(name.get_ref<const std::string&>())) throw Conflict("Invalid connection name");
         bot.settings[key] = config[key];
     }
-    if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
+    if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = initialModelCallLimit(config);
     if (const auto fix = config.find("fixPullRequests"); fix != config.end())
         bot.settings["fixPullRequests"] = validatedBotFixPullRequests(*fix);
     if (config.contains("conversationEnvironments")) {
@@ -393,7 +394,7 @@ std::optional<Store::PlannerModel> Bots::plannerModel(std::string_view id) const
                                 std::nullopt};
     if (const auto effort = bot->settings.find("reasoningEffort"); effort != bot->settings.end())
         planner.reasoningEffort = effort->get<std::string>();
-    if (bot->settings.contains("modelCallLimit")) planner.modelCallLimit = modelCallLimit(bot->settings);
+    if (bot->settings.contains("modelCallLimit")) planner.modelCallLimit = initialModelCallLimit(bot->settings);
     return planner;
 }
 
@@ -410,7 +411,7 @@ std::string Bots::soul(std::string_view id) const {
 }
 
 std::string Bots::initialMemory(std::string_view id) const {
-    return readOptionalNotes(id, "MEMORY.md", 8192);
+    return readOptionalNotes(id, "MEMORY.md", limits::memory::maxDocumentBytes);
 }
 
 std::vector<PeerBot> Bots::peers(std::string_view id) const {
@@ -453,7 +454,7 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     Json item = {{"id", id}, {"name", name}, {"soul", readText(botDir / "SOUL.md", maxBotRoleBytes, true)}, {"cron", schedules}};
     if (const auto fix = config.find("fixPullRequests"); fix != config.end()) item["fixPullRequests"] = *fix == true;
     try {
-        item["modelCallLimit"] = modelCallLimit(config);
+        item["modelCallLimit"] = initialModelCallLimit(config);
     } catch (const Conflict&) {
     }
     for (const std::string_view key : botRunSettingFields) {

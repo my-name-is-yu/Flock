@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/limits.hpp"
 #include "outbox_storage.hpp"
 #include "commit_check.hpp"
 #include "conversation_storage.hpp"
@@ -19,7 +20,7 @@
 
 namespace flockv0 {
 namespace {
-bool present(std::string_view value, std::size_t limit = 8000) {
+bool present(std::string_view value, std::size_t limit = limits::session_prompt::maxDecisionTextBytes) {
     return value.size() <= limit && value.find_first_not_of(" \r\n\t") != std::string_view::npos;
 }
 bool hasRun(const RunRef& r) {
@@ -37,10 +38,10 @@ bool hasPending(const Json& task) {
 
 struct SourceQuotes {
     const SecretRedactor& scrub;
-    std::size_t remaining = 8192;
+    std::size_t remaining = limits::session_prompt::maxQuoteTextBytes;
     std::set<Id> included{};
 
-    std::string quote(const Json& source, std::size_t limit = 8192) {
+    std::string quote(const Json& source, std::size_t limit = limits::session_prompt::maxQuoteTextBytes) {
         const auto id = source.at("messageId").get<Id>();
         if (!id || !included.insert(id).second) return {};
         auto text = "\n\nReferenced result " + std::to_string(id) + " from task " + std::to_string(source.at("taskId").get<Id>());
@@ -55,15 +56,16 @@ struct SourceQuotes {
     }
 };
 
-Json pendingBatch(const Json& task, std::size_t maxPromptBytes, SourceQuotes quotes) {
+Json pendingBatch(const Json& task, std::size_t promptBudgetBytes, SourceQuotes quotes) {
     Json batch = Json::array();
-    std::size_t bytes = 0, promptBytes = 0;
+    std::size_t serializedBytes = 0, promptBytes = 0;
     if (!hasPending(task)) return batch;
     for (const auto& item : task.at("pendingInstructions")) {
-        bytes += item.dump().size();
+        serializedBytes += item.dump().size();
         promptBytes += 2 + field(item, "text").size();
         if (item.contains("source")) promptBytes += quotes.quote(item.at("source")).size();
-        if (!batch.empty() && (bytes > 64000 || promptBytes > maxPromptBytes)) break;
+        if (!batch.empty() && (serializedBytes > limits::session_prompt::pendingBatchJsonThresholdBytes || promptBytes > promptBudgetBytes))
+            break;
         batch.push_back(item);
     }
     return batch;
@@ -1363,7 +1365,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 cmd.instruction = scrub.text(cmd.instruction);
                 action.command.instruction = cmd.instruction;
                 cmd.instruction = sessionPrompt(cmd.actionId, cmd.instruction);
-                if (cmd.instruction.size() > maxSessionPromptBytes)
+                if (cmd.instruction.size() > limits::session_prompt::maxBytes)
                     return applyDelivery(id, action, {Delivery::Kind::Settings, {}, SessionContextLimit{}.what(), true});
             }
             auto payload = Json{{"tool", commandToolName(cmd.tool)},
@@ -1615,7 +1617,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
             throw Conflict("History source does not match the requested Run");
         scrub.requirePublic({excerpt.itemId, excerpt.nextCursor});
         const auto redacted = scrub.text(excerpt.text);
-        auto text = bounded(redacted, 8192);
+        auto text = bounded(redacted, limits::session_evidence::maxHistoryExcerptBytes);
         const bool clipped = text.size() < redacted.size();
         return {{"environmentId", req.environmentId},
                 {"threadId", req.threadId},
@@ -1761,7 +1763,7 @@ ORDER BY j.id
             instruction += "):\n";
             if (answer) instruction += from_json(item.at("waitId"), rows.string(3)).text + "\nAnswer: ";
             instruction += field(item, "text");
-            if (instruction.size() > maxSessionPromptBytes) throw SessionContextLimit{};
+            if (instruction.size() > limits::session_prompt::maxBytes) throw SessionContextLimit{};
             if (item.contains("source")) sources.push_back(item.at("source"));
         }
         return sources;
@@ -1771,8 +1773,8 @@ ORDER BY j.id
         WorkPrompt prompt;
         auto& [instruction, pending, contextIds, resultReferences] = prompt;
         const auto scrub = db.redactor(field(task, "botId"));
-        // Use the same allowance before and after the model supplies its instruction and criteria.
-        std::size_t overhead = 8000 + 512 + std::max<std::size_t>(64, actionIdBytes);
+        std::size_t reservedBytes =
+            limits::session_prompt::instructionReserveBytes + std::max(limits::session_prompt::minActionIdReserveBytes, actionIdBytes);
         if (!contract && event.contains("userAnswer")) {
             contextIds.answerEventId = event.at("id").get<Id>();
             instruction += "\n\nUser answer:\n" + field(event, "userAnswer");
@@ -1782,7 +1784,7 @@ ORDER BY j.id
             const auto criteria = contract ? contract->doneWhen : effectiveDoneWhen(task);
             instruction +=
                 "\n\nTask intent:\n" + (contract ? contract->intent : taskIntent(task)) + "\n\nCompletion criteria:\n" + criteria;
-            overhead += std::max<std::size_t>(criteria.size(), 8000) - criteria.size();
+            reservedBytes += std::max(criteria.size(), limits::session_prompt::maxDecisionTextBytes) - criteria.size();
         }
         if (contract || moved) {
             if (field(event, "kind") == "bot_answer") {
@@ -1801,7 +1803,7 @@ ORDER BY j.id
             for (const auto& item : delivered) instruction += "\n\n" + field(item, "text");
         }
         SourceQuotes quotes{scrub};
-        const auto quoteSource = [&](const Json& source, std::size_t limit = 8192) {
+        const auto quoteSource = [&](const Json& source, std::size_t limit = limits::session_prompt::maxQuoteTextBytes) {
             const auto safe = scrub.record(source, SecretRedactor::Fields::external);
             const auto quote = quotes.quote(safe, limit);
             if (quote.empty()) return;
@@ -1837,12 +1839,14 @@ ORDER BY j.id
                 --remainingReports;
             }
         }
-        overhead += instruction.size();
         const bool resumedTask = task.contains("restartContext") && task["lastRun"].is_null();
         if (contract && !resumedTask)
             pending = task.value("pendingInstructions", Json::array());
-        else
-            pending = pendingBatch(task, overhead < maxSessionPromptBytes ? maxSessionPromptBytes - overhead : 0, quotes);
+        else {
+            constexpr auto maxPromptBytes = limits::session_prompt::maxBytes;
+            const auto occupiedBytes = reservedBytes + instruction.size();
+            pending = pendingBatch(task, maxPromptBytes - std::min(maxPromptBytes, occupiedBytes), quotes);
+        }
         if (contract) {
             const auto sources = appendSessionDirections(instruction, task, pending, contract->answersAfter);
             if (resumedTask && hasPending(task) && pending.size() < task.at("pendingInstructions").size())

@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/limits.hpp"
 #include "../src/commit_check.hpp"
 #include "flock/session_read.hpp"
 #include "flock/session_settings.hpp"
@@ -549,7 +550,7 @@ void verifyCommand(const Command& command) {
     if (!validTarget || (command.tool != CommandTool::message_session && command.projectId.empty()) || command.actionId.empty() ||
         command.actionId.size() > 256 || trim(command.actionId) != command.actionId ||
         command.actionId.find_first_of("\r\n[]") != std::string::npos || trim(command.instruction).empty() ||
-        sessionPrompt(command.actionId, command.instruction).size() > maxSessionPromptBytes)
+        sessionPrompt(command.actionId, command.instruction).size() > limits::session_prompt::maxBytes)
         throw Failure(Failure::Kind::Settings, "Invalid T3 command, action ID or destination");
 }
 
@@ -710,16 +711,16 @@ Report readReport(Client& client, const RunRef& run, std::string_view view, std:
             auto text = itemText(*it);
             auto output = std::move(text.text);
             const auto id = str(*it, "itemId");
-            while (text.more && output.size() < 8192) {
+            while (text.more && output.size() < limits::session_evidence::maxReportBytes) {
                 scan.step();
                 auto item = readItem(client, run.threadId, view, id, text.next);
                 if (!fromRun(item, run) || str(item, "type") != type || str(item, "updatedAt") != str(*it, "updatedAt")) invalidResponse();
                 text = itemText(item, text.next);
                 output += text.text;
             }
-            report.text = bounded(output, 8192);
+            report.text = bounded(output, limits::session_evidence::maxReportBytes);
             report.itemId = id;
-            report.truncated = text.more || output.size() > 8192;
+            report.truncated = text.more || output.size() > limits::session_evidence::maxReportBytes;
             return report;
         }
         const auto next = cursor(page, "earlierPosition");
@@ -843,7 +844,7 @@ RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::stri
         }
     }
     if (report.text.empty()) report.text = "T3 Run " + std::string(status) + " without a written report.";
-    evidence.report = bounded(report.text, 8192);
+    evidence.report = bounded(report.text, limits::session_evidence::maxReportBytes);
     evidence.truncated = report.truncated || evidence.report.size() < report.text.size();
     evidence.itemId = std::move(report.itemId);
     evidence.sessionCreatedAt = std::move(report.sessionCreatedAt);
@@ -1298,7 +1299,7 @@ public:
         excerpt.runId = request.runId;
         const auto copy = [&](const Json& item, std::size_t offset) {
             auto page = itemText(item, offset);
-            if (page.text.size() > 8192) invalidResponse();
+            if (page.text.size() > limits::session_evidence::maxHistoryExcerptBytes) invalidResponse();
             excerpt.text = std::move(page.text);
             excerpt.itemId = str(item, "itemId");
             excerpt.nextOffset = page.next;

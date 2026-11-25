@@ -173,6 +173,8 @@ void messageAttachmentLimits(const std::filesystem::path& path) {
     Browser::checked(response, 413);
 
     const auto view = browser.get("/api/view?bot=release");
+    check(view.at("limits") == Json{{"messageBytes", 16'000}, {"waitAnswerBytes", 8'000}, {"attachments", 4}},
+          "The Bot view did not publish the composer limits");
     const auto& events = view.at("events");
     check(events.size() == 1 && events[0].at("id") == receipt.at("messageId") && events[0].at("data").at("imageAttachmentCount") == 4,
           "HTTP attachment intake did not save exactly four screenshots on one message");

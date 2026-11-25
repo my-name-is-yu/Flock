@@ -1,4 +1,5 @@
 #include "flock/policy.hpp"
+#include "flock/limits.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/participation.hpp"
 #include "flock/t3_connection.hpp"
@@ -1230,7 +1231,7 @@ void resumeRestoresCancelledTaskDirections() {
     f.advanceUntil([&] { return f.t3.sent.back().environmentId == "desktop"; }, "the resumed task did not move");
     const auto& moved = f.t3.sent.back().instruction;
     check(moved.find(localNote) != moved.npos && moved.find(localNote) == moved.rfind(localNote) && moved.find(trace) != moved.npos &&
-              sessionPrompt(f.t3.sent.back().actionId, moved).size() <= maxSessionPromptBytes && f.task(last)["remaining"] == 1,
+              sessionPrompt(f.t3.sent.back().actionId, moved).size() <= limits::session_prompt::maxBytes && f.task(last)["remaining"] == 1,
           "the moved Session lost an applicable direction or spent extra allowance");
 }
 
@@ -1325,7 +1326,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
               criteriaHeading == instruction.rfind("Completion criteria:\n") && criteriaValue != instruction.npos &&
               criteriaValue == instruction.rfind(criteria) && criteriaValue > criteriaHeading,
           "the resumed prompt duplicated or lost its large task contract");
-    check(sessionPrompt(command.actionId, instruction).size() <= maxSessionPromptBytes,
+    check(sessionPrompt(command.actionId, instruction).size() <= limits::session_prompt::maxBytes,
           "the resumed prompt exceeded the Session prompt cap");
 }
 
@@ -3852,7 +3853,7 @@ void authoritativeHandoffFitsBeforeMemory() {
         const auto& prompt = command.instruction;
         const auto notes = prompt.find("\n\nNotes from alpha's memory:\n");
         const auto marker = prompt.find(sessionPrompt(command.actionId, {}));
-        check(notes < marker && marker - notes <= sectionBudget && prompt.size() <= maxSessionPromptBytes &&
+        check(notes < marker && marker - notes <= sectionBudget && prompt.size() <= limits::session_prompt::maxBytes &&
                   prompt.find("Use fixture credentials: [redacted]") != prompt.npos && prompt.find(protectedValue) == prompt.npos &&
                   prompt.find("[Bot memory truncated]") < marker,
               "the Session memory exceeded its budget, lost its truncation notice, or contained a protected value");

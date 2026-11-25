@@ -116,7 +116,7 @@ function fixtures() {
       ? { messages: [older], hasOlder: false } : { messages: peerEvents, hasOlder: true });
     const response = Response.json({ bot, events, olderBefore: 0, presence: activeSessions.length ? 'working' : 'idle',
       activeSessions, sessionTasks, sessionsBefore: 0, sessionCursor: 0, waits: [],
-      canDecide: true, composerPerson: null });
+      canDecide: true, composerPerson: null, limits: { messageBytes: 16000, waitAnswerBytes: 8000, attachments: 4 } });
     if (holdView && path.startsWith('/api/view?')) {
       const held = holdView;
       holdView = undefined;

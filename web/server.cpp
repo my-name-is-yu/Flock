@@ -8,7 +8,7 @@
 #include "git_routes.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/base64.hpp"
-#include "flock/message_attachments.hpp"
+#include "flock/limits.hpp"
 #include "channel_routes.hpp"
 #include "mcp_routes.hpp"
 
@@ -29,10 +29,12 @@ using httplib::Request;
 using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
+constexpr std::size_t messagePayloadOverheadBytes = 132 * 1024;
+constexpr std::size_t maxMessagePayloadBytes = limits::messages::maxEncodedImagesBytes + messagePayloadOverheadBytes;
 enum class Mutation { Message, Operation };
 
 std::size_t requestPayloadLimit(std::string_view path) {
-    if (path == "/api/messages") return message_attachments::maxRequestBytes;
+    if (path == "/api/messages") return maxMessagePayloadBytes;
     if (path == "/api/bots" || path == "/api/bots/profile") return web::maxUploadPayload;
     return web::maxStandardPayload;
 }
@@ -165,7 +167,7 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
 }
 
 Json operationData(const Json& body, std::string_view operation) {
-    if (operation == "answer") return {{"text", requiredText(body, "text", 8000)}};
+    if (operation == "answer") return {{"text", requiredText(body, "text", limits::messages::maxWaitAnswerBytes)}};
     if (operation == "extend") {
         const auto deadline = bodyId(body, "deadline");
         if (deadline <= unixTime()) throw InputError("invalid_deadline");
@@ -221,7 +223,7 @@ public:
         store_.protectGitCredential(callbacks_.githubWebhookSecret);
         server_.new_task_queue = [] { return new httplib::ThreadPool(4, 8, 32); };
         server_.set_address_family(AF_INET)
-            .set_payload_max_length(std::max(web::maxUploadPayload, message_attachments::maxRequestBytes))
+            .set_payload_max_length(std::max(web::maxUploadPayload, maxMessagePayloadBytes))
             .set_read_timeout(10)
             .set_write_timeout(10)
             .set_keep_alive_timeout(1)
@@ -324,6 +326,9 @@ public:
                         const auto [sessionThrough, sessionTasks] = store_.sessionChangesSince(id, sessionsAfter);
                         auto view = readBotView(actor, id, *bot, sessionsAfter ? &sessionTasks : nullptr);
                         view["bot"]["id"] = id;
+                        view["limits"] = {{"messageBytes", limits::messages::maxBodyBytes},
+                                          {"waitAnswerBytes", limits::messages::maxWaitAnswerBytes},
+                                          {"attachments", limits::messages::maxAttachments}};
                         view["composerPerson"] = web::hasWebIdentities(callbacks_) ? Json(actor.id) : Json(nullptr);
                         view["historyCursor"] = changes.through;
                         view["changedMessageIds"] = Json::array();
@@ -751,7 +756,7 @@ private:
             if (!store_.policy().allows(actor, Action::bot_decide, bot)) return error(res, 403, "access_denied");
             if (!botById(bots(), bot)) return error(res, 404, "bot_not_found");
             if (mutation == Mutation::Message) {
-                const auto request = requiredText(body, "text", 16000);
+                const auto request = requiredText(body, "text", limits::messages::maxBodyBytes);
                 const auto clientMessageId = requiredText(body, "clientMessageId", 256);
                 const auto replyTo = body.contains("replyToMessageId") ? bodyId(body, "replyToMessageId") : Id{};
                 const auto attachments = body.value("attachments", Json::array());

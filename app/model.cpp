@@ -1,6 +1,6 @@
 #include "model.hpp"
 #include "flock/git_host.hpp"
-#include "flock/message_attachments.hpp"
+#include "flock/limits.hpp"
 #include "flock/workspace_tools.hpp"
 #include "flock/policy.hpp"
 #include "tool_batch.hpp"
@@ -32,7 +32,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
     if (recordsTaskDecisionReason(name)) {
         text("reason", "Briefly explain the evidence and why this action follows.");
         fields["reason"]["minLength"] = 1;
-        fields["reason"]["maxLength"] = decisionReasonLimit;
+        fields["reason"]["maxLength"] = limits::model::maxDecisionReasonBytes;
     }
     std::string description;
     if (name == "delegate") {
@@ -481,7 +481,7 @@ ModelTurn ChatGPTModel::decide(const ModelInput& input) {
 
 Json ChatGPTModel::respond(const Json& request, std::size_t inspectedImageBytes) {
     auto body = request.dump(-1, ' ', false, Json::error_handler_t::replace);
-    if (inspectedImageBytes > message_attachments::maxEncodedImages || body.size() > maxRequest + inspectedImageBytes)
+    if (inspectedImageBytes > limits::messages::maxEncodedImagesBytes || body.size() > maxRequest + inspectedImageBytes)
         throw ModelError("Flock's ChatGPT request exceeded the local transport limit", false);
     return chatgpt::infer(transport_, accessToken(), std::move(body));
 }

@@ -23,8 +23,6 @@ struct Message {
 }
 
 namespace flockv0::conversation_storage {
-inline constexpr auto messageSize = 16000;
-inline constexpr std::size_t expandedContextBytes = 8192;
 std::size_t boundExpandedContext(Json& turn);
 void projectToolHistory(Json& turn, const Json& redactionRevision);
 inline bool japanese(std::string_view text) {

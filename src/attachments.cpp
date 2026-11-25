@@ -1,5 +1,5 @@
 #include "storage.hpp"
-#include "flock/message_attachments.hpp"
+#include "flock/limits.hpp"
 #include "image_headers.hpp"
 
 #include <set>
@@ -7,6 +7,9 @@
 namespace flockv0 {
 namespace {
 using namespace message_attachments;
+using limits::messages::maxAttachments;
+using limits::messages::maxImageBytes;
+constexpr std::size_t maxAudioBytes = 64 * 1024;
 
 std::uint32_t littleEndian(std::string_view data, std::size_t offset, unsigned size) {
     std::uint32_t value = 0;
@@ -56,7 +59,7 @@ Json metadata(const Json& value) {
 }
 
 void Store::Impl::saveAttachments(Id message, const Json& attachments) {
-    if (!attachments.is_array() || attachments.size() > maxFiles) throw Conflict("Attachments exceed the message limit");
+    if (!attachments.is_array() || attachments.size() > maxAttachments) throw Conflict("Attachments exceed the message limit");
     for (std::size_t i = 0; i < attachments.size(); ++i) {
         const auto& attachment = attachments[i];
         const auto id = std::to_string(i + 1);
@@ -99,7 +102,7 @@ Json Store::Impl::inspectAttachment(std::string_view bot, Id throughMessage, con
 std::vector<ModelImage> Store::Impl::inspectedImages(std::string_view bot, Id message, const Json& steps) const {
     std::vector<ModelImage> images;
     std::set<std::pair<Id, std::string>> seen;
-    for (auto it = steps.rbegin(); it != steps.rend() && images.size() < maxFiles; ++it) {
+    for (auto it = steps.rbegin(); it != steps.rend() && images.size() < maxAttachments; ++it) {
         const auto& entry = *it;
         if (entry.at("tool") != "inspect_attachment" || !entry.at("result").at("ok").get<bool>() ||
             entry.at("result").at("data").value("kind", "") != "image")

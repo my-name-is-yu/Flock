@@ -25,11 +25,12 @@ Json fieldAnswer(const Json& field, const Json& options, const Json& answer) {
     const bool multiple = field.value("multiple", false);
     if (selected.empty() || (!multiple && selected.size() != 1)) throw Conflict("Question field answer has the wrong cardinality");
 
+    constexpr std::size_t maxFieldAnswerBytes = 8'000;
     std::set<std::string> seen;
     for (const auto& value : selected) {
         if (!value.is_string()) throw Conflict("Expected a textual question answer");
         const auto& text = value.get_ref<const std::string&>();
-        if (text.size() > 8000 || !seen.insert(text).second) throw Conflict("Question answer is too long or repeated");
+        if (text.size() > maxFieldAnswerBytes || !seen.insert(text).second) throw Conflict("Question answer is too long or repeated");
         if (std::ranges::any_of(options, [&](const Json& option) { return option.at("value") == value; })) continue;
 
         if (selected.size() != 1) throw Conflict("A freeform answer must be submitted on its own");

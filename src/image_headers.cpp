@@ -1,10 +1,10 @@
 #include "image_headers.hpp"
-#include "flock/message_attachments.hpp"
 
 #include <bitset>
 
 namespace flockv0::message_attachments {
 namespace {
+constexpr unsigned maxImageEdge = 8'192, maxImagePixels = 4 * 1024 * 1024;
 constexpr unsigned char jpegTemporaryMarker = 0x01, jpegBaselineFrame = 0xc0;
 constexpr unsigned char jpegFirstRestart = 0xd0, jpegStartOfScan = 0xda;
 

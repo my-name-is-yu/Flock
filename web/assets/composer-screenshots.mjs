@@ -1,4 +1,3 @@
-const maxFiles = 4;
 const maxSourceBytes = 20 * 1024 * 1024;
 const maxPreparedBytes = 1792 * 1024;
 const maxPreparedEdge = 2048;
@@ -81,11 +80,11 @@ async function screenshotAttachment(file, prepared) {
   return { name: attachmentName(file, prepared.type), mimeType: prepared.type, dataBase64: btoa(binary) };
 }
 
-export async function stageScreenshots(draft, files, isCurrent) {
+export async function stageScreenshots(draft, files, maxAttachments, isCurrent) {
   for (const file of files) {
     if (!isCurrent()) return;
-    if (draft.images.length >= maxFiles) {
-      draft.error ||= `Attach up to ${maxFiles} screenshots per message.`;
+    if (draft.images.length >= maxAttachments) {
+      draft.error ||= `Attach up to ${maxAttachments} screenshots per message.`;
       return;
     }
     try {
