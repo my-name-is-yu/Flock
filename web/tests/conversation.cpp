@@ -811,7 +811,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     if (authenticated) browser.client.set_default_headers({{"Authorization","Bearer fixture-author"}});
-    if (access == PeerAccess::paused) store.setBotPaused(localOwner,"reviewer",true,unixTime());
+    if (access == PeerAccess::paused) store.setBotPaused(localOwner,"reviewer",true);
     constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
 
     const auto hello = browser.post("/api/messages",{{"botId","ernest"},{"clientMessageId","hello"},{"text",greeting}},201);

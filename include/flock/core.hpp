@@ -148,7 +148,7 @@ struct Delivery {
     std::string delivery = {};
     std::string launchWarning = {};
 };
-enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun };
+enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun, TargetGone };
 enum class QueueCancelOutcome { Cancelled, AlreadyStarted, NotCancellable, Retry };
 struct ReadRequest {
     std::string environmentId, threadId, runId, itemId, cursor, view = "messages";
@@ -297,7 +297,7 @@ public:
     bool botDeleted(std::string_view bot) const;
     void deleteBot(const Person&, std::string_view bot);
     bool botPaused(std::string_view bot) const;
-    void setBotPaused(const Person&, std::string_view bot, bool paused, Seconds now);
+    void setBotPaused(const Person&, std::string_view bot, bool paused, const std::function<Seconds()>& clock = unixTime);
     Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
     Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
     Json automations(const Person&, std::string_view bot, Id before = 0, bool activeOnly = false) const;

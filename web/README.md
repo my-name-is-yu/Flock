@@ -158,10 +158,14 @@ In **General**, the owner or an installation administrator can **Pause** or
 notice and offers **Resume** to people who manage the Bot.
 
 Pause closes unfinished conversations and requests and asks T3 to interrupt
-their active work. Flock keeps the conversation history. After resuming, send a
-new message to start work. Pause persists across restarts. Recurrences,
-reminders, and webhook triggers skipped during the pause stay skipped, including
-when a webhook sender retries the same event after resume.
+the active Runs the Bot started. Flock keeps the conversation history. In a
+shared T3 Session, delegated work can continue if the Bot's reply already
+finished. External T3 connections have no way to stop just those delegates.
+
+After resuming, send a new message to start work. Pause persists across
+restarts. Recurrences, reminders, and webhook triggers skipped during the pause
+stay skipped, including when a webhook sender retries the same event after
+resume.
 
 `GET /api/bot-settings?bot=ID` returns settings visible to that person.
 `POST /api/bots/pause` takes `botId` and the Boolean `paused`. A fresh message

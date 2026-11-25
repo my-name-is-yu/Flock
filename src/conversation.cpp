@@ -74,6 +74,14 @@ CREATE TABLE IF NOT EXISTS session_message_waits(
   run_finished INTEGER NOT NULL DEFAULT 0,
   interrupt_at INTEGER,
   PRIMARY KEY(message_id,environment,thread,run));
+CREATE TABLE IF NOT EXISTS session_message_sends(
+  action TEXT PRIMARY KEY,
+  message_id INTEGER NOT NULL REFERENCES messages(id),
+  environment TEXT NOT NULL, thread TEXT NOT NULL, gateway_environment TEXT NOT NULL,
+  instruction TEXT NOT NULL, interrupt_at INTEGER);
+CREATE INDEX IF NOT EXISTS session_message_sends_by_message ON session_message_sends(message_id);
+CREATE INDEX IF NOT EXISTS session_message_sends_due ON session_message_sends(interrupt_at)
+  WHERE interrupt_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   number INTEGER NOT NULL, intent TEXT NOT NULL, done_when TEXT NOT NULL,

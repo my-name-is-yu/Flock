@@ -14,12 +14,15 @@ inline Json initializeParams() {
 
 struct Failure : std::runtime_error {
     enum class Kind { Auth, Settings, Wire, Rpc, Tool };
-    enum class Reason { Other, QuestionGone, WorkSettings, HistoryNotFound, ProjectNotFound, Timeout,
+    enum class Reason { Other, QuestionGone, WorkSettings, ThreadNotFound, HistoryNotFound, ProjectNotFound, Timeout,
                         DelegatedFromRejected, CredentialExpired, LinkedEnvironmentUnavailable };
     Kind kind;
     Reason reason;
     explicit Failure(Kind category, std::string message, Reason reason = Reason::Other)
         : std::runtime_error(std::move(message)), kind(category), reason(reason) {}
+    bool missingHistory() const {
+        return reason == Reason::ThreadNotFound || reason == Reason::HistoryNotFound;
+    }
 };
 
 using Headers = std::map<std::string, std::string>;

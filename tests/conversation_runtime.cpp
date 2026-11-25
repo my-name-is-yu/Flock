@@ -273,7 +273,7 @@ void pauseCancelsOpenWorkAcrossRestart() {
     const auto pausedRun = f.task(active).at("activeRun").at("runId").get<std::string>();
     {
         Store writer(f.dir/"state.db");
-        writer.setBotPaused(localOwner,"alpha",true,f.now);
+        writer.setBotPaused(localOwner,"alpha",true);
     }
     check(f.store->botPaused("alpha") && f.task(active)["state"] == "cancelling" &&
           f.task(queued)["state"] == "cancelled", "pause did not cancel active and queued work");
@@ -296,7 +296,7 @@ void pauseCancelsOpenWorkAcrossRestart() {
     f.reach(active,"cancelled");
     check(f.t3.sent.size() == 1 && f.model.turnInputs.empty(),"paused work was processed");
 
-    f.store->setBotPaused(localOwner,"alpha",false,f.now);
+    f.store->setBotPaused(localOwner,"alpha",false,[&] { return f.now; });
     f.script("New message",{say("Ready again.")});
     check(f.response(f.receive("new","New message")).at("text") == "Ready again.",
           "resume did not restore new conversations");
@@ -309,8 +309,8 @@ void pauseDiscardsInFlightModelResult() {
     f.script("Start work",{start()});
     f.model.beforeTurn = [&](const ModelInput&) {
         Store writer(f.dir/"state.db");
-        writer.setBotPaused(localOwner,"alpha",true,f.now);
-        writer.setBotPaused(localOwner,"alpha",false,f.now);
+        writer.setBotPaused(localOwner,"alpha",true);
+        writer.setBotPaused(localOwner,"alpha",false,[&] { return f.now; });
     };
     const auto receipt = f.receive("in-flight","Start work");
     f.tick(3);

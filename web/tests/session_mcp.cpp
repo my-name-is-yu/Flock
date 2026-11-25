@@ -229,7 +229,9 @@ void stopDuringSendDispatch() {
 
 void pausedBotStopsSessionMessages() {
     struct SessionT3 : FixedT3 {
-        int reads = 0, sends = 0, observations = 0;
+        int reads = 0, sends = 0, observations = 0, reconciliations = 0;
+        std::optional<Command> unconfirmed;
+        bool recoveryVisible = false;
         std::vector<std::string> interrupted;
         std::map<std::string,int> stopChecks;
 
@@ -240,7 +242,20 @@ void pausedBotStopsSessionMessages() {
         Delivery send(const Command& command) override {
             check(command.tool == "message_session","Unexpected command for a Session reply");
             const auto run = "bot-reply-" + std::to_string(++sends);
-            return {Delivery::Kind::Accepted,{command.target.threadId,run,{}},{},false,sends == 1 ? "started" : "queued"};
+            if (sends == 3) {
+                unconfirmed = command;
+                return {};
+            }
+            return {Delivery::Kind::Accepted,{command.target.threadId,run,{},{}},{},false,sends == 1 ? "started" : "queued"};
+        }
+        Delivery reconcile(const Command& command) override {
+            ++reconciliations;
+            check(unconfirmed && command.actionId == unconfirmed->actionId && command.tool == unconfirmed->tool &&
+                  command.instruction == unconfirmed->instruction && command.environmentId == unconfirmed->environmentId &&
+                  command.target.threadId == unconfirmed->target.threadId,
+                  "Pause reconciled a different send instead of its saved request");
+            if (!recoveryVisible) return {};
+            return {Delivery::Kind::Accepted,{command.target.threadId,"bot-reply-3",{},{}},{}};
         }
         std::string sessionMessageWake(const SessionTarget&, const RunRef& run) override {
             ++observations;
@@ -278,7 +293,11 @@ void pausedBotStopsSessionMessages() {
         mcp.call("flock_ask",next).at("structuredContent");
         runtime.runConversations();
         check(t3.sends == 2,"The second Bot reply was not queued");
-        store.setBotPaused(localOwner,"release",true,now);
+        next["requestId"] = "receipt-lost";
+        mcp.call("flock_ask",next).at("structuredContent");
+        runtime.runConversations();
+        check(t3.sends == 3 && t3.reconciliations == 0,"The unconfirmed reply was retried before Pause");
+        store.setBotPaused(localOwner,"release",true);
         check(mcp.call("flock_ask",ask).at("structuredContent") == receipt,"Pause changed an existing Session ask receipt");
         ask["requestId"] = "while-paused";
     }
@@ -294,18 +313,23 @@ void pausedBotStopsSessionMessages() {
     runtime.runConversations();
     runtime.runConversations();
     check(t3.interrupted == std::vector<std::string>{"bot-reply-1","bot-reply-2"} &&
-          t3.observations == observations && t3.sends == 2 && model.wakes == 1,
+          t3.observations == observations && t3.sends == 3 && t3.reconciliations == 1 && model.wakes == 1,
           "Restart did not interrupt both Bot-owned Runs exactly once, or discarded work was revived");
     now += 5;
     runtime.runConversations();
     check(t3.stopChecks == std::map<std::string,int>{{"bot-reply-1",2},{"bot-reply-2",2}},
           "The accepted interruptions were not checked for settlement");
-    store.setBotPaused(localOwner,"release",false,now);
+    store.setBotPaused(localOwner,"release",false,[&] { return now; });
+    t3.recoveryVisible = true;
     now += 5;
     runtime.runConversations();
-    check(t3.stopChecks == std::map<std::string,int>{{"bot-reply-1",2},{"bot-reply-2",2}} &&
-          t3.observations == observations && t3.sends == 2 && model.wakes == 1,
-          "Resume revived a wake for a stopped Bot reply");
+    check(t3.interrupted == std::vector<std::string>{"bot-reply-1","bot-reply-2","bot-reply-3"} &&
+          t3.reconciliations == 3 && t3.sends == 3,"Resume forgot an unconfirmed send or resent it");
+    now += 5;
+    runtime.runConversations();
+    check(t3.stopChecks == std::map<std::string,int>{{"bot-reply-1",2},{"bot-reply-2",2},{"bot-reply-3",2}} &&
+          t3.observations == observations && t3.sends == 3 && model.wakes == 1,
+          "Resume revived a wake for a stopped Bot reply or failed to settle the recovered Run");
     check(mcp.call("flock_ask",ask).contains("structuredContent"),"Resume did not admit a fresh Session ask");
 }
 
@@ -1049,9 +1073,11 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
                         approval.at("taskId"),approval.at("targetRevision"),approval.at("targetGeneration")},"allow_once");
     runtime->runConversations();
     const auto wire = sends();
-    check(wire.size() == 1 && wire.front() == Json{{"mode","queue"},{"threadId","thread"},
-          {"message","Release Bot: For the person: Which checks should I review?"},
-          {"clientRequestId","flock-turn-" + std::to_string(anchor) + "-1"}},
+    check(wire.size() == 1,"The Bot did not send exactly one reply");
+    const auto action = wire.front().at("clientRequestId").get<std::string>();
+    check(action.starts_with("flock-turn-") && wire.front() == Json{{"mode","queue"},{"threadId","thread"},
+          {"message",sessionPrompt(action,"Release Bot: For the person: Which checks should I review?")},
+          {"clientRequestId",action}},
           "The Bot's reply did not use the named, idempotent Session queue path");
 
     db->policy().setMode(alice,"full");

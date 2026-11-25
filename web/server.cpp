@@ -529,7 +529,7 @@ private:
         const auto actor = web::person(callbacks_,req);
         if (!store_.policy().allows(actor,Action::bot_settings,bot)) return error(res,403,"access_denied");
         if (findBot(bot).is_null()) return error(res,404,"bot_not_found");
-        try { store_.setBotPaused(actor,bot,paused->get<bool>(),unixTime()); }
+        try { store_.setBotPaused(actor,bot,paused->get<bool>()); }
         catch (const DecisionDenied&) { return error(res,403,"access_denied"); }
         changes_.rescan();
         json(res,200,{{"paused",*paused}});

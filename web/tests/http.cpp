@@ -939,7 +939,7 @@ void pausedWebhookStatus(const std::filesystem::path& path) {
     trigger("release","release-only");
     trigger("release","shared");
     trigger("triage","shared");
-    store.setBotPaused(localOwner,"release",true,now);
+    store.setBotPaused(localOwner,"release",true);
 
     const auto server = startWeb(store,0,web);
     Browser browser(*server);

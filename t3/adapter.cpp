@@ -156,6 +156,15 @@ Json wait(Client& client, const RunRef& run, WaitFor scope, int timeout = 400) {
     return response;
 }
 
+bool confirmsMissingSession(Client& client, const std::string& thread) {
+    try { threadHead(client,thread); }
+    catch (const Failure& failure) {
+        if (failure.reason != Failure::Reason::ThreadNotFound) throw;
+        return true;
+    }
+    return false;
+}
+
 bool isRestartContinuation(Client& client, const RunRef& assigned, const std::string& effective) {
     // T3 creates a server message keyed by the cut Run each time it resumes after a restart.
     constexpr std::string_view prefix = "message:restart-continuation:";
@@ -546,6 +555,7 @@ void queuedMatches(Client& client, Scan& scan, const std::string& thread,
 
 Delivery reconcileWork(Client& client, const Command& command) {
     const bool launch = command.tool == "delegate";
+    const bool direct = command.tool == "message_session";
     const auto& destination = launch ? command.launchReceiptThreadId : command.target.threadId;
     const auto& hint = command.candidate.threadId;
     if (!destination.empty() && !hint.empty() && hint != destination)
@@ -561,9 +571,9 @@ Delivery reconcileWork(Client& client, const Command& command) {
         scan.step();
         const auto head = threadHead(client, threadId);
         const auto& thread = head.at("thread");
-        if (str(thread, "projectId") != command.projectId ||
+        if ((!direct && str(thread, "projectId") != command.projectId) ||
             (launch && (str(thread, "createdBy") != "agent" || str(thread, "creationSource") != "mcp"))) continue;
-        if (command.tool == "start_in_session") {
+        if (direct || command.tool == "start_in_session") {
             std::set<std::string> queued;
             queuedMatches(client,scan,threadId,expected,queued);
             for (const auto& run : queued)
@@ -908,7 +918,8 @@ public:
                     return {Outcome::Settings,{},"The OAuth endpoint belongs to a different T3 environment",true};
                 invoked = true;
                 const auto reply = client.call("t3_thread_send",{{"threadId",command.target.threadId},
-                    {"mode","queue"},{"message",command.instruction},{"clientRequestId",command.actionId}});
+                    {"mode","queue"},{"message",sessionPrompt(command.actionId,command.instruction)},
+                    {"clientRequestId",command.actionId}});
                 const auto run = str(reply,"runId");
                 const auto delivery = str(reply,"delivery");
                 if (str(reply,"threadId") != command.target.threadId || run.empty() ||
@@ -986,6 +997,19 @@ public:
             auto connection = credential(gateway, command.config);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection),{},targetRoute(command.environmentId,gateway));
+            if (command.tool == "message_session") {
+                if (gateway == command.environmentId &&
+                    str(client.call("t3_environment_read",Json::object()),"environmentId") != command.environmentId)
+                    return result(Outcome::Settings,"The OAuth endpoint belongs to a different T3 environment");
+                try {
+                    return reconcileWork(client,command);
+                } catch (const Failure& failure) {
+                    if (failure.reason == Failure::Reason::ThreadNotFound &&
+                        confirmsMissingSession(client,command.target.threadId))
+                        return result(Outcome::NotAccepted,"The T3 Session was removed");
+                    throw;
+                }
+            }
             if (command.tool == "delegate" || command.tool == "follow_up" || command.tool == "start_in_session") {
                 if (gateway == command.environmentId) checkVerificationRoute(client,command.config,command.environmentId);
                 auto recovered = reconcileWork(client, command);
@@ -1035,7 +1059,7 @@ public:
             if (str(head,"activeRunId") == effective) return "waiting_for_person";
             return {};
         } catch (const Failure& failure) {
-            return failure.reason == Failure::Reason::HistoryNotFound ||
+            return failure.missingHistory() ||
                    failure.reason == Failure::Reason::CredentialExpired ? "unknown" : "";
         }
     }
@@ -1175,7 +1199,7 @@ public:
             if (status == "running" || status == "waiting" || status == "completed") return Outcome::AlreadyStarted;
             if (terminal(status)) return Outcome::NotCancellable;
         } catch (const Failure& failure) {
-            if (failure.reason == Failure::Reason::HistoryNotFound) return Outcome::NotCancellable;
+            if (failure.missingHistory()) return Outcome::NotCancellable;
         }
         return Outcome::Retry;
     }
@@ -1349,8 +1373,19 @@ private:
         auto connection = credential(gateway, config);
         requireOperate(connection);
         Client client(std::move(connection),{},targetRoute(environmentId,gateway));
-        if (gateway == environmentId) checkVerificationRoute(client,config,environmentId,run.threadId);
-        const auto current = wait(client,run,exactSessionMessage ? WaitFor::DelegatedWork : WaitFor::Run,1);
+        if (gateway == environmentId) {
+            if (exactSessionMessage &&
+                str(client.call("t3_environment_read",Json::object()),"environmentId") != environmentId)
+                throw Failure(Failure::Kind::Settings,"The OAuth endpoint belongs to a different T3 environment");
+            checkVerificationRoute(client,config,environmentId,run.threadId);
+        }
+        Json current;
+        try { current = wait(client,run,exactSessionMessage ? WaitFor::DelegatedWork : WaitFor::Run,1); }
+        catch (const Failure& failure) {
+            if (exactSessionMessage && failure.reason == Failure::Reason::ThreadNotFound &&
+                confirmsMissingSession(client,run.threadId)) return InterruptOutcome::TargetGone;
+            throw;
+        }
         const auto effective = str(current, "runId");
         if ((exactSessionMessage || config.contains("commitVerification")) && effective != run.runId &&
             !isRestartContinuation(client,run,effective))

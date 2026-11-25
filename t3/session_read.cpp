@@ -22,7 +22,7 @@ auto withSession(const std::filesystem::path& directory, const SessionTarget& ta
         return read(client);
     } catch (const Failure& error) {
         if (error.kind == Failure::Kind::Auth || error.kind == Failure::Kind::Settings ||
-            error.reason == Failure::Reason::HistoryNotFound) return {};
+            error.missingHistory()) return {};
         throw;
     }
 }

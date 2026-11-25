@@ -188,7 +188,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     event["externalMessageId"] = "queued-before-pause";
     const auto accepted = Browser::checked(sessionBridge.Post(imessage,credential,event.dump(),"application/json"),201);
     const auto sentBeforePause = transport->replies.size();
-    store.setBotPaused(owner,"release",true,unixTime());
+    store.setBotPaused(owner,"release",true);
     check(Browser::checked(sessionBridge.Post(imessage,credential,event.dump(),"application/json"),201) == accepted,
           "Pause changed an existing channel receipt");
     event["externalMessageId"] = "while-paused";
@@ -197,7 +197,7 @@ void channelEndpoints(const std::filesystem::path& database) {
         check(paused.at("error") == botPausedMessage,"Channel did not explain why the Bot refused a message");
     }
     runtime.runConversations();
-    store.setBotPaused(owner,"release",false,unixTime());
+    store.setBotPaused(owner,"release",false);
     runtime.runConversations();
     check(transport->replies.size() == sentBeforePause,"A channel reply escaped pause or replayed on resume");
     event["externalMessageId"] = "after-resume";

@@ -218,23 +218,75 @@ bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
 }
 }
 
-void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt) {
-    const auto& [bot,target,title,delivery] = receipt;
-    if (!acceptedSessionSend(target,delivery)) return;
-    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment)"
-         " VALUES(?,?,?,?,?,?,?,?)",
-         {message,bot,target.environmentId,target.threadId,delivery.run.runId,title,
-          sessionParticipationStopped(bot,target,message) ? 1 : 0,target.gatewayEnvironmentId});
+void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
+    const auto& [bot,target,title,action,delivery] = receipt;
+    const bool accepted = interruptAt
+        ? delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == target.threadId && !delivery.run.runId.empty()
+        : acceptedSessionSend(target,delivery);
+    if (accepted) {
+        exec(R"SQL(
+INSERT OR IGNORE INTO session_message_waits(
+ message_id,bot,environment,thread,run,title,notified,gateway_environment,interrupt_at)
+VALUES(?,?,?,?,?,?,?,?,?)
+)SQL",{message,bot,target.environmentId,target.threadId,delivery.run.runId,title,
+       interruptAt || sessionParticipationStopped(bot,target,message) ? 1 : 0,target.gatewayEnvironmentId,
+       interruptAt ? Json(*interruptAt) : Json(nullptr)});
+    }
+    if (accepted || delivery.definitelyUnsent || (interruptAt && delivery.kind == Delivery::Kind::NotAccepted))
+        exec("DELETE FROM session_message_sends WHERE action=?",{action});
 }
 
 void Store::Impl::stopPausedBotParticipation(std::string_view bot) {
     for (const auto& [source,receipt] : sessionSendReceipts)
         if (receipt.bot == bot) recordSessionSendRun(source,receipt);
+    const auto now = policyClock();
     exec("UPDATE session_message_waits SET notified=1,interrupt_at=coalesce(interrupt_at,?) WHERE bot=? AND run_finished=0",
-         {policyClock(),bot});
+         {now,bot});
+    exec(R"SQL(
+UPDATE session_message_sends SET interrupt_at=? WHERE interrupt_at IS NULL
+AND message_id IN (SELECT id FROM messages WHERE bot_id=?)
+)SQL",{now,bot});
+}
+
+void Store::Impl::reconcilePausedSessionSends(T3& t3, std::stop_token shutdown) {
+    std::vector<std::pair<Id,Command>> pending;
+    {
+        std::lock_guard lock(mutex);
+        auto rows = query(R"SQL(
+SELECT s.message_id,m.bot_id,s.environment,s.thread,s.gateway_environment,s.action,s.instruction
+FROM session_message_sends s JOIN messages m ON m.id=s.message_id
+WHERE s.interrupt_at<=? ORDER BY s.interrupt_at,s.rowid LIMIT 20
+)SQL",{policyClock()});
+        while (rows.next()) {
+            Command command;
+            command.tool = "message_session";
+            command.ownerBotId = rows.string(1);
+            command.environmentId = rows.string(2);
+            command.target.threadId = rows.string(3);
+            command.gatewayEnvironmentId = rows.string(4);
+            command.target.gatewayEnvironmentId = command.gatewayEnvironmentId;
+            command.actionId = rows.string(5);
+            command.instruction = rows.string(6);
+            pending.emplace_back(rows.number(0),std::move(command));
+        }
+    }
+    for (const auto& [message,command] : pending) {
+        if (shutdown.stop_requested()) return;
+        Delivery delivery;
+        try { delivery = t3.reconcile(command); }
+        catch (const std::exception&) {}
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        const auto now = policyClock();
+        const SessionTarget target{command.environmentId,command.target.threadId,command.gatewayEnvironmentId};
+        recordSessionSendRun(message,{command.ownerBotId,target,{},command.actionId,std::move(delivery)},now);
+        exec("UPDATE session_message_sends SET interrupt_at=? WHERE action=?",{now+5,command.actionId});
+        transaction.commit();
+    }
 }
 
 void Store::Impl::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
+    reconcilePausedSessionSends(t3,shutdown);
     struct Pending { Id key; std::string environment; RunRef run; };
     std::vector<Pending> pending;
     {
@@ -248,7 +300,8 @@ void Store::Impl::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
         if (shutdown.stop_requested()) return;
         bool finished = false;
         try {
-            finished = t3.interruptSessionMessage(item.environment,item.run) == InterruptOutcome::AlreadyTerminal;
+            const auto outcome = t3.interruptSessionMessage(item.environment,item.run);
+            finished = outcome == InterruptOutcome::AlreadyTerminal || outcome == InterruptOutcome::TargetGone;
         } catch (const std::exception&) {}
         std::lock_guard lock(mutex);
         exec("UPDATE session_message_waits SET interrupt_at=?,run_finished=? WHERE rowid=?",
@@ -266,7 +319,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     };
     Command command;
     command.tool = "message_session";
-    command.actionId = "flock-turn-" + std::to_string(id) + "-" + std::to_string(step);
+    command.actionId = "flock-turn-" + actionId();
     command.ownerBotId = message.bot;
     std::string error;
     bool savedTaskTarget = false;
@@ -299,7 +352,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             command.instruction = conversation_storage::text(decision.args,"text",conversation_storage::messageSize,true);
         }
         const auto name = redactor(message.bot).text(message.routing.at("config").value("botDisplayName",message.bot));
-        command.instruction = name + ": " + command.instruction;
+        command.instruction = redactor(message.bot).text(name + ": " + command.instruction);
         if (decision.tool == "message_session" &&
             (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
             throw ToolError("Use the Session identifiers");
@@ -414,6 +467,10 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{Json{{"kind","message_session"}},id,step});
         if (!sqlite3_changes(db)) return stop;
+        exec(R"SQL(
+INSERT INTO session_message_sends(action,message_id,environment,thread,gateway_environment,instruction)
+VALUES(?,?,?,?,?,?)
+)SQL",{command.actionId,id,target.environmentId,target.threadId,target.gatewayEnvironmentId,command.instruction});
         const auto read = Resource::sessionRead(target.environmentId,target.threadId);
         if (!message.channelScope.empty() || !Policy(*this).allows(message.bot,read)) title.clear();
         title = bounded(redactT3Tokens(redactor(message.bot).text(title)),512);
@@ -436,7 +493,7 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     std::lock_guard lock(mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
     const auto checkpoint = sessionSendReceipts.insert_or_assign(
-        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt)}).first;
+        id,SessionSendReceipt{message.bot,target,std::move(title),command.actionId,std::move(receipt)}).first;
     Transaction transaction(db);
     recordSessionSendRun(id,checkpoint->second);
     saveReceipt(checkpoint->second.delivery);

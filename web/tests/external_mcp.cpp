@@ -151,7 +151,7 @@ void pausedBotRefusesExternalMessages() {
     Mcp client(*server,token);
     Json ask{{"bot","release"},{"text","Check the release"},{"requestId","before-pause"}};
     const auto receipt = client.success(submitTool,ask);
-    store.setBotPaused(localOwner,"release",true,unixTime());
+    store.setBotPaused(localOwner,"release",true);
     check(client.success(submitTool,ask) == receipt,"Pause changed an existing external MCP receipt");
 
     ask["requestId"] = "while-paused";
@@ -168,7 +168,7 @@ void pausedBotRefusesExternalMessages() {
 
     const auto other = client.success(submitTool,{{"bot","triage"},{"text","Check triage"},{"requestId","other-bot"}});
     check(other.at("status") == "received","Pause prevented submitting to another Bot");
-    store.setBotPaused(localOwner,"release",false,unixTime());
+    store.setBotPaused(localOwner,"release",false);
     check(client.success(submitTool,ask).at("taskId") != receipt.at("taskId"),"Resume did not admit fresh external work");
 }
 

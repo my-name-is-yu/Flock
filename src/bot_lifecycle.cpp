@@ -20,7 +20,7 @@ bool Store::botPaused(std::string_view bot) const {
     return p_->botPaused(bot);
 }
 
-void Store::setBotPaused(const Person& actor, std::string_view bot, bool paused, Seconds now) {
+void Store::setBotPaused(const Person& actor, std::string_view bot, bool paused, const std::function<Seconds()>& clock) {
     const SessionDispatchFileLock dispatch(p_->path,SessionDispatchFileLock::Mode::exclusive);
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
@@ -64,7 +64,7 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
         p_->stopPausedBotParticipation(bot);
         p_->dropPausedBotDeliveries(bot);
     } else {
-        p_->skipDueAutomations(bot,now);
+        p_->skipDueAutomations(bot,clock());
         p_->skipPendingGitWebhooks(bot);
         p_->exec("DELETE FROM bot_pauses WHERE bot=?",{bot});
     }
@@ -87,6 +87,8 @@ SELECT 1 WHERE
              WHERE w.bot_id=?1 AND w.stop_requested=0 AND s.task_id IS NULL AND s.status='pending')
   OR EXISTS (SELECT 1 FROM workspace_commands WHERE bot=?1 AND state IN ('running','stop_requested'))
   OR EXISTS (SELECT 1 FROM session_message_waits WHERE bot=?1 AND (notified=0 OR interrupt_at IS NOT NULL))
+  OR EXISTS (SELECT 1 FROM messages m JOIN session_message_sends s ON s.message_id=m.id
+             WHERE m.bot_id=?1 AND s.interrupt_at IS NOT NULL)
   OR EXISTS (SELECT 1 FROM messages m JOIN channel_deliveries d ON d.source_id=m.id
              WHERE m.bot_id=?1 AND d.state IN ('pending','unknown'))
 )SQL",{bot}).next() || p_->actionablePrReviews(bot).next()) throw BotBusy{};

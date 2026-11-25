@@ -260,7 +260,7 @@ void pausedGitNotifications() {
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(store.task(task).at("state") == "completed" && host->createCalls == 1,
               "Git notification fixture did not finish its watched request");
-        store.setBotPaused(localOwner,"owner",true,1'800'000'000);
+        store.setBotPaused(localOwner,"owner",true);
         check(store.receiveGitWebhook({hostName,"paused-delivery",repoName,"comment","created",{1},sha,"Paused",0}),
               "Paused delivery was not acknowledged");
         runtime.runConversations();
@@ -272,7 +272,7 @@ void pausedGitNotifications() {
     {
         Store restarted(path);
         Runtime runtime(restarted,script,sessions,{},options(host));
-        restarted.setBotPaused(localOwner,"owner",false,1'800'000'001);
+        restarted.setBotPaused(localOwner,"owner",false);
         runtime.runConversations();
         check(script.notifications == 0 && historyCount(restarted,task,"git_webhook") == 0,
               "Resume backfilled a Git webhook received during the pause");

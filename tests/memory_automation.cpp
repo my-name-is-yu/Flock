@@ -346,7 +346,7 @@ void pausedSchedules(const std::filesystem::path& db) {
         duringDowntime = reminder(store,alpha,first + 75);
         afterResume = reminder(store,alpha,next + 15);
         reminder(store,beta,first + 15);
-        store.setBotPaused(owner,alpha.botId,true,now + 5);
+        store.setBotPaused(owner,alpha.botId,true);
     }
     {
         Store restarted(db);
@@ -357,7 +357,7 @@ void pausedSchedules(const std::filesystem::path& db) {
     }
     {
         Store restarted(db);
-        restarted.setBotPaused(owner,alpha.botId,false,resumedAt);
+        restarted.setBotPaused(owner,alpha.botId,false,[&] { return resumedAt; });
         restarted.fireDueAutomations(resumedAt);
         check(restarted.tasks(alpha.botId).empty(),"Resume replayed missed occurrences");
         const auto schedules = restarted.automations(owner,alpha.botId).at("automations");
@@ -495,7 +495,7 @@ void pausedWebhookFanout(const std::filesystem::path& db) {
         store.policy().setMember(owner,alpha.botId,sender.id,true);
         store.createAutomation(owner,alpha,trigger,now);
         store.createAutomation(owner,beta,trigger,now);
-        store.setBotPaused(owner,alpha.botId,true,now);
+        store.setBotPaused(owner,alpha.botId,true);
 
         const auto shared = deliver(store,owner,"shared");
         activeReceipts = shared.at("tasks");
@@ -509,7 +509,7 @@ void pausedWebhookFanout(const std::filesystem::path& db) {
     }
     {
         Store restarted(db);
-        restarted.setBotPaused(owner,alpha.botId,false,now + 1);
+        restarted.setBotPaused(owner,alpha.botId,false,[&] { return now + 1; });
         const auto shared = deliver(restarted,owner,"shared");
         const auto privateEvent = deliver(restarted,sender,"alpha-only");
         check(shared.at("duplicate") == true && shared.at("skippedBots") == paused &&

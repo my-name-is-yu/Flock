@@ -353,9 +353,10 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
-    struct SessionSendReceipt { std::string bot; SessionTarget target; std::string title; Delivery delivery; };
+    struct SessionSendReceipt { std::string bot; SessionTarget target; std::string title, action; Delivery delivery; };
     std::map<Id,SessionSendReceipt> sessionSendReceipts;
-    void recordSessionSendRun(Id, const SessionSendReceipt&);
+    void recordSessionSendRun(Id, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
+    void reconcilePausedSessionSends(T3&, std::stop_token);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,
                  const PeerResolver&, std::stop_token);
