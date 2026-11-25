@@ -2308,7 +2308,17 @@ void savedDestinationFollowupStopTargetsOnlyItsRun() {
     f.t3.finish(otherRun,"Unexpectedly interrupted",true,"interrupted");
     f.advanceUntil([&] { return f.task(id).at("state") == "completed"; },"the interrupted Runs did not settle");
     const auto alerts = f.store->notificationEventsSince(localOwner,{"alpha"},cursor.through,cursor.scope);
-    check(alerts.events.size() == 1 && alerts.events.front().at("kind") == "failure",
+    const auto history = f.store->history(id,cursor.through,100);
+    const auto hasFailureAlert = [&](const std::string& runId) {
+        const auto report = std::ranges::find_if(history,[&](const Json& event) {
+            return event.at("kind") == "report" && event.at("data").at("run").at("runId") == runId;
+        });
+        check(report != history.end(),"the interrupted Run did not record a report");
+        return std::ranges::any_of(alerts.events,[&](const Json& event) {
+            return event.at("id") == report->at("id") && event.at("kind") == "failure";
+        });
+    };
+    check(!hasFailureAlert(followupRun.runId) && hasFailureAlert(otherRun),
           "only the sibling Run's unexpected interruption should send a failure notification");
 }
 
