@@ -185,15 +185,26 @@ Json operationData(const Json& body, std::string_view operation) {
     return Json::object();
 }
 
-bool localApprovalNavigation(const Request& req) {
-    if (req.method != "GET" || req.has_header("Origin") || req.get_header_value("Sec-Fetch-Site") != "cross-site" ||
-        req.get_header_value("Sec-Fetch-Mode") != "navigate" || req.get_header_value("Sec-Fetch-Dest") != "document")
-        return false;
+bool hasSingleHeaderValue(const Request& req, const std::string& name, std::string_view value) {
+    return req.get_header_value_count(name) == 1 && req.get_header_value(name) == value;
+}
+
+bool isLocalApprovalNavigation(const Request& req) {
+    if (req.method != "GET" || req.has_header("Origin")) return false;
+    if (req.get_header_value("Sec-Fetch-Mode") != "navigate" || req.get_header_value("Sec-Fetch-Dest") != "document") return false;
     std::string_view path = req.path;
     constexpr std::string_view prefix = "/settings/";
     if (!path.starts_with(prefix)) return false;
     path.remove_prefix(prefix.size());
     return validBotId(path);
+}
+
+bool isAllowedFetchSite(const Request& req) {
+    const auto count = req.get_header_value_count("Sec-Fetch-Site");
+    if (count == 0) return true;
+    if (count != 1) return false;
+    const auto site = req.get_header_value("Sec-Fetch-Site");
+    return site == "same-origin" || site == "none" || (site == "cross-site" && isLocalApprovalNavigation(req));
 }
 
 class LoopbackServer final : public WebServer {
@@ -426,75 +437,63 @@ private:
     }
 
     HandlerResult guard(const Request& req, Response& res) const {
+        const auto reject = [&](int status, std::string_view code) {
+            error(res, status, code);
+            return HandlerResult::Handled;
+        };
         const auto portSuffix = port_ == 80 ? std::string{} : ":" + std::to_string(port_);
         const auto host = req.get_header_value("Host");
-        if (req.get_header_value_count("Host") != 1 || (host != loopback + portSuffix && host != "localhost" + portSuffix)) {
-            error(res, 403, "invalid_host");
-            return HandlerResult::Handled;
-        }
-        if ((req.method == "GET" || req.method == "HEAD") && web::artifactPreview(req.path)) return HandlerResult::Unhandled;
-        const auto origin = req.get_header_value("Origin");
-        const auto origins = req.get_header_value_count("Origin");
-        const auto fetchSite = req.get_header_value("Sec-Fetch-Site");
-        const bool sameOrigin = origins == 1 && origin == "http://" + host;
-        if ((origins != 0 && !sameOrigin) ||
-            (req.has_header("Sec-Fetch-Site") && (req.get_header_value_count("Sec-Fetch-Site") != 1 ||
-                                                  (fetchSite != "same-origin" && fetchSite != "none" && !localApprovalNavigation(req))))) {
-            error(res, 403, "invalid_origin");
-            return HandlerResult::Handled;
-        }
+        if (req.get_header_value_count("Host") != 1 || (host != loopback + portSuffix && host != "localhost" + portSuffix))
+            return reject(403, "invalid_host");
+
+        const bool readOnlyMethod = req.method == "GET" || req.method == "HEAD";
+        if (readOnlyMethod && web::artifactPreview(req.path)) return HandlerResult::Unhandled;
+
+        const auto originCount = req.get_header_value_count("Origin");
+        const bool isSameOriginRequest = originCount == 1 && req.get_header_value("Origin") == "http://" + host;
+        if (originCount != 0 && !isSameOriginRequest) return reject(403, "invalid_origin");
+        if (!isAllowedFetchSite(req)) return reject(403, "invalid_origin");
+
+        const bool hasBrowserOriginHeaders = originCount != 0 || req.has_header("Sec-Fetch-Site");
+        const bool post = req.method == "POST";
         if (req.path == web::sessionMcpPath || req.path == web::externalMcpPath) {
-            if (origins || req.has_header("Sec-Fetch-Site"))
-                error(res, 403, "invalid_origin");
-            else if (req.method != "POST" && req.method != "GET" && req.method != "DELETE") {
+            if (hasBrowserOriginHeaders) return reject(403, "invalid_origin");
+            if (!post && req.method != "GET" && req.method != "DELETE") {
                 res.set_header("Allow", "POST");
-                error(res, 405, "method_not_allowed");
-            } else
-                return HandlerResult::Unhandled;
-            return HandlerResult::Handled;
-        }
-        if (!origins && !req.has_header("Sec-Fetch-Site") && req.method == "POST" && req.path.starts_with("/api/git/webhooks/"))
-            return HandlerResult::Unhandled;
-        if (req.method == "POST" && web::bridgeEndpoint(req.path)) {
-            if (origins || req.has_header("Sec-Fetch-Site"))
-                error(res, 403, "invalid_origin");
-            else if (req.get_header_value_count("Content-Type") != 1 || req.get_header_value("Content-Type") != "application/json")
-                error(res, 415, "expected_json");
-            else
-                return HandlerResult::Unhandled;
-            return HandlerResult::Handled;
-        }
-        if (web::person(callbacks_, req).id.empty() || (!callbacks_.authenticate && store_.policy().requiresIdentity())) {
-            res.set_header("WWW-Authenticate", "Basic realm=\"Flock\"");
-            error(res, 401, "identity_required");
-            return HandlerResult::Handled;
-        }
-        if (req.method == "GET" || req.method == "HEAD") return HandlerResult::Unhandled;
-        const bool deleting = req.method == "DELETE" && req.path == "/api/schedules";
-        const bool machine = req.path.starts_with("/api/webhooks/") && origins == 0 && !req.has_header("Sec-Fetch-Site");
-        if (req.method != "POST" && !deleting)
-            error(res, 405, "method_not_allowed");
-        else if ((!sameOrigin && !machine) || req.get_header_value_count("X-Flock-Action") != 1 ||
-                 req.get_header_value("X-Flock-Action") != "1")
-            error(res, 403, "invalid_origin");
-        else if (deleting)
-            return HandlerResult::Unhandled;
-        else if (req.get_header_value_count("Content-Type") != 1 || req.get_header_value("Content-Type") != "application/json")
-            error(res, 415, "expected_json");
-        else {
-            const auto lengthHeader = req.get_header_value("Content-Length");
-            std::size_t contentLength = 0;
-            if (!lengthHeader.empty()) {
-                const auto parsed = std::from_chars(lengthHeader.data(), lengthHeader.data() + lengthHeader.size(), contentLength);
-                if (parsed.ec == std::errc{} && parsed.ptr == lengthHeader.data() + lengthHeader.size() &&
-                    contentLength > requestPayloadLimit(req.path)) {
-                    error(res, 413, "payload_too_large");
-                    return HandlerResult::Handled;
-                }
+                return reject(405, "method_not_allowed");
             }
             return HandlerResult::Unhandled;
         }
-        return HandlerResult::Handled;
+        if (post && !hasBrowserOriginHeaders && req.path.starts_with("/api/git/webhooks/")) return HandlerResult::Unhandled;
+        if (post && web::bridgeEndpoint(req.path)) {
+            if (hasBrowserOriginHeaders) return reject(403, "invalid_origin");
+            if (!hasSingleHeaderValue(req, "Content-Type", "application/json")) return reject(415, "expected_json");
+            return HandlerResult::Unhandled;
+        }
+
+        if (web::person(callbacks_, req).id.empty() || (!callbacks_.authenticate && store_.policy().requiresIdentity())) {
+            res.set_header("WWW-Authenticate", "Basic realm=\"Flock\"");
+            return reject(401, "identity_required");
+        }
+        if (readOnlyMethod) return HandlerResult::Unhandled;
+
+        const bool deletingSchedule = req.method == "DELETE" && req.path == "/api/schedules";
+        if (!post && !deletingSchedule) return reject(405, "method_not_allowed");
+        const bool isMachineWebhook = !hasBrowserOriginHeaders && req.path.starts_with("/api/webhooks/");
+        if (!isSameOriginRequest && !isMachineWebhook) return reject(403, "invalid_origin");
+        if (!hasSingleHeaderValue(req, "X-Flock-Action", "1")) return reject(403, "invalid_origin");
+        if (deletingSchedule) return HandlerResult::Unhandled;
+
+        if (!hasSingleHeaderValue(req, "Content-Type", "application/json")) return reject(415, "expected_json");
+        const auto lengthHeader = req.get_header_value("Content-Length");
+        if (!lengthHeader.empty()) {
+            std::size_t contentLength = 0;
+            const auto end = lengthHeader.data() + lengthHeader.size();
+            const auto parsed = std::from_chars(lengthHeader.data(), end, contentLength);
+            if (parsed.ec == std::errc{} && parsed.ptr == end && contentLength > requestPayloadLimit(req.path))
+                return reject(413, "payload_too_large");
+        }
+        return HandlerResult::Unhandled;
     }
 
     void saveBot(const Request& req, Response& res, bool update) {

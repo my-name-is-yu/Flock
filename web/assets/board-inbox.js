@@ -754,9 +754,10 @@ export function mountBoardInbox({
     const active = conversation ? conversation.active
       : inline ? items.find((entry) => itemKey(entry) === itemKey(item)) : current();
     const fingerprint = decisionTarget(item);
-    if (!active?.canDecide || busy(item) || decisionTarget(active) !== fingerprint ||
-        (!conversation && !item.canDecide) ||
-        (savesFlockRule(decision) && active.canSaveRule !== true)) return;
+    if (!active?.canDecide || busy(item)) return;
+    const matchesActiveTarget = decisionTarget(active) === fingerprint;
+    if (!matchesActiveTarget || (!conversation && !item.canDecide)) return;
+    if (savesFlockRule(decision) && active.canSaveRule !== true) return;
     const owner = viewer;
     const save = saveKey(item);
     const textKey = draftKey(item, false);

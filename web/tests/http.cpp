@@ -87,6 +87,14 @@ void boundary(Browser& browser) {
     Browser::checked(browser.client.Post("/api/messages", draft, "application/json"), 403);
     Browser::checked(browser.client.Post("/api/messages", {{"Origin", browser.origin}}, draft, "application/json"), 403);
     Browser::checked(browser.client.Post("/api/messages", {{"Origin", "null"}, {"X-Flock-Action", "1"}}, draft, "application/json"), 403);
+    const httplib::Headers crossOrigin{{"Origin", "https://other.invalid"}, {"X-Flock-Action", "1"}};
+    check(Browser::checked(browser.client.Post("/api/messages", crossOrigin, draft, "application/json"), 403).at("error") ==
+              "invalid_origin",
+          "a cross-origin POST reached the message route");
+    const httplib::Headers machineHeaders{{"X-Flock-Action", "1"}};
+    check(Browser::checked(browser.client.Post("/api/messages", machineHeaders, draft, "application/json"), 403).at("error") ==
+              "invalid_origin",
+          "a POST without browser origin headers was allowed on a regular route");
     Browser::checked(browser.client.Post("/api/messages", browser.headers(), draft, "text/plain"), 415);
     Browser::checked(browser.client.Post("/api/messages", browser.headers(), "{", "application/json"), 400);
     Browser::checked(browser.client.Post("/api/operations", browser.headers(), std::string(140000, 'x'), "application/json"), 413);
