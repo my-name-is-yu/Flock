@@ -1069,7 +1069,6 @@ void eventStream(const std::filesystem::path& path) {
         ++changes;
         return true;
     },[&] {
-        // Wait until the stream has delivered the Git tool's conversation changes.
         if (!approval.empty() && !approved) {
             botsBeforeApproval = browser.get("/api/bots");
             browser.post("/api/inbox/decide",approval);
@@ -1753,6 +1752,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target",""},{"add",true}},400);
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","  "},{"add",true}},400);
     browser.post("/api/settings/rule",{{"kind","never"},{"action","bot.talk"},{"target","release"},{"add",true}},400);
+    browser.post("/api/settings/rule",{{"kind","allow"},{"action","workspace.exec"},{"target","release"},{"add",true}},400);
     check(browser.get("/api/settings").at("rules").empty(),"an invalid addition changed installation rules");
     browser.post("/api/settings/rule",addition);
     const auto added = browser.get("/api/settings").at("rules");

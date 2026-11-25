@@ -24,7 +24,6 @@ export const actionLabels = {
   'memory.write': 'Edit Bot memory',
   'workspace.read': 'Read workspace files',
   'workspace.write': 'Write workspace files',
-  'workspace.exec': 'Run workspace commands',
   'web.search': 'Search the web',
   'web.fetch': 'Open web pages',
   'skill.list': 'List skills',

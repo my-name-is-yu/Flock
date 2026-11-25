@@ -32,7 +32,6 @@ enum class Action {
     private_memory_write,
     workspace_read,
     workspace_write,
-    workspace_exec,
     web_search,
     web_fetch,
     skill_list,
