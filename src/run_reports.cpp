@@ -87,6 +87,12 @@ bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observati
         {"commit",observed.checkedCommit},
         {"revisionId",task.value("currentRevision",Json(nullptr))},{"resultRunId",observed.resultRunId.empty() ? ref.runId : observed.resultRunId}};
     if (task.contains("requestedCommit")) data["requestedCommit"] = task.at("requestedCommit");
+    if (status == "interrupted") {
+        const auto action = outbox(task,field(run,"actionId"));
+        const bool targetedStop = action.is_object() && action.value("stopRequested",false) &&
+            field(action,"stopRunId") == ref.runId && field(action,"stopThreadId") == ref.threadId;
+        if (task.at("state") == "cancelling" || targetedStop) data["stopRequested"] = true;
+    }
     setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,std::move(detail),
         observed.truncated,observed.sessionCreatedAt});
     for (const auto* key : {"status","commit","report","detail","evidenceStatus","sessionCreatedAt"})

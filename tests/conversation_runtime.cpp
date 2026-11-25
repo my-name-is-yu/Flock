@@ -2244,6 +2244,15 @@ void savedDestinationFollowupStopTargetsOnlyItsRun() {
           f.t3.interruptedRuns.front().gatewayEnvironmentId == "desktop" &&
           destinationRunFor(f.task(id),"other").at("status") == "running",
           "the target-specific stop missed the live follow-up or affected its sibling");
+
+    const auto cursor = f.store->notificationEventsSince(localOwner,{"alpha"},std::nullopt,{});
+    const auto otherRun = destinationRunFor(f.task(id),"other").at("runId").get<std::string>();
+    f.t3.finish(followupRun.runId,"Stopped by request",true,"interrupted");
+    f.t3.finish(otherRun,"Unexpectedly interrupted",true,"interrupted");
+    f.advanceUntil([&] { return f.task(id).at("state") == "completed"; },"the interrupted Runs did not settle");
+    const auto alerts = f.store->notificationEventsSince(localOwner,{"alpha"},cursor.through,cursor.scope);
+    check(alerts.events.size() == 1 && alerts.events.front().at("kind") == "failure",
+          "only the sibling Run's unexpected interruption should send a failure notification");
 }
 
 Id oneLinkedDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
