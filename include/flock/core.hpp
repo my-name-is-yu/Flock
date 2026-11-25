@@ -439,6 +439,7 @@ public:
 private:
     class Maintenance;
     class TaskScheduler;
+    class TaskDecisions;
     class OutboxDispatch;
     class SessionPrompts;
     class RunObserver;

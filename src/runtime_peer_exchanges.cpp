@@ -218,20 +218,9 @@ void Runtime::PeerExchanges::readPeerEvidence(const TaskData& task, const Json& 
     });
 }
 
-CompletionProvenance Runtime::PeerExchanges::completionProvenance(const TaskData& task, const Json& event) {
+std::optional<PeerCompletion> Runtime::PeerExchanges::peerCompletion(const TaskData& task, const Json& event) {
     const auto peer = peerResult(task, event);
-    if (!peer) {
-        const auto& report = event.contains("sessionResult") ? event.at("sessionResult") : event;
-        if (report.is_null()) return std::monostate{};
-        const auto run = runRef(report.value("run", Json(nullptr)));
-        if (!hasRun(run)) return std::monostate{};
-        return OutboxSourceRun{.threadId = run.threadId,
-                               .runId = field(report, "resultRunId"),
-                               .environmentId = report.at("environmentId").get<std::string>(),
-                               .link = run.link,
-                               .itemId = field(report, "itemId"),
-                               .status = field(report, "status")};
-    }
+    if (!peer) return std::nullopt;
 
     PeerCompletion result{peer->taskId,
                           event.at("exchangeId").get<std::string>(),

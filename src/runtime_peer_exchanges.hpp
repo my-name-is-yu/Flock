@@ -23,7 +23,7 @@ public:
     Json replyKinds(const TaskData&, const PeerExchange&) const;
     bool replyPeer(TaskData&, const Json& event, const TaskDecision&, const std::string& action);
     void readPeerEvidence(const TaskData&, const Json& event, const TaskDecision&);
-    CompletionProvenance completionProvenance(const TaskData&, const Json& event);
+    std::optional<PeerCompletion> peerCompletion(const TaskData&, const Json& event);
     bool forwardedQuestionAnswer(const TaskData&, const QuestionTarget&);
 private:
     static BotMessageEntry peerMessage(const PeerExchange&, const TaskData& from, const TaskData& to, std::string_view type,
