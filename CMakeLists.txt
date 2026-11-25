@@ -74,6 +74,8 @@ add_library(flock_core STATIC src/store.cpp src/schema.cpp src/journal.cpp src/t
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/runtime_maintenance.cpp src/runtime_task_scheduler.cpp
+                       src/runtime_run_reports.cpp
+                       src/runtime_session_history.cpp
                        src/runtime_task_questions.cpp
                        src/runtime_task_updates.cpp
                        src/run_reports.cpp src/project_slots.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp

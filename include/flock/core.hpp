@@ -439,6 +439,8 @@ public:
 private:
     class Maintenance;
     class TaskScheduler;
+    class RunReports;
+    class SessionHistory;
     class TaskQuestions;
     class TaskUpdates;
     struct Impl;
