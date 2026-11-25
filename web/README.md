@@ -192,6 +192,13 @@ when available.
 
 ## Memory and automation
 
+When you tell a Bot you manage about a lasting preference, correction,
+convention, or decision, it can update its private memory. The memory review
+sees only your direct message and the Bot's existing private memory.
+**Remembered** shows what changed. Use **Undo**
+to restore the previous memory while the saved edit is still current. Bot
+memory edits follow the installation's **Edit Bot memory** rules.
+
 Model input starts with the Bot's role, private memory, and earlier conversation
 history. Flock puts the current event and tool results near the end to lengthen
 the prefix shared by requests for the same Bot.

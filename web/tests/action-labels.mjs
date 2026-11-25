@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { actionLabel, approvalSummary } from '../assets/action-labels.mjs';
 
 assert.equal(actionLabel('environment.launch'), 'Start T3 Sessions');
+assert.equal(actionLabel('memory.write'), 'Edit Bot memory');
 assert.equal(actionLabel('custom.action'), 'custom.action');
 const launch = { action: 'environment.launch', target: 'env-demo' };
 const preview = JSON.stringify({ environmentId: 'env-demo', tool: 'delegate',
@@ -30,6 +31,8 @@ assert.equal(approvalSummary(JSON.stringify({ environmentId: 'env-demo' })), 'En
 assert.equal(approvalSummary(JSON.stringify(['revert_memory_edit', { docId: 'notes', revisionId: 12, baseVersion: 20 }]),
   { action: 'shared_memory.write', target: 'notes' }),
   'revert memory edit\nDoc Id: notes\nRevision Id: 12\nBase Version: 20');
+assert.equal(approvalSummary(JSON.stringify('Prefer short release notes.'), { action: 'memory.write' }),
+  'Prefer short release notes.');
 assert.equal(approvalSummary(JSON.stringify({ body: '' })), 'Body: ');
 assert.equal(approvalSummary('plain preview'), 'plain preview');
 assert.equal(approvalSummary(''), '');

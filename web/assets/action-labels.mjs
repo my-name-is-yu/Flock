@@ -21,6 +21,7 @@ export const actionLabels = {
   'environment.launch': 'Start T3 Sessions',
   'shared_memory.read': 'Read shared memory',
   'shared_memory.write': 'Write to shared memory',
+  'memory.write': 'Edit Bot memory',
   'workspace.read': 'Read workspace files',
   'workspace.write': 'Write workspace files',
   'web.search': 'Search the web',
