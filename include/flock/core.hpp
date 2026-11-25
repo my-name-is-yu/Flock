@@ -449,6 +449,8 @@ private:
     class SessionHistory;
     class TaskQuestions;
     class TaskUpdates;
+    class DatabaseLock;
+    class Workers;
     struct Impl;
     std::unique_ptr<Impl> p_;
 };
