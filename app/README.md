@@ -120,6 +120,7 @@ build/app/flock answer TASK_ID WAIT_ID REVISION_ID GENERATION "Use main"
 with `messageId` and a status of `received`. The running daemon processes the
 message in the Bot's conversation. If the Bot starts a Task, `flock tasks`
 shows the same message ID in the Task's `sourceMessageId` field.
+To include a screenshot with a message, choose or paste it in the Web composer.
 
 ## Offline demo
 
