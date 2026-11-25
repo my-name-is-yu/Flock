@@ -1,5 +1,6 @@
 #include "model.hpp"
 #include "flock/git_host.hpp"
+#include "flock/message_attachments.hpp"
 #include "flock/workspace_tools.hpp"
 #include "flock/policy.hpp"
 #include "tool_batch.hpp"
@@ -398,7 +399,10 @@ ModelTurn ChatGPTModel::decide(const ModelInput& input) {
     const auto begin = std::chrono::steady_clock::now();
     const auto request = responseRequest(input);
     auto body = request.dump(-1, ' ', false, Json::error_handler_t::replace);
-    if (body.size() > maxRequest)
+    std::size_t inspectedImageBytes = 0;
+    for (const auto& image : input.images)
+        if (!image.attachmentId.empty()) inspectedImageBytes += image.dataBase64.size();
+    if (inspectedImageBytes > message_attachments::maxEncodedImages || body.size() > maxRequest + inspectedImageBytes)
         throw ModelError("Flock's ChatGPT request exceeded the local transport limit",false);
     const auto response = chatgpt::infer(transport_,accessToken(),std::move(body));
     auto usage = chatgpt::tokenUsage(chatgpt::field(response,"usage"));

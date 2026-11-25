@@ -1,63 +1,99 @@
 const maxFiles = 4;
-const maxFileBytes = 64 * 1024;
-const maxAttachmentBytes = 98_000;
-const maxMessageBytes = 128 * 1024;
-// Match the attachment inspector's limits in src/attachments.cpp.
-const maxImageEdge = 8192;
-const maxImagePixels = 4_194_304;
+const maxSourceBytes = 20 * 1024 * 1024;
+const maxPreparedBytes = 1792 * 1024;
+const maxPreparedEdge = 2048;
 const encoder = new TextEncoder();
-const jsonBytes = (value) => encoder.encode(JSON.stringify(value));
 const signatures = {
   'image/png': [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
   'image/jpeg': [0xff, 0xd8, 0xff],
 };
 
-export class ScreenshotError extends Error {}
+class ScreenshotError extends Error {}
 
 function attachmentName(file, mimeType) {
   let name = '';
   let bytes = 0;
-  for (const char of file.name.replace(/[\u0000-\u001f\u007f]/g, '').trim()) {
+  const original = file.name.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  const extension = mimeType === 'image/png' ? '.png' : '.jpg';
+  const mismatchedExtension = mimeType === 'image/png' ? /\.jpe?g$/i : /\.png$/i;
+  const filename = original.replace(mismatchedExtension, extension) || `Screenshot${extension}`;
+  for (const char of filename) {
     bytes += encoder.encode(char).length;
     if (bytes > 128) break;
     name += char;
   }
-  return name || (mimeType === 'image/png' ? 'Screenshot.png' : 'Screenshot.jpg');
+  return name;
 }
 
-export async function encodeScreenshot(file, attachments) {
-  if (attachments.length >= maxFiles) throw new ScreenshotError('Attach up to 4 screenshots per message.');
-  if (file.type && !Object.hasOwn(signatures, file.type)) throw new ScreenshotError('Choose a PNG or JPEG screenshot.');
-  if (file.size > maxFileBytes) throw new ScreenshotError('Each screenshot must be 64 KiB or smaller.');
+function canvasBlob(canvas, type, quality) {
+  return new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+}
 
-  let bytes;
-  try { bytes = new Uint8Array(await file.arrayBuffer()); }
-  catch { throw new ScreenshotError('Could not read the screenshot.'); }
+function hasTransparency(context, { width, height }) {
+  const { data } = context.getImageData(0, 0, width, height);
+  for (let alpha = 3; alpha < data.length; alpha += 4) {
+    if (data[alpha] !== 255) return true;
+  }
+  return false;
+}
+
+async function compressScreenshot(bitmap, longestEdge, mimeType) {
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  for (let edge = Math.min(longestEdge, maxPreparedEdge); edge >= 1; edge = Math.floor(edge * 0.75)) {
+    const scale = edge / longestEdge;
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const png = await canvasBlob(canvas, 'image/png');
+    const opaque = mimeType === 'image/jpeg' || !hasTransparency(context, canvas);
+    const jpeg = opaque ? await canvasBlob(canvas, 'image/jpeg', 0.85) : null;
+    const smallest = jpeg && (!png || jpeg.size < png.size) ? jpeg : png;
+    if (smallest?.size <= maxPreparedBytes) return smallest;
+  }
+  throw new ScreenshotError('Could not prepare this screenshot.');
+}
+
+export async function resizeScreenshot(file) {
+  if (file.type && !Object.hasOwn(signatures, file.type)) throw new ScreenshotError('Choose a PNG or JPEG screenshot.');
+  if (file.size > maxSourceBytes) throw new ScreenshotError('Choose a screenshot up to 20 MiB.');
+
+  const bytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
   const mimeType = Object.keys(signatures).find((type) => signatures[type].every((byte, index) => bytes[index] === byte));
   if (!mimeType || (file.type && file.type !== mimeType)) throw new ScreenshotError('Choose a valid PNG or JPEG screenshot.');
 
+  const bitmap = await createImageBitmap(file);
+  try {
+    const edge = Math.max(bitmap.width, bitmap.height);
+    if (edge <= maxPreparedEdge && file.size <= maxPreparedBytes) return file.type ? file : file.slice(0, file.size, mimeType);
+    return await compressScreenshot(bitmap, edge, mimeType);
+  } finally {
+    bitmap.close();
+  }
+}
+
+async function screenshotAttachment(file, prepared) {
+  const bytes = new Uint8Array(await prepared.arrayBuffer());
   let binary = '';
   for (let index = 0; index < bytes.length; index += 8192)
     binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
-  const attachment = { name: attachmentName(file, mimeType), mimeType, dataBase64: btoa(binary) };
-  if (jsonBytes([...attachments, attachment]).length > maxAttachmentBytes)
-    throw new ScreenshotError('Screenshots together exceed the 98,000-byte encoded limit. Remove one or choose smaller files.');
-  return attachment;
+  return { name: attachmentName(file, prepared.type), mimeType: prepared.type, dataBase64: btoa(binary) };
 }
 
 export async function stageScreenshots(draft, files, isCurrent) {
   for (const file of files) {
     if (!isCurrent()) return;
+    if (draft.images.length >= maxFiles) {
+      draft.error ||= `Attach up to ${maxFiles} screenshots per message.`;
+      return;
+    }
     try {
-      const attachment = await encodeScreenshot(file, draft.images.map((image) => image.attachment));
+      const prepared = await resizeScreenshot(file);
       if (!isCurrent()) return;
-      const image = await createImageBitmap(file);
-      const { width, height } = image;
-      image.close();
+      const attachment = await screenshotAttachment(file, prepared);
       if (!isCurrent()) return;
-      if (width > maxImageEdge || height > maxImageEdge || width * height > maxImagePixels)
-        throw new ScreenshotError(`Crop or resize ${attachment.name} to at most 8,192 pixels per side and 4,194,304 pixels total.`);
-      const preview = URL.createObjectURL(file);
+      const preview = URL.createObjectURL(prepared);
       draft.images = [...draft.images, { attachment, preview }];
     } catch (error) {
       if (isCurrent()) draft.error ||= error instanceof ScreenshotError ? error.message : 'Could not open this PNG or JPEG screenshot.';
@@ -67,11 +103,7 @@ export async function stageScreenshots(draft, files, isCurrent) {
 
 export async function screenshotMessage(fields, attachments, previous) {
   const message = { ...fields, attachments };
-  const bytes = jsonBytes({ ...message, clientMessageId: previous?.clientMessageId ?? '0'.repeat(36) });
-  if (bytes.length > maxMessageBytes)
-    throw new ScreenshotError('This message and its screenshots are too large together. Shorten the message or remove a screenshot.');
-
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', jsonBytes(message)));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(JSON.stringify(message))));
   const fingerprint = btoa(String.fromCharCode(...digest));
   const clientMessageId = previous?.fingerprint === fingerprint ? previous.clientMessageId : crypto.randomUUID();
   return { payload: { ...message, clientMessageId }, pending: { fingerprint, clientMessageId } };

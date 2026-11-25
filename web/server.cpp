@@ -1,12 +1,14 @@
 #include "flock/web.hpp"
 #include "change_feed.hpp"
 #include "embedded_assets.hpp"
+#include "http_payload.hpp"
 #include "views.hpp"
 #include "settings_routes.hpp"
 #include "board_inbox_routes.hpp"
 #include "git_routes.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/base64.hpp"
+#include "flock/message_attachments.hpp"
 #include "channel_routes.hpp"
 #include "mcp_routes.hpp"
 
@@ -27,9 +29,13 @@ using httplib::Request;
 using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
-constexpr std::size_t maxStandardPayload = 128 * 1024;
-constexpr std::size_t maxProfilePayload = 7 * 1024 * 1024 + 128 * 1024;
 enum class Mutation { Message, Operation };
+
+std::size_t requestPayloadLimit(std::string_view path) {
+    if (path == "/api/messages") return message_attachments::maxRequestBytes;
+    if (path == "/api/bots" || path == "/api/bots/profile") return web::maxUploadPayload;
+    return web::maxStandardPayload;
+}
 
 void json(Response& res, int status, const Json& body) {
     res.status = status;
@@ -208,7 +214,7 @@ public:
         store_.protectGitCredential(callbacks_.githubWebhookSecret);
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
         server_.set_address_family(AF_INET)
-            .set_payload_max_length(maxProfilePayload)
+            .set_payload_max_length(std::max(web::maxUploadPayload,message_attachments::maxRequestBytes))
             .set_read_timeout(10)
             .set_write_timeout(10)
             .set_keep_alive_timeout(1)
@@ -450,24 +456,24 @@ private:
         else if (deleting) return HandlerResult::Unhandled;
         else if (req.get_header_value_count("Content-Type") != 1 ||
                  req.get_header_value("Content-Type") != "application/json") error(res,415,"expected_json");
-        else if (req.path != "/api/bots" && req.path != "/api/bots/profile") {
+        else {
             const auto lengthHeader = req.get_header_value("Content-Length");
             std::size_t contentLength = 0;
             if (!lengthHeader.empty()) {
                 const auto parsed = std::from_chars(lengthHeader.data(),lengthHeader.data() + lengthHeader.size(),contentLength);
                 if (parsed.ec == std::errc{} && parsed.ptr == lengthHeader.data() + lengthHeader.size() &&
-                    contentLength > maxStandardPayload) {
+                    contentLength > requestPayloadLimit(req.path)) {
                     error(res,413,"payload_too_large");
                     return HandlerResult::Handled;
                 }
             }
             return HandlerResult::Unhandled;
         }
-        else return HandlerResult::Unhandled;
         return HandlerResult::Handled;
     }
 
     void saveBot(const Request& req, Response& res, bool update) {
+        if (req.body.size() > requestPayloadLimit(req.path)) return error(res,413,"payload_too_large");
         if (update ? !callbacks_.updateBot : !callbacks_.createBot)
             return error(res,501,"bot_management_unavailable");
         const auto body = Json::parse(req.body,nullptr,false);
@@ -500,7 +506,7 @@ private:
     }
 
     void deleteBot(const Request& req, Response& res) {
-        if (req.body.size() > maxStandardPayload) return error(res,413,"payload_too_large");
+        if (req.body.size() > web::maxStandardPayload) return error(res,413,"payload_too_large");
         const auto body = Json::parse(req.body,nullptr,false);
         if (!body.is_object()) return error(res,400,"invalid_json");
         const auto bot = web::field(body,"botId");
@@ -663,7 +669,7 @@ private:
     }
 
     void mutate(const Request& req, Response& res, Mutation mutation) {
-        if (req.body.size() > maxStandardPayload) return error(res,413,"payload_too_large");
+        if (req.body.size() > requestPayloadLimit(req.path)) return error(res,413,"payload_too_large");
         const auto body = Json::parse(req.body,nullptr,false);
         if (!body.is_object()) return error(res,400,"invalid_json");
         try {
