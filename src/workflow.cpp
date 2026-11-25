@@ -89,43 +89,44 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
                    {"artifacts", Json::array()},
                    {"verdicts", Json::array()}};
     bool finished = true, attention = false, failed = false, stale = false;
-    auto rows = query(R"SQL(SELECT s.spec,s.status,s.task_id,s.input,s.output,s.deadline,t.data,t.id,t.state,t.generation,s.alerted,
+    static const auto sql = R"SQL(SELECT s.spec,s.status,s.task_id,s.input,s.output,s.deadline,s.alerted,
           s.confirmed_state,s.confirmed_at,s.unreachable,old.stage_id IS NOT NULL,
           (SELECT json_group_array(d.parent_id) FROM workflow_dependencies d WHERE d.workflow_id=s.workflow_id AND d.stage_id=s.stage_id),
-          pending.phase='started' AND t.has_active_run IS NOT 1,v.verdict
+          pending.phase='started' AND t.active_run IS NULL,v.verdict,)SQL" +
+                            taskProjection() + R"SQL(
         FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id
         LEFT JOIN outbox pending ON pending.id=t.action_id
         LEFT JOIN outdated_workflow_stages old USING(workflow_id,stage_id)
         LEFT JOIN workflow_verdicts v ON v.report_id=s.result_id
-        WHERE s.workflow_id=? ORDER BY s.rowid)SQL",
-                      {id});
+        WHERE s.workflow_id=? ORDER BY s.rowid)SQL";
+    auto rows = query(sql.c_str(), {id});
     while (rows.next()) {
         const auto spec = rows.json(0);
         const auto taskId = rows.number(2);
-        const auto task = taskId ? std::optional{decodeTaskRow(rows, 6)} : std::nullopt;
+        const auto task = taskId ? std::optional{readTask(rows, 14)} : std::nullopt;
         const auto taskState = task ? std::optional{task->state} : std::nullopt;
         auto status = rows.string(1);
         if (taskState == TaskState::cancelled)
             status = "stopped";
-        else if (!closed(status) && (rows.number(13) || rows.number(16)))
+        else if (!closed(status) && (rows.number(9) || rows.number(12)))
             status = "unreachable";
         else if (taskState == TaskState::cancelling)
             status = "stop_requested";
         const bool active = task && task->activeRun;
         const auto run = task ? assignedRunJson(active ? task->activeRun : task->lastRun) : Json(nullptr);
-        const bool exceeded = !closed(status) && rows.number(5) > 0 && (now >= rows.number(5) || rows.number(10));
-        const bool outdated = closed(status) && rows.number(14);
+        const bool exceeded = !closed(status) && rows.number(5) > 0 && (now >= rows.number(5) || rows.number(6));
+        const bool outdated = closed(status) && rows.number(10);
         const bool needs = outdated || exceeded || status == "failed" || status == "unreachable" || taskState == TaskState::waiting ||
                            (task && task->pendingRunReport);
         const bool childSettled = !task || terminal(*task);
-        finished &= closed(status) && childSettled && !active && !rows.number(16);
+        finished &= closed(status) && childSettled && !active && !rows.number(12);
         attention |= needs;
         failed |= (status == "failed" && !outdated) || status == "stopped";
         stale |= outdated;
         Json stage = {{"stageId", spec.at("stageId")},
                       {"name", spec.at("name")},
                       {"role", scrub.text(field(spec, "role"))},
-                      {"dependsOn", rows.json(15)},
+                      {"dependsOn", rows.json(11)},
                       {"outdated", outdated},
                       {"taskId", taskId},
                       {"runRef", run},
@@ -134,12 +135,12 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
                       {"softDeadlineAt", rows.number(5)},
                       {"deadlineExceeded", exceeded},
                       {"needsAttention", needs},
-                      {"lastConfirmedState", rows.string(11)},
-                      {"lastConfirmedAt", rows.number(12)},
+                      {"lastConfirmedState", rows.string(7)},
+                      {"lastConfirmedAt", rows.number(8)},
                       {"inputArtifactVersion", rows.string(3)},
                       {"outputArtifactVersion", rows.string(4)}};
         if (spec.at("role") == "verify") stage["verified"] = status == "completed" && !outdated;
-        const auto verdict = rows.string(17);
+        const auto verdict = rows.string(13);
         if (!verdict.empty() && !outdated && (status == "completed" || status == "failed")) stage["currentVerdict"] = verdict;
         result["stages"].push_back(stage);
     }

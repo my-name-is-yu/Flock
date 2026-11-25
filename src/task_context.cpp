@@ -29,7 +29,9 @@ TaskRestart decodeRestart(const Json& data, const RecordDecoder& row) {
     return restart;
 }
 
-TaskTrigger decodeTrigger(const Json& data, const RecordDecoder& row) {
+}
+
+TaskTrigger decodeTaskTrigger(const Json& data, const RecordDecoder& row) {
     const auto id = row.get<Id>(data, "triggerId");
     const auto firedAt = row.get<Seconds>(data, "firedAt");
     const auto kind = row.get<std::string>(data, "triggerKind");
@@ -49,7 +51,6 @@ TaskTrigger decodeTrigger(const Json& data, const RecordDecoder& row) {
                              row.get<std::string>(data, "timezone"),
                              row.optional<std::string>(data, "label")};
     return {id, firedAt, std::move(trigger)};
-}
 }
 
 std::string_view taskPeerOutcomeName(TaskPeerOutcome outcome) {
@@ -87,7 +88,6 @@ Json sourceResultsJson(std::span<const OutboxSource> sources) {
 }
 
 void decodeTaskContext(TaskData& task, const Json& data, const RecordDecoder& row) {
-    task.sourceMessageId = row.optional<Id>(data, "sourceMessageId");
     task.sourceTaskId = row.optional<Id>(data, "sourceTaskId");
     task.sourceMessageCoversFullRequest = row.optional<bool>(data, "sourceMessageCoversFullRequest");
     task.requester = row.optional<std::string>(data, "requester");
@@ -95,10 +95,6 @@ void decodeTaskContext(TaskData& task, const Json& data, const RecordDecoder& ro
         task.sourceResultRefs = taskResultReferences(*found, task.id);
     if (const auto found = row.find(data, "restartContext"); found != data.end())
         task.restartContext = row.nested("restartContext").decodeClosed(*found, decodeRestart);
-    if (const auto found = row.find(data, "trigger"); found != data.end())
-        task.trigger = row.nested("trigger").decodeClosed(*found, decodeTrigger);
-    if (const auto workflow = row.optional<Id>(data, "workflowId"))
-        task.workflow = TaskWorkflow{*workflow, row.get<std::string>(data, "stageId"), row.get<std::string>(data, "inputArtifactVersion")};
     if (const auto peer = row.optional<std::string>(data, "peerOutcome")) {
         task.peerOutcome = enumValue(peerOutcomes, *peer);
         if (!task.peerOutcome) row.fail("peerOutcome", "unknown peer outcome");
@@ -106,18 +102,11 @@ void decodeTaskContext(TaskData& task, const Json& data, const RecordDecoder& ro
 }
 
 void encodeTaskContext(Json& data, const TaskData& task) {
-    if (task.sourceMessageId) data["sourceMessageId"] = *task.sourceMessageId;
     if (task.sourceTaskId) data["sourceTaskId"] = *task.sourceTaskId;
     if (task.sourceMessageCoversFullRequest) data["sourceMessageCoversFullRequest"] = *task.sourceMessageCoversFullRequest;
     if (task.requester) data["requester"] = *task.requester;
     if (!task.sourceResultRefs.empty() || task.workflow) data["sourceResultRefs"] = sourceResultsJson(task.sourceResultRefs);
     if (task.restartContext) data["restartContext"] = taskRestartJson(*task.restartContext);
-    if (task.trigger) data["trigger"] = taskTriggerJson(*task.trigger);
-    if (const auto& workflow = task.workflow) {
-        data["workflowId"] = workflow->id;
-        data["stageId"] = workflow->stageId;
-        data["inputArtifactVersion"] = workflow->inputArtifactVersion;
-    }
     if (task.peerOutcome) data["peerOutcome"] = taskPeerOutcomeName(*task.peerOutcome);
 }
 }

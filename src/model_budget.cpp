@@ -72,17 +72,17 @@ LEFT JOIN session_invitations i ON i.message_id=m.id WHERE m.id=?
 }
 
 ModelBudget Store::Impl::taskModelBudget(Id taskId) const {
-    auto ancestor = query(R"SQL(
+    static const auto sql = R"SQL(
 WITH RECURSIVE ancestry(id) AS (
   SELECT ? UNION ALL
   SELECT p.sender_task FROM peer_exchanges p JOIN ancestry a ON a.id=p.recipient_task
   WHERE p.sender_task<a.id
 )
-SELECT t.data,t.id,t.state,t.generation FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1
-)SQL",
-                          {taskId});
+SELECT )SQL" + taskProjection() +
+                            " FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1";
+    auto ancestor = query(sql.c_str(), {taskId});
     if (!ancestor.next()) throw Conflict("The originating task is missing");
-    const auto root = decodeTaskRow(ancestor);
+    const auto root = readTask(ancestor);
     if (root.sourceMessageId) return messageModelBudget(*root.sourceMessageId);
     return {"task/" + std::to_string(root.id), initialModelCallLimit(root.config)};
 }
@@ -144,7 +144,7 @@ void Store::Impl::resumeSharedModelBudgetWaits(const Person& actor, std::string_
     std::vector<Id> tasks;
     auto waits = query(R"SQL(
 SELECT w.task_id,t.bot_id FROM waits w CROSS JOIN tasks t ON t.id=w.task_id
-WHERE w.resolution IS NULL AND w.task_id<>? AND json_extract(w.data,'$.reason')='model_budget' AND t.state='waiting'
+WHERE w.resolution IS NULL AND w.task_id<>? AND w.reason='model_budget' AND t.state='waiting'
 )SQL",
                        {approvedTask});
     while (waits.next()) {

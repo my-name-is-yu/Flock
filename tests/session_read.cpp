@@ -374,10 +374,9 @@ void catalogResultsAreDeduplicatedAcrossRecordedBatches() {
         const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> writer(raw, sqlite3_close);
         check(sqlite3_exec(writer.get(), R"SQL(
 WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<65)
-INSERT INTO outbox(id,task_id,phase,data)
-SELECT printf('fixture-%02d',n),tasks.id,'accepted',
-       '{"tool":"delegate","environmentId":"desktop","projectId":"project","target":null,"questionId":"","answers":{},
-         "revisionId":null,"instructions":[],"contextIds":{},"sourceResultRefs":[],"chargesBudget":false,"instruction":""}'
+INSERT INTO outbox(id,task_id,phase,tool,environment_id,project_id,instruction,data)
+SELECT printf('fixture-%02d',n),tasks.id,'accepted','delegate','desktop','project','',
+       '{"target":null,"questionId":"","answers":{},"instructions":[],"contextIds":{},"sourceResultRefs":[],"chargesBudget":false}'
 FROM numbers CROSS JOIN tasks;
 INSERT INTO runs(action_id,task_id,environment_id,thread_id,run_id,link)
 SELECT id,task_id,'desktop',CASE WHEN id='fixture-65' THEN 'internal-staging-thread' ELSE id END,id,''

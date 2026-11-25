@@ -1,4 +1,5 @@
 #include "../src/outbox_storage.hpp"
+#include "../src/storage.hpp"
 
 #include "flock/record_decode_error.hpp"
 
@@ -23,15 +24,10 @@ Json payload() {
                          {"run", {{"threadId", "source-thread"}, {"runId", "source-run"}, {"itemId", "source-item"}}}};
     auto instructionSource = source;
     instructionSource["text"] = "Earlier result";
-    return {{"tool", "follow_up"},
-            {"environmentId", "environment"},
-            {"projectId", "project"},
-            {"target", {{"threadId", "thread"}, {"runId", "run"}, {"link", "link"}, {"gatewayEnvironmentId", "gateway"}}},
+    return {{"target", {{"threadId", "thread"}, {"runId", "run"}, {"link", "link"}, {"gatewayEnvironmentId", "gateway"}}},
             {"gatewayEnvironmentId", "gateway"},
-            {"instruction", "Continue the work"},
             {"questionId", ""},
             {"answers", Json::object()},
-            {"revisionId", 13},
             {"instructions", Json::array({{{"messageId", 14},
                                            {"step", 2},
                                            {"text", "Earlier direction"},
@@ -47,15 +43,27 @@ Json payload() {
             {"candidate", {{"threadId", "candidate-thread"}, {"runId", "candidate-run"}, {"link", "candidate-link"}}},
             {"candidateQuestionId", "candidate-question"},
             {"launchReceiptThreadId", "launch-receipt-thread"},
-            {"sessionParticipationId", 18},
-            {"sessionMemory", {{"version", 19}, {"section", "Session notes"}, {"excerptBytes", 21}}},
-            {"stopRequested", true},
-            {"stopOperation", "stop-action"},
             {"stopRunId", "stop-run"},
             {"stopThreadId", "stop-thread"},
             {"stopPolicy",
              {{"tool", "cancel_task"}, {"args", {{"taskId", 11}, {"destination", "left"}}}, {"generation", 22}, {"revisionId", 13}}},
             {"stopPolicyOrigin", {{"scope", "task/11"}, {"requester", "user"}, {"anchor", 24}, {"turn", 0}, {"background", false}}}};
+}
+
+Json storedAction() {
+    return Json::array(
+        {"follow_up", "environment", "project", 13, 18, "stop-action", "Continue the work", 0, 0, "Session notes", 21, payload()});
+}
+
+Outbox decode(Json columns, std::string_view phase = "ready", std::string_view auth = authGeneration) {
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open(":memory:", &raw);
+    const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
+    check(opened == SQLITE_OK, "Could not open the outbox row fixture");
+    columns.insert(columns.begin(), {id, phase, auth});
+    Statement row(db.get(), "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?", columns);
+    check(row.next(), "Outbox row fixture returned no rows");
+    return decodeOutboxRow(row);
 }
 
 void roundTripPhases() {
@@ -64,17 +72,29 @@ void roundTripPhases() {
         std::pair{ready, "ready"sv},   std::pair{started, "started"sv},       std::pair{accepted, "accepted"sv},
         std::pair{closed, "closed"sv}, std::pair{superseded, "superseded"sv},
     };
-    const auto stored = payload();
+    const auto stored = storedAction();
     for (const auto& [phase, name] : phases) {
-        const auto row = from_json(id, name, authGeneration, stored.dump());
+        const auto row = decode(stored, name);
         check(row.phase == phase && outboxPhaseName(row.phase) == name, "Outbox phase did not round-trip");
         check(row.command.actionId == id && row.authGeneration == authGeneration, "Outbox lost its ID or auth generation");
         check(row.command.tool == CommandTool::follow_up && row.command.target.runId == "run", "Outbox lost its follow-up target");
+        check(row.command.environmentId == "environment" && row.command.projectId == "project" && row.revisionId == 13 &&
+                  row.sessionParticipationId == 18 && row.command.instruction == "Continue the work",
+              "Outbox lost its normalized action fields");
         check(row.stop && row.stop->run && row.stop->run->runId == "stop-run" && row.stop->approval &&
-                  row.stop->approval->scope == "task/11",
+                  row.stop->approval->scope == "task/11" && row.stop->operation == "stop-action",
               "Outbox lost its stop request");
-        const auto encoded = to_json(row);
-        check(encoded == stored, "Outbox payload changed on round-trip. Diff " + Json::diff(stored, encoded).dump());
+        check(row.sessionMemory && row.sessionMemory->version == 0 && row.sessionMemory->section == "Session notes" &&
+                  row.sessionMemory->excerptBytes == 21,
+              "Outbox lost its version-zero memory snapshot");
+        const auto encoded = outboxColumnValues(row);
+        check(encoded == stored, "Outbox columns and payload changed on round-trip. Diff " + Json::diff(stored, encoded).dump());
+        const auto wire = outboxActionJson(row);
+        check(wire.at("tool") == "follow_up" && wire.at("environmentId") == "environment" && wire.at("projectId") == "project" &&
+                  wire.at("revisionId") == 13 && wire.at("sessionParticipationId") == 18 && wire.at("stopRequested") == true &&
+                  wire.at("stopOperation") == "stop-action" && wire.at("instruction") == "Continue the work" &&
+                  !wire.contains("sessionMemory"),
+              "Stored columns changed the outbox action projection");
     }
 }
 
@@ -84,19 +104,22 @@ void roundTripDeferredAndAnswerCommands() {
     deferred.command.environmentId = "environment";
     deferred.command.projectId = "project";
     deferred.instructionBase = "Start the work";
-    auto stored = to_json(deferred);
-    auto row = from_json(id, "ready", "", stored.dump());
-    check(stored.at("target").is_null() && stored.at("revisionId").is_null() && !stored.contains("instruction"),
-          "A deferred launch saved a concrete target, revision or instruction");
+    auto stored = outboxColumnValues(deferred);
+    auto row = decode(stored, "ready", "");
+    const auto wire = outboxActionJson(row);
+    check(wire.at("target").is_null() && wire.at("revisionId").is_null() && !wire.contains("instruction") &&
+              wire.at("instructionBase") == "Start the work",
+          "A deferred launch projected a concrete target, revision or instruction");
     check(row.instructionBase == deferred.instructionBase && !row.revisionId && row.command.target.threadId.empty() &&
-              !row.command.candidate && !row.stop && to_json(row) == stored,
+              !row.command.candidate && !row.stop && !row.sessionMemory && outboxColumnValues(row) == stored,
           "A deferred launch did not round-trip");
 
     deferred.command.tool = CommandTool::start_in_session;
     deferred.command.target.threadId = "selected";
-    stored = to_json(deferred);
-    row = from_json(id, "ready", "", stored.dump());
-    check(row.command.tool == CommandTool::start_in_session && row.command.target.threadId == "selected" && to_json(row) == stored,
+    stored = outboxColumnValues(deferred);
+    row = decode(stored, "ready", "");
+    check(row.command.tool == CommandTool::start_in_session && row.command.target.threadId == "selected" &&
+              outboxColumnValues(row) == stored,
           "A deferred Session start did not round-trip");
 
     Outbox reply;
@@ -104,16 +127,17 @@ void roundTripDeferredAndAnswerCommands() {
     reply.command.target = {"thread", "run", "link", {}};
     reply.command.questionId = "question";
     reply.command.answers = {{"branch", "main"}, {"checks", Json::array({"unit", "integration"})}};
-    stored = to_json(reply);
-    row = from_json(id, "closed", authGeneration, stored.dump());
+    stored = outboxColumnValues(reply);
+    row = decode(stored, "closed");
     check(row.command.tool == CommandTool::answer_session_question && row.command.questionId == "question" &&
-              row.command.answers == reply.command.answers && to_json(row) == stored,
+              row.command.answers == reply.command.answers && !row.instructionBase && row.command.instruction.empty() &&
+              outboxColumnValues(row) == stored,
           "A Session answer did not round-trip");
 }
 
-void expectDecodeError(std::string_view stored, std::string_view key, std::string_view phase = "ready") {
+void expectDecodeError(const Json& stored, std::string_view key, std::string_view phase = "ready") {
     try {
-        from_json(id, phase, authGeneration, stored);
+        decode(stored, phase);
     } catch (const RecordDecodeError& error) {
         const auto expected = "outbox row " + std::string(id) + ", key " + std::string(key) + ": ";
         check(std::string_view(error.what()).starts_with(expected), error.what());
@@ -123,41 +147,37 @@ void expectDecodeError(std::string_view stored, std::string_view key, std::strin
 }
 
 void rejectsInvalidRows() {
-    const auto stored = payload();
-    expectDecodeError("{", "data");
-    expectDecodeError(stored.dump(), "phase", "dispatched");
+    const auto stored = storedAction();
     auto invalid = stored;
-    invalid.erase("projectId");
-    expectDecodeError(invalid.dump(), "projectId");
+    invalid.back() = "{";
+    expectDecodeError(invalid, "data");
+    expectDecodeError(stored, "phase", "dispatched");
     invalid = stored;
-    invalid["revisionId"] = 2.5;
-    expectDecodeError(invalid.dump(), "revisionId");
+    invalid.at(0) = "send";
+    expectDecodeError(invalid, "tool");
+    invalid.at(0) = "message_session";
+    expectDecodeError(invalid, "tool");
     invalid = stored;
-    invalid["tool"] = "send";
-    expectDecodeError(invalid.dump(), "tool");
-    invalid["tool"] = "message_session";
-    expectDecodeError(invalid.dump(), "tool");
+    invalid.at(7) = 1;
+    expectDecodeError(invalid, "instructionBase");
     invalid = stored;
-    invalid.erase("instruction");
-    expectDecodeError(invalid.dump(), "instruction");
+    invalid.back()["instructions"][0]["step"] = "2";
+    expectDecodeError(invalid, "instructions.0.step");
     invalid = stored;
-    invalid["instructions"][0]["step"] = "2";
-    expectDecodeError(invalid.dump(), "instructions.0.step");
+    invalid.at(10) = -1;
+    expectDecodeError(invalid, "sessionMemory.excerptBytes");
     invalid = stored;
-    invalid["sessionMemory"]["excerptBytes"] = -1;
-    expectDecodeError(invalid.dump(), "sessionMemory.excerptBytes");
+    invalid.back()["answers"]["checks"] = Json::array({"unit", false});
+    expectDecodeError(invalid, "answers.checks");
     invalid = stored;
-    invalid["answers"]["checks"] = Json::array({"unit", false});
-    expectDecodeError(invalid.dump(), "answers.checks");
+    invalid.back().erase("stopThreadId");
+    expectDecodeError(invalid, "stopThreadId");
     invalid = stored;
-    invalid.erase("stopThreadId");
-    expectDecodeError(invalid.dump(), "stopThreadId");
+    invalid.back().erase("stopPolicyOrigin");
+    expectDecodeError(invalid, "stopPolicyOrigin");
     invalid = stored;
-    invalid.erase("stopPolicyOrigin");
-    expectDecodeError(invalid.dump(), "stopPolicyOrigin");
-    invalid = stored;
-    invalid.erase("stopRequested");
-    expectDecodeError(invalid.dump(), "stopRequested");
+    invalid.at(5) = nullptr;
+    expectDecodeError(invalid, "stopOperation");
 }
 }
 

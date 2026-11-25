@@ -692,7 +692,7 @@ bool Store::Impl::connectedSessionAccess(const conversation::Message& message, c
         if (target == parent) return authorized();
         if (query(R"SQL(
 SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
-WHERE t.bot_id=? AND r.environment_id=? AND r.thread_id=? AND json_extract(o.data,'$.tool')='delegate'
+WHERE t.bot_id=? AND r.environment_id=? AND r.thread_id=? AND o.tool='delegate'
   AND t.origin_environment_id=? AND t.origin_thread_id=?
 )SQL",
                   {message.bot, target.environmentId, target.threadId, parent.environmentId, parent.threadId})

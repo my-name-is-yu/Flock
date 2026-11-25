@@ -99,10 +99,10 @@ std::optional<SessionMemory> Store::Impl::sessionMemory(const Command& command, 
     if (truncated) section += truncation;
     if (command.tool == CommandTool::follow_up) {
         auto prior = query(R"SQL(
-SELECT json_extract(o.data,'$.sessionMemory.section'),json_extract(o.data,'$.sessionMemory.excerptBytes')
+SELECT o.memory_section,o.memory_excerpt_bytes
 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
 WHERE r.environment_id=? AND r.thread_id=? AND t.bot_id=?
-  AND json_extract(o.data,'$.sessionMemory.version')=?
+  AND o.memory_version=?
 )SQL",
                            {command.environmentId, command.target.threadId, bot, version});
         const auto prefix = std::string_view(section).substr(0, heading.size() + excerpt.size());

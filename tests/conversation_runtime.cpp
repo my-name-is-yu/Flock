@@ -2395,7 +2395,8 @@ Json persistedTaskDiagnostics(Fixture& f, Id taskId, Id messageId = 0) {
         }
         return values;
     };
-    result["outbox"] = rows("SELECT id,phase,data FROM outbox WHERE task_id=? ORDER BY id");
+    result["outbox"] = rows("SELECT id,phase,tool,environment_id,project_id,revision_id,session_participation_id,stop_operation,data"
+                            " FROM outbox WHERE task_id=? ORDER BY id");
     result["runs"] = rows("SELECT action_id,environment_id,thread_id,run_id FROM runs WHERE task_id=? ORDER BY action_id");
     result["session_message_waits"] = rows(
         "SELECT action_id,environment,thread,run,gateway_environment,delivery FROM session_message_waits WHERE task_id=? ORDER BY rowid");
@@ -2788,7 +2789,7 @@ void acceptedLegacyDestinationStopSurvivesRestart() {
     const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(writer, sqlite3_close);
     check(sqlite3_exec(db.get(),
                        "UPDATE outbox SET data=json_remove(data,'$.stopRunId','$.stopThreadId') "
-                       "WHERE phase='accepted' AND json_extract(data,'$.stopRequested')=1",
+                       "WHERE phase='accepted' AND stop_operation IS NOT NULL",
                        nullptr, nullptr, nullptr) == SQLITE_OK &&
               sqlite3_changes(db.get()) == 1,
           "could not persist the legacy stop shape");

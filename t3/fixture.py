@@ -990,8 +990,7 @@ def test_multi_environment(local, runner, temp, linked_routes=False):
                         time.sleep(0.01)
                     with sqlite3.connect(Path(temp) / "recovery.db") as db:
                         actions = db.execute("""
-                            SELECT id,json_extract(data,'$.environmentId'),json_extract(data,'$.projectId'),phase
-                            FROM outbox WHERE json_extract(data,'$.tool')='delegate'
+                            SELECT id,environment_id,project_id,phase FROM outbox WHERE tool='delegate'
                         """).fetchall()
                     assert len(actions) == 2, actions
                     for server in (local, mini):

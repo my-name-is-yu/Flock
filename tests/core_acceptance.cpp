@@ -310,8 +310,8 @@ Id seedSelectedTask(Fixture& fixture) {
     fixture.runtime->runConversations();
     const auto id = fixture.submit();
     executeSql(fixture.directory / "state.db", R"SQL(
-UPDATE tasks SET data=json_set(data,'$.sourceMessageId',(SELECT id FROM messages WHERE bot_id='alpha'),
-    '$.selectedSession',json_object('environmentId','e','projectId','p','threadId','selected-thread'))
+UPDATE tasks SET source_message_id=(SELECT id FROM messages WHERE bot_id='alpha'),
+    selected_environment_id='e',selected_project_id='p',selected_thread_id='selected-thread'
 WHERE id=(SELECT max(id) FROM tasks);
 )SQL");
     return id;

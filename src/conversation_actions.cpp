@@ -919,14 +919,14 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
         task.sessionOrigin = decodeSessionOrigin(*origin, {"messages", std::to_string(messageId), "routing.sessionOrigin"});
     else if (resume) {
         auto parent = query(R"SQL(
-SELECT t.data,t.id,t.state,t.generation FROM tasks t
+SELECT t.origin_environment_id,t.origin_thread_id,t.origin_gateway_environment_id,t.origin_title FROM tasks t
 JOIN messages m ON m.id=t.source_message_id
 JOIN messages request ON request.id=? AND request.person_id=m.person_id
 LEFT JOIN channel_messages channel ON channel.message_id=request.id
-WHERE t.id=? AND t.bot_id=? AND t.has_session_origin AND channel.message_id IS NULL
+WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.message_id IS NULL
 )SQL",
                             {messageId, reference.value().taskId, bot});
-        if (parent.next()) task.sessionOrigin = decodeTaskRow(parent).sessionOrigin;
+        if (parent.next()) task.sessionOrigin = SessionOrigin{{parent.string(0), parent.string(1), parent.string(2)}, parent.string(3)};
     }
     if (task.sessionOrigin) task.sessionOrigin->title = redactor(bot).text(task.sessionOrigin->title);
     if (selectedSession)

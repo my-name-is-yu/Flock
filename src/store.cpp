@@ -267,15 +267,15 @@ void Store::Impl::consumeEvent(const TaskData& task) {
     exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=? AND consumed=0", {task.eventId, task.id});
 }
 std::optional<Wait> Store::Impl::currentWait(Id task) const {
-    auto row = query("SELECT id,data FROM waits WHERE task_id=? AND resolution IS NULL", {task});
+    auto row = query("SELECT id,reason,data FROM waits WHERE task_id=? AND resolution IS NULL", {task});
     if (!row.next()) return std::nullopt;
-    return from_json(row.number(0), row.string(1));
+    return decodeWaitRow(row);
 }
 
 std::optional<Wait> Store::Impl::projectedWait(Id task, const Statement& row, int col) const {
     const auto id = row.number(col);
     if (!id) return std::nullopt;
-    auto wait = from_json(id, row.string(col + 1));
+    auto wait = decodeWaitRow(row, col);
     if (const auto anchor = waitAnchor(task, wait.id)) wait.messageId = anchor;
     if (const auto allowance = waitAllowance(task, wait.reason())) wait.allowance = allowance;
     return wait;
@@ -294,9 +294,10 @@ Id Store::Impl::wait(TaskData& task, Wait waiting) {
             waiting.run = WaitRun{*action->command.candidate};
     }
     waiting.actionId = task.actionId;
-    auto data = to_json(waiting);
-    exec("INSERT INTO waits(task_id,data) VALUES(?,?)", {task.id, data});
+    auto data = encodeWaitData(waiting);
+    exec("INSERT INTO waits(task_id,reason,data) VALUES(?,?,?)", {task.id, storedWaitReason(waiting), data});
     const auto id = last();
+    data["reason"] = waitReasonName(waiting.reason());
     data["id"] = id;
     if (waiting.allowance) data["allowance"] = *waiting.allowance;
     journal(task.id, "waiting", data);
@@ -491,9 +492,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const OutboxSourc
     }
     task.trigger = std::move(trigger);
     task.requester = std::move(requester);
-    exec("INSERT INTO tasks(bot_id,environment_id,project_id,state,generation,data) VALUES(?,?,?,?,0,?)",
-         {task.botId, task.environmentId, task.projectId, taskStateName(task.state), encodeTask(task)});
-    const auto id = last();
+    const auto id = insertTask(task);
     if (sourceKind == TaskSource::request) {
         Json entry = {{"text", request},
                       {"messageId", sourceMessageId},
@@ -759,7 +758,7 @@ SELECT page.id,page.task_id,page.time,page.kind,
                 AND d.task_id=i.task_id AND d.step=i.step
               )) FROM instructions i WHERE i.kind!='instruction_delivered'
             ) THEN 'true' ELSE 'false' END))) END,
-  channel.message_id IS NOT NULL,w.id,w.data
+  channel.message_id IS NOT NULL,w.id,w.reason,w.data
 FROM page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN conversation_input_status input ON input.message_id=m.id
 LEFT JOIN waits w ON page.kind='user_answer'
@@ -772,7 +771,7 @@ ORDER BY page.id DESC)SQL",
         auto event = journalRow(rows);
         if (event.at("kind") == "memory_remembered") p_->projectMemoryNotice(bot, event.at("data"));
         if (rows.number(5)) event["data"].update(p_->channelContext(rows.number(0), bot, nullptr, viewer));
-        if (const auto waitId = rows.number(6)) event["data"]["question"] = from_json(waitId, rows.string(7)).text;
+        if (rows.number(6)) event["data"]["question"] = decodeWaitRow(rows, 6).text;
         result.push_back(std::move(event));
     }
     std::reverse(result.begin(), result.end());

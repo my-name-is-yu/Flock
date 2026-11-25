@@ -26,6 +26,7 @@ constexpr std::array workTools{
 };
 
 constexpr std::string_view unsupportedEffort = "unsupported_reasoning_effort";
+constexpr std::string_view projectQuestionReason = "project_question";
 
 }
 
@@ -88,8 +89,8 @@ std::optional<WaitRun> taskWaitRun(const TaskData& task) {
     return WaitRun{run.ref, run.environmentId, run.assignment};
 }
 
-Json to_json(const Wait& wait) {
-    Json data{{"reason", waitReasonName(wait.reason())}, {"text", wait.text}, {"eventId", wait.eventId}, {"run", waitRunJson(wait.run)}};
+Json encodeWaitData(const Wait& wait) {
+    Json data{{"text", wait.text}, {"eventId", wait.eventId}, {"run", waitRunJson(wait.run)}};
     if (wait.actionId) data["actionId"] = *wait.actionId;
     std::visit(
         [&]<typename T>(const T& value) {
@@ -126,6 +127,16 @@ Json to_json(const Wait& wait) {
     return data;
 }
 
+Json to_json(const Wait& wait) {
+    auto data = encodeWaitData(wait);
+    data["reason"] = waitReasonName(wait.reason());
+    return data;
+}
+
+std::string_view storedWaitReason(const Wait& wait) {
+    return std::holds_alternative<ProjectQuestionWait>(wait.details) ? projectQuestionReason : waitReasonName(wait.reason());
+}
+
 WaitUsage waitUsage(const Json& data) {
     const auto count = [](const Json& record, std::string_view key) -> std::optional<Id> {
         const auto found = record.find(key);
@@ -140,18 +151,26 @@ WaitUsage waitUsage(const Json& data) {
 }
 
 namespace {
+WaitReason readWaitReason(const RecordDecoder& decoder, std::string_view name) {
+    const auto reason = enumValue(reasons, name);
+    if (!reason) decoder.fail("reason", "unknown wait reason");
+    return *reason;
+}
+
+ProjectQuestionWait readProjectQuestion(const RecordDecoder& decoder, const Json& data) {
+    auto choices = decoder.get<std::vector<std::string>>(data, "choices");
+    const auto& projects = decoder.object(decoder.require(data, "projectChoices"), "projectChoices");
+    const auto project = decoder.nested("projectChoices");
+    std::map<std::string, std::string> ids;
+    for (const auto& [name, id] : projects.items()) ids.emplace(name, project.value<std::string>(id, name));
+    return {std::move(choices), std::move(ids)};
+}
+
 WaitDetails readWaitDetails(const RecordDecoder& decoder, const Json& data, WaitReason reason) {
     switch (reason) {
-    case WaitReason::user_question: {
-        auto choices = decoder.get<std::vector<std::string>>(data, "choices");
-        if (!data.contains("projectChoices"))
-            return ModelQuestionWait{std::move(choices), decoder.get<std::string>(data, "decisionReason"),
-                                     decoder.get<std::string>(data, "questionId")};
-        const auto& projects = decoder.object(data.at("projectChoices"), "projectChoices");
-        std::map<std::string, std::string> ids;
-        for (const auto& [name, id] : projects.items()) ids.emplace(name, decoder.nested("projectChoices").value<std::string>(id, name));
-        return ProjectQuestionWait{std::move(choices), std::move(ids)};
-    }
+    case WaitReason::user_question:
+        return ModelQuestionWait{decoder.get<std::vector<std::string>>(data, "choices"), decoder.get<std::string>(data, "decisionReason"),
+                                 decoder.get<std::string>(data, "questionId")};
     case WaitReason::budget: {
         const auto attempted = enumValue(workTools, decoder.get<std::string>(data, "attempted"));
         if (!attempted) decoder.fail("attempted", "unknown work tool");
@@ -200,10 +219,8 @@ std::optional<WaitRun> decodeWaitRun(const Json& data, const RecordDecoder& deco
 }
 
 namespace {
-Wait readWaitPayload(const RecordDecoder& decoder, const Json& data) {
-    const auto reason = enumValue(reasons, decoder.get<std::string>(data, "reason"));
-    if (!reason) decoder.fail("reason", "unknown wait reason");
-    Wait wait{readWaitDetails(decoder, data, *reason), decoder.get<std::string>(data, "text")};
+Wait readWaitPayload(const RecordDecoder& decoder, const Json& data, WaitDetails details) {
+    Wait wait{std::move(details), decoder.get<std::string>(data, "text")};
     wait.eventId = decoder.get<Id>(data, "eventId");
     wait.actionId = decoder.optional<std::string>(data, "actionId");
     wait.run = decodeWaitRun(decoder.require(data, "run"), decoder.nested("run"));
@@ -211,18 +228,29 @@ Wait readWaitPayload(const RecordDecoder& decoder, const Json& data) {
 }
 }
 
-Wait from_json(Id id, std::string_view data) {
+Wait decodeWait(Id id, std::string_view reason, std::string_view data) {
     const auto row = std::to_string(id);
     const RecordDecoder decoder("waits", row);
-    auto wait = readWaitPayload(decoder, decoder.parse(data));
-    wait.id = id;
-    return wait;
+    return decoder.decodeClosed(decoder.parse(data), [&](const Json& payload, const RecordDecoder& fields) {
+        auto details = reason == projectQuestionReason ? WaitDetails{readProjectQuestion(fields, payload)}
+                                                       : readWaitDetails(fields, payload, readWaitReason(fields, reason));
+        auto wait = readWaitPayload(fields, payload, std::move(details));
+        wait.id = id;
+        return wait;
+    });
+}
+
+Wait decodeWaitRow(const Statement& row, int col) {
+    return decodeWait(row.number(col), row.string(col + 1), row.string(col + 2));
 }
 
 Wait decodeWaitingEntry(Id entry, const Json& data) {
     const auto row = std::to_string(entry);
     const RecordDecoder decoder("journal", row);
-    auto wait = readWaitPayload(decoder, data);
+    const auto reason = readWaitReason(decoder, decoder.get<std::string>(data, "reason"));
+    auto details = reason == WaitReason::user_question && data.contains("projectChoices") ? WaitDetails{readProjectQuestion(decoder, data)}
+                                                                                          : readWaitDetails(decoder, data, reason);
+    auto wait = readWaitPayload(decoder, data, std::move(details));
     wait.id = decoder.get<Id>(data, "id");
     wait.messageId = decoder.optional<Id>(data, "messageId");
     wait.allowance = decoder.optional<Id>(data, "allowance");

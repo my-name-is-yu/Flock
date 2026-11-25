@@ -17,7 +17,7 @@ void Store::Impl::rememberT3Project(std::string_view bot, std::string_view envir
 bool Store::Impl::projectQuestionOpen(std::string_view bot, std::string_view environment) const {
     return query("SELECT 1 FROM tasks t JOIN waits w ON w.task_id=t.id "
                  "WHERE t.bot_id=? AND t.environment_id=? AND t.project_id='' AND w.resolution IS NULL "
-                 "AND json_type(w.data,'$.projectChoices')='object' LIMIT 1",
+                 "AND w.reason='project_question' LIMIT 1",
                  {bot, environment})
         .next();
 }

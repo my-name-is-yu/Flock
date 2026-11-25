@@ -41,6 +41,7 @@ public:
     ~Statement() { sqlite3_finalize(stmt_); }
     Statement(const Statement&) = delete;
     bool next();
+    bool null(int col) const { return sqlite3_column_type(stmt_, col) == SQLITE_NULL; }
     Id number(int col) const { return sqlite3_column_int64(stmt_, col); }
     std::string string(int col) const;
     Json json(int col) const { return Json::parse(string(col)); }
@@ -435,6 +436,8 @@ struct Store::Impl {
                            const TaskChange* change);
     Id addRevision(TaskData&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
+    TaskData readTask(const Statement&, int col = 0) const;
+    Id insertTask(const TaskData&);
     void save(TaskData&);
     void saveDecisionCheckpoint(TaskData&, DecisionCheckpoint);
     bool automationBeforeDispatch(Id task) const;
