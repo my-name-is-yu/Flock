@@ -44,9 +44,9 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_board_inbox_live_retry COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}" live)
-    add_test(NAME flock_web_composer_screenshot_dimensions COMMAND "${FLOCK_NODE_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-screenshot-dimensions.mjs" "${FLOCK_CHROME_EXECUTABLE}")
-    set_tests_properties(flock_web_composer_screenshot_dimensions PROPERTIES TIMEOUT 30)
+    add_test(NAME flock_web_composer_screenshot_resize COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-screenshot-resize.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    set_tests_properties(flock_web_composer_screenshot_resize PROPERTIES TIMEOUT 30)
     add_test(NAME flock_web_message_time_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/message-time.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     set_tests_properties(flock_web_message_time_dom PROPERTIES TIMEOUT 30)

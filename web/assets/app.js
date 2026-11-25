@@ -9,7 +9,7 @@ import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
-import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
+import { screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
@@ -3122,8 +3122,7 @@ async function submit(event) {
       if (attachments.length) delete screenshots.pending;
       else composer.settleSend(payload, false);
     }
-    const message = error instanceof ScreenshotError ? error.message : errors[error.message];
-    setNotice(context, message ?? 'Flock could not confirm receipt. You can resend the same message.', true);
+    setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
     sendingMessages.delete(composer);
