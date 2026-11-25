@@ -2,6 +2,7 @@
 #include "flock/board_inbox.hpp"
 #include "flock/participation.hpp"
 #include "flock/t3_connection.hpp"
+#include "flock/channels.hpp"
 #include "task_history.hpp"
 #include <sqlite3.h>
 #include <algorithm>
@@ -2624,7 +2625,7 @@ void pinnedDestinationFollowupKeepsVerificationContract() {
           "the completed follow-up did not retain the requested commit evidence");
 }
 
-void savedSessionSendAfterAccessLoss(std::string_view sendState) {
+void savedSessionSendAfterAccessLoss(std::string_view sendState, std::string_view closeRoute = "session_access") {
     Fixture f;
     f.requireT3Connection = true;
     f.restart();
@@ -2637,7 +2638,38 @@ void savedSessionSendAfterAccessLoss(std::string_view sendState) {
     const auto originalRun = destinationRunFor(f.task(taskId),"cloud").at("runId").get<std::string>();
     const auto queuedId = oneLinkedDestinationTask(f,"access-loss-sibling","Queue behind the unresolved send");
     const auto actionId = destinationRunFor(f.task(taskId),"cloud").at("actionId").get<std::string>();
-    const auto receipt = f.enqueue("prepared-session-send","Send a follow-up before access closes");
+    const Person accessMember{"access-loss-member",false};
+    Json receipt;
+    if (closeRoute == "session_access") {
+        receipt = f.enqueue("prepared-session-send","Send a follow-up before access closes");
+    } else if (closeRoute == "access") {
+        f.store->policy().setMember(localOwner,"alpha",accessMember.id,true);
+        Store writer(f.dir/"state.db");
+        receipt = writer.receive(accessMember,f.routing(),"prepared-session-send","Send a follow-up before access closes");
+    } else if (closeRoute == "channel_access") {
+        struct Transport final : ChannelTransport {
+            ChannelDelivery send(std::string_view, const ChannelOrigin&, std::string_view, const Json&) override {
+                return {ChannelDelivery::State::accepted,"fixture-reply"};
+            }
+            ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
+        };
+        f.store->policy().setMember(localOwner,"alpha",accessMember.id,true);
+        f.store->connectChannel({ChannelKind::slack,channelCapabilities(ChannelKind::slack),
+            [](std::string_view credential,std::string_view workspace) {
+                return credential == "fixture-auth" && workspace == "workspace";
+            },[accessMember](std::string_view workspace,std::string_view sender) -> std::optional<ChannelSender> {
+                if (workspace == "workspace" && sender == "channel-user")
+                    return ChannelSender{"alpha",accessMember.id};
+                return std::nullopt;
+            },std::make_shared<Transport>()});
+        receipt = f.store->receiveChannel(ChannelKind::slack,"fixture-auth",
+            {{"workspaceId","workspace"},{"threadRef","access-loss-thread"},
+             {"externalMessageId","prepared-session-send"},{"senderId","channel-user"},
+             {"text","Send a follow-up before access closes"}},
+            [&](std::string_view bot,std::string_view text) { return f.routing(std::string(text),std::string(bot)); });
+    } else {
+        throw std::runtime_error("unknown access-loss route");
+    }
     const auto messageId = receipt.at("messageId").get<Id>();
     sqlite3* raw = nullptr;
     check(sqlite3_open((f.dir/"state.db").c_str(),&raw) == SQLITE_OK,"could not open the pending-send fixture database");
@@ -2652,27 +2684,31 @@ void savedSessionSendAfterAccessLoss(std::string_view sendState) {
     sqlite3_bind_text(statement,2,encodedEffect.c_str(),-1,SQLITE_TRANSIENT);
     check(sqlite3_step(statement) == SQLITE_DONE,"could not persist the prepared Session effect");
     sqlite3_finalize(statement);
-    check(sqlite3_prepare_v2(db.get(),"UPDATE messages SET principal_source=4,routing=json_set(routing,'$.sessionOrigin.environmentId','desktop',"
-                             "'$.sessionOrigin.threadId','closed-thread') WHERE id=?",-1,&statement,nullptr) == SQLITE_OK,
-          "could not prepare the Session access fixture");
-    sqlite3_bind_int64(statement,1,messageId);
-    check(sqlite3_step(statement) == SQLITE_DONE,"could not mark the Session-origin turn");
-    sqlite3_finalize(statement);
-    check(sqlite3_prepare_v2(db.get(),"INSERT OR IGNORE INTO session_participations(bot_id,environment_id,thread_id,person_id,state) "
-                             "VALUES('alpha','desktop','closed-thread',?,'active')",-1,&statement,nullptr) == SQLITE_OK,
-          "could not prepare the active Session participation fixture");
-    sqlite3_bind_text(statement,1,localOwner.id.c_str(),-1,SQLITE_TRANSIENT);
-    check(sqlite3_step(statement) == SQLITE_DONE,"could not persist the active Session participation fixture");
-    sqlite3_finalize(statement);
+    if (closeRoute == "session_access") {
+        check(sqlite3_prepare_v2(db.get(),"UPDATE messages SET principal_source=4,routing=json_set(routing,'$.sessionOrigin.environmentId','desktop',"
+                                 "'$.sessionOrigin.threadId','closed-thread') WHERE id=?",-1,&statement,nullptr) == SQLITE_OK,
+              "could not prepare the Session access fixture");
+        sqlite3_bind_int64(statement,1,messageId);
+        check(sqlite3_step(statement) == SQLITE_DONE,"could not mark the Session-origin turn");
+        sqlite3_finalize(statement);
+        check(sqlite3_prepare_v2(db.get(),"INSERT OR IGNORE INTO session_participations(bot_id,environment_id,thread_id,person_id,state) "
+                                 "VALUES('alpha','desktop','closed-thread',?,'active')",-1,&statement,nullptr) == SQLITE_OK,
+              "could not prepare the active Session participation fixture");
+        sqlite3_bind_text(statement,1,localOwner.id.c_str(),-1,SQLITE_TRANSIENT);
+        check(sqlite3_step(statement) == SQLITE_DONE,"could not persist the active Session participation fixture");
+        sqlite3_finalize(statement);
+    } else if (closeRoute == "access") {
+        f.store->policy().setMember(localOwner,"alpha",accessMember.id,false);
+    }
 
     f.restart();
-    T3Connections(*f.store).disconnect("desktop");
+    if (closeRoute == "session_access") T3Connections(*f.store).disconnect("desktop");
     f.runtime->runConversations();
     f.advanceConcurrentlyUntil([&] { return !f.response(receipt).is_null(); },
-                               "the restarted Session-origin turn did not close after access loss");
-    check(f.response(receipt).value("route","") == "session_access" &&
+                               "the restarted turn did not close after access loss");
+    check(f.response(receipt).value("route","") == closeRoute &&
           f.task(taskId).at("state") == "running",
-          "lost Session access did not close the prepared-send turn while the original Run kept the task active");
+          "lost access did not close the prepared-send turn while the original Run kept the task active");
     f.t3.finish(originalRun,"The task report settled after the unsent follow-up was closed");
     const auto retryAt = destinationRunFor(f.task(taskId),"cloud").value("retryAt",f.now);
     if (retryAt > f.now) f.now = retryAt;
@@ -2718,6 +2754,14 @@ void preparedSavedSessionSendSettlesAfterAccessLoss() {
 void uncertainSavedSessionSendRemainsHeldAfterAccessLoss() {
     savedSessionSendAfterAccessLoss("sending");
     savedSessionSendAfterAccessLoss("");
+}
+
+void terminalAccessRoutesSettleOnlyPreparedSessionSends() {
+    for (const auto closeRoute : {std::string_view{"access"},std::string_view{"channel_access"}}) {
+        savedSessionSendAfterAccessLoss("prepared",closeRoute);
+        savedSessionSendAfterAccessLoss("sending",closeRoute);
+        savedSessionSendAfterAccessLoss("",closeRoute);
+    }
 }
 
 void recoveredStopApprovalBelongsToTheStopRequester() {
@@ -3622,6 +3666,11 @@ int main(int argc, char** argv) {
             std::cout << "Uncertain saved Session sends remain held after access loss\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "lost-access-other-reasons") {
+            terminalAccessRoutesSettleOnlyPreparedSessionSends();
+            std::cout << "Terminal access routes settle only definitely-unsent Session sends\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "recovered-stop-requester") {
             recoveredStopApprovalBelongsToTheStopRequester();
             std::cout << "Recovered stop requester authorization passed\n";
@@ -3703,6 +3752,7 @@ int main(int argc, char** argv) {
         pinnedDestinationFollowupKeepsVerificationContract();
         preparedSavedSessionSendSettlesAfterAccessLoss();
         uncertainSavedSessionSendRemainsHeldAfterAccessLoss();
+        terminalAccessRoutesSettleOnlyPreparedSessionSends();
         recoveredStopApprovalBelongsToTheStopRequester();
         recoveredDestinationStopHonorsPolicy();
         startedRunOutboxApprovalIsStale();

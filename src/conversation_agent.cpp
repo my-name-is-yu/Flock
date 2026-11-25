@@ -637,7 +637,7 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
 
 void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route,
                              const conversation::QuestionAnchor* question) {
-    if (route == "session_access") {
+    if (route == "session_access" || route == "access" || route == "channel_access") {
         auto pending = query(R"SQL(
 SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
   AND json_extract(effect,'$.kind')='message_session'
@@ -648,7 +648,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         for (const auto step : steps)
             saveTurnResults(message.id,step,Json::array({redactor(message.bot).record({
                 {"ok",false},{"delivery","not_accepted"},
-                {"error","The T3 Session participation ended before sending."}})}));
+                {"error","Access ended before the T3 Session message was sent."}})}));
     }
     Json actions = Json::array();
     std::set<Id> touched;
