@@ -47,7 +47,7 @@ add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent
                        src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
                        src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/base64.cpp
-                       src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp)
+                       src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp src/git_followup.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
 if(TARGET SQLite3::SQLite3)
@@ -165,7 +165,7 @@ if(BUILD_TESTING)
   add_executable(flock_live_evidence tests/live_evidence.cpp)
   target_include_directories(flock_live_evidence PRIVATE app)
   target_link_libraries(flock_live_evidence PRIVATE flock_t3 flock_app_support)
-  add_executable(flock_git_pr_ci tests/git_pr_ci.cpp)
+  add_executable(flock_git_pr_ci tests/git_pr_ci.cpp tests/git_pr_followup.cpp)
   target_include_directories(flock_git_pr_ci PRIVATE app)
   target_link_libraries(flock_git_pr_ci PRIVATE flock_app_support)
   target_compile_options(flock_git_pr_ci PRIVATE -Wall -Wextra -Wpedantic)

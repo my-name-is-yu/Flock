@@ -661,7 +661,7 @@ void budgetAndStaleWaits() {
     f.reach(id,"cancelled");
     f.rejects(id,budget,"approve");
     f.runtime->tick();
-    check(f.task(id)["remaining"] == 1 && f.logs(id,"budget_granted") == 1 && f.t3.seen.size() == 4,
+    check(f.task(id)["remaining"] == 3 && f.logs(id,"budget_granted") == 1 && f.t3.seen.size() == 4,
           "replayed permit or late work after cancel");
 }
 
@@ -1266,7 +1266,7 @@ void evidenceResume() {
         check(std::find(i.tools.begin(),i.tools.end(),"session_read") != i.tools.end(),"read tool not presented");
         auto req = Json{{"threadId",i.event["run"]["threadId"]},{"runId",i.event["run"]["runId"]},{"view","activity"}};
         if (!i.evidence.empty()) req["cursor"] = i.evidence.back()["nextCursor"];
-        return Decision{"session_read",req,"Check the commit and setting"};
+        return Decision{"session_read",req,{}};
     };
     f.reach(id,"running");
     f.t3.finish("run-1");
@@ -1507,14 +1507,16 @@ void peerWorkSharesBudgetWithDirectT3Work() {
           beforeApproval["additionalUsed"] == 3 && f.t3.launches == 0 && f.store->tasks("beta").size() == 4,
           "direct T3 work bypassed the allowance exhausted by peer work");
     f.store->operate(localOwner,TaskTarget::from(f.store->task(root),budget),"approve");
+    f.restart();
     f.reach(root,"running");
-    check(f.t3.launches == 1 && f.task(root)["remaining"] == 0 && f.task(root)["additionalUsed"] == 4,
-          "one approval did not admit exactly one direct T3 action");
+    check(f.t3.launches == 1 && f.task(root)["remaining"] == 2 && f.task(root)["additionalUsed"] == 4,
+          "the direct T3 action did not spend one round from the renewed allowance");
     f.t3.finish("run-1");
+    for (int step = 0; step < 64 && f.task(root)["state"] != "waiting"; ++step) f.runtime->tick();
     const auto secondBudget = f.wait(root,"budget");
     const auto paused = f.task(root);
-    check(secondBudget != budget && paused["remaining"] == 0 && paused["additionalUsed"] == 4 &&
-          f.store->tasks("beta").size() == 4,"the approved direct T3 action also authorized unapproved peer work");
+    check(secondBudget != budget && paused["remaining"] == 0 && paused["additionalUsed"] == 6 &&
+          f.store->tasks("beta").size() == 6,"T3 and peer work did not share the renewed allowance");
     const auto& wait = paused.at("wait");
     check(wait.at("attempted") == "send_bot_message" && wait.at("decisionReason") == "Use the configured verifier" &&
           wait.at("usage") == Json{{"total_tokens",37}},"the peer budget wait lost the proposed action or its usage");
@@ -2192,18 +2194,27 @@ void modelBudgetFollowsBotConsultation() {
     const auto recipientWait = f.wait(recipient,"model_budget");
     f.restart();
     for (int i = 0; i < 4; ++i) f.runtime->tick();
-    check(f.model.calls == 3 && f.task(recipient)["wait"]["id"] == recipientWait,
+    check(f.model.calls == 3 && f.task(recipient)["wait"]["id"] == recipientWait &&
+          f.task(recipient)["wait"]["allowance"] == 3,
           "the recipient reached the provider without approval, or restart changed its wait");
     Store writer(f.directory/"state.db");
-    writer.operate(localOwner,TaskTarget::from(writer.task(recipient),recipientWait),"approve");
+    const Person verifier{"verifier",false};
+    writer.policy().setMember(localOwner,"beta",verifier.id,true);
+    executeSql(f.directory/"state.db",R"SQL(
+INSERT INTO journal(time,kind,data,conversation_bot_id)
+VALUES(0,'conversation_budget_wait','{}','alpha');
+UPDATE conversation_turns SET status='paused',pause_id=last_insert_rowid()
+WHERE message_id=(SELECT id FROM messages WHERE bot_id='alpha' ORDER BY id LIMIT 1);
+)SQL");
+    check(writer.pausedConversations("alpha").size() == 1,"the shared conversation fixture is not paused");
+    writer.operate(verifier,TaskTarget::from(writer.task(recipient),recipientWait),"approve");
+    check(writer.pausedConversations("alpha").size() == 1,
+          "a member of the receiving Bot resumed a conversation on the originating Bot");
     f.rejects(recipient,recipientWait,"approve");
-    const auto senderWait = f.wait(sender,"model_budget");
-    check(f.model.calls == 4 && f.task(recipient)["state"] == "completed",
-          "one approval did not resume only one call in the exchange");
-    writer.operate(localOwner,TaskTarget::from(writer.task(sender),senderWait),"approve");
     f.reach(sender,"completed");
-    check(f.model.calls == 5 && f.t3.launches == 0 && f.task(sender)["remaining"] == 3,
-          "the sender did not finish under its shared model budget and separate Run allowance");
+    check(f.model.calls == 5 && f.task(recipient)["state"] == "completed" &&
+          f.t3.launches == 0 && f.task(sender)["remaining"] == 3,
+          "the recipient and sender did not finish under one renewal of their shared model allowance");
 }
 
 void peerResultWaitsForRecipientTurn() {
@@ -2289,7 +2300,7 @@ void modelBudgetCountsFailedAttempts() {
     Fixture f;
     const auto id = f.store->submit({"alpha","Retry a decision","e","p",{{"modelCallLimit",2}}});
     f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.task["id"] != id || f.model.calls >= 3) return ask();
+        if (input.task["id"] != id || f.model.calls >= 4) return ask();
         if (f.model.calls == 1) throw ModelError("Transient failure with usage",true,{{"input_tokens",42}});
         throw ModelError("Transient failure without usage",true);
     };
@@ -2319,9 +2330,19 @@ void modelBudgetCountsFailedAttempts() {
     const auto independent = f.store->submit({"alpha","Independent request","e","other",{{"modelCallLimit",2}}});
     f.wait(independent,"user_question");
     check(f.model.calls == 3 && f.task(id)["wait"]["id"] == wait,"an independent request needed the paused budget");
-    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait),"approve");
-    f.wait(id,"user_question");
-    check(f.model.calls == 4 && f.task(id)["remaining"] == 3,"approval did not resume the saved retry event");
+    const auto approval = TaskTarget::from(f.store->task(id),wait);
+    check(f.task(id)["wait"]["allowance"] == 2,"the pause did not show the original allowance");
+    f.store->operate(localOwner,approval,"approve");
+    f.restart();
+    f.rejects(id,wait,"approve");
+    for (const auto* answer : {"Use main","Yes, use main"}) {
+        const auto question = f.wait(id,"user_question");
+        f.store->operate(localOwner,TaskTarget::from(f.store->task(id),question),"answer",{{"text",answer}});
+    }
+    const auto next = f.wait(id,"model_budget");
+    check(next != wait && f.model.calls == 5 && f.task(id)["remaining"] == 3,
+          "one approval did not restore exactly the original allowance after restart");
+    f.rejects(id,wait,"approve");
 }
 
 void taskInferenceSurvivesWriterContention(bool modelFails, bool restart = false) {

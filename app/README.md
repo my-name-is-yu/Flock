@@ -28,6 +28,7 @@ Example `bots/release/config.json`
   "projectId": "CANONICAL_T3_PROJECT_ID",
   "allowedBots": ["verifier"],
   "runTimeoutSeconds": 1800,
+  "fixPullRequests": true,
   "session": {
     "runtimeMode": "approval-required"
   },
@@ -59,6 +60,10 @@ optionally set `branch`. To use an existing worktree, set `type` to
 If a task is waiting for a Session settings correction, update its Bot's
 `config.json` and reconcile the task to retry the unsent action.
 
+Set `fixPullRequests` to `false` to receive PR notifications without automated
+fix requests. The setting defaults to `true` and can also be changed from the
+Bot's **General** settings. See [GitHub repositories and PR notifications](../README.md#github-repositories-and-pr-notifications).
+
 Add the IDs of Bots that this Bot may contact to `allowedBots`. It defaults
 to an empty list. For the example above, set up `bots/verifier/` with its own
 configuration and role. Release may send Verifier a question or request work,
@@ -88,6 +93,12 @@ the Bot ID. Use the conversation or Web API to edit memory explicitly. Shared
 playbooks use an explicit document ID and the applicable `shared_memory` rules.
 
 Ask a Bot in its conversation to manage a schedule or reminder or follow up on a webhook.
+
+Set `"shareMemoryWithSessions": true` in a Bot's `config.json` to send its memory
+with work instructions. Session history retains the notes and makes them
+available to anyone with read access to that Session. Flock redacts protected
+values and trims the notes to fit after the work instruction. Follow-ups
+include changed notes or a longer excerpt when more space is available.
 
 ## Connect and run
 
@@ -172,11 +183,11 @@ fixture Session run to completion.
 
 ## Model call allowance
 
-Set `modelCallLimit` in a Bot's `config.json` to a positive integer. The
-default is 20. Flock takes the limit from the originating request's saved
-settings. Each step of the Bot's conversation turn, the decisions of the tasks
-the turn starts, and their Bot exchanges consume attempts from the same
-allowance. Every message gets its own allowance.
+Set **Steps per request** in the Bot's settings under **How it runs**, or set
+`modelCallLimit` to a positive integer in its `config.json`. The default is
+20. Flock saves the allowance with the originating request. Each step of the
+Bot's conversation turn, the decisions of the tasks the turn starts, and their
+Bot exchanges share it. Each new request gets its own allowance.
 
 Flock saves each attempt in SQLite before invoking the model. Failed attempts,
 retries, and in-flight attempts at restart count. The `model_attempts` table
@@ -188,19 +199,29 @@ conversation history, task state, evidence, and feedback before the current
 event and its tool results. Reuse depends on matching tools and earlier
 content, and on where ChatGPT places cache boundaries for the selected model.
 
-When the allowance runs out, choose **Approve one more model call** on the
-paused conversation message or task. For a task, `flock approve TASK WAIT REVISION GENERATION`
-uses the wait ID, current revision (or `0` before the first revision), and generation from `flock status TASK`. If another Bot's task is paused, open that Bot's
-waiting item. Each approval grants one attempt. The additional Run
-allowance remains separate. T3 observation, reconciliation, and calls made
-inside T3 or an external provider are outside the local model call allowance.
+When the allowance runs out, choose **Continue for 20 more steps** on the
+paused conversation message or in **Needs you**. The button shows the
+request's original allowance. If a request started with 8 steps, each approval
+grants 8 more, even after a settings change or restart. Paused work that shares
+the request's allowance can continue when it has steps available.
+
+For a paused task, `flock approve TASK WAIT REVISION GENERATION` grants the
+same block. Use the wait ID, current revision (or `0` before the first
+revision), and generation from `flock status TASK`. Each pause accepts one
+approval. If another Bot's task is paused, open that Bot's waiting item.
+
+Follow-up work in T3 and work handed off to another Bot share a separate
+three-round allowance. **Continue for 3 more rounds** and `flock approve`
+renew it. Installation and T3 permissions still apply to each action. T3
+observation, reconciliation, and calls made inside T3 or an external provider
+are outside Flock's model call allowance.
 
 ## Six-trial model acceptance
 
 After ChatGPT sign-in, run the following command with a slug from the model
 catalog. It writes one JSON record per trial with the chosen action, arguments,
-and reason, or an error. All six must match their expected actions for exit
-status 0.
+and reason, or an error. All six must match their expected actions and include
+a reason for exit status 0.
 
 ```sh
 build/app/flock model acceptance MODEL_SLUG > model-acceptance.jsonl
@@ -218,6 +239,11 @@ home has one ChatGPT connection. See the official [sign-in guide][signin],
 [limits]: https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
 
 ## Bot tools
+
+Workspace, web, MCP, skill, attachment, and conversation tools use their
+operation arguments without a separate rationale. Git issue reads and other
+Git reads work the same way. Git writes include a reason recorded in task
+history.
 
 Conversation turns can read, write, and search files under
 `<home>/workspaces/<botId>`. The `workspace.read` policy action governs reading

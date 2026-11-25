@@ -227,9 +227,12 @@ void exercise(const std::filesystem::path& path) {
     check(row(inbox,"itemKind","user_question").at("choices") == Json::array({"Draft","Final"}) &&
           row(inbox,"itemKind","conversation_model_budget").at("itemId") == conversation.at("messageId") &&
           row(inbox,"itemKind","conversation_model_budget").at("request") == "Pause this conversation" &&
+          row(inbox,"itemKind","conversation_model_budget").at("allowance") == 1 &&
           row(inbox,"itemKind","protected_input").at("itemId") == secret &&
           row(inbox,"itemKind","pr_review").at("itemId") == review &&
           row(inbox,"itemKind","model_budget").at("taskId") == model &&
+          row(inbox,"itemKind","model_budget").at("allowance") == 20 &&
+          row(inbox,"itemKind","extra_run").at("allowance") == 3 &&
           row(inbox,"itemKind","deadline").at("taskId") == deadlineTask &&
           row(inbox,"itemKind","unknown_delivery").at("taskId") == unknown &&
           inbox.size() == 9, "inbox omitted a pending decision or its prompt");
@@ -309,7 +312,7 @@ SELECT )SQL"+std::to_string(question)+",1,'fixture_activity','{}' FROM newer");
     auto second = std::async(std::launch::async,[&] { return act(concurrent,bob); });
     const auto a = first.get();
     const auto b = second.get();
-    check(a.empty() != b.empty() && store.task(budget).at("remaining") == allowance+1,
+    check(a.empty() != b.empty() && store.task(budget).at("remaining") == allowance+3,
           "simultaneous approval took effect more or less than once");
     const auto decided = row(store.history(budget),"kind","inbox_decision").at("data");
     check(decided.at("decidedBy") == (a.empty() ? b : a) && decided.at("decidedAt").get<Id>() > 0 &&

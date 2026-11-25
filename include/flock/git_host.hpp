@@ -56,6 +56,15 @@ public:
     virtual Json call(const GitContext&, const GitRepository&, const Decision&) = 0;
 };
 
+enum class GitFollowup { none, failedCheck, changesRequested, reviewComment };
+
+struct GitReviewLocation {
+    Id commentId = 0;
+    std::string path, side;
+    Id line = 0;
+    bool originalLine = false;
+};
+
 struct GitWebhook {
     std::string host, eventId, repo, kind, action;
     std::vector<Id> prNumbers;
@@ -63,6 +72,9 @@ struct GitWebhook {
     Id jobId = 0;
     std::string payloadDigest = {};
     std::string requestedReviewer = {};
+    GitFollowup followup = GitFollowup::none;
+    Id feedbackId = 0;
+    std::optional<GitReviewLocation> reviewLocation = {};
 };
 
 const std::vector<std::string>& gitTools(bool conversation = true);

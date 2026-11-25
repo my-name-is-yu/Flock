@@ -17,6 +17,11 @@
 namespace flockv0 {
 namespace conversation { struct Message; struct QuestionAnchor; }
 
+struct ModelBudget {
+    std::string id;
+    Id initialLimit;
+};
+
 struct WorkSession {
     std::string environmentId, threadId, projectId;
 };
@@ -143,6 +148,12 @@ private:
     int fd_;
 };
 
+struct SessionMemory {
+    Id version;
+    std::string section;
+    std::size_t excerptBytes;
+};
+
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
 std::string_view approvalError(ApprovalGate);
 enum class GitWatchStart { operationIntent, mutationAdmission };
@@ -226,6 +237,7 @@ struct Store::Impl {
     void initializeAutomationSchema();
     void retireAutomations(const Json& botIds);
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
+    std::optional<SessionMemory> sessionMemory(const Command&, Seconds now);
     void createMemory(std::string_view key, std::string_view bot, std::string_view id,
                       std::string_view content, Seconds now);
     std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
@@ -246,6 +258,7 @@ struct Store::Impl {
     Json cancelAutomation(std::string_view bot, Id id);
     void fireDueAutomations(Seconds now);
     void fireAutomation(Id, const Statement&, Seconds now);
+    static void applyPlannerModel(Json& config, const PlannerModel&);
     Json automationRoute(std::string_view bot, Json routing) const;
     SecretRedactor sharedRedactor() const;
     void initializeBoardInboxSchema();
@@ -255,13 +268,26 @@ struct Store::Impl {
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
     void projectTaskGitReads(GitHost&, const Json& task, Json& event);
     Json saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result);
-    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
+    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent,
+                   std::string_view reason);
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
     Id latestGitWebhookId() const;
-    std::set<GitPrKey> gitPrMutationsInFlight;
+    std::multiset<GitPrKey> gitPrMutationsInFlight, gitFeedbackMutationsInFlight;
     class GitPrMutationClaim;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
+    struct GitPrFollowup {
+        enum class Status { available, attempted, limitReached };
+        SessionTarget session;
+        PolicyOrigin origin;
+        std::string operation;
+        Json target;
+        Status status;
+    };
+    std::optional<GitPrFollowup> gitPrFollowup(const conversation::Message&, const IntakeResolver&);
+    bool currentGitPrCheck(GitHost&, const conversation::Message&);
+    std::string gitPrFollowupInstruction(const conversation::Message&, const GitPrFollowup&, const Decision&) const;
+    void recordGitPrFollowup(const conversation::Message&, const GitPrFollowup&);
     bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
     bool watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest&,
                     GitWatchStart = GitWatchStart::operationIntent);
@@ -275,7 +301,7 @@ struct Store::Impl {
                         const Json& candidates = Json::array());
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
-    void approveMessageModelCall(Id message, Id pause);
+    void approveMessageModelCall(const Person&, Id message, Id pause);
     void recordTaskBlocker(Json&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
@@ -331,14 +357,16 @@ struct Store::Impl {
     void saveTurnResults(Id, int step, const Json& results);
     class ToolBatch;
     std::map<std::pair<Id,int>,std::map<std::size_t,ToolCallResult>> unpersistedToolResults;
-    std::string messageModelBudget(Id messageId);
-    std::string taskModelBudget(const Json& task);
-    std::string ensureModelBudget(std::string key, const Json& config);
-    Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    ModelBudget messageModelBudget(Id messageId) const;
+    ModelBudget taskModelBudget(Id taskId) const;
+    Id waitAllowance(Id taskId, std::string_view reason) const;
+    Id reserveModelCall(const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Id takeReservedConversationCall(Id messageId);
     Id takeReservedTaskCall(Id event);
     void releaseModelCall(Id attempt);
-    Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    Id approveModelBudget(const Person&, const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    void resumeSharedModelBudgetWaits(const Person&, std::string_view budget, Id approvedMessage, Id approvedTask);
+    void resumeMessageModelCall(Id message, Id pause, Id attempt);
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                      bool gitNotification) const;
     ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered,
@@ -347,7 +375,13 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
-    struct SessionSendReceipt { std::string bot; SessionTarget target; std::string title; Delivery delivery; };
+    struct SessionSendReceipt {
+        std::string bot;
+        SessionTarget target;
+        std::string title;
+        Delivery delivery;
+        bool notify;
+    };
     std::map<Id,SessionSendReceipt> sessionSendReceipts;
     void recordSessionSendRun(Id, const SessionSendReceipt&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
@@ -382,7 +416,7 @@ struct Store::Impl {
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                   bool hasWebEvidence, T3&, std::stop_token);
+                                   const ConversationCallContext&);
     CallOutcome cancelDestinationRun(const conversation::Message&, int step, const Decision&, std::string_view key,
                                      bool offered, bool hasWebEvidence, std::stop_token);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&,

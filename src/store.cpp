@@ -15,6 +15,7 @@ namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
 constexpr Id schemaVersion = 9;
+constexpr int initialWorkAllowance = 3;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -298,6 +299,8 @@ Json taskRow(const auto& store, const Statement& row, int col = 0) {
     if (const auto waitId = row.number(col+3)) {
         auto wait = row.json(col+4);
         wait["id"] = waitId;
+        if (const auto allowance = store.waitAllowance(id,field(wait,"reason")); allowance)
+            wait["allowance"] = allowance;
         attachWait(task,std::move(wait),store.waitAnchor(id,waitId));
     }
     return task;
@@ -308,6 +311,12 @@ Id Store::Impl::waitAnchor(Id task, Id wait) const {
     auto row = query("SELECT id FROM journal WHERE task_id=? AND kind='waiting' AND conversation_bot_id IS NULL"
                      " AND json_extract(data,'$.id')=? ORDER BY id DESC LIMIT 1",{task,wait});
     return row.next() ? row.number(0) : 0;
+}
+
+Id Store::Impl::waitAllowance(Id task, std::string_view reason) const {
+    if (reason == "model_budget") return taskModelBudget(task).initialLimit;
+    if (reason == "budget") return initialWorkAllowance;
+    return 0;
 }
 
 Json Store::Impl::load(Id id) const {
@@ -686,7 +695,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
     const auto request = scrub.text(item.request);
     Json data = {{"botId", item.botId}, {"request", request}, {"intent", request}, {"environmentId", item.environmentId},
         {"projectId", item.projectId}, {"config", item.config},
-        {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
+        {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", initialWorkAllowance},
         {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
         {"activeRun", nullptr}, {"lastRun", nullptr}, {"question", nullptr}};
     if (sourceMessageId) data["sourceMessageId"] = sourceMessageId;
@@ -806,17 +815,18 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         if (sourceMessage) entry["messageId"] = sourceMessage;
         journal(id,answerKind,entry);
     } else if (operation == "approve" && reason == "budget") {
-        task["remaining"] = task["remaining"].get<int>() + 1;
+        task["remaining"] = task["remaining"].get<int>() + initialWorkAllowance;
         journal(id, "budget_granted", {{"waitId",waitId},{"remaining",task["remaining"]}});
     } else if (operation == "approve" && reason == "model_budget") {
         const Id eventId = task.at("eventId");
-        const auto attempt = reserveExtraModelCall(taskModelBudget(task),"task_decision",0,id,eventId);
+        const auto attempt = approveModelBudget(actor,taskModelBudget(id),"task_decision",0,id,eventId);
         exec("UPDATE events SET reserved_attempt=? WHERE id=? AND task_id=?",{attempt,eventId,id});
         journal(id,"model_budget_granted",{{"waitId",waitId},{"attemptId",attempt}});
     } else if (operation == "retry" && (reason == "model_failure" || isUndispatchedNotesWait(task))) {
         if (reason == "bot_notes_unavailable") next = "queued";
-        if (field(wait,"failureCode") == "unsupported_reasoning_effort")
-            task["config"] = automationRoute(bot,{{"config",task.at("config")}}).at("config");
+        if (field(wait,"failureCode") == "unsupported_reasoning_effort" && automationModel) {
+            if (const auto planner = automationModel(bot)) applyPlannerModel(task.at("config"),*planner);
+        }
         exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task["eventId"]});
         task.erase("feedback");
         journal(id, "model_retry", {{"waitId",waitId}});
@@ -921,7 +931,10 @@ FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
 void Store::Impl::addTaskDetails(Json& result) const {
     const Id id = result.at("id");
     auto pending = outbox(result);
-    if (pending.is_object()) pending.erase("authGeneration");
+    if (pending.is_object()) {
+        pending.erase("authGeneration");
+        pending.erase("sessionMemory");
+    }
     result["pendingAction"] = pending;
     auto revisions = query("SELECT id,number,intent,done_when,source_message_id FROM task_revisions"
                            " WHERE task_id=? ORDER BY number", {id});

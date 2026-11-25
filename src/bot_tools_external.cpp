@@ -121,8 +121,8 @@ bool isBotTool(std::string_view name) {
 }
 Json botToolSchema(std::string_view name) {
     const auto& item = spec(name);
-    auto required = Json::array({"reason"});
-    Json fields{{"reason",{{"type","string"},{"minLength",1},{"maxLength",4000}}}};
+    auto required = Json::array();
+    auto fields = Json::object();
     for (const auto key : item.required) {
         required.push_back(key);
         fields[key] = parameter(key);
