@@ -40,7 +40,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
         } catch (const ToolError&) {}
         if (destinationTask)
             return sendSessionMessage(message,step,decision,tool_batch::turnCallKey(message.id,step),
-                                      ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
+                                      ctx);
     }
     if (calls.size() == 1 && tool == "cancel_task" && decision.args.is_object() &&
         (decision.args.contains("destination") || decision.args.contains("environmentId") ||
@@ -56,7 +56,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     const bool offered = decision.rejection.empty();
     if (offered || effectType == "object") {
         if (tool == "message_session" || tool == "fix_pull_request")
-            return sendSessionMessage(message,step,decision,key,ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
+            return sendSessionMessage(message,step,decision,key,ctx);
         if (tool == "interrupt_session")
             return runSessionEffect(message,step,decision,key,offered,ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
     }

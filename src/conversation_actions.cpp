@@ -229,7 +229,7 @@ void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& rec
 
 Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     const conversation::Message& message, int step, const Decision& decision, std::string_view key,
-    bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
+    const ConversationCallContext& ctx) {
     using enum CallOutcome;
     const auto id = message.id;
     const bool fixesPullRequest = decision.tool == "fix_pull_request";
@@ -276,14 +276,14 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             sessionSendReceipts.erase(id);
             return advance;
         }
-        if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
+        if (ctx.hasWebEvidence && !allowedAfterWebEvidence(decision)) {
             save(webEvidenceActionDenied());
             transaction.commit();
             return advance;
         }
         try {
             if (fixesPullRequest) {
-                followup = gitPrFollowup(message);
+                followup = gitPrFollowup(message,ctx.intake);
                 if (!followup || followup->status != GitPrFollowup::Status::available)
                     throw ToolError("Automatic follow-up is unavailable for this pull request");
                 command.environmentId = followup->session.environmentId;
@@ -334,18 +334,21 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     std::string error;
     std::string title;
     try {
-        command.authGeneration = t3.authGeneration(
+        command.authGeneration = ctx.t3.authGeneration(
             target.gatewayEnvironmentId.empty() ? target.environmentId : target.gatewayEnvironmentId,command.config);
         if (!fixesPullRequest && !savedTaskTarget) {
-            if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
+            if (const auto metadata = ctx.t3.sessionMetadata(target,false)) title = metadata->title;
             else error = "This Session is unavailable through your T3 connection";
         }
     } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
+    if (error.empty() && followup && followup->target.contains("headSha") &&
+        (!ctx.gitHost || !currentGitPrCheck(*ctx.gitHost,message)))
+        error = "Could not confirm that the failing check belongs to this pull request's current head";
     const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::shared);
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (shutdown.stop_requested()) return stop;
+        if (ctx.shutdown.stop_requested()) return stop;
         if (!authorizeTurn(message)) { transaction.commit(); return stop; }
         if (sessionParticipationStopped(message.bot,target,id)) {
             save(toolFailure(stopped));
@@ -360,7 +363,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         auto origin = policyOrigin(message);
         Json policyPayload{decision.tool,decision.args,command.authGeneration};
         if (fixesPullRequest) {
-            const auto current = gitPrFollowup(message);
+            const auto current = gitPrFollowup(message,ctx.intake);
             if (!current || current->operation != followup->operation || current->session != target ||
                 current->status != GitPrFollowup::Status::available) {
                 save(toolFailure("Automatic follow-up is unavailable for this pull request"));
@@ -426,7 +429,7 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     try {
         receipt = Policy(*this).forbidden(message.bot,resource.action,resource.target)
             ? Delivery{Delivery::Kind::NotAccepted,{},std::string(approvalError(ApprovalGate::denied)),true}
-            : t3.send(command);
+            : ctx.t3.send(command);
     } catch (const std::exception&) {
         receipt.detail = "Could not confirm delivery to T3";
     }

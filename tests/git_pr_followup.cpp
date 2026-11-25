@@ -21,6 +21,7 @@ public:
     bool canFix = false;
     bool fixAcknowledged = false;
     Id createdTask = 0;
+    std::function<void()> beforeFix;
 
     ModelTurn decide(const ModelInput& input) override {
         auto next = choose(input);
@@ -64,6 +65,7 @@ private:
             if (steps.empty() && git.at("jobId") != 0)
                 return {"git_read_ci_logs",{{"host",git.at("host")},{"repo",git.at("repo")},
                     {"jobId",git.at("jobId")},{"maxBytes",32}},{}};
+            if (beforeFix) beforeFix();
             const auto excerpt = steps.empty() ? git.at("summary") : steps.back().at("result").at("data").at("text");
             return {"fix_pull_request",{{"diagnosis","The migration test needs attention."},{"evidence",excerpt}},{}};
         }
@@ -90,9 +92,14 @@ struct Fixture {
     Id task;
     std::optional<T3Connection> sessionConnection;
 
-    Fixture(bool person = true, bool fixPullRequests = true, bool fromSession = false)
-        : store(directory.path/"state.db"),runtime(store,model,sessions,[](std::string_view) { return std::string{}; },options(host)) {
+    Fixture(bool person = true, bool fixPullRequests = true, bool fromSession = false, IntakeResolver liveIntake = {})
+        : store(directory.path/"state.db"),runtime(store,model,sessions,[](std::string_view) { return std::string{}; },[&] {
+            auto settings = options(host);
+            settings.intake = std::move(liveIntake);
+            return settings;
+        }()) {
         auto request = intake();
+        host->result["state"] = "open";
         if (!fixPullRequests) request.config["fixPullRequests"] = false;
         store.policy().setOwner(testRequester,request.botId);
         T3Connections connections(store);
@@ -199,6 +206,7 @@ void recoversAcceptedSendAfterWriteContention() {
 void skipsSupersededChecks() {
     Fixture f;
     const std::string newHead(40,'b');
+    f.host->result["headSha"] = newHead;
     f.notify({hostName,"synchronized",repoName,"pull_request","synchronize",{1},newHead,"New change"});
     f.notify(failure("previous-head"));
     check(f.sessions.sessionSends.empty() && !f.model.canFix &&
@@ -209,6 +217,58 @@ void skipsSupersededChecks() {
     check(f.model.fixAcknowledged && f.sessions.sessionSends.size() == 1 &&
           includes(f.sessions.sessionSends.front().instruction,"\"headSha\":\"" + newHead + "\""),
           "The current failing check did not arrive with its expected head");
+}
+
+void followsCurrentChecksAcrossWebhookOrdering() {
+    Fixture f;
+    const std::string before(40,'b'), latest(40,'c');
+    f.host->result["headSha"] = before;
+    auto early = failure("early-check");
+    early.headSha = before;
+    f.notify(early);
+    check(f.model.fixAcknowledged && f.sessions.sessionSends.size() == 1,
+          "An explicitly attributed failure was lost before the synchronize webhook");
+
+    f.host->result["headSha"] = latest;
+    f.notify({hostName,"newer-update",repoName,"pull_request","synchronize",{1},latest,"Newer change"});
+    f.notify({hostName,"delayed-update",repoName,"pull_request","synchronize",{1},before,"Older change"});
+    f.runtime.runConversations();
+    check(f.sessions.sessionSends.size() == 1,"A late synchronize webhook retriggered an earlier fix");
+    auto stale = failure("obsolete-after-delayed-hook");
+    stale.headSha = before;
+    f.notify(stale);
+    check(!f.model.canFix && f.sessions.sessionSends.size() == 1,
+          "An older check received a fix because a late webhook named its head");
+    auto current = failure("current-after-delayed-hook");
+    current.headSha = latest;
+    f.notify(current);
+    check(f.model.fixAcknowledged && f.sessions.sessionSends.size() == 2,
+          "A late synchronize webhook suppressed a fix for the current head");
+}
+
+void readsLiveFixSettingBeforeSending() {
+    bool enabled = true;
+    Fixture f(true,true,false,[&](std::string_view bot, std::string_view) {
+        auto current = intake(std::string(bot));
+        current.config["fixPullRequests"] = enabled;
+        return current;
+    });
+    f.model.beforeFix = [&] { enabled = false; };
+    f.notify(review("setting-changed-before-send"));
+    check(f.model.canFix && !enabled && f.sessions.sessionSends.empty() &&
+          historyCount(f.store,f.task,"git_pr_followup_requested") == 0,
+          "Automatic fix ignored a settings change after the fix was offered");
+}
+
+void checksAgainBeforeSending() {
+    Fixture f;
+    auto event = failure("head-changed-before-send");
+    event.jobId = 0;
+    f.model.beforeFix = [&] { f.host->result["headSha"] = std::string(40,'b'); };
+    f.notify(event);
+    check(f.model.canFix && f.sessions.sessionSends.empty() &&
+          historyCount(f.store,f.task,"git_pr_followup_requested") == 0,
+          "A check for an obsolete commit started work after the fix was offered");
 }
 
 void waitsForSupervisedApproval() {
@@ -238,11 +298,7 @@ void rejectsStaleSupervisedApproval(bool disconnect) {
     const auto card = std::ranges::find_if(inbox,[](const auto& row) { return row.at("itemKind") == "policy_approval"; });
     check(card != inbox.end(),"No approval was requested before the target changed");
     if (disconnect) T3Connections(f.store).disconnect("sandbox");
-    else {
-        const std::string newHead(40,'b');
-        check(f.store.receiveGitWebhook({hostName,"pushed-while-waiting",repoName,"pull_request","synchronize",{1},newHead,"New change"}),
-              "Could not advance the head while waiting");
-    }
+    else f.host->result["headSha"] = std::string(40,'b');
     f.store.decideInbox(testRequester,target(*card),"allow_once");
     f.runtime.runConversations();
     check(f.sessions.sessionSends.empty() && historyCount(f.store,f.task,"git_pr_followup_requested") == 0,
@@ -255,6 +311,9 @@ void testGitPrFollowup() {
     sessionAskResetsTheCap();
     recoversAcceptedSendAfterWriteContention();
     skipsSupersededChecks();
+    followsCurrentChecksAcrossWebhookOrdering();
+    readsLiveFixSettingBeforeSending();
+    checksAgainBeforeSending();
     waitsForSupervisedApproval();
     rejectsStaleSupervisedApproval(true);
     rejectsStaleSupervisedApproval(false);
