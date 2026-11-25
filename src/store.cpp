@@ -751,6 +751,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         journal(id,"model_budget_granted",{{"waitId",waitId},{"attemptId",attempt}});
     } else if (operation == "retry" && (reason == "model_failure" || isUndispatchedNotesWait(task))) {
         if (reason == "bot_notes_unavailable") next = "queued";
+        if (field(wait,"failureCode") == "unsupported_reasoning_effort")
+            task["config"] = automationRoute(bot,{{"config",task.at("config")}}).at("config");
         exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task["eventId"]});
         task.erase("feedback");
         journal(id, "model_retry", {{"waitId",waitId}});
@@ -1023,6 +1025,7 @@ ORDER BY page.id DESC)SQL",
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
+        if (event.at("kind") == "memory_remembered") p_->projectMemoryNotice(bot,event.at("data"));
         if (rows.number(5))
             event["data"].update(p_->channelContext(rows.number(0),bot,nullptr,viewer));
         result.push_back(std::move(event));

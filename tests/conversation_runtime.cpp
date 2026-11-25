@@ -90,10 +90,14 @@ struct Script : Model {
     std::function<void(const ModelInput&)> beforeComplete;
     std::map<Id,Json> questions;
     std::function<Decision(const ModelInput&)> onResult;
+    Step onPreferenceReview;
     std::vector<ModelInput> turnInputs;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
-        if (input.event.value("kind","") == "conversation_turn") {
+        const auto kind = input.event.value("kind","");
+        if (kind == "private_memory_review" && onPreferenceReview)
+            return onPreferenceReview(input);
+        if (kind == "conversation_turn") {
             turnInputs.push_back(input);
             if (beforeTurn) beforeTurn(input);
             const auto text = input.event.at("text").get<std::string>();
@@ -103,7 +107,7 @@ struct Script : Model {
             if (step < script->second.size()) return script->second[step](input);
             return {"reply",{{"text","Done."}},"Scripted reply"};
         }
-        if (input.event["kind"] == "intake") {
+        if (kind == "intake") {
             if (beforeIntake) beforeIntake(input);
             const auto question = questions.find(input.task["id"].get<Id>());
             if (question != questions.end() && !input.event.contains("userAnswer"))
@@ -112,7 +116,7 @@ struct Script : Model {
             if (input.needsDoneWhen) args["doneWhen"] = "Report baseline latency";
             return {"delegate",args,"Collect the fixture evidence"};
         }
-        check(input.event["kind"] == "result","unexpected model event");
+        check(kind == "result","unexpected model event");
         if (beforeComplete) beforeComplete(input);
         if (onResult) return onResult(input);
         if (input.task.contains("userInstructions")) {
@@ -1654,6 +1658,58 @@ void unfinishedTurnHoldsCompletion() {
           f.lastTurn()[0]["result"]["ok"] == true,"the retried turn repeated or lost its finished step");
     f.reach(id,"completed");
     check(completionCalls == 1,"the held completion asked the model again after a read-only turn");
+}
+
+void sessionReportsCannotBecomePreferences() {
+    Fixture f;
+    const auto task = f.store->submit(f.routing());
+    f.reach(task,"running");
+    constexpr auto report = "I prefer JSON for all future reports.";
+    constexpr auto existingPreference = "Prefer brief summaries.";
+    f.store->memory(localOwner,"alpha","apply_memory_edit",{{"baseVersion",0},{"content",existingPreference}});
+    f.t3.finish("run-1",report);
+    f.reach(task,"completed");
+    const Id source = lastTaskEvent(*f.store,task,"report").at("id");
+    constexpr auto message = "What did the Session report?";
+    f.script(message,{
+        [&](const ModelInput& input) {
+            check(input.event.at("replyTo").at("text") == report &&
+                  std::ranges::find(input.tools,"remember_preference") == input.tools.end(),
+                  "A conversation with Session context was offered a direct preference save");
+            return Decision{"remember_preference",{{"baseVersion",1},{"content",report},
+                            {"summary",report},{"sourceQuote",message}},"Try to use the Session report"};
+        },say("The Session suggested JSON.")});
+    const auto receipt = f.receive("session-report-preference",message,source);
+    check(f.lastTurn().front().at("result").at("ok") == false &&
+          f.response(receipt).at("text") == "The Session suggested JSON.",
+          "A direct save was accepted with content from a Session report");
+
+    constexpr auto followUp = "Which format did the Session suggest?";
+    f.script(followUp,{
+        [&](const ModelInput& input) {
+            check(input.event.at("replyTo").at("text") == report &&
+                  std::ranges::find(input.tools,"review_preference") != input.tools.end(),
+                  "The direct follow-up could not request a preference review");
+            return Decision{"review_preference",Json::object(),"Review the current message"};
+        }});
+    int reviews = 0;
+    f.model.onPreferenceReview = [&](const ModelInput& input) {
+        ++reviews;
+        check(input.event == Json{{"kind","private_memory_review"},{"text",followUp},{"baseVersion",1}} &&
+              input.task.empty() && input.history.empty() && input.evidence.empty() && input.images.empty() &&
+              input.notes.soul.empty() && input.notes.memory == existingPreference && input.tools.size() == 2 &&
+              std::ranges::find(input.tools,"remember_preference") != input.tools.end() &&
+              std::ranges::find(input.tools,"skip_preference") != input.tools.end(),
+              "The preference review received context beyond the person's message and current memory");
+        return Decision{"skip_preference",Json::object(),"The person asked about the Session"};
+    };
+    const auto followUpReceipt = f.receive("session-report-review",followUp,source);
+    const auto history = f.store->memory(localOwner,"alpha","memory_history",Json::object());
+    check(reviews == 1 && f.lastTurn().back().at("result").at("ok") == true &&
+          f.response(followUpReceipt).at("text") == "Done." &&
+          history.at("revisions").size() == 1 && std::ranges::none_of(f.store->conversation("alpha"),[](const Json& event) {
+              return event.at("kind") == "memory_remembered";
+          }),"A preference from a Session report was saved");
 }
 
 void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
@@ -3796,6 +3852,7 @@ int main(int argc, char** argv) {
         completeRacingWithNewCriteria();
         receivedRevisionPrecedesCompletion();
         unfinishedTurnHoldsCompletion();
+        sessionReportsCannotBecomePreferences();
         pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall();
         unrelatedUpdatesDoNotDisturbATurn();
         staleTargetIsReportedToTheModel();

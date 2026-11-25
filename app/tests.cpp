@@ -69,6 +69,49 @@ public:
     InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
+void retryScheduledTaskWithUpdatedReasoningEffort() {
+    Sandbox temp;
+    const auto folder = temp.path / "bots";
+    auto config = botConfig("old-model");
+    config["reasoningEffort"] = "high";
+    createBot(folder / "release",config,"","");
+    Bots bots(folder);
+    Store store(temp.path / "state.db",{},[&](std::string_view id) {
+        return bots.plannerModel(id);
+    });
+    const auto now = utc(2026,1,1,12,0);
+    const auto saved = bots.get("release").intake("");
+    store.createAutomation(localOwner,saved,{{"kind","reminder"},{"timezone","Etc/UTC"},
+        {"fireAt",now+1},{"request","Check the release"}},now);
+    store.fireDueAutomations(now+1);
+    const Id id = store.tasks("release").at(0).at("id");
+    struct RejectEffort final : Model {
+        std::vector<Json> requests;
+        ModelTurn decide(const ModelInput& input) override {
+            requests.push_back(input.config);
+            if (input.config.contains("reasoningEffort"))
+                throw ModelError("Unsupported reasoning effort",ModelErrorCode::unsupported_reasoning_effort);
+            return {{{"ask_user",{{"question","Which release?"}},"Choose the release"}}};
+        }
+    } model;
+    NotesT3 t3;
+    Runtime runtime(store,model,t3,[&](auto bot) { return bots.soul(bot); });
+    for (int tick = 0; tick < 8 && store.task(id).at("state") != "waiting"; ++tick) runtime.tick();
+    const auto rejected = store.task(id);
+    check(model.requests.size() == 1 && rejected.at("wait").at("failureCode") == "unsupported_reasoning_effort",
+          "The rejected effort did not stop repeat attempts or preserve the failure type");
+    bots.updateRunSettings(store,"release",{{"model","new-model"},{"reasoningEffort",""},
+        {"environmentId","new-env"},{"projectId","new-project"}},now+1,[](auto, auto) {});
+    store.operate(localOwner,TaskTarget::from(rejected,rejected.at("wait").at("id")),"retry");
+    for (int tick = 0; tick < 8 && store.task(id).at("state") != "waiting"; ++tick) runtime.tick();
+    const auto retried = store.task(id);
+    check(model.requests.size() == 2 && model.requests.back().at("model") == "new-model" &&
+          !model.requests.back().contains("reasoningEffort") && retried.at("wait").at("reason") == "user_question" &&
+          retried.at("environmentId") == saved.environmentId && retried.at("projectId") == saved.projectId &&
+          retried.at("config").at("session") == saved.config.at("session"),
+          "Retry did not use the corrected planner settings on the original task route");
+}
+
 enum class NotesRecovery { Retry, Edit };
 
 void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery) {
@@ -416,6 +459,12 @@ void responseContract() {
         {{"modelProvider","chatgpt"},{"model","fixture-slug"},{"secret","must-stay-local"}},
     };
     const auto request = responseRequest(input);
+    check(!request.contains("reasoning"),"Model default sent a reasoning override");
+    input.config["reasoningEffort"] = "low";
+    check(responseRequest(input).at("reasoning") == Json{{"effort","low"}},"Configured reasoning effort was not sent");
+    input.config["reasoningEffort"] = "";
+    check(!responseRequest(input).contains("reasoning"),"Cleared reasoning effort was still sent");
+    input.config.erase("reasoningEffort");
     check(request["model"] == "fixture-slug" && request["store"] == false && request["stream"] == true &&
         request["tool_choice"] == "required" && request["parallel_tool_calls"] == false,"request policy");
     const auto& tool = request["tools"].at(0);
@@ -1080,6 +1129,7 @@ void pullRequestSettings() {
 int main() {
     try {
         configuredSchedules();
+        retryScheduledTaskWithUpdatedReasoningEffort();
         unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Retry);
         unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Edit);
         pinnedConversationDestinations();

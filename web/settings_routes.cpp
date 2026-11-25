@@ -85,9 +85,15 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             return reply(res,400,{{"error","invalid_bot"}});
         if (!store.policy().allows(person(callbacks,req),Action::bot_settings,bot))
             return reply(res,403,{{"error","access_denied"}});
-        if (!callbacks.modelCatalog) return reply(res,503,{{"error","models_unavailable"}});
-        try { reply(res,200,{{"models",callbacks.modelCatalog()}}); }
-        catch (const std::exception&) { reply(res,503,{{"error","models_unavailable"}}); }
+        Json catalog = {{"fallbackReasoningEfforts",fallbackReasoningEfforts()}};
+        try {
+            if (callbacks.modelCatalog) {
+                catalog["models"] = callbacks.modelCatalog();
+                return reply(res,200,catalog);
+            }
+        } catch (const std::exception&) {}
+        catalog["error"] = "models_unavailable";
+        reply(res,503,catalog);
     });
     server.Get("/api/settings/installation",[&](const httplib::Request& req, httplib::Response& res) {
         const auto actor = person(callbacks,req);

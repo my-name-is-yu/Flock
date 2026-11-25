@@ -22,6 +22,8 @@ build concurrency.
 ## Configure a Bot
 
 Edit the Bot's instructions under **Role** in its Web settings.
+Under **How it runs**, choose its **Model** and **Reasoning effort**. Lower effort
+can reduce response time and reasoning tokens. **Model default** uses the model’s own setting.
 
 Bots can read, write, and search files in their own workspaces. They delegate commands, scripts, builds, and tests to T3 Sessions. Make any files the work needs available in the selected T3 project.
 
@@ -46,6 +48,8 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 ```
 
 In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
+
+Bots can remember lasting preferences, corrections, conventions, and decisions from messages sent directly by a Bot owner or installation administrator. The conversation shows what changed and offers **Undo** while that edit is current. You can also ask a Bot to remember something explicitly.
 
 Flock uses the sole connected T3 environment when the Bot starts work. It uses the sole active project, or asks which project to use and remembers the choice for that Bot and environment. You can pin a destination with `environmentId` and `projectId` in the Bot configuration. Optional `conversationEnvironments` entries name other connected environments for requests such as “Run the measurement on the cloud Mac.” Each environment has its own project selection.
 
@@ -105,6 +109,8 @@ See [Ask a Bot from a T3 Session](web/README.md#ask-a-bot-from-a-t3-session) for
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.
 
+Attach screenshots by choosing PNG or JPEG files or by pasting them into the message box. The browser resizes larger screenshots before sending them.
+
 To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock message release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 
 In a Bot’s settings, open **Recurring requests** to add or remove scheduled requests. You can also ask the Bot in its conversation. Requests defined in `config.json` appear in the list and are managed in that file.
@@ -155,6 +161,7 @@ ownership apply in both modes.
 | Channel posts outside the asking conversation, published artifacts, and email sends | Ask |
 | T3 Session launch or a send outside the originating Thread | Ask |
 | Bot creation or rename, schedule, reminder, or trigger changes | Ask |
+| Bot private memory edits (`memory.write`, targeted by Bot ID) | Allow |
 | Distinct destructive operations or secret use at a new destination | Ask |
 | MCP tool calls | Allow when discovery returns `annotations.readOnlyHint: true` for the tool. Hints apply to the configured server and exact tool for two minutes. Ask otherwise |
 | Reads, workspace file access, and replies, reactions, edits, and attachments in the originating conversation | Allow |
