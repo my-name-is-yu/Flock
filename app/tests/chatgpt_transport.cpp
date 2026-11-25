@@ -143,14 +143,34 @@ void checkCatalog() {
         check(request.url == std::string(resource) + "/models" && request.authorization == "Bearer fixture" &&
               request.body.empty() && !request.onData, "unexpected model catalog request");
         return HttpResponse{200,"application/json",{},R"({"models":[
-            {"slug":"a","visibility":"list","display_name":"A"},
+            {"slug":"a","visibility":"list","display_name":"A","supported_reasoning_levels":[
+                {"effort":"low","description":"More responsive"},{"effort":"ultra"},{"effort":"low"},{"effort":4}]},
             {"slug":"b","visibility":"list"},
             {"slug":"c","visibility":"hidden"},
+            {"slug":"d","visibility":"list","supported_reasoning_levels":[]},
             {"visibility":"list"}
         ]})"};
     },"fixture");
-    check(catalog == Json::array({{{"slug","a"},{"displayName","A"}},{{"slug","b"},{"displayName","b"}}}),
-          "model catalog filter changed");
+    check(catalog == Json::array({
+        {{"slug","a"},{"displayName","A"},{"reasoningEfforts",{"low","ultra"}}},
+        {{"slug","b"},{"displayName","b"}},
+        {{"slug","d"},{"displayName","d"},{"reasoningEfforts",Json::array()}},
+    }),"model catalog lost the distinction between advertised efforts and missing metadata");
+}
+
+void checkUnsupportedReasoningEffort() {
+    try {
+        infer([](const HttpRequest&) {
+            return HttpResponse{400,"application/json",{},R"({"error":{"code":"unsupported_value",
+                "param":"reasoning.effort","message":"private provider detail"}})"};
+        },"fixture",R"({"reasoning":{"effort":"low"}})");
+        throw std::runtime_error("Unsupported effort was accepted");
+    } catch (const ModelError& error) {
+        const std::string_view message = error.what();
+        check(error.code == ModelErrorCode::unsupported_reasoning_effort && !error.transient &&
+              message.find("Model default") != message.npos && message.find("private provider detail") == message.npos,
+              "Unsupported effort did not give a safe, actionable error");
+    }
 }
 
 void checkInspectedImageRequest() {
@@ -233,6 +253,7 @@ int main(int argc, char** argv) {
         checkProviderErrors();
         checkCatalog();
         checkInspectedImageRequest();
+        checkUnsupportedReasoningEffort();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

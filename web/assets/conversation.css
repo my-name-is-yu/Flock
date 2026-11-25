@@ -317,6 +317,11 @@
 .timeline > .day:first-child { margin-top: .2rem; }
 .day.chat-time-break { margin: 1.35rem 0 .15rem; }
 .system-note { text-align: center; color: var(--text-3); font-size: var(--text-xs); margin: 1.1rem 0 .2rem; }
+.memory-notice { color: var(--text-2); overflow-wrap: anywhere; }
+.memory-notice strong { font-weight: 600; }
+.memory-notice .text-button { color: var(--text); font-size: inherit; }
+.memory-notice .text-button[aria-disabled="true"] { color: var(--text-3); }
+.memory-notice-status { display: block; }
 .session-event { overflow-wrap: anywhere; }
 .session-event .text-button { font-size: inherit; }
 .session-invitation-note { margin: .25rem 0 0; }

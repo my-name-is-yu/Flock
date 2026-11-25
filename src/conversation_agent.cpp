@@ -39,6 +39,7 @@ const std::vector<std::string> webTools{"start_workflow","workflow_status","inst
 std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
         case ModelErrorCode::authentication_required: return "authentication_required";
+        case ModelErrorCode::unsupported_reasoning_effort: return "unsupported_reasoning_effort";
         case ModelErrorCode::invalid_tool_count: return "invalid_tool_count";
         case ModelErrorCode::invalid_tool_output: return "invalid_tool_output";
         case ModelErrorCode::unavailable_tool: return "unavailable_tool";
@@ -46,6 +47,22 @@ std::string_view modelFailureReason(ModelErrorCode code) {
         case ModelErrorCode::inference_failed: return "inference_failed";
     }
     return "inference_failed";
+}
+
+bool repairableModelOutput(ModelErrorCode code) {
+    return code == ModelErrorCode::invalid_tool_count || code == ModelErrorCode::invalid_tool_output ||
+        code == ModelErrorCode::unavailable_tool || code == ModelErrorCode::invalid_tool_arguments;
+}
+
+std::string modelFailureReply(ModelErrorCode code, bool ja) {
+    if (code == ModelErrorCode::authentication_required)
+        return ja ? "ChatGPTへのサインインが必要です。Flockの設定でサインインしてから、もう一度メッセージを送ってください。"
+                  : "This Flock needs a ChatGPT sign-in. Open Flock Settings, sign in to ChatGPT, then send your message again.";
+    if (code == ModelErrorCode::unsupported_reasoning_effort)
+        return ja ? "このモデルは選択された推論レベルに対応していません。Botの設定で別のレベルか「Model default」を選んでください。"
+                  : "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.";
+    return ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
+              : "I couldn't process this message. Please send it again.";
 }
 
 bool japanese(std::string_view text) {
@@ -439,6 +456,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
+    if (tool == "review_preference") {
+        if (step != 1 || !canReviewPreference(message)) throw ToolError("Automatic memory is unavailable");
+        return {{"ok",true}};
+    }
+    if (tool == "remember_preference") return rememberPreference(message,step,args,now);
+    if (tool == "skip_preference") return {{"ok",true}};
     if (tool == "read_tool_result") {
         const auto sourceMessage = identifier(args,"messageId",true);
         const auto sourceStep = identifier(args,"step",true);
@@ -791,8 +814,14 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         tools.insert(tools.end(),botToolNames().begin(),botToolNames().end());
     }
     if (!message.channelScope.empty()) tools.insert(tools.end(),channelTools.begin(),channelTools.end());
-    const auto available = [&] {
+    const auto available = [&](int step, bool reviewPreference) {
+        if (reviewPreference) {
+            std::vector<std::string> reviewTools{"skip_preference"};
+            if (canReviewPreference(message)) reviewTools.push_back("remember_preference");
+            return std::pair{std::move(reviewTools),Json::array()};
+        }
         auto offered = tools;
+        if (step == 1 && canReviewPreference(message)) offered.push_back("review_preference");
         auto machines = Json::array();
         if (!notification) {
             for (const auto& [machineId,machine] : localMachines)
@@ -808,8 +837,6 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         if (authorizeTurn(message)) finishTurn(message,std::move(text),nullptr,route);
         transaction.commit();
     };
-    const auto failure = ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
-                            : "I couldn't process this message. Please send it again.";
     const auto encodeCalls = [](const std::vector<ModelCall>& calls) {
         auto saved = Json::array();
         for (const auto& call : calls) {
@@ -842,8 +869,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                 const bool isRepair = checkpoint.attempt && query(
                     "SELECT 1 FROM conversation_model_failures WHERE repair_attempt_id=?",{checkpoint.attempt}).next();
                 Id repair = 0;
-                if (checkpoint.attempt && error.code != ModelErrorCode::inference_failed &&
-                    error.code != ModelErrorCode::authentication_required &&
+                if (checkpoint.attempt && repairableModelOutput(error.code) &&
                     !query("SELECT 1 FROM conversation_model_failures WHERE message_id=? AND repair_attempt_id IS NOT NULL",
                            {id}).next()) {
                     repair = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
@@ -856,10 +882,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                           repair ? Json(repair) : Json(nullptr)});
                 if (!repair) {
                     if (error.retryFrom && !isRepair) deferConversation(id,*error.retryFrom);
-                    else finishTurn(message,error.code == ModelErrorCode::authentication_required
-                        ? (ja ? "ChatGPTへのサインインが必要です。Flockの設定でサインインしてから、もう一度メッセージを送ってください。"
-                              : "This Flock needs a ChatGPT sign-in. Open Flock Settings, sign in to ChatGPT, then send your message again.")
-                        : failure,nullptr,"error");
+                    else finishTurn(message,modelFailureReply(error.code,ja),nullptr,"error");
                 }
             }
         }
@@ -873,17 +896,19 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         std::vector<ModelCall> calls;
         std::string effectType;
         bool hasWebEvidence = false;
+        bool reviewPreference = false;
         {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!authorizeTurn(message)) { transaction.commit(); return; }
+            reviewPreference = preferenceReviewPending(id,step);
             auto row = query("SELECT decision,result,json_type(effect) FROM conversation_steps WHERE message_id=? AND step=?",
                              {id,step});
             if (row.next()) {
                 if (!row.string(1).empty()) continue;
                 effectType = row.string(2);
                 if (!row.string(0).empty()) {
-                    const auto [offered,machines] = available();
+                    const auto [offered,machines] = available(step,reviewPreference);
                     bool rejectionChanged = false;
                     for (const auto& saved : row.json(0)) {
                         Decision call{saved.at("tool"),saved.at("args"),saved.at("reason")};
@@ -913,7 +938,7 @@ LIMIT 1
             const auto now = clock();
             BotNotes botNotes;
             try {
-                if (!notification) botNotes = loadNotes(message.bot,soul,now);
+                if (!notification && !reviewPreference) botNotes = loadNotes(message.bot,soul,now);
             } catch (const StorageError&) {
                 throw;
             } catch (const std::exception& error) {
@@ -924,7 +949,7 @@ LIMIT 1
                        "error");
                 return;
             }
-            const auto linkedDestinations = discoverLinkedTaskDestinations(t3,message.bot);
+            const auto linkedDestinations = reviewPreference ? LinkedTaskDestinations{} : discoverLinkedTaskDestinations(t3,message.bot);
             ModelInput input;
             {
                 std::lock_guard lock(mutex);
@@ -942,13 +967,29 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                         // A previous worker claimed the repair, but no result survived.
                         exec("INSERT INTO conversation_model_failures(attempt_id,message_id,step,reason) VALUES(?,?,?,?)",
                              {repair.number(0),id,step,"repair_interrupted"});
-                        finishTurn(message,failure,nullptr,"error");
+                        finishTurn(message,modelFailureReply(ModelErrorCode::inference_failed,ja),nullptr,"error");
                         transaction.commit();
                         return;
                     }
                     feedback = "The previous model response was rejected before executing any of its tools. "
                                "Reason: " + repair.string(2) + ". Return offered tools with valid arguments. "
                                "Batch independent reads, and propose replies or actions that make changes on their own.";
+                }
+                auto [offered,machines] = available(step,reviewPreference);
+                if (reviewPreference) {
+                    auto prepared = preferenceReviewInput(message,std::move(offered),std::move(feedback),now);
+                    if (!prepared) {
+                        const std::vector<ModelCall> skipped{
+                            ModelCall{Decision{"skip_preference",Json::object(),{}},{}}};
+                        exec(R"SQL(
+INSERT INTO conversation_steps(message_id,step,decision,result) VALUES(?,?,?,?)
+ON CONFLICT(message_id,step) DO UPDATE SET decision=excluded.decision,result=excluded.result
+WHERE conversation_steps.result IS NULL
+)SQL",{id,step,encodeCalls(skipped),Json::array({{{"ok",true}}})});
+                        transaction.commit();
+                        continue;
+                    }
+                    input = std::move(*prepared);
                 }
                 if (!query(R"SQL(
 SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
@@ -958,18 +999,21 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                     transaction.commit();
                     return;
                 }
-                std::vector<ModelImage> images;
-                auto [offered,machines] = available();
-                const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
-                input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
-                         .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
-                         .images = std::move(images)};
+                if (!reviewPreference) {
+                    std::vector<ModelImage> images;
+                    const auto context = turnInput(message,step,now,std::move(machines),images,linkedDestinations);
+                    input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
+                             .notes = botNotes,.tools = std::move(offered),.feedback = std::move(feedback),.config = message.routing.at("config"),
+                             .images = std::move(images)};
+                }
                 transaction.commit();
             }
             ConversationModelCheckpoint checkpoint{0,step,Json::object(),ConversationModelFailure{}};
             try {
-                authorizeSessionHistory(message,input.event.at("turn"),t3);
-                authorizeBotToolHistory(message.bot,id,input);
+                if (!reviewPreference) {
+                    authorizeSessionHistory(message,input.event.at("turn"),t3);
+                    authorizeBotToolHistory(message.bot,id,input);
+                }
                 {
                     std::lock_guard lock(mutex);
                     Transaction transaction(db);
