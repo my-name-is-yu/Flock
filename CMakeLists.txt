@@ -90,11 +90,7 @@ target_sources(flock_core PRIVATE src/session_question.cpp src/session_settings.
 target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl OpenSSL::Crypto cmark)
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
-<<<<<<< HEAD
-include(CTest)
 option(FLOCK_LIVE_TESTS "Register live ChatGPT and T3 tests in CTest" OFF)
-=======
->>>>>>> origin/main
 if(BUILD_TESTING)
   function(flock_verify_model name skill)
     set(model "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py")
