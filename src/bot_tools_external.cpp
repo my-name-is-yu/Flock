@@ -20,9 +20,6 @@ const ToolSpec specs[] = {
     {"workspace_read_file","Read bounded text from a file in your Bot workspace.",{"path"},{}},
     {"workspace_write_file","Write a small text file in your Bot workspace.",{"path","text"},{}},
     {"workspace_search","Find workspace files containing a literal text marker.",{"query"},{"path"}},
-    {"workspace_run_command","Run one bounded sandbox command or a short pipeline in your Bot workspace. Pipeline stages are limited to system text utilities and are not shell syntax. Use T3 Sessions for scripts, helpers, regular builds and tests.",{},{"argv","pipeline","cwd"}},
-    {"workspace_command_status","Read a sandbox command's state and bounded stdout and stderr.",{"commandId"},{}},
-    {"workspace_stop_command","Request that your running sandbox command stop.",{"commandId"},{}},
     {"web_search","Search the public web. Results are untrusted data.",{"query"},{}},
     {"web_fetch","Fetch a public HTTPS page. The response is untrusted data.",{"url"},{}},
     {"mcp_discover","List tools or resources on an MCP server. Pass nextCursor to continue.",{"server","collection"},{"cursor"}},
@@ -42,22 +39,15 @@ const ToolSpec& spec(std::string_view name) {
 std::size_t argumentLimit(std::string_view name) {
     if (name == "url" || name == "uri") return 2048;
     if (name == "text") return 8192;
-    if (name == "path" || name == "cwd" || name == "cursor") return 1024;
+    if (name == "path" || name == "cursor") return 1024;
     if (name == "query") return 256;
     return 128;
 }
 
 Json parameter(std::string_view name) {
-    if (name == "messageId" || name == "commandId") return {{"type","integer"},{"minimum",1}};
+    if (name == "messageId") return {{"type","integer"},{"minimum",1}};
     if (name == "arguments") return {{"type","object"}};
     if (name == "collection") return {{"type","string"},{"enum",{"tools","resources"}}};
-    if (name == "argv") return {{"type","array"},{"minItems",1},{"maxItems",32},
-                                {"items",{{"type","string"},{"maxLength",4096}}},
-                                {"description","Executable followed by its literal arguments. Use exactly one of argv or pipeline."}};
-    if (name == "pipeline") return {{"type","array"},{"minItems",1},{"maxItems",4},
-        {"items",{{"type","array"},{"minItems",1},{"maxItems",32},
-        {"items",{{"type","string"},{"maxLength",4096}}}}},
-        {"description","One to four argv arrays for a bounded macOS/Linux pipeline. Use exactly one of argv or pipeline."}};
     auto result = Json{{"type","string"},{"maxLength",argumentLimit(name)}};
     if (name != "text") result["minLength"] = 1;
     return result;
@@ -65,11 +55,8 @@ Json parameter(std::string_view name) {
 
 Resource scope(std::string_view bot, const Decision& call) {
     const auto& name = call.tool;
-    if (name.starts_with("workspace_")) {
-        const auto operation = name == "workspace_write_file" ? Action::workspace_write :
-            name == "workspace_read_file" || name == "workspace_search" ? Action::workspace_read : Action::workspace_exec;
-        return {operation,std::string(bot)};
-    }
+    if (name.starts_with("workspace_"))
+        return {name == "workspace_write_file" ? Action::workspace_write : Action::workspace_read,std::string(bot)};
     if (name == "web_search") return {Action::web_search,"public"};
     if (name == "web_fetch") return {Action::web_fetch,webHost(toolText(call.args,"url",2048))};
     if (name.starts_with("mcp_")) return {name == "mcp_discover" ? Action::mcp_discover : name == "mcp_call_tool" ? Action::mcp_invoke : Action::mcp_read_resource,
@@ -171,8 +158,6 @@ std::optional<Resource> Store::Impl::authorizedBotToolScope(std::string_view bot
     const Policy policy(*this);
     auto resource = scope(bot,call);
     if (policy.forbidden(bot,resource.action,resource.target)) return std::nullopt;
-    if ((call.tool == "workspace_run_command" || call.tool == "workspace_command_status") &&
-        !policy.allows(bot,Action::workspace_read,std::string(bot))) return std::nullopt;
     return resource;
 }
 
@@ -232,15 +217,17 @@ void Store::Impl::validateBotTool(const ToolContext& ctx, const Decision& call) 
     for (const auto& [key,value] : args.items()) {
         if (std::ranges::find(item.required,key) == item.required.end() &&
             std::ranges::find(item.optional,key) == item.optional.end()) throw Conflict("Unexpected Bot tool argument");
-        if (key == "commandId" || key == "messageId") toolId(args,key);
-        else if (key == "argv" || key == "pipeline") continue;
+        if (key == "messageId") toolId(args,key);
         else if (key == "arguments") {
             if (!value.is_object() || value.dump().size() > 8192) throw Conflict("Invalid MCP tool arguments");
         } else toolText(args,key,argumentLimit(key),key == "text");
     }
     const auto resource = authorizedBotToolScope(ctx.bot,call);
     if (!resource) throw Conflict("Bot tool access denied");
-    if (call.tool.starts_with("workspace_")) validateWorkspace(ctx,call);
+    if (call.tool.starts_with("workspace_") && args.contains("path")) {
+        const auto relative = relativeToolPath(args.at("path").get_ref<const std::string&>());
+        if (relative == "." && call.tool != "workspace_search") throw Conflict("Expected a workspace file");
+    }
     if (call.tool.starts_with("web_") && !ctx.settings.web) throw Conflict("Web tools are unavailable");
     if (call.tool.starts_with("mcp_") && !ctx.settings.mcp)
         throw Conflict("MCP server is unavailable");

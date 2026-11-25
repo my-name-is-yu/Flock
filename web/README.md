@@ -6,6 +6,8 @@ The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`
 
 The Bot explains results and next steps in its reply. Task decision and Git change rationales are recorded in the corresponding CLI history.
 
+Bots can read, write, and search files in their own workspaces. Requests to run commands, scripts, builds, or tests go to T3 Sessions. If a Session needs a file it cannot access, the Bot asks you to make it available in the selected T3 project.
+
 The Bot's name and **needs you** count above its chat open the items waiting on you. The Bot list also shows a count shortcut. A question card uses the composer to answer its exact target through `POST /api/inbox/decide`. A pull request review card uses the composer to send a message to the Bot through `POST /api/messages`, with the review as the reply target. The review stays in **Needs you** until you respond. **History**, in the conversation controls and the Bot's menu, lists what you have already answered or approved.
 
 The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `sessionCursor` as `sessionsAfter` on the next view request to receive the groups that recorded a new Run. Each returned group includes its full list of Sessions. To continue paging backwards, pass the last page’s `sessionsBefore` to `GET /api/sessions?bot=...&before=...`.
@@ -99,7 +101,8 @@ Use **Appearance** to set the theme for the current browser. Use **Permissions**
 to set the installation's permission mode and rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
-[category defaults](../README.md#installation-policy).
+[category defaults](../README.md#installation-policy). Rules added here or
+from an approval card stay in the list until an administrator removes them.
 
 Installation administrators manage ChatGPT, T3, and other integrations in
 **Connections**. Local discovery and URL connections both use T3 OAuth.
@@ -180,6 +183,10 @@ shows the number of images attached. Bot inspection follows the `attachment.insp
 in the current page and are cleared on reload.
 
 ## Memory and automation
+
+Model input starts with the Bot's role, private memory, and earlier conversation
+history. Flock puts the current event and tool results near the end to lengthen
+the prefix shared by requests for the same Bot.
 
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared
 document, for example `team%2Fstaging.md`. `GET /api/memory/history` accepts the

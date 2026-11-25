@@ -2328,7 +2328,7 @@ void taskInferenceSurvivesWriterContention(bool modelFails, bool restart = false
     const auto opened = sqlite3_open((f.directory/"state.db").c_str(),&connection);
     const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(connection,sqlite3_close);
     check(opened == SQLITE_OK,"Could not open the fixture writer");
-    f.model.usage = {{"input_tokens",7}};
+    f.model.usage = {{"input_tokens",7},{"input_tokens_details",{{"cached_tokens",3}}}};
     f.model.script = [&](const ModelInput&) {
         check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,
               "Could not acquire the fixture write lock");
@@ -2358,11 +2358,12 @@ void taskInferenceSurvivesWriterContention(bool modelFails, bool restart = false
               "The Task repeated inference or lost the decision after the writer released its lock");
     }
     sqlite3_stmt* statement = nullptr;
-    check(sqlite3_prepare_v2(writer.get(),"SELECT json_extract(usage,'$.input_tokens') FROM model_attempts WHERE task_id=?",
+    check(sqlite3_prepare_v2(writer.get(),"SELECT json_extract(usage,'$.input_tokens'),"
+                             "json_extract(usage,'$.input_tokens_details.cached_tokens') FROM model_attempts WHERE task_id=?",
                              -1,&statement,nullptr) == SQLITE_OK,"Could not read the fixture model usage");
     const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> row(statement,sqlite3_finalize);
     check(sqlite3_bind_int64(row.get(),1,taskId) == SQLITE_OK && sqlite3_step(row.get()) == SQLITE_ROW &&
-          sqlite3_column_int(row.get(),0) == 7 && sqlite3_step(row.get()) == SQLITE_DONE,
+          sqlite3_column_int(row.get(),0) == 7 && sqlite3_column_int(row.get(),1) == 3 && sqlite3_step(row.get()) == SQLITE_DONE,
           "The Task did not save the original model attempt's usage");
 }
 
