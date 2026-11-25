@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <barrier>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -279,7 +280,7 @@ void savedDecisionIsAppliedWithoutAnotherModelCall() {
     const auto message = receive(store,"saved-decision","Write a release note");
     const auto id = std::to_string(message);
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision) VALUES(" + id +
-                ",1,'[{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"},\"reason\":\"Saved\"}]')");
+                ",1,'[{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"}}]')");
     RuntimeFixture execution(store);
     unsigned calls = 0;
     execution.model.conversation = [&](const ModelInput& input) {
@@ -830,19 +831,24 @@ void longResultsAreReadInChunks() {
 void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     Fixture fixture;
     Store store(fixture.database());
-    RuntimeFixture execution(store);
     auto limited = Fixture::bot();
-    limited.config["modelCallLimit"] = 1;
-    execution.model.conversation = [&](const ModelInput& input) -> Decision {
+    limited.config["modelCallLimit"] = 14;
+    int calls = 0;
+    const auto script = [&](const ModelInput& input) -> Decision {
         if (input.event["text"] == "Thanks") return say("You're welcome.");
-        if (turn(input).empty()) return {"find_tasks",Json::object(),"Look"};
+        if (++calls <= 27) return {"find_tasks",Json::object(),"Look"};
         return say("Nothing yet.");
     };
     const auto paused = receive(store,"limited","What is running?",0,limited);
     const auto later = receive(store,"later","Thanks");
-    execution.runtime.runConversations();
+    {
+        RuntimeFixture execution(store);
+        execution.model.conversation = script;
+        execution.runtime.runConversations();
+    }
     const auto pauses = store.pausedConversations("alpha");
-    check(pauses.size() == 1 && pauses[0]["route"] == "model_budget" && reply(store,paused)["route"] == "model_budget" &&
+    check(calls == 14 && pauses.size() == 1 && pauses[0]["allowance"] == 14 && pauses[0]["route"] == "model_budget" &&
+          reply(store,paused)["route"] == "model_budget" &&
           reply(store,later)["text"] == "You're welcome.","A paused turn blocked a later message or was not reported");
     const auto waitMessage = pauses[0]["messageId"].get<Id>();
     const InboxTarget target{"alpha",InboxKind::conversation_model_budget,pauses.at(0).at("replyToMessageId"),
@@ -854,7 +860,15 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
           "Reopening the journal lost a persisted pause");
     const auto beforeApproval = reopened.conversation("alpha",0,2);
     const auto cursor = reopened.conversationChangesSince(std::nullopt,"alpha").through;
-    reopened.decideInbox(localOwner,target,"approve");
+    std::barrier ready(2);
+    const auto approve = [&](Store& connection) {
+        ready.arrive_and_wait();
+        try { connection.decideInbox(localOwner,target,"approve"); return true; }
+        catch (const DecisionUnavailable&) { return false; }
+    };
+    auto first = std::async(std::launch::async,[&] { return approve(store); });
+    const auto second = approve(reopened);
+    check(second != first.get(),"The same pause was accepted twice or both approvals failed");
     const auto changes = reopened.conversationChangesSince(cursor,"alpha");
     const auto afterApproval = reopened.conversation("alpha",0,2);
     check(changes.through > cursor && changes.messages.at("alpha") == std::vector<Id>{paused,waitMessage} &&
@@ -865,15 +879,76 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     try { store.decideInbox(localOwner,target,"approve"); }
     catch (const Conflict&) { rejected = true; }
     check(rejected && store.pausedConversations("alpha").empty(),"The same pause was approved twice");
-    execution.runtime.runConversations();
+    Store afterRestart(fixture.database());
+    RuntimeFixture resumed(afterRestart);
+    resumed.model.conversation = script;
+    resumed.runtime.runConversations();
     Json answered;
     for (const auto& row : store.conversation("alpha",0,200))
         if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == paused && row["data"]["route"] == "reply")
             answered = row["data"];
-    check(answered["text"] == "Nothing yet." &&
-          fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(paused)) == 2 &&
-          fixture.count("SELECT attempts FROM model_budgets WHERE id='message/" + std::to_string(paused) + "'") == 2,
-          "The approved call did not resume the paused turn exactly once");
+    check(answered["text"] == "Nothing yet." && calls == 28 &&
+          fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(paused)) == 28 &&
+          fixture.count("SELECT call_limit FROM model_budgets WHERE id='message/" + std::to_string(paused) + "'") == 28,
+          "The full renewed allowance did not survive restart or was granted twice");
+}
+
+void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
+    Fixture fixture;
+    Store store(fixture.database());
+    auto limited = Fixture::bot();
+    limited.config["modelCallLimit"] = 3;
+    auto unrelated = Fixture::bot("beta");
+    unrelated.config["modelCallLimit"] = 1;
+    const auto message = receive(store,"shared","Write a release note",0,limited);
+    receive(store,"unrelated","Check another request",0,unrelated);
+    const auto script = [&](const ModelInput& input) -> Decision {
+        const auto steps = turn(input).size();
+        if (input.event.at("text") == "Check another request" || (steps > 0 && steps < 3))
+            return {"find_tasks",Json::object(),"Look up the work"};
+        if (steps == 0) return {"start_task",{{"request","Write a release note"}},"Start it"};
+        return say("I started the release note.");
+    };
+    Id taskId = 0;
+    {
+        RuntimeFixture execution(store);
+        execution.model.conversation = script;
+        execution.runtime.runConversations();
+        taskId = store.tasks("alpha").at(0).at("id");
+        execution.reach(store,taskId,"waiting");
+    }
+    const auto task = store.task(taskId);
+    const auto taskTarget = TaskTarget::from(task,task.at("wait").at("id"));
+    const auto pause = store.pausedConversations("alpha").at(0).at("messageId").get<Id>();
+    const InboxTarget turnTarget{"alpha",InboxKind::conversation_model_budget,message,pause,0,0,pause};
+    check(task.at("wait").at("reason") == "model_budget" && store.pausedConversations("beta").size() == 1,
+          "The fixture did not exhaust the shared and independent allowances");
+    const auto beforeApproval = store.conversationChangesSince(std::nullopt,"alpha").through;
+    if (approveTask) store.operate(localOwner,taskTarget,"approve");
+    else store.decideInbox(localOwner,turnTarget,"approve");
+    const auto changes = store.conversationChangesSince(beforeApproval,"alpha");
+    check(store.pausedConversations("alpha").empty() && store.task(taskId).at("wait").is_null() &&
+          store.pausedConversations("beta").size() == 1 && changes.messages.at("alpha") == std::vector<Id>{message,pause},
+          "Renewal did not clear both shared pauses, invalidate the conversation, or preserve the independent pause");
+    bool rejected = false;
+    try {
+        if (approveTask) store.decideInbox(localOwner,turnTarget,"approve");
+        else store.operate(localOwner,taskTarget,"approve");
+    } catch (const Conflict&) { rejected = true; }
+    check(rejected,"A sibling pause could grant another block from a stale approval");
+
+    Store reopened(fixture.database());
+    RuntimeFixture resumed(reopened);
+    resumed.model.conversation = script;
+    resumed.runtime.runConversations();
+    resumed.finish(reopened,taskId,"The release note is ready.");
+    auto events = reopened.conversation("alpha",0,200);
+    check(std::ranges::any_of(events,[&](const Json& row) {
+        return row.at("kind") == "conversation_reply" && row.at("data").at("replyToMessageId") == message &&
+               row.at("data").at("text") == "I started the release note.";
+    }) && reopened.inbox(localOwner,"alpha").empty() &&
+          fixture.count("SELECT call_limit FROM model_budgets WHERE id='message/" + std::to_string(message) + "'") == 6,
+          "Shared work did not finish after restart with exactly one new block");
 }
 
 void notesFailureReleasesUnusedApproval() {
@@ -997,6 +1072,8 @@ int main() {
         boundedContextAndOlderTasks();
         longResultsAreReadInChunks();
         budgetPauseLetsLaterMessagesRunAndApprovalResumes();
+        oneApprovalResumesSharedBudgetWaits(false);
+        oneApprovalResumesSharedBudgetWaits(true);
         notesFailureReleasesUnusedApproval();
         replyTargetsReachTheTurn();
         conversationPagesCombineTaskAndMessageHistory();

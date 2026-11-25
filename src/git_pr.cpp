@@ -100,7 +100,7 @@ INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,eve
 }
 
 Json Store::Impl::openGitPr(GitHost& host, const GitContext& context, const GitOpenPr& input,
-                               std::string_view invocation, bool newIntent) {
+                            std::string_view invocation, bool newIntent, std::string_view reason) {
     auto request = input;
     const auto& [base,head,baseRef,headRef] = request.target;
     const auto intent = std::string(invocation) + (newIntent ? "/new" : "");
@@ -123,8 +123,9 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
                  "(SELECT coalesce(max(id),0) FROM git_webhook_events),'pending',NULL,NULL)",
                  {request.operationId,base.host,base.repo,baseRef,head.repo,headRef,context.taskId,context.botId,
                   runJson(context.run),intent});
-            journal(context.taskId,"git_mutation",sharedRedactor().record(
-                gitJournal(context,"git_open_pr",base,prResult(request.operationId,"pending"))));
+            auto pending = prResult(request.operationId,"pending");
+            pending["reason"] = reason;
+            journal(context.taskId,"git_mutation",sharedRedactor().record(gitJournal(context,"git_open_pr",base,pending)));
         } else {
             if (operation.number(1) != context.taskId || operation.string(2) != context.botId)
                 throw Conflict("This PR target belongs to another task");

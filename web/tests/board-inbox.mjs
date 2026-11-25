@@ -404,7 +404,7 @@ async function exerciseLiveRetry() {
   if (badge.hidden || badge.textContent !== '2' || preview.textContent !== fixture.bot.preview ||
       !preview.querySelector('.presence-dot').hidden)
     throw new Error('The Bot row did not show the last message and a single waiting indicator');
-  const { width, height } = badge.getBoundingClientRect();
+  const { offsetWidth: width, offsetHeight: height } = badge;
   if (width < 24 || height < 24) throw new Error('The count button is smaller than 24 × 24 pixels');
   const stream = fixture.stream;
   await waitFor(() => document.getElementById('event-4'), 'The pending wait did not appear');

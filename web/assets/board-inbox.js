@@ -1,9 +1,9 @@
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
-import { actionLabel, approvalSummary } from './action-labels.mjs';
+import { actionLabel, approvalSummary, continuationLabel } from './action-labels.mjs';
 
 const labels = {
-  user_question: 'Question', extra_run: 'One more run', deadline: 'Deadline extension',
-  model_budget: 'Another model call', conversation_model_budget: 'Another model call',
+  user_question: 'Question', extra_run: 'Follow-up allowance used', deadline: 'Deadline extension',
+  model_budget: 'Step allowance used', conversation_model_budget: 'Step allowance used',
   unknown_delivery: 'Unconfirmed message to T3',
   protected_input: 'Secret value', pr_review: 'Pull request review',
   pr_reconciliation: 'Unconfirmed pull request',
@@ -14,10 +14,7 @@ const labels = {
   allow_next_time: 'Allow rule saved for this Flock',
 };
 const actions = {
-  extra_run: [['approve', 'Approve one run']],
   deadline: [['extend', 'Extend deadline']],
-  model_budget: [['approve', 'Approve one call']],
-  conversation_model_budget: [['approve', 'Approve one call']],
   unknown_delivery: [['reconcile', 'Check T3 again']],
   protected_input: [['supply', 'Save secret']],
   pr_reconciliation: [['reject_pr', 'Reject']],
@@ -212,7 +209,7 @@ function decisionCard(item, submit, source, question, busy) {
 
   const bodyLines = [];
   if (item.request && item.request !== item.requestTitle) bodyLines.push(item.request);
-  const prompt = approval ? approvalSummary(item.prompt, item) : item.prompt;
+  const prompt = item.allowance ? '' : approval ? approvalSummary(item.prompt, item) : item.prompt;
   if (prompt && prompt !== item.requestTitle && prompt !== item.request) bodyLines.push(prompt);
   // A bare pull request URL in the text repeats the card, so drop that line.
   const text = bodyLines.join('\n').split('\n')
@@ -255,9 +252,9 @@ function decisionCard(item, submit, source, question, busy) {
     btn.dataset.prNumber = pr.prNumber;
     buttons.append(btn);
   }
-  const choices = expiredApproval
-    ? [['allow_next_time', 'Allow next time for this Flock']]
-    : actions[item.itemKind];
+  const choices = item.allowance
+    ? [['approve', continuationLabel(item.allowance, item.itemKind === 'extra_run' ? 'round' : 'step')]]
+    : expiredApproval ? [['allow_next_time', 'Allow next time for this Flock']] : actions[item.itemKind];
   for (const [decision, title] of choices) {
     if (savesFlockRule(decision) && item.canSaveRule !== true) continue;
     const style = item.itemKind === 'pr_review' ? (decision === 'approve' ? 'primary' : 'secondary')
