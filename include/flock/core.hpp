@@ -439,6 +439,8 @@ public:
 private:
     class Maintenance;
     class TaskScheduler;
+    class TaskQuestions;
+    class TaskUpdates;
     struct Impl;
     std::unique_ptr<Impl> p_;
 };
