@@ -96,7 +96,8 @@ def validate_page(exchange, project, thread_id, run_id, cursor, has_more):
         cursor = position
     require(len(ids) == len(items), "read repeated an item")
     require(field(page, "hasMore", bool) == has_more, "wrong pagination state")
-    require(field(page, "nextPosition", int) == cursor, "page cursor does not match its last item")
+    if has_more or page.get("nextPosition") is not None:
+        require(field(page, "nextPosition", int) == cursor, "page cursor does not match its last item")
     field(page, "earlierPosition", int, nullable=True)
     return cursor, ids
 
@@ -137,14 +138,14 @@ def validate(exchanges):
             "expected thread-not-found error")
 
 
-def run_probe(handler, program, args, setup, env):
+def run_probe(handler, program, plan, setup, env):
     with ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
         server.origin = f"http://127.0.0.1:{server.server_port}"
         setup(server)
         worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02})
         worker.start()
         try:
-            subprocess.run([program, server.origin, *args], env=env, timeout=10, check=True)
+            subprocess.run([program, server.origin, json.dumps(plan)], env=env, timeout=10, check=True)
         finally:
             server.shutdown()
             worker.join()
@@ -171,7 +172,10 @@ def fixture_capture(fixture, program, capture_path, commit, env):
         server.state = {"sessionAskFixture": True}
         server.peer_recovery = server.multi_environment = server.stock_thread = False
 
-    run_probe(ObservedFixture, program, ("project", "offline-action", "missing-thread"), setup,
+    read = dict(view="messages", limit=1, maxCharsPerItem=100, runLimit=1)
+    plan = [dict(projectId="project", clientRequestId="offline-action"),
+            dict(timeoutMs=400, untilDelegatedWorkSettled=True), read, read, dict(read, threadId="missing-thread")]
+    run_probe(ObservedFixture, program, plan, setup,
               dict(env, FLOCK_RECORD_T3=str(capture_path), FLOCK_RECORD_COMMIT=commit))
     return observed
 
@@ -188,7 +192,7 @@ def replay(fixture, program, exchanges, env):
                 return
             exchange = next(remaining)
             expected = exchange["request"]
-            for name in ("id", "jsonrpc", "method"):
+            for name in ("jsonrpc", "method"):
                 require(request.get(name) == expected[name], f"replay request {name} mismatch")
             actual = request["params"]
             expected = expected["params"]
@@ -201,13 +205,13 @@ def replay(fixture, program, exchanges, env):
                 else:
                     require(name in actual and actual[name] == value, f"replay argument {name} mismatch")
             headers = {"Mcp_Session_Id": "fixture-session"} if request["method"] == "initialize" else {}
-            self.reply(exchange["response"], code=exchange["status"],
+            response = dict(exchange["response"], id=field(request, "id", int))
+            self.reply(response, code=exchange["status"],
                        event_stream=exchange["contentType"] == "text/event-stream", **headers)
             completed.append(exchange)
 
-    launch = exchanges[1]["request"]["params"]["arguments"]
-    missing_thread = exchanges[-1]["request"]["params"]["arguments"]["threadId"]
-    run_probe(Replay, program, (launch["projectId"], launch["clientRequestId"], missing_thread), lambda _: None, env)
+    plan = [exchange["request"]["params"]["arguments"] for exchange in exchanges[1:]]
+    run_probe(Replay, program, plan, lambda _: None, env)
     require(len(completed) == len(exchanges), "replay did not use the complete transcript")
 
 
@@ -230,11 +234,13 @@ def verify(fixture, program, recording):
 
     structured = copy.deepcopy(exchanges)
     for exchange in structured[1:]:
+        exchange["request"]["id"] = exchange["response"]["id"] = 2
         result = exchange["response"]["result"]
         if result.get("structuredContent") is None:
             result["structuredContent"] = json.loads(result["content"][0]["text"])
         result["structuredContent"]["extension"] = {"version": 1}
         result.pop("content", None)
+    structured[4]["response"]["result"]["structuredContent"]["nextPosition"] = None
     validate(structured)
     replay(fixture, program, structured, env)
 

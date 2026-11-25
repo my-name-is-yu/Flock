@@ -25,7 +25,6 @@ private:
     chatgpt::HttpTransport transport_;
     chatgpt::BrowserOpener opener_;
     std::string accessToken();
-    Json sendResponse(const Json&, std::size_t inspectedImageBytes, bool recordFlockContract);
 };
 
 Json responseRequest(const ModelInput&);

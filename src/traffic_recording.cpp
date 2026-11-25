@@ -64,7 +64,12 @@ std::unique_ptr<Capture> configure(Provider provider, const char* pathVariable) 
         return {};
     }
     try {
-        return std::make_unique<Capture>(path, provider, commit);
+        const auto* model = provider == Provider::ChatGPT ? std::getenv("FLOCK_RECORD_CHATGPT_MODEL") : "";
+        if (provider == Provider::ChatGPT && (!model || !validRevision(provider, model) || privateText(model))) {
+            refused("FLOCK_RECORD_CHATGPT_MODEL must name the model selected for capture");
+            return {};
+        }
+        return std::make_unique<Capture>(path, provider, commit, model);
     } catch (...) {
         refused("could not configure capture");
         return {};
@@ -99,6 +104,22 @@ Json Ids::replace(std::string_view domain, const Json& value) {
     return number;
 }
 
+void Fields::redact(std::initializer_list<std::string_view> keys) {
+    for (const auto key : keys) pick(key, redactedShape);
+}
+
+void Fields::counters(std::initializer_list<std::string_view> keys) {
+    for (const auto key : keys) pick(key, [](const Json& value) { return value.is_number_integer() ? value : redactedShape(value); });
+}
+
+void Fields::ids(Ids& ids, std::string_view domain, std::initializer_list<std::string_view> keys) {
+    for (const auto key : keys) pick(key, [&](const Json& value) { return ids.replace(domain, value); });
+}
+
+void Fields::literal(std::string_view key, std::initializer_list<std::string_view> allowed) {
+    pick(key, [&](const Json& value) { return literalOrRedacted(value, allowed); });
+}
+
 Capture* Capture::configured(Provider provider) noexcept {
     if (provider == Provider::T3) {
         static const auto capture = configure(provider, "FLOCK_RECORD_T3");
@@ -108,8 +129,8 @@ Capture* Capture::configured(Provider provider) noexcept {
     return capture.get();
 }
 
-Capture::Capture(std::filesystem::path path, Provider provider, std::string commit)
-    : path_(std::move(path)), provider_(provider), commit_(std::move(commit)) {
+Capture::Capture(std::filesystem::path path, Provider provider, std::string commit, std::string selectedRevision)
+    : path_(std::move(path)), provider_(provider), commit_(std::move(commit)), selectedRevision_(std::move(selectedRevision)) {
     if (!validCommit(commit_)) throw std::invalid_argument("Capture requires a full Git commit SHA");
 }
 
@@ -118,6 +139,7 @@ Capture::~Capture() {
 }
 
 bool Capture::append(std::string_view revision, const std::function<Json(Ids&)>& projection) noexcept {
+    if (!selectedRevision_.empty() && revision != selectedRevision_) return true;
     try {
         std::lock_guard lock(mutex_);
         if (writeFailed_) return false;

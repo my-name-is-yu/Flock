@@ -27,7 +27,7 @@ void checkIds() {
 
 void checkSink(const std::filesystem::path& path) {
     const std::string commit(40, 'a');
-    Capture capture(path, Provider::ChatGPT, commit);
+    Capture capture(path, Provider::ChatGPT, commit, "gpt-5-test");
     const auto accept = [](Ids& ids) {
         return Json{{"output", Json::array({ids.replace("item", "opaque-a"), ids.replace("item", "opaque-b")})}};
     };
@@ -43,6 +43,7 @@ void checkSink(const std::filesystem::path& path) {
         check(!capture.append("gpt-5-test", [&](Ids&) { return value; }) && !std::filesystem::exists(path),
               "capture created a file for potential private data");
     }
+    check(capture.append("account-name", accept) && !std::filesystem::exists(path), "capture persisted an unselected model slug");
     check(capture.append("gpt-5-test", [](Ids&) { return nullptr; }) && !std::filesystem::exists(path),
           "capture created a file for an excluded exchange");
     check(capture.append("gpt-5-test", accept), "capture refused a safe exchange");

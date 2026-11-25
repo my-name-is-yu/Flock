@@ -205,7 +205,7 @@ private:
         const auto event = Json::parse(data_, nullptr, false);
         data_.clear();
         if (event.is_discarded()) throw ModelError("Invalid JSON in ChatGPT response stream", false);
-        if (recording_) recording_->event(event, response);
+        if (recording_) recording_->event(event, response.status);
         const auto type = stringField(event, "type");
         if (type.empty()) throw ModelError("Invalid ChatGPT response event", false);
         const auto& result = field(event, "response");

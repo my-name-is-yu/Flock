@@ -10,14 +10,13 @@ public:
     ResponseRecording(recording::Capture&, const Json& request);
     ~ResponseRecording();
 
-    void event(const Json&, const HttpResponse&) noexcept;
+    void event(const Json&, long status) noexcept;
     void httpError(const HttpResponse&) noexcept;
 private:
     recording::Capture& capture_;
     const Json& request_;
     std::vector<Json> events_;
     long status_ = 0;
-    bool hasContentType_ = false;
     bool collectionFailed_ = false;
 };
 

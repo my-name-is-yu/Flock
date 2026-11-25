@@ -7,27 +7,39 @@ using namespace flockv0::t3detail;
 
 namespace {
 
-void probe(const std::string& origin, const std::string& project, const std::string& action, const std::string& missingThread) {
+Json readPage(Client& client, const std::string& thread, Json args, Id after) {
+    const auto view = args.at("view").get<std::string>();
+    const auto limit = args.at("limit").get<unsigned>();
+    const auto chars = args.at("maxCharsPerItem").get<int>();
+    const auto runs = args.at("runLimit").get<int>();
+    args["afterPosition"] = after;
+    return readThread(client, thread, view, limit, chars, std::move(args), runs);
+}
+
+void probe(const std::string& origin, const Json& plan) {
     Client client({.mcpUrl = origin + "/mcp", .token = "fixture.signed-token", .generation = {}, .label = {}});
-    const auto launch =
-        client.call("t3_thread_launch", {{"projectId", project},
-                                         {"clientRequestId", action},
-                                         {"title", "Flock task"},
-                                         {"message", "Check /Users/fixture/private@example.invalid\n\n[Flock action ID: " + action + "]"}});
+    auto launchArgs = plan.at(0);
+    launchArgs["title"] = "Flock task";
+    launchArgs["message"] =
+        "Check /Users/fixture/private@example.invalid\n\n[Flock action ID: " + launchArgs.at("clientRequestId").get<std::string>() + "]";
+    const auto launch = client.call("t3_thread_launch", std::move(launchArgs));
     const auto thread = launch.at("threadId").get<std::string>();
     const auto run = launch.at("runId").get<std::string>();
-    client.call("t3_thread_wait", {{"threadId", thread}, {"runId", run}, {"timeoutMs", 400}, {"untilDelegatedWorkSettled", true}});
+    auto waitArgs = plan.at(1);
+    waitArgs.update(Json{{"threadId", thread}, {"runId", run}});
+    client.call("t3_thread_wait", std::move(waitArgs));
 
     Id position = -1;
-    for (const bool hasMore : {true, false}) {
+    for (const auto index : {2, 3}) {
         const auto start = position;
-        auto page = readThread(client, thread, "messages", 1, 100, {{"afterPosition", start}});
+        const auto page = readPage(client, thread, plan.at(index), start);
         for (const auto& item : page.at("items")) advancePosition(item, position);
-        if (moreHistory(page, position, start) != hasMore) throw std::runtime_error("T3 recording did not advance through two pages");
+        if (moreHistory(page, position, start) != (index == 2)) throw std::runtime_error("T3 recording did not advance through two pages");
     }
 
     try {
-        readThread(client, missingThread, "messages", 1, 100, {{"afterPosition", -1}});
+        const auto& missing = plan.at(4);
+        readPage(client, missing.at("threadId").get<std::string>(), missing, -1);
     } catch (const Failure& error) {
         if (error.kind == Failure::Kind::Tool && error.reason == Failure::Reason::ThreadNotFound) return;
         throw;
@@ -38,9 +50,9 @@ void probe(const std::string& origin, const std::string& project, const std::str
 }
 
 int main(int argc, char** argv) {
-    if (argc != 5) return 2;
+    if (argc != 3) return 2;
     try {
-        probe(argv[1], argv[2], argv[3], argv[4]);
+        probe(argv[1], Json::parse(argv[2]));
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

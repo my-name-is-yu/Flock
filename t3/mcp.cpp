@@ -263,7 +263,6 @@ Json Client::rpc(std::string_view method, const Json& arguments) {
     const auto type = response.headers.find("content-type");
     const std::string_view contentType = type == response.headers.end() ? std::string_view{} : type->second;
     auto message = detail::decodeRpcResponse(response.body, contentType, id, [](std::string_view frame) {
-        // T3 ignores SSE events whose data fields are empty.
         if (frame.find_first_not_of('\n') == frame.npos) return Json();
         return parse(frame);
     });

@@ -260,6 +260,7 @@ void checkRecordings(const std::filesystem::path& recordingFile) {
     const app::test::Sandbox sandbox;
     const auto capturedFile = sandbox.path / "capture.jsonl";
     check(setenv("FLOCK_RECORD_CHATGPT", capturedFile.c_str(), 1) == 0 &&
+              setenv("FLOCK_RECORD_CHATGPT_MODEL", records[0].at("modelSlug").get_ref<const std::string&>().c_str(), 1) == 0 &&
               setenv("FLOCK_RECORD_COMMIT", records[0].at("captureCommit").get_ref<const std::string&>().c_str(), 1) == 0,
           "could not enable ChatGPT capture");
     constexpr auto privateText = "private-person@example.test /Users/private-person/work";

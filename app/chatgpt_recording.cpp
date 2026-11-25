@@ -1,32 +1,25 @@
 #include "chatgpt_recording.hpp"
+#include "flock/limits.hpp"
 
 #include <algorithm>
 
 namespace flockv0::app::chatgpt {
 namespace {
 
+using recording::Fields;
 using recording::literalOrRedacted;
+using recording::projectArray;
 using recording::redactedShape;
 
-void keep(Json& result, const Json& source, std::string_view key, const auto& project) {
-    if (auto it = source.find(key); it != source.end()) result[key] = project(*it);
-}
-
-void keepCounts(Json& result, const Json& source, std::initializer_list<std::string_view> keys) {
-    for (const auto key : keys)
-        keep(result, source, key, [](const Json& value) { return value.is_number() ? value : redactedShape(value); });
-}
-
 Json projectUsage(const Json& value) {
-    if (!value.is_object()) return redactedShape(value);
-    auto result = Json::object();
-    keepCounts(result, value, {"input_tokens", "output_tokens", "total_tokens"});
-    keep(result, value, "input_tokens_details", [](const Json& details) {
-        auto projected = redactedShape(details);
-        keepCounts(projected, details, {"cached_tokens"});
-        return projected;
+    Fields fields(value);
+    fields.counters({"input_tokens", "output_tokens", "total_tokens"});
+    fields.pick("input_tokens_details", [](const Json& details) {
+        Fields counts(details);
+        counts.counters({"cached_tokens"});
+        return counts.take();
     });
-    return result;
+    return fields.take();
 }
 
 Json errorCode(const Json& value) {
@@ -35,19 +28,18 @@ Json errorCode(const Json& value) {
                                      "rate_limit_exceeded", "service_unavailable", "subscription_sharing_usage_limit_exceeded"});
 }
 
-void keepErrorFields(Json& result, const Json& value) {
-    keep(result, value, "code", errorCode);
-    keep(result, value, "param",
-         [](const Json& param) { return literalOrRedacted(param, {"model", "reasoning", "reasoning.effort", "input"}); });
+void projectErrorFields(Fields& fields) {
+    fields.pick("code", errorCode);
+    fields.literal("param", {"model", "reasoning", "reasoning.effort", "input"});
 }
 
-void keepError(Json& result, const Json& value) {
-    keepErrorFields(result, value);
-    keep(result, value, "error", [](const Json& error) {
+void projectError(Fields& fields) {
+    projectErrorFields(fields);
+    fields.pick("error", [](const Json& error) {
         if (!error.is_object()) return errorCode(error);
-        auto projected = Json::object();
-        keepErrorFields(projected, error);
-        return projected;
+        Fields nested(error);
+        projectErrorFields(nested);
+        return nested.take();
     });
 }
 
@@ -94,68 +86,56 @@ Json projectArguments(const Json& value, const Json& schema, recording::Ids& ids
     if (!value.is_string()) return redactedShape(value);
     const auto& raw = value.get_ref<const std::string&>();
     const auto parseDepth = [](int depth, Json::parse_event_t, Json&) {
-        if (depth > 20) throw std::invalid_argument("Recorded tool arguments are nested too deeply");
+        if (depth > limits::model::maxToolArgumentDepth) throw std::invalid_argument("Recorded tool arguments are nested too deeply");
         return true;
     };
     if (raw.empty()) return "";
-    if (raw.size() > 32000) return "{";
+    if (raw.size() > limits::model::maxToolArgumentBytes) return "{";
     const auto args = Json::parse(raw, parseDepth, false);
     return args.is_discarded() ? "{" : projectArgument(args, schema, ids).dump();
 }
 
 Json projectItem(const Json& value, const Json& request, recording::Ids& ids) {
-    if (!value.is_object()) return redactedShape(value);
-    auto result = Json::object();
-    keep(result, value, "type", [](const Json& type) { return literalOrRedacted(type, {"function_call", "reasoning", "message"}); });
-    keep(result, value, "status", [](const Json& status) { return literalOrRedacted(status, {"in_progress", "completed", "incomplete"}); });
-    keep(result, value, "role", [](const Json& role) { return literalOrRedacted(role, {"assistant"}); });
-    keep(result, value, "namespace", [](const Json& name) { return literalOrRedacted(name, {"flock"}); });
-    keep(result, value, "id", [&](const Json& id) { return ids.replace("item", id); });
-    keep(result, value, "call_id", [&](const Json& id) { return ids.replace("call", id); });
+    Fields fields(value);
+    fields.literal("type", {"function_call", "reasoning", "message"});
+    fields.literal("status", {"in_progress", "completed", "incomplete"});
+    fields.literal("role", {"assistant"});
+    fields.literal("namespace", {"flock"});
+    fields.ids(ids, "item", {"id"});
+    fields.ids(ids, "call", {"call_id"});
     const auto& declared = declaredFunction(request, field(value, "name"));
-    keep(result, value, "name", [&](const Json& name) { return declared.is_null() ? redactedShape(name) : name; });
-    keep(result, value, "arguments", [&](const Json& args) { return projectArguments(args, field(declared, "parameters"), ids); });
-    return result;
+    fields.pick("name", [&](const Json& name) { return declared.is_null() ? redactedShape(name) : name; });
+    fields.pick("arguments", [&](const Json& args) { return projectArguments(args, field(declared, "parameters"), ids); });
+    return fields.take();
 }
 
 Json projectResponse(const Json& value, const Json& request, recording::Ids& ids) {
-    if (!value.is_object()) return redactedShape(value);
-    auto result = Json::object();
-    keep(result, value, "id", [&](const Json& id) { return ids.replace("response", id); });
-    keep(result, value, "status", [](const Json& status) {
-        return literalOrRedacted(status, {"queued", "in_progress", "completed", "incomplete", "failed", "cancelled"});
+    Fields fields(value);
+    fields.ids(ids, "response", {"id"});
+    fields.literal("status", {"queued", "in_progress", "completed", "incomplete", "failed", "cancelled"});
+    fields.pick("usage", projectUsage);
+    projectError(fields);
+    fields.pick("output", [&](const Json& output) {
+        return projectArray(output, [&](const Json& item) { return projectItem(item, request, ids); });
     });
-    keep(result, value, "usage", projectUsage);
-    keepError(result, value);
-    keep(result, value, "output", [&](const Json& output) {
-        if (!output.is_array()) return redactedShape(output);
-        auto items = Json::array();
-        for (const auto& item : output) items.push_back(projectItem(item, request, ids));
-        return items;
-    });
-    return result;
+    return fields.take();
 }
 
 Json projectEvent(const Json& value, const Json& request, recording::Ids& ids) {
-    if (!value.is_object()) return redactedShape(value);
-    auto result = Json::object();
-    keep(result, value, "type", [](const Json& type) {
-        return literalOrRedacted(type, {"response.created", "response.in_progress", "response.completed", "response.incomplete",
-                                        "response.failed", "response.output_item.added", "response.output_item.done",
-                                        "response.function_call_arguments.delta", "response.function_call_arguments.done",
-                                        "response.content_part.added", "response.content_part.done", "response.output_text.delta",
-                                        "response.output_text.done", "error"});
-    });
-    keepCounts(result, value, {"sequence_number", "output_index", "content_index"});
-    keep(result, value, "item_id", [&](const Json& id) { return ids.replace("item", id); });
-    keep(result, value, "response_id", [&](const Json& id) { return ids.replace("response", id); });
-    keep(result, value, "item", [&](const Json& item) { return projectItem(item, request, ids); });
-    keep(result, value, "response", [&](const Json& response) { return projectResponse(response, request, ids); });
-    keep(result, value, "usage", projectUsage);
-    keep(result, value, "arguments", redactedShape);
-    keep(result, value, "delta", redactedShape);
-    keepError(result, value);
-    return result;
+    Fields fields(value);
+    fields.literal("type", {"response.created", "response.in_progress", "response.completed", "response.incomplete", "response.failed",
+                            "response.output_item.added", "response.output_item.done", "response.function_call_arguments.delta",
+                            "response.function_call_arguments.done", "response.content_part.added", "response.content_part.done",
+                            "response.output_text.delta", "response.output_text.done", "error"});
+    fields.counters({"sequence_number", "output_index", "content_index"});
+    fields.ids(ids, "item", {"item_id"});
+    fields.ids(ids, "response", {"response_id"});
+    fields.pick("item", [&](const Json& item) { return projectItem(item, request, ids); });
+    fields.pick("response", [&](const Json& response) { return projectResponse(response, request, ids); });
+    fields.pick("usage", projectUsage);
+    fields.redact({"arguments", "delta"});
+    projectError(fields);
+    return fields.take();
 }
 
 std::string_view modelSlug(const Json& request) {
@@ -172,16 +152,15 @@ ResponseRecording::~ResponseRecording() {
     capture_.append(modelSlug(request_), [this](recording::Ids& ids) {
         auto events = Json::array();
         for (const auto& frame : events_) events.push_back(projectEvent(frame, request_, ids));
-        return Json{{"status", status_}, {"contentType", hasContentType_ ? "text/event-stream" : ""}, {"events", std::move(events)}};
+        return Json{{"status", status_}, {"contentType", "text/event-stream"}, {"events", std::move(events)}};
     });
 }
 
-void ResponseRecording::event(const Json& value, const HttpResponse& response) noexcept {
+void ResponseRecording::event(const Json& value, long status) noexcept {
     if (collectionFailed_) return;
     try {
         events_.push_back(value);
-        status_ = response.status;
-        hasContentType_ = !response.contentType.empty();
+        status_ = status;
     } catch (...) {
         collectionFailed_ = true;
     }
@@ -194,9 +173,9 @@ void ResponseRecording::httpError(const HttpResponse& response) noexcept {
             return Json{{"status", response.status},
                         {"contentType", response.contentType.empty() ? "" : "text/plain"},
                         {"body", response.body.empty() ? "" : "redacted"}};
-        auto projected = redactedShape(body);
-        keepError(projected, body);
-        return Json{{"status", response.status}, {"contentType", "application/json"}, {"body", projected.dump()}};
+        Fields fields(body);
+        projectError(fields);
+        return Json{{"status", response.status}, {"contentType", "application/json"}, {"body", fields.take().dump()}};
     });
 }
 
