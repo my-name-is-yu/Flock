@@ -75,7 +75,7 @@ const settings = (await read('/bot-settings.html')).toString().replace('<script 
       document.documentElement.dataset.flockResult = error.message;
     }
   </script>`);
-const contentTypes = {'.js': 'text/javascript', '.css': 'text/css'};
+const contentTypes = {'.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css'};
 const server = createServer(async (request, response) => {
   const {pathname} = new URL(request.url, 'http://localhost');
   try {

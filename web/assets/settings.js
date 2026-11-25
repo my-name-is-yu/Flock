@@ -1,5 +1,9 @@
 import { actionLabel, actionLabels } from '/action-labels.mjs';
 import {
+  browserNotificationsEnabled, listenForBrowserNotifications, notificationPermission, onNotificationPreferenceChange,
+  setBrowserNotifications,
+} from '/browser-notifications.mjs';
+import {
   confirmSetting, loadInstallation, postSettings, showInstallationUnavailable, statusBadge,
 } from '/installation-settings.js';
 import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
@@ -41,6 +45,29 @@ for (const input of themeInputs) {
     document.dispatchEvent(new CustomEvent('flock-theme', { detail: input.value }));
   };
 }
+
+const notificationsToggle = $('notifications-toggle');
+const notificationsStatus = $('notifications-status');
+function reflectNotifications() {
+  const note = { denied: 'Blocked in this browser.', unsupported: 'Unavailable in this browser.' }[notificationPermission()];
+  notificationsStatus.textContent = note ?? '';
+  notificationsStatus.hidden = !note;
+  notificationsToggle.hidden = !!note;
+  notificationsToggle.textContent = browserNotificationsEnabled() ? 'Turn off' : 'Turn on';
+}
+notificationsToggle.onclick = async () => {
+  notificationsToggle.disabled = true;
+  try { await setBrowserNotifications(!browserNotificationsEnabled()); }
+  catch { $('status').textContent = 'Couldn’t change notifications.'; }
+  finally {
+    reflectNotifications();
+    notificationsToggle.disabled = false;
+  }
+};
+onNotificationPreferenceChange(reflectNotifications);
+window.addEventListener('focus', reflectNotifications);
+reflectNotifications();
+listenForBrowserNotifications();
 
 async function load() {
   const modelAtStart = modelRequest;

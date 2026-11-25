@@ -3,6 +3,7 @@ import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
 import { actionLabel, approvalSummary, continuationLabel } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
+import { browserNotificationsEnabled, createBrowserNotifications, onNotificationPreferenceChange } from '/browser-notifications.mjs';
 import { createBotEditor } from '/bot-editor.js';
 import { createBotRoleCard } from '/bot-role.js';
 import { createBotWorkspaceCard } from '/bot-workspace.js';
@@ -2542,6 +2543,17 @@ function pullRequestSetting(bot) {
   return row;
 }
 let reopenSettingsOnClose = false;
+let finishingBotEditor = false;
+let notificationDestination;
+
+function followNotification() {
+  if (!notificationDestination || finishingBotEditor || elements['bot-editor'].open) return false;
+  const botId = notificationDestination;
+  notificationDestination = null;
+  selectBot(botId);
+  return true;
+}
+
 const botEditor = createBotEditor(elements['bot-editor'], {
   api,
   onDraft(draft) {
@@ -2551,7 +2563,13 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   async onSaved(savedBot, savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
-    await Promise.all([refreshBots(), view?.id === savedBot.id && view.refresh()]);
+    finishingBotEditor = true;
+    try {
+      await Promise.all([refreshBots(), view?.id === savedBot.id && view.refresh()]);
+    } finally {
+      finishingBotEditor = false;
+    }
+    if (followNotification()) return;
     if (savedMode === 'create') {
       selectBot(savedBot.id);
       return;
@@ -2563,6 +2581,7 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   onCancel(savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
+    if (followNotification()) return;
     if (savedMode === 'edit' && returnToSettings && view?.data) {
       openDetail({ kind: 'settings', section: 'general' });
     }
@@ -3543,6 +3562,13 @@ document.addEventListener('keydown', (event) => {
 });
 
 let syncRetry;
+const browserNotifications = createBrowserNotifications({
+  viewingBot: () => view?.id ?? null,
+  openBot(botId) {
+    notificationDestination = botId;
+    followNotification();
+  },
+});
 function retrySync() {
   if (!document.hidden) syncRetry ??= setTimeout(catchUp, 2500);
 }
@@ -3550,6 +3576,7 @@ function retrySync() {
 function catchUp() {
   clearTimeout(syncRetry);
   syncRetry = null;
+  void browserNotifications.refresh();
   if (document.hidden) return;
   void refreshBots();
   void view?.refresh();
@@ -3557,6 +3584,7 @@ function catchUp() {
 }
 
 const liveUpdates = createLiveUpdates(catchUp, (change) => {
+  if (change.list === true) void browserNotifications.refresh();
   if (document.hidden) return;
   if (change.list === true) void refreshBots();
   if (view && change.bot === view.id) void view.refresh(undefined, liveUpdates.live ? visibilityGeneration : null);
@@ -3565,8 +3593,9 @@ const liveUpdates = createLiveUpdates(catchUp, (change) => {
 });
 
 function subscribeToView() {
+  browserNotifications.updateViewing();
   if (document.hidden) {
-    liveUpdates.use(null);
+    liveUpdates.use(browserNotificationsEnabled() ? '/api/events' : null);
     return;
   }
   const params = new URLSearchParams();
@@ -3596,6 +3625,7 @@ new ResizeObserver(scheduleReadCheck).observe(elements.conversation);
 document.addEventListener('close', scheduleReadCheck, true);
 render();
 resumeUpdates();
+onNotificationPreferenceChange(resumeUpdates);
 document.addEventListener('visibilitychange', () => {
   visibilityGeneration++;
   resumeUpdates();
