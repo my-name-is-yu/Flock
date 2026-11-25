@@ -2,27 +2,6 @@
 #include "conversation_storage.hpp"
 
 namespace flockv0 {
-void Store::Impl::initializeBotPauseSchema() {
-    const auto installed = [&] { return query("SELECT 1 FROM pragma_table_info('session_message_sends') WHERE name='step'").next(); };
-    if (installed()) return;
-    Transaction transaction(db);
-    if (!installed()) {
-        exec(R"SQL(
-CREATE TABLE IF NOT EXISTS session_message_sends(
-  action TEXT PRIMARY KEY,
-  message_id INTEGER NOT NULL REFERENCES messages(id),
-  environment TEXT NOT NULL, thread TEXT NOT NULL, gateway_environment TEXT NOT NULL,
-  instruction TEXT NOT NULL, interrupt_at INTEGER, step INTEGER)
-)SQL");
-        if (!installed()) exec("ALTER TABLE session_message_sends ADD COLUMN step INTEGER");
-        exec("CREATE INDEX IF NOT EXISTS session_message_sends_by_message ON session_message_sends(message_id)");
-        exec("CREATE INDEX IF NOT EXISTS session_message_sends_due ON session_message_sends(interrupt_at) "
-             "WHERE interrupt_at IS NOT NULL");
-        exec("CREATE TABLE IF NOT EXISTS bot_pauses(bot TEXT PRIMARY KEY)");
-    }
-    transaction.commit();
-}
-
 bool Store::Impl::botDeleted(std::string_view bot) const {
     return query("SELECT 1 FROM deleted_bots WHERE bot=?", {bot}).next();
 }

@@ -86,30 +86,6 @@ InboxKind parseInboxKind(std::string_view name) {
     throw std::invalid_argument("Unknown inbox item kind");
 }
 
-void Store::Impl::initializeBoardInboxSchema() {
-    const char* schema = R"SQL(
-CREATE TABLE IF NOT EXISTS pr_review_items(
-    id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
-    target_revision INTEGER NOT NULL,
-    url TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL,
-    git_key TEXT, operation_id TEXT REFERENCES git_pr_operations(operation_id), candidates TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','changes_requested','linked','rejected','superseded')),
-    UNIQUE(task_id,git_key), CHECK((git_key IS NULL) <> (operation_id IS NULL)));
-CREATE UNIQUE INDEX IF NOT EXISTS pending_pr_reconciliation ON pr_review_items(operation_id) WHERE status='pending';
-CREATE INDEX IF NOT EXISTS pr_reviews_by_task ON pr_review_items(task_id,id);
-CREATE UNIQUE INDEX IF NOT EXISTS journal_pr_review_anchor ON journal(task_id,json_extract(data,'$.itemId'))
-    WHERE kind='pr_review_requested';
-CREATE TABLE IF NOT EXISTS inbox_decisions(
-    id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, item_kind TEXT NOT NULL, item_id INTEGER NOT NULL,
-    wait_id INTEGER NOT NULL, task_id INTEGER REFERENCES tasks(id),
-    target_revision INTEGER NOT NULL, target_generation INTEGER NOT NULL,
-    decided_by TEXT NOT NULL, decided_at INTEGER NOT NULL, decision TEXT NOT NULL,
-    UNIQUE(bot_id,item_kind,item_id,wait_id));
-CREATE INDEX IF NOT EXISTS inbox_decisions_by_bot ON inbox_decisions(bot_id,id);
-)SQL";
-    if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
-}
-
 std::vector<std::string> Store::Impl::visibleBoardBots(const Person& actor, std::string_view bot) {
     const Policy policy(*this);
     if (!bot.empty()) return policy.allows(actor, Action::bot_view, bot) ? std::vector{std::string(bot)} : std::vector<std::string>{};

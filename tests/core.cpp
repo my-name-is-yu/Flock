@@ -16,13 +16,16 @@ void check(bool b, std::string_view message) {
     if (!b) throw std::runtime_error(std::string(message));
 }
 
-void unsupportedSchemaLeavesDatabaseIntact(const std::filesystem::path& file, const char* schema) {
+void unsupportedSchemaLeavesDatabaseIntact(const std::filesystem::path& file, int application, int version, int currentVersion) {
     {
         sqlite3* raw = nullptr;
         const auto opened = sqlite3_open(file.c_str(), &raw);
         const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
         check(opened == SQLITE_OK, "could not open the old database fixture");
-        check(sqlite3_exec(db.get(), schema, nullptr, nullptr, nullptr) == SQLITE_OK, "could not create the unsupported database fixture");
+        const auto sql = "PRAGMA application_id=" + std::to_string(application) + "; PRAGMA user_version=" + std::to_string(version) +
+                         "; CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES(1);";
+        check(sqlite3_exec(db.get(), sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
+              "could not create the unsupported database fixture");
     }
     const auto contents = [&] {
         std::ifstream data(file, std::ios::binary);
@@ -34,52 +37,34 @@ void unsupportedSchemaLeavesDatabaseIntact(const std::filesystem::path& file, co
     try {
         Store store(file);
     } catch (const Conflict& error) {
-        refused = std::string_view(error.what()).find("--home") != std::string_view::npos;
+        const std::string_view message = error.what();
+        check(message.find("(schema version " + std::to_string(version) + ")") != message.npos &&
+                  message.find("This build requires a Flock database at schema version " + std::to_string(currentVersion) + ".") !=
+                      message.npos &&
+                  message.find("Use --home with a new state directory") != message.npos,
+              "unexpected refusal for " + file.filename().string() + ": " + error.what());
+        refused = true;
     }
-    check(refused && contents() == original && !std::filesystem::exists(file.string() + "-wal"),
-          "opening unsupported state did not fail with guidance or changed the original database");
+    check(refused, "opening unsupported state succeeded: " + file.filename().string());
+    check(contents() == original && !std::filesystem::exists(file.string() + "-wal"),
+          "opening unsupported state changed the original database: " + file.filename().string());
 }
 
-void pauseSchemaPreservesExistingSessionReplies(const std::filesystem::path& file) {
-    {
-        Store store(file);
-        store.receiveWeb(localOwner, {"release", "Check staging", "env", "proj"}, "before-pause-schema", "Check staging");
-    }
-    {
-        sqlite3* raw = nullptr;
-        const auto opened = sqlite3_open(file.c_str(), &raw);
-        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
-        check(opened == SQLITE_OK, "could not open the existing Flock database fixture");
-        constexpr auto schema = R"SQL(
-DROP TABLE bot_pauses;
-DROP TABLE session_message_sends;
-DROP INDEX session_message_interrupts_due;
-DROP INDEX session_message_missing_targets;
-ALTER TABLE session_message_waits DROP COLUMN run_finished;
-ALTER TABLE session_message_waits DROP COLUMN interrupt_at;
-ALTER TABLE session_message_waits DROP COLUMN session_missing;
-INSERT INTO session_message_waits(message_id,bot,environment,thread,run,title)
-SELECT id,'release','env','thread','existing-run','Staging' FROM messages
-WHERE client_message_id='before-pause-schema';
-)SQL";
-        check(sqlite3_exec(db.get(), schema, nullptr, nullptr, nullptr) == SQLITE_OK && sqlite3_changes(db.get()) == 1,
-              "could not prepare the pre-Pause v9 database: " + std::string(sqlite3_errmsg(db.get())));
-    }
-    {
-        Store store(file);
-        store.setBotPaused(localOwner, "release", true);
-    }
-    {
-        Store store(file);
-        check(store.botPaused("release"), "Pause did not persist in the existing v9 database");
-        bool stopPending = false;
-        try {
-            store.deleteBot(localOwner, "release");
-        } catch (const BotBusy&) {
-            stopPending = true;
-        }
-        check(stopPending, "opening the existing v9 database discarded the pending Session reply");
-    }
+void checkSchemaRefusals(const std::filesystem::path& freshDatabase) {
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open_v2(freshDatabase.c_str(), &raw, SQLITE_OPEN_READONLY, nullptr);
+    const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
+    check(opened == SQLITE_OK, "could not read the fresh database fixture");
+    sqlite3_stmt* query = nullptr;
+    const auto prepared = sqlite3_prepare_v2(db.get(), "PRAGMA user_version", -1, &query, nullptr);
+    const std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> versionRow(query, sqlite3_finalize);
+    check(prepared == SQLITE_OK && sqlite3_step(query) == SQLITE_ROW, "could not read the fresh database version");
+    const int currentVersion = sqlite3_column_int(query, 0);
+    const auto dir = freshDatabase.parent_path();
+    unsupportedSchemaLeavesDatabaseIntact(dir / "unmarked.db", 0, 0, currentVersion);
+    unsupportedSchemaLeavesDatabaseIntact(dir / "unrelated.db", 123, currentVersion, currentVersion);
+    for (const int version : {1, 2, 6, 7, 8, 9, currentVersion + 1})
+        unsupportedSchemaLeavesDatabaseIntact(dir / ("version-" + std::to_string(version) + ".db"), 0x464c4f43, version, currentVersion);
 }
 
 void tickUntil(Runtime& runtime, const auto& satisfied, std::string_view failure) {
@@ -135,30 +120,6 @@ int main() {
     char temp[] = "/tmp/flock-core-XXXXXX";
     const auto path = std::filesystem::path(mkdtemp(temp));
     try {
-        unsupportedSchemaLeavesDatabaseIntact(path / "old-state.db",
-                                              "CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES (1);");
-        unsupportedSchemaLeavesDatabaseIntact(
-            path / "unrelated-state.db", "PRAGMA application_id=123; PRAGMA user_version=1; CREATE TABLE items(id INTEGER PRIMARY KEY);");
-        unsupportedSchemaLeavesDatabaseIntact(
-            path / "pre-policy-state.db",
-            "PRAGMA application_id=0x464c4f43; PRAGMA user_version=1; CREATE TABLE tasks(id INTEGER PRIMARY KEY);");
-        unsupportedSchemaLeavesDatabaseIntact(path / "full-policy-state.db",
-                                              "PRAGMA application_id=0x464c4f43; PRAGMA user_version=2;"
-                                              "CREATE TABLE policy_settings(id INTEGER PRIMARY KEY,mode TEXT NOT NULL);"
-                                              "INSERT INTO policy_settings VALUES (1,'full');");
-        unsupportedSchemaLeavesDatabaseIntact(path / "pre-project-selection.db",
-                                              "PRAGMA application_id=0x464c4f43; PRAGMA user_version=6;"
-                                              "CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES (1);");
-        unsupportedSchemaLeavesDatabaseIntact(path / "pre-gateway-identity.db",
-                                              "PRAGMA application_id=0x464c4f43; PRAGMA user_version=7;"
-                                              "CREATE TABLE session_message_waits(message_id INTEGER NOT NULL, bot TEXT NOT NULL,"
-                                              "environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL, title TEXT NOT NULL,"
-                                              "notified INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(message_id,environment,thread,run));"
-                                              "INSERT INTO session_message_waits VALUES (1,'release','env','thread','run','Session',0);");
-        unsupportedSchemaLeavesDatabaseIntact(path / "version-8.db",
-                                              "PRAGMA application_id=0x464c4f43; PRAGMA user_version=8;"
-                                              "CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES (1);");
-        pauseSchemaPreservesExistingSessionReplies(path / "pre-bot-pause.db");
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;
@@ -166,6 +127,7 @@ int main() {
         Id id;
         {
             Store store(db);
+            checkSchemaRefusals(db);
             Runtime runtime(store, model, t3, notes);
             id = store.submit({"release", "Check main", "env", "proj"});
             tickUntil(runtime, [&] { return store.task(id)["state"] == "running"; }, "delegate did not start");

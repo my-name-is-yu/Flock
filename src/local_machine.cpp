@@ -106,18 +106,6 @@ std::shared_ptr<LocalMachine> hostLocalMachine(std::string owner) {
     return std::make_shared<HostLocalMachine>(std::move(owner));
 }
 
-void Store::Impl::initializeLocalMachineSchema() {
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS local_machine_connections(
-      id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
-      environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, requested_run_id TEXT NOT NULL,
-      machine_id TEXT NOT NULL, machine_owner TEXT NOT NULL, rules TEXT NOT NULL,
-      status TEXT NOT NULL CHECK(status IN ('pending','approved','declined','disconnected')),
-      decided_by TEXT, decided_at INTEGER))SQL");
-    exec(R"SQL(CREATE UNIQUE INDEX IF NOT EXISTS local_machine_open_request
-      ON local_machine_connections(bot_id,task_id,environment_id,thread_id,machine_id)
-      WHERE status IN ('pending','approved'))SQL");
-}
-
 void Store::connectLocalMachine(std::string id, std::shared_ptr<LocalMachine> machine) {
     if (id.empty() || id.size() > 128 || !machine || machine->owner().empty()) throw Conflict("Invalid local machine");
     std::lock_guard lock(p_->mutex);
