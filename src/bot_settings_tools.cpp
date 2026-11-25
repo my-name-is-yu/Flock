@@ -42,7 +42,7 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     command.projectId = configuredT3Project(routing, id, name);
     command.config = config;
     command.actionId = actionId();
-    command.tool = "delegate";
+    command.tool = CommandTool::delegate;
     command.instruction = "Check environment readiness";
     try {
         if (command.projectId.empty()) {

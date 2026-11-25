@@ -132,7 +132,7 @@ struct SimulatedT3 : T3 {
     Delivery send(const Command& cmd) override {
         seen.push_back(cmd);
         check(cmd.authGeneration == generation, "OAuth generation missing from committed send");
-        if (cmd.tool == "answer_session_question") {
+        if (cmd.tool == CommandTool::answer_session_question) {
             if (std::exchange(failNextAnswerRead, false)) return {Delivery::Kind::Unknown, {}, "T3 question read failed", true};
             ++replies;
             check(cmd.questionId == "branch-question" && cmd.answers["branch"] == expectedBranch, "wrong T3 answer");
@@ -146,14 +146,14 @@ struct SimulatedT3 : T3 {
             return {Delivery::Kind::NotAccepted, {}, "The provisioned specialist worktree does not match the saved commit", true};
         const auto serial = launches + follows + selectedStarts + 1;
         RunRef run{"thread-" + std::to_string(launches + 1), "run-" + std::to_string(serial), "https://t3.test/thread"};
-        if (cmd.tool == "delegate")
+        if (cmd.tool == CommandTool::delegate)
             ++launches;
         else {
-            if (cmd.tool == "start_in_session") {
+            if (cmd.tool == CommandTool::start_in_session) {
                 check(!cmd.target.threadId.empty() && cmd.target.runId.empty(), "invalid selected Session target");
                 ++selectedStarts;
             } else {
-                check(cmd.tool == "follow_up" && !cmd.target.runId.empty(), "invalid follow-up target");
+                check(cmd.tool == CommandTool::follow_up && !cmd.target.runId.empty(), "invalid follow-up target");
                 ++follows;
             }
             run.threadId = cmd.target.threadId;
@@ -162,14 +162,14 @@ struct SimulatedT3 : T3 {
         check(assignments.emplace(cmd.actionId, run).second, "duplicated action");
         if (auto callback = std::exchange(beforeWorkAcknowledgement, {})) callback();
         if (std::exchange(loseAcknowledgement, false)) return {};
-        if (cmd.tool == "delegate" && std::exchange(delayLaunchRunId, false))
+        if (cmd.tool == CommandTool::delegate && std::exchange(delayLaunchRunId, false))
             return {Delivery::Kind::Unknown, {run.threadId, {}, run.link}, "Run ID pending"};
         return {Delivery::Kind::Accepted, run, {}};
     }
     Delivery reconcile(const Command& cmd) override {
         ++reconciles;
         recovery.push_back(cmd);
-        if (cmd.tool == "answer_session_question" && runs.at(cmd.target.runId).kind == Observation::Kind::Running)
+        if (cmd.tool == CommandTool::answer_session_question && runs.at(cmd.target.runId).kind == Observation::Kind::Running)
             return {Delivery::Kind::Accepted, {}, {}};
         if (!hasReconciledRun || !assignments.contains(cmd.actionId)) return {};
         return {Delivery::Kind::Accepted, assignments.at(cmd.actionId), {}};
@@ -1011,7 +1011,7 @@ void launchReceiptSurvivesRecovery() {
     f.store->operate(localOwner, TaskTarget::from(f.task(id), wait), "reconcile");
     f.t3.hasReconciledRun = true;
     f.reach(id, "running");
-    check(f.t3.recovery.back().launchReceiptThreadId == "thread-1" && f.t3.recovery.back().candidate.threadId.empty() && f.t3.launches == 1,
+    check(f.t3.recovery.back().launchReceiptThreadId == "thread-1" && !f.t3.recovery.back().candidate && f.t3.launches == 1,
           "reconciliation lost the launch receipt or sent another launch");
 }
 
@@ -1394,8 +1394,8 @@ void taskPagesShowProjectOwners() {
               older[1].at("blockedBy") == desktopOwner && f.store->tasks("alpha", desktopNext, 2).empty(),
           "the older page skipped a task, repeated the cursor or mixed up project owners");
     const auto active = f.store->activeTasks("alpha");
-    check(active.size() == 3 && active.front().at("id") == cloudNext && active.front().at("blockedBy") == cloudOwner &&
-              active.back().at("id") == desktopNext && active.back().at("blockedBy") == desktopOwner,
+    check(active.size() == 3 && active.front().task.at("id") == cloudNext && active.front().task.at("blockedBy") == cloudOwner &&
+              active.back().task.at("id") == desktopNext && active.back().task.at("blockedBy") == desktopOwner,
           "the active task list lost the owners of work in separate environments");
 
     const auto history = f.store->tasks({}, cloud, 1);
@@ -1859,8 +1859,8 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
               !f.logs(recipient, "peer_completed"),
           "failed reply bypassed the outstanding revision before deferral");
     for (int step = 0; step < 24 && f.t3.follows == 0; ++step) f.runtime->tick();
-    check(f.t3.follows == 1 && f.t3.seen.size() == 2 && f.t3.seen.back().tool == "follow_up" && f.t3.seen.back().target.runId == "run-1" &&
-              f.t3.seen.back().instruction.find(revisedCriteria) != std::string::npos &&
+    check(f.t3.follows == 1 && f.t3.seen.size() == 2 && f.t3.seen.back().tool == CommandTool::follow_up &&
+              f.t3.seen.back().target.runId == "run-1" && f.t3.seen.back().instruction.find(revisedCriteria) != std::string::npos &&
               f.task(recipient)["activeRun"]["runId"] == "run-2" && f.botMessages("alpha").size() == 1,
           "settling the old Run did not continue the same exchange under revised criteria");
 
@@ -1955,13 +1955,13 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
     f.reach(recipient, "running");
     const auto command = f.t3.seen.back();
     if (moves) {
-        check(f.t3.launches == 2 && f.t3.follows == 0 && command.tool == "delegate" && command.environmentId == "cloud" &&
+        check(f.t3.launches == 2 && f.t3.follows == 0 && command.tool == CommandTool::delegate && command.environmentId == "cloud" &&
                   command.target.threadId.empty() && command.target.runId.empty() &&
                   command.instruction.find("Verify the release") != std::string::npos &&
                   command.instruction.find("Previous verification found one failing check") != std::string::npos,
               "the fresh Session received the old target or lost the task context");
     } else {
-        check(f.t3.launches == 1 && f.t3.follows == 1 && command.tool == "follow_up" && command.target.runId == "run-1",
+        check(f.t3.launches == 1 && f.t3.follows == 1 && command.tool == CommandTool::follow_up && command.target.runId == "run-1",
               "the same-environment revision lost its existing Session");
     }
     check(attemptedInvalidDecision && sawAnswer && offeredFollowUp == !moves && f.t3.seen.size() == 2 &&

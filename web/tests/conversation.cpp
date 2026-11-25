@@ -160,7 +160,7 @@ struct FixedT3 : T3 {
         return {{"backup-release", "Backup release", "release"}};
     }
     Delivery send(const Command& command) override {
-        if (command.tool == "delegate") {
+        if (command.tool == CommandTool::delegate) {
             ++launches;
             if (command.projectId == "settings") return {Delivery::Kind::Settings, {}, privateValue};
             const auto& project = command.projectId;
@@ -170,7 +170,7 @@ struct FixedT3 : T3 {
             const auto link = project == "triage" ? "http://localhost:3773/linked%20env/" + thread : "javascript:unexpected";
             return {Delivery::Kind::Accepted, {std::move(thread), "run-" + std::to_string(launches), link}, {}};
         }
-        check(command.tool == "answer_session_question", "unexpected command in fixture");
+        check(command.tool == CommandTool::answer_session_question, "unexpected command in fixture");
         replies.push_back(command);
         observations.erase(command.target.threadId);
         return {Delivery::Kind::Accepted, {}, {}};

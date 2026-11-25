@@ -70,7 +70,7 @@ function(flock_fetch_cmark)
 endfunction()
 flock_fetch_cmark()
 
-add_library(flock_core STATIC src/store.cpp src/schema.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
+add_library(flock_core STATIC src/store.cpp src/schema.cpp src/wait.cpp src/outbox.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/run_reports.cpp src/project_slots.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
@@ -155,6 +155,12 @@ if(BUILD_TESTING)
   add_executable(flock_core_tests tests/core.cpp)
   target_link_libraries(flock_core_tests PRIVATE flock_core)
   add_test(NAME flock_core COMMAND flock_core_tests)
+  add_executable(flock_wait_records tests/wait_records.cpp)
+  target_link_libraries(flock_wait_records PRIVATE flock_core)
+  add_test(NAME flock_wait_records COMMAND flock_wait_records)
+  add_executable(flock_outbox_records tests/outbox.cpp)
+  target_link_libraries(flock_outbox_records PRIVATE flock_core)
+  add_test(NAME flock_outbox_records COMMAND flock_outbox_records)
   add_executable(flock_core_acceptance tests/core_acceptance.cpp)
   target_link_libraries(flock_core_acceptance PRIVATE flock_core)
   add_test(NAME flock_core_acceptance COMMAND flock_core_acceptance)
@@ -206,6 +212,8 @@ if(BUILD_TESTING)
   target_include_directories(flock_live_evidence PRIVATE app)
   target_link_libraries(flock_live_evidence PRIVATE flock_t3 flock_app_support)
   add_test(NAME flock_live_evidence_schema COMMAND flock_live_evidence --self-test)
+  add_test(NAME flock_verify_live_gate COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_live_gate.py")
   if(FLOCK_LIVE_TESTS)
     foreach(test flock_live_t3 flock_live_conversation flock_live_evidence)
       add_test(NAME ${test} COMMAND ${test} --live)

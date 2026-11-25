@@ -323,7 +323,7 @@ WHERE s.interrupt_at<=? ORDER BY s.interrupt_at,s.rowid LIMIT 20
                           {policyClock()});
         while (rows.next()) {
             Command command;
-            command.tool = "message_session";
+            command.tool = CommandTool::message_session;
             command.ownerBotId = rows.string(1);
             command.environmentId = rows.string(2);
             command.target.threadId = rows.string(3);
@@ -417,7 +417,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
     const bool fixesPullRequest = decision.tool == "fix_pull_request";
     const auto save = [&](Json result) { saveTurnResults(id, step, Json::array({redactor(message.bot).record(std::move(result))})); };
     Command command;
-    command.tool = "message_session";
+    command.tool = CommandTool::message_session;
     command.actionId = "flock-turn-" + actionId();
     command.ownerBotId = message.bot;
     const bool savedTaskTarget = decision.tool == "send_to_task";
@@ -590,10 +590,9 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                     selected.threadId != target.threadId || selected.runId.empty())
                     throw ToolError("The destination Session is unavailable");
                 const auto action = outbox(task, selected.actionId);
-                if (action.is_null() || !action.value("destinationAction", false) || action.value("phase", "") != "accepted" ||
-                    action.value("stopRequested", false) || field(action, "environmentId") != selected.environmentId ||
-                    field(action, "projectId") != selected.projectId ||
-                    field(action, "gatewayEnvironmentId") != selected.gatewayEnvironmentId)
+                if (!action || !action->destinationAction || action->phase != OutboxPhase::accepted || action->stop ||
+                    action->command.environmentId != selected.environmentId || action->command.projectId != selected.projectId ||
+                    action->command.gatewayEnvironmentId != selected.gatewayEnvironmentId)
                     throw ToolError("The destination Session is unavailable");
                 if (!query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
                            {selected.actionId, savedTaskId, selected.environmentId, selected.threadId, selected.runId})
@@ -754,9 +753,9 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
             const auto task = ownTask(taskId, message);
             if (generation != task.at("generation")) throw ToolError("stale", {{"taskId", taskId}, {"current", taskState(task, message)}});
             const auto selected = selectSavedDestination(task, decision.args, false);
-            const auto action = outbox(task, selected.actionId);
-            if (action.is_null() || !action.value("destinationAction", false) || field(action, "environmentId") != selected.environmentId ||
-                field(action, "projectId") != selected.projectId)
+            auto action = outbox(task, selected.actionId);
+            if (!action || !action->destinationAction || action->command.environmentId != selected.environmentId ||
+                action->command.projectId != selected.projectId)
                 throw ToolError("The destination is unavailable");
             if (!destinationRunOutstanding(selected.run)) {
                 save({{"ok", true}, {"effect", "already_settled"}, {"taskId", taskId}, {"destination", selected.name}});
@@ -764,18 +763,20 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
                 throw ToolError("The whole task is already stopping", {{"taskId", taskId}});
             } else if (terminal(task)) {
                 throw ToolError("The task is " + field(task, "state"), {{"taskId", taskId}});
-            } else if (action.value("stopRequested", false)) {
+            } else if (action->stop) {
                 save({{"ok", true}, {"effect", "already_requested"}, {"taskId", taskId}, {"destination", selected.name}});
             } else {
-                const auto phase = field(action, "phase");
-                if (phase != "ready" && phase != "started" && phase != "accepted") throw ToolError("The destination is unavailable");
+                const auto phase = action->phase;
+                if (phase != OutboxPhase::ready && phase != OutboxPhase::started && phase != OutboxPhase::accepted)
+                    throw ToolError("The destination is unavailable");
+                const bool hasRun = !selected.threadId.empty() && !selected.runId.empty();
                 const bool exactRun =
-                    phase == "accepted" && !selected.threadId.empty() && !selected.runId.empty() &&
+                    phase == OutboxPhase::accepted && hasRun &&
                     query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
                           {selected.actionId, taskId, selected.environmentId, selected.threadId, selected.runId})
                         .next();
-                if (phase == "accepted" && !exactRun) throw ToolError("The destination Session is unavailable");
-                const bool recoveredRun = phase == "started" && !selected.threadId.empty() && !selected.runId.empty();
+                if (phase == OutboxPhase::accepted && !exactRun) throw ToolError("The destination Session is unavailable");
+                const bool recoveredRun = phase == OutboxPhase::started && hasRun;
                 if (exactRun || recoveredRun) {
                     const Resource resource{Action::t3_send, Resource::sessionRead(selected.environmentId, selected.threadId).target};
                     auto origin = policyOrigin(message);
@@ -790,30 +791,21 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
                         return gate == ApprovalGate::waiting ? waiting : advance;
                     }
                 }
-                auto updated = action;
-                updated["stopRequested"] = true;
-                updated["stopOperation"] = key;
-                if (!selected.run.value("runId", std::string{}).empty()) {
-                    updated["stopRunId"] = selected.run.at("runId");
-                    updated["stopThreadId"] = selected.run.at("threadId");
-                }
-                if (phase == "started" && (selected.threadId.empty() || selected.runId.empty())) {
+                OutboxStop stop{.operation = std::string(key)};
+                if (!selected.runId.empty()) stop.run = OutboxRunIdentity{selected.threadId, selected.runId};
+                if (phase == OutboxPhase::started && !recoveredRun) {
                     const auto origin = policyOrigin(message);
-                    updated["stopPolicy"] = {{"tool", decision.tool},
-                                             {"args", decision.args},
-                                             {"generation", generation},
-                                             {"revisionId", task.value("currentRevision", Id{})}};
-                    updated["stopPolicyOrigin"] = {{"scope", origin.scope},
-                                                   {"requester", origin.requester},
-                                                   {"anchor", origin.anchor},
-                                                   {"turn", 0},
-                                                   {"background", origin.background}};
+                    stop.approval = OutboxStopApproval{.decision = {decision.tool, decision.args, {}},
+                                                       .generation = generation,
+                                                       .revisionId = task.value("currentRevision", Id{}),
+                                                       .scope = origin.scope,
+                                                       .requester = origin.requester,
+                                                       .anchor = origin.anchor,
+                                                       .turn = 0,
+                                                       .background = origin.background};
                 }
-                updated.erase("phase");
-                updated.erase("authGeneration");
-                exec("UPDATE outbox SET data=? WHERE id=? AND task_id=? AND phase=?",
-                     Json::array({updated, selected.actionId, taskId, phase}));
-                if (!sqlite3_changes(db)) throw ToolError("The destination changed before its stop request was saved");
+                action->stop = std::move(stop);
+                if (!saveOutbox(*action, phase)) throw ToolError("The destination changed before its stop request was saved");
                 exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL AND effect IS NULL",
                      {Json{{"kind", "destination_cancel"},
                            {"taskId", taskId},
@@ -1069,13 +1061,14 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
             clearWait(task, "request_changed");
             task["state"] = "queued";
         } else if (task.at("state") == "waiting" && waitIsActionable(task)) {
-            auto data = task.at("wait");
-            if (!data.is_object()) throw DecisionUnavailable{};
-            for (const auto* key : {"id", "messageId", "target"}) data.erase(key);
-            const auto reason = field(data, "reason");
+            auto previous = currentWait(task.at("id"));
+            if (!previous) throw DecisionUnavailable{};
+            const auto reason = previous->reason();
+            if (const auto allowance = waitAllowance(task.at("id"), reason)) previous->allowance = allowance;
             clearWait(task, "request_changed");
-            wait(task, reason, std::move(data));
-            if (task["question"].is_object()) task["question"]["target"] = questionTarget(task);
+            const auto waitId = wait(task, std::move(*previous));
+            if (task["question"].is_object())
+                task["question"]["target"] = questionTarget(task, reason == WaitReason::user_question ? waitId : 0);
         }
     }
     if (!task.contains("pendingInstructions")) task["pendingInstructions"] = Json::array();
@@ -1089,9 +1082,11 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
 void Store::Impl::recordTaskBlocker(Json& task, std::string_view reason, Id waitId) {
     if ((!reason.empty() && !conversation_storage::hasText(reason)) || reason.size() > 2000)
         throw Conflict("Provide a blocker reason of up to 2,000 bytes, or an empty string to clear it");
-    const auto& wait = task.at("wait");
-    if (waitId && (reason.empty() || task.at("state") != "waiting" || wait.is_null() || wait.at("id") != waitId || !waitIsActionable(task)))
-        throw DecisionUnavailable{};
+    if (waitId) {
+        const auto wait = currentWait(task.at("id"));
+        if (reason.empty() || task.at("state") != "waiting" || !wait || wait->id != waitId || !waitIsActionable(task))
+            throw DecisionUnavailable{};
+    }
     const auto publicReason = redactor(field(task, "botId")).text(std::string(reason));
     task.erase("blockerWaitId");
     if (reason.empty())
@@ -1106,13 +1101,14 @@ void Store::Impl::recordTaskBlocker(Json& task, std::string_view reason, Id wait
 }
 
 void Store::Impl::withdrawTaskQuestion(Json& task, Id waitId) {
-    const auto& wait = task.at("wait");
-    if (task.at("state") != "waiting" || field(wait, "reason") != "user_question" || wait.at("id") != waitId || !waitIsActionable(task))
+    const auto wait = currentWait(task.at("id"));
+    if (task.at("state") != "waiting" || !wait || wait->reason() != WaitReason::user_question || wait->id != waitId ||
+        !waitIsActionable(task))
         throw Conflict("The question is no longer open");
-    if (wait.contains("projectChoices")) throw Conflict("Choose a T3 project before this task can start");
+    if (std::holds_alternative<ProjectQuestionWait>(wait->details)) throw Conflict("Choose a T3 project before this task can start");
     auto updated = currentEvent(task);
     for (const auto* metadata : {"id", "failures", "retryAt", "evidence", "consumed"}) updated.erase(metadata);
-    updated["withdrawnUserQuestion"] = field(wait, "text");
+    updated["withdrawnUserQuestion"] = wait->text;
     consumeEvent(task);
     event(task, "withdraw/" + std::to_string(waitId), updated);
     clearWait(task, "withdrawn");

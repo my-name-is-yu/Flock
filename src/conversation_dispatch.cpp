@@ -188,7 +188,8 @@ Store::Impl::CallOutcome Store::Impl::executeConversationReply(const Message& me
             if (!continuesQuestion->is_boolean()) throw ToolError("continuesQuestion must be a boolean");
             if (continuesQuestion->get<bool>()) {
                 if (!message.question) throw ToolError("Use continuesQuestion only for a reply about the attached task question");
-                if (const auto error = questionAnswerError(load(message.question->taskId), message)) throw ToolError(error);
+                const auto taskId = message.question->taskId;
+                if (const auto error = questionAnswerError(load(taskId), message, currentWait(taskId))) throw ToolError(error);
                 question = &*message.question;
             }
         }

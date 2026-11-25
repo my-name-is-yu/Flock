@@ -45,7 +45,7 @@ public:
         return SessionMetadata{.title = "Original request", .project = "Fixture project", .projectId = "project"};
     }
     Delivery send(const Command& command) override {
-        if (command.tool == "message_session") {
+        if (command.tool == CommandTool::message_session) {
             sessionSends.push_back(command);
             if (afterSessionSend) afterSessionSend();
             return {Delivery::Kind::Accepted,

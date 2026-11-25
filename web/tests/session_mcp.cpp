@@ -241,7 +241,7 @@ void pausedBotStopsSessionMessages() {
             return SessionMetadata{.title = "Staging follow-up", .projectId = "origin-project"};
         }
         Delivery send(const Command& command) override {
-            check(command.tool == "message_session", "Unexpected command for a Session reply");
+            check(command.tool == CommandTool::message_session, "Unexpected command for a Session reply");
             const auto run = "bot-reply-" + std::to_string(++sends);
             if (sends == 3) {
                 unconfirmed = command;
@@ -843,7 +843,8 @@ void stopSelectedTaskAndConsultation() {
         }
         Delivery send(const Command& command) override {
             sends.push_back(command);
-            if (command.tool == "start_in_session") return {Delivery::Kind::Accepted, {"thread", "queued-task", {}}, {}, false, "queued"};
+            if (command.tool == CommandTool::start_in_session)
+                return {Delivery::Kind::Accepted, {"thread", "queued-task", {}}, {}, false, "queued"};
             return FixedT3::send(command);
         }
         Observation observe(const std::string&, const Json&, const RunRef&) override {

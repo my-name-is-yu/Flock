@@ -478,7 +478,21 @@ void stopRequesterDecidesCurrentStopApproval(const std::filesystem::path& path) 
     sqlite3_bind_int64(statement, 1, taskId);
     check(sqlite3_step(statement) == SQLITE_DONE, "could not activate the stop task");
     sqlite3_finalize(statement);
-    const Json outbox = {{"stopRequested", true}, {"stopOperation", "stop-request-1"}};
+    const Json outbox = {{"tool", "delegate"},
+                         {"environmentId", "env"},
+                         {"projectId", "project"},
+                         {"target", nullptr},
+                         {"questionId", ""},
+                         {"answers", Json::object()},
+                         {"revisionId", nullptr},
+                         {"instructions", Json::array()},
+                         {"contextIds", Json::object()},
+                         {"sourceResultRefs", Json::array()},
+                         {"chargesBudget", false},
+                         {"instruction", ""},
+                         {"destinationAction", true},
+                         {"stopRequested", true},
+                         {"stopOperation", "stop-request-1"}};
     check(sqlite3_prepare_v2(db.get(),
                              "INSERT INTO outbox(id,task_id,phase,auth_generation,data) VALUES('destination-action',?,'started','',?)", -1,
                              &statement, nullptr) == SQLITE_OK,

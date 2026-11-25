@@ -97,7 +97,7 @@ std::optional<SessionMemory> Store::Impl::sessionMemory(const Command& command, 
     }
     auto section = heading + excerpt;
     if (truncated) section += truncation;
-    if (command.tool == "follow_up") {
+    if (command.tool == CommandTool::follow_up) {
         auto prior = query(R"SQL(
 SELECT json_extract(o.data,'$.sessionMemory.section'),json_extract(o.data,'$.sessionMemory.excerptBytes')
 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id

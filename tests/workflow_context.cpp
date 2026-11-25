@@ -25,10 +25,11 @@ struct SessionService : T3 {
 
     std::string authGeneration(const std::string&, const Json&) override { return "test"; }
     Delivery send(const Command& command) override {
-        if (command.tool == "answer_session_question") return {Delivery::Kind::NotAccepted, {}, "Answer definitely unsent", true};
+        if (command.tool == CommandTool::answer_session_question)
+            return {Delivery::Kind::NotAccepted, {}, "Answer definitely unsent", true};
         commands.push_back(command);
         auto suffix = std::to_string(commands.size());
-        RunRef run{command.tool == "delegate" ? "thread-" + suffix : command.target.threadId, "run-" + suffix, "link-" + suffix};
+        RunRef run{command.tool == CommandTool::delegate ? "thread-" + suffix : command.target.threadId, "run-" + suffix, "link-" + suffix};
         require(runs.emplace(command.actionId, run).second, "duplicate T3 dispatch");
         if (std::exchange(loseReceipt, false)) return {Delivery::Kind::Unknown, {}, {}};
         return {Delivery::Kind::Accepted, run, {}};
@@ -283,7 +284,7 @@ void freshStandaloneSessionIncludesEarlierEvidence() {
     f.t3.finish("run-4", "Latest report: " + std::string(9000, 'z'));
     f.ticks(5);
     const auto& next = f.t3.commands.back();
-    require(f.t3.commands.size() == 5 && next.tool == "delegate" &&
+    require(f.t3.commands.size() == 5 && next.tool == CommandTool::delegate &&
                 next.instruction.find("Option B must preserve the retry window") != std::string::npos &&
                 next.instruction.find("Latest report:") != std::string::npos &&
                 next.instruction.find("Second Run found a duplicate entry") != std::string::npos &&
@@ -319,7 +320,7 @@ void verifyAfterRestart(bool advance) {
     require(f.status() == beforeRestart, "restart lost workflow IDs, dependencies or artifact evidence");
     f.ticks(3);
     auto status = f.status();
-    require(f.t3.commands.size() == 2 && f.t3.commands.back().tool == "delegate" &&
+    require(f.t3.commands.size() == 2 && f.t3.commands.back().tool == CommandTool::delegate &&
                 f.t3.commands.back().instruction.find(shaA) != std::string::npos &&
                 f.t3.commands.back().instruction.find("Implement feature") != std::string::npos &&
                 status["stages"][1]["inputArtifactVersion"] == shaA,
@@ -641,7 +642,8 @@ void reopenedStageWaitsForProject() {
     require(f.t3.commands.size() == 2, "older stage took another workflow's active slot");
     f.t3.finish("run-2", "Second workflow done");
     f.ticks(4);
-    require(f.t3.commands.size() == 3 && f.t3.commands.back().tool == "follow_up" && f.t3.commands.back().target.threadId == "thread-1",
+    require(f.t3.commands.size() == 3 && f.t3.commands.back().tool == CommandTool::follow_up &&
+                f.t3.commands.back().target.threadId == "thread-1",
             "reopened task lost its Session");
 }
 
@@ -708,7 +710,7 @@ void settledWhileReadingInstruction() {
     f.restart();
     f.ticks(6);
     const auto& next = f.t3.commands.back();
-    require(f.t3.commands.size() == 2 && next.tool == "delegate" && f.store->task(task)["runs"].size() == 2 &&
+    require(f.t3.commands.size() == 2 && next.tool == CommandTool::delegate && f.store->task(task)["runs"].size() == 2 &&
                 next.instruction.find("Keep the original row count") != std::string::npos &&
                 next.instruction.find("run-1") != std::string::npos && f.status()["artifacts"][0]["artifactVersion"] == shaA &&
                 f.status()["stages"][1]["taskId"] == 0,
@@ -867,7 +869,7 @@ void compactAndContinue() {
     auto after = f.store->task(task);
     require(after["doneWhen"] == before["doneWhen"] && after["currentRevision"] == before["currentRevision"] &&
                 after["inputArtifactVersion"] == shaA && after["activeRun"]["threadId"] == "thread-3" &&
-                f.t3.commands.back().tool == "delegate" && f.t3.commands.back().instruction.find(shaA) != std::string::npos &&
+                f.t3.commands.back().tool == CommandTool::delegate && f.t3.commands.back().instruction.find(shaA) != std::string::npos &&
                 f.store->history(task, 0, static_cast<unsigned>(history.size())) == history,
             "fresh continuation lost task provenance");
 }

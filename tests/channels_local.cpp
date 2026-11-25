@@ -52,7 +52,7 @@ struct SessionAdapter final : T3 {
     std::string authGeneration(const std::string&, const Json&) override { return "auth"; }
     Delivery send(const Command& command) override {
         ++launches;
-        const auto thread = command.tool == "follow_up" ? command.target.threadId : "thread-" + std::to_string(launches);
+        const auto thread = command.tool == CommandTool::follow_up ? command.target.threadId : "thread-" + std::to_string(launches);
         return {Delivery::Kind::Accepted, {thread, "run-" + std::to_string(launches), ""}, {}};
     }
     Delivery reconcile(const Command&) override { return {}; }
@@ -510,7 +510,7 @@ void taskUpdates(const std::filesystem::path& database) {
     model.decideNext = std::move(taskModel);
     const auto receipt = store.receiveChannel(channel, "fixture-auth", original, intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
-    const auto taskId = store.activeTasks("release").at(0).at("id").get<Id>();
+    const Id taskId = store.activeTasks("release").at(0).task.at("id");
     const auto active = store.task(taskId).at("activeRun");
     check(active.is_object(), "Channel task did not start a Session");
     t3.observeRun = [](const RunRef&) {
@@ -745,7 +745,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
                                  return route;
                              });
         for (int i = 0; i < 8; ++i) runtime.tick();
-        const auto task = store.activeTasks("release").at(0);
+        const auto task = store.task(store.activeTasks("release").at(0).task.at("id"));
         check(task.at("state") == "waiting" && transport->effects.back().at("payload").at("suggestions") == Json::array({"Yes", "No"}),
               "The task question was not posted");
         return std::pair{task, transport->effects.back().at("externalMessageId")};
@@ -861,8 +861,8 @@ void local(const std::filesystem::path& database, const std::string& path) {
         return Decision{"follow_up", {{"instruction", "Continue in this Session"}}, "The work needs one more Run"};
     };
     for (int i = 0; i < 5; ++i) runtime.tick();
-    for (const auto& task : store.activeTasks("release")) {
-        const auto active = store.task(task.at("id")).at("activeRun");
+    for (const auto& row : store.activeTasks("release")) {
+        const auto active = store.task(row.task.at("id")).at("activeRun");
         if (active.is_object() && active.at("threadId") == originalRun.at("threadId")) a = active;
     }
     check(a.at("runId") != originalRun.at("runId"), "Fixture did not start a follow-up Run in Session A");

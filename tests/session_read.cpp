@@ -375,7 +375,10 @@ void catalogResultsAreDeduplicatedAcrossRecordedBatches() {
         check(sqlite3_exec(writer.get(), R"SQL(
 WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<65)
 INSERT INTO outbox(id,task_id,phase,data)
-SELECT printf('fixture-%02d',n),tasks.id,'acked','{}' FROM numbers CROSS JOIN tasks;
+SELECT printf('fixture-%02d',n),tasks.id,'accepted',
+       '{"tool":"delegate","environmentId":"desktop","projectId":"project","target":null,"questionId":"","answers":{},
+         "revisionId":null,"instructions":[],"contextIds":{},"sourceResultRefs":[],"chargesBudget":false,"instruction":""}'
+FROM numbers CROSS JOIN tasks;
 INSERT INTO runs(action_id,task_id,environment_id,thread_id,run_id,link)
 SELECT id,task_id,'desktop',CASE WHEN id='fixture-65' THEN 'internal-staging-thread' ELSE id END,id,''
 FROM outbox;

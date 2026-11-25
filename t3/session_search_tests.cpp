@@ -250,7 +250,7 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
               wire.at("message") == sessionPrompt(requestId, "Ernest: Check the fixture output"),
           "Wrong Session send arguments");
     Command reconcile;
-    reconcile.tool = "message_session";
+    reconcile.tool = CommandTool::message_session;
     reconcile.environmentId = "env-1";
     reconcile.target.threadId = thread;
     reconcile.instruction = "Ernest: Check the fixture output";
