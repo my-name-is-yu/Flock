@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS session_message_waits(
   bot TEXT NOT NULL, environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL, title TEXT NOT NULL,
   gateway_environment TEXT NOT NULL DEFAULT '',
   notified INTEGER NOT NULL DEFAULT 0,
+  task_id INTEGER REFERENCES tasks(id), action_id TEXT REFERENCES outbox(id),
+  delivery TEXT NOT NULL DEFAULT 'started', link TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(message_id,environment,thread,run));
 CREATE TABLE IF NOT EXISTS task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -79,6 +81,18 @@ CREATE TABLE IF NOT EXISTS task_revisions(
   UNIQUE(task_id,number));
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK)
         throw StorageError(db);
+}
+
+void Store::Impl::upgradeSessionMessageWaitSchema() {
+    const auto addColumn = [&](std::string_view name, std::string_view definition) {
+        if (query("SELECT 1 FROM pragma_table_info('session_message_waits') WHERE name=?",{name}).next()) return;
+        const auto sql = "ALTER TABLE session_message_waits ADD COLUMN " + std::string(name) + " " + std::string(definition);
+        exec(sql.c_str());
+    };
+    addColumn("task_id","INTEGER REFERENCES tasks(id)");
+    addColumn("action_id","TEXT REFERENCES outbox(id)");
+    addColumn("delivery","TEXT NOT NULL DEFAULT 'started'");
+    addColumn("link","TEXT NOT NULL DEFAULT ''");
 }
 
 Id Store::Impl::addRevision(Json& task, std::string_view intent, std::string_view doneWhen, Id source) {

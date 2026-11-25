@@ -328,6 +328,9 @@ void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const 
     fixture.advanceUntil([&](const Json& task) {
         return Scenario::result(task,fixture.mini).value("status","") == "running";
     },"the linked target should launch through its gateway");
+    const auto expectedTargetLink = local.origin + "/" + fixture.mini.id() + "/" + threadId;
+    check(Scenario::result(fixture.task(),fixture.mini).value("link","") == expectedTargetLink,
+          "a linked launch URL must use the target environment, not its credential gateway");
     fixture.model.followUpTask = fixture.taskId;
     fixture.model.followUpGeneration = fixture.task().at("generation");
     const Intake routing{bot,{},local.id(),local.project(),{{"conversationEnvironments",{
@@ -338,8 +341,9 @@ void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const 
     fixture.store.receive(localOwner,routing,"linked-send-fixture","Send instruction to Mini");
     fixture.runtime.runConversations();
     check(fixture.model.sendResult.value("ok",false) && local.effects("t3_thread_send").size() == 1 &&
-          mini.effects("t3_thread_send").empty(),
-          "a saved linked-target follow-up must use the gateway credential and target environment ID");
+          mini.effects("t3_thread_send").empty() &&
+          Scenario::result(fixture.task(),fixture.mini).value("link","") == expectedTargetLink,
+          "a saved linked-target follow-up must use the gateway credential and preserve the target Session URL");
     fixture.model.cancelTask = fixture.taskId;
     fixture.model.cancelGeneration = fixture.task().at("generation");
     fixture.store.receive(localOwner,routing,"linked-stop-fixture","Stop Mini");
@@ -397,9 +401,11 @@ void resumeNativeLinkedRoute(const Endpoint& local, const Endpoint& mini,
                          "the linked stop should settle after process restart");
     const auto task = resumed.task();
     const auto result = Scenario::result(task,mini);
+    const auto expectedTargetLink = local.origin + "/" + mini.id() + "/" + result.value("threadId","");
     const auto routed = local.routedTargets();
     check(resumed.model.cancelResult.value("ok",false) && task.value("state","") == "completed" &&
           result.value("status","") == "interrupted" && result.value("gatewayEnvironmentId","") == local.id() &&
+          result.value("link","") == expectedTargetLink &&
           local.effects("t3_thread_launch").size() == 1 &&
           mini.effects("t3_thread_launch").empty() && local.effects("t3_thread_send").size() == 1 &&
           mini.effects("t3_thread_send").empty() && local.effects("t3_thread_interrupt").size() == 1 &&
@@ -435,9 +441,11 @@ void nativeLinkedUnknownAcceptance(const Endpoint& local, const Endpoint& mini,
     }
     const auto task = fixture.task();
     const auto result = Scenario::result(task,mini);
+    const auto expectedTargetLink = local.origin + "/" + mini.id() + "/" + result.value("threadId","");
     const auto routed = local.routedTargets();
     check(task.value("state","") == "completed" && result.value("status","") == "interrupted" &&
           result.value("gatewayEnvironmentId","") == local.id() &&
+          result.value("link","") == expectedTargetLink &&
           local.effects("t3_thread_launch").size() == 1 && mini.effects("t3_thread_launch").empty() &&
           local.effects("t3_thread_interrupt").size() == 1 && mini.effects("t3_thread_interrupt").empty() &&
           !routed.empty() && std::all_of(routed.begin(),routed.end(),[&](const auto& target) { return target == mini.id(); }),
@@ -901,6 +909,13 @@ int main(int argc, char** argv) {
         const std::filesystem::path directory = argv[3];
         const std::string commit = argv[4];
         const std::string_view phase = argv[5];
+        if (phase == "linked-routes") {
+            local.login(directory);
+            mini.login(directory);
+            linkedTargetUsesGateway(local,mini,directory);
+            nativeLinkedUnknownAcceptance(local,mini,directory);
+            return 0;
+        }
         if (phase == "native-start") {
             Scenario fixture(local,mini,directory,commit,"native-linked-restart");
             fixture.startNativeLinked();

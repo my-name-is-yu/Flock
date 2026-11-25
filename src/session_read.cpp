@@ -685,7 +685,9 @@ WHERE t.bot_id=? AND r.environment_id=? AND r.thread_id=? AND json_extract(o.dat
 )SQL",{message.bot,target.environmentId,target.threadId,parent.environmentId,parent.threadId}).next())
             return authorized();
     }
-    return connectedSessionEnvironments(message).contains(target.environmentId);
+    const auto connectionEnvironment = target.gatewayEnvironmentId.empty()
+        ? target.environmentId : target.gatewayEnvironmentId;
+    return connectedSessionEnvironments(message).contains(connectionEnvironment);
 }
 
 std::optional<WorkSession> Store::Impl::resolveWorkSession(const conversation::Message& message,

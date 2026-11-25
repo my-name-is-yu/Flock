@@ -29,6 +29,57 @@ bool destinationRunOutstanding(const Json& run) {
     return status == "queued" || status == "running" || status == "confirmation_pending";
 }
 
+bool destinationStopRequested(const Json& action, const RunRef& run) {
+    if (!action.is_object() || !action.value("stopRequested",false)) return false;
+    const auto runId = field(action,"stopRunId");
+    const auto threadId = field(action,"stopThreadId");
+    // Older stops referred to the outbox's original Run. Promotion clears that stop.
+    return (runId.empty() && threadId.empty()) || (runId == run.runId && threadId == run.threadId);
+}
+
+bool Store::Impl::advanceDestinationSessionMessageRun(Json& task, Json& run) {
+    auto pending = query(R"SQL(
+SELECT w.environment,w.thread,w.run,w.gateway_environment,w.delivery,w.link
+FROM session_message_waits w
+WHERE w.task_id=? AND w.action_id=?
+  AND w.environment=? AND w.thread=? AND w.gateway_environment=?
+  AND NOT EXISTS (
+    SELECT 1 FROM journal j WHERE j.task_id=? AND j.kind='report'
+      AND json_extract(j.data,'$.environmentId')=w.environment
+      AND json_extract(j.data,'$.run.runId')=w.run
+      AND json_extract(j.data,'$.run.threadId')=w.thread)
+ORDER BY w.rowid LIMIT 1)SQL",
+        {task.at("id"),field(run,"actionId"),field(run,"environmentId"),field(run,"threadId"),
+         field(run,"gatewayEnvironmentId"),task.at("id")});
+    if (!pending.next()) return false;
+    const auto environment = pending.string(0);
+    const auto thread = pending.string(1);
+    const auto runId = pending.string(2);
+    const auto gateway = pending.string(3);
+    const auto delivery = pending.string(4);
+    const auto link = pending.string(5);
+    if (runId == field(run,"runId")) return false;
+    exec("UPDATE runs SET thread_id=?,run_id=?,link=? WHERE action_id=? AND task_id=? AND environment_id=?",
+         {thread,runId,link.empty() ? field(run,"link") : link,field(run,"actionId"),task.at("id"),environment});
+    if (sqlite3_changes(db) != 1) return false;
+    run["threadId"] = thread;
+    run["runId"] = runId;
+    run["gatewayEnvironmentId"] = gateway;
+    if (!link.empty()) run["link"] = link;
+    run["status"] = delivery == "queued" ? "queued" : "running";
+    auto action = outbox(task,field(run,"actionId"));
+    if (action.value("stopRequested",false)) {
+        for (const auto* key : {"stopRequested","stopOperation","stopRunId","stopThreadId","stopPolicy","stopPolicyOrigin"})
+            action.erase(key);
+        exec("UPDATE outbox SET data=? WHERE id=?",{action,field(run,"actionId")});
+    }
+    for (const auto* key : {"commit","report","detail","evidenceStatus","sessionCreatedAt"}) run.erase(key);
+    run.erase("retryAt");
+    run.erase("stopRetryAt");
+    run.erase("evidenceAttempts");
+    return true;
+}
+
 bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observation& observed) {
     const auto ref = runRef(run);
     auto status = observed.status;
@@ -44,6 +95,10 @@ bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observati
         {"commit",observed.checkedCommit},
         {"revisionId",task.value("currentRevision",Json(nullptr))},{"resultRunId",observed.resultRunId.empty() ? ref.runId : observed.resultRunId}};
     if (task.contains("requestedCommit")) data["requestedCommit"] = task.at("requestedCommit");
+    if (status == "interrupted" || status == "cancelled") {
+        const auto action = outbox(task,field(run,"actionId"));
+        data["stopRequested"] = task.at("state") == "cancelling" || destinationStopRequested(action,ref);
+    }
     setReportEvidence(data,{observed.evidence,observed.report,observed.itemId,std::move(detail),
         observed.truncated,observed.sessionCreatedAt});
     for (const auto* key : {"status","commit","report","detail","evidenceStatus","sessionCreatedAt"})
@@ -55,7 +110,33 @@ bool Store::Impl::recordDestinationReport(Json& task, Json& run, const Observati
         clearWait(task,"run_finished");
         task["state"] = "running";
     }
-    journal(task.at("id"),"report",data);
+    auto priorReport = query("SELECT 1 FROM journal WHERE task_id=? AND kind='report' "
+                             "AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run.runId')=? "
+                             "AND json_extract(data,'$.run.threadId')=? AND json_extract(data,'$.revisionId') IS ? LIMIT 1",
+        {task.at("id"),run.at("environmentId"),ref.runId,ref.threadId,
+         task.value("currentRevision",Json(nullptr))});
+    if (!priorReport.next()) journal(task.at("id"),"report",data);
+    if (advanceDestinationSessionMessageRun(task,run)) return false;
+    auto pendingSends = query(R"SQL(
+SELECT json_extract(effect,'$.actionId') FROM conversation_steps
+WHERE json_extract(effect,'$.kind')='message_session'
+  AND json_extract(effect,'$.taskId')=?
+)SQL",{task.at("id")});
+    bool waitingForSend = false;
+    while (pendingSends.next()) {
+        waitingForSend = true;
+        const auto actionId = pendingSends.string(0);
+        const auto destination = std::ranges::find_if(task.at("runResults"),[&](const Json& candidate) {
+            return field(candidate,"actionId") == actionId;
+        });
+        if (destination == task.at("runResults").end()) continue;
+        if (!destinationRunOutstanding(*destination)) {
+            (*destination)["status"] = "confirmation_pending";
+            (*destination)["detail"] = "A Session message may have been accepted by T3, but Flock has no receipt to identify its Run. The task remains held.";
+            (*destination)["retryAt"] = policyClock() + 5;
+        }
+    }
+    if (waitingForSend) return false;
     const auto& results = task.at("runResults");
     if (std::ranges::any_of(results,destinationRunOutstanding)) return false;
     if (task.at("state") == "cancelling") return true;

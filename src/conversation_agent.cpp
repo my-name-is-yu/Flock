@@ -554,7 +554,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             if (revision != task.value("currentRevision",Id{0}))
                 throw ToolError("stale",{{"applied",0},{"taskId",task.at("id")},
                     {"expected",{{"revisionId",revision}}},{"current",taskState(task,message)}});
-            change = taskChange(message,args,task);
+            change = taskChange(message,args,task,linked);
         }
         const bool conflicting = acceptInstruction(task,message.id,step,
             instruction,result.is_null() ? Json(nullptr) : sourceRef(result),change ? &*change : nullptr);
@@ -588,7 +588,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                 {"taskId",task.at("id")},{"current",taskState(task,message)}};
     }
     if (tool == "cancel_task") {
-        if (args.contains("destination") || args.contains("environmentId") || args.contains("projectId"))
+        if (hasDestinationSelector(args))
             throw ToolError("Cancel one destination in a standalone cancel_task action");
         const auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
@@ -656,6 +656,21 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
 
 void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route,
                              const conversation::QuestionAnchor* question) {
+    const auto receipt = sessionSendReceipts.find(message.id);
+    if (receipt != sessionSendReceipts.end()) persistSessionSendReceipt(message.id,receipt->second);
+    if (route == "session_access" || route == "access" || route == "channel_access") {
+        auto pending = query(R"SQL(
+SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
+  AND json_extract(effect,'$.kind')='message_session'
+  AND json_extract(effect,'$.sendState')='prepared'
+)SQL",{message.id});
+        std::vector<int> steps;
+        while (pending.next()) steps.push_back(static_cast<int>(pending.number(0)));
+        for (const auto step : steps)
+            saveTurnResults(message.id,step,Json::array({redactor(message.bot).record({
+                {"ok",false},{"delivery","not_accepted"},
+                {"error","Access ended before the T3 Session message was sent."}})}));
+    }
     Json actions = Json::array();
     std::set<Id> touched;
     Json artifacts = Json::array();
@@ -711,10 +726,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
     std::erase_if(unpersistedToolResults,[&](const auto& entry) { return entry.first.first == message.id; });
-    if (const auto receipt = sessionSendReceipts.find(message.id); receipt != sessionSendReceipts.end()) {
-        recordSessionSendRun(message.id,receipt->second);
-        sessionSendReceipts.erase(receipt);
-    }
+    if (receipt != sessionSendReceipts.end()) sessionSendReceipts.erase(receipt);
 }
 
 Person Store::Impl::turnActor(const Message& message) {

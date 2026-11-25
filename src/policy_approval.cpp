@@ -102,12 +102,24 @@ bool Store::Impl::currentPolicyApproval(Id turn, Id task, Id revision, Id genera
     if (turn && !query("SELECT 1 FROM conversation_turns WHERE message_id=? AND status IN ('policy_waiting','running')",
                        {turn}).next()) return false;
     if (!task) return true;
-    if (operation.starts_with(runOutboxOperation))
+    if (operation.starts_with(runOutboxOperation) || operation.starts_with(runStopOperation)) {
+        const bool stopOperation = operation.starts_with(runStopOperation);
+        const auto prefix = stopOperation ? runStopOperation : runOutboxOperation;
+        if (stopOperation)
+            return query(R"SQL(
+SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
+WHERE t.id=? AND (o.id=? OR json_extract(o.data,'$.stopOperation')=?)
+  AND o.phase IN ('started','accepted') AND json_extract(o.data,'$.stopRequested')=1
+  AND t.state IN ('running','waiting')
+  AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
+)SQL",{task,operation.substr(prefix.size()),operation.substr(prefix.size()),revision}).next();
         return query(R"SQL(
 SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
-WHERE o.id=? AND t.id=? AND o.phase='ready' AND t.state IN ('running','waiting')
+WHERE o.id=? AND t.id=? AND o.phase='ready'
+  AND t.state IN ('running','waiting')
   AND coalesce(json_extract(t.data,'$.currentRevision'),0)=?
-)SQL",{operation.substr(runOutboxOperation.size()),task,revision}).next();
+)SQL",{operation.substr(prefix.size()),task,revision}).next();
+    }
     return query("SELECT 1 FROM tasks WHERE id=? AND generation=?"
                  " AND coalesce(json_extract(data,'$.currentRevision'),0)=?"
                  " AND state NOT IN ('cancelling','cancelled') AND (? OR state<>'completed')",{task,generation,revision,turn ? 1 : 0}).next();
@@ -181,7 +193,8 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.operation=?
         if (row.string(1) != action || row.string(2) != resource.target || row.string(3) != fingerprint(payload) ||
             !row.number(5) || row.number(7) != origin.turn || row.number(8) != origin.task ||
             row.number(9) != origin.revision ||
-            (!operation.starts_with(runOutboxOperation) && row.number(10) != origin.generation) ||
+            (!operation.starts_with(runOutboxOperation) && !operation.starts_with(runStopOperation) &&
+             row.number(10) != origin.generation) ||
             !currentPolicyApproval(origin.turn,origin.task,origin.revision,origin.generation,operation)) return ApprovalGate::stale;
         if (status == "expired" || status == "rule_saved" ||
             (status == "pending" && row.number(6) && row.number(6) <= now))

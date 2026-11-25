@@ -276,7 +276,9 @@ WHERE json_type(task.data,'$.runResults') IS NULL AND NOT EXISTS (
 )
 UNION ALL
 SELECT slot.id,slot.action_id FROM slots slot JOIN tasks task ON task.id=slot.id
-WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR (
+WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR EXISTS (
+  SELECT 1 FROM outbox stop WHERE stop.id=slot.action_id AND json_extract(stop.data,'$.stopRequested')=1
+) OR (
   slot.blocker_id IS NULL AND NOT EXISTS (
     SELECT 1 FROM policy_approvals WHERE operation=?1 || slot.action_id AND status='pending'
   )
@@ -944,7 +946,8 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
         const auto phase = field(action,"phase");
         const auto now = options.clock();
         const bool cancelling = task.at("state") == "cancelling";
-        const bool stopRequested = action.value("stopRequested",false);
+        const auto ref = runRef(run);
+        const bool stopRequested = destinationStopRequested(action,ref);
         const bool stopping = cancelling || stopRequested;
         if (stopping && phase == "ready") {
             applyDelivery(id,action,{Delivery::Kind::NotAccepted,{},"Cancelled before dispatch",true});
@@ -985,12 +988,12 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
         if ((phase == "ready" || phase == "started") && !stopRequested) return deliver(task,std::move(action));
         if (phase != "accepted") return;
         const auto cmd = command(task,action);
-        const auto ref = runRef(run);
         const auto observed = observeRun(cmd.ownerBotId,cmd.environmentId,cmd.config,ref);
         if (observed.kind == Observation::Kind::Finished) {
             changeTask(id,[&](Json& current) {
                 auto& saved = destinationRun(current,key);
-                if (!destinationRunOutstanding(saved)) return false;
+                if (!destinationRunOutstanding(saved) || field(saved,"threadId") != ref.threadId ||
+                    field(saved,"runId") != ref.runId) return false;
                 if (!stopping &&
                     (observed.commitEvidenceUnavailable || observed.evidence == RunEvidence::Availability::ReportUnavailable) &&
                     saved.value("evidenceAttempts",std::size_t{}) + 1 < maxEvidenceReads) {
@@ -1008,9 +1011,10 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
         using Kind = Observation::Kind;
         changeTask(id,[&](Json& current) {
             auto& saved = destinationRun(current,key);
-            if (!destinationRunOutstanding(saved)) return false;
+            if (!destinationRunOutstanding(saved) || field(saved,"threadId") != ref.threadId ||
+                field(saved,"runId") != ref.runId) return false;
             const auto savedAction = db.outbox(current,key);
-            const bool stopping = current.at("state") == "cancelling" || savedAction.value("stopRequested",false);
+            const bool stopping = current.at("state") == "cancelling" || destinationStopRequested(savedAction,ref);
             bool changed = false;
             if (observed.kind == Kind::Unavailable)
                 changed = setDestinationStatus(saved,"confirmation_pending","Flock could not confirm the Run's status in T3.");
@@ -1024,11 +1028,62 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             now < run.value("stopRetryAt",Seconds{})) return;
         if (!changeTask(id,[&](Json& current) {
             const auto savedAction = db.outbox(current,key);
+            const auto& saved = destinationRun(current,key);
             if (shutdown.stop_requested() ||
-                (current.at("state") != "cancelling" && !savedAction.value("stopRequested",false))) return false;
+                (current.at("state") != "cancelling" && !destinationStopRequested(savedAction,ref)) ||
+                field(saved,"threadId") != ref.threadId || field(saved,"runId") != ref.runId) return false;
             destinationRun(current,key)["stopRetryAt"] = now + 5;
             return true;
         })) return;
+        if (!cancelling && action.value("stopPolicy",Json(nullptr)).is_object()) {
+            ApprovalGate gate = ApprovalGate::stale;
+            {
+                std::lock_guard lock(db.mutex);
+                Transaction tx(db.db);
+                const auto current = db.load(id);
+                const auto resource = Resource{Action::t3_send,
+                    Resource::sessionRead(cmd.environmentId,ref.threadId).target};
+                auto origin = db.taskPolicyOrigin(current);
+                const auto savedOrigin = action.value("stopPolicyOrigin",Json::object());
+                if (savedOrigin.is_object()) {
+                    if (savedOrigin.contains("scope")) origin.scope = field(savedOrigin,"scope");
+                    origin.requester = field(savedOrigin,"requester");
+                    origin.anchor = savedOrigin.value("anchor",Id{});
+                    origin.turn = savedOrigin.value("turn",Id{});
+                    origin.background = savedOrigin.value("background",false);
+                }
+                origin.task = id;
+                origin.generation = action.at("stopPolicy").value("generation",Id{});
+                origin.revision = action.at("stopPolicy").value("revisionId",Id{});
+                const auto operationId = action.value("stopOperation",key);
+                gate = db.approveAction(origin,resource,std::string(runStopOperation) + operationId,
+                    action.at("stopPolicy"),now,true,Store::Impl::ApprovalWait::defer);
+                if (gate == ApprovalGate::allow) {
+                    auto approved = db.outbox(current,key);
+                    approved.erase("stopPolicy");
+                    approved.erase("stopPolicyOrigin");
+                    db.exec("UPDATE outbox SET data=? WHERE id=?",{approved,key});
+                } else if (gate != ApprovalGate::waiting) {
+                    auto updated = db.outbox(current,key);
+                    if (field(updated,"stopOperation") == operationId) {
+                        updated.erase("stopRequested");
+                        updated.erase("stopOperation");
+                        updated.erase("stopRunId");
+                        updated.erase("stopThreadId");
+                        updated.erase("stopPolicy");
+                        updated.erase("stopPolicyOrigin");
+                        db.exec("UPDATE outbox SET data=? WHERE id=?",{updated,key});
+                    }
+                }
+                tx.commit();
+            }
+            if (gate != ApprovalGate::allow) {
+                destinationStatus(id,key,gate == ApprovalGate::waiting ? "confirmation_pending" : "running",
+                    gate == ApprovalGate::waiting ? "Waiting for approval to stop the recovered T3 Run" :
+                    "The recovered T3 Run stop was denied by policy");
+                return;
+            }
+        }
         try {
             const SessionDispatchFileLock dispatch(db.path,SessionDispatchFileLock::Mode::shared);
             t3.interrupt(cmd.environmentId,cmd.config,ref);
@@ -1065,6 +1120,12 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             if (destination) {
                 auto& run = destinationRun(task,key);
                 if (!accepted) return deferDestinationDelivery(task,run,saved,outcome,delivery);
+                if (saved.value("stopRequested",false) && field(saved,"stopRunId").empty()) {
+                    auto updated = db.outbox(task,key);
+                    updated["stopRunId"] = outcome.run.runId;
+                    updated["stopThreadId"] = outcome.run.threadId;
+                    db.exec("UPDATE outbox SET data=? WHERE id=?",{updated,key});
+                }
                 run["status"] = "running";
                 run.erase("detail");
                 run.erase("retryAt");
@@ -1205,7 +1266,9 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         };
         const bool firstSend = action["phase"] == "ready";
         const auto disconnected = [&] {
-            return options.requireT3Connection && !db.t3EnvironmentConnected(cmd.environmentId);
+            const auto& connectionEnvironment = cmd.gatewayEnvironmentId.empty()
+                ? cmd.environmentId : cmd.gatewayEnvironmentId;
+            return options.requireT3Connection && !db.t3EnvironmentConnected(connectionEnvironment);
         };
         const auto connectionUnavailable = [&] {
             applyDelivery(id,action,{Delivery::Kind::Auth,{},
@@ -1782,13 +1845,7 @@ ORDER BY j.id
             if (destination && task.contains("requestedCommit")) {
                 out["expectedCommit"] = task.at("requestedCommit");
                 out["markedCommitChecks"] = true;
-                out["instruction"] = field(out,"instruction") +
-                    "\n\nVerify the requested commit " + field(task,"requestedCommit") +
-                    ". As your first command, run exactly `" + commit_check::before +
-                    "`. After all work and checks, run exactly `" + commit_check::after +
-                    "` as your final command. Run each as a standalone command using a command tool. "
-                    "Stop and report a mismatch if HEAD differs. Keep the checkout at the requested commit. "
-                    "After the final command, write a report with the checks and their outcomes.";
+                out["instruction"] = commit_check::instructions(field(out,"instruction"),field(task,"requestedCommit"));
             }
             out["instructionBase"] = db.redactor(field(task,"botId")).text(field(out,"instruction"));
             out.erase("instruction");

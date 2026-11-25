@@ -47,10 +47,15 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 std::string field(const Json&, std::string_view);
+inline bool hasDestinationSelector(const Json& args) {
+    return args.is_object() && (args.contains("destination") || args.contains("environmentId") ||
+                                args.contains("projectId") || args.contains("gatewayEnvironmentId"));
+}
 std::string conversationEnvironmentId(const Json& alias);
 std::string conversationGatewayEnvironmentId(const Json& alias);
 std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name = {});
 inline constexpr std::string_view runOutboxOperation = "run-outbox/";
+inline constexpr std::string_view runStopOperation = "run-stop/";
 bool terminal(const Json&);
 Json questionTarget(const Json&);
 std::string actionId();
@@ -60,6 +65,7 @@ Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 Json& destinationRun(Json& task, std::string_view action);
 bool destinationRunOutstanding(const Json& run);
+bool destinationStopRequested(const Json& action, const RunRef&);
 void setReportEvidence(Json&, const RunEvidence&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
@@ -342,6 +348,7 @@ struct Store::Impl {
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
     void initializeConversationSchema();
+    void upgradeSessionMessageWaitSchema();
     void initializeModelBudgetSchema();
     void initializeAttachmentsSchema();
     void saveAttachments(Id, const Json&);
@@ -380,10 +387,16 @@ struct Store::Impl {
         SessionTarget target;
         std::string title;
         Delivery delivery;
+        int step;
+        Id taskId = 0;
+        std::string actionId;
         bool notify;
     };
     std::map<Id,SessionSendReceipt> sessionSendReceipts;
     void recordSessionSendRun(Id, const SessionSendReceipt&);
+    void saveSessionSendResult(std::string_view bot, Id message, int step, Json result);
+    void persistSessionSendReceipt(Id message, const SessionSendReceipt&);
+    bool advanceDestinationSessionMessageRun(Json&, Json&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,
                  const PeerResolver&, std::stop_token);
@@ -463,11 +476,12 @@ struct Store::Impl {
     std::set<std::string> registeredT3Environments(std::string_view bot);
     std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {});
     TaskRoute taskRoute(std::string_view bot, const Json& routing, std::string_view name,
-                        const Json* movingTask = nullptr);
+                        const Json* movingTask = nullptr, const LinkedTaskDestinations* linked = nullptr);
     StartDestinations startDestinations(const conversation::Message&, const Json& args, bool resume,
                                        const WorkSession* selectedSession, const LinkedTaskDestinations& linked);
     LinkedTaskDestinations discoverLinkedTaskDestinations(T3&, std::string_view bot);
-    TaskChange taskChange(const conversation::Message&, const Json& args, const Json& task);
+    TaskChange taskChange(const conversation::Message&, const Json& args, const Json& task,
+                          const LinkedTaskDestinations& linked);
     std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
     Id submitRequest(const Intake&, const Person* requester);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,

@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
+#include "commit_check.hpp"
 
 #include <algorithm>
 #include <set>
@@ -219,12 +220,51 @@ bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
 }
 
 void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt) {
-    const auto& [bot,target,title,delivery,notify] = receipt;
+    const auto& target = receipt.target;
+    const auto& delivery = receipt.delivery;
     if (!acceptedSessionSend(target,delivery)) return;
-    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment)"
-         " VALUES(?,?,?,?,?,?,?,?)",
-         {message,bot,target.environmentId,target.threadId,delivery.run.runId,title,
-          !notify || sessionParticipationStopped(bot,target,message) ? 1 : 0,target.gatewayEnvironmentId});
+    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment,"
+         "task_id,action_id,delivery,link) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,0),NULLIF(?,''),?,?)",
+         {message,receipt.bot,target.environmentId,target.threadId,delivery.run.runId,receipt.title,
+          !receipt.notify || sessionParticipationStopped(receipt.bot,target,message) ? 1 : 0,target.gatewayEnvironmentId,
+          receipt.taskId,receipt.actionId,delivery.delivery == "queued" ? "queued" : "started",
+          redactor(receipt.bot).text(delivery.run.link)});
+    if (!receipt.taskId || receipt.actionId.empty()) return;
+    auto task = load(receipt.taskId);
+    auto& run = destinationRun(task,receipt.actionId);
+    auto report = query(R"SQL(
+SELECT 1 FROM journal WHERE task_id=? AND kind='report'
+AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run.runId')=?
+AND json_extract(data,'$.run.threadId')=? LIMIT 1)SQL",
+        {receipt.taskId,field(run,"environmentId"),field(run,"runId"),field(run,"threadId")});
+    if ((!destinationRunOutstanding(run) || report.next()) && advanceDestinationSessionMessageRun(task,run))
+        save(task);
+}
+
+void Store::Impl::saveSessionSendResult(std::string_view bot, Id message, int step, Json result) {
+    const bool unknown = field(result,"delivery") == "unknown";
+    const auto results = Json::array({redactor(bot).record(std::move(result))});
+    exec(R"SQL(
+UPDATE conversation_steps
+SET result=?,effect=CASE WHEN ? AND json_extract(effect,'$.taskId') IS NOT NULL THEN effect END
+WHERE message_id=? AND step=? AND result IS NULL
+)SQL",{results,unknown ? 1 : 0,message,step});
+}
+
+void Store::Impl::persistSessionSendReceipt(Id message, const SessionSendReceipt& receipt) {
+    const auto& target = receipt.target;
+    const auto& delivery = receipt.delivery;
+    recordSessionSendRun(message,receipt);
+    Json result;
+    if (acceptedSessionSend(target,delivery)) {
+        result = {{"ok",true},{"delivery",delivery.delivery}};
+        if (receipt.notify) result.update({{"environmentId",target.environmentId},{"threadId",target.threadId}});
+    } else {
+        result = toolFailure(delivery.detail.empty() ? "Could not confirm delivery to T3" : delivery.detail);
+        if (!delivery.definitelyUnsent && (delivery.kind == Delivery::Kind::Unknown || delivery.kind == Delivery::Kind::Accepted))
+            result["delivery"] = "unknown";
+    }
+    saveSessionSendResult(receipt.bot,message,receipt.step,std::move(result));
 }
 
 Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
@@ -236,20 +276,6 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     const auto save = [&](Json result) {
         saveTurnResults(id,step,Json::array({redactor(message.bot).record(std::move(result))}));
     };
-    const auto saveReceipt = [&](const SessionSendReceipt& saved) {
-        const auto& target = saved.target;
-        const auto& receipt = saved.delivery;
-        if (acceptedSessionSend(target,receipt)) {
-            Json result{{"ok",true},{"delivery",receipt.delivery}};
-            if (saved.notify) result.update({{"environmentId",target.environmentId},{"threadId",target.threadId}});
-            save(std::move(result));
-        } else {
-            auto result = toolFailure(receipt.detail.empty() ? "Could not confirm delivery to T3" : receipt.detail);
-            if (!receipt.definitelyUnsent && (receipt.kind == Delivery::Kind::Unknown || receipt.kind == Delivery::Kind::Accepted))
-                result["delivery"] = "unknown";
-            save(std::move(result));
-        }
-    };
     Command command;
     command.tool = "message_session";
     command.actionId = "flock-turn-" + std::to_string(id) + "-" + std::to_string(step);
@@ -257,6 +283,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     const bool savedTaskTarget = decision.tool == "send_to_task";
     Id savedTaskId = 0, savedGeneration = 0;
     std::string savedActionId;
+    bool includesSavedContent = false;
     std::optional<GitPrFollowup> followup;
     SessionTarget target;
     Resource resource{Action::t3_send,{}};
@@ -269,9 +296,13 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         if (!row.next()) return stop;
         if (!row.string(0).empty()) {
             if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end()) {
-                recordSessionSendRun(id,receipt->second);
-                saveReceipt(receipt->second);
-            } else save({{"ok",false},{"delivery","unknown"},{"error","Flock restarted while sending this. Check the Session before sending again."}});
+                persistSessionSendReceipt(id,receipt->second);
+            } else if (field(row.json(0),"sendState") == "prepared") {
+                save({{"ok",false},{"delivery","not_accepted"},{"error","The T3 Session message was not sent."}});
+            } else {
+                saveSessionSendResult(message.bot,id,step,{{"ok",false},{"delivery","unknown"},
+                    {"error","Flock restarted while sending this. Check the Session before sending again."}});
+            }
             transaction.commit();
             sessionSendReceipts.erase(id);
             return advance;
@@ -282,6 +313,8 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             return advance;
         }
         try {
+            std::string expectedCommit;
+            Json source = nullptr;
             if (fixesPullRequest) {
                 followup = gitPrFollowup(message,ctx.intake);
                 if (!followup || followup->status != GitPrFollowup::Status::available)
@@ -298,6 +331,12 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
                 if (terminal(task) || task.at("state") == "cancelling")
                     throw ToolError("The task is " + field(task,"state"),{{"taskId",task.at("id")}});
                 const auto selected = selectSavedDestination(task,decision.args,true);
+                if (const auto sourceId = conversation_storage::identifier(decision.args,"sourceResultMessageId",false); sourceId) {
+                    source = resultReference(sourceId,message);
+                    if (source.at("taskId") != task.at("id") ||
+                        source.at("revisionId") != task.value("currentRevision",Id{0}))
+                        throw ToolError("sourceResultMessageId must be a result of this task's current revision");
+                }
                 command.environmentId = selected.environmentId;
                 command.gatewayEnvironmentId = selected.gatewayEnvironmentId;
                 command.target.threadId = selected.threadId;
@@ -306,6 +345,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
                 savedTaskId = task.at("id");
                 savedGeneration = task.at("generation");
                 savedActionId = selected.actionId;
+                expectedCommit = field(task,"requestedCommit");
                 command.instruction = conversation_storage::text(decision.args,"instruction",conversation_storage::messageSize,true);
             } else {
                 command.environmentId = conversation_storage::text(decision.args,"environmentId",256,true);
@@ -314,6 +354,11 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             }
             const auto name = redactor(message.bot).text(message.routing.at("config").value("botDisplayName",message.bot));
             command.instruction = name + ": " + command.instruction;
+            includesSavedContent = !source.is_null() || !expectedCommit.empty();
+            if (!source.is_null())
+                command.instruction += "\n\n(reference only):\n" + bounded(field(source,"text"),8192);
+            if (!expectedCommit.empty())
+                command.instruction = commit_check::instructions(std::move(command.instruction),expectedCommit);
             if (decision.tool == "message_session" &&
                 (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
                 throw ToolError("Use the Session identifiers");
@@ -331,6 +376,12 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         }
         transaction.commit();
     }
+    const auto availableFollowup = [&]() -> std::optional<GitPrFollowup> {
+        auto current = gitPrFollowup(message,ctx.intake);
+        if (!current || current->operation != followup->operation || current->session != target ||
+            current->status != GitPrFollowup::Status::available) return std::nullopt;
+        return current;
+    };
     std::string error;
     std::string title;
     try {
@@ -361,11 +412,11 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
             return advance;
         }
         auto origin = policyOrigin(message);
+        auto approvalOperation = std::string(key);
         Json policyPayload{decision.tool,decision.args,command.authGeneration};
         if (fixesPullRequest) {
-            const auto current = gitPrFollowup(message,ctx.intake);
-            if (!current || current->operation != followup->operation || current->session != target ||
-                current->status != GitPrFollowup::Status::available) {
+            const auto current = availableFollowup();
+            if (!current) {
                 save(toolFailure("Automatic follow-up is unavailable for this pull request"));
                 transaction.commit();
                 return advance;
@@ -398,22 +449,30 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
                 origin.generation = savedGeneration;
                 origin.revision = task.value("currentRevision",Id{});
                 policyPayload.push_back(selected.actionId);
+                if (includesSavedContent) {
+                    approvalOperation += "/rendered-session-message";
+                    policyPayload.push_back(command.instruction);
+                }
             } catch (const ToolError& failure) {
                 save(toolFailure(failure.what()));
                 transaction.commit();
                 return advance;
             }
         }
-        const auto gate = approveAction(origin,resource,key,policyPayload,policyClock());
+        const auto gate = approveAction(origin,resource,approvalOperation,policyPayload,policyClock());
         if (gate != ApprovalGate::allow) {
             if (gate != ApprovalGate::waiting) save(toolFailure(approvalError(gate)));
             transaction.commit();
             return gate == ApprovalGate::waiting ? waiting : advance;
         }
+        Json effect{{"kind","message_session"},{"sendState","prepared"}};
+        if (savedTaskTarget) {
+            effect["taskId"] = savedTaskId;
+            effect["actionId"] = savedActionId;
+        }
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
-             "AND result IS NULL AND effect IS NULL",{Json{{"kind","message_session"}},id,step});
+             "AND result IS NULL AND effect IS NULL",{effect,id,step});
         if (!sqlite3_changes(db)) return stop;
-        if (followup) recordGitPrFollowup(message,*followup);
         const auto read = Resource::sessionRead(target.environmentId,target.threadId);
         if (!message.channelScope.empty() || !Policy(*this).allows(message.bot,read)) title.clear();
         title = bounded(redactT3Tokens(redactor(message.bot).text(title)),512);
@@ -422,6 +481,31 @@ INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,sta
 SELECT ?,?,?,person_id,'active' FROM t3_connector WHERE singleton=1
 ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
 )SQL",{message.bot,target.environmentId,target.threadId});
+        transaction.commit();
+    }
+
+    {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (ctx.shutdown.stop_requested()) return stop;
+        if (!authorizeTurn(message)) { transaction.commit(); return stop; }
+        auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
+                         {id,step});
+        if (!row.next()) { transaction.commit(); return stop; }
+        auto effect = row.json(0);
+        if (effect.value("sendState",std::string{}) != "prepared") { transaction.commit(); return stop; }
+        if (fixesPullRequest) {
+            const auto current = availableFollowup();
+            if (!current) {
+                save(toolFailure("Automatic follow-up is unavailable for this pull request"));
+                transaction.commit();
+                return advance;
+            }
+            recordGitPrFollowup(message,*current);
+        }
+        effect["sendState"] = "sending";
+        exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL",
+             {effect,id,step});
         transaction.commit();
     }
 
@@ -436,10 +520,10 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     std::lock_guard lock(mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
     const auto checkpoint = sessionSendReceipts.insert_or_assign(
-        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt),!fixesPullRequest}).first;
+        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt),step,
+                              savedTaskId,savedActionId,!fixesPullRequest}).first;
     Transaction transaction(db);
-    recordSessionSendRun(id,checkpoint->second);
-    saveReceipt(checkpoint->second);
+    persistSessionSendReceipt(id,checkpoint->second);
     transaction.commit();
     sessionSendReceipts.erase(checkpoint);
     return advance;
@@ -511,7 +595,8 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(
                 query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
                       {selected.actionId,taskId,selected.environmentId,selected.threadId,selected.runId}).next();
             if (phase == "accepted" && !exactRun) throw ToolError("The destination Session is unavailable");
-            if (exactRun) {
+            const bool recoveredRun = phase == "started" && !selected.threadId.empty() && !selected.runId.empty();
+            if (exactRun || recoveredRun) {
                 const Resource resource{Action::t3_send,
                     Resource::sessionRead(selected.environmentId,selected.threadId).target};
                 auto origin = policyOrigin(message);
@@ -529,6 +614,18 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(
             auto updated = action;
             updated["stopRequested"] = true;
             updated["stopOperation"] = key;
+            if (!selected.run.value("runId",std::string{}).empty()) {
+                updated["stopRunId"] = selected.run.at("runId");
+                updated["stopThreadId"] = selected.run.at("threadId");
+            }
+            if (phase == "started" && (selected.threadId.empty() || selected.runId.empty()))
+            {
+                const auto origin = policyOrigin(message);
+                updated["stopPolicy"] = {{"tool",decision.tool},{"args",decision.args},
+                    {"generation",generation},{"revisionId",task.value("currentRevision",Id{})}};
+                updated["stopPolicyOrigin"] = {{"scope",origin.scope},{"requester",origin.requester},
+                    {"anchor",origin.anchor},{"turn",0},{"background",origin.background}};
+            }
             updated.erase("phase");
             updated.erase("authGeneration");
             exec("UPDATE outbox SET data=? WHERE id=? AND task_id=? AND phase=?",

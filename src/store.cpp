@@ -146,6 +146,11 @@ void Store::Impl::openSchema() {
         initialize.commit();
     }
     initializeProjectQueue();
+    {
+        Transaction migration(db);
+        upgradeSessionMessageWaitSchema();
+        migration.commit();
+    }
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_review_receipts(
   inbox_key TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -619,7 +624,12 @@ FROM visible_bots b JOIN tasks t ON t.bot_id=b.bot JOIN journal j ON j.task_id=t
 WHERE j.conversation_bot_id IS NULL AND (
   (j.kind='report' AND (
     json_extract(j.data,'$.status') IN ('failed','rolled_back')
-    OR (json_extract(j.data,'$.status')='interrupted' AND json_extract(j.data,'$.stopRequested') IS NOT 1
+    OR ((json_extract(j.data,'$.status')='interrupted' OR (
+           json_extract(j.data,'$.status')='cancelled'
+           AND json_extract(j.data,'$.stopRequested')=0
+           AND length(json_extract(j.data,'$.run.runId'))>0
+           AND length(json_extract(j.data,'$.run.threadId'))>0
+        )) AND json_extract(j.data,'$.stopRequested') IS NOT 1
         AND NOT EXISTS (
           SELECT 1 FROM journal stop
           WHERE stop.task_id=j.task_id AND stop.id<j.id AND stop.kind='interrupt_requested'
