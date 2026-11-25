@@ -58,8 +58,8 @@ void cronIntakeAndRestart() {
         store.fireDueAutomations(utc(2026, 11, 1, 6, 30));
         const auto tasks = store.tasks();
         check(tasks.size() == 2, "both fall-back instants should submit exactly once");
-        check(tasks[0].task.rest.at("trigger").at("targetTime") == utc(2026, 11, 1, 6, 30) &&
-                  tasks[1].task.rest.at("trigger").at("targetTime") == utc(2026, 11, 1, 5, 30),
+        check(std::get<TimedTaskTrigger>(tasks[0].task.trigger.value().details).targetTime == utc(2026, 11, 1, 6, 30) &&
+                  std::get<TimedTaskTrigger>(tasks[1].task.trigger.value().details).targetTime == utc(2026, 11, 1, 5, 30),
               "fall offsets did not produce separate UTC instants");
         check(tasks[0].blockedBy.value().id == tasks[1].task.id, "cron must participate in the same project queue");
     }
@@ -100,7 +100,8 @@ void invalidSessionSettingsPreserveDueTimes() {
     Store store(database);
     bots.syncSchedules(store, due + 3600, report);
     store.fireDueAutomations(due + 3600);
-    check(store.tasks("release").size() == 1 && store.tasks("release").at(0).task.rest.at("trigger").at("targetTime") == due,
+    check(store.tasks("release").size() == 1 &&
+              std::get<TimedTaskTrigger>(store.tasks("release").at(0).task.trigger.value().details).targetTime == due,
           "invalid Session settings erased the original scheduled occurrence");
 }
 
@@ -230,7 +231,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
     store.fireDueAutomations(due + 1);
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && tasks.at(0).task.environmentId == "new-environment" && tasks.at(0).task.projectId == "new-project" &&
-              tasks.at(0).task.rest.at("trigger").at("targetTime") == due,
+              std::get<TimedTaskTrigger>(tasks.at(0).task.trigger.value().details).targetTime == due,
           "workspace save lost the due time, kept the old route, or restored a canceled schedule");
     const auto settings = tasks.front().task.config;
     check(settings.at("model") == "next-model" && settings.at("modelProvider") == "chatgpt" && settings.at("reasoningEffort") == "ultra" &&
@@ -294,7 +295,8 @@ void automationFiringsUseCurrentPlannerSettings() {
 
     store.fireDueAutomations(nextDue);
     const auto recurring = store.tasks("release").at(0).task;
-    check(recurring.rest.at("trigger").at("triggerId") == schedule.at("id") && recurring.rest.at("trigger").at("targetTime") == nextDue,
+    check(recurring.trigger.value().id == schedule.at("id").get<Id>() &&
+              std::get<TimedTaskTrigger>(recurring.trigger.value().details).targetTime == nextDue,
           "model change lost the next scheduled occurrence");
     const auto webhook = store.receiveWebhook(owner, "deploy", "event-1", {{"branch", "main"}}, nextDue);
     check(webhook.at("tasks").size() == 1 && webhook.at("tasks").at(0).at("triggerId") == trigger.at("id"),
@@ -333,7 +335,7 @@ void automationFiringsUseCurrentPlannerSettings() {
     write(folder / "config.json", "invalid");
     store.fireDueAutomations(fallbackDue);
     const auto fallback = store.tasks("release").at(0).task;
-    check(fallback.rest.at("trigger").at("targetTime") == fallbackDue,
+    check(std::get<TimedTaskTrigger>(fallback.trigger.value().details).targetTime == fallbackDue,
           "unreadable Bot settings prevented the saved automation from firing");
     checkTask(fallback.id, saved.config);
 }
@@ -452,8 +454,8 @@ void invalidEntriesPreserveDueSchedule() {
     store.fireDueAutomations(now);
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && tasks.at(0).task.request == "Daily check" &&
-              tasks.at(0).task.rest.at("trigger").at("coveredFrom") == firstDue &&
-              tasks.at(0).task.rest.at("trigger").at("occurrenceCount") == 3,
+              std::get<TimedTaskTrigger>(tasks.at(0).task.trigger.value().details).coveredFrom == firstDue &&
+              std::get<TimedTaskTrigger>(tasks.at(0).task.trigger.value().details).occurrenceCount == 3,
           "The valid sibling did not fire its saved occurrences after restart");
 }
 

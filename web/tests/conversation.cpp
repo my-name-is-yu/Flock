@@ -466,7 +466,7 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     check(tasks.size() == 1 && conversationReply(resolved, receipt.at("messageId")).at("actions").at(0).at("tool") == "start_task",
           "the chosen destination did not create a Task");
     const auto& task = tasks.front();
-    check(task.task.projectId == "backup-release" && !task.runs.empty() && task.runs.back().at("environmentId") == "backup-env",
+    check(task.task.projectId == "backup-release" && !task.runs.empty() && task.runs.back().run.environmentId == "backup-env",
           "the chosen destination did not receive the new Run");
 }
 
@@ -708,8 +708,7 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto firstWaitTask = store.submit(web.intake("triage", "掲載する範囲を決める"));
     const auto secondWaitTask = store.submit({"triage", "次回の掲載範囲を決める", "linked env", "next-scope"});
     tick(runtime, 3);
-    t3.observations["thread-triage"] = {.kind = Observation::Kind::Question,
-                                        .question = {"scope-question", Json::array({{{"id", "scope"}, {"required", true}}})}};
+    t3.observations["thread-triage"] = {.kind = Observation::Kind::Question, .question = {"scope-question", {{.id = "scope"}}}};
     t3.observations["thread-next-scope"] = t3.observations.at("thread-triage");
     tick(runtime, 2);
     const auto waitPage = browser.get("/api/view?bot=triage");
@@ -1203,8 +1202,8 @@ void chatGPTConversation(const std::filesystem::path& home) {
     const auto& firstRuns = firstTask.runs;
     const auto& secondRuns = secondTask.runs;
     check(!firstRuns.empty() && !secondRuns.empty(), "both composer requests must launch a Run");
-    check(firstRuns.back().at("environmentId") == "local-env" && firstTask.task.projectId == "release" &&
-              secondRuns.back().at("environmentId") == "backup-env" && secondTask.task.projectId == "backup-release",
+    check(firstRuns.back().run.environmentId == "local-env" && firstTask.task.projectId == "release" &&
+              secondRuns.back().run.environmentId == "backup-env" && secondTask.task.projectId == "backup-release",
           "the composer Runs did not keep each request on its own destination");
     const auto active = view().at("activeSessions");
     check(

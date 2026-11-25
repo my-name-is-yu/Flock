@@ -145,8 +145,8 @@ LEFT JOIN channel_tasks c ON c.task_id=t.id
 WHERE t.bot_id=? AND r.thread_id=? AND r.run_id=?
 AND (?='' OR c.scope_key=?)
 AND t.state IN ('running','waiting')
-AND json_extract(t.data,'$.activeRun.threadId')=r.thread_id
-AND json_extract(t.data,'$.activeRun.runId')=r.run_id
+AND t.active_thread_id=r.thread_id
+AND t.active_run_id=r.run_id
 AND t.environment_id=r.environment_id LIMIT 2
 )SQL",
                          {bot, thread, run, scope, scope});
@@ -201,8 +201,8 @@ AND c.environment_id=r.environment_id AND c.thread_id=r.thread_id
 WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
 AND c.machine_id=? AND c.machine_owner=? AND c.status='approved'
 AND t.state IN ('running','waiting')
-AND json_extract(t.data,'$.activeRun.threadId')=r.thread_id
-AND json_extract(t.data,'$.activeRun.runId')=r.run_id
+AND t.active_thread_id=r.thread_id
+AND t.active_run_id=r.run_id
 AND t.environment_id=r.environment_id
 )SQL",
                                 {environment, authenticatedRun.threadId, authenticatedRun.runId, machineId, owner});

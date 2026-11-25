@@ -81,7 +81,7 @@ void parallelDestinations() {
     const auto& task = tasks.front().task;
     const Json expected = Json::array({{{"name", "mini"}, {"environmentId", "mini-env"}, {"projectId", "mini-project"}},
                                        {{"name", "local"}, {"environmentId", "env-canonical"}, {"projectId", "project-canonical"}}});
-    check(taskJson(tasks.front()).at("runTargets") == expected && task.rest.at("requestedCommit") == std::string(40, 'a'),
+    check(taskJson(tasks.front()).at("runTargets") == expected && task.requestedCommit == std::string(40, 'a'),
           "the task must pin the selected canonical routes and normalized SHA");
 
     model.action.args["environments"] = {"local", "env-canonical"};
@@ -94,7 +94,7 @@ void parallelDestinations() {
     runtime.runConversations();
     const auto singleNamed = store.task(model.receipt.at("taskId"));
     check(model.receipt.value("ok", false) && singleNamed.task.projectId == "mini-project" &&
-              singleNamed.task.rest.at("requestedCommit") == std::string(40, 'a') && singleNamed.task.runTargets().size() == 1 &&
+              singleNamed.task.requestedCommit == std::string(40, 'a') && singleNamed.task.runTargets().size() == 1 &&
               singleNamed.task.runTargets().front().route.environmentId == "mini-env",
           "a single named destination must retain optional verification and its saved route");
     model.action.args = {{"request", "Verify on the Mini"}, {"environments", Json::array({"mini"})}};
@@ -124,8 +124,7 @@ void genericDestinationCounts() {
     auto tasks = store.tasks();
     check(tasks.size() == 1, "one destination must create one conversation task");
     const auto& single = tasks.front().task;
-    check(single.runTargets().size() == 1 && !single.rest.contains("requestedCommit"),
-          "ordinary one-destination work must not require commit verification");
+    check(single.runTargets().size() == 1 && !single.requestedCommit, "ordinary one-destination work must not require commit verification");
 
     model.action.args = {{"request", "Run on all three"}, {"environments", {"mini", "local", "cloud"}}};
     store.receive(localOwner, intake, "three-route-work", "Run this on all three destinations");
@@ -133,7 +132,7 @@ void genericDestinationCounts() {
     tasks = store.tasks();
     check(tasks.size() == 2, "three destinations must remain one additional conversation task");
     const auto& multi = tasks.front().task;
-    check(multi.runTargets().size() == 3 && !multi.rest.contains("requestedCommit"),
+    check(multi.runTargets().size() == 3 && !multi.requestedCommit,
           "ordinary multi-destination work must persist all routes without a SHA policy");
 }
 

@@ -379,11 +379,11 @@ bool Store::Impl::inviteSessionBot(const conversation::Message& message, int ste
             } else {
                 auto launch = query(R"SQL(
 WITH RECURSIVE ancestry(id,source) AS (
- SELECT t.id,json_extract(t.data,'$.sourceMessageId')
+ SELECT t.id,t.source_message_id
  FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
  WHERE t.bot_id=?1 AND r.environment_id=?3 AND r.thread_id=?4 AND json_extract(o.data,'$.tool')='delegate'
  UNION ALL
- SELECT t.id,json_extract(t.data,'$.sourceMessageId')
+ SELECT t.id,t.source_message_id
  FROM ancestry a JOIN peer_exchanges p ON p.recipient_task=a.id JOIN tasks t ON t.id=p.sender_task
  WHERE a.source IS NULL AND p.sender_task<a.id
 )
@@ -602,12 +602,11 @@ WHERE t.status IN ('paused','policy_waiting') AND (
     auto children = query((stopCascade + R"SQL(
 SELECT t.id,p.id FROM stopping s JOIN session_participations p ON p.id=s.id
 JOIN tasks t ON t.bot_id=p.bot_id
-JOIN messages m ON m.id=json_extract(t.data,'$.sourceMessageId') AND m.bot_id=p.bot_id AND m.person_id=p.person_id
-WHERE json_extract(t.data,'$.sessionOrigin.environmentId')=p.environment_id
-  AND json_extract(t.data,'$.sessionOrigin.threadId')=p.thread_id
+JOIN messages m ON m.id=t.source_message_id AND m.bot_id=p.bot_id AND m.person_id=p.person_id
+WHERE t.origin_environment_id=p.environment_id AND t.origin_thread_id=p.thread_id
   AND t.state NOT IN ('completed','cancelled','cancelling')
-  AND json_type(t.data,'$.selectedSession') IS NULL
-  AND NOT (json_extract(t.data,'$.activeRun.threadId') IS p.thread_id AND t.environment_id=p.environment_id)
+  AND NOT t.has_selected_session
+  AND NOT (t.active_thread_id IS p.thread_id AND t.environment_id=p.environment_id)
 ORDER BY t.id
 )SQL")
                               .c_str(),
@@ -622,12 +621,11 @@ ORDER BY t.id
 SELECT t.id,m.id,p.person_id,p.environment_id,p.thread_id
 FROM stopping s JOIN session_participations p ON p.id=s.id
 JOIN tasks t ON t.bot_id=p.bot_id
-JOIN messages m ON m.id=json_extract(t.data,'$.sourceMessageId')
-LEFT JOIN outbox o ON o.id=json_extract(t.data,'$.actionId')
-WHERE json_extract(t.data,'$.selectedSession.environmentId')=p.environment_id
-  AND json_extract(t.data,'$.selectedSession.threadId')=p.thread_id
+JOIN messages m ON m.id=t.source_message_id
+LEFT JOIN outbox o ON o.id=t.action_id
+WHERE t.selected_environment_id=p.environment_id AND t.selected_thread_id=p.thread_id
   AND t.state NOT IN ('completed','cancelled','cancelling')
-  AND json_type(t.data,'$.activeRun')='null' AND o.phase IS NOT 'started'
+  AND NOT t.has_active_run AND o.phase IS NOT 'started'
 )SQL")
                               .c_str(),
                           {id, cutoff});

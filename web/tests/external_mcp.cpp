@@ -239,8 +239,7 @@ void roundTrip() {
     const auto running = client.success(statusTool, task);
     check(running.at("status") == "running" && running.at("sessionLink") == releaseLink && t3.launches.at("release") == 1,
           "The external Task did not launch one T3 Session");
-    t3.observations["thread-release"] = {.kind = Observation::Kind::Question,
-                                         .question = {"scope-question", Json::array({{{"id", "scope"}, {"required", true}}})}};
+    t3.observations["thread-release"] = {.kind = Observation::Kind::Question, .question = {"scope-question", {{.id = "scope"}}}};
     tick(runtime, 2);
 
     const auto waiting = client.success(statusTool, task);
@@ -426,9 +425,9 @@ void hostedSessionLinks() {
     hostedSession["link"] = "https://app.t3.codes/threads/build.prod/thread~nightly";
     check(web::externalSessionLink(hostedSession).empty(), "A noncanonical hosted link was accepted");
 
-    const Json loopbackSession{{"environmentId", "build.prod"}, {"threadId", "loopback~nightly"}, {"link", loopbackUrl}};
     TaskView task;
-    task.runs = Json::array({loopbackSession, hostedSession});
+    task.runs = {{.run = {{"loopback~nightly", {}, loopbackUrl, {}}, "build.prod", {}}},
+                 {.run = {{"thread~nightly", {}, hostedSession.at("link"), {}}, "build.prod", {}}}};
     const std::vector tasks{std::move(task)};
     TestDirectory dir;
     Store store(dir.path / "flock.sqlite3");

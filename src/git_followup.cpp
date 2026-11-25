@@ -50,8 +50,8 @@ LIMIT 2
 
     std::string requester;
     std::string requesterBot = message.bot;
-    if (const auto id = conversation_storage::integer(task.rest, "sourceMessageId")) {
-        const auto source = loadTurnMessage(id);
+    if (task.sourceMessageId) {
+        const auto source = loadTurnMessage(*task.sourceMessageId);
         requesterBot = source.bot;
         if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
             const auto actor = turnActor(source);
@@ -59,8 +59,8 @@ LIMIT 2
                 (source.principalSource != session || activeSessionOrigin(source)))
                 requester = policyOrigin(source).requester;
         }
-    } else {
-        const auto person = field(task.rest, "requester");
+    } else if (const auto& requesterId = task.requester) {
+        const auto& person = *requesterId;
         Person actor{person, person == localOwner.id};
         if (!person.empty() && resolveWebIdentity) {
             const auto role = resolveWebIdentity(person);

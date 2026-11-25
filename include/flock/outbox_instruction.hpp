@@ -11,9 +11,9 @@ struct OutboxSourceRun {
 
 struct OutboxSource {
     std::int64_t taskId, messageId;
-    std::optional<std::int64_t> revisionId;
-    std::optional<std::string> text, stageId, artifactVersion, resultRunId;
-    std::optional<OutboxSourceRun> run;
+    std::optional<std::int64_t> revisionId{};
+    std::optional<std::string> text{}, stageId{}, artifactVersion{}, resultRunId{};
+    std::optional<OutboxSourceRun> run{};
 };
 
 struct OutboxInstruction {

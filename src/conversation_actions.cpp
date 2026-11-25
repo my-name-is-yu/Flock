@@ -477,7 +477,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                 savedTaskId = task.id;
                 savedGeneration = task.generation;
                 savedActionId = selected.actionId;
-                expectedCommit = field(task.rest, "requestedCommit");
+                expectedCommit = task.requestedCommit.value_or("");
                 command.instruction = conversation_storage::text(decision.args, "instruction", limits::messages::maxBodyBytes, true);
             } else {
                 command.environmentId = conversation_storage::text(decision.args, "environmentId", 256, true);
@@ -899,11 +899,19 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
     }
 }
 
+namespace {
+void rememberSourceResult(TaskData& task, const OutboxSource& source) {
+    auto& refs = task.sourceResultRefs;
+    if (std::ranges::find(refs, source.messageId, &OutboxSource::messageId) == refs.end()) refs.push_back(source);
+}
+}
+
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute& destination,
-                                      Id messageId, const Json& source, bool resume, const WorkSession* selectedSession) {
+                                      Id messageId, const std::optional<OutboxSource>& reference, bool resume,
+                                      const WorkSession* selectedSession) {
     if (selectedSession) redactor(bot).requirePublic(selectedSession->target.threadId);
     const auto id = submit({std::string(bot), std::string(request), destination.environmentId, destination.projectId, routing.at("config")},
-                           messageId, source);
+                           messageId, reference ? &*reference : nullptr);
     auto task = load(id);
     if (!destination.gatewayEnvironmentId.empty() && destination.gatewayEnvironmentId != destination.environmentId)
         task.gatewayEnvironmentId = destination.gatewayEnvironmentId;
@@ -911,14 +919,14 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
         task.sessionOrigin = decodeSessionOrigin(*origin, {"messages", std::to_string(messageId), "routing.sessionOrigin"});
     else if (resume) {
         auto parent = query(R"SQL(
-SELECT t.id,json_extract(t.data,'$.sessionOrigin') FROM tasks t
-JOIN messages m ON m.id=json_extract(t.data,'$.sourceMessageId')
+SELECT t.data,t.id,t.state,t.generation FROM tasks t
+JOIN messages m ON m.id=t.source_message_id
 JOIN messages request ON request.id=? AND request.person_id=m.person_id
 LEFT JOIN channel_messages channel ON channel.message_id=request.id
-WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND channel.message_id IS NULL
+WHERE t.id=? AND t.bot_id=? AND t.has_session_origin AND channel.message_id IS NULL
 )SQL",
-                            {messageId, source.at("taskId"), bot});
-        if (parent.next()) task.sessionOrigin = decodeSessionOrigin(parent.json(1), {"tasks", parent.string(0), "sessionOrigin"});
+                            {messageId, reference.value().taskId, bot});
+        if (parent.next()) task.sessionOrigin = decodeTaskRow(parent).sessionOrigin;
     }
     if (task.sessionOrigin) task.sessionOrigin->title = redactor(bot).text(task.sessionOrigin->title);
     if (selectedSession)
@@ -926,12 +934,12 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
             {destination.environmentId, selectedSession->target.threadId, task.gatewayEnvironmentId.value_or("")}, destination.projectId};
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId, bot});
-    task.rest["sourceMessageCoversFullRequest"] = source.is_null() && message.next() && message.string(0) == request;
+    task.sourceMessageCoversFullRequest = !reference && message.next() && message.string(0) == request;
     if (resume) {
-        const auto priorId = source.at("taskId").get<Id>();
+        const auto priorId = reference.value().taskId;
         const auto prior = load(priorId);
         const auto criteria = effectiveDoneWhen(prior);
-        if (!criteria.empty()) task.rest["requestedDoneWhen"] = criteria;
+        if (!criteria.empty()) task.criteriaProposal = TaskCriteriaProposal{criteria, std::nullopt};
         const auto& pending = prior.cancelledInstructions;
         std::set<std::pair<Id, int>> pendingIds;
         for (const auto& item : pending) pendingIds.emplace(item.messageId, item.step);
@@ -940,29 +948,27 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
         auto rows = query("SELECT data FROM journal WHERE task_id=? AND kind='instruction_accepted'"
                           " ORDER BY id DESC",
                           {priorId});
-        Json delivered = Json::array();
+        std::vector<DeliveredInstruction> delivered;
         constexpr std::size_t maxEarlierInstructionBytes = 8'000, maxEarlierInstructions = 20;
         std::size_t remaining = maxEarlierInstructionBytes;
         while (remaining && delivered.size() < maxEarlierInstructions && rows.next()) {
             const auto item = rows.json(0);
-            if (pendingIds.contains({item.at("messageId").get<Id>(), item.at("step").get<int>()})) continue;
-            const auto text = bounded(field(item, "text"), remaining);
+            const auto messageId = item.at("messageId").get<Id>();
+            const auto step = item.at("step").get<int>();
+            if (pendingIds.contains({messageId, step})) continue;
+            auto text = bounded(field(item, "text"), remaining);
             remaining -= text.size();
-            delivered.push_back({{"messageId", item.at("messageId")}, {"step", item.at("step")}, {"text", text}});
+            delivered.push_back({messageId, step, std::move(text)});
         }
         std::reverse(delivered.begin(), delivered.end());
         task.intent = prior.intent;
-        task.rest["restartContext"] = {{"taskId", priorId}, {"deliveredInstructions", std::move(delivered)}};
+        task.restartContext = TaskRestart{priorId, std::move(delivered)};
         for (auto item : pending) {
             item.revisionId.reset();
             item.conflicting = false;
             const auto entry = instructionJson(item);
-            if (item.source) {
-                auto& refs = task.rest["sourceResultRefs"];
-                if (std::ranges::none_of(refs, [&](const Json& ref) { return ref.at("messageId") == item.source->messageId; }))
-                    refs.push_back(entry.at("source"));
-            }
-            task.rest["pendingInstructions"].push_back(entry);
+            if (item.source) rememberSourceResult(task, *item.source);
+            task.pendingInstructions.push_back(std::move(item));
             journal(id, "instruction_accepted", entry);
         }
     }
@@ -970,8 +976,8 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
     return id;
 }
 
-bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, const Json& source,
-                                    const TaskChange* change) {
+bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction,
+                                    std::optional<OutboxSource> source, const TaskChange* change) {
     Id revision = task.currentRevision.value_or(0);
     bool conflicting = task.replanning;
     if (change) {
@@ -1011,13 +1017,10 @@ bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std:
                 revision = addRevision(task, intent, done, messageId);
             else {
                 task.intent = intent;
-                if (criteriaChanged) {
-                    task.rest["requestedDoneWhen"] = done;
-                    task.rest["criteriaSourceMessageId"] = messageId;
-                }
+                if (criteriaChanged) task.criteriaProposal = TaskCriteriaProposal{done, messageId};
                 journal(task.id, "task_contract_changed", {{"messageId", messageId}});
             }
-            if (intentChanged) task.rest["sourceMessageCoversFullRequest"] = false;
+            if (intentChanged) task.sourceMessageCoversFullRequest = false;
             conflicting = true;
         }
         if (nextRoute) {
@@ -1025,15 +1028,8 @@ bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std:
             conflicting = true;
         }
     }
-    Json pending = {
-        {"messageId", messageId}, {"step", step}, {"text", instruction}, {"revisionId", revision}, {"conflicting", conflicting}};
-    if (!source.is_null()) {
-        pending["source"] = source;
-        auto& references = task.rest["sourceResultRefs"];
-        if (references.is_null()) references = Json::array();
-        if (std::ranges::none_of(references, [&](const Json& ref) { return ref.at("messageId") == source.at("messageId"); }))
-            references.push_back(source);
-    }
+    if (source) rememberSourceResult(task, *source);
+    OutboxInstruction pending{messageId, step, std::string(instruction), revision, conflicting, std::move(source)};
     if (conflicting) {
         task.replanning = true;
         releaseModelCall(takeReservedTaskCall(task.eventId));
@@ -1047,14 +1043,12 @@ bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std:
             if (const auto allowance = waitAllowance(task.id, reason)) previous->allowance = allowance;
             clearWait(task, "request_changed");
             const auto waitId = wait(task, std::move(*previous));
-            if (task.rest["question"].is_object())
-                task.rest["question"]["target"] = questionTarget(task, reason == WaitReason::user_question ? waitId : 0);
+            if (task.question) task.question->target = questionTarget(task, reason == WaitReason::user_question ? waitId : 0);
         }
     }
-    if (!task.rest.contains("pendingInstructions")) task.rest["pendingInstructions"] = Json::array();
-    task.rest["pendingInstructions"].push_back(pending);
-    if (task.rest["question"].is_object()) task.rest["question"].erase("suspendedDecision");
-    journal(task.id, "instruction_accepted", pending);
+    if (task.question) task.question->suspendedDecision.reset();
+    journal(task.id, "instruction_accepted", instructionJson(pending));
+    task.pendingInstructions.push_back(std::move(pending));
     save(task);
     return conflicting;
 }
@@ -1068,12 +1062,10 @@ void Store::Impl::recordTaskBlocker(TaskData& task, std::string_view reason, Id 
             throw DecisionUnavailable{};
     }
     const auto publicReason = redactor(task.botId).text(std::string(reason));
-    task.rest.erase("blockerWaitId");
     if (reason.empty())
-        task.rest.erase("blockerReason");
+        task.blocker.reset();
     else
-        task.rest["blockerReason"] = publicReason;
-    if (waitId) task.rest["blockerWaitId"] = waitId;
+        task.blocker = RecordedTaskBlocker{publicReason, waitId ? std::optional{waitId} : std::nullopt};
     auto entry = Json{{"blockerReason", publicReason}, {"targetRevision", task.currentRevision.value_or(0)}};
     if (waitId) entry["waitId"] = waitId;
     journal(task.id, reason.empty() ? "blocker_cleared" : "blocker_recorded", entry);
@@ -1092,7 +1084,7 @@ void Store::Impl::withdrawTaskQuestion(TaskData& task, Id waitId) {
     consumeEvent(task);
     event(task, "withdraw/" + std::to_string(waitId), updated);
     clearWait(task, "withdrawn");
-    if (task.rest["question"].is_object()) task.rest["question"]["target"] = questionTarget(task);
+    if (task.question) task.question->target = questionTarget(task);
     journal(task.id, "question_withdrawn", {{"waitId", waitId}});
     task.state = TaskState::deciding;
     save(task);

@@ -136,7 +136,7 @@ int main() {
             for (int i = 0; i < 3; ++i) runtime.tick();
             check(t3.polls > pollsBeforeIdle && model.calls == callsBeforeIdle, "idle monitoring did not stay model-free");
             t3.current.kind = Observation::Kind::Question;
-            t3.current.question = {"q1", Json::array({{{"id", "branch"}, {"required", true}}})};
+            t3.current.question = {"q1", {{.id = "branch"}}};
             tickUntil(
                 runtime, [&] { return t3.replies == 1 && store.task(id).task.state == TaskState::running; },
                 "did not answer and return to the same Run");

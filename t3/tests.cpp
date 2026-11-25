@@ -339,12 +339,11 @@ int main(int argc, char** argv) {
         auto observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::Question && observation.question.requestId == "request", "owned question is exposed");
         const auto& field = observation.question.fields.at(0);
-        check(field.at("id") == "color" && field.at("question") == "Which colors?" && field.at("multiple") == true &&
-                  field.at("freeform") == false,
+        check(field.id == "color" && field.prompt == "Which colors?" && field.multiple && !field.freeform,
               "question retains its prompt and input constraints");
-        const auto& options = field.at("options");
-        check(options.size() == 2 && options.at(0).at("label") == "Green" && options.at(0).at("value") == "green" &&
-                  options.at(1).at("label") == "　blue　" && options.at(1).at("value") == "blue",
+        const auto& options = field.options;
+        check(options.size() == 2 && options.at(0).label == "Green" && options.at(0).value == "green" &&
+                  options.at(1).label == "　blue　" && options.at(1).value == "blue",
               "question retains the display labels and answer values for both options");
         Command answer = launch;
         answer.tool = CommandTool::answer_session_question;

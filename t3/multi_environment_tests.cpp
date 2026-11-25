@@ -337,8 +337,7 @@ void ordinaryMulti(const Endpoint& local, const Endpoint& mini, const std::files
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; },
                          "ordinary multi-environment work should complete without a requested commit");
     const auto task = fixture.task();
-    check(!task.task.rest.contains("requestedCommit") && task.task.runOutcome() == RunOutcome::all_completed &&
-              task.task.runResults().size() == 2,
+    check(!task.task.requestedCommit && task.task.runOutcome() == RunOutcome::all_completed && task.task.runResults().size() == 2,
           "ordinary work must aggregate both destinations without SHA policy");
     fixture.checkResult(fixture.local, Scenario::result(task, fixture.local), "completed", "");
     fixture.checkResult(fixture.mini, Scenario::result(task, fixture.mini), "completed", "");

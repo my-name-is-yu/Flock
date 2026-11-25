@@ -205,10 +205,8 @@ struct SimulatedT3 : T3 {
     }
     void question(std::string run) {
         runs.at(run).kind = Observation::Kind::Question;
-        runs.at(run).question = {"branch-question",
-                                 Json::array({{{"id", "branch"},
-                                               {"options", Json::array({{{"label", "Main branch"}, {"value", "main"}},
-                                                                        {{"label", "Development branch"}, {"value", "dev"}}})}}})};
+        runs.at(run).question = {
+            "branch-question", {{.id = "branch", .freeform = false, .options = {{"Main branch", "main"}, {"Development branch", "dev"}}}}};
     }
     void external(std::string run) {
         runs.at(run).kind = Observation::Kind::ExternalInput;
@@ -535,8 +533,7 @@ void invalidDecisions() {
     };
     f.reach(id, "running");
     f.t3.question("run-1");
-    f.t3.runs.at("run-1").question.fields.push_back(
-        {{"id", "checks"}, {"multiple", true}, {"freeform", true}, {"options", Json::array({{{"label", "Lint"}, {"value", "lint"}}})}});
+    f.t3.runs.at("run-1").question.fields.push_back({.id = "checks", .multiple = true, .options = {{"Lint", "lint"}}});
     f.model.script = [](const ModelInput&) { return work(); };
     const auto questionWait = f.wait(id, "model_failure");
     check(f.t3.launches == 1 && f.t3.replies == 0 && f.task(id)["doneWhen"] == Evidence, "invalid in-question action executed");
@@ -1135,7 +1132,7 @@ void settledReportCanRecoverAfterRestart() {
         observation.detail = secret;
         f.runtime->tick();
         check(f.task(id)["activeRun"].is_null() && f.task(id)["lastRun"]["runId"] == "run-1" &&
-                  f.store->sessionTasks("alpha", 0, 1).at(0).runs.at(0).at("status") == "completed" &&
+                  f.store->sessionTasks("alpha", 0, 1).at(0).runs.at(0).status == "completed" &&
                   f.store->history(id).dump().find(secret) == std::string::npos,
               "missing evidence kept the Run active or leaked diagnostics");
         const auto polls = f.t3.polls;
@@ -2975,9 +2972,9 @@ void prefillInFull() {
     };
     f.reach(id, "running");
     f.t3.question("run-1");
-    f.t3.runs.at("run-1").question.fields.at(0)["prompt"] = hidden;
+    f.t3.runs.at("run-1").question.fields.at(0).prompt = hidden;
     f.runtime->tick();
-    check(f.task(id).at("question").at("fields").at(0).at("prompt") == "[redacted]" &&
+    check(f.task(id).at("question").at("fields").at(0).at("question") == "[redacted]" &&
               f.store->history(id).dump().find(hidden) == std::string::npos,
           "raw question persisted in Task or journal");
     f.reach(id, "running");

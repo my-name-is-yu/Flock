@@ -1,5 +1,7 @@
 #pragma once
 
+#include "flock/command.hpp"
+#include "flock/decision.hpp"
 #include "flock/task.hpp"
 
 #include <nlohmann/json.hpp>
@@ -11,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -59,13 +62,6 @@ struct PeerBot {
 };
 using PeerResolver = std::function<std::vector<PeerBot>(std::string_view)>;
 
-struct Decision {
-    std::string tool;
-    Json args = Json::object();
-    std::string reason;
-};
-bool recordsTaskDecisionReason(std::string_view tool);
-bool validDecisionReason(std::string_view reason);
 struct ModelTurn {
     std::vector<Decision> calls;
     Json usage = Json::object();
@@ -110,14 +106,10 @@ public:
     virtual ModelTurn decide(const ModelInput&) = 0;
 };
 
-struct Question {
-    std::string requestId;
-    Json fields = Json::array();
-};
 // T3 trims ordinary input and labels without explicit values using JavaScript String.trim.
 std::string_view trimSessionQuestionText(std::string_view text);
 // Validate a model answer against the observed fields and encode it for Session submission.
-Json sessionQuestionAnswers(const Json& fields, const Json& answers);
+Json sessionQuestionAnswers(std::span<const QuestionField> fields, const Json& answers);
 struct Observation {
     enum class Kind { Running, Question, ExternalInput, Settling, Finished, Unavailable } kind = Kind::Running;
     Question question;
@@ -131,21 +123,6 @@ struct Observation {
 };
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
 
-enum class CommandTool { none, delegate, start_in_session, follow_up, answer_session_question, message_session };
-std::string_view commandToolName(CommandTool);
-std::optional<CommandTool> commandToolFromName(std::string_view);
-
-struct CommandPayload {
-    std::string actionId, environmentId, projectId, instruction;
-    CommandTool tool = CommandTool::none;
-    Json answers = Json::object();
-    RunRef target;
-    std::string questionId;
-    std::optional<RunRef> candidate;
-    std::string candidateQuestionId;
-    std::string launchReceiptThreadId; // From the launch response, even if the Run ID was pending.
-    std::string gatewayEnvironmentId;
-};
 struct Command : CommandPayload {
     Json config = Json::object();
     std::string authGeneration{}, ownerBotId{};

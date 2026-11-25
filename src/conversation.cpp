@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
+#include "task_storage.hpp"
 
 namespace flockv0 {
 using conversation_storage::hasText;
@@ -37,8 +38,7 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
          {task.id, intent, doneWhen, source ? Json(source) : Json(nullptr), task.id});
     const auto revision = last();
     task.currentRevision = revision;
-    task.rest.erase("blockerReason");
-    task.rest.erase("blockerWaitId");
+    task.blocker.reset();
     task.intent = intent;
     task.doneWhen = doneWhen;
     journal(task.id, "task_revision", {{"revisionId", revision}, {"sourceMessageId", source}});
@@ -130,20 +130,20 @@ Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, 
             {"environmentId", origin->target.environmentId}, {"threadId", origin->target.threadId}, {"title", scrub.text(origin->title)}};
     } else if (replyTo && (source == conversation::PrincipalSource::trusted || source == conversation::PrincipalSource::web)) {
         auto previous = query(R"SQL(
-SELECT coalesce(json_extract(t.data,'$.sessionOrigin'),json_extract(m.routing,'$.sessionOrigin')),
+SELECT t.data,t.id,t.state,t.generation,t.has_session_origin,json_extract(m.routing,'$.sessionOrigin'),
        json_extract(m.routing,'$.sessionInvitationDepth') FROM journal j
 LEFT JOIN conversation_turns turn ON turn.reply_id=j.id
 LEFT JOIN tasks t ON t.id=j.task_id AND t.bot_id=?2
-JOIN messages m ON m.id=coalesce(turn.message_id,json_extract(t.data,'$.sourceMessageId'),j.id)
+JOIN messages m ON m.id=coalesce(turn.message_id,t.source_message_id,j.id)
 WHERE j.id=?1 AND m.bot_id=?2 AND m.person_id=?3
-  AND (json_type(t.data,'$.sessionOrigin')='object' OR json_type(m.routing,'$.sessionOrigin')='object')
+  AND (t.has_session_origin OR json_type(m.routing,'$.sessionOrigin')='object')
 )SQL",
                               {replyTo, routing.botId, actor.id});
         if (previous.next()) {
-            auto inherited = previous.json(0);
+            auto inherited = previous.number(4) ? sessionOriginJson(decodeTaskRow(previous).sessionOrigin.value()) : previous.json(5);
             inherited["title"] = scrub.text(field(inherited, "title"));
             saved["sessionOrigin"] = std::move(inherited);
-            if (const auto depth = previous.number(1)) saved["sessionInvitationDepth"] = depth;
+            if (const auto depth = previous.number(6)) saved["sessionInvitationDepth"] = depth;
         }
     }
     Json event = Json::object();

@@ -1,4 +1,6 @@
 #include "task_storage.hpp"
+#include "task_context_storage.hpp"
+#include "task_interaction_storage.hpp"
 #include "storage.hpp"
 #include "record_decode.hpp"
 #include "outbox_storage.hpp"
@@ -83,7 +85,7 @@ AssignedRun decodeAssignedRun(const Json& data, const RecordDecoder& row) {
 std::optional<AssignedRun> decodeNullableRun(const Json& data, const RecordDecoder& row, std::string_view key) {
     const auto& value = row.require(data, key);
     if (value.is_null()) return std::nullopt;
-    return decodeAssignedRun(value, row.nested(key));
+    return row.nested(key).decodeClosed(value, decodeAssignedRun);
 }
 
 RunStop decodeRunStop(const Json& data, const RecordDecoder& row) {
@@ -95,7 +97,7 @@ RunStop decodeRunStop(const Json& data, const RecordDecoder& row) {
 
 SettledRunReport decodeSettledRunReport(const Json& data, const RecordDecoder& row) {
     if (row.get<std::string>(data, "kind") != "result") row.fail("kind", "expected a Run result");
-    auto run = decodeAssignedRun(row.require(data, "run"), row.nested("run"));
+    auto run = row.nested("run").decodeClosed(row.require(data, "run"), decodeAssignedRun);
     if (row.get<std::string>(data, "environmentId") != run.environmentId) row.fail("environmentId", "does not match the assigned Run");
     if (row.nullable<Id>(data, "revisionId") != run.assignment.revisionId) row.fail("revisionId", "does not match the assigned Run");
     RunEvidence evidence{.availability = decodeReportAvailability(data, row),
@@ -109,7 +111,7 @@ SettledRunReport decodeSettledRunReport(const Json& data, const RecordDecoder& r
 }
 
 PendingRunReport decodePendingRunReport(const Json& data, const RecordDecoder& row) {
-    return {decodeSettledRunReport(row.require(data, "report"), row.nested("report")), row.get<Seconds>(data, "retryAt"),
+    return {row.nested("report").decodeClosed(row.require(data, "report"), decodeSettledRunReport), row.get<Seconds>(data, "retryAt"),
             row.get<int>(data, "attempts")};
 }
 
@@ -253,14 +255,11 @@ Json sessionOriginJson(const SessionOrigin& origin) {
     return data;
 }
 
-TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_view text) {
-    const auto rowId = std::to_string(id);
-    const RecordDecoder row("tasks", rowId);
-    auto data = row.parse(text);
-    row.object(data);
+namespace {
+TaskData decodeTaskData(Id id, TaskState state, Id generation, const Json& data, const RecordDecoder& row) {
     TaskData task;
     task.id = id;
-    task.state = decodeTaskState(id, state);
+    task.state = state;
     task.generation = generation;
     task.botId = row.get<std::string>(data, "botId");
     task.request = row.get<std::string>(data, "request");
@@ -268,35 +267,36 @@ TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_vi
     task.environmentId = row.get<std::string>(data, "environmentId");
     task.projectId = row.get<std::string>(data, "projectId");
     task.doneWhen = row.get<std::string>(data, "doneWhen");
-    row.object(row.require(data, "config"), "config");
-    task.config = std::move(data.at("config"));
+    task.config = row.object(row.require(data, "config"), "config");
     task.gatewayEnvironmentId = row.optional<std::string>(data, "gatewayEnvironmentId");
     task.currentRevision = row.optional<Id>(data, "currentRevision");
-    if (const auto found = data.find("pendingDestination"); found != data.end())
-        task.pendingDestination = decodeDestination(*found, row.nested("pendingDestination"));
+    if (const auto found = row.find(data, "pendingDestination"); found != data.end())
+        task.pendingDestination = row.nested("pendingDestination").decodeClosed(*found, decodeDestination);
     task.actionId = row.get<std::string>(data, "actionId");
     task.eventId = row.get<Id>(data, "eventId");
     task.deadline = row.get<Seconds>(data, "deadline");
     task.activeRun = decodeNullableRun(data, row, "activeRun");
     task.lastRun = decodeNullableRun(data, row, "lastRun");
-    if (const auto found = data.find("runStop"); found != data.end()) task.runStop = decodeRunStop(*found, row.nested("runStop"));
-    if (const auto found = data.find("runTargets"); found != data.end()) {
+    if (const auto found = row.find(data, "runStop"); found != data.end())
+        task.runStop = row.nested("runStop").decodeClosed(*found, decodeRunStop);
+    if (const auto found = row.find(data, "runTargets"); found != data.end()) {
         if (data.contains("runResults")) row.fail("runTargets", "cannot coexist with dispatched Runs");
         auto& targets = task.destinations.emplace<RunTargets>();
         for (const auto& target : row.array(*found, "runTargets"))
-            targets.push_back(decodeRunTarget(target, row.nested("runTargets." + std::to_string(targets.size()))));
+            targets.push_back(row.nested("runTargets." + std::to_string(targets.size())).decodeClosed(target, decodeRunTarget));
         if (targets.empty()) row.fail("runTargets", "expected at least one destination");
     }
-    if (const auto found = data.find("runResults"); found != data.end()) {
+    const auto outcome = row.optional<std::string>(data, "runOutcome");
+    if (const auto found = row.find(data, "runResults"); found != data.end()) {
         auto& results = task.destinations.emplace<RunResults>();
         for (const auto& run : row.array(*found, "runResults"))
-            results.runs.push_back(decodeDestinationRun(run, row.nested("runResults." + std::to_string(results.runs.size()))));
+            results.runs.push_back(row.nested("runResults." + std::to_string(results.runs.size())).decodeClosed(run, decodeDestinationRun));
         if (results.runs.empty()) row.fail("runResults", "expected at least one destination");
-        if (const auto status = row.optional<std::string>(data, "runOutcome")) {
-            results.outcome = enumValue(runOutcomes, *status);
+        if (outcome) {
+            results.outcome = enumValue(runOutcomes, *outcome);
             if (!results.outcome) row.fail("runOutcome", "unknown task Run outcome");
         }
-    } else if (data.contains("runOutcome")) {
+    } else if (outcome) {
         row.fail("runOutcome", "requires dispatched Runs");
     }
     task.replanning = row.optional<bool>(data, "replanning").value_or(false);
@@ -304,63 +304,47 @@ TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_vi
     task.cancelledByBotPause = row.optional<bool>(data, "cancelledByBotPause").value_or(false);
     task.replanningDetail = row.optional<std::string>(data, "replanningDetail");
     task.cancellationDetail = row.optional<std::string>(data, "cancellationDetail");
-    if (const auto found = data.find("cancelledInstructions"); found != data.end())
+    if (const auto found = row.find(data, "pendingInstructions"); found != data.end())
+        task.pendingInstructions = taskInstructions(*found, id, "pendingInstructions");
+    if (const auto found = row.find(data, "cancelledInstructions"); found != data.end())
         task.cancelledInstructions = taskInstructions(*found, id, "cancelledInstructions");
-    if (const auto found = data.find("pendingRunReport"); found != data.end())
-        task.pendingRunReport = decodePendingRunReport(*found, row.nested("pendingRunReport"));
+    if (const auto found = row.find(data, "pendingRunReport"); found != data.end())
+        task.pendingRunReport = row.nested("pendingRunReport").decodeClosed(*found, decodePendingRunReport);
     task.pendingStageReport = row.optional<Id>(data, "pendingStageReport");
     task.sessionReconcileAt = row.optional<Seconds>(data, "sessionReconcileAt");
     task.workflowReconcileAt = row.optional<Seconds>(data, "workflowReconcileAt");
-    if (const auto found = data.find("selectedSession"); found != data.end()) {
-        const auto session = row.nested("selectedSession");
-        task.selectedSession = WorkSession{decodeSessionTarget(*found, session), session.get<std::string>(*found, "projectId")};
+    if (const auto found = row.find(data, "selectedSession"); found != data.end()) {
+        task.selectedSession = row.nested("selectedSession").decodeClosed(*found, [](const Json& value, const RecordDecoder& session) {
+            return WorkSession{decodeSessionTarget(value, session), session.get<std::string>(value, "projectId")};
+        });
     }
-    if (const auto found = data.find("sessionOrigin"); found != data.end())
-        task.sessionOrigin = decodeSessionOrigin(*found, row.nested("sessionOrigin"));
+    if (const auto found = row.find(data, "sessionOrigin"); found != data.end())
+        task.sessionOrigin = row.nested("sessionOrigin").decodeClosed(*found, decodeSessionOrigin);
     task.newSessionRequired = row.optional<bool>(data, "newSessionRequired").value_or(false);
     task.freshContextRequested = row.optional<bool>(data, "freshContextRequested").value_or(false);
     task.launchWarning = row.optional<std::string>(data, "launchWarning");
-    for (const auto* key : {"id",
-                            "state",
-                            "generation",
-                            "botId",
-                            "request",
-                            "intent",
-                            "environmentId",
-                            "projectId",
-                            "doneWhen",
-                            "config",
-                            "gatewayEnvironmentId",
-                            "currentRevision",
-                            "pendingDestination",
-                            "revisions",
-                            "actionId",
-                            "eventId",
-                            "deadline",
-                            "activeRun",
-                            "lastRun",
-                            "runStop",
-                            "runTargets",
-                            "runResults",
-                            "runOutcome",
-                            "replanning",
-                            "queuedInT3",
-                            "cancelledByBotPause",
-                            "replanningDetail",
-                            "cancellationDetail",
-                            "cancelledInstructions",
-                            "pendingRunReport",
-                            "pendingStageReport",
-                            "sessionReconcileAt",
-                            "workflowReconcileAt",
-                            "selectedSession",
-                            "sessionOrigin",
-                            "newSessionRequired",
-                            "freshContextRequested",
-                            "launchWarning"})
-        data.erase(key);
-    task.rest = std::move(data);
+    task.createdAt = row.get<Seconds>(data, "createdAt");
+    task.allowance = {row.get<int>(data, "remaining"), row.get<int>(data, "additionalUsed")};
+    auto criteria = row.optional<std::string>(data, "requestedDoneWhen");
+    const auto criteriaSource = row.optional<Id>(data, "criteriaSourceMessageId");
+    if (criteria)
+        task.criteriaProposal = TaskCriteriaProposal{std::move(*criteria), criteriaSource};
+    else if (criteriaSource)
+        row.fail("criteriaSourceMessageId", "requires proposed completion criteria");
+    task.requestedCommit = row.optional<std::string>(data, "requestedCommit");
+    task.feedback = row.optional<std::string>(data, "feedback");
+    decodeTaskInteraction(task, data, row);
+    decodeTaskContext(task, data, row);
     return task;
+}
+}
+
+TaskData decodeTask(Id id, std::string_view state, Id generation, std::string_view text) {
+    const auto rowId = std::to_string(id);
+    const RecordDecoder row("tasks", rowId);
+    return row.decodeClosed(row.parse(text), [&](const Json& data, const RecordDecoder& fields) {
+        return decodeTaskData(id, decodeTaskState(id, state), generation, data, fields);
+    });
 }
 
 TaskData decodeTaskRow(const Statement& row, int col) {
@@ -368,19 +352,21 @@ TaskData decodeTaskRow(const Statement& row, int col) {
 }
 
 Json encodeTask(const TaskData& task) {
-    auto data = task.rest;
-    data.update({{"botId", task.botId},
-                 {"request", task.request},
-                 {"intent", task.intent},
-                 {"environmentId", task.environmentId},
-                 {"projectId", task.projectId},
-                 {"doneWhen", task.doneWhen},
-                 {"config", task.config},
-                 {"actionId", task.actionId},
-                 {"eventId", task.eventId},
-                 {"deadline", task.deadline},
-                 {"activeRun", assignedRunJson(task.activeRun)},
-                 {"lastRun", assignedRunJson(task.lastRun)}});
+    Json data{{"botId", task.botId},
+              {"request", task.request},
+              {"intent", task.intent},
+              {"environmentId", task.environmentId},
+              {"projectId", task.projectId},
+              {"doneWhen", task.doneWhen},
+              {"config", task.config},
+              {"actionId", task.actionId},
+              {"eventId", task.eventId},
+              {"deadline", task.deadline},
+              {"activeRun", assignedRunJson(task.activeRun)},
+              {"lastRun", assignedRunJson(task.lastRun)},
+              {"createdAt", task.createdAt},
+              {"remaining", task.allowance.remaining},
+              {"additionalUsed", task.allowance.additionalUsed}};
     if (task.gatewayEnvironmentId) data["gatewayEnvironmentId"] = *task.gatewayEnvironmentId;
     if (task.pendingDestination) data["pendingDestination"] = destinationJson(*task.pendingDestination);
     if (task.currentRevision) data["currentRevision"] = *task.currentRevision;
@@ -397,10 +383,8 @@ Json encodeTask(const TaskData& task) {
     if (task.cancelledByBotPause) data["cancelledByBotPause"] = true;
     if (task.replanningDetail) data["replanningDetail"] = *task.replanningDetail;
     if (task.cancellationDetail) data["cancellationDetail"] = *task.cancellationDetail;
-    if (!task.cancelledInstructions.empty()) {
-        auto& instructions = data["cancelledInstructions"] = Json::array();
-        for (const auto& instruction : task.cancelledInstructions) instructions.push_back(instructionJson(instruction));
-    }
+    if (!task.pendingInstructions.empty()) data["pendingInstructions"] = instructionsJson(task.pendingInstructions);
+    if (!task.cancelledInstructions.empty()) data["cancelledInstructions"] = instructionsJson(task.cancelledInstructions);
     if (const auto& pending = task.pendingRunReport)
         data["pendingRunReport"] = {
             {"report", settledRunReportJson(pending->report)}, {"retryAt", pending->retryAt}, {"attempts", pending->attempts}};
@@ -416,15 +400,15 @@ Json encodeTask(const TaskData& task) {
     if (task.newSessionRequired) data["newSessionRequired"] = true;
     if (task.freshContextRequested) data["freshContextRequested"] = true;
     if (task.launchWarning) data["launchWarning"] = *task.launchWarning;
+    if (task.criteriaProposal) {
+        data["requestedDoneWhen"] = task.criteriaProposal->doneWhen;
+        if (task.criteriaProposal->sourceMessageId) data["criteriaSourceMessageId"] = *task.criteriaProposal->sourceMessageId;
+    }
+    if (task.requestedCommit) data["requestedCommit"] = *task.requestedCommit;
+    if (task.feedback) data["feedback"] = *task.feedback;
+    encodeTaskInteraction(data, task);
+    encodeTaskContext(data, task);
     return data;
-}
-
-Json waitQuestionTarget(const Wait& wait) {
-    const auto* question = std::get_if<ModelQuestionWait>(&wait.details);
-    return {{"waitId", wait.id},
-            {"eventId", wait.eventId},
-            {"run", waitRunJson(wait.run)},
-            {"requestId", question ? question->questionId : std::string{}}};
 }
 
 namespace {
@@ -434,13 +418,30 @@ Json taskWaitJson(const TaskData& task, const std::optional<Wait>& wait) {
     result["id"] = wait->id;
     if (wait->messageId) result["messageId"] = *wait->messageId;
     if (wait->allowance) result["allowance"] = *wait->allowance;
-    if (wait->reason() == WaitReason::user_question && !task.rest.at("question").is_object()) result["target"] = waitQuestionTarget(*wait);
+    if (wait->reason() == WaitReason::user_question && !task.question) result["target"] = questionTargetJson(waitQuestionTarget(*wait));
     return result;
 }
 
 Json blockerJson(const std::optional<TaskBlocker>& blocker) {
     if (!blocker) return nullptr;
     return {{"id", blocker->id}, {"botId", blocker->botId}, {"request", blocker->request}, {"state", taskStateName(blocker->state)}};
+}
+
+Json pendingActionJson(const std::optional<OutboxAction>& action) {
+    if (!action) return nullptr;
+    auto data = outboxActionJson(*action);
+    data["id"] = action->command.actionId;
+    data["phase"] = outboxPhaseName(action->phase);
+    return data;
+}
+
+Json taskRunJson(const TaskRunView& view) {
+    auto data = assignedRunJson(view.run);
+    data["actionId"] = view.actionId;
+    data["revisionId"] = view.run.assignment.revisionId.value_or(0);
+    if (view.status) data["status"] = *view.status;
+    if (view.sessionCreatedAt) data["sessionCreatedAt"] = *view.sessionCreatedAt;
+    return data;
 }
 }
 
@@ -452,8 +453,9 @@ Json taskJson(const TaskView& view) {
     data["generation"] = task.generation;
     data["wait"] = taskWaitJson(task, view.wait);
     data["blockedBy"] = blockerJson(view.blockedBy);
-    data["pendingAction"] = view.pendingAction;
-    data["runs"] = view.runs;
+    data["pendingAction"] = pendingActionJson(view.pendingAction);
+    auto& runs = data["runs"] = Json::array();
+    for (const auto& run : view.runs) runs.push_back(taskRunJson(run));
     data["revisions"] = Json::array();
     for (const auto& revision : view.revisions)
         data["revisions"].push_back({{"id", revision.id},
@@ -486,8 +488,7 @@ void Store::Impl::save(TaskData& task) {
 namespace {
 const std::string queueBlockers = R"SQL(
 blockers AS (
-  SELECT requested.id,owner.id AS owner_id,owner.bot_id,
-         json_extract(owner.data,'$.request') AS request,owner.state
+  SELECT requested.id,owner.id AS owner_id,owner.bot_id,owner.request,owner.state
   FROM requested
   CROSS JOIN task_project_slots slot ON slot.id=requested.id
   JOIN tasks owner ON owner.id=slot.blocker_id
@@ -536,13 +537,7 @@ TaskView Store::Impl::taskDetails(Id id, bool includeBlocker) const {
 
 void Store::Impl::addTaskDetails(TaskView& view) const {
     const auto& task = view.task;
-    if (auto pending = outbox(task)) {
-        pending->sessionMemory.reset();
-        auto data = to_json(*pending);
-        data["id"] = pending->command.actionId;
-        data["phase"] = outboxPhaseName(pending->phase);
-        view.pendingAction = std::move(data);
-    }
+    if (auto pending = outbox(task)) view.pendingAction.emplace(std::move(*pending));
     auto revisions = query("SELECT id,number,intent,done_when,source_message_id FROM task_revisions"
                            " WHERE task_id=? ORDER BY number",
                            {task.id});
@@ -555,15 +550,13 @@ void Store::Impl::addTaskDetails(TaskView& view) const {
                       "json_extract(outbox.data,'$.revisionId'),json_extract(outbox.data,'$.projectId') FROM runs"
                       " JOIN outbox ON runs.action_id=outbox.id WHERE runs.task_id=? ORDER BY outbox.rowid",
                       {task.id});
-    while (runs.next())
-        view.runs.push_back({{"threadId", runs.string(0)},
-                             {"runId", runs.string(1)},
-                             {"link", runs.string(2)},
-                             {"actionId", runs.string(3)},
-                             {"environmentId", runs.string(4)},
-                             {"revisionId", runs.number(5)},
-                             {"projectId", runs.string(6)},
-                             {"ownerBotId", task.botId}});
+    while (runs.next()) {
+        const auto revision = runs.number(5);
+        view.runs.push_back({.run = {{runs.string(0), runs.string(1), runs.string(2), {}},
+                                     runs.string(4),
+                                     {task.botId, runs.string(6), revision ? std::optional{revision} : std::nullopt}},
+                             .actionId = runs.string(3)});
+    }
 }
 
 std::vector<TaskView> Store::tasks(std::string_view bot, Id before, unsigned limit) const {
@@ -590,7 +583,7 @@ std::vector<Store::ActiveTask> Store::activeTasks(std::string_view bot) const {
 std::map<std::string, std::vector<TaskPresence>> Store::activeTaskStatesByBot() const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
-SELECT bot_id,state,coalesce(json_extract(data,'$.replanning'),0) AS replanning,min(id)
+SELECT bot_id,state,replanning,min(id)
 FROM tasks WHERE state NOT IN ('completed','cancelled')
 GROUP BY bot_id,state,replanning)SQL");
     std::map<std::string, std::vector<TaskPresence>> result;
@@ -619,12 +612,13 @@ FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
         auto timestamp = reports.string(4);
         if (!timestamp.empty()) createdAt.try_emplace(SessionKey{environment, thread}, std::move(timestamp));
     }
-    for (auto& run : view.runs) {
-        const SessionKey session{field(run, "environmentId"), field(run, "threadId")};
-        const auto status = statuses.find({session.first, session.second, field(run, "runId")});
-        if (status != statuses.end()) run["status"] = status->second;
+    for (auto& runView : view.runs) {
+        const auto& run = runView.run;
+        const SessionKey session{run.environmentId, run.ref.threadId};
+        const auto status = statuses.find({session.first, session.second, run.ref.runId});
+        if (status != statuses.end()) runView.status = status->second;
         const auto timestamp = createdAt.find(session);
-        if (timestamp != createdAt.end()) run["sessionCreatedAt"] = timestamp->second;
+        if (timestamp != createdAt.end()) runView.sessionCreatedAt = timestamp->second;
     }
     return view;
 }

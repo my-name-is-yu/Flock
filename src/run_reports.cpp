@@ -80,7 +80,7 @@ bool Store::Impl::recordDestinationReport(TaskData& task, DestinationRun& run, c
     auto status = observed.status;
     if (status.empty()) status = "failed";
     auto detail = observed.detail;
-    if (status == "completed" && task.rest.contains("requestedCommit") && observed.checkedCommit != field(task.rest, "requestedCommit")) {
+    if (status == "completed" && task.requestedCommit && observed.checkedCommit != *task.requestedCommit) {
         status = "failed";
         if (detail.empty()) detail = "The Run did not verify the requested commit.";
     }
@@ -93,7 +93,7 @@ bool Store::Impl::recordDestinationReport(TaskData& task, DestinationRun& run, c
                  {"commit", observed.checkedCommit},
                  {"revisionId", task.currentRevision ? Json(*task.currentRevision) : Json(nullptr)},
                  {"resultRunId", observed.resultRunId.empty() ? ref.runId : observed.resultRunId}};
-    if (task.rest.contains("requestedCommit")) data["requestedCommit"] = task.rest.at("requestedCommit");
+    if (task.requestedCommit) data["requestedCommit"] = *task.requestedCommit;
     if (status == "interrupted" || status == "cancelled") {
         const auto action = outbox(task, run.actionId);
         data["stopRequested"] = task.state == TaskState::cancelling || destinationStopRequested(action, ref);
@@ -154,12 +154,12 @@ WHERE json_extract(effect,'$.kind')='message_session'
     results.outcome = outcome;
     task.state = TaskState::completed;
     auto summary = std::to_string(count) + " of " + std::to_string(runs.size()) + " T3 Runs completed";
-    if (task.rest.contains("requestedCommit")) summary += " with a verified commit";
+    if (task.requestedCommit) summary += " with a verified commit";
     Json completion = {{"text", std::move(summary) + "."},
                        {"runOutcome", runOutcomeName(outcome)},
                        {"doneWhen", task.doneWhen},
                        {"revisionId", data.at("revisionId")}};
-    if (task.rest.contains("requestedCommit")) completion["requestedCommit"] = task.rest.at("requestedCommit");
+    if (task.requestedCommit) completion["requestedCommit"] = *task.requestedCommit;
     journal(task.id, "completed", std::move(completion));
     return true;
 }

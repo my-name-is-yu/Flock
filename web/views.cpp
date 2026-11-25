@@ -273,7 +273,12 @@ Json taskSummary(const TaskData& task) {
     Json result = {{"state", displayState(task)}, {"id", task.id}, {"request", task.request}, {"generation", task.generation}};
     if (task.currentRevision) result["currentRevision"] = *task.currentRevision;
     result["deadline"] = task.deadline;
-    copyFields(result, task.rest, {"createdAt", "workflowId", "stageId", "inputArtifactVersion"});
+    result["createdAt"] = task.createdAt;
+    if (const auto& workflow = task.workflow) {
+        result["workflowId"] = workflow->id;
+        result["stageId"] = workflow->stageId;
+        result["inputArtifactVersion"] = workflow->inputArtifactVersion;
+    }
     return result;
 }
 
@@ -313,26 +318,26 @@ Json sessionGroup(const TaskView& view) {
     auto sessions = Json::array();
     const auto& env = task.environmentId;
     const auto& activeRun = task.activeRun;
-    const auto& runs = view.runs;
     std::set<std::pair<std::string, std::string>> seen;
-    for (auto run = runs.rbegin(); run != runs.rend(); ++run) {
-        auto session = runView(*run, env);
+    for (const auto& entry : view.runs | std::views::reverse) {
+        const auto& run = entry.run;
+        const auto& environment = run.environmentId.empty() ? env : run.environmentId;
+        const auto& thread = run.ref.threadId;
+        const auto& runId = run.ref.runId;
+        auto session = runView(environment, thread, runId, run.ref.link);
         if (session.is_null()) continue;
-        const auto thread = field(session, "threadId");
-        if (!seen.emplace(field(session, "environmentId"), thread).second) continue;
-        const bool active = activeRun && field(*run, "runId") == activeRun->ref.runId && thread == activeRun->ref.threadId &&
-                            field(session, "environmentId") == env;
-        session["state"] = active ? displayState(task) : run->value("status", "ended");
+        if (!seen.emplace(environment, thread).second) continue;
+        const bool active = activeRun && runId == activeRun->ref.runId && thread == activeRun->ref.threadId && environment == env;
+        session["state"] = active ? displayState(task) : entry.status.value_or("ended");
         const auto result = std::ranges::find_if(task.runResults(), [&](const DestinationRun& check) {
-            return check.environmentId == field(*run, "environmentId") && check.ref.threadId == thread &&
-                   check.ref.runId == field(*run, "runId");
+            return check.environmentId == run.environmentId && check.ref.threadId == thread && check.ref.runId == runId;
         });
         if (result != task.runResults().end()) {
             session["name"] = result->name;
             if (result->report) session["commit"] = result->report->commit;
             session["state"] = destinationRunStatusName(result->status);
         }
-        if (const auto createdAt = field(*run, "sessionCreatedAt"); !createdAt.empty()) session["createdAt"] = createdAt;
+        if (entry.sessionCreatedAt) session["createdAt"] = *entry.sessionCreatedAt;
         sessions.push_back(std::move(session));
     }
     auto group = taskSummary(task);
@@ -386,7 +391,7 @@ Json activity(const std::vector<Store::ActiveTask>& activeTasks, std::string_vie
                     auto active = run;
                     active["taskId"] = task.id;
                     active["request"] = task.request;
-                    copyFields(active, task.rest, {"createdAt"});
+                    active["createdAt"] = task.createdAt;
                     result["activeSessions"].push_back(std::move(active));
                 }
                 checks.push_back(std::move(run));
@@ -398,7 +403,7 @@ Json activity(const std::vector<Store::ActiveTask>& activeTasks, std::string_vie
             active["taskId"] = task.id;
             active["request"] = task.request;
             active["state"] = displayState(task);
-            copyFields(active, task.rest, {"createdAt"});
+            active["createdAt"] = task.createdAt;
             result["activeSessions"].push_back(std::move(active));
         }
     }

@@ -121,8 +121,8 @@ FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
 LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
 AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
 WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
-    p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
-    AND NOT coalesce(json_extract(t.data,'$.replanning'),0))) ORDER BY p.id DESC
+    p.target_revision=coalesce(t.current_revision,0)
+    AND NOT t.replanning)) ORDER BY p.id DESC
 )SQL",
                  {bot});
 }
@@ -259,7 +259,7 @@ Json Store::decisionHistory(const Person& actor, std::string_view bot) const {
         auto rows = p_->query(R"SQL(
 SELECT d.id,d.item_kind,d.item_id,d.wait_id,coalesce(d.task_id,0),d.target_revision,d.target_generation,
        d.decided_by,d.decided_at,d.decision,
-       coalesce(nullif(r.intent,''),nullif(json_extract(t.data,'$.request'),''),m.text,''),
+       coalesce(nullif(r.intent,''),nullif(t.request,''),m.text,''),
        coalesce(a.action,''),coalesce(a.target,'')
 FROM inbox_decisions d
 LEFT JOIN tasks t ON t.id=d.task_id AND t.bot_id=d.bot_id

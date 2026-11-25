@@ -141,7 +141,7 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
         task.newSessionRequired = true;
         task.freshContextRequested = true;
         task.replanning = true;
-        acceptInstruction(task, message.id, step, instruction, nullptr, nullptr);
+        acceptInstruction(task, message.id, step, instruction, std::nullopt, nullptr);
         return {{"ok", true}, {"freshContext", true}, {"taskId", task.id}, {"effect", "replanning"}};
     }
 
