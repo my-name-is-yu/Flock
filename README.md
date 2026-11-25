@@ -23,7 +23,7 @@ build concurrency.
 
 Edit the Bot's instructions under **Role** in its Web settings.
 
-Bots can read, write, and search files in their own workspaces. They delegate commands, scripts, builds, and tests to T3 Sessions.
+Bots can read, write, and search files in their own workspaces. They delegate commands, scripts, builds, and tests to T3 Sessions. Make any files the work needs available in the selected T3 project.
 
 The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.
 

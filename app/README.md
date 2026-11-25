@@ -204,7 +204,8 @@ home has one ChatGPT connection. See the official [sign-in guide][signin],
 Conversation turns can read, write, and search files under
 `<home>/workspaces/<botId>`. The `workspace.read` policy action governs reading
 and searching, and `workspace.write` governs writing. Both target the Bot ID.
-Bots delegate commands, scripts, builds, and tests to T3 Sessions.
+Bots delegate commands, scripts, builds, and tests to T3 Sessions. Make any
+files the work needs available in the selected T3 project.
 
 Web fetch requires `web/<hostname>/fetch` and accepts public HTTPS text
 responses. Web search requires `web/public/search` and the host environment
