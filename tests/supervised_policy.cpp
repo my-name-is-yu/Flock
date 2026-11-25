@@ -49,9 +49,11 @@ struct FixtureModel : Model {
 
 struct Adapter : T3 {
     int sends = 0;
+    std::string instruction;
     std::string authGeneration(const std::string&,const Json&) override { return "fixture"; }
-    Delivery send(const Command&) override {
+    Delivery send(const Command& command) override {
         ++sends;
+        instruction = command.instruction;
         return {Delivery::Kind::Accepted,{"thread-" + std::to_string(sends),"run",""},{}};
     }
     Delivery reconcile(const Command&) override { return {}; }
@@ -127,7 +129,9 @@ void reopenDirectTask(const std::filesystem::path& path) {
         Store store(path);
         store.policy().setOwner(requester,"release");
         store.policy().setMode(localOwner,"supervised");
-        task = store.submit({"release","Build the release","env","project"},&requester);
+        store.memory(requester,"release","apply_memory_edit",{{"baseVersion",0},{"content","Use the old signing process."}});
+        task = store.submit({"release","Build the release","env","project",{{"shareMemoryWithSessions",true}}},
+                            &requester);
     }
     {
         sqlite3* handle = nullptr;
@@ -152,9 +156,15 @@ INSERT INTO task_request_receipts SELECT bot_id,'requester','existing','digest',
     const auto items = reopened.inbox(requester);
     check(items.size()==1 && items.at(0).at("taskId")==task && items.at(0).at("expiresAt")==0 && adapter.sends==0,
           "A saved direct request lost its approval for the original requester");
+    check(items.dump().find("Use the old signing process.") == std::string::npos,
+          "The approval displayed the Bot's private memory");
+    reopened.memory(requester,"release","apply_memory_edit",{{"baseVersion",1},{"content","Use the current signing process."}});
     reopened.decideInbox(requester,target(items.at(0)),"allow_once");
     for (int i=0;i<6;++i) runtime.tick();
     check(adapter.sends==1,"The saved direct request did not launch after approval");
+    check(adapter.instruction.find("Use the current signing process.") != std::string::npos &&
+          adapter.instruction.find("Use the old signing process.") == std::string::npos,
+          "The approved work did not use memory current at dispatch");
 }
 
 void turns(const std::filesystem::path& path) {

@@ -4,9 +4,16 @@ The executable serves the embedded UI on its IPv4 loopback listener. The Web UI 
 
 The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. For the same person and Bot, retrying the same payload with the same `clientMessageId` returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Select a task question's choice and press **Send answer** to answer directly through `POST /api/operations`. Written replies to questions go through the Bot.
 
+The Bot explains results and next steps in its reply. Task decision and Git change rationales are recorded in the corresponding CLI history.
+
 Bots can read, write, and search files in their own workspaces. Requests to run commands, scripts, builds, or tests go to T3 Sessions. If a Session needs a file it cannot access, the Bot asks you to make it available in the selected T3 project.
 
 The Bot's name and **needs you** count above its chat open the items waiting on you. The Bot list also shows a count shortcut. A question card uses the composer to answer its exact target through `POST /api/inbox/decide`. A pull request review card uses the composer to send a message to the Bot through `POST /api/messages`, with the review as the reply target. The review stays in **Needs you** until you respond. **History**, in the conversation controls and the Bot's menu, lists what you have already answered or approved.
+
+When a request uses its step allowance, approve another block in the conversation
+or **Needs you**. The button shows the original allowance, such as **Continue for
+20 more steps**. **Continue for 3 more rounds** renews the separate allowance for
+follow-up work.
 
 The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `sessionCursor` as `sessionsAfter` on the next view request to receive the groups that recorded a new Run. Each returned group includes its full list of Sessions. To continue paging backwards, pass the last page’s `sessionsBefore` to `GET /api/sessions?bot=...&before=...`.
 
@@ -95,7 +102,14 @@ environment's OAuth endpoint.
 
 ## Flock settings
 
-Use **Appearance** to set the theme for the current browser. Use **Permissions**
+Use **Appearance** to set the theme and turn on **Notifications** for the
+current browser. Allow notifications when the browser asks. Flock alerts you
+when a Bot replies, needs your input, or encounters a failure. Alerts work
+while a Flock tab is open and pause for the Bot you are viewing. Select an
+alert to open its Bot. If the Bot editor is open, Flock opens the conversation
+when you save or close the editor.
+
+Use **Permissions**
 to set the installation's permission mode and rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
@@ -186,10 +200,12 @@ message.
 for the Bot owner and installation roots. Each model has `slug` and `displayName`,
 with `reasoningEfforts` when ChatGPT lists supported levels. An unavailable
 catalog returns `503` with `error: "models_unavailable"` and `fallbackReasoningEfforts`.
-`POST /api/bots/profile` accepts `botId` and any of `environmentId`,
-`projectId`, `model`, or `reasoningEffort` in one request. Omitted fields are
-preserved. An empty string clears the supplied field. Changing the model uses
-**Model default** unless the request also supplies an effort for the new model.
+Under **How it runs**, set **Steps per request** for future requests. The default is 20.
+`POST /api/bots/profile` accepts `botId` and any of `environmentId`, `projectId`,
+`model`, `reasoningEffort`, or the positive integer `modelCallLimit` in one request.
+Omitted fields are preserved. An empty string clears a supplied environment,
+project, model, or reasoning effort. Changing the model uses **Model default**
+unless the request also supplies an effort for the new model.
 Save boolean `fixPullRequests` on its own with `botId`. Name, avatar, and role are saved separately.
 `POST /api/bot-settings/members` takes `botId`, `person` and boolean `add`.
 `POST /api/bot-settings/secret` accepts `botId`, `requestId` and `value`.
@@ -220,6 +236,10 @@ attachment from a T3 Session returns its metadata and up to 8 KiB of text
 when available.
 
 ## Memory and automation
+
+If the Bot's local configuration enables `shareMemoryWithSessions`, T3 Sessions
+receive notes from the Bot's memory. Anyone with read access to the Session
+can see the notes in its history.
 
 When you tell a Bot you manage about a lasting preference, correction,
 convention, or decision, it can update its private memory. The memory review

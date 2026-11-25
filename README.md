@@ -56,6 +56,10 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 
 In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
 
+Set `"shareMemoryWithSessions": true` in a Bot's `config.json` to include its
+memory when it starts work in T3. These notes become part of the Session
+history and are visible to anyone who can read that Session.
+
 Bots can remember lasting preferences, corrections, conventions, and decisions from messages sent directly by a Bot owner or installation administrator. The conversation shows what changed and offers **Undo** while that edit is current. You can also ask a Bot to remember something explicitly.
 
 Flock uses the sole connected T3 environment when the Bot starts work. It uses the sole active project, or asks which project to use and remembers the choice for that Bot and environment. You can pin a destination with `environmentId` and `projectId` in the Bot configuration. Optional `conversationEnvironments` entries name other connected environments for requests such as “Run the measurement on the cloud Mac.” Each environment has its own project selection.
@@ -75,7 +79,7 @@ In the Bot's Flock conversation, ask it to verify a full Git commit SHA on both 
 
 Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange. Consultations can run without a T3 connection. For work requests, a Bot without a pinned environment uses the sender's environment if the recipient can use it, or its sole eligible connected environment.
 
-Optional `modelCallLimit` sets the initial allowance per request (20 by default). Each step of the Bot's conversation turn, the tasks it starts, and work or consultations passed to other Bots share that allowance. Failed attempts and retries count. Use **Approve one more model call** on the paused message or task to continue. See the [CLI guide](app/README.md#model-call-allowance) for details.
+In the Bot's settings under **How it runs**, set **Steps per request** (20 by default). The Bot's conversation, work it starts, and work or consultations it passes to other Bots share the request's saved allowance. Failed attempts and retries count. If it pauses, choose **Continue for 20 more steps** in the conversation or **Needs you** to grant another block of the original size. Follow-up work has a separate allowance of three rounds. See the [CLI guide](app/README.md#model-call-allowance) for details.
 
 ### Scheduled requests
 
@@ -112,6 +116,7 @@ Flock puts the Bot's role and memory first in model input so ChatGPT can reuse t
 In a T3 Session, ask for a Bot by name or select `/skill:flock-<bot>` or
 `$flock-<bot>` in the provider's skill menu. The Bot replies in the same Session.
 Open **Flock settings** to see the connected environments and saved loopback port. Use `--port PORT` to change the port.
+Under **Appearance → Notifications**, turn on desktop alerts for Bot replies, requests that need you, and work that fails while Flock is open.
 See [Ask a Bot from a T3 Session](web/README.md#ask-a-bot-from-a-t3-session) for connection details.
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.
@@ -131,6 +136,8 @@ build/app/flock answer <task-id> <wait-id> <revision-id> <generation> 'main'
 ```
 
 To check whether a live model applies different completion criteria, run `build/app/flock model acceptance <model-slug>` with an authorized ChatGPT connection. The command prints the decision and rationale for each trial as JSON Lines.
+
+Routine tool calls use only the arguments needed to perform the operation. Task decisions such as completion and requests for more work record their evidence in task history. Git changes record their rationale with the operation.
 
 The Bot normally evaluates the Session's final report. It can retry an unavailable final report once Flock has verified which Run produced it. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime allows up to three evidence reads per event and saves history excerpts of up to 8 KiB each in SQLite.
 

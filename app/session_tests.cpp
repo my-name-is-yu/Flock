@@ -53,7 +53,7 @@ void sessionConversationDispatch(Store& store, const Json& config) {
             const auto request = responseRequest(input);
             const auto& steps = input.event.at("turn");
             std::string tool = "flock_session_search";
-            Json args{{"query","staging"},{"reason","Find the shared investigation"}};
+            Json args{{"query","staging"}};
             if (steps.size() == 1) {
                 emptyPage = steps[0].at("result");
                 check(emptyPage.at("sessions").empty() && emptyPage.at("nextCursor").is_string(),
@@ -63,24 +63,23 @@ void sessionConversationDispatch(Store& store, const Json& config) {
                 const auto& sessions = steps[1].at("result").at("sessions");
                 sessionRef = sessions.at(0).at("sessionRef");
                 tool = "flock_session_events";
-                args = {{"sessionRef",sessionRef},{"operation","list"},{"limit",1},{"reason","Read the first event"}};
+                args = {{"sessionRef",sessionRef},{"operation","list"},{"limit",1}};
             } else if (steps.size() == 3) {
                 tool = "flock_session_events";
                 args = {{"sessionRef",sessionRef},{"operation","list"},{"limit",1},
-                        {"cursor",steps[2].at("result").at("nextCursor")},{"reason","Read the next event"}};
+                        {"cursor",steps[2].at("result").at("nextCursor")}};
             } else if (steps.size() == 4) {
                 const auto& event = steps[3].at("result").at("events").at(0);
                 paged = event.at("excerpt") == "staging failed";
                 store.policy().changeNeverRule(localOwner,shared.action,shared.target,true);
                 tool = "flock_session_events";
-                args = {{"sessionRef",sessionRef},{"operation","read_event"},{"eventRef",event.at("eventRef")},
-                        {"reason","Read details of the failure"}};
+                args = {{"sessionRef",sessionRef},{"operation","read_event"},{"eventRef",event.at("eventRef")}};
             } else if (steps.size() == 5) {
                 const Json missing{{"ok",false},{"error","Session evidence not found"}};
                 revoked = steps[0].at("result") == emptyPage &&
                     std::all_of(steps.begin()+1,steps.end(),[&](const Json& step) { return step.at("result") == missing; });
                 tool = "reply";
-                args = {{"text","The investigation is no longer readable."},{"reason","Explain the status"}};
+                args = {{"text","The investigation is no longer readable."}};
             }
             return responseDecision(Json::array({{{"type","function_call"},{"namespace","flock"},{"status","completed"},
                                     {"name",tool},{"arguments",args.dump()}}}),request);

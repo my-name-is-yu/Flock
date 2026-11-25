@@ -740,20 +740,23 @@ void syntheticTurnsShareModelBudget() {
     runtime.runConversations();
     runtime.runConversations();
     const auto wakeApproval = store.inbox(localOwner,"release").at(0);
-    check(model.calls == 2 && t3.sends == 1 && wakeApproval.at("itemKind") == "conversation_model_budget",
+    check(model.calls == 2 && t3.sends == 1 && wakeApproval.at("itemKind") == "conversation_model_budget" &&
+          wakeApproval.at("allowance") == 2,
           "A synthetic wake got a new two-call allowance");
     approve(wakeApproval);
     for (int i = 0; i < 3; ++i) runtime.runConversations();
-    check(model.calls == 3 && t3.sends == 2,"The next wake escaped the root budget after one approved call");
+    const auto nextWake = store.inbox(localOwner,"release").at(0);
+    check(model.calls == 4 && t3.sends == 2 && nextWake.at("waitId") != wakeApproval.at("waitId"),
+          "Synthetic wakes did not share the renewed root allowance");
     ask("invite","Invite Triage");
     runtime.runConversations();
     const auto inviteApproval = store.inbox(localOwner,"triage").at(0);
-    check(model.calls == 4 && model.inviteeCalls == 0 &&
-          inviteApproval.at("itemKind") == "conversation_model_budget",
+    check(model.calls == 5 && model.inviteeCalls == 0 &&
+          inviteApproval.at("itemKind") == "conversation_model_budget" && inviteApproval.at("allowance") == 1,
           "The fresh ask did not get one call, or the invitation used the invitee's allowance");
     approve(inviteApproval);
     runtime.runConversations();
-    check(model.calls == 5 && model.inviteeCalls == 1,"The invitee's approval did not allow precisely one call");
+    check(model.calls == 6 && model.inviteeCalls == 1,"The invitee's approval did not restore the originating allowance");
 
     connector.connect("env-2",localOwner.id,4173);
     ask("cross-environment","Check the other Session.");
@@ -763,7 +766,7 @@ void syntheticTurnsShareModelBudget() {
     connector.disconnect("env-1");
     connector.connect("env-1",localOwner.id,4173);
     runtime.runConversations();
-    check(model.calls == 7 && store.pausedConversations("release").size() < pausedCount,
+    check(model.calls == 8 && store.pausedConversations("release").size() < pausedCount,
           "Reconnecting the origin revived a wake in a different environment");
 }
 

@@ -124,7 +124,7 @@ Json botSummary(const Json& bot) {
 Json waitView(const Json& wait) {
     if (wait.is_null()) return nullptr;
     Json view = Json::object();
-    copyFields(view,wait,{"id","messageId","reason"});
+    copyFields(view,wait,{"id","messageId","reason","allowance"});
     const auto reason = field(wait,"reason");
     if (reason == "user_question" || reason == "t3_input") copyFields(view,wait,{"text"});
     if (reason == "user_question" && wait.contains("choices") && wait["choices"].is_array()) {
@@ -229,7 +229,7 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
         const auto kind = field(*event,"kind");
         const auto& data = event->at("data");
         const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" || kind == "pr_review_requested" ||
-            (kind == "waiting" && field(data,"reason") == "user_question");
+            (kind == "waiting" && (field(data,"reason") == "user_question" || field(data,"reason") == "model_failure"));
         auto text = kind == "report" ? field(data,"report") : field(data,"text");
         if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage"))
             text = field(data.at("forwardedMessage"),"text");
@@ -398,7 +398,7 @@ Json botSettings(const Json& bot) {
     auto view = botSummary(bot);
     view["soul"] = field(bot,"soul");
     view["fixPullRequests"] = bot.value("fixPullRequests",true);
-    copyFields(view,bot,{"environmentId","projectId","model","reasoningEffort"});
+    copyFields(view,bot,{"environmentId","projectId","model","reasoningEffort","modelCallLimit"});
     return view;
 }
 
@@ -497,7 +497,7 @@ Json botView(Store& store, const Json& bot, const Json* changedSessionTasks, std
     auto& paused = result["pausedConversations"] = Json::array();
     for (const auto& turn : store.pausedConversations(id)) {
         Json view = Json::object();
-        copyFields(view,turn,{"messageId","replyToMessageId","text","route"});
+        copyFields(view,turn,{"messageId","replyToMessageId","text","route","allowance"});
         paused.push_back(std::move(view));
     }
     if (!paused.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))

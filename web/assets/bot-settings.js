@@ -1,7 +1,9 @@
 import { accentColor } from '/avatars.js';
+import { listenForBrowserNotifications } from '/browser-notifications.mjs';
 import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
 
 const botId = decodeURIComponent(location.pathname.split('/')[2]);
+listenForBrowserNotifications(() => botId);
 const botQuery = new URLSearchParams({bot: botId});
 const $ = (id) => document.getElementById(id);
 const status = $('status');

@@ -1,8 +1,9 @@
 import { handleComposerEnter, isComposerSuggestionKey } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
-import { actionLabel, approvalSummary } from '/action-labels.mjs';
+import { actionLabel, approvalSummary, continuationLabel } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
+import { browserNotificationsEnabled, createBrowserNotifications, onNotificationPreferenceChange } from '/browser-notifications.mjs';
 import { createBotEditor } from '/bot-editor.js';
 import { createBotRoleCard } from '/bot-role.js';
 import { createBotWorkspaceCard } from '/bot-workspace.js';
@@ -92,10 +93,9 @@ const stateLabels = {
 // Bot's own first-person wording for its conversation bubble.
 const waitLabels = {
   user_question: ['Question from $BOT', '$BOT is waiting for your answer.', 'I’m waiting for your answer.'],
-  budget: ['Approval for one more run', 'This request used all of its runs. Approving lets $BOT start one more run, which can use more model and T3 usage.',
-    'This request used all of its runs. If you approve, I can start one more run, which can use more model and T3 usage.'],
+  budget: ['Follow-up allowance used', 'This request used its allowance for follow-up work.'],
   policy_approval: ['Approval needed', '$BOT is waiting for your approval before it continues.', 'I need your approval before I continue.'],
-  model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
+  model_budget: ['Step allowance used', 'This request used its step allowance.'],
   model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
     'I couldn’t choose my next step after several attempts. Try again to continue.'],
   bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s role and memory, then try again.'],
@@ -107,7 +107,7 @@ const waitLabels = {
 };
 // Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
 const pendingActionLabels = {
-  budget: 'Approve one more run…', model_budget: 'Approve another model call…', model_failure: 'Try again…',
+  budget: 'Continue…', model_budget: 'Continue…', model_failure: 'Try again…',
   bot_notes_unavailable: 'Try again…',
   deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
 };
@@ -1019,10 +1019,10 @@ const decisionKindLabels = {
   user_question: 'Question for you',
   pr_review: 'Review requested',
   pr_reconciliation: 'Confirm the pull request',
-  extra_run: 'Approve one more run',
+  extra_run: 'Follow-up allowance used',
   deadline: 'Deadline reached',
-  model_budget: 'Approve another model call',
-  conversation_model_budget: 'Approve another model call',
+  model_budget: 'Step allowance used',
+  conversation_model_budget: 'Step allowance used',
   unknown_delivery: 'Message to T3 unconfirmed',
   protected_input: 'Secret needed',
   policy_approval: 'Approval needed',
@@ -1214,7 +1214,7 @@ function pausedActions(turn) {
   const context = view;
   const item = pausedDecision(context.id, turn);
   const actions = node('div', 'event-actions');
-  const approve = button('Approve one more model call', 'button', () => {
+  const approve = button(continuationLabel(turn.allowance), 'button', () => {
     const current = context.data?.pausedConversations?.find((entry) => entry.messageId === item.waitId);
     void submitConversationDecision(context, item, current && pausedDecision(context.id, current), 'approve');
   });
@@ -1604,13 +1604,14 @@ function eventCard(event, context, place, report) {
       }
     }
   } else if (event.kind === 'conversation_reply') {
-    if (typeof data.textHtml === 'string') {
+    const paused = context.paused.get(data.messageId);
+    if (paused) text.textContent = copy = paused.text;
+    else if (typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
       text.innerHTML = data.textHtml;
     } else text.textContent = data.text ?? '';
     text.classList.add('foldable-text');
     bubble.append(text);
-    const paused = context.paused.get(data.messageId);
     if (paused && context.canDecide) extras.push(pausedActions(paused));
     else if (data.suggestions?.length) {
       if (context.canDecide) extras.push(suggestionActions(event));
@@ -2570,6 +2571,17 @@ function pullRequestSetting(bot) {
   return row;
 }
 let reopenSettingsOnClose = false;
+let finishingBotEditor = false;
+let notificationDestination;
+
+function followNotification() {
+  if (!notificationDestination || finishingBotEditor || elements['bot-editor'].open) return false;
+  const botId = notificationDestination;
+  notificationDestination = null;
+  selectBot(botId);
+  return true;
+}
+
 const botEditor = createBotEditor(elements['bot-editor'], {
   api,
   onDraft(draft) {
@@ -2579,7 +2591,13 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   async onSaved(savedBot, savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
-    await Promise.all([refreshBots(), view?.id === savedBot.id && view.refresh()]);
+    finishingBotEditor = true;
+    try {
+      await Promise.all([refreshBots(), view?.id === savedBot.id && view.refresh()]);
+    } finally {
+      finishingBotEditor = false;
+    }
+    if (followNotification()) return;
     if (savedMode === 'create') {
       selectBot(savedBot.id);
       return;
@@ -2591,6 +2609,7 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   onCancel(savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
+    if (followNotification()) return;
     if (savedMode === 'edit' && returnToSettings && view?.data) {
       openDetail({ kind: 'settings', section: 'general' });
     }
@@ -2861,9 +2880,9 @@ function waitContent(context, task, deadlineDraft) {
   }
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
-  } else if (wait.reason === 'budget') primary.append(action('Approve one more run', 'approve'));
-  else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
-  else if (['model_failure', 'bot_notes_unavailable'].includes(wait.reason)) primary.append(action('Try again', 'retry'));
+  } else if (wait.reason === 'budget' || wait.reason === 'model_budget') {
+    primary.append(action(continuationLabel(wait.allowance, wait.reason === 'budget' ? 'round' : 'step'), 'approve'));
+  } else if (['model_failure', 'bot_notes_unavailable'].includes(wait.reason)) primary.append(action('Try again', 'retry'));
   else if (wait.reason === 'deadline') {
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
       type: 'datetime-local', value: deadlineDraft ?? localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
@@ -2932,11 +2951,11 @@ function renderDetail() {
     const bot = view.data.bot;
     labelDetail(`${bot.name} settings`);
     renderDetailNav(settingsTabs, detail.section);
-    const { soul, environmentId, projectId, model, reasoningEffort, ...settings } = bot;
+    const { soul, environmentId, projectId, model, reasoningEffort, modelCallLimit, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
     const canEdit = bot.canDelete === true;
     detailRole?.update(soul, canEdit);
-    detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort }, canEdit);
+    detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort, modelCallLimit }, canEdit);
     return;
   }
   labelDetail(null);
@@ -3608,6 +3627,13 @@ document.addEventListener('keydown', (event) => {
 });
 
 let syncRetry;
+const browserNotifications = createBrowserNotifications({
+  viewingBot: () => view?.id ?? null,
+  openBot(botId) {
+    notificationDestination = botId;
+    followNotification();
+  },
+});
 function retrySync() {
   if (!document.hidden) syncRetry ??= setTimeout(catchUp, 2500);
 }
@@ -3615,6 +3641,7 @@ function retrySync() {
 function catchUp() {
   clearTimeout(syncRetry);
   syncRetry = null;
+  void browserNotifications.refresh();
   if (document.hidden) return;
   void refreshBots();
   void view?.refresh();
@@ -3622,6 +3649,7 @@ function catchUp() {
 }
 
 const liveUpdates = createLiveUpdates(catchUp, (change) => {
+  if (change.list === true) void browserNotifications.refresh();
   if (document.hidden) return;
   if (change.list === true) void refreshBots();
   if (view && change.bot === view.id) void view.refresh(undefined, liveUpdates.live ? visibilityGeneration : null);
@@ -3630,8 +3658,9 @@ const liveUpdates = createLiveUpdates(catchUp, (change) => {
 });
 
 function subscribeToView() {
+  browserNotifications.updateViewing();
   if (document.hidden) {
-    liveUpdates.use(null);
+    liveUpdates.use(browserNotificationsEnabled() ? '/api/events' : null);
     return;
   }
   const params = new URLSearchParams();
@@ -3661,6 +3690,7 @@ new ResizeObserver(scheduleReadCheck).observe(elements.conversation);
 document.addEventListener('close', scheduleReadCheck, true);
 render();
 resumeUpdates();
+onNotificationPreferenceChange(resumeUpdates);
 document.addEventListener('visibilitychange', () => {
   visibilityGeneration++;
   resumeUpdates();

@@ -51,6 +51,9 @@ struct Decision {
     Json args = Json::object();
     std::string reason;
 };
+inline constexpr std::size_t decisionReasonLimit = 4000;
+bool recordsTaskDecisionReason(std::string_view tool);
+bool validDecisionReason(std::string_view reason);
 struct ModelTurn {
     std::vector<Decision> calls;
     Json usage = Json::object();
@@ -290,6 +293,7 @@ public:
     struct PlannerModel {
         std::string model, provider;
         std::optional<std::string> reasoningEffort;
+        std::optional<Id> modelCallLimit = std::nullopt;
     };
     using AutomationModelResolver = std::function<std::optional<PlannerModel>(std::string_view botId)>;
     using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&,
@@ -377,6 +381,14 @@ public:
     };
     // Original messages affected by replies and instruction delivery since a journal cursor.
     ConversationChanges conversationChangesSince(std::optional<Id> after, std::string_view bot = {}) const;
+    struct NotificationEvents {
+        Id through;
+        Json events;
+        std::map<std::string,Id> scope;
+        bool more;
+    };
+    NotificationEvents notificationEventsSince(const Person&, const std::vector<std::string>& bots,
+        std::optional<Id> after, const std::map<std::string,Id>& previousScope) const;
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
     Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);

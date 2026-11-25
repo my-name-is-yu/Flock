@@ -387,9 +387,10 @@ bool Store::Impl::settleStageReport(Json& task) {
     const auto role = field(row.json(0),"role");
     const auto pin = row.string(1);
     const auto report = row.json(2);
+    const auto status = field(report,"status");
     const auto result = Json::parse(field(report,"report"),nullptr,false);
     const auto version = field(result,"artifactVersion");
-    bool ok = field(report,"status")=="completed" && !report.value("truncated",false) &&
+    bool ok = status == "completed" && !report.value("truncated",false) &&
         field(report,"evidenceStatus") != "report_unavailable";
     std::string output;
     if (role=="verify") {
@@ -414,8 +415,10 @@ bool Store::Impl::settleStageReport(Json& task) {
     consumeEvent(task);
     task["state"] = "completed";
     const auto text = field(report,"evidenceStatus") == "report_unavailable" ? field(report,"detail") : field(report,"report");
-    journal(task.at("id"),"completed",{{"text",ok ? text : "Workflow stage failed: "+text},
-        {"revisionId",task.at("currentRevision")},{"source",report.at("run")}});
+    Json completion = {{"text",ok ? text : "Workflow stage failed: "+text},
+        {"revisionId",task.at("currentRevision")},{"source",report.at("run")}};
+    if (status == "completed" || status == "cancelled") completion["workflowOutcome"] = ok ? "completed" : "failed";
+    journal(task.at("id"),"completed",std::move(completion));
     return true;
 }
 }

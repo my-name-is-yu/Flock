@@ -96,6 +96,13 @@ void includeInstructions(std::string& instruction, const Json& pending) {
     instruction += "\n\nUser instructions accepted for this task, oldest first. Apply later directions where they replace earlier ones:";
     for (const auto& item : pending) instruction += "\n\n" + field(item,"text");
 }
+
+std::string dispatchedWorkPrompt(const Json& action) {
+    auto instruction = field(action,"instruction");
+    if (const auto memory = action.find("sessionMemory"); memory != action.end())
+        instruction += field(*memory,"section");
+    return sessionPrompt(field(action,"id"),instruction);
+}
 }
 
 struct Runtime::Impl {
@@ -759,7 +766,8 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
         c.tool = field(action,"tool");
         c.environmentId = action.at("environmentId");
         c.projectId = action.value("projectId",field(task,"projectId"));
-        c.instruction = field(action,"instruction");
+        c.instruction = action["phase"] == "started" && c.tool != "answer_session_question"
+            ? dispatchedWorkPrompt(action) : field(action,"instruction");
         c.config = task["config"];
         if (action.contains("expectedCommit")) {
             const auto& commit = action.at("expectedCommit");
@@ -1206,6 +1214,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         const bool usesExistingSession = cmd.tool == "follow_up" || cmd.tool == "start_in_session";
         const bool sendsToSession = usesExistingSession || cmd.tool == "answer_session_question";
         const bool preparesTaskContract = cmd.tool == "delegate" || cmd.tool == "start_in_session";
+        const bool sendsWork = preparesTaskContract || usesExistingSession;
         const auto sessionActionAllowed = [&](const Json& current) {
             if (!cmd.sessionOrigin && !sendsToSession) return true;
             std::lock_guard lock(db.mutex);
@@ -1299,17 +1308,19 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},error.what(),true});
                 }
             }
-            if (preparesTaskContract || usesExistingSession) {
+            if (sendsWork) {
                 const auto scrub = db.redactor(cmd.ownerBotId);
                 const auto pin = field(task,"inputArtifactVersion");
                 if (scrub.text(pin) != pin)
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},"The pinned workflow artifact version contains a protected value",true});
                 const auto marker = sessionPrompt(cmd.actionId,{});
                 if (cmd.instruction.ends_with(marker)) cmd.instruction.resize(cmd.instruction.size()-marker.size());
-                cmd.instruction = sessionPrompt(cmd.actionId,scrub.text(cmd.instruction));
+                action.erase("sessionMemory");
+                cmd.instruction = scrub.text(cmd.instruction);
+                action["instruction"] = cmd.instruction;
+                cmd.instruction = sessionPrompt(cmd.actionId,cmd.instruction);
                 if (cmd.instruction.size() > maxSessionPromptBytes)
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},SessionContextLimit{}.what(),true});
-                action["instruction"] = cmd.instruction;
             }
             auto payload = Json{{"tool",cmd.tool},{"instruction",cmd.instruction},{"questionId",cmd.questionId},
                                   {"answers",cmd.answers},{"run",runJson(cmd.target)},{"projectId",cmd.projectId},
@@ -1358,6 +1369,18 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             }
             if (!dispatch) dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
             if (disconnected()) return connectionUnavailable();
+            const auto sharesMemory = [](const Json& config) {
+                return config.value("shareMemoryWithSessions",Json(false)) == true;
+            };
+            bool includeMemory = false;
+            if (sendsWork) {
+                try {
+                    includeMemory = options.intake ? sharesMemory(options.intake(cmd.ownerBotId,{}).config)
+                                                  : sharesMemory(cmd.config);
+                } catch (const std::exception&) {
+                    // An unreadable Bot profile cannot authorize sharing.
+                }
+            }
             auto policyGate = ApprovalGate::allow;
             const auto startSend = [&](Json& current) {
                 if (shutdown.stop_requested() || terminal(current) || current.at("state") == "cancelling" ||
@@ -1383,6 +1406,13 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                     if (participant.next() && (participant.string(1) == db.turnActor(source).id ||
                                                db.connectedSessionAccess(source,target)))
                         action["sessionParticipationId"] = participant.number(0);
+                }
+                if (includeMemory) {
+                    if (const auto memory = db.sessionMemory(cmd,options.clock())) {
+                        action["sessionMemory"] = {{"version",memory->version},{"section",memory->section},
+                                                   {"excerptBytes",memory->excerptBytes}};
+                        cmd.instruction = dispatchedWorkPrompt(action);
+                    }
                 }
                 auto payload = action;
                 payload.erase("phase");
@@ -1808,7 +1838,7 @@ ORDER BY j.id
             const auto scrub = db.redactor(field(task,"botId"));
             prompt.pending = scrub.record(std::move(prompt.pending),SecretRedactor::Fields::external);
             instruction += prompt.instruction;
-            instruction = sessionPrompt(action,scrub.text(instruction));
+            instruction = scrub.text(instruction);
         }
         if (tool == "delegate" || tool == "follow_up" || tool == "start_in_session") task["deadline"] = 0;
         const auto& route = destination ? *destination : task;
@@ -1855,7 +1885,7 @@ ORDER BY j.id
             "SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1",{task["id"]}).next();
         if (!charge) return true;
         if (task["remaining"] == 0) {
-            db.wait(task,"budget",{{"text","The additional work allowance is exhausted"},{"attempted",decision.tool},
+            db.wait(task,"budget",{{"text","This request used its allowance for follow-up work."},{"attempted",decision.tool},
                                   {"decisionReason",decision.reason},{"usage",decision.usage}});
             return false;
         }
@@ -2382,7 +2412,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         if (saved == task.end() || saved->at("eventId") != event.at("id") ||
             saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
             return std::nullopt;
-        return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage"),
+        return TaskDecision{{saved->at("tool"),saved->at("args"),field(*saved,"reason")},saved->at("usage"),
                             saved->at("attemptId"),
                             saved->value("rejection",std::string{})};
     }
@@ -2407,8 +2437,9 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
                 decision = TaskDecision{call,inference.usage,inference.attemptId,call.rejection};
                 // Bookkeeping must not advance the generation observed by conversation turns.
                 Json saved{{"generation",inference.generation},{"eventId",inference.eventId},{"revisionId",inference.revisionId},
-                    {"tool",call.tool},{"args",call.args},{"reason",call.reason},{"usage",inference.usage},
+                    {"tool",call.tool},{"args",call.args},{"usage",inference.usage},
                     {"attemptId",inference.attemptId}};
+                if (!call.reason.empty()) saved["reason"] = call.reason;
                 if (!call.rejection.empty()) saved["rejection"] = call.rejection;
                 db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?)) WHERE id=?",{saved,id});
             }
@@ -2471,10 +2502,10 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
                 revision(current) != revision(task) || current["state"] != "deciding")
                 return std::nullopt;
             attempt = db.takeReservedTaskCall(event["id"]);
-            if (!attempt) attempt = db.reserveModelCall(db.taskModelBudget(current),"task_decision",0,task["id"],event["id"]);
+            if (!attempt) attempt = db.reserveModelCall(db.taskModelBudget(task["id"]),"task_decision",0,task["id"],event["id"]);
             if (!attempt) {
                 db.wait(current,"model_budget",{{"text",
-                    "The model call limit is exhausted. Approve one more model call to continue."}});
+                    "This request used its step allowance."}});
                 saveTask(current);
             }
             transaction.commit();
@@ -2584,9 +2615,11 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 decision->reason = std::move(call.reason);
             }
             try {
-                if (!decision->args.is_object() || decision->args.dump().size() > 20000 || !present(decision->reason,4000) ||
+                if (!decision->args.is_object() || decision->args.dump().size() > 20000 ||
                     std::ranges::find(tools,decision->tool) == tools.end())
-                    throw Conflict("Return exactly one permitted action, valid arguments and a reason");
+                    throw Conflict("Return exactly one permitted action with valid arguments");
+                if (recordsTaskDecisionReason(decision->tool) && !validDecisionReason(decision->reason))
+                    throw Conflict("This action requires a brief reason");
                 accept(task,event,*decision);
             } catch (const Conflict& error) {
                 rejectDecision(task,event,*decision,error.what());

@@ -959,6 +959,153 @@ void readChanges(Browser& stream, const std::string& path, const std::function<b
     check(!result && ready && finished,"stream missed an invalidation");
 }
 
+void notificationEvents(const std::filesystem::path& path) {
+    const Person owner{"owner",true};
+    Store store(path);
+    auto web = callbacks();
+    web.authenticate = [owner](std::string_view credential) {
+        if (credential == "Bearer owner") return owner;
+        if (credential == "Bearer reader") return Person{"reader"};
+        return Person{};
+    };
+    web.resolveIdentity = [](std::string_view id) -> std::optional<bool> {
+        if (id == "owner") return true;
+        if (id == "reader") return false;
+        return std::nullopt;
+    };
+    struct NotificationModel : FixedModel {
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") == "conversation_turn") {
+                if (input.event.at("text") == "Check in several steps" && input.event.at("turn").size() < 2)
+                    return {{{"find_tasks",{{"query","release"}},"Find the current work"}}};
+                return {{{"reply",{{"text","A reply"}},"Respond to the request"}}};
+            }
+            if (input.event.at("kind") == "intake" && input.task.at("request") == "Choose a publish date")
+                return {{{"ask_user",{{"question","When should we publish?"}},"The schedule needs a date"}}};
+            return FixedModel::decide(input);
+        }
+    } model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,{});
+    const auto server = startWeb(store,0,web);
+    Browser reader(*server), administrator(*server), stream(*server);
+    for (auto* browser : {&reader,&stream}) browser->client.set_default_headers({{"Authorization","Bearer reader"}});
+    administrator.client.set_default_headers({{"Authorization","Bearer owner"}});
+
+    const auto reply = [&](std::string_view bot, std::string_view key) {
+        store.receive(owner,web.intake(bot,"Can you help?"),key,"Can you help?");
+    };
+    constexpr auto endpoint = "/api/notifications";
+    const auto cursor = [](const Json& page) {
+        return Json{{"after",page.at("through")},{"scope",page.at("scope")}};
+    };
+    const auto notify = [&](Browser& browser, const Json& page) { return browser.post(endpoint,cursor(page)); };
+    reply("release","already-seen");
+    runtime.runConversations();
+    const auto unshared = reader.post(endpoint,Json::object());
+    check(unshared.at("through") == 0 && unshared.at("scope").empty() && unshared.at("events").empty(),
+          "a private reply changed a viewer's baseline");
+    const auto adminBaseline = administrator.post(endpoint,Json::object());
+    store.policy().setMember(owner,"release","reader",true);
+    const auto baseline = notify(reader,unshared);
+    check(baseline.at("through") == 0 && baseline.at("scope").at("release").get<Id>() > 0 &&
+          baseline.at("events").empty() && baseline.at("inbox").empty(),
+          "a newly shared Bot replayed a reply or advanced the established cursor");
+    check(notify(reader,baseline).at("events").empty(),"a shared Bot replayed its history on the next page");
+
+    bool wroteEvents = false;
+    readChanges(stream,"/api/events",[&](const Json& change) {
+        check(change.at("list") == true,"browser notification activity did not invalidate the Bot list");
+        if (wroteEvents) return false;
+        reply("release","new-reply-one");
+        reply("triage","private-reply");
+        reply("release","new-reply-two");
+        runtime.runConversations();
+        store.submit({"release","Choose a publish date","local-env","publication"});
+        store.submit(web.intake("release","Verify staging"));
+        t3.observations["thread-release"] = {.kind=Observation::Kind::Finished,.status="failed",
+            .report="Health check failed",.resultRunId="run-result",.itemId="failed-report"};
+        tick(runtime,8);
+        wroteEvents = true;
+        return true;
+    });
+
+    const auto page = notify(reader,baseline);
+    const auto& events = page.at("events");
+    check(events.size() == 3 && events.at(0).at("kind") == "reply" && events.at(1).at("kind") == "reply" &&
+          events.at(2).at("kind") == "failure" && events.at(0).at("id").get<Id>() < events.at(1).at("id").get<Id>(),
+          "notification catch-up lost a reply or confused a failed report with a reply: " + page.dump());
+    const auto administratorPage = notify(administrator,adminBaseline);
+    check(std::ranges::all_of(events,[](const Json& item) {
+        return item.size() == 4 && item.at("botId") == "release" && item.at("botName") == "Release";
+    }) &&
+          administratorPage.at("events").size() == 4,
+          "notification access did not match the visible Bots: " + page.dump() + " / " + administratorPage.dump());
+    const auto question = reader.get("/api/inbox").at("items").at(0);
+    check(page.at("inbox") == Json::array({{{"botId","release"},{"botName","Release"},{"kind","user_question"},
+          {"id",question.at("itemId")}}}),"the notification feed lost the actionable question: " + page.dump());
+    const auto caughtUp = notify(reader,page);
+    check(caughtUp.at("events").empty() && caughtUp.at("inbox") == page.at("inbox"),
+          "the feed replayed consumed events or dropped a pending question");
+
+    for (int index = 0; index < 101; ++index) {
+        reply("triage","private-burst-" + std::to_string(index));
+        runtime.runConversations();
+    }
+    auto spoofed = cursor(caughtUp);
+    spoofed["scope"]["triage"] = 0;
+    check(notify(reader,caughtUp) == caughtUp && reader.post(endpoint,spoofed) == caughtUp &&
+          reader.post(endpoint,Json::object()).at("through") == caughtUp.at("through"),
+          "private Bot replies changed a limited viewer's page or baseline");
+    const auto privatePage = notify(administrator,administratorPage);
+    check(privatePage.at("more") == true && privatePage.at("events").size() == 100,
+          "the owner did not receive a full page of authorized replies");
+    const auto finalPrivatePage = notify(administrator,privatePage);
+    check(finalPrivatePage.at("more") == false && finalPrivatePage.at("events").size() == 1,
+          "the last authorized reply was missing from the following page");
+    reply("release","reply-after-private-burst");
+    runtime.runConversations();
+    reply("triage","last-private-reply");
+    runtime.runConversations();
+    store.policy().setMember(owner,"triage","reader",true);
+    const auto visiblePage = notify(reader,caughtUp);
+    check(visiblePage.at("more") == false && visiblePage.at("events").size() == 1 &&
+          visiblePage.at("events").at(0).at("botId") == "release" &&
+          visiblePage.at("scope").at("triage").get<Id>() > visiblePage.at("through").get<Id>(),
+          "sharing a Bot replayed its history or displaced a previously visible reply");
+    reply("triage","reply-after-sharing");
+    runtime.runConversations();
+    const auto sharedPage = notify(reader,visiblePage);
+    check(sharedPage.at("events").size() == 1 && sharedPage.at("events").at(0).at("botId") == "triage",
+          "the shared Bot's next reply did not enter the notification feed");
+    store.policy().setMember(owner,"triage","reader",false);
+    check(!notify(reader,sharedPage).at("scope").contains("triage"),
+          "notification scope exposed a Bot after unsharing");
+
+    auto limited = web.intake("release","Check in several steps");
+    limited.config["modelCallLimit"] = 1;
+    const auto receipt = store.receive(owner,limited,"repeat-approval",limited.request);
+    runtime.runConversations();
+    const auto budgetItem = [](const Json& items, const char* kind) {
+        const auto found = std::ranges::find_if(items,[&](const Json& item) {
+            return item.at(kind) == "conversation_model_budget";
+        });
+        check(found != items.end(),"missing conversation approval: " + items.dump());
+        return *found;
+    };
+    auto firstApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"),"itemKind");
+    const auto firstAlert = budgetItem(reader.post(endpoint,Json::object()).at("inbox"),"kind");
+    check(firstAlert.at("id") == firstApproval.at("waitId"),"the alert did not identify the pending approval");
+    firstApproval["decision"] = "approve";
+    administrator.post("/api/inbox/decide",firstApproval);
+    runtime.runConversations();
+    const auto secondApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"),"itemKind");
+    const auto secondAlert = budgetItem(reader.post(endpoint,Json::object()).at("inbox"),"kind");
+    check(secondApproval.at("itemId") == receipt.at("messageId") &&
+          secondAlert.at("id") == secondApproval.at("waitId") && secondAlert.at("id") != firstAlert.at("id"),
+          "another approval for the same message did not get a distinct alert");
+}
+
 void recurringRequestStatus(const std::filesystem::path& path) {
     constexpr Seconds now = 2'000'000'000;
     const Person owner{"fixture",true};
@@ -1624,6 +1771,18 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     const auto modelOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model","next-model"}},200);
     check(modelOnly.at("model") == "next-model" && modelOnly.at("projectId") == "project-1",
           "model-only update lost the workspace");
+    const auto allowance = browser.post("/api/bots/profile",{{"botId","bot-1"},{"modelCallLimit",12}},200);
+    check(allowance.at("modelCallLimit") == 12 && allowance.at("model") == "next-model" && allowance.at("projectId") == "project-1",
+          "saving the allowance changed the model or destination");
+    for (const auto& invalid : Json::array({nullptr,"15",true,-1,0,1.5,2147483648LL})) {
+        const auto rejected = browser.post("/api/bots/profile",{
+            {"botId","bot-1"},{"modelCallLimit",invalid},{"model","other-model"},
+        },400);
+        check(rejected.at("error") == "invalid_model_call_limit","invalid allowance was accepted");
+    }
+    const auto settingsView = browser.get("/api/view?bot=bot-1").at("bot");
+    check(settingsView.at("modelCallLimit") == 12 && settingsView.at("model") == "next-model",
+          "the Bot settings view lost saved settings or an invalid update changed them");
     check(browser.get("/api/view?bot=bot-1").at("bot").at("model") == "next-model","Bot settings view lost its model");
     for (const auto& invalid : {Json(nullptr),Json(1),Json("high effort"),Json(" low ")}) {
         const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"reasoningEffort",invalid}},400);
@@ -1917,6 +2076,7 @@ int main() {
         messageAttachmentLimits(directory.path / "message-attachments.db");
         messageReceipts(directory.path / "message-receipts.db");
         sidebarReplies(directory.path / "sidebar.db");
+        notificationEvents(directory.path / "notifications.db");
         failedCompletion(directory.path / "failed-completion.db");
         recurringRequestStatus(directory.path / "recurring-requests.db");
         pausedWebhookStatus(directory.path / "paused-webhooks.db");

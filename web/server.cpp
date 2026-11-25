@@ -267,6 +267,27 @@ public:
             json(res,200,botList(actor));
         });
         server_.Get("/api/events",[this](const Request& req, Response& res) { changes(req,res); });
+        server_.Post("/api/notifications",[this](const Request& req, Response& res) {
+            const auto actor = web::person(callbacks_,req);
+            try {
+                const auto body = Json::parse(req.body,nullptr,false);
+                std::optional<Id> after;
+                std::map<std::string,Id> scope;
+                if (!body.is_object()) throw InputError("invalid_notification_cursor");
+                if (!body.empty()) {
+                    const auto bots = body.find("scope");
+                    if (bots == body.end() || !bots->is_object() || body.size() != 2)
+                        throw InputError("invalid_notification_cursor");
+                    after = bodyId(body,"after",0);
+                    for (const auto& [bot,unused] : bots->items()) {
+                        if (!validBotId(bot)) throw InputError("invalid_notification_cursor");
+                        scope.emplace(bot,bodyId(*bots,bot,0));
+                    }
+                }
+                setViewer(res,callbacks_,actor);
+                json(res,200,notificationPage(actor,after,scope));
+            } catch (const InputError& e) { error(res,400,e.what()); }
+        });
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
             const auto id = req.get_param_value("bot");
             if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
@@ -578,6 +599,31 @@ private:
 
     Json snapshot(const Person& person, const ChangeFeed::BotList&) const {
         return {{"bots",botList(person)},{"inbox",store_.inbox(person,{})}};
+    }
+
+    Json notificationPage(const Person& person, std::optional<Id> after,
+                          const std::map<std::string,Id>& scope) const {
+        std::map<std::string,std::string> names;
+        std::vector<std::string> configured;
+        for (const auto& bot : bots()) {
+            const auto id = web::field(bot,"id");
+            configured.push_back(id);
+            names.emplace(id,web::field(bot,"name"));
+        }
+        auto page = store_.notificationEventsSince(person,configured,after,scope);
+        for (const auto& [bot,cursor] : page.scope)
+            names.at(bot) = web::field(redactBot(bot,{{"name",names.at(bot)}}),"name");
+        auto inbox = Json::array();
+        for (const auto& item : store_.inbox(person,{})) {
+            const auto id = web::field(item,"botId");
+            if (!page.scope.contains(id) || !item.value("canDecide",false) || web::field(item,"status") == "expired") continue;
+            const auto kind = web::field(item,"itemKind");
+            const auto& eventId = item.at(kind == "conversation_model_budget" ? "waitId" : "itemId");
+            inbox.push_back({{"id",eventId},{"botId",id},{"botName",names.at(id)},{"kind",kind}});
+        }
+        for (auto& event : page.events) event["botName"] = names.at(web::field(event,"botId"));
+        return {{"through",page.through},{"scope",std::move(page.scope)},{"more",page.more},
+                {"events",std::move(page.events)},{"inbox",std::move(inbox)}};
     }
 
     Json withConversationAccess(const Person& actor, std::string_view bot, Json view) const {
