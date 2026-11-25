@@ -5,33 +5,41 @@
 namespace flockv0 {
 namespace {
 using enum InboxKind;
-constexpr std::pair<InboxKind,std::string_view> kinds[] = {
-    {user_question,"user_question"}, {extra_run,"extra_run"}, {deadline,"deadline"},
-    {model_budget,"model_budget"}, {conversation_model_budget,"conversation_model_budget"},
-    {unknown_delivery,"unknown_delivery"},
-    {protected_input,"protected_input"}, {pr_review,"pr_review"},
-    {pr_reconciliation,"pr_reconciliation"}, {policy_approval,"policy_approval"}
-};
+constexpr std::pair<InboxKind, std::string_view> kinds[] = {{user_question, "user_question"},
+                                                            {extra_run, "extra_run"},
+                                                            {deadline, "deadline"},
+                                                            {model_budget, "model_budget"},
+                                                            {conversation_model_budget, "conversation_model_budget"},
+                                                            {unknown_delivery, "unknown_delivery"},
+                                                            {protected_input, "protected_input"},
+                                                            {pr_review, "pr_review"},
+                                                            {pr_reconciliation, "pr_reconciliation"},
+                                                            {policy_approval, "policy_approval"}};
 
 Json key(const InboxTarget& item) {
-    return {{"botId",item.botId},{"itemKind",inboxKindName(item.itemKind)},{"itemId",item.itemId},
-            {"waitId",item.waitId},{"taskId",item.taskId},{"targetRevision",item.targetRevision},
-            {"targetGeneration",item.targetGeneration}};
+    return {{"botId", item.botId},
+            {"itemKind", inboxKindName(item.itemKind)},
+            {"itemId", item.itemId},
+            {"waitId", item.waitId},
+            {"taskId", item.taskId},
+            {"targetRevision", item.targetRevision},
+            {"targetGeneration", item.targetGeneration}};
 }
 
 std::string title(std::string_view request) {
-    return bounded(request.substr(0,request.find_first_of("\r\n")),160);
+    return bounded(request.substr(0, request.find_first_of("\r\n")), 160);
 }
 
 std::string taskTitle(const Json& task) {
-    const auto intent = field(task,"intent");
-    return title(intent.empty() ? field(task,"request") : intent);
+    const auto intent = field(task, "intent");
+    return title(intent.empty() ? field(task, "request") : intent);
 }
 
 Id messageAnchor(const auto& store, std::string_view bot, Id message) {
     if (message <= 0) return 0;
     auto row = store.query("SELECT id FROM journal WHERE id=? AND conversation_bot_id=?"
-                           " AND kind='conversation_message'",{message,bot});
+                           " AND kind='conversation_message'",
+                           {message, bot});
     return row.next() ? row.number(0) : 0;
 }
 
@@ -42,13 +50,15 @@ void addAnchor(Json& view, Id anchor) {
 bool validDecision(InboxKind kind, std::string_view decision) {
     switch (kind) {
     case user_question: return decision == "answer";
-    case extra_run: case model_budget: case conversation_model_budget: return decision == "approve";
+    case extra_run:
+    case model_budget:
+    case conversation_model_budget: return decision == "approve";
     case deadline: return decision == "extend";
     case unknown_delivery: return decision == "reconcile";
     case protected_input: return decision == "supply";
     case pr_reconciliation: return decision == "link_pr" || decision == "reject_pr";
-    case policy_approval: return decision == "allow_once" || decision == "always_allow" ||
-                                 decision == "deny" || decision == "allow_next_time";
+    case policy_approval:
+        return decision == "allow_once" || decision == "always_allow" || decision == "deny" || decision == "allow_next_time";
     case pr_review: return decision == "approve" || decision == "request_changes";
     }
     return false;
@@ -65,12 +75,14 @@ std::optional<InboxKind> inboxWaitKind(std::string_view reason) {
 }
 
 std::string_view inboxKindName(InboxKind kind) {
-    for (const auto& [value,name] : kinds) if (kind == value) return name;
+    for (const auto& [value, name] : kinds)
+        if (kind == value) return name;
     throw std::invalid_argument("Unknown inbox item kind");
 }
 
 InboxKind parseInboxKind(std::string_view name) {
-    for (const auto& [value,label] : kinds) if (name == label) return value;
+    for (const auto& [value, label] : kinds)
+        if (name == label) return value;
     throw std::invalid_argument("Unknown inbox item kind");
 }
 
@@ -95,14 +107,14 @@ CREATE TABLE IF NOT EXISTS inbox_decisions(
     UNIQUE(bot_id,item_kind,item_id,wait_id));
 CREATE INDEX IF NOT EXISTS inbox_decisions_by_bot ON inbox_decisions(bot_id,id);
 )SQL";
-    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK)
-        throw std::runtime_error(sqlite3_errmsg(db));
+    if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
 }
 
 std::vector<std::string> Store::Impl::visibleBoardBots(const Person& actor, std::string_view bot) {
     const Policy policy(*this);
-    if (!bot.empty()) return policy.allows(actor,Action::bot_view,bot) ? std::vector{std::string(bot)} : std::vector<std::string>{};
-    auto rows = actor.adminRoot ? query(R"SQL(
+    if (!bot.empty()) return policy.allows(actor, Action::bot_view, bot) ? std::vector{std::string(bot)} : std::vector<std::string>{};
+    auto rows = actor.adminRoot
+                    ? query(R"SQL(
 -- Seek the next Bot ID in each index, regardless of how much history belongs to it.
 WITH RECURSIVE task_bots(bot) AS (
   SELECT min(bot_id) FROM tasks
@@ -114,11 +126,13 @@ WITH RECURSIVE task_bots(bot) AS (
 SELECT bot FROM task_bots WHERE bot IS NOT NULL UNION SELECT bot FROM message_bots WHERE bot IS NOT NULL
 UNION SELECT bot FROM bot_owners UNION SELECT bot FROM bot_members
 UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION SELECT bot_id FROM inbox_decisions
-)SQL") : query("SELECT bot FROM bot_owners WHERE person=?1 UNION SELECT bot FROM bot_members WHERE person=?1 ORDER BY bot",{actor.id});
+)SQL")
+                    : query("SELECT bot FROM bot_owners WHERE person=?1 UNION SELECT bot FROM bot_members WHERE person=?1 ORDER BY bot",
+                            {actor.id});
     std::vector<std::string> result;
     while (rows.next()) {
         auto id = rows.string(0);
-        if (policy.allows(actor,Action::bot_view,id)) result.push_back(std::move(id));
+        if (policy.allows(actor, Action::bot_view, id)) result.push_back(std::move(id));
     }
     return result;
 }
@@ -132,29 +146,31 @@ AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
 WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
     p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
     AND NOT coalesce(json_extract(t.data,'$.replanning'),0))) ORDER BY p.id DESC
-)SQL",{bot});
+)SQL",
+                 {bot});
 }
 
 Json Store::inbox(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     p_->settlePolicyApprovals(p_->policyClock());
-    Transaction snapshot(p_->db,Transaction::Mode::read);
+    Transaction snapshot(p_->db, Transaction::Mode::read);
     const Policy policy(*p_);
     auto result = Json::array();
-    const auto visible = p_->visibleBoardBots(actor,bot);
+    const auto visible = p_->visibleBoardBots(actor, bot);
     auto approvalBots = p_->query("SELECT DISTINCT bot FROM policy_approvals WHERE status IN ('pending','expired')"
-                                  " AND (?='' OR bot=?) AND (requester=? OR ?)",{bot,bot,actor.id,actor.adminRoot});
+                                  " AND (?='' OR bot=?) AND (requester=? OR ?)",
+                                  {bot, bot, actor.id, actor.adminRoot});
     auto withCards = visible;
     while (approvalBots.next())
-        if (std::ranges::find(withCards,approvalBots.string(0)) == withCards.end()) withCards.push_back(approvalBots.string(0));
+        if (std::ranges::find(withCards, approvalBots.string(0)) == withCards.end()) withCards.push_back(approvalBots.string(0));
     for (const auto& id : withCards)
-        for (auto& card : p_->policyApprovalCards(actor,id)) result.push_back(std::move(card));
+        for (auto& card : p_->policyApprovalCards(actor, id)) result.push_back(std::move(card));
     for (const auto& id : visible) {
         const auto scrub = p_->redactor(id);
-        const bool canDecide = policy.allows(actor,Action::bot_decide,id);
+        const bool canDecide = policy.allows(actor, Action::bot_decide, id);
         const auto anchorTime = [&](Id anchor) -> Id {
             if (anchor <= 0) return 0;
-            auto row = p_->query("SELECT time FROM journal WHERE id=?",{anchor});
+            auto row = p_->query("SELECT time FROM journal WHERE id=?", {anchor});
             return row.next() ? row.number(0) : 0;
         };
         const auto add = [&](const InboxTarget& target, Json view, Id anchor = 0, Id createdAt = 0) {
@@ -162,35 +178,40 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
             view.update(key(target));
             view["botName"] = id;
             view["canDecide"] = canDecide;
-            addAnchor(view,anchor);
+            addAnchor(view, anchor);
             if (const auto ts = createdAt > 0 ? createdAt : anchorTime(anchor); ts > 0) view["createdAt"] = ts;
             result.push_back(std::move(view));
         };
         const auto addProtectedInput = [&](InboxKind kind, Id requestId, std::string_view label, const std::string& request,
-                                   std::string prompt, Id message, Id createdAt = 0) {
-            add({id,kind,requestId,0,0,0,0},{{"requestTitle",request.empty() ? std::string(label) : title(request)},
-                {"request",request},{"prompt",std::move(prompt)}},messageAnchor(*p_,id,message),createdAt);
+                                           std::string prompt, Id message, Id createdAt = 0) {
+            add({id, kind, requestId, 0, 0, 0, 0},
+                {{"requestTitle", request.empty() ? std::string(label) : title(request)},
+                 {"request", request},
+                 {"prompt", std::move(prompt)}},
+                messageAnchor(*p_, id, message), createdAt);
         };
         auto waits = p_->query(R"SQL(
 SELECT t.id,t.generation,t.data,w.id,w.data
 FROM tasks t JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL
 WHERE t.bot_id=? AND t.state='waiting'
 ORDER BY w.id DESC
-)SQL",{id});
+)SQL",
+                               {id});
         while (waits.next()) {
             const auto task = waits.json(2);
             const auto wait = waits.json(4);
-            const auto reason = field(wait,"reason");
+            const auto reason = field(wait, "reason");
             const auto kind = inboxWaitKind(reason);
             if (!kind || !p_->waitIsActionable(task)) continue;
             const auto waitId = waits.number(3);
             const auto taskId = waits.number(0);
-            Json view{{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",field(wait,"text")},
-                      {"choices",*kind == user_question ? wait.value("choices",Json::array()) : Json::array()}};
-            if (const auto allowance = p_->waitAllowance(taskId,reason); allowance)
-                view["allowance"] = allowance;
-            add({id,*kind,waitId,waitId,taskId,task.value("currentRevision",Id{0}),waits.number(1)},
-                std::move(view),p_->waitAnchor(taskId,waitId));
+            Json view{{"requestTitle", taskTitle(task)},
+                      {"request", task.at("request")},
+                      {"prompt", field(wait, "text")},
+                      {"choices", *kind == user_question ? wait.value("choices", Json::array()) : Json::array()}};
+            if (const auto allowance = p_->waitAllowance(taskId, reason); allowance) view["allowance"] = allowance;
+            add({id, *kind, waitId, waitId, taskId, task.value("currentRevision", Id{0}), waits.number(1)}, std::move(view),
+                p_->waitAnchor(taskId, waitId));
         }
         auto turns = p_->query(R"SQL(
 SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
@@ -198,13 +219,16 @@ SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversat
 FROM conversation_turns t
 CROSS JOIN messages m ON m.id=t.message_id CROSS JOIN journal j ON j.id=t.pause_id
 WHERE t.pause_id IS NOT NULL AND t.status='paused' AND m.bot_id=? ORDER BY t.pause_id DESC
-)SQL",{id});
+)SQL",
+                               {id});
         while (turns.next()) {
             const auto message = turns.number(0);
             const auto request = turns.string(1);
-            add({id,conversation_model_budget,message,turns.number(2),0,0,turns.number(2)},
-                {{"requestTitle",title(request)},{"request",request},{"prompt",field(turns.json(3),"text")},
-                 {"allowance",p_->messageModelBudget(message).initialLimit}},
+            add({id, conversation_model_budget, message, turns.number(2), 0, 0, turns.number(2)},
+                {{"requestTitle", title(request)},
+                 {"request", request},
+                 {"prompt", field(turns.json(3), "text")},
+                 {"allowance", p_->messageModelBudget(message).initialLimit}},
                 turns.number(4) ? turns.number(2) : 0);
         }
         auto inputs = p_->query(R"SQL(
@@ -213,16 +237,23 @@ LEFT JOIN messages m ON m.id=p.source_message_id AND m.bot_id=p.bot
 WHERE p.bot=? AND p.status='pending'
 AND NOT EXISTS (SELECT 1 FROM protected_inputs filled WHERE filled.name=p.name AND filled.status='fulfilled')
 ORDER BY p.id DESC
-)SQL",{id});
+)SQL",
+                                {id});
         while (inputs.next())
-            addProtectedInput(protected_input,inputs.number(0),"Protected input",inputs.string(2),"Supply a value for "+inputs.string(1),inputs.number(3));
+            addProtectedInput(protected_input, inputs.number(0), "Protected input", inputs.string(2),
+                              "Supply a value for " + inputs.string(1), inputs.number(3));
         auto reviews = p_->actionablePrReviews(id);
         while (reviews.next()) {
             const auto task = reviews.json(3);
             const auto kind = reviews.number(7) ? pr_reconciliation : pr_review;
-            add({id,kind,reviews.number(0),0,reviews.number(1),task.value("currentRevision",Id{0}),reviews.number(2)},
-                {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",reviews.string(6)},
-                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)},{"candidates",reviews.json(8)}},reviews.number(9));
+            add({id, kind, reviews.number(0), 0, reviews.number(1), task.value("currentRevision", Id{0}), reviews.number(2)},
+                {{"requestTitle", taskTitle(task)},
+                 {"request", task.at("request")},
+                 {"prompt", reviews.string(6)},
+                 {"prTitle", reviews.string(5)},
+                 {"prUrl", reviews.string(4)},
+                 {"candidates", reviews.json(8)}},
+                reviews.number(9));
         }
     }
     snapshot.commit();
@@ -236,21 +267,21 @@ void Store::Impl::recordInboxDecision(const Person& actor, const InboxTarget& ta
 INSERT INTO inbox_decisions(bot_id,item_kind,item_id,wait_id,task_id,target_revision,target_generation,
                             decided_by,decided_at,decision)
 VALUES(?,?,?,?,?,?,?,?,?,?)
-)SQL",{target.botId,inboxKindName(target.itemKind),target.itemId,target.waitId,
-       target.taskId ? Json(target.taskId) : Json(nullptr),target.targetRevision,target.targetGeneration,
-       actor.id,now,decision});
+)SQL",
+         {target.botId, inboxKindName(target.itemKind), target.itemId, target.waitId, target.taskId ? Json(target.taskId) : Json(nullptr),
+          target.targetRevision, target.targetGeneration, actor.id, now, decision});
     if (target.taskId) {
         auto entry = key(target);
-        entry.update(Json{{"decidedBy",actor.id},{"decidedAt",now},{"decision",decision}});
-        journal(target.taskId,"inbox_decision",entry);
+        entry.update(Json{{"decidedBy", actor.id}, {"decidedAt", now}, {"decision", decision}});
+        journal(target.taskId, "inbox_decision", entry);
     }
 }
 
 Json Store::decisionHistory(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
-    Transaction snapshot(p_->db,Transaction::Mode::read);
+    Transaction snapshot(p_->db, Transaction::Mode::read);
     auto result = Json::array();
-    for (const auto& id : p_->visibleBoardBots(actor,bot)) {
+    for (const auto& id : p_->visibleBoardBots(actor, bot)) {
         // Join what was decided on, so History can say what each response was about.
         auto rows = p_->query(R"SQL(
 SELECT d.id,d.item_kind,d.item_id,d.wait_id,coalesce(d.task_id,0),d.target_revision,d.target_generation,
@@ -268,108 +299,110 @@ LEFT JOIN messages m ON m.bot_id=d.bot_id AND m.id=CASE d.item_kind
     WHEN 'policy_approval' THEN a.anchor
 END AND (d.item_kind<>'policy_approval' OR NOT EXISTS (SELECT 1 FROM channel_messages c WHERE c.message_id=m.id))
 WHERE d.bot_id=? ORDER BY d.id DESC LIMIT 100
-)SQL",{id});
+)SQL",
+                              {id});
         const auto scrub = p_->redactor(id);
         while (rows.next()) {
-            auto row = key({id,parseInboxKind(rows.string(1)),rows.number(2),rows.number(3),rows.number(4),
-                            rows.number(5),rows.number(6)});
+            auto row =
+                key({id, parseInboxKind(rows.string(1)), rows.number(2), rows.number(3), rows.number(4), rows.number(5), rows.number(6)});
             const auto decidedBy = rows.string(7);
-            row.update(Json{{"id",rows.number(0)},{"decidedBy",scrub.text(decidedBy)},{"decidedByYou",decidedBy == actor.id},
-                            {"decidedAt",rows.number(8)},{"decision",rows.string(9)},{"botName",id},
-                            {"requestTitle",title(scrub.text(rows.string(10)))},
-                            {"action",rows.string(11)},{"target",scrub.text(rows.string(12))}});
+            row.update(Json{{"id", rows.number(0)},
+                            {"decidedBy", scrub.text(decidedBy)},
+                            {"decidedByYou", decidedBy == actor.id},
+                            {"decidedAt", rows.number(8)},
+                            {"decision", rows.string(9)},
+                            {"botName", id},
+                            {"requestTitle", title(scrub.text(rows.string(10)))},
+                            {"action", rows.string(11)},
+                            {"target", scrub.text(rows.string(12))}});
             result.push_back(std::move(row));
         }
     }
-    std::sort(result.begin(),result.end(),[](const Json& a,const Json& b) { return a.at("id") > b.at("id"); });
-    if (result.size() > 100) result.erase(result.begin()+100,result.end());
+    std::sort(result.begin(), result.end(), [](const Json& a, const Json& b) { return a.at("id") > b.at("id"); });
+    if (result.size() > 100) result.erase(result.begin() + 100, result.end());
     snapshot.commit();
     return result;
 }
 
-void Store::decideInbox(const Person& actor, const InboxTarget& item, std::string_view decision,
-                        const Json& data) {
+void Store::decideInbox(const Person& actor, const InboxTarget& item, std::string_view decision, const Json& data) {
     std::lock_guard lock(p_->mutex);
     p_->settlePolicyApprovals(p_->policyClock());
     Transaction transaction(p_->db);
     auto policy = this->policy();
-    if (item.itemId <= 0 || !data.is_object() || !validDecision(item.itemKind,decision))
+    if (item.itemId <= 0 || !data.is_object() || !validDecision(item.itemKind, decision))
         throw std::invalid_argument("Invalid inbox decision");
     const auto textInput = [&](std::string_view fieldName) {
         const auto value = data.find(fieldName);
-        if (value == data.end() || !value->is_string())
-            throw std::invalid_argument("Missing decision text");
+        if (value == data.end() || !value->is_string()) throw std::invalid_argument("Missing decision text");
         return value->get_ref<const std::string&>();
     };
 
     const auto kind = item.itemKind;
     if (kind == policy_approval) {
-        p_->decidePolicyApproval(actor,item,decision);
+        p_->decidePolicyApproval(actor, item, decision);
     } else if (kind == protected_input) {
         if (item.waitId || item.taskId || item.targetRevision || item.targetGeneration) throw RequestChanged{};
-        policy.fulfillSecret(actor,item.botId,item.itemId,textInput("value"));
+        policy.fulfillSecret(actor, item.botId, item.itemId, textInput("value"));
     } else if (kind == conversation_model_budget) {
-        if (!policy.allows(actor,Action::bot_decide,item.botId)) throw DecisionDenied{};
+        if (!policy.allows(actor, Action::bot_decide, item.botId)) throw DecisionDenied{};
         auto paused = p_->query(R"SQL(
 SELECT t.pause_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
 WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
-)SQL",{item.botId,item.itemId});
+)SQL",
+                                {item.botId, item.itemId});
         if (!paused.next()) throw DecisionUnavailable{};
         if (item.taskId || item.targetRevision || item.waitId != paused.number(0) || item.targetGeneration != paused.number(0))
             throw RequestChanged{};
-        p_->approveMessageModelCall(actor,item.itemId,item.waitId);
-        p_->recordInboxDecision(actor,item,decision);
+        p_->approveMessageModelCall(actor, item.itemId, item.waitId);
+        p_->recordInboxDecision(actor, item, decision);
     } else if (kind == pr_review || kind == pr_reconciliation) {
-        if (!policy.allows(actor,Action::bot_decide,item.botId)) throw DecisionDenied{};
-        if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?",{item.taskId,item.botId}).next())
-            throw RequestChanged{};
+        if (!policy.allows(actor, Action::bot_decide, item.botId)) throw DecisionDenied{};
+        if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?", {item.taskId, item.botId}).next()) throw RequestChanged{};
         const auto task = p_->load(item.taskId);
         auto review = p_->query("SELECT target_revision,status,operation_id IS NOT NULL"
                                 " FROM pr_review_items WHERE id=? AND task_id=?",
-                                {item.itemId,item.taskId});
+                                {item.itemId, item.taskId});
         if (!review.next()) throw RequestChanged{};
         if (review.string(1) != "pending") throw DecisionUnavailable{};
-        if (review.number(2) != (kind == pr_reconciliation) || item.waitId ||
-            task.value("currentRevision",Id{0}) != item.targetRevision || task.at("generation") != item.targetGeneration)
+        if (review.number(2) != (kind == pr_reconciliation) || item.waitId || task.value("currentRevision", Id{0}) != item.targetRevision ||
+            task.at("generation") != item.targetGeneration)
             throw RequestChanged{};
-        if (kind == pr_review && (review.number(0) != item.targetRevision || task.value("replanning",false)))
-            throw RequestChanged{};
-        if (kind == pr_reconciliation) p_->decideGitPr(item,decision,data,task);
+        if (kind == pr_review && (review.number(0) != item.targetRevision || task.value("replanning", false))) throw RequestChanged{};
+        if (kind == pr_reconciliation)
+            p_->decideGitPr(item, decision, data, task);
         else {
             p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
-                     {decision == "approve" ? "approved" : "changes_requested",item.itemId});
-            p_->exec("DELETE FROM git_review_receipts WHERE inbox_key=(SELECT git_key FROM pr_review_items WHERE id=?)",
-                     {item.itemId});
+                     {decision == "approve" ? "approved" : "changes_requested", item.itemId});
+            p_->exec("DELETE FROM git_review_receipts WHERE inbox_key=(SELECT git_key FROM pr_review_items WHERE id=?)", {item.itemId});
         }
-        p_->recordInboxDecision(actor,item,decision);
+        p_->recordInboxDecision(actor, item, decision);
     } else {
         if (item.itemId != item.waitId) throw RequestChanged{};
         auto args = Json::object();
         if (kind == user_question) args["text"] = textInput("text");
         if (kind == deadline) args["deadline"] = data.at("deadline");
         if (kind == unknown_delivery)
-            for (const auto* name : {"threadId","runId","questionId"})
+            for (const auto* name : {"threadId", "runId", "questionId"})
                 if (data.contains(name)) args[name] = textInput(name);
-        p_->operate(actor,{item.botId,item.taskId,item.waitId,item.targetRevision,item.targetGeneration},decision,args,0,kind);
+        p_->operate(actor, {item.botId, item.taskId, item.waitId, item.targetRevision, item.targetGeneration}, decision, args, 0, kind);
     }
     transaction.commit();
 }
 
 void Store::Impl::insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
-                               std::string_view gitKey, std::string_view operationId, const Json& candidates) {
-    if (!(url.starts_with("https://") || url.starts_with("http://")) ||
-        url.find_first_of(" \t\r\n") != url.npos || url.find('\0') != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 ||
-        prompt.empty() || prompt.size() > 8000)
+                                 std::string_view gitKey, std::string_view operationId, const Json& candidates) {
+    if (!(url.starts_with("https://") || url.starts_with("http://")) || url.find_first_of(" \t\r\n") != url.npos ||
+        url.find('\0') != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 || prompt.empty() || prompt.size() > 8000)
         throw Conflict("A PR review needs a URL, title, and prompt");
     const auto scrub = sharedRedactor();
-    scrub.requirePublic({url,candidates});
+    scrub.requirePublic({url, candidates});
     const auto savedTitle = scrub.text(title);
     const auto savedPrompt = scrub.text(prompt);
     exec("INSERT INTO pr_review_items(task_id,target_revision,url,title,prompt,git_key,operation_id,candidates)"
          " VALUES(?,?,?,?,?,?,?,?)",
-         {task.at("id"),task.value("currentRevision",Id{0}),url,savedTitle,savedPrompt,
-          gitKey.empty() ? Json(nullptr) : Json(gitKey),operationId.empty() ? Json(nullptr) : Json(operationId),candidates});
-    if (operationId.empty()) journal(task.at("id"),"pr_review_requested",
-        {{"itemId",last()},{"title",savedTitle},{"text",savedPrompt},{"prUrl",url}});
+         {task.at("id"), task.value("currentRevision", Id{0}), url, savedTitle, savedPrompt, gitKey.empty() ? Json(nullptr) : Json(gitKey),
+          operationId.empty() ? Json(nullptr) : Json(operationId), candidates});
+    if (operationId.empty())
+        journal(task.at("id"), "pr_review_requested", {{"itemId", last()}, {"title", savedTitle}, {"text", savedPrompt}, {"prUrl", url}});
 }
 }

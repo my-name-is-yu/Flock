@@ -58,6 +58,5 @@ public:
     virtual ~WebServer() = default;
     virtual unsigned port() const = 0;
 };
-std::unique_ptr<WebServer> startWeb(Store&, unsigned port, WebCallbacks,
-                                   std::function<void(unsigned)> afterBind = {});
+std::unique_ptr<WebServer> startWeb(Store&, unsigned port, WebCallbacks, std::function<void(unsigned)> afterBind = {});
 }

@@ -13,7 +13,6 @@ class ChatGPTWeb {
 public:
     ChatGPTWeb(ChatGPTModel&, SettingsAccess&);
     void configure(WebCallbacks&);
-
 private:
     Json status();
     bool signIn(const Person&, bool reconsent, bool switchAccount);

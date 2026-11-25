@@ -30,7 +30,9 @@ constexpr std::string_view CallbackPath = "/flock/oauth/callback";
 class Fd {
 public:
     explicit Fd(int fd) : fd_(fd) {}
-    ~Fd() { if (fd_ >= 0) close(fd_); }
+    ~Fd() {
+        if (fd_ >= 0) close(fd_);
+    }
     Fd(const Fd&) = delete;
     Fd& operator=(const Fd&) = delete;
     int get() const { return fd_; }
@@ -63,8 +65,7 @@ std::string base64url(const unsigned char* data, int size) {
 
 std::string randomValue() {
     std::array<unsigned char, 32> bytes{};
-    if (RAND_bytes(bytes.data(), bytes.size()) != 1)
-        throw Failure(Failure::Kind::Wire, "Could not generate T3 OAuth randomness");
+    if (RAND_bytes(bytes.data(), bytes.size()) != 1) throw Failure(Failure::Kind::Wire, "Could not generate T3 OAuth randomness");
     return base64url(bytes.data(), bytes.size());
 }
 
@@ -83,7 +84,8 @@ std::string credentialName(const std::string& environmentId) {
 void verifyPrivate(int fd, bool directory) {
     struct stat st{};
     if (fd < 0 || fstat(fd, &st) != 0 || st.st_uid != geteuid() || (st.st_mode & 0077) ||
-        (directory ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode) || st.st_nlink != 1)) privateStorage();
+        (directory ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode) || st.st_nlink != 1))
+        privateStorage();
 }
 
 int openDirectory(const std::filesystem::path& path, bool create) {
@@ -95,8 +97,12 @@ int openDirectory(const std::filesystem::path& path, bool create) {
     }
     const int fd = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0 && errno == ENOENT && !create) noCredential();
-    try { verifyPrivate(fd, true); }
-    catch (...) { if (fd >= 0) close(fd); throw; }
+    try {
+        verifyPrivate(fd, true);
+    } catch (...) {
+        if (fd >= 0) close(fd);
+        throw;
+    }
     return fd;
 }
 
@@ -110,17 +116,17 @@ bool writeAll(int fd, std::string_view text) {
     return true;
 }
 
-void saveCredential(int directory, const std::string& name, const std::string& environmentId,
-                    const Credential& credential) {
+void saveCredential(int directory, const std::string& name, const std::string& environmentId, const Credential& credential) {
     const auto temporary = ".pending-" + randomValue();
     Fd file(openat(directory, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
     if (file.get() < 0) privateStorage();
     try {
-        const auto data = Json{{"environmentId", environmentId}, {"label", credential.label}, {"mcpUrl", credential.mcpUrl},
-                               {"token", credential.token}, {"generation", credential.generation},
-                               {"expiresAt", credential.expiresAt}, {"operate", credential.operate}}.dump();
-        if (!writeAll(file.get(), data) || fsync(file.get()) != 0 ||
-            renameat(directory, temporary.c_str(), directory, name.c_str()) != 0) privateStorage();
+        const auto data = Json{{"environmentId", environmentId}, {"label", credential.label},           {"mcpUrl", credential.mcpUrl},
+                               {"token", credential.token},      {"generation", credential.generation}, {"expiresAt", credential.expiresAt},
+                               {"operate", credential.operate}}
+                              .dump();
+        if (!writeAll(file.get(), data) || fsync(file.get()) != 0 || renameat(directory, temporary.c_str(), directory, name.c_str()) != 0)
+            privateStorage();
         if (fsync(directory) != 0 && errno != EINVAL && errno != ENOTSUP) privateStorage();
     } catch (...) {
         unlinkat(directory, temporary.c_str(), 0);
@@ -143,8 +149,7 @@ Headers parseForm(std::string_view input) {
         const auto end = input.find('&');
         const auto field = input.substr(0, end);
         const auto equals = field.find('=');
-        if (equals == std::string_view::npos ||
-            !result.emplace(decode(field.substr(0, equals)), decode(field.substr(equals + 1))).second)
+        if (equals == std::string_view::npos || !result.emplace(decode(field.substr(0, equals)), decode(field.substr(equals + 1))).second)
             invalidResponse();
         input.remove_prefix(end == std::string_view::npos ? input.size() : end + 1);
     }
@@ -153,8 +158,7 @@ Headers parseForm(std::string_view input) {
 
 std::string sameOrigin(const Url& resource, const std::string& value) {
     const auto url = checkedUrl(value);
-    if (url.origin != resource.origin)
-        throw Failure(Failure::Kind::Settings, "T3 OAuth discovery advertised a different origin");
+    if (url.origin != resource.origin) throw Failure(Failure::Kind::Settings, "T3 OAuth discovery advertised a different origin");
     return url.full;
 }
 
@@ -187,7 +191,8 @@ std::optional<std::string> bearerMetadata(std::string_view header) {
     };
     auto lower = [](std::string_view value) {
         std::string result(value);
-        for (char& c : result) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        for (char& c : result)
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
         return result;
     };
     bool bearer = false;
@@ -195,7 +200,10 @@ std::optional<std::string> bearerMetadata(std::string_view header) {
     while (!header.empty()) {
         space();
         if (header.empty()) break;
-        if (header.front() == ',') { header.remove_prefix(1); continue; }
+        if (header.front() == ',') {
+            header.remove_prefix(1);
+            continue;
+        }
         auto key = token();
         if (key.empty()) invalidResponse();
         space();
@@ -206,8 +214,8 @@ std::optional<std::string> bearerMetadata(std::string_view header) {
             auto credentials = header.substr(0, header.find(','));
             auto padding = credentials.find('=');
             auto bare = trim(credentials.substr(0, padding));
-            if (!bare.empty() && bare.find_first_not_of(
-                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~+/") == std::string::npos &&
+            if (!bare.empty() &&
+                bare.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~+/") == std::string::npos &&
                 (padding == std::string_view::npos || trim(credentials.substr(padding)).find_first_not_of('=') == std::string::npos)) {
                 header.remove_prefix(credentials.size());
                 continue;
@@ -245,15 +253,16 @@ std::optional<std::string> bearerMetadata(std::string_view header) {
 
 bool supports(const Json& metadata, const char* key, std::string_view value) {
     const auto found = metadata.find(key);
-    return found != metadata.end() && found->is_array() &&
-        std::find(found->begin(), found->end(), Json(value)) != found->end();
+    return found != metadata.end() && found->is_array() && std::find(found->begin(), found->end(), Json(value)) != found->end();
 }
 
-struct OAuthEndpoints { std::string issuer, authorization, token, registration; };
+struct OAuthEndpoints {
+    std::string issuer, authorization, token, registration;
+};
 OAuthEndpoints discover(const Url& resource) {
-    const auto probe = http(resource.full, "POST", {{"Accept", "application/json, text/event-stream"},
-                            {"Content-Type", "application/json"}},
-        Json{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"}, {"params", initializeParams()}}.dump());
+    const auto probe =
+        http(resource.full, "POST", {{"Accept", "application/json, text/event-stream"}, {"Content-Type", "application/json"}},
+             Json{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"}, {"params", initializeParams()}}.dump());
     if (probe.status != 401) throw oauthFailure("discovery", probe);
     auto metadataUrl = resource.origin + "/.well-known/oauth-protected-resource" + resource.path;
     if (const auto auth = probe.headers.find("www-authenticate"); auth != probe.headers.end()) {
@@ -266,12 +275,11 @@ OAuthEndpoints discover(const Url& resource) {
     const auto issuer = checkedUrl(authorities.front().get<std::string>());
     if (issuer.origin != resource.origin || issuer.path != "/") invalidResponse();
     const auto oauth = oauthJson("discovery", issuer.origin + "/.well-known/oauth-authorization-server");
-    if (checkedUrl(str(oauth, "issuer")).full != issuer.full ||
-        !supports(oauth, "code_challenge_methods_supported", "S256") ||
+    if (checkedUrl(str(oauth, "issuer")).full != issuer.full || !supports(oauth, "code_challenge_methods_supported", "S256") ||
         !supports(oauth, "token_endpoint_auth_methods_supported", "none") ||
-        !supports(oauth, "grant_types_supported", "authorization_code") ||
-        !supports(oauth, "scopes_supported", OperateScope) ||
-        !supports(oauth, "scopes_supported", ReadScope)) invalidResponse();
+        !supports(oauth, "grant_types_supported", "authorization_code") || !supports(oauth, "scopes_supported", OperateScope) ||
+        !supports(oauth, "scopes_supported", ReadScope))
+        invalidResponse();
     return {str(oauth, "issuer"), sameOrigin(resource, str(oauth, "authorization_endpoint")),
             sameOrigin(resource, str(oauth, "token_endpoint")), sameOrigin(resource, str(oauth, "registration_endpoint"))};
 }
@@ -282,8 +290,8 @@ int listenOnLoopback() {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (fcntl(listener, F_SETFD, FD_CLOEXEC) != 0 ||
-        bind(listener, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0 || listen(listener, 4) != 0) {
+    if (fcntl(listener, F_SETFD, FD_CLOEXEC) != 0 || bind(listener, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        listen(listener, 4) != 0) {
         close(listener);
         callbackFailure();
     }
@@ -301,7 +309,7 @@ bool ready(int fd, Clock::time_point end, std::stop_token stop) {
         if (remaining.count() <= 0) return false;
         pollfd item{fd, POLLIN, 0};
         const auto timeout = static_cast<int>(remaining.count());
-        const int result = poll(&item, 1, stop.stop_possible() ? std::min(timeout,100) : timeout);
+        const int result = poll(&item, 1, stop.stop_possible() ? std::min(timeout, 100) : timeout);
         if ((result < 0 && errno == EINTR) || (result == 0 && stop.stop_possible())) continue;
         return result > 0 && (item.revents & POLLIN);
     }
@@ -324,9 +332,10 @@ std::string requestTarget(int client, Clock::time_point deadline, std::stop_toke
 }
 
 void callbackReply(int client, bool success) {
-    const std::string_view text = success ? "T3 authorization received. Return to Flock.\n" :
-                                            "This is not the active Flock authorization callback.\n";
-    const auto response = std::string(success ? "HTTP/1.1 200 OK" : "HTTP/1.1 400 Bad Request") +
+    const std::string_view text =
+        success ? "T3 authorization received. Return to Flock.\n" : "This is not the active Flock authorization callback.\n";
+    const auto response =
+        std::string(success ? "HTTP/1.1 200 OK" : "HTTP/1.1 400 Bad Request") +
         "\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: " +
         std::to_string(text.size()) + "\r\n\r\n" + std::string(text);
 #ifdef SO_NOSIGPIPE
@@ -347,12 +356,14 @@ std::string receiveCode(int listener, const std::string& state, const std::strin
         const auto query = target.find('?');
         Headers parameters;
         if (query != std::string::npos && std::string_view(target).substr(0, query) == CallbackPath) {
-            try { parameters = parseForm(std::string_view(target).substr(query + 1)); }
-            catch (const Failure&) {}
+            try {
+                parameters = parseForm(std::string_view(target).substr(query + 1));
+            } catch (const Failure&) {
+            }
         }
         const auto& receivedState = parameters["state"];
-        const bool matches = receivedState.size() == state.size() &&
-            CRYPTO_memcmp(receivedState.data(), state.data(), state.size()) == 0 && parameters["iss"] == issuer;
+        const bool matches = receivedState.size() == state.size() && CRYPTO_memcmp(receivedState.data(), state.data(), state.size()) == 0 &&
+                             parameters["iss"] == issuer;
         callbackReply(client.get(), matches);
         if (!matches) continue;
         if (parameters.contains("error") || parameters["code"].empty())
@@ -384,12 +395,13 @@ static Credential readCredential(const std::filesystem::path& path, const std::s
         bytes.append(buffer.data(), static_cast<std::size_t>(n));
     }
     const auto saved = Json::parse(bytes, nullptr, false);
-    if (!saved.is_object() || str(saved, "environmentId") != environmentId ||
-        !saved.contains("expiresAt") || !saved["expiresAt"].is_number_integer() ||
-        !saved.contains("operate") || !saved["operate"].is_boolean()) noCredential();
+    if (!saved.is_object() || str(saved, "environmentId") != environmentId || !saved.contains("expiresAt") ||
+        !saved["expiresAt"].is_number_integer() || !saved.contains("operate") || !saved["operate"].is_boolean())
+        noCredential();
     const auto url = checkedUrl(str(saved, "mcpUrl"));
-    Credential credential{url.full, str(saved, "token"), str(saved, "generation"),
-                          saved["expiresAt"].get<Seconds>(), saved["operate"].get<bool>(), str(saved, "label")};
+    Credential credential{
+        url.full,           str(saved, "token"), str(saved, "generation"), saved["expiresAt"].get<Seconds>(), saved["operate"].get<bool>(),
+        str(saved, "label")};
     if (credential.label.empty() || url.path != "/mcp" || !validToken(credential.token) || credential.generation.size() != 43 ||
         credential.generation.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != std::string::npos)
         noCredential();
@@ -399,7 +411,7 @@ static Credential readCredential(const std::filesystem::path& path, const std::s
 Credential loadCredential(const std::filesystem::path& path, const std::string& environmentId) {
     auto credential = readCredential(path, environmentId);
     if (credential.expiresAt <= unixTime())
-        throw Failure(Failure::Kind::Auth,"Sign in to this T3 environment again",Failure::Reason::CredentialExpired);
+        throw Failure(Failure::Kind::Auth, "Sign in to this T3 environment again", Failure::Reason::CredentialExpired);
     return credential;
 }
 
@@ -413,25 +425,27 @@ t3detail::Url checkedResource(const std::string& mcpUrl) {
 }
 }
 
-std::optional<T3SavedConnection> savedT3Connection(const std::filesystem::path& directory,
-                                                 const std::string& environmentId) {
+std::optional<T3SavedConnection> savedT3Connection(const std::filesystem::path& directory, const std::string& environmentId) {
     try {
         auto credential = t3detail::readCredential(directory, environmentId);
         const bool loopbackHttp = credential.mcpUrl.starts_with("http://");
-        return T3SavedConnection{std::move(credential.label), std::move(credential.mcpUrl), credential.expiresAt,loopbackHttp};
-    } catch (const t3detail::Failure&) { return {}; }
+        return T3SavedConnection{std::move(credential.label), std::move(credential.mcpUrl), credential.expiresAt, loopbackHttp};
+    } catch (const t3detail::Failure&) {
+        return {};
+    }
 }
 
 void validateT3McpUrl(const std::string& mcpUrl) {
-    try { (void)checkedResource(mcpUrl); }
-    catch (const t3detail::Failure&) { throw Conflict("Use a valid T3 connection URL ending in /mcp"); }
+    try {
+        (void)checkedResource(mcpUrl);
+    } catch (const t3detail::Failure&) {
+        throw Conflict("Use a valid T3 connection URL ending in /mcp");
+    }
 }
 
-T3LoginResult loginT3(const std::filesystem::path& credentialDirectory,
-                      const std::optional<std::string>& expectedEnvironmentId, const std::string& mcpUrl,
-                      const std::function<void(const std::string&)>& showAuthorizationUrl, bool requireOperate,
-                      const std::function<void(const std::string&, const std::function<void()>&)>& install,
-                      std::stop_token stop) {
+T3LoginResult loginT3(const std::filesystem::path& credentialDirectory, const std::optional<std::string>& expectedEnvironmentId,
+                      const std::string& mcpUrl, const std::function<void(const std::string&)>& showAuthorizationUrl, bool requireOperate,
+                      const std::function<void(const std::string&, const std::function<void()>&)>& install, std::stop_token stop) {
     using namespace t3detail;
     checkCancelled(stop);
     if (expectedEnvironmentId) (void)credentialName(*expectedEnvironmentId);
@@ -445,26 +459,40 @@ T3LoginResult loginT3(const std::filesystem::path& credentialDirectory,
     if (getsockname(listener.get(), reinterpret_cast<sockaddr*>(&addr), &size) != 0) callbackFailure();
     const auto redirect = "http://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + std::string(CallbackPath);
     const auto registration = oauthJson("registration", oauth.registration, {{"Content-Type", "application/json"}},
-        Json{{"client_name", "Flock"}, {"redirect_uris", Json::array({redirect})},
-             {"token_endpoint_auth_method", "none"}, {"grant_types", Json::array({"authorization_code"})},
-             {"response_types", Json::array({"code"})}}.dump());
+                                        Json{{"client_name", "Flock"},
+                                             {"redirect_uris", Json::array({redirect})},
+                                             {"token_endpoint_auth_method", "none"},
+                                             {"grant_types", Json::array({"authorization_code"})},
+                                             {"response_types", Json::array({"code"})}}
+                                            .dump());
     checkCancelled(stop);
     const auto clientId = str(registration, "client_id");
     if (clientId.empty() || clientId.size() > 8192) invalidResponse();
     const auto state = randomValue();
     const auto verifier = randomValue();
     const auto scope = std::string(ReadScope) + " " + std::string(OperateScope);
-    showAuthorizationUrl(oauth.authorization + '?' + form({{"response_type", "code"}, {"client_id", clientId},
-        {"redirect_uri", redirect}, {"scope", scope}, {"resource", resource.full}, {"state", state},
-        {"code_challenge", digest(verifier)}, {"code_challenge_method", "S256"}}));
+    showAuthorizationUrl(oauth.authorization + '?' +
+                         form({{"response_type", "code"},
+                               {"client_id", clientId},
+                               {"redirect_uri", redirect},
+                               {"scope", scope},
+                               {"resource", resource.full},
+                               {"state", state},
+                               {"code_challenge", digest(verifier)},
+                               {"code_challenge_method", "S256"}}));
     const auto code = receiveCode(listener.get(), state, oauth.issuer, stop);
     checkCancelled(stop);
     const auto tokenResult = oauthJson("token", oauth.token, {{"Content-Type", "application/x-www-form-urlencoded"}},
-        form({{"grant_type", "authorization_code"}, {"code", code}, {"redirect_uri", redirect},
-              {"client_id", clientId}, {"code_verifier", verifier}, {"resource", resource.full}}));
+                                       form({{"grant_type", "authorization_code"},
+                                             {"code", code},
+                                             {"redirect_uri", redirect},
+                                             {"client_id", clientId},
+                                             {"code_verifier", verifier},
+                                             {"resource", resource.full}}));
     const auto token = str(tokenResult, "access_token");
-    if (!validToken(token) || str(tokenResult, "token_type") != "Bearer" ||
-        !tokenResult.contains("expires_in") || !tokenResult["expires_in"].is_number_integer()) invalidResponse();
+    if (!validToken(token) || str(tokenResult, "token_type") != "Bearer" || !tokenResult.contains("expires_in") ||
+        !tokenResult["expires_in"].is_number_integer())
+        invalidResponse();
     const auto expires = tokenResult["expires_in"].get<Seconds>();
     if (expires <= 0 || expires > 31 * 24 * 60 * 60) invalidResponse();
     bool readScope = false, operateScope = false;
@@ -475,7 +503,7 @@ T3LoginResult loginT3(const std::filesystem::path& credentialDirectory,
     }
     if (!readScope) noCredential();
     if (requireOperate && !operateScope)
-        throw Failure(Failure::Kind::Auth,"Authorize T3 read and operate access for the Flock connection");
+        throw Failure(Failure::Kind::Auth, "Authorize T3 read and operate access for the Flock connection");
     checkCancelled(stop);
     Credential credential{resource.full, token, randomValue(), unixTime() + expires, operateScope, {}};
     Client client(credential);
@@ -488,8 +516,10 @@ T3LoginResult loginT3(const std::filesystem::path& credentialDirectory,
     const auto name = credentialName(environmentId);
     checkCancelled(stop);
     const auto save = [&] { saveCredential(directory.get(), name, environmentId, credential); };
-    if (install) install(environmentId, save);
-    else save();
-    return {std::move(environmentId),operateScope};
+    if (install)
+        install(environmentId, save);
+    else
+        save();
+    return {std::move(environmentId), operateScope};
 }
 }

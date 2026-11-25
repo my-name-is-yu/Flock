@@ -20,17 +20,15 @@ struct T3SavedConnection {
     Seconds expiresAt;
     bool loopbackHttp;
 };
-std::optional<T3SavedConnection> savedT3Connection(const std::filesystem::path& credentialDirectory,
-                                                 const std::string& environmentId);
+std::optional<T3SavedConnection> savedT3Connection(const std::filesystem::path& credentialDirectory, const std::string& environmentId);
 
 struct T3LoginResult {
     std::string environmentId;
     bool operate;
 };
 
-T3LoginResult loginT3(const std::filesystem::path& credentialDirectory,
-                      const std::optional<std::string>& expectedEnvironmentId, const std::string& mcpUrl,
-                      const std::function<void(const std::string&)>& showAuthorizationUrl, bool requireOperate = false,
-                      const std::function<void(const std::string&, const std::function<void()>&)>& install = {},
-                      std::stop_token stop = {});
+T3LoginResult loginT3(const std::filesystem::path& credentialDirectory, const std::optional<std::string>& expectedEnvironmentId,
+                      const std::string& mcpUrl, const std::function<void(const std::string&)>& showAuthorizationUrl,
+                      bool requireOperate = false,
+                      const std::function<void(const std::string&, const std::function<void()>&)>& install = {}, std::stop_token stop = {});
 }

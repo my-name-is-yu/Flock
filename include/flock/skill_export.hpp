@@ -5,7 +5,7 @@
 
 namespace flockv0 {
 
-std::map<std::string,std::string> flockSkillNames(const Json& bots);
+std::map<std::string, std::string> flockSkillNames(const Json& bots);
 void exportFlockSkills(const std::filesystem::path& root, const Json& bots);
 
 }

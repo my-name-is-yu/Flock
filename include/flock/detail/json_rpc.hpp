@@ -4,8 +4,7 @@
 
 namespace flockv0::detail {
 
-inline Json decodeRpcResponse(std::string_view body, std::string_view contentType,
-                              std::int64_t id, Json (*parse)(std::string_view)) {
+inline Json decodeRpcResponse(std::string_view body, std::string_view contentType, std::int64_t id, Json (*parse)(std::string_view)) {
     const auto matches = [id](const Json& message) {
         const auto field = message.find("id");
         return field != message.end() && *field == id;

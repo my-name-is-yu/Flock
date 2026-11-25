@@ -24,7 +24,6 @@ public:
     T3WebSetup(std::filesystem::path home, std::function<void()> onConnected);
     void configure(WebCallbacks&, Store&, bool live);
     void listeningOn(unsigned port) { port_.store(port); }
-
 private:
     Json status(const Person&);
     bool start(const Person&, const T3ConnectRequest&);
