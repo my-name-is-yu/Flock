@@ -168,7 +168,13 @@ allowance. Every message gets its own allowance.
 
 Flock saves each attempt in SQLite before invoking the model. Failed attempts,
 retries, and in-flight attempts at restart count. The `model_attempts` table
-records usage fields when available. Missing fields are unknown.
+records usage fields when available, including `input_tokens_details.cached_tokens`.
+A reported zero means no input tokens were reused. An absent count is unknown.
+
+ChatGPT requests list tools by name and send the Bot's role, memory, earlier
+conversation history, task state, evidence, and feedback before the current
+event and its tool results. Reuse depends on matching tools and earlier
+content, and on where ChatGPT places cache boundaries for the selected model.
 
 When the allowance runs out, choose **Approve one more model call** on the
 paused conversation message or task. For a task, `flock approve TASK WAIT REVISION GENERATION`

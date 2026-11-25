@@ -192,8 +192,14 @@ void notesAndRoutingOnRestart() {
     rejects<Conflict>([&] { bots.get("../first"); },"path traversal accepted as Bot ID");
 }
 
-Json requestContext(const Json& request) {
-    return Json::parse(request.at("input").at(0).at("content").at(0).at("text").get<std::string>());
+const std::string& requestText(const Json& request) {
+    return request.at("input").at(0).at("content").at(0).at("text").get_ref<const std::string&>();
+}
+
+const Json& toolParameters(const Json& request, std::string_view name) {
+    for (const auto& function : request.at("tools").at(0).at("tools"))
+        if (function.at("name") == name) return function.at("parameters");
+    throw std::runtime_error("Missing model tool: " + std::string(name));
 }
 
 void notesAcrossConversationAndWork() {
@@ -205,7 +211,7 @@ void notesAcrossConversationAndWork() {
         ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
         Decision choose(const ModelInput& input) {
             requests.push_back(responseRequest(input));
-            const auto context = requestContext(requests.back());
+            const auto context = Json::parse(requestText(requests.back()));
             const auto& event = context.at("event");
             const auto& memory = context.at("memory").get_ref<const std::string&>();
             const auto styled = [&](std::string text) {
@@ -270,7 +276,7 @@ void notesAcrossConversationAndWork() {
     };
 
     const auto checkRequest = [](const Json& request, const Intake& bot, const BotNotes& notes, std::string_view kind) {
-        const auto context = requestContext(request);
+        const auto context = Json::parse(requestText(request));
         check(request.at("model") == bot.config.at("model") && context.at("event").at("kind") == kind,
             "unexpected configured model request");
         check(context.at("soul") == notes.soul && context.at("memory") == notes.memory,
@@ -310,8 +316,16 @@ void notesAcrossConversationAndWork() {
         check(reply.at("replyToMessageId") == question && reply.at("text") == expectedReply,
               "the explanation should apply current notes to the selected result");
         check(model.requests.size() == start + 2,"expected a read and a reply step");
-        checkRequest(model.requests.at(start),bot,notes,"conversation_turn");
-        checkRequest(model.requests.at(start + 1),bot,notes,"conversation_turn");
+        const auto& read = model.requests.at(start);
+        const auto& respond = model.requests.at(start + 1);
+        checkRequest(read,bot,notes,"conversation_turn");
+        checkRequest(respond,bot,notes,"conversation_turn");
+        const std::string_view readText = requestText(read), responseText = requestText(respond);
+        constexpr std::string_view eventField = ",\"event\":";
+        const auto event = readText.find(eventField);
+        check(event != readText.npos && responseText.starts_with(readText.substr(0,event + eventField.size())) &&
+              readText != responseText && read.at("tools") == respond.at("tools") &&
+              read.at("instructions") == respond.at("instructions"),"a read-only turn step changed the prompt prefix before event data");
         check(store.tasks().size() == taskCount && t3.commands.size() == commands && store.task(task) == before,
             "explaining a result must preserve the Task and its Runs without starting any new work");
     };
@@ -397,8 +411,8 @@ void directionalPeerConfiguration() {
 void responseContract() {
     ModelInput input{
         {{"doneWhen","An existing requirement"}},
-        {{"kind","result"}},Json::array(),{"New SOUL","Current MEMORY"},
-        {"follow_up","delegate","complete","ask_user"},"",Json::array(),
+        {{"kind","result"}},Json::array({{{"text","Older turn"}}}),{"New SOUL","Current MEMORY"},
+        {"follow_up","delegate","complete","ask_user"},"Still missing a report",Json::array({{{"text","Interim log"}}}),
         {{"modelProvider","chatgpt"},{"model","fixture-slug"},{"secret","must-stay-local"}},
     };
     const auto request = responseRequest(input);
@@ -406,11 +420,13 @@ void responseContract() {
         request["tool_choice"] == "required" && request["parallel_tool_calls"] == false,"request policy");
     const auto& tool = request["tools"].at(0);
     check(tool["type"] == "namespace" && tool["name"] == "flock" && tool["tools"].size() == 4,"only allowed tools grouped in namespace");
-    check(!tool["tools"][1]["parameters"]["properties"].contains("doneWhen"),"later delegate must omit doneWhen");
+    check(!toolParameters(request,"delegate").at("properties").contains("doneWhen"),"later delegate must omit doneWhen");
     check(request.dump().find("must-stay-local") == std::string::npos,"adapter config leaked into the prompt");
-    const auto context = requestContext(request);
-    check(context["task"]["doneWhen"] == "An existing requirement" && context["soul"] == "New SOUL" &&
-        context["memory"] == "Current MEMORY","missing model context");
+    check(nlohmann::ordered_json::parse(requestText(request)) == nlohmann::ordered_json{
+        {"soul",input.notes.soul},{"memory",input.notes.memory},{"history",input.history},{"task",input.task},
+        {"evidence",input.evidence},{"feedback",input.feedback},{"event",input.event}},"model context content or order changed");
+    std::ranges::reverse(input.tools);
+    check(responseRequest(input) == request,"tool input order changed the provider request");
     check(request.at("instructions").get<std::string>().find("when writing your report") != std::string::npos,
           "the task provider prompt must apply the notes to the Bot's own report");
 
@@ -418,9 +434,9 @@ void responseContract() {
     input.task["requestedDoneWhen"] = "Use independently verified measurements";
     input.tools = {"delegate","ask_user"};
     const auto initial = responseRequest(input);
-    check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
+    check(toolParameters(initial,"delegate").at("required") ==
         Json::array({"reason","instruction"}),"saved requested criteria must not require model authorship");
-    check(requestContext(initial).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
+    check(Json::parse(requestText(initial)).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
           initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
@@ -437,9 +453,7 @@ void responseContract() {
     input.event = {{"kind","conversation_turn"},{"text","Create a sales report in CSV format"},{"turn",Json::array()}};
     const auto turn = responseRequest(input);
     const auto turnTool = [&](std::string_view name) -> const Json& {
-        for (const auto& function : turn.at("tools").at(0).at("tools"))
-            if (function.at("name") == name) return function.at("parameters");
-        throw std::runtime_error("Missing conversation tool: " + std::string(name));
+        return toolParameters(turn,name);
     };
     check(turn.at("tools").at(0).at("tools").size() == input.tools.size() &&
           turnTool("start_workflow")["properties"]["stages"]["items"]["required"] == Json::array({"stageId","role"}) &&
@@ -589,41 +603,36 @@ void responseContract() {
     input.task["peer"] = {{"replyKinds",{"question","result","failed"}}};
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
     const auto peerRequest = responseRequest(input);
-    const auto peerContext = requestContext(peerRequest);
+    const auto peerContext = Json::parse(requestText(peerRequest));
     const auto& destinations = peerContext.at("task").at("peers");
     check(destinations.size() == 1 && destinations.at(0).at("botId") == "verifier" &&
         destinations.at(0).at("name") == "Verifier",
         "the model did not receive the allowed peer destination");
     check(peerRequest.at("tools").at(0).at("tools").size() == 3,"unavailable tools entered the peer request");
-    const auto parameters = [](const Json& request, std::string_view name) -> const Json& {
-        for (const auto& function : request.at("tools").at(0).at("tools"))
-            if (function.at("name") == name) return function.at("parameters");
-        throw std::runtime_error("Missing model tool: " + std::string(name));
-    };
     using Names = std::multiset<std::string>;
-    const auto& send = parameters(peerRequest,"send_bot_message");
+    const auto& send = toolParameters(peerRequest,"send_bot_message");
     check(send["properties"]["kind"]["enum"].get<Names>() == Names{"consult","work"} &&
         send["properties"]["doneWhen"]["type"] == "string" &&
         !send["properties"].contains("forwardUserMessage") &&
         send["required"].get<Names>() == Names{"reason","botId","kind","text"},
         "first peer work may set a criterion while consultation only needs a question");
-    const auto& reply = parameters(peerRequest,"reply_to_bot");
+    const auto& reply = toolParameters(peerRequest,"reply_to_bot");
     check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","result","failed"} &&
         reply["required"].get<Names>() == Names{"reason","kind","text"},
         "peer replies must specify their kind and text");
-    const auto& evidence = parameters(peerRequest,"read_bot_evidence");
+    const auto& evidence = toolParameters(peerRequest,"read_bot_evidence");
     check(evidence["properties"]["messageId"]["type"] == "string" &&
         evidence["required"].get<Names>() == Names{"reason","messageId"},
         "peer evidence must identify the message that carries it");
     input.needsDoneWhen = false;
     input.task["doneWhen"] = "Saved work acceptance";
     const auto nextPeerRequest = responseRequest(input);
-    check(!parameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
+    check(!toolParameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
         "later peer work must keep the saved criterion");
     input.canForwardUserMessage = true;
     input.task["forwardableUserMessage"] = {{"text","Saved user message"},{"time",123}};
     const auto forwardRequest = responseRequest(input);
-    const auto& forward = parameters(forwardRequest,"send_bot_message");
+    const auto& forward = toolParameters(forwardRequest,"send_bot_message");
     check(forward["properties"]["forwardUserMessage"]["type"] == "boolean" &&
           forward["required"].get<Names>() == Names{"reason","botId","kind"},
           "forwarding a saved user message must support an optional Bot note");

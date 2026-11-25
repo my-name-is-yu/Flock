@@ -179,6 +179,10 @@ in the current page and are cleared on reload.
 
 ## Memory and automation
 
+Model input starts with the Bot's role, private memory, and earlier conversation
+history. Flock puts the current event and tool results near the end to lengthen
+the prefix shared by requests for the same Bot.
+
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared
 document, for example `team%2Fstaging.md`. `GET /api/memory/history` accepts the
 same parameters. Use `before` to page through revisions and `proposalsBefore`
