@@ -439,6 +439,7 @@ public:
 private:
     class Maintenance;
     class TaskScheduler;
+    class PeerExchanges;
     class RunReports;
     class SessionHistory;
     class TaskQuestions;
