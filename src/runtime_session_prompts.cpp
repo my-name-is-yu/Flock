@@ -1,5 +1,4 @@
 #include "runtime_session_prompts.hpp"
-
 #include "flock/limits.hpp"
 #include "journal.hpp"
 #include "journal_task.hpp"
@@ -7,10 +6,23 @@
 #include "record_decode.hpp"
 #include "runtime_task_state.hpp"
 #include "task_context_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/task.hpp"
+#include "flock/outbox.hpp"
+#include "flock/outbox_instruction.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <optional>
 #include <set>
+#include <span>
+#include <string>
 #include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {
@@ -56,7 +68,7 @@ void includeInstructions(std::string& instruction, std::span<const OutboxInstruc
 }
 }
 
-Runtime::SessionPrompts::SessionContract Runtime::SessionPrompts::sessionContract(const TaskData& task) {
+Runtime::Components::SessionPrompts::SessionContract Runtime::Components::SessionPrompts::sessionContract(const TaskData& task) {
     auto row = db.query(R"SQL(
 SELECT r.intent,r.done_when,
        coalesce((SELECT max(j.id) FROM journal j WHERE j.task_id=r.task_id AND
@@ -70,8 +82,9 @@ FROM task_revisions r WHERE r.id=? AND r.task_id=?
     return {row.string(0), row.string(1), row.number(2)};
 }
 
-std::vector<OutboxSource> Runtime::SessionPrompts::appendSessionDirections(std::string& instruction, const TaskData& task,
-                                                                           std::span<const OutboxInstruction> pending, Id answersAfter) {
+std::vector<OutboxSource> Runtime::Components::SessionPrompts::appendSessionDirections(std::string& instruction, const TaskData& task,
+                                                                                       std::span<const OutboxInstruction> pending,
+                                                                                       Id answersAfter) {
     using InstructionId = std::pair<Id, int>;
     std::set<InstructionId> pendingIds;
     for (const auto& item : pending) pendingIds.emplace(item.messageId, item.step);
@@ -116,8 +129,9 @@ ORDER BY j.id
     return sources;
 }
 
-Runtime::SessionPrompts::WorkPrompt Runtime::SessionPrompts::workPrompt(const TaskData& task, const Json& event, std::size_t actionIdBytes,
-                                                                        const SessionContract* contract) {
+Runtime::Components::SessionPrompts::WorkPrompt Runtime::Components::SessionPrompts::workPrompt(const TaskData& task, const Json& event,
+                                                                                                std::size_t actionIdBytes,
+                                                                                                const SessionContract* contract) {
     WorkPrompt prompt;
     auto& [instruction, pending, contextIds, resultReferences] = prompt;
     const auto scrub = db.redactor(task.botId);
@@ -206,7 +220,7 @@ Runtime::SessionPrompts::WorkPrompt Runtime::SessionPrompts::workPrompt(const Ta
     return prompt;
 }
 
-void Runtime::SessionPrompts::prepareDelegation(const TaskData& task, Outbox& action) {
+void Runtime::Components::SessionPrompts::prepareDelegation(const TaskData& task, Outbox& action) {
     auto instruction = *action.instructionBase;
     const auto contract = sessionContract(task);
     const auto event = db.currentEvent(task);
@@ -221,18 +235,18 @@ void Runtime::SessionPrompts::prepareDelegation(const TaskData& task, Outbox& ac
     action.instructionBase.reset();
 }
 
-std::string Runtime::SessionPrompts::dispatchedWorkPrompt(const Outbox& action) {
+std::string Runtime::Components::SessionPrompts::dispatchedWorkPrompt(const Outbox& action) {
     auto instruction = action.command.instruction;
     if (action.sessionMemory) instruction += action.sessionMemory->section;
     return sessionPrompt(action.command.actionId, instruction);
 }
 
-Runtime::SessionPrompts::WorkPrompt Runtime::SessionPrompts::workPrompt(const TaskData& task, const Json& event,
-                                                                        std::size_t actionIdBytes) {
+Runtime::Components::SessionPrompts::WorkPrompt Runtime::Components::SessionPrompts::workPrompt(const TaskData& task, const Json& event,
+                                                                                                std::size_t actionIdBytes) {
     return workPrompt(task, event, actionIdBytes, nullptr);
 }
 
-std::vector<OutboxInstruction> Runtime::SessionPrompts::pendingInstructions(const TaskData& task, const Json& event) {
+std::vector<OutboxInstruction> Runtime::Components::SessionPrompts::pendingInstructions(const TaskData& task, const Json& event) {
     return workPrompt(task, event, 0).pending;
 }
 }

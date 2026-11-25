@@ -1,11 +1,30 @@
 #pragma once
 
 #include "flock/web.hpp"
+#include "flock/command.hpp"
+#include "flock/decision.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <httplib.h>
 
+#include <cstdlib>
+#include <exception>
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
 
 namespace flockv0::http_test {
 

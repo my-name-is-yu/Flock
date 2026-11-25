@@ -2,8 +2,19 @@
 #include "fixtures.hpp"
 #include "flock/base64.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <string>
 
 namespace {
 using namespace flockv0;

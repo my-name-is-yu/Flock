@@ -3,8 +3,23 @@
 #include "journal.hpp"
 #include "journal_task.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/t3.hpp"
+#include "flock/task.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/run_report.hpp"
+#include "flock/outbox.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 RunEvidence boundedReportEvidence(const RunEvidence& evidence) {

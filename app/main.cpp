@@ -9,20 +9,47 @@
 #include "t3_connection_setup.hpp"
 #include "t3_setup.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/bot_change.hpp"
+#include "flock/bot_profile.hpp"
 #include "flock/external_mcp.hpp"
-#include "flock/t3_connection.hpp"
 #include "flock/identity.hpp"
-
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_connection.hpp"
 #include "flock/t3_mcp.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+#include "flock/wait.hpp"
 #include "flock/web.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <iostream>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace flockv0::app {
 namespace {

@@ -1,5 +1,6 @@
 #include "../chatgpt.hpp"
 #include "fixtures.hpp"
+#include "flock/model_error.hpp"
 
 #include <arpa/inet.h>
 #include <spawn.h>
@@ -7,9 +8,19 @@
 
 #include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <cstddef>
+#include <exception>
 #include <future>
 #include <iostream>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
+#include <stop_token>
+#include <streambuf>
+#include <string>
+#include <string_view>
+#include <system_error>
 
 extern char** environ;
 

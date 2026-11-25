@@ -1,5 +1,4 @@
 #include "runtime_outbox_dispatch.hpp"
-
 #include "commit_check.hpp"
 #include "conversation_storage.hpp"
 #include "flock/limits.hpp"
@@ -14,12 +13,28 @@
 #include "runtime_task_state.hpp"
 #include "runtime_task_updates.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/command.hpp"
+#include "flock/task.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/session_ref.hpp"
+#include "flock/wait.hpp"
+#include "flock/outbox.hpp"
+#include "flock/outbox_instruction.hpp"
 
 #include <algorithm>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 namespace flockv0 {
-void Runtime::OutboxDispatch::stop(TaskData task) {
+void Runtime::Components::OutboxDispatch::stop(TaskData task) {
     const bool cancel = task.state == TaskState::cancelling;
     const auto intent = cancel ? RunStopIntent::cancel : RunStopIntent::replan;
     if (task.pendingRunReport) {
@@ -89,7 +104,7 @@ void Runtime::OutboxDispatch::stop(TaskData task) {
         runs.finishReplan(task);
 }
 
-Command Runtime::OutboxDispatch::command(const TaskData& task, const Outbox& action) {
+Command Runtime::Components::OutboxDispatch::command(const TaskData& task, const Outbox& action) {
     Command c{action.command};
     c.authGeneration = action.authGeneration;
     c.ownerBotId = task.botId;
@@ -111,7 +126,7 @@ Command Runtime::OutboxDispatch::command(const TaskData& task, const Outbox& act
     return c;
 }
 
-void Runtime::OutboxDispatch::instructionDelivery(TaskData& task, const Outbox& action) {
+void Runtime::Components::OutboxDispatch::instructionDelivery(TaskData& task, const Outbox& action) {
     if (action.instructions.empty()) return;
     auto& pending = task.pendingInstructions;
     for (const auto& item : action.instructions) {
@@ -122,7 +137,7 @@ void Runtime::OutboxDispatch::instructionDelivery(TaskData& task, const Outbox& 
     }
 }
 
-bool Runtime::OutboxDispatch::assignedRunMatches(const TaskData& task, const CommandPayload& command, const RunRef& run) {
+bool Runtime::Components::OutboxDispatch::assignedRunMatches(const TaskData& task, const CommandPayload& command, const RunRef& run) {
     const auto& environment = command.environmentId;
     auto owner =
         db.query("SELECT action_id FROM runs WHERE environment_id=? AND thread_id=? AND run_id=?", {environment, run.threadId, run.runId});
@@ -140,8 +155,8 @@ bool Runtime::OutboxDispatch::assignedRunMatches(const TaskData& task, const Com
     return !prior.next();
 }
 
-Runtime::OutboxDispatch::DeliveryOutcome Runtime::OutboxDispatch::classifyDelivery(const TaskData& task, const Outbox& action,
-                                                                                   Delivery& outcome, bool reply) {
+Runtime::Components::OutboxDispatch::DeliveryOutcome
+Runtime::Components::OutboxDispatch::classifyDelivery(const TaskData& task, const Outbox& action, Delivery& outcome, bool reply) {
     const auto scrub = db.redactor(task.botId);
     if (scrub.payload(runJson(outcome.run)) != runJson(outcome.run))
         outcome = {Delivery::Kind::Unknown, {}, "T3 returned a protected Run identifier"};
@@ -155,8 +170,8 @@ Runtime::OutboxDispatch::DeliveryOutcome Runtime::OutboxDispatch::classifyDelive
     return DeliveryOutcome::Unknown;
 }
 
-AssignedRun Runtime::OutboxDispatch::recordRunAssignment(const TaskData& task, const Outbox& action, const RunRef& ref,
-                                                         DestinationRun* destination) {
+AssignedRun Runtime::Components::OutboxDispatch::recordRunAssignment(const TaskData& task, const Outbox& action, const RunRef& ref,
+                                                                     DestinationRun* destination) {
     const auto& cmd = action.command;
     db.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)",
             {cmd.actionId, task.id, cmd.environmentId, ref.threadId, ref.runId, ref.link});
@@ -175,17 +190,17 @@ AssignedRun Runtime::OutboxDispatch::recordRunAssignment(const TaskData& task, c
     return run;
 }
 
-void Runtime::OutboxDispatch::rememberRunCandidate(Outbox action, const RunRef& ref) {
+void Runtime::Components::OutboxDispatch::rememberRunCandidate(Outbox action, const RunRef& ref) {
     action.command.candidate = ref;
     if (action.command.tool == CommandTool::delegate) action.command.launchReceiptThreadId = ref.threadId;
     db.saveOutbox(action);
 }
 
-void Runtime::OutboxDispatch::writeDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed) {
+void Runtime::Components::OutboxDispatch::writeDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed) {
     if (db.recordDestinationReport(task, run, observed) && task.state == TaskState::cancelling) runs.cancelDone(task);
 }
 
-bool Runtime::OutboxDispatch::setDestinationStatus(DestinationRun& run, DestinationRunPhase status, std::string detail) {
+bool Runtime::Components::OutboxDispatch::setDestinationStatus(DestinationRun& run, DestinationRunPhase status, std::string detail) {
     const auto currentDetail = run.detail ? std::string_view(*run.detail) : std::string_view{};
     if (run.inPhase(status) && currentDetail == detail) return false;
     run.status = status;
@@ -193,15 +208,16 @@ bool Runtime::OutboxDispatch::setDestinationStatus(DestinationRun& run, Destinat
     return true;
 }
 
-void Runtime::OutboxDispatch::destinationStatus(Id id, std::string_view action, DestinationRunPhase status, std::string detail) {
+void Runtime::Components::OutboxDispatch::destinationStatus(Id id, std::string_view action, DestinationRunPhase status,
+                                                            std::string detail) {
     updates.changeTask(id, [&](TaskData& task) {
         auto& run = destinationRun(task, action);
         return run.outstanding() && setDestinationStatus(run, status, std::move(detail));
     });
 }
 
-bool Runtime::OutboxDispatch::deferDestinationDelivery(TaskData& task, DestinationRun& run, const Outbox& action, const Delivery& outcome,
-                                                       DeliveryOutcome delivery) {
+bool Runtime::Components::OutboxDispatch::deferDestinationDelivery(TaskData& task, DestinationRun& run, const Outbox& action,
+                                                                   const Delivery& outcome, DeliveryOutcome delivery) {
     const bool cancelling = task.state == TaskState::cancelling || action.stop.has_value();
     const auto& key = action.command.actionId;
     const auto phase = action.phase;
@@ -227,7 +243,7 @@ bool Runtime::OutboxDispatch::deferDestinationDelivery(TaskData& task, Destinati
     return true;
 }
 
-void Runtime::OutboxDispatch::applyDelivery(Id id, const Outbox& action, Delivery outcome) {
+void Runtime::Components::OutboxDispatch::applyDelivery(Id id, const Outbox& action, Delivery outcome) {
     updates.changeTask(id, [&](TaskData& task) {
         if (terminal(task)) return false;
         const auto& key = action.command.actionId;
@@ -338,7 +354,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
     });
 }
 
-void Runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
+void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
     if (shutdown.stop_requested()) return;
     auto cmd = command(task, action);
     const auto id = task.id;
@@ -578,7 +594,7 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
     applyDelivery(id, action, std::move(outcome));
 }
 
-void Runtime::OutboxDispatch::step(const TaskData& task) {
+void Runtime::Components::OutboxDispatch::step(const TaskData& task) {
     const auto state = task.state;
     const bool reconcile = state == TaskState::waiting && (task.workflow || task.selectedSession) && !task.actionId.empty();
     if (state != TaskState::sending && !reconcile) return;
@@ -603,8 +619,8 @@ void Runtime::OutboxDispatch::step(const TaskData& task) {
     deliver(task, std::move(*action));
 }
 
-void Runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id, CommandTool tool, std::string instruction,
-                                          const Json& args, const Json& event, bool charge, const TaskRoute* destination) {
+void Runtime::Components::OutboxDispatch::queueAction(TaskData& task, const std::string& id, CommandTool tool, std::string instruction,
+                                                      const Json& args, const Json& event, bool charge, const TaskRoute* destination) {
     const auto& run = tool == CommandTool::follow_up ? task.lastRun : task.activeRun;
     auto target = run ? run->ref : RunRef{};
     if (tool == CommandTool::delegate && task.selectedSession) {
@@ -658,8 +674,8 @@ void Runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id,
     task.state = TaskState::sending;
 }
 
-void Runtime::OutboxDispatch::queueDestinations(TaskData& task, const std::string& first, std::string_view instruction, const Json& args,
-                                                const Json& event, bool charge) {
+void Runtime::Components::OutboxDispatch::queueDestinations(TaskData& task, const std::string& first, std::string_view instruction,
+                                                            const Json& args, const Json& event, bool charge) {
     RunResults results;
     for (const auto& target : task.runTargets()) {
         const auto& route = target.route;

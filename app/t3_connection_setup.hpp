@@ -1,9 +1,23 @@
 #pragma once
 
-#include "flock/web.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+
 #include <atomic>
+#include <filesystem>
+#include <functional>
 #include <mutex>
+#include <optional>
+#include <stop_token>
+#include <string>
 #include <thread>
+#include <vector>
+
+namespace flockv0 {
+class Store;
+struct T3ConnectRequest;
+struct WebCallbacks;
+}
 
 namespace flockv0::app {
 

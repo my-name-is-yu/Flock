@@ -1,5 +1,4 @@
 #include "runtime_task_turn.hpp"
-
 #include "flock/decision.hpp"
 #include "journal_peer.hpp"
 #include "journal_task.hpp"
@@ -14,20 +13,39 @@
 #include "runtime_task_updates.hpp"
 #include "task_context_storage.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/wait.hpp"
+#include "flock/outbox_instruction.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <functional>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <variant>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::TaskTurn::TaskTurn(Store::Impl& db, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock, GitHost* gitHost,
-                            const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
-                            SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs, SessionPrompts& prompts,
-                            TaskDecisions& decisions)
+Runtime::Components::TaskTurn::TaskTurn(Store::Impl& db, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock,
+                                        GitHost* gitHost, const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates,
+                                        RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges,
+                                        RunObserver& runs, SessionPrompts& prompts, TaskDecisions& decisions)
     : db(db), model(model), soul(soul), clock(clock), gitHost(gitHost), sessionRead(sessionRead), stop(std::move(stop)), updates(updates),
       reports(reports), sessionHistory(sessionHistory), peerExchanges(peerExchanges), runs(runs), prompts(prompts), decisions(decisions) {}
 
-std::vector<std::string> Runtime::TaskTurn::available(const TaskData& task, const Json& event, const std::optional<PeerExchange>& peer,
-                                                      bool canSend, bool canRead) {
+std::vector<std::string> Runtime::Components::TaskTurn::available(const TaskData& task, const Json& event,
+                                                                  const std::optional<PeerExchange>& peer, bool canSend, bool canRead) {
     if (!task.runTargets().empty()) return {"delegate", "ask_user"};
     const auto id = task.id;
     if (peer && peer->sender == id && peer->phase == "question") return {"reply_to_bot", "ask_user"};
@@ -51,7 +69,8 @@ std::vector<std::string> Runtime::TaskTurn::available(const TaskData& task, cons
     return tools;
 }
 
-void Runtime::TaskTurn::recordFailure(TaskData& task, const Json& event, std::string_view detail, bool transient, FailureCause cause) {
+void Runtime::Components::TaskTurn::recordFailure(TaskData& task, const Json& event, std::string_view detail, bool transient,
+                                                  FailureCause cause) {
     const auto attempts = event["failures"].get<int>() + 1;
     const auto why = bounded(db.redactor(task.botId).text(std::string(detail)), 2048);
     db.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?", {attempts, transient ? clock() + (1 << (attempts - 1)) : 0, event["id"]});
@@ -67,14 +86,15 @@ void Runtime::TaskTurn::recordFailure(TaskData& task, const Json& event, std::st
     }
 }
 
-void Runtime::TaskTurn::failure(const TaskData& task, const Json& event, std::string_view detail, bool transient, FailureCause cause) {
+void Runtime::Components::TaskTurn::failure(const TaskData& task, const Json& event, std::string_view detail, bool transient,
+                                            FailureCause cause) {
     updates.change(task, [&](TaskData& current) {
         recordFailure(current, event, detail, transient, cause);
         return true;
     });
 }
 
-std::optional<TaskDecision> Runtime::TaskTurn::persistTaskInference(Id id) {
+std::optional<TaskDecision> Runtime::Components::TaskTurn::persistTaskInference(Id id) {
     const auto found = taskInferences.find(id);
     const auto& inference = found->second;
     Transaction transaction(db.db);
@@ -99,15 +119,15 @@ std::optional<TaskDecision> Runtime::TaskTurn::persistTaskInference(Id id) {
     return decision;
 }
 
-void Runtime::TaskTurn::persistTaskInferences() {
+void Runtime::Components::TaskTurn::persistTaskInferences() {
     std::lock_guard lock(db.mutex);
     while (!taskInferences.empty()) persistTaskInference(taskInferences.begin()->first);
 }
 
-std::optional<TaskDecision> Runtime::TaskTurn::inferDecision(const TaskData& task, Json event, const Json& history,
-                                                             const std::vector<std::string>& tools,
-                                                             std::span<const OutboxInstruction> pending, Json choices,
-                                                             const std::optional<PeerExchange>& peer) {
+std::optional<TaskDecision> Runtime::Components::TaskTurn::inferDecision(const TaskData& task, Json event, const Json& history,
+                                                                         const std::vector<std::string>& tools,
+                                                                         std::span<const OutboxInstruction> pending, Json choices,
+                                                                         const std::optional<PeerExchange>& peer) {
     const auto prefill = sessionHistory.prefillHistory(task, event);
     if (prefill == SessionHistory::PrefillResult::Persisted) return std::nullopt;
     if (prefill == SessionHistory::PrefillResult::UnavailableWithSettledReport) event["historyUnavailable"] = true;
@@ -190,7 +210,7 @@ std::optional<TaskDecision> Runtime::TaskTurn::inferDecision(const TaskData& tas
     return persistTaskInference(id);
 }
 
-void Runtime::TaskTurn::decide(const TaskData& task) {
+void Runtime::Components::TaskTurn::decide(const TaskData& task) {
     if (task.activeRun && !runs.questionStillOpen(task)) return;
     if (stop.stop_requested()) return;
     Json event, history = Json::array();

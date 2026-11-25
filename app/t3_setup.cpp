@@ -1,22 +1,37 @@
 #include "t3_setup.hpp"
-
+#include "flock/json.hpp"
 #include "flock/skill_export.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
+#include <toml++/toml.hpp>
+
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/file.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
-#include <fcntl.h>
+#include <exception>
+#include <filesystem>
 #include <fstream>
+#include <functional>
+#include <iterator>
 #include <memory>
-#include <spawn.h>
-#include <sys/file.h>
-#include <sys/wait.h>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <tuple>
-#include <unistd.h>
-#include <toml++/toml.hpp>
+#include <utility>
+#include <vector>
 
 extern char** environ;
 

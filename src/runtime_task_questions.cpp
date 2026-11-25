@@ -1,15 +1,23 @@
 #include "runtime_task_questions.hpp"
-
 #include "record_decode.hpp"
 #include "runtime_task_updates.hpp"
+#include "flock/types.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/wait.hpp"
+
+#include <optional>
+#include <string_view>
+#include <utility>
+#include <variant>
 
 namespace flockv0 {
-void Runtime::TaskQuestions::closeQuestion(TaskData& task, std::string_view reason, std::string_view resolution) {
+void Runtime::Components::TaskQuestions::closeQuestion(TaskData& task, std::string_view reason, std::string_view resolution) {
     db.clearWait(task, reason);
     db.unlockQuestion(task, resolution.empty() ? reason : resolution);
 }
 
-void Runtime::TaskQuestions::suspendQuestion(TaskData& task) {
+void Runtime::Components::TaskQuestions::suspendQuestion(TaskData& task) {
     if (!task.question) return;
     auto& question = *task.question;
     if (const auto wait = db.currentWait(task.id)) {
@@ -21,7 +29,7 @@ void Runtime::TaskQuestions::suspendQuestion(TaskData& task) {
     if (pending && TaskUpdates::checkpointMatches(*pending, task)) question.suspendedDecision = *pending;
 }
 
-std::optional<DecisionCheckpoint> Runtime::TaskQuestions::resumeQuestion(TaskData& task) {
+std::optional<DecisionCheckpoint> Runtime::Components::TaskQuestions::resumeQuestion(TaskData& task) {
     auto& question = *task.question;
     const auto& target = question.target;
     const auto waitId = std::exchange(question.suspendedWaitId, std::nullopt);

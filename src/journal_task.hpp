@@ -1,7 +1,18 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/task.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/decision.hpp"
+#include "flock/run_report.hpp"
+
+#include <optional>
+#include <string>
+#include <variant>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 enum class CompletionEvidenceKind { peer_report, session_read };

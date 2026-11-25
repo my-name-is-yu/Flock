@@ -1,5 +1,11 @@
 #pragma once
-#include "flock/core.hpp"
+#include "flock/json.hpp"
+#include "flock/types.hpp"
+
+#include <cstddef>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0 {
 struct BotProfileError : Conflict {

@@ -1,11 +1,20 @@
 #include "flock/skill_export.hpp"
 #include "flock/policy.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <fstream>
 #include <map>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include <openssl/evp.h>
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

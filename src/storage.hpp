@@ -8,15 +8,52 @@
 #include "flock/channels.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/outbox.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/bot_change.hpp"
+#include "flock/json.hpp"
+#include "flock/model_error.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/decision.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/run_report.hpp"
+#include "flock/session_ref.hpp"
+#include "flock/wait.hpp"
+#include "flock/outbox_instruction.hpp"
+
+#include <cstddef>
+#include <filesystem>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
-#include <sqlite3.h>
+#include <span>
+#include <stdexcept>
 #include <stop_token>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
+
+#include <sqlite3.h>
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
+class Model;
+class T3;
+struct BotNotes;
+struct ModelImage;
+struct ModelInput;
+struct Observation;
+struct T3Project;
+
 namespace conversation {
 struct Message;
 struct QuestionAnchor;
@@ -59,7 +96,6 @@ std::string configuredT3Project(const Json& routing, std::string_view environmen
 inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 inline constexpr std::string_view runStopOperation = "run-stop/";
 QuestionTarget questionTarget(const TaskData&, Id waitId = 0);
-std::string actionId();
 std::string effectiveDoneWhen(const TaskData& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
@@ -246,7 +282,7 @@ struct Store::Impl {
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     bool t3EnvironmentConnected(std::string_view environment);
     void retireAutomations(const Json& botIds);
-    BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
+    BotNotes loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>&, Seconds now);
     std::optional<SessionMemory> sessionMemory(const Command&, Seconds now);
     void createMemory(std::string_view key, std::string_view bot, std::string_view id, std::string_view content, Seconds now);
     std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
@@ -392,8 +428,9 @@ struct Store::Impl {
     void persistSessionSendReceipt(Id message, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
     void reconcilePausedSessionSends(T3&, std::stop_token);
     bool advanceDestinationSessionMessageRun(TaskData&, DestinationRun&);
-    void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*,
-                 const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&, const PeerResolver&, std::stop_token);
+    void runTurn(Id messageId, Model&, T3&, const std::function<std::string(std::string_view)>&, const std::function<Seconds()>&,
+                 const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&, const PeerResolver&,
+                 std::stop_token);
     enum class CallOutcome { advance, waiting, stop, finished };
     struct ConversationCallContext {
         T3& t3;

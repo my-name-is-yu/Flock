@@ -1,4 +1,10 @@
 #include "flock/session_settings.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+
+#include <string>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

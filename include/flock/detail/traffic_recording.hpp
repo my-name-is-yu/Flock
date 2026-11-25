@@ -1,10 +1,18 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/json.hpp"
 
+#include <cstddef>
+#include <filesystem>
+#include <functional>
 #include <initializer_list>
 #include <map>
 #include <mutex>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0::recording {
 

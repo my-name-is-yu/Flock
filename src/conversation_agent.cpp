@@ -8,11 +8,34 @@
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/intake.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/bot_change.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/model_error.hpp"
+#include "flock/t3.hpp"
+#include "flock/decision.hpp"
+#include "flock/task.hpp"
+#include "flock/wait.hpp"
+#include "flock/outbox_instruction.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <functional>
 #include <limits>
+#include <optional>
 #include <set>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 using conversation_storage::integer;
@@ -881,10 +904,10 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     return false;
 }
 
-void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul, const std::function<Seconds()>& clock,
-                          const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
-                          const ReconcileBotCreation& reconcileBotCreation, const IntakeResolver& intake, const PeerResolver& peers,
-                          std::stop_token shutdown) {
+void Store::Impl::runTurn(Id id, Model& model, T3& t3, const std::function<std::string(std::string_view)>& soul,
+                          const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost,
+                          const ApplyBotChange& applyBotChange, const ReconcileBotCreation& reconcileBotCreation,
+                          const IntakeResolver& intake, const PeerResolver& peers, std::stop_token shutdown) {
     Message message;
     {
         std::lock_guard lock(mutex);

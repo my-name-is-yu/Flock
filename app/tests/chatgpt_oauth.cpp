@@ -3,12 +3,33 @@
 #include "../settings_access.hpp"
 #include "fixtures.hpp"
 #include "flock/base64.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model_error.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
 #include "flock/web.hpp"
 
 #include <curl/curl.h>
+#include <nlohmann/json.hpp>
 #include <openssl/bn.h>
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
+
+#include <chrono>
+#include <cstddef>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 #include <openssl/core_names.h>
 #endif

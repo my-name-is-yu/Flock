@@ -1,12 +1,21 @@
 #include "internal.hpp"
 #include "flock/detail/json_rpc.hpp"
 #include "flock/detail/traffic_recording.hpp"
+#include "flock/json.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/types.hpp"
 
 #include <curl/curl.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstddef>
 #include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0::t3detail {
 namespace {

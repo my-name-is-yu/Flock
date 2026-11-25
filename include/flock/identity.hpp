@@ -1,7 +1,15 @@
 #pragma once
-#include "flock/policy.hpp"
+#include "flock/person.hpp"
+
+#include <filesystem>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace flockv0 {
+class Store;
 
 struct ConfiguredIdentities {
     std::function<Person(std::string_view authorization)> authenticate;

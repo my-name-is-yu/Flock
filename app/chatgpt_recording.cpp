@@ -1,7 +1,17 @@
 #include "chatgpt_recording.hpp"
+#include "chatgpt.hpp"
+#include "flock/detail/traffic_recording.hpp"
+#include "flock/json.hpp"
 #include "flock/limits.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0::app::chatgpt {
 namespace {

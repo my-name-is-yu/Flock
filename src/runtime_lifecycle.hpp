@@ -1,13 +1,19 @@
 #pragma once
 
+#include "runtime_components.hpp"
 #include "runtime_task_scheduler.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
 
+#include <functional>
 #include <future>
 #include <map>
 #include <stop_token>
+#include <string>
+#include <string_view>
 
 namespace flockv0 {
-class Runtime::DatabaseLock {
+class Runtime::Components::DatabaseLock {
 public:
     DatabaseLock(Store::Impl& db, const std::function<Seconds()>& clock);
     ~DatabaseLock();
@@ -18,7 +24,7 @@ private:
     int fd;
 };
 
-class Runtime::Workers {
+class Runtime::Components::Workers {
 public:
     static constexpr unsigned batchLimit = 4;
 

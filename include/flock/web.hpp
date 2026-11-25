@@ -1,12 +1,21 @@
 #pragma once
-#include "flock/policy.hpp"
 #include "flock/bot_profile.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/types.hpp"
 
+#include <filesystem>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace flockv0 {
+class Store;
+class T3;
 struct T3ConnectRequest {
     enum class Source { Local, Url, Saved };
     Source source;

@@ -1,7 +1,19 @@
 #pragma once
-#include "flock/core.hpp"
+#include "flock/json.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/types.hpp"
+
+#include <cstddef>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace flockv0 {
+struct Decision;
 struct GitRepository {
     std::string host, repo;
     std::string resource() const { return host + "/" + repo; }

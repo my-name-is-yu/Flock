@@ -1,9 +1,21 @@
 #pragma once
 
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/person.hpp"
+#include "flock/json.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0::conversation {
 enum class PrincipalSource { gitWebhook = 0, trusted = 1, web = 2, channel = 3, session = 4 };

@@ -1,18 +1,38 @@
 #include "bots.hpp"
+#include "flock/bot_change.hpp"
+#include "flock/bot_profile.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
 #include "flock/limits.hpp"
+#include "flock/memory_automation.hpp"
+#include "flock/model.hpp"
+#include "flock/policy.hpp"
 #include "flock/session_settings.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace flockv0::app {
 namespace {

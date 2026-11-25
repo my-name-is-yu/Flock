@@ -1,6 +1,22 @@
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/command.hpp"
+#include "flock/task.hpp"
+#include "flock/outbox.hpp"
+#include "flock/outbox_instruction.hpp"
+
+#include <cstddef>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

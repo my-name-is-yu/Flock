@@ -1,9 +1,19 @@
 #pragma once
 
+#include "runtime_components.hpp"
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/runtime.hpp"
+
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0 {
-class Runtime::Maintenance {
+class Runtime::Components::Maintenance {
     using ErrorReporter = std::function<void(std::string_view)>;
 public:
     Maintenance(Store::Impl&, const std::function<Seconds()>& clock, const ErrorReporter& automationError,

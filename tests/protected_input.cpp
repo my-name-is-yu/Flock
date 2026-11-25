@@ -1,11 +1,37 @@
+#include "flock/person.hpp"
 #include "flock/policy.hpp"
+#include "flock/bot_change.hpp"
+#include "flock/decision.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
+
 #include <barrier>
+#include <cstdlib>
 #include <sqlite3.h>
 #include <filesystem>
-#include <future>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <sys/stat.h>
+#include <exception>
+#include <functional>
+#include <map>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 #include <unistd.h>
 
 using namespace flockv0;

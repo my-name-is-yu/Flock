@@ -1,8 +1,16 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/json.hpp"
+#include "flock/types.hpp"
 
+#include <filesystem>
 #include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 

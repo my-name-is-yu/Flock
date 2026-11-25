@@ -1,9 +1,17 @@
 #pragma once
 
+#include "runtime_components.hpp"
 #include "storage.hpp"
+#include "flock/store.hpp"
+#include "flock/runtime.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+
+#include <optional>
+#include <string_view>
 
 namespace flockv0 {
-class Runtime::TaskQuestions {
+class Runtime::Components::TaskQuestions {
 public:
     explicit TaskQuestions(Store::Impl& db) : db(db) {}
 

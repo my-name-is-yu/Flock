@@ -1,13 +1,31 @@
 #include "flock/policy.hpp"
+#include "flock/command.hpp"
+#include "flock/decision.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <memory>
 #include <sqlite3.h>
+#include <exception>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unistd.h>
 
 using namespace flockv0;

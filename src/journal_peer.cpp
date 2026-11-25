@@ -2,6 +2,14 @@
 #include "journal.hpp"
 #include "record_decode.hpp"
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+
+#include <cstddef>
+#include <optional>
+#include <string>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

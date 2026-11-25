@@ -1,8 +1,22 @@
 #include "storage.hpp"
 #include "journal_peer.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
+#include "flock/wait.hpp"
 
 #include <algorithm>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

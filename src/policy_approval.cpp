@@ -1,7 +1,19 @@
 #include "conversation_storage.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/person.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
+
+#include <algorithm>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include <openssl/evp.h>
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

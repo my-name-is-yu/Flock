@@ -5,9 +5,25 @@
 #include "../src/storage.hpp"
 
 #include "flock/record_decode_error.hpp"
+#include "flock/json.hpp"
+#include "flock/run_report.hpp"
+#include "flock/session_ref.hpp"
+#include "flock/store.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <array>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <unistd.h>
 
 using namespace flockv0;

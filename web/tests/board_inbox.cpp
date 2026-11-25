@@ -1,4 +1,19 @@
 #include "http_fixture.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <filesystem>
+#include <string>
+#include <string_view>
 
 namespace flockv0::http_test {
 void boardInboxEndpoints(const std::filesystem::path& path) {

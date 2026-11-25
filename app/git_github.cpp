@@ -1,10 +1,21 @@
 #include "git_github.hpp"
+#include "flock/decision.hpp"
+#include "flock/git_host.hpp"
+#include "flock/json.hpp"
+#include "flock/types.hpp"
 
 #include <curl/curl.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <initializer_list>
 #include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace flockv0 {
 namespace {

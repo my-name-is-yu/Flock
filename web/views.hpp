@@ -1,5 +1,15 @@
 #pragma once
-#include "flock/core.hpp"
+#include "flock/json.hpp"
+#include "flock/types.hpp"
+
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace flockv0 {
+class Store;
+struct TaskView;
+}
 
 namespace flockv0::web {
 std::string field(const Json&, std::string_view);

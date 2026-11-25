@@ -1,11 +1,21 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/decision.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <string>
+#include <string_view>
 #include <thread>
 
 namespace flockv0::live_test {

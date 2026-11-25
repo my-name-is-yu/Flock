@@ -1,4 +1,5 @@
 #include "chatgpt.hpp"
+#include "flock/model_error.hpp"
 
 #include <openssl/crypto.h>
 
@@ -14,8 +15,16 @@
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <cstddef>
 #include <iostream>
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
+#include <utility>
 
 extern char** environ;
 

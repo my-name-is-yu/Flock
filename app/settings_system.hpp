@@ -1,8 +1,17 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/json.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <filesystem>
 #include <mutex>
+#include <optional>
+#include <string>
+
+namespace flockv0 {
+class Store;
+}
 
 namespace flockv0::app {
 

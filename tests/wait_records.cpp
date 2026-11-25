@@ -1,7 +1,20 @@
 #include "../src/wait_storage.hpp"
 #include "flock/record_decode_error.hpp"
+#include "flock/json.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/types.hpp"
+#include "flock/wait.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <exception>
 #include <iostream>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
 
 using namespace flockv0;
 namespace {

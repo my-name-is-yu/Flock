@@ -1,6 +1,20 @@
 #include "storage.hpp"
+#include "flock/types.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/bot_change.hpp"
+#include "flock/json.hpp"
+#include "flock/run_ref.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

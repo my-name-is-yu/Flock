@@ -1,6 +1,12 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/json.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <string_view>
 
 namespace flockv0::test {
 inline Json lastTaskEvent(const Store& store, Id task, std::string_view kind) {

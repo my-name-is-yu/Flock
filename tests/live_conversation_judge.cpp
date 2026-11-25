@@ -1,10 +1,16 @@
 #include "live_conversation_judge.hpp"
 #include "model.hpp"
+#include "flock/json.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 
 namespace flockv0::live_test {
 namespace {

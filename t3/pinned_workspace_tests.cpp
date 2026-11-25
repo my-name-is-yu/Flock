@@ -1,5 +1,19 @@
 #include "internal.hpp"
+#include "flock/command.hpp"
+#include "flock/json.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/t3_mcp.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <exception>
+#include <filesystem>
 #include <iostream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 
 using namespace flockv0;
 using flockv0::t3detail::http;

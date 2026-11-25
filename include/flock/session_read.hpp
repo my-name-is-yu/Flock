@@ -1,9 +1,10 @@
 #pragma once
-#include "flock/core.hpp"
-
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
+#include <string_view>
+#include <system_error>
 
 namespace flockv0::session_read {
 inline bool contains(std::string_view text, std::string_view query) {

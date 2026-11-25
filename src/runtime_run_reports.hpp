@@ -1,10 +1,23 @@
 #pragma once
 
+#include "runtime_components.hpp"
 #include "storage.hpp"
 #include "journal.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/run_report.hpp"
+
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace flockv0 {
-class Runtime::RunReports {
+class Runtime::Components::RunReports {
 public:
     struct JournalReport {
         Id id;

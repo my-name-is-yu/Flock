@@ -1,8 +1,19 @@
 #pragma once
 
-#include "flock/t3_mcp.hpp"
+#include "flock/json.hpp"
+#include "flock/session_ref.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/types.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <filesystem>
 #include <map>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0::recording {
 class Capture;

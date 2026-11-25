@@ -1,8 +1,13 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/task_context.hpp"
+#include "flock/outbox_instruction.hpp"
+#include "flock/json.hpp"
+
+#include <span>
 
 namespace flockv0 {
+struct TaskData;
 class RecordDecoder;
 
 void decodeTaskContext(TaskData&, const Json&, const RecordDecoder&);

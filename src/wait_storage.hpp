@@ -1,8 +1,13 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/wait.hpp"
 
+#include <optional>
+#include <string_view>
 namespace flockv0 {
+struct TaskData;
 class RecordDecoder;
 class Statement;
 

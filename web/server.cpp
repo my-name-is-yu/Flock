@@ -11,16 +11,38 @@
 #include "flock/limits.hpp"
 #include "channel_routes.hpp"
 #include "mcp_routes.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/store.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <httplib.h>
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <functional>
 #include <future>
 #include <limits>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace flockv0 {
 namespace {

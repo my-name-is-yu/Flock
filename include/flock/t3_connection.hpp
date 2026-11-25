@@ -1,8 +1,13 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace flockv0 {
+class Store;
 
 struct T3Connection {
     std::string id, personId;

@@ -1,8 +1,15 @@
 #pragma once
-#include "flock/core.hpp"
+#include "flock/types.hpp"
+
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <optional>
 #include <stop_token>
+#include <string>
 
 namespace flockv0 {
+class T3;
 
 // Environment URLs are configured independently of Bot settings. The directory
 // is private and may contain credentials, never conversation state.

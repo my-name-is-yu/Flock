@@ -3,6 +3,20 @@
 #include "record_decode.hpp"
 #include "storage.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/run_report.hpp"
+#include "flock/wait.hpp"
+#include "flock/outbox_instruction.hpp"
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

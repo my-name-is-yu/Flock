@@ -1,5 +1,9 @@
 #include "internal.hpp"
+#include "flock/json.hpp"
+#include "flock/t3_mcp.hpp"
+#include "flock/types.hpp"
 
+#include <nlohmann/json.hpp>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -17,7 +21,16 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
+#include <filesystem>
+#include <functional>
+#include <optional>
 #include <sstream>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 
 namespace flockv0 {
 namespace t3detail {

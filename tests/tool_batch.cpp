@@ -1,9 +1,20 @@
 #include "../src/tool_batch.hpp"
 #include "flock/git_host.hpp"
 #include "flock/workspace_tools.hpp"
+#include "flock/decision.hpp"
+#include "flock/json.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <cstddef>
+#include <exception>
+#include <initializer_list>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 using namespace flockv0;
 using namespace flockv0::tool_batch;

@@ -2,9 +2,19 @@
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/t3.hpp"
+#include "flock/task.hpp"
 
 #include <algorithm>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <utility>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 std::string conversationEnvironmentId(const Json& alias) {

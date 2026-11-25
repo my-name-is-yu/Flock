@@ -1,7 +1,16 @@
 #pragma once
 
 #include "flock/limits.hpp"
-#include "flock/core.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/run_ref.hpp"
+
+#include <cstddef>
+#include <optional>
+#include <string_view>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 inline bool present(std::string_view value, std::size_t limit = limits::session_prompt::maxDecisionTextBytes) {

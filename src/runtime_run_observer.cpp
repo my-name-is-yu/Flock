@@ -1,5 +1,4 @@
 #include "runtime_run_observer.hpp"
-
 #include "journal.hpp"
 #include "runtime_peer_exchanges.hpp"
 #include "runtime_run_reports.hpp"
@@ -8,11 +7,25 @@
 #include "runtime_task_updates.hpp"
 #include "task_interaction_storage.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/t3.hpp"
+#include "flock/command.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/run_report.hpp"
+#include "flock/wait.hpp"
+#include "flock/outbox.hpp"
 
+#include <optional>
+#include <string>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 namespace flockv0 {
-bool Runtime::RunObserver::shouldStop(const TaskData& task) {
+bool Runtime::Components::RunObserver::shouldStop(const TaskData& task) {
     if (db.replanReady(task)) return true;
     if (task.state != TaskState::cancelling) return false;
     std::lock_guard lock(db.mutex);
@@ -20,8 +33,8 @@ bool Runtime::RunObserver::shouldStop(const TaskData& task) {
     return !peer || peer->recipient == task.id;
 }
 
-Observation Runtime::RunObserver::observeRun(const std::string& bot, const std::string& environment, const Json& config,
-                                             const RunRef& run) {
+Observation Runtime::Components::RunObserver::observeRun(const std::string& bot, const std::string& environment, const Json& config,
+                                                         const RunRef& run) {
     try {
         auto observed = t3.observe(environment, config, run);
         const auto scrub = db.redactor(bot);
@@ -41,12 +54,12 @@ Observation Runtime::RunObserver::observeRun(const std::string& bot, const std::
     }
 }
 
-Observation Runtime::RunObserver::observe(const TaskData& task) {
+Observation Runtime::Components::RunObserver::observe(const TaskData& task) {
     const auto& run = task.activeRun.value();
     return observeRun(task.botId, run.environmentId, task.config, run.ref);
 }
 
-bool Runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& observed) {
+bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Observation& observed) {
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
     auto task = db.load(snapshot.id);
@@ -183,7 +196,7 @@ bool Runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
     return changed;
 }
 
-bool Runtime::RunObserver::questionStillOpen(const TaskData& task) {
+bool Runtime::Components::RunObserver::questionStillOpen(const TaskData& task) {
     const auto observed = observe(task);
     if (ingest(task, observed) || observed.kind != Observation::Kind::Question) return false;
     if (!task.question || task.question->target.requestId != observed.question.requestId) return false;
@@ -194,7 +207,7 @@ bool Runtime::RunObserver::questionStillOpen(const TaskData& task) {
     return savedTarget == target && peerExchanges.forwardedQuestionAnswer(task, savedTarget);
 }
 
-void Runtime::RunObserver::interruptRun(const TaskData& task) {
+void Runtime::Components::RunObserver::interruptRun(const TaskData& task) {
     const auto& stop = task.runStop.value();
     if (!task.activeRun || task.activeRun != stop.run || (task.state == TaskState::cancelling) != (stop.intent == RunStopIntent::cancel))
         return;
@@ -229,7 +242,7 @@ void Runtime::RunObserver::interruptRun(const TaskData& task) {
     transaction.commit();
 }
 
-void Runtime::RunObserver::cancelDone(TaskData& task) {
+void Runtime::Components::RunObserver::cancelDone(TaskData& task) {
     questions.closeQuestion(task, "cancelled");
     if (!task.actionId.empty()) {
         const auto action = db.outbox(task);
@@ -251,7 +264,7 @@ void Runtime::RunObserver::cancelDone(TaskData& task) {
                                  actionId());
 }
 
-void Runtime::RunObserver::finishReplan(const TaskData& task) {
+void Runtime::Components::RunObserver::finishReplan(const TaskData& task) {
     updates.change(task, [&](TaskData& current) {
         const auto id = current.id;
         const auto peer = db.peerExchange(id);
@@ -301,7 +314,7 @@ void Runtime::RunObserver::finishReplan(const TaskData& task) {
     });
 }
 
-void Runtime::RunObserver::stopNote(const TaskData& snapshot, const std::string& detail) {
+void Runtime::Components::RunObserver::stopNote(const TaskData& snapshot, const std::string& detail) {
     updates.change(snapshot, [&](TaskData& task) {
         const bool cancel = task.state == TaskState::cancelling;
         auto& saved = cancel ? task.cancellationDetail : task.replanningDetail;

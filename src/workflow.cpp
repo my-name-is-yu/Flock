@@ -3,8 +3,23 @@
 #include "journal_task.hpp"
 #include "outbox_storage.hpp"
 #include "task_storage.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/t3.hpp"
+#include "flock/task.hpp"
+#include "flock/run_report.hpp"
+#include "flock/outbox_instruction.hpp"
 
+#include <algorithm>
+#include <optional>
 #include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {

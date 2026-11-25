@@ -1,7 +1,13 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/outbox_instruction.hpp"
 #include "flock/outbox.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+
+#include <span>
+#include <string_view>
+#include <vector>
 
 namespace flockv0 {
 class RecordDecoder;

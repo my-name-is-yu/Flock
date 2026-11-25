@@ -1,6 +1,17 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
 #include "journal_conversation.hpp"
+#include "flock/types.hpp"
+#include "flock/person.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/task.hpp"
+
+#include <functional>
+#include <string_view>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 bool Store::Impl::botDeleted(std::string_view bot) const {

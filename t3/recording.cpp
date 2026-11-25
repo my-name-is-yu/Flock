@@ -1,7 +1,13 @@
 #include "internal.hpp"
 #include "flock/detail/traffic_recording.hpp"
+#include "flock/json.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <cstdio>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0::t3detail {
 namespace {

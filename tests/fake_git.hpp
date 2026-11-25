@@ -1,11 +1,35 @@
 #pragma once
 #include "flock/git_host.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/command.hpp"
+#include "flock/decision.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/session_ref.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <memory>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 #include <unistd.h>
 
 namespace git_fixture {

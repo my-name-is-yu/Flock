@@ -1,12 +1,24 @@
 #include "storage.hpp"
 #include "workspace_internal.hpp"
+#include "flock/types.hpp"
+#include "flock/json.hpp"
+#include "flock/decision.hpp"
 
 #include <algorithm>
 #include <cerrno>
+#include <cstddef>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace fs = std::filesystem;

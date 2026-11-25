@@ -1,11 +1,22 @@
 #pragma once
-#include "flock/policy.hpp"
-
+#include "flock/bot_change.hpp"
 #include "flock/bot_profile.hpp"
-#include "flock/memory_automation.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/policy.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <cstddef>
+#include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace flockv0::app {
 struct Bot {

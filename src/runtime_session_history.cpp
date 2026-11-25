@@ -1,7 +1,20 @@
 #include "runtime_session_history.hpp"
-
 #include "runtime_task_updates.hpp"
 #include "flock/limits.hpp"
+#include "flock/types.hpp"
+#include "flock/store.hpp"
+#include "flock/json.hpp"
+#include "flock/model_error.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/task.hpp"
+
+#include <cstddef>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 namespace {
@@ -10,16 +23,17 @@ struct HistoryUnavailable : ModelError {
 };
 }
 
-Runtime::SessionHistory::SessionHistory(Store::Impl& db, T3& t3, const Policy& policy, TaskUpdates& updates, const std::string& mode)
+Runtime::Components::SessionHistory::SessionHistory(Store::Impl& db, T3& t3, const Policy& policy, TaskUpdates& updates,
+                                                    const std::string& mode)
     : db(db), t3(t3), policy(policy), updates(updates), mode(mode) {}
 
-std::size_t Runtime::SessionHistory::readOffset(const Json& args) {
+std::size_t Runtime::Components::SessionHistory::readOffset(const Json& args) {
     if (args.contains("offset") && (!args["offset"].is_number_integer() || args["offset"].get<Id>() < 0))
         throw Conflict("Invalid history offset");
     return args.value("offset", std::size_t{0});
 }
 
-SessionExcerptEntry Runtime::SessionHistory::readExcerpt(std::string_view bot, const ReadRequest& req) {
+SessionExcerptEntry Runtime::Components::SessionHistory::readExcerpt(std::string_view bot, const ReadRequest& req) {
     const auto scrub = db.redactor(bot);
     const auto excerpt = [&] {
         try {
@@ -47,7 +61,7 @@ SessionExcerptEntry Runtime::SessionHistory::readExcerpt(std::string_view bot, c
             excerpt.nextOffset > req.offset || clipped};
 }
 
-bool Runtime::SessionHistory::readEvidence(const TaskData& task, const Json& event, const Json& args, const Json& usage) {
+bool Runtime::Components::SessionHistory::readEvidence(const TaskData& task, const Json& event, const Json& args, const Json& usage) {
     ReadRequest req;
     req.environmentId = task.environmentId;
     req.gatewayEnvironmentId = task.gatewayEnvironmentId.value_or("");
@@ -82,20 +96,21 @@ bool Runtime::SessionHistory::readEvidence(const TaskData& task, const Json& eve
     });
 }
 
-void Runtime::SessionHistory::appendEventEvidence(const TaskData& task, const Json& event, const Json& entry) {
+void Runtime::Components::SessionHistory::appendEventEvidence(const TaskData& task, const Json& event, const Json& entry) {
     auto evidence = event.at("evidence");
     if (evidence.size() >= maxEvidenceReads) throw Conflict("History read allowance exhausted");
     evidence.push_back(entry);
     db.exec("UPDATE events SET evidence=? WHERE id=? AND task_id=?", {evidence, event["id"], task.id});
 }
 
-void Runtime::SessionHistory::recordSessionRead(const TaskData& task, const Json& event, Json entry, const Json& usage) {
+void Runtime::Components::SessionHistory::recordSessionRead(const TaskData& task, const Json& event, Json entry, const Json& usage) {
     appendEventEvidence(task, event, entry);
     if (!usage.empty()) entry["usage"] = usage;
     db.journal(task.id, "session_read", entry);
 }
 
-Runtime::SessionHistory::PrefillResult Runtime::SessionHistory::prefillHistory(const TaskData& task, const Json& event) {
+Runtime::Components::SessionHistory::PrefillResult Runtime::Components::SessionHistory::prefillHistory(const TaskData& task,
+                                                                                                       const Json& event) {
     if (mode != "prefill" || !event["evidence"].empty() || (event["kind"] != "result" && !event.contains("sessionResult")))
         return PrefillResult::NotNeeded;
     const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;

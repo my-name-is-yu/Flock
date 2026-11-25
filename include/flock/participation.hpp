@@ -1,8 +1,17 @@
 #pragma once
 
-#include "flock/t3_connection.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/types.hpp"
+
+#include <string>
+#include <string_view>
 
 namespace flockv0 {
+class Store;
+class T3;
+struct Person;
+struct T3Connection;
 
 struct SessionAsk {
     std::string bot, text, threadId, requestId;

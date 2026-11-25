@@ -1,11 +1,36 @@
 #include "flock/board_inbox.hpp"
 #include "fake_git.hpp"
+#include "flock/decision.hpp"
+#include "flock/intake.hpp"
+#include "flock/json.hpp"
+#include "flock/model.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/runtime.hpp"
+#include "flock/store.hpp"
+#include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
+#include "flock/task.hpp"
+#include "flock/task_interaction.hpp"
+#include "flock/types.hpp"
+#include "flock/wait.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <barrier>
 #include <cstdlib>
 #include <future>
 #include <iostream>
 #include <sqlite3.h>
+#include <exception>
+#include <filesystem>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 #include <unistd.h>
 
 using namespace flockv0;

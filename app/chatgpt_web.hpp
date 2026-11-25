@@ -1,10 +1,17 @@
 #pragma once
 
-#include "settings_access.hpp"
-#include "flock/web.hpp"
+#include "flock/json.hpp"
 
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
+
+namespace flockv0 {
+struct Person;
+struct WebCallbacks;
+class SettingsAccess;
+}
 
 namespace flockv0::app {
 class ChatGPTModel;

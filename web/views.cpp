@@ -2,12 +2,28 @@
 #include "flock/markdown.hpp"
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
+#include "flock/json.hpp"
+#include "flock/run_ref.hpp"
+#include "flock/store.hpp"
+#include "flock/task.hpp"
+#include "flock/types.hpp"
+#include "flock/wait.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
+#include <initializer_list>
 #include <iterator>
+#include <optional>
 #include <ranges>
 #include <set>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace flockv0::web {
 std::string field(const Json& object, std::string_view key) {

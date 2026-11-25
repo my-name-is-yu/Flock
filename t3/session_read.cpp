@@ -1,7 +1,18 @@
 #include "internal.hpp"
+#include "flock/json.hpp"
 #include "flock/session_read.hpp"
+#include "flock/session_ref.hpp"
+#include "flock/t3_session.hpp"
+#include "flock/types.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace flockv0::t3detail {
 namespace {
