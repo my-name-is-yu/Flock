@@ -363,6 +363,8 @@ Json Store::Impl::automationRoute(std::string_view bot, Json routing) const {
         auto& config = routing.at("config");
         config["model"] = std::move(current->model);
         config["modelProvider"] = std::move(current->provider);
+        if (current->reasoningEffort) config["reasoningEffort"] = std::move(*current->reasoningEffort);
+        else config.erase("reasoningEffort");
     }
     return routing;
 }

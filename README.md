@@ -22,6 +22,8 @@ build concurrency.
 ## Configure a Bot
 
 Edit the Bot's instructions under **Role** in its Web settings.
+Under **How it runs**, choose its **Model** and **Reasoning effort**. Lower effort
+can reduce response time and reasoning tokens. **Model default** uses the model’s own setting.
 
 Bots can read, write, and search files in their own workspaces. They delegate commands, scripts, builds, and tests to T3 Sessions. Make any files the work needs available in the selected T3 project.
 
@@ -107,6 +109,8 @@ Open **Flock settings** to see the connected environments and saved loopback por
 See [Ask a Bot from a T3 Session](web/README.md#ask-a-bot-from-a-t3-session) for connection details.
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.
+
+Attach screenshots by choosing PNG or JPEG files or by pasting them into the message box. The browser resizes larger screenshots before sending them.
 
 To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock message release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 

@@ -1430,7 +1430,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         if (canSend && (!task.contains("selectedSession") || hasSettledRun(task))) tools.push_back("send_bot_message");
         return tools;
     }
-    enum class FailureCause { Model, BotNotes };
+    enum class FailureCause { Model, BotNotes, UnsupportedReasoningEffort };
 
     void recordFailure(Json& task, const Json& event, std::string_view detail, bool transient,
                        FailureCause cause = FailureCause::Model) {
@@ -1440,7 +1440,9 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
                 {attempts, transient ? options.clock() + (1 << (attempts - 1)) : 0,event["id"]});
         db.journal(task["id"],"model_failure",{{"eventId",event["id"]},{"attempt",attempts},{"text",why}});
         task["feedback"] = why;
-        if (attempts >= 3) {
+        if (cause == FailureCause::UnsupportedReasoningEffort)
+            db.wait(task,"model_failure",{{"text",why},{"failureCode","unsupported_reasoning_effort"}});
+        else if (attempts >= 3) {
             const auto reason = cause == FailureCause::BotNotes && db.automationBeforeDispatch(task.at("id"))
                 ? "bot_notes_unavailable" : "model_failure";
             db.wait(task,reason,{{"text",why}});
@@ -2355,7 +2357,9 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         if (current.at("state") == "deciding" && current.at("generation") == inference.generation &&
             current.at("eventId") == inference.eventId && revision(current) == inference.revisionId) {
             if (const auto* error = std::get_if<ModelError>(&inference.outcome)) {
-                recordFailure(current,db.currentEvent(current),error->what(),error->transient);
+                const auto cause = error->code == ModelErrorCode::unsupported_reasoning_effort
+                    ? FailureCause::UnsupportedReasoningEffort : FailureCause::Model;
+                recordFailure(current,db.currentEvent(current),error->what(),error->transient,cause);
                 saveTask(current);
             } else {
                 const auto& call = std::get<ModelCall>(inference.outcome);

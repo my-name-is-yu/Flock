@@ -33,7 +33,7 @@ struct Authorization { std::string code, clientId, redirectUri; };
 
 struct Failure : ModelError {
     Failure(std::string message, bool transient = false, std::string providerCode = {},
-            Json usage = Json::object());
+            Json usage = Json::object(), ModelErrorCode code = ModelErrorCode::inference_failed);
     std::string providerCode;
 };
 
