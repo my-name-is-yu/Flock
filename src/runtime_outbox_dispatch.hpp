@@ -13,13 +13,19 @@ public:
 
     void stop(TaskData task);
     void step(const TaskData& task);
+    void stepDestination(const TaskData& task, const DestinationRun& run);
+    void queueAction(TaskData& task, const std::string& id, CommandTool tool, std::string instruction, const Json& args, const Json& event,
+                     bool charge, const TaskRoute* destination = nullptr);
+    void queueDestinations(TaskData& task, const std::string& first, std::string_view instruction, const Json& args, const Json& event,
+                           bool charge);
+private:
     Command command(const TaskData& task, const Outbox& action);
     void deliver(const TaskData& task, Outbox action);
     void applyDelivery(Id id, const Outbox& action, Delivery outcome);
     void writeDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed);
     static bool setDestinationStatus(DestinationRun& run, DestinationRunPhase status, std::string detail);
     void destinationStatus(Id id, std::string_view action, DestinationRunPhase status, std::string detail);
-private:
+    bool destinationDeadline(TaskData& task, DestinationRun& run, Seconds now);
     enum class DeliveryOutcome { Accepted, DefinitelyUnsent, Unknown };
 
     void instructionDelivery(TaskData& task, const Outbox& action);
