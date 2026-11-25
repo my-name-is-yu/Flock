@@ -1,4 +1,5 @@
 #include "flock/policy.hpp"
+#include "live_setup.hpp"
 #include "model.hpp"
 
 #include <algorithm>
@@ -13,9 +14,9 @@
 #include <regex>
 #include <set>
 #include <stdexcept>
-#include <unistd.h>
 
 using namespace flockv0;
+using namespace flockv0::live_test;
 
 namespace {
 void check(bool passed, const std::string& failure) {
@@ -26,18 +27,6 @@ void checkReply(const Json& data) {
     const auto outcome = data.at("route").get<std::string>();
     if (outcome != "reply") throw std::runtime_error("Turn ended with " + outcome + ": " + data.value("text", ""));
 }
-
-struct Directory {
-    std::filesystem::path path;
-    Directory() {
-        char pattern[] = "/tmp/flock-live-conversation-XXXXXX";
-        if (const auto* created = mkdtemp(pattern))
-            path = created;
-        else
-            throw std::runtime_error("Cannot create a test directory");
-    }
-    ~Directory() { std::filesystem::remove_all(path); }
-};
 
 struct Mixed : Model {
     Model& live;
@@ -100,7 +89,7 @@ struct Turn {
 };
 
 struct Scene {
-    Directory directory;
+    ScratchDirectory directory;
     Store store;
     Mixed& model;
     Runs t3;
@@ -752,25 +741,41 @@ void selfTest() {
     }
     std::cout << "Offline scoring self-test: " << passed << " cases passed\n";
 }
+
+void usage(std::ostream& out) {
+    out << "Usage:\n"
+        << "  flock_live_conversation --live\n"
+        << "  flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]\n"
+        << "  flock_live_conversation --self-test\n\n"
+        << "--live runs one trial of each conversation scenario. --self-test checks scoring offline.\n"
+        << chatGPTSetup << "\n"
+        << "Positional runs default to three trials per scenario. The optional filter matches a substring of the scenario name.\n"
+        << "Scenarios:\n";
+    for (const auto& [name, scenario] : scenarios) out << "  " << name << '\n';
+}
 }
 
 int main(int argc, char** argv) {
-    if (argc == 2 && std::string_view(argv[1]) == "--self-test") {
-        try {
+    try {
+        const std::string_view operation = argc > 1 ? argv[1] : "";
+        if (argc == 2 && operation == "--help") {
+            usage(std::cout);
+            return 0;
+        }
+        if (argc == 2 && operation == "--self-test") {
             selfTest();
             return 0;
-        } catch (const std::exception& error) {
-            std::cerr << error.what() << '\n';
-            return 1;
         }
-    }
-    if (argc < 3 || argc > 5) {
-        std::cerr << "usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]\n"
-                     "       flock_live_conversation --self-test\n";
-        return 2;
-    }
-    try {
-        int trials = 3;
+        const bool fromEnvironment = argc == 2 && operation == "--live";
+        if (!fromEnvironment && (argc < 3 || argc > 5 || operation.starts_with("--"))) {
+            usage(std::cerr);
+            return 2;
+        }
+        const auto home = fromEnvironment ? environment("FLOCK_HOME") : argv[1];
+        const auto slug = fromEnvironment ? environment("FLOCK_LIVE_MODEL") : argv[2];
+        if (home.empty()) return skip("FLOCK_HOME is unset", chatGPTSetup);
+        if (slug.empty()) return skip("FLOCK_LIVE_MODEL is unset", chatGPTSetup);
+        int trials = fromEnvironment ? 1 : 3;
         if (argc >= 4) {
             const std::string_view input(argv[3]);
             const auto [end, error] = std::from_chars(input.data(), input.data() + input.size(), trials);
@@ -785,7 +790,13 @@ int main(int argc, char** argv) {
             std::cerr << "No scenario matches '" << filter << "'\n";
             return 2;
         }
-        app::ChatGPTModel live(std::filesystem::path(argv[1]) / "credentials" / "chatgpt");
+        const auto credentials = std::filesystem::path(home) / "credentials" / "chatgpt";
+        if (!hasChatGPTProfile(credentials)) return skip("No ChatGPT sign-in in FLOCK_HOME", chatGPTSetup);
+        app::ChatGPTModel live(credentials);
+        const auto status = live.status();
+        if (!status.at("connected").get<bool>()) return skip("No ChatGPT sign-in in FLOCK_HOME", chatGPTSetup);
+        check(status.at("planUsage").get<bool>(),
+              "ChatGPT plan usage is unavailable. Run flock model login --reconsent in the same FLOCK_HOME.");
         bool passed = true;
         for (const auto& [name, scenario] : selected) {
             int passes = 0;
@@ -793,7 +804,7 @@ int main(int argc, char** argv) {
                 std::string failure;
                 Mixed model(live);
                 try {
-                    Scene scene(model, argv[2]);
+                    Scene scene(model, slug);
                     scenario(scene);
                 } catch (const std::exception& error) {
                     failure = error.what();

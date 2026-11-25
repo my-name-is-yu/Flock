@@ -1,112 +1,17 @@
 #include "flock/policy.hpp"
 #include "flock/t3_mcp.hpp"
+#include "live_setup.hpp"
+#include "live_t3_fixture.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <sys/resource.h>
-#include <thread>
 
 using namespace flockv0;
-using namespace std::chrono_literals;
+using namespace flockv0::live_test;
 
 namespace {
-constexpr auto sameQuestion = "Use the user-input tool to ask exactly one question with id target_branch, header Branch, "
-                              "question 'Which branch?', options main with description 'Use main.' and dev with description 'Use dev.'. "
-                              "Do not rephrase any fields. Wait for the answer and then report the chosen branch. Do not edit files.";
-
-class TestModel final : public Model {
-public:
-    unsigned calls = 0;
-    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
-    Decision choose(const ModelInput& input) {
-        ++calls;
-        const auto request = input.task.at("request").get<std::string>();
-        if (input.event.at("kind") == "intake") {
-            std::string instruction =
-                "Read notes.md in this fixture project. Report the two pending items with their owners. Keep the repository unchanged.";
-            if (request == "interrupt") {
-                instruction = "Start the harmless terminal command sleep 60 and wait for it to finish. Do not edit any files.";
-            }
-            if (request == "question") {
-                instruction = "Use the available user-input tool to ask which of main or dev is the target branch. "
-                              "Wait for that answer in the same Run. Then report the chosen branch. Do not edit any files.";
-            }
-            if (request == "ambiguous-question") instruction = sameQuestion;
-            if (request == "approval") {
-                instruction = "Use the terminal tool to execute `printf 'approval-fixture\\n'`, with "
-                              "sandbox_permissions=require_escalated and justification 'Verify the Flock approval hold'. "
-                              "Wait for approval if one is requested. Do not edit files.";
-            }
-            if (request == "delegated-result") {
-                instruction = "Start an asynchronous T3 delegate using the delegate_task tool, asking it to read notes.md "
-                              "and identify the two pending owners and their items. Do not write files. "
-                              "After launching it, end this turn with 'child started'. When T3 wakes you with completion, "
-                              "write the delegate's final list. Do not launch a second delegate.";
-            }
-            if (request.starts_with("measurement-")) {
-                const auto flags = request == "measurement-mismatch" ? "off" : "on";
-                instruction =
-                    std::string("Execute exactly the shell command `./measure_") + flags +
-                    ".sh`. Do not edit any project file. "
-                    "Leave the measurement output in the terminal activity. The entire final answer must be exactly Measurement complete, with no punctuation or details.";
-            }
-            if (request == "profile-short" || request == "profile-long") {
-                instruction = request == "profile-short" ? "Run `printf 'short-history-fixture\\n'` in a terminal."
-                                                         : "Run `seq 1 25000` in a terminal and request max_output_tokens=16000.";
-                instruction += " Then execute `sleep 45` in a separate terminal tool call and wait for it to finish. Do not edit files.";
-            }
-            return {"delegate",
-                    {{"instruction", instruction}, {"doneWhen", "The fixture task and its result are documented"}},
-                    "Send the fixed acceptance case to the isolated fixture project."};
-        }
-        if (input.event.at("kind") == "question") {
-            auto answers = Json::object();
-            const auto& question = input.event.at("question");
-            for (const auto& item : question.at("fields")) {
-                auto& answer = answers[item.at("id").get<std::string>()];
-                answer = "main";
-                for (const auto& option : item.value("options", Json::array())) {
-                    if (option.is_object() && option.value("value", std::string{}).starts_with("main")) {
-                        answer = option["value"];
-                        break;
-                    }
-                }
-            }
-            return {
-                "answer_session_question", {{"requestId", question.at("requestId")}, {"answers", answers}}, "The fixture targets main."};
-        }
-        const auto report = input.event.at("report").get<std::string>();
-        if (input.event.at("status") != "completed" || report.empty())
-            return {"ask_user",
-                    {{"question", "The fixture Run did not produce a successful report. Check T3."}},
-                    "The Run status and report do not provide the required evidence."};
-        if (request == "summary-follow" && input.task.at("additionalUsed") == 0)
-            return {"follow_up",
-                    {{"instruction",
-                      "Check that you named both owners from notes.md, and repeat the two pending items. Do not modify any files."}},
-                    "Confirm the complete list within the same Thread."};
-        if (request == "measurement-read-resume") {
-            if (input.evidence.empty()) {
-                return {
-                    "session_read",
-                    {{"threadId", input.event.at("run").at("threadId")}, {"runId", input.event.at("resultRunId")}, {"view", "activity"}},
-                    "Read the live measurement activity."};
-            }
-            if (input.evidence.size() != 1 || input.evidence[0].at("text").get<std::string>().empty())
-                throw Conflict("The saved live excerpt was not restored");
-        }
-        if (request == "ambiguous-question" && input.task.at("additionalUsed") == 0)
-            return {"follow_up", {{"instruction", sameQuestion}}, "Repeat the exact same question on a separate Run."};
-        if ((request.starts_with("summary") || request == "delegated-result") &&
-            (report.find("Mina") == std::string::npos || report.find("Alex") == std::string::npos))
-            return {
-                "ask_user", {{"question", "The report omitted an owner. Check the fixture output."}}, "The fixture requires both names."};
-        return {"complete", {{"report", report}}, "The report from the assigned T3 Run meets the fixture criteria."};
-    }
-};
-
 class CrashOnAcknowledgement final : public T3 {
 public:
     CrashOnAcknowledgement(T3& adapter, std::string command) : inner(adapter), tool(std::move(command)) {}
@@ -139,15 +44,49 @@ private:
     const std::string tool;
 };
 
-void usage() {
-    std::cerr << "Usage:\n"
-              << "  flock_live_t3 login <credentials-dir> <environment-id> <MCP URL>\n"
-              << "  flock_live_t3 submit <db> <environment-id> <project-id> <case> [<provider-id> <model>]\n"
-              << "  flock_live_t3 pump <db> <credentials-dir> <task-id> <target-state> [<crash-after-send-tool>]\n"
-              << "  flock_live_t3 operate <db> <task-id> <wait-id> <operation> [<JSON>]\n"
-              << "  flock_live_t3 show <db> <task-id>\n"
-              << "  flock_live_t3 inspect <db> <credentials-dir> <task-id>\n"
-              << "  flock_live_t3 profile <db> <credentials-dir> <task-id> <wait|read>\n";
+void usage(std::ostream& out) {
+    out << "Usage:\n"
+        << "  flock_live_t3 --live\n"
+        << "  flock_live_t3 login <credentials-dir> <environment-id> <MCP URL>\n"
+        << "  flock_live_t3 submit <db> <environment-id> <project-id> <case> [<provider-id> <model>]\n"
+        << "  flock_live_t3 pump <db> <credentials-dir> <task-id> <target-state> [<crash-after-send-tool>]\n"
+        << "  flock_live_t3 operate <db> <task-id> <wait-id> <operation> [<JSON>]\n"
+        << "  flock_live_t3 show <db> <task-id>\n"
+        << "  flock_live_t3 inspect <db> <credentials-dir> <task-id>\n"
+        << "  flock_live_t3 profile <db> <credentials-dir> <task-id> <wait|read>\n\n"
+        << "--live launches one smoke Run and checks its exact report. It creates a temporary database and uses the project's default model.\n"
+        << t3Setup << "\n"
+        << "For manual cases, use a scratch SQLite path for <db>. The summary and delegated-result cases need notes.md with pending items\n"
+        << "for Mina and Alex. Measurement cases need executable measure_on.sh and measure_off.sh at the project root.\n"
+        << "Set FLOCK_ACCEPTANCE_RUNTIME_MODE to override the default T3 runtime mode (auto).\n"
+        << "Cases:";
+    for (const auto scenario : t3Scenarios) out << ' ' << scenario;
+    out << '\n';
+}
+
+int runSmoke() {
+    const auto home = environment("FLOCK_HOME");
+    const auto environmentId = environment("FLOCK_LIVE_T3_ENVIRONMENT");
+    const auto projectId = environment("FLOCK_LIVE_T3_PROJECT");
+    if (home.empty()) return skip("FLOCK_HOME is unset", t3Setup);
+    if (environmentId.empty()) return skip("FLOCK_LIVE_T3_ENVIRONMENT is unset", t3Setup);
+    if (projectId.empty()) return skip("FLOCK_LIVE_T3_PROJECT is unset", t3Setup);
+    const auto directory = std::filesystem::path(home) / "credentials" / "t3";
+    if (!hasT3Credentials(directory)) return skip("No saved T3 credentials in FLOCK_HOME", t3Setup);
+
+    auto t3 = makeT3Mcp(directory);
+    t3->authGeneration(environmentId, Json::object());
+    ScratchDirectory scratch;
+    Store store(scratch.path / "state.db");
+    const auto id = submit(store, environmentId, projectId, "smoke");
+    if (const auto status = pump(store, *t3, id, "completed"); status != 0) return status;
+    for (const auto& item : store.history(id)) {
+        if (item.at("kind") != "completed") continue;
+        const auto& report = item.at("data").at("text");
+        if (report != smokeReport) throw Conflict("T3 smoke expected " + Json(smokeReport).dump() + ", got " + report.dump());
+        return 0;
+    }
+    throw Conflict("T3 smoke did not save a completion report");
 }
 
 int profile(Store& store, T3& t3, Id id, std::string_view mode) {
@@ -211,30 +150,22 @@ int profile(Store& store, T3& t3, Id id, std::string_view mode) {
 int main(int argc, char** argv) {
     try {
         if (argc < 2) {
-            usage();
+            usage(std::cerr);
             return 2;
         }
         const std::string operation = argv[1];
-        if (operation == "login" && argc == 5) {
+        if (operation == "--help" && argc == 2) {
+            usage(std::cout);
+        } else if (operation == "--live" && argc == 2) {
+            return runSmoke();
+        } else if (operation == "login" && argc == 5) {
             loginT3(argv[2], argv[3], argv[4], [](const std::string& url) { std::cout << url << std::endl; });
             std::cout << "T3 login succeeded\n";
         } else if (operation == "submit" && (argc == 6 || argc == 8)) {
             Store store(argv[2]);
-            const std::string request = argv[5];
-            if (request != "summary" && request != "summary-follow" && request != "interrupt" && request != "question" &&
-                request != "measurement-match" && request != "measurement-mismatch" && request != "measurement-read-resume" &&
-                request != "profile-short" && request != "profile-long" && request != "ambiguous-question" && request != "approval" &&
-                request != "delegated-result") {
-                throw std::runtime_error("Unknown fixture case");
-            }
-            Json config = {{"runTimeoutSeconds", 300}, {"session", {{"runtimeMode", "auto"}}}};
-            if (argc == 8) {
-                config["session"]["providerInstanceId"] = argv[6];
-                config["session"]["model"] = argv[7];
-            }
-            if (request == "question" || request == "ambiguous-question") config["session"]["interactionMode"] = "plan";
-            if (const auto* mode = std::getenv("FLOCK_ACCEPTANCE_RUNTIME_MODE")) config["session"]["runtimeMode"] = mode;
-            std::cout << store.submit({"acceptance", request, argv[3], argv[4], config}) << '\n';
+            const auto id =
+                argc == 8 ? submit(store, argv[3], argv[4], argv[5], argv[6], argv[7]) : submit(store, argv[3], argv[4], argv[5]);
+            std::cout << id << '\n';
         } else if (operation == "show" && argc == 4) {
             Store store(argv[2]);
             const auto id = std::stoll(argv[3]);
@@ -265,40 +196,9 @@ int main(int argc, char** argv) {
             Store store(argv[2]);
             auto real = makeT3Mcp(argv[3]);
             CrashOnAcknowledgement adapter(*real, argc == 7 ? argv[6] : "");
-            TestModel model;
-            const auto id = std::stoll(argv[4]);
-            RuntimeOptions options;
-            if (store.task(id).at("request") == "measurement-read-resume") options.sessionRead = "on_demand";
-            Runtime runtime(
-                store, model, adapter, [](std::string_view) { return std::string("Validate the acceptance fixture"); }, options);
-            std::string previous;
-            const auto end = std::chrono::steady_clock::now() + 5min;
-            do {
-                const auto task = store.task(id);
-                const auto state = task.at("state").get<std::string>();
-                if (previous != state) {
-                    std::cout << state << " ";
-                    if (!task.at("activeRun").is_null()) std::cout << task.at("activeRun").dump();
-                    if (!task.at("wait").is_null()) std::cout << task.at("wait").dump();
-                    std::cout << std::endl;
-                    previous = state;
-                }
-                if (state == argv[5]) return 0;
-                if (std::string_view(argv[5]) == "read-saved") {
-                    const auto history = store.history(id);
-                    if (std::any_of(history.begin(), history.end(), [](const Json& item) { return item["kind"] == "session_read"; }))
-                        return 0;
-                }
-                if ((state == "waiting" && task.at("wait").value("reason", "") != "t3_input") || state == "completed" ||
-                    state == "cancelled")
-                    return 3;
-                runtime.tick();
-                std::this_thread::sleep_for(250ms);
-            } while (std::chrono::steady_clock::now() < end);
-            std::cerr << "Live fixture timed out\n";
-            return 4;
+            return pump(store, adapter, std::stoll(argv[4]), argv[5]);
         } else {
-            usage();
+            usage(std::cerr);
             return 2;
         }
         return 0;
