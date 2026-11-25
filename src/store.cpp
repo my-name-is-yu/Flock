@@ -145,6 +145,7 @@ void Store::Impl::openSchema() {
         initialize.commit();
     }
     initializeProjectQueue();
+    initializeBotPauseSchema();
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS git_review_receipts(
   inbox_key TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -169,7 +170,6 @@ CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
 
 void Store::Impl::initializeSchema() {
     const char* schema = R"SQL(
-CREATE TABLE IF NOT EXISTS bot_pauses(bot TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, environment_id TEXT NOT NULL,
   project_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL);

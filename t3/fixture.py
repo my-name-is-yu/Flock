@@ -420,7 +420,8 @@ class Fixture(BaseHTTPRequestHandler):
                             "timedOut": status in ("running", "queued")}
                 assert args["runId"] == state["botRun"]
                 if error := state.get("directStopWaitError"):
-                    return {"_tag": "OrchestratorMcpFailure", "code": error}
+                    return {"_tag": "OrchestratorMcpFailure", "code": error,
+                            "message": state.get("directStopWaitErrorMessage", "")}
                 if state.get("transientWakeFailure"):
                     return {"_tag": "OrchestratorMcpFailure", "code": "temporarily_unavailable"}
                 status = state["botRunStatus"]
@@ -429,7 +430,8 @@ class Fixture(BaseHTTPRequestHandler):
                 delegated_pending = args["untilDelegatedWorkSettled"] and state.get("botRunDelegatesPending", False)
                 return {"threadId": "thread", "runId": state.get("botRunContinuation") or state["botRun"],
                         "status": status,
-                        "timedOut": status != "completed" or state.get("botRunTimedOut", False) or delegated_pending}
+                        "timedOut": status not in ("completed", "interrupted") or
+                                    state.get("botRunTimedOut", False) or delegated_pending}
             if scenario == "selected-session":
                 assert args["threadId"] in ("human-selected", "flock-selected") and args["runId"] == "selected-run"
                 status = state["selectedRunStatus"]
@@ -458,6 +460,12 @@ class Fixture(BaseHTTPRequestHandler):
                                       "status": terminal_status}
             return reply
         if name == "t3_thread_interrupt":
+            if state.get("sessionWakeFixture"):
+                run = state.get("botRunContinuation") or state["botRun"]
+                assert args == {"threadId": "thread", "runId": run}
+                assert state["botRunStatus"] == "running"
+                state["botRunStatus"] = "interrupted"
+                return {**args, "status": "interrupt_requested"}
             if state.get("lineageFixture"):
                 child = next(entry for entry in state["lineageSessions"].values() if entry["threadId"] == args["threadId"])
                 assert args["runId"] == "root" and child.get("status", "running") == "running"
@@ -493,7 +501,8 @@ class Fixture(BaseHTTPRequestHandler):
             return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "History is unavailable."}
         thread_id = args["threadId"]
         if state.get("sessionWakeFixture") and (error := state.get("directStopReadError")):
-            return {"_tag": "OrchestratorMcpFailure", "code": error}
+            return {"_tag": "OrchestratorMcpFailure", "code": error,
+                    "message": state.get("directStopReadErrorMessage", "")}
         if state.get("lineageFixture"):
             child = next((entry for entry in state["lineageSessions"].values() if entry["threadId"] == thread_id), None)
             if not child and thread_id not in ("lineage-parent", "lineage-unrelated"):

@@ -263,7 +263,8 @@ void pausedBotStopsSessionMessages() {
         }
         InterruptOutcome interrupt(const std::string& environment, const Json&, const RunRef& run) override {
             check(environment == "env-1" && run.threadId == "thread","Interrupted a different Session");
-            if (++stopChecks[run.runId] > 1) return InterruptOutcome::AlreadyTerminal;
+            if (++stopChecks[run.runId] > 1)
+                return run.runId == "bot-reply-2" ? InterruptOutcome::TargetGone : InterruptOutcome::AlreadyTerminal;
             interrupted.push_back(run.runId);
             return InterruptOutcome::Requested;
         }
@@ -331,6 +332,9 @@ void pausedBotStopsSessionMessages() {
           t3.observations == observations && t3.sends == 3 && model.wakes == 1,
           "Resume revived a wake for a stopped Bot reply or failed to settle the recovered Run");
     check(mcp.call("flock_ask",ask).contains("structuredContent"),"Resume did not admit a fresh Session ask");
+    store.setBotPaused(localOwner,"release",true);
+    store.deleteBot(localOwner,"release");
+    check(store.botDeleted("release"),"An interrupted reply in a deleted Session blocked Bot deletion");
 }
 
 void webSendParticipation() {

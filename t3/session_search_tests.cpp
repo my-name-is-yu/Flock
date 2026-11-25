@@ -279,14 +279,23 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     runtime->runConversations();
     check(model.wakes.empty() && sends() == before + 1,"The person's completion woke the Bot or resent the step");
     const RunRef directRun{thread,"bot-run-" + std::to_string(sends()),{},{}};
+    const auto previousInterrupts = effects("t3_thread_interrupt").size();
     fixture({{"botRunStatus","completed"},{"botRunDelegatesPending",true}});
-    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::NoActiveRun,
-          "A completed Session reply settled before its delegated work");
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::AlreadyTerminal &&
+          effects("t3_thread_interrupt").size() == previousInterrupts,
+          "A completed reply stop depended on the shared Session's delegated work");
     runtime->runConversations();
     check(model.wakes.empty(),"A completed Session reply woke the Bot before its delegated work settled");
-    fixture({{"botRunDelegatesPending",false}});
-    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::AlreadyTerminal,
-          "A completed Session reply did not settle after its delegated work");
+    fixture({{"botRunDelegatesPending",false},{"botRunTimedOut",true}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::NoActiveRun,
+          "A completed reply stop settled while its restart continuation was pending");
+    fixture({{"botRunTimedOut",false},{"botRunStatus","running"},{"botRunContinuation","continued-reply"}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::Requested &&
+          effects("t3_thread_interrupt").size() == previousInterrupts + 1 &&
+          effects("t3_thread_interrupt").back() == Json{{"threadId",thread},{"runId","continued-reply"}} &&
+          t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::AlreadyTerminal,
+          "Pause did not interrupt and settle the exact restart continuation");
+    fixture({{"botRunContinuation",""}});
     fixture({{"botRunStatus","queued"},{"differentWaitRun",true}});
     bool stopRejected = false;
     try { t3.interruptSessionMessage("env-1",directRun); }
@@ -304,11 +313,16 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     requireStopRetry();
     fixture({{"directStopReadError","capability_denied"}});
     requireStopRetry();
-    fixture({{"directStopReadError","thread_not_found"},{"directStopWaitError","run_not_found"}});
+    fixture({{"directStopReadError",nullptr},{"directStopWaitError","run_not_found"}});
     requireStopRetry();
-    fixture({{"directStopWaitError","thread_not_found"}});
+    fixture({{"directStopReadError","thread_not_found"}});
     check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::TargetGone,
-          "A confirmed missing Session did not finish interruption");
+          "A missing Run in a confirmed deleted Session did not finish interruption");
+    fixture({{"directStopWaitError","invalid_request"},{"directStopReadError","invalid_request"},
+             {"directStopWaitErrorMessage","The thread was not found."},
+             {"directStopReadErrorMessage","The thread was not found."}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::TargetGone,
+          "A deleted Session reported by older T3 did not finish interruption");
     fixture({{"directStopWaitError",nullptr},{"directStopReadError",nullptr}});
     fixture({{"differentWaitRun",false},{"transientWakeFailure",true}});
     runtime->runConversations();

@@ -2,6 +2,32 @@
 #include "conversation_storage.hpp"
 
 namespace flockv0 {
+void Store::Impl::initializeBotPauseSchema() {
+    const auto installed = [&] {
+        return query("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='bot_pauses'").next();
+    };
+    if (installed()) return;
+    Transaction transaction(db);
+    if (!installed()) {
+        exec("ALTER TABLE session_message_waits ADD COLUMN run_finished INTEGER NOT NULL DEFAULT 0");
+        exec("ALTER TABLE session_message_waits ADD COLUMN interrupt_at INTEGER");
+        exec("CREATE INDEX session_message_interrupts_due ON session_message_waits(interrupt_at) "
+             "WHERE interrupt_at IS NOT NULL");
+        exec(R"SQL(
+CREATE TABLE session_message_sends(
+  action TEXT PRIMARY KEY,
+  message_id INTEGER NOT NULL REFERENCES messages(id),
+  environment TEXT NOT NULL, thread TEXT NOT NULL, gateway_environment TEXT NOT NULL,
+  instruction TEXT NOT NULL, interrupt_at INTEGER)
+)SQL");
+        exec("CREATE INDEX session_message_sends_by_message ON session_message_sends(message_id)");
+        exec("CREATE INDEX session_message_sends_due ON session_message_sends(interrupt_at) "
+             "WHERE interrupt_at IS NOT NULL");
+        exec("CREATE TABLE bot_pauses(bot TEXT PRIMARY KEY)");
+    }
+    transaction.commit();
+}
+
 bool Store::Impl::botDeleted(std::string_view bot) const {
     return query("SELECT 1 FROM deleted_bots WHERE bot=?",{bot}).next();
 }

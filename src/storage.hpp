@@ -316,6 +316,7 @@ struct Store::Impl {
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
     void initializeConversationSchema();
+    void initializeBotPauseSchema();
     void initializeModelBudgetSchema();
     void initializeWorkspaceSchema();
     void initializeAttachmentsSchema();

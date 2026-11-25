@@ -1004,7 +1004,7 @@ public:
                 try {
                     return reconcileWork(client,command);
                 } catch (const Failure& failure) {
-                    if (failure.reason == Failure::Reason::ThreadNotFound &&
+                    if (failure.missingHistory() &&
                         confirmsMissingSession(client,command.target.threadId))
                         return result(Outcome::NotAccepted,"The T3 Session was removed");
                     throw;
@@ -1380,9 +1380,10 @@ private:
             checkVerificationRoute(client,config,environmentId,run.threadId);
         }
         Json current;
-        try { current = wait(client,run,exactSessionMessage ? WaitFor::DelegatedWork : WaitFor::Run,1); }
+        // Pause owns this reply Run, while delegated settlement covers the entire shared Session.
+        try { current = wait(client,run,WaitFor::Run,1); }
         catch (const Failure& failure) {
-            if (exactSessionMessage && failure.reason == Failure::Reason::ThreadNotFound &&
+            if (exactSessionMessage && failure.missingHistory() &&
                 confirmsMissingSession(client,run.threadId)) return InterruptOutcome::TargetGone;
             throw;
         }
@@ -1391,13 +1392,9 @@ private:
             !isRestartContinuation(client,run,effective))
             throw Failure(Failure::Kind::Wire,"Could not identify the Run's restart continuation");
         const auto status = str(current,"status");
-        if (terminal(status)) {
-            if (!exactSessionMessage || !boolean(current,"timedOut")) return InterruptOutcome::AlreadyTerminal;
-            if (status == "cancelled" && effective == run.runId &&
-                confirmsQueueCancellation(client,run,threadHead(client,run.threadId,50)))
-                return InterruptOutcome::AlreadyTerminal;
-            return InterruptOutcome::NoActiveRun;
-        }
+        if (terminal(status))
+            return exactSessionMessage && boolean(current,"timedOut")
+                ? InterruptOutcome::NoActiveRun : InterruptOutcome::AlreadyTerminal;
         if (status == "queued" && (effective == run.runId || exactSessionMessage)) {
             client.call("t3_queue",{{"action","cancel"},{"threadId",run.threadId},{"queuedRunId",effective}});
             return InterruptOutcome::Requested;

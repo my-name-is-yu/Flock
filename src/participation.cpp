@@ -84,8 +84,6 @@ CREATE TABLE IF NOT EXISTS session_invitations(
 )SQL");
     exec("CREATE INDEX IF NOT EXISTS session_invitations_inviter ON session_invitations(inviter_participation_id)");
     exec("CREATE INDEX IF NOT EXISTS session_message_waits_participation ON session_message_waits(bot,environment,thread)");
-    exec("CREATE INDEX IF NOT EXISTS session_message_interrupts_due ON session_message_waits(interrupt_at) "
-         "WHERE interrupt_at IS NOT NULL");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS session_queue_cancellations(
  participation_id INTEGER NOT NULL REFERENCES session_participations(id), run TEXT NOT NULL,

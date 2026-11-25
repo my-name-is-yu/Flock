@@ -24,8 +24,9 @@ build concurrency.
 Edit the Bot's instructions under **Role** in its Web settings.
 
 Bot owners and installation administrators can pause a Bot from **General**
-in its settings. Pause closes unfinished requests, stops the T3 work they
-started, and refuses new messages. **Resume** opens the Bot to new work.
+in its settings. Pause closes unfinished requests, requests interruption of the
+T3 Runs the Bot started, and refuses new messages. In shared Sessions, already
+delegated work can continue. **Resume** opens the Bot to new work.
 Recurring requests, reminders, and triggers due during the pause are skipped.
 Flock keeps the pause across restarts.
 
