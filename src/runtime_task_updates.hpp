@@ -12,6 +12,11 @@ public:
     void consumeEvent(TaskData& task);
     static bool checkpointMatches(const DecisionCheckpoint& checkpoint, const TaskData& task);
 
+    bool admitWork(TaskData&, const TaskDecision&, bool& charge);
+    void establishCriteria(TaskData&, const Json& args);
+    void recordDecision(const TaskData&, const Json& event, const TaskDecision&, std::string_view action);
+    static void refundUnsentWork(TaskData&, const Outbox&);
+
     bool changeTask(Id id, const auto& update, TaskData* saved = nullptr) {
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
