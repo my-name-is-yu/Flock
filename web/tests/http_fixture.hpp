@@ -57,7 +57,7 @@ struct FixedT3 : T3 {
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
     Delivery send(const Command& command) override {
-        if (command.tool == "delegate") {
+        if (command.tool == CommandTool::delegate) {
             if (command.projectId == "settings" &&
                 command.config.value("session", Json::object()).value("runtimeMode", "") != "approval-required")
                 return {Delivery::Kind::Settings, {}, privateValue, true};
@@ -66,7 +66,7 @@ struct FixedT3 : T3 {
             return {
                 Delivery::Kind::Accepted, {"thread-" + project, "run-" + project + "-" + std::to_string(++launches[project]), link}, {}};
         }
-        check(command.tool == "answer_session_question", "unexpected command in fixture");
+        check(command.tool == CommandTool::answer_session_question, "unexpected command in fixture");
         replies.push_back(command);
         observations.erase(command.target.threadId);
         return {Delivery::Kind::Accepted, {}, {}};

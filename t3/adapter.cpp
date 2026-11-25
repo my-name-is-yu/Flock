@@ -537,16 +537,16 @@ LaunchArguments launchArgs(const Command& command) {
 }
 
 void verifyCommand(const Command& command) {
-    if (command.tool == "answer_session_question") {
+    if (command.tool == CommandTool::answer_session_question) {
         if (!hasRun(command.target) || command.questionId.empty() || !command.answers.is_object())
             throw Failure(Failure::Kind::Settings, "The T3 answer requires a Thread, Run, question ID and answers");
         return;
     }
-    const bool validTarget = command.tool == "delegate" ||
-                             ((command.tool == "start_in_session" || command.tool == "message_session") &&
+    const bool validTarget = command.tool == CommandTool::delegate ||
+                             ((command.tool == CommandTool::start_in_session || command.tool == CommandTool::message_session) &&
                               !command.target.threadId.empty() && command.target.runId.empty()) ||
-                             (command.tool == "follow_up" && hasRun(command.target));
-    if (!validTarget || (command.tool != "message_session" && command.projectId.empty()) || command.actionId.empty() ||
+                             (command.tool == CommandTool::follow_up && hasRun(command.target));
+    if (!validTarget || (command.tool != CommandTool::message_session && command.projectId.empty()) || command.actionId.empty() ||
         command.actionId.size() > 256 || trim(command.actionId) != command.actionId ||
         command.actionId.find_first_of("\r\n[]") != std::string::npos || trim(command.instruction).empty() ||
         sessionPrompt(command.actionId, command.instruction).size() > maxSessionPromptBytes)
@@ -629,15 +629,16 @@ void queuedMatches(Client& client, Scan& scan, const std::string& thread, const 
 }
 
 Delivery reconcileWork(Client& client, const Command& command) {
-    const bool launch = command.tool == "delegate";
-    const bool direct = command.tool == "message_session";
+    const bool launch = command.tool == CommandTool::delegate;
+    const bool direct = command.tool == CommandTool::message_session;
     const auto& destination = launch ? command.launchReceiptThreadId : command.target.threadId;
-    const auto& hint = command.candidate.threadId;
+    const auto hint = command.candidate ? std::string_view(command.candidate->threadId) : std::string_view{};
     if (!destination.empty() && !hint.empty() && hint != destination)
         return result(Outcome::Unknown, "The supplied Thread is outside the saved action destination");
     Scan scan;
     auto threads = destination.empty() ? projectThreads(client, scan, command) : std::vector{destination};
-    if (destination.empty() && !hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end()) threads.push_back(hint);
+    if (destination.empty() && !hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end())
+        threads.emplace_back(hint);
     const auto expected = sessionPrompt(command.actionId, command.instruction);
     struct Match {
         RunRef run;
@@ -652,7 +653,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
         if ((!direct && str(thread, "projectId") != command.projectId) ||
             (launch && (str(thread, "createdBy") != "agent" || str(thread, "creationSource") != "mcp")))
             continue;
-        if (direct || command.tool == "start_in_session") {
+        if (direct || command.tool == CommandTool::start_in_session) {
             std::set<std::string> queued;
             queuedMatches(client, scan, threadId, expected, queued);
             for (const auto& run : queued)
@@ -680,7 +681,8 @@ Delivery reconcileWork(Client& client, const Command& command) {
         return result(Outcome::Unknown, matches.size() > 1 ? "More than one T3 Run matches the saved action"
                                                            : "T3 history did not establish exactly one Run for the saved action");
     const auto& [match, queued] = matches.begin()->second;
-    if ((!hint.empty() && hint != match.threadId) || (!command.candidate.runId.empty() && command.candidate.runId != match.runId))
+    if ((!hint.empty() && hint != match.threadId) ||
+        (command.candidate && !command.candidate->runId.empty() && command.candidate->runId != match.runId))
         return result(Outcome::Unknown, "The supplied T3 Run does not match the saved action");
     auto recovered = result(Outcome::Accepted, {}, match);
     if (direct) recovered.delivery = queued ? "queued" : "started";
@@ -960,7 +962,7 @@ public:
     std::optional<Delivery> preflight(const Command& command) override {
         try {
             verifyCommand(command);
-            const bool launch = command.tool == "delegate";
+            const bool launch = command.tool == CommandTool::delegate;
             const auto pin = launch ? launchArgs(command).pin : std::string{};
             const auto gateway = gatewayFor(command.environmentId, command.gatewayEnvironmentId);
             auto connection = credential(gateway, command.config);
@@ -985,8 +987,8 @@ public:
         std::string launchWarning;
         try {
             verifyCommand(command);
-            const bool launch = command.tool == "delegate";
-            const bool selected = command.tool == "start_in_session";
+            const bool launch = command.tool == CommandTool::delegate;
+            const bool selected = command.tool == CommandTool::start_in_session;
             auto launchArguments = launch ? launchArgs(command) : LaunchArguments{};
             const auto gateway = gatewayFor(command.environmentId, command.gatewayEnvironmentId);
             auto connection = credential(gateway, command.config);
@@ -995,8 +997,8 @@ public:
             requireOperate(connection);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection), {}, targetRoute(command.environmentId, gateway));
-            if (command.tool == "answer_session_question") return answer(client, command, invoked);
-            if (command.tool == "message_session") {
+            if (command.tool == CommandTool::answer_session_question) return answer(client, command, invoked);
+            if (command.tool == CommandTool::message_session) {
                 const auto environment =
                     gateway == command.environmentId ? client.call("t3_environment_read", Json::object()) : Json::object();
                 if (gateway == command.environmentId && str(environment, "environmentId") != command.environmentId)
@@ -1073,7 +1075,7 @@ public:
             delivery.launchWarning = std::move(launchWarning);
             return delivery;
         } catch (const Failure& failure) {
-            if (invoked && command.tool != "answer_session_question") {
+            if (invoked && command.tool != CommandTool::answer_session_question) {
                 auto delivery = workReply(failure);
                 delivery.launchWarning = std::move(launchWarning);
                 return delivery;
@@ -1091,7 +1093,7 @@ public:
             auto connection = credential(gateway, command.config);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection), {}, targetRoute(command.environmentId, gateway));
-            if (command.tool == "message_session") {
+            if (command.tool == CommandTool::message_session) {
                 if (gateway == command.environmentId &&
                     str(client.call("t3_environment_read", Json::object()), "environmentId") != command.environmentId)
                     return result(Outcome::Settings, "The OAuth endpoint belongs to a different T3 environment");
@@ -1103,10 +1105,11 @@ public:
                     throw;
                 }
             }
-            if (command.tool == "delegate" || command.tool == "follow_up" || command.tool == "start_in_session") {
+            if (command.tool == CommandTool::delegate || command.tool == CommandTool::follow_up ||
+                command.tool == CommandTool::start_in_session) {
                 if (gateway == command.environmentId) checkVerificationRoute(client, command.config, command.environmentId);
                 auto recovered = reconcileWork(client, command);
-                if (command.tool == "delegate" && recovered.kind == Outcome::Accepted) {
+                if (command.tool == CommandTool::delegate && recovered.kind == Outcome::Accepted) {
                     const auto pin = launchArgs(command).pin;
                     if (!pin.empty()) {
                         if (!loopbackGitHost(origin))
@@ -1120,8 +1123,9 @@ public:
                 useLocalThreadLink(recovered.run, command.environmentId, origin);
                 return recovered;
             }
-            if ((!command.candidate.threadId.empty() && command.candidate.threadId != command.target.threadId) ||
-                (!command.candidate.runId.empty() && command.candidate.runId != command.target.runId) ||
+            const auto& hint = command.candidate;
+            if ((hint && ((!hint->threadId.empty() && hint->threadId != command.target.threadId) ||
+                          (!hint->runId.empty() && hint->runId != command.target.runId))) ||
                 (!command.candidateQuestionId.empty() && command.candidateQuestionId != command.questionId))
                 return result(Outcome::Unknown, "The supplied T3 question is outside the saved answer destination");
             if (pending(client, command.target.threadId).contains(command.questionId))

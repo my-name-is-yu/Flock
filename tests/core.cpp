@@ -63,7 +63,7 @@ void checkSchemaRefusals(const std::filesystem::path& freshDatabase) {
     const auto dir = freshDatabase.parent_path();
     unsupportedSchemaLeavesDatabaseIntact(dir / "unmarked.db", 0, 0, currentVersion);
     unsupportedSchemaLeavesDatabaseIntact(dir / "unrelated.db", 123, currentVersion, currentVersion);
-    for (const int version : {1, 2, 6, 7, 8, 9, currentVersion + 1})
+    for (const int version : {1, 2, 6, 7, 8, 9, 10, currentVersion + 1})
         unsupportedSchemaLeavesDatabaseIntact(dir / ("version-" + std::to_string(version) + ".db"), 0x464c4f43, version, currentVersion);
 }
 
@@ -91,14 +91,14 @@ struct FixedT3 : T3 {
     Observation current;
     std::string authGeneration(const std::string&, const Json&) override { return "fixed-auth"; }
     Delivery send(const Command& cmd) override {
-        if (cmd.tool == "delegate") {
+        if (cmd.tool == CommandTool::delegate) {
             ++launches;
             check(!cmd.actionId.empty() && cmd.instruction.starts_with("Check main") &&
                       cmd.instruction.find("[Flock action ID: " + cmd.actionId + "]") != std::string::npos,
                   "T3 did not receive the work instruction and its recovery identifier");
             return {Delivery::Kind::Accepted, {"thread-1", "run-1", "t3://thread-1"}, {}};
         }
-        check(cmd.tool == "answer_session_question" && cmd.questionId == "q1" && cmd.target.threadId == "thread-1" &&
+        check(cmd.tool == CommandTool::answer_session_question && cmd.questionId == "q1" && cmd.target.threadId == "thread-1" &&
                   cmd.target.runId == "run-1" && cmd.answers == Json{{"branch", "main"}},
               "wrong reply destination or answer");
         ++replies;

@@ -119,11 +119,11 @@ struct SimulatedT3 : T3 {
         return std::nullopt;
     }
     Delivery send(const Command& command) override {
-        if (command.tool == "message_session") {
+        if (command.tool == CommandTool::message_session) {
             ++sessionSends;
             return {Delivery::Kind::Accepted, command.target, {}};
         }
-        check(command.tool == "delegate", "Unexpected work command in the Store fixture");
+        check(command.tool == CommandTool::delegate, "Unexpected work command in the Store fixture");
         const auto suffix = std::to_string(++launches);
         return {Delivery::Kind::Accepted, {"thread-" + suffix, "run-" + suffix, {}}, {}};
     }

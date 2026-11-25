@@ -6,8 +6,9 @@ bool Store::Impl::automationBeforeDispatch(Id task) const {
 }
 
 bool Store::Impl::isUndispatchedNotesWait(const Json& task) const {
-    return task.at("state") == "waiting" && field(task.at("wait"), "reason") == "bot_notes_unavailable" &&
-           automationBeforeDispatch(task.at("id"));
+    if (task.at("state") != "waiting" || !automationBeforeDispatch(task.at("id"))) return false;
+    const auto wait = currentWait(task.at("id"));
+    return wait && wait->reason() == WaitReason::bot_notes_unavailable;
 }
 
 bool Store::Impl::projectRouteReady(Id task, std::string_view action) const {

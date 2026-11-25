@@ -94,7 +94,7 @@ struct LinkedT3 : FixedT3 {
 
     Delivery send(const Command& command) override {
         auto result = FixedT3::send(command);
-        if (command.tool == "delegate") {
+        if (command.tool == CommandTool::delegate) {
             const auto link = links.find(command.projectId);
             if (link != links.end()) result.run.link = link->second;
         }

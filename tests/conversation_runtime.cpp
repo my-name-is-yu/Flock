@@ -203,12 +203,12 @@ struct SimulatedT3 : T3 {
             check(!command.actionId.empty(), "T3 received work without a request ID");
             check(command.authGeneration == login, "a dispatched instruction lacks its authentication generation");
             const auto suffix = std::to_string(sent.size());
-            auto run = RunRef{command.tool == "delegate" ? "session-" + suffix : command.target.threadId, "run-" + suffix,
+            auto run = RunRef{command.tool == CommandTool::delegate ? "session-" + suffix : command.target.threadId, "run-" + suffix,
                               "https://example.test/session-" + suffix};
             run.gatewayEnvironmentId = command.gatewayEnvironmentId;
             check(deliveries.emplace(command.actionId, run).second, "the same work was sent twice");
             auto observation = Observation{};
-            const bool queued = command.tool == "message_session" && std::exchange(queueNextMessage, false);
+            const bool queued = command.tool == CommandTool::message_session && std::exchange(queueNextMessage, false);
             if (queued) observation.status = "queued";
             observations.emplace(run.runId, std::move(observation));
             const bool lostReceipt = std::exchange(loseNextSend, false) || command.environmentId == loseSendForEnvironment;
@@ -216,7 +216,7 @@ struct SimulatedT3 : T3 {
             if (lostReceipt) return {};
             if (std::exchange(deferNextRunId, false))
                 return {Delivery::Kind::Unknown, {run.threadId, {}, run.link, run.gatewayEnvironmentId}, {}};
-            const auto delivery = command.tool != "message_session" ? "" : queued ? "queued" : "started";
+            const auto delivery = command.tool != CommandTool::message_session ? "" : queued ? "queued" : "started";
             result = {Delivery::Kind::Accepted, run, {}, false, delivery};
             gate = beforeSend;
         }
@@ -228,7 +228,9 @@ struct SimulatedT3 : T3 {
         reconciled.push_back(command);
         if (!deliveryVisible || !deliveries.contains(command.actionId)) return {};
         const auto& run = deliveries.at(command.actionId);
-        const auto delivery = command.tool != "message_session" ? "" : observations.at(run.runId).status == "queued" ? "queued" : "started";
+        const auto delivery = command.tool != CommandTool::message_session    ? ""
+                              : observations.at(run.runId).status == "queued" ? "queued"
+                                                                              : "started";
         return {Delivery::Kind::Accepted, run, {}, false, delivery};
     }
     Observation observe(const std::string&, const Json&, const RunRef& run) override {
@@ -502,8 +504,8 @@ void linkedResultStartsANewSession() {
           "implementation was not linked to the earlier result");
     f.reach(id, "running");
     check(f.t3.sent.size() == 2 && f.t3.sent.front().sessionOrigin && !f.t3.sent.back().sessionOrigin &&
-              f.t3.sent.back().tool == "delegate" && f.task(original)["runs"][0]["threadId"] != f.task(id)["runs"][0]["threadId"] &&
-              f.event(original, "completed") == earlier,
+              f.t3.sent.back().tool == CommandTool::delegate &&
+              f.task(original)["runs"][0]["threadId"] != f.task(id)["runs"][0]["threadId"] && f.event(original, "completed") == earlier,
           "linked implementation changed prior work or reused its Thread");
     const auto& instruction = f.t3.sent.back().instruction;
     check(instruction.find("Implement option 2") != std::string::npos &&
@@ -548,7 +550,7 @@ void followUpCarriesTheReferencedReport() {
     f.t3.finish("run-2", "Separate baseline checked");
     f.reach(id, "deciding");
     f.reach(id, "running");
-    check(f.t3.sent.size() == 3 && f.t3.sent.back().tool == "follow_up" && f.t3.sent.back().target.threadId == "session-2" &&
+    check(f.t3.sent.size() == 3 && f.t3.sent.back().tool == CommandTool::follow_up && f.t3.sent.back().target.threadId == "session-2" &&
               f.t3.sent.back().instruction.find("案2を実装") != std::string::npos &&
               f.t3.sent.back().instruction.find("Capture a fixture trace") != std::string::npos &&
               f.conversationMessage(message["messageId"])["deliveredToT3"] == true,
@@ -1170,7 +1172,7 @@ void resumeRestoresCancelledTaskDirections() {
     check(f.task(next)["doneWhen"] == f.task(old)["doneWhen"] && f.task(next)["sourceTaskId"] == old && next != old &&
               f.task(next)["environmentId"] == "cloud" && instruction.find("Measure the reference dataset") != std::string::npos &&
               instruction.find("Report baseline latency") != std::string::npos &&
-              instruction.find("Use a pinned regression fixture") != std::string::npos && f.t3.sent.back().tool == "delegate",
+              instruction.find("Use a pinned regression fixture") != std::string::npos && f.t3.sent.back().tool == CommandTool::delegate,
           "resume omitted the original intent, criteria, or accepted directions");
 
     constexpr auto goal = "Measure the release dataset";
@@ -1216,7 +1218,7 @@ void resumeRestoresCancelledTaskDirections() {
     f.script(localNote, {send(last)});
     f.receive("cpu-model", localNote);
     f.t3.finish(f.task(last)["activeRun"]["runId"].get<std::string>(), "Measurement ready");
-    f.advanceUntil([&] { return f.t3.sent.back().tool == "follow_up"; }, "the supplement never reached the Session");
+    f.advanceUntil([&] { return f.t3.sent.back().tool == CommandTool::follow_up; }, "the supplement never reached the Session");
     const auto& follow = f.t3.sent.back().instruction;
     check(follow.find(localNote) != follow.npos && follow.find("Measure the reference dataset") == follow.npos,
           "the follow-up omitted or replayed directions");
@@ -1255,7 +1257,7 @@ void liveMoveAndCriteriaCorrectionKeepCurrentContract() {
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "the live move was not delivered");
     const auto& command = f.t3.sent.back();
     const auto& instruction = command.instruction;
-    check(command.tool == "delegate" && command.environmentId == "desktop" && f.task(id)["environmentId"] == "desktop" &&
+    check(command.tool == CommandTool::delegate && command.environmentId == "desktop" && f.task(id)["environmentId"] == "desktop" &&
               f.task(id)["intent"] == goal && f.task(id)["doneWhen"] == correctedCriteria,
           "the live replan started with the wrong destination or work contract");
     check(instruction.find(trace) != instruction.npos && instruction.find(trace) == instruction.rfind(trace),
@@ -1397,7 +1399,7 @@ void resumeBatchesOversizedPendingBacklog() {
     f.t3.loseNextSend = true;
     f.reach(next, "waiting");
     const auto inherited = f.task(next).at("pendingInstructions");
-    check(inherited.size() == specs.size() && f.t3.sent.back().tool == "delegate",
+    check(inherited.size() == specs.size() && f.t3.sent.back().tool == CommandTool::delegate,
           "unconfirmed delegate lost part of the inherited backlog");
     for (std::size_t i = 0; i < specs.size(); ++i)
         check(inherited[i].at("text") == specs[i], "unconfirmed delivery changed an inherited specification");
@@ -1415,7 +1417,7 @@ void resumeBatchesOversizedPendingBacklog() {
         if (f.task(next).at("pendingInstructions").empty()) break;
         f.reach(next, "deciding");
         f.reach(next, "running");
-        check(f.t3.sent.back().tool == "follow_up", "a subsequent batch did not continue the Session");
+        check(f.t3.sent.back().tool == CommandTool::follow_up, "a subsequent batch did not continue the Session");
     }
     f.reach(next, "completed");
     check(f.task(next).value("pendingInstructions", Json::array()).empty(), "completed with inherited work pending");
@@ -1606,7 +1608,8 @@ void unknownSendThenScopeChange() {
     f.restart();
     f.store->operate(localOwner, TaskTarget::from(f.store->task(id), f.task(id)["wait"]["id"]), "reconcile");
     f.reach(id, "running");
-    check(f.t3.sent.size() == 2 && f.t3.reconciled.back().actionId == replacementAction && f.t3.sent.back().tool == "follow_up" &&
+    check(f.t3.sent.size() == 2 && f.t3.reconciled.back().actionId == replacementAction &&
+              f.t3.sent.back().tool == CommandTool::follow_up &&
               f.t3.sent.back().instruction.find("Task intent:\nMeasure startup latency") != std::string::npos &&
               f.t3.sent.back().instruction.find("Completion criteria:\np95 レイテンシを報告") != std::string::npos &&
               f.conversationMessage(change["messageId"])["deliveredToT3"] == true,
@@ -2425,7 +2428,7 @@ Json persistedTaskDiagnostics(Fixture& f, Id taskId, Id messageId = 0) {
         result["interrupts"] = f.t3.interrupted;
         result["sentCommands"] = Json::array();
         for (const auto& command : f.t3.sent)
-            result["sentCommands"].push_back({{"tool", command.tool},
+            result["sentCommands"].push_back({{"tool", commandToolName(command.tool)},
                                               {"actionId", command.actionId},
                                               {"environment", command.environmentId},
                                               {"threadId", command.target.threadId}});
@@ -2459,7 +2462,7 @@ void lateSavedDestinationReceiptKeepsTaskAndSlot() {
     std::promise<void> releaseSend;
     auto releaseSendFuture = releaseSend.get_future().share();
     f.t3.beforeSend = [&](const Command& command) {
-        if (command.tool == "message_session") {
+        if (command.tool == CommandTool::message_session) {
             enteredSend.set_value(command);
             releaseSendFuture.wait();
         }
@@ -2751,7 +2754,7 @@ void destinationFollowupValidatesAndRedactsSourceReport() {
                          "allow_once");
     f.runtime->runConversations();
     const auto& sent = f.t3.sent.back();
-    check(f.t3.sent.size() == sentBefore + 1 && sent.tool == "message_session" &&
+    check(f.t3.sent.size() == sentBefore + 1 && sent.tool == CommandTool::message_session &&
               sent.instruction.find("stable result") != std::string::npos && sent.instruction.find("[redacted]") != std::string::npos &&
               sent.instruction.find(secret) == std::string::npos,
           "the approved destination follow-up lost report context or sent its synthetic secret");
@@ -2814,7 +2817,8 @@ void ordinarySessionApprovalKeepsItsPayload() {
                           card.at("targetRevision"), card.at("targetGeneration")},
                          "allow_once");
     f.runtime->runConversations();
-    check(f.t3.sent.size() == 1 && f.t3.sent.front().tool == "message_session", "the ordinary send approval did not survive restart");
+    check(f.t3.sent.size() == 1 && f.t3.sent.front().tool == CommandTool::message_session,
+          "the ordinary send approval did not survive restart");
 }
 
 Json destinationResult(const Json& task, std::string_view environment) {
@@ -3003,7 +3007,7 @@ void savedSessionSendAfterAccessLoss(std::string_view sendState, std::string_vie
         check(f.task(taskId).at("state") == "running" && f.task(queuedId).at("state") == "queued",
               "an uncertain Session send released its slot after access closed");
     }
-    check(std::ranges::none_of(f.t3.sent, [](const Command& sent) { return sent.tool == "message_session"; }),
+    check(std::ranges::none_of(f.t3.sent, [](const Command& sent) { return sent.tool == CommandTool::message_session; }),
           "a saved Session send was dispatched after access closed");
 }
 
@@ -3047,7 +3051,7 @@ void savedFollowupHoldsSlotUntilItsReceiptAndRunSettle() {
         f.t3.loseNextSend = losesReceipt;
         if (!losesReceipt)
             f.t3.beforeSend = [&](const Command& command) {
-                if (command.tool == "message_session")
+                if (command.tool == CommandTool::message_session)
                     locked = sqlite3_exec(writer,
                                           "BEGIN IMMEDIATE; DELETE FROM bot_members "
                                           "WHERE bot='alpha' AND person='receipt-member'",
@@ -3070,7 +3074,8 @@ void savedFollowupHoldsSlotUntilItsReceiptAndRunSettle() {
             f.runtime->runConversations();
             check(f.response(receipt).value("route", "") == "access", "the pending turn did not close on revoked access");
         }
-        check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == "message_session", "the saved follow-up did not reach T3 exactly once");
+        check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == CommandTool::message_session,
+              "the saved follow-up did not reach T3 exactly once");
         const auto followup = f.t3.delivered(f.t3.sent.back().actionId);
         f.t3.finish(originalRun, "The original destination Run finished");
         if (losesReceipt) {
@@ -3110,7 +3115,7 @@ void pauseRecoversTheRetainedSavedFollowup(bool sessionMissing = false) {
     f.script(instruction, {sendCloudFollowup(taskId)});
     const auto receipt = f.receive("pause-recovery-send", instruction);
     const auto messageId = receipt.at("messageId").get<Id>();
-    check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == "message_session", "the follow-up did not reach T3");
+    check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == CommandTool::message_session, "the follow-up did not reach T3");
     const auto request = f.t3.sent.back().actionId;
     const auto followup = f.t3.delivered(request);
     f.t3.finish(original, "Original report stopped holding the destination");
@@ -3456,7 +3461,7 @@ void cloudDestinationWaitsForItsProject() {
     f.reach(moving, "running");
     const auto task = f.task(moving);
     check(task.at("deadline") == f.now + 1800, "moved task retained the old environment timeout");
-    check(sawHistoricalEnvironment && f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" &&
+    check(sawHistoricalEnvironment && f.t3.sent.size() == 4 && f.t3.sent.back().tool == CommandTool::delegate &&
               f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().projectId == "cloud-project" &&
               f.t3.sent.back().instruction.find("as CSV") != std::string::npos && task["remaining"] == 2 &&
               task["runs"][0]["environmentId"] == "desktop" && task["runs"][1]["environmentId"] == "cloud" &&
@@ -3776,7 +3781,7 @@ void newSessionsReceivePersistedTaskDecisions() {
         f.reach(id, "running");
         const auto& command = f.t3.sent.back();
         const auto task = f.task(id);
-        check(f.t3.sent.size() == 2 && command.tool == "delegate" && task["runs"].size() == 2 &&
+        check(f.t3.sent.size() == 2 && command.tool == CommandTool::delegate && task["runs"].size() == 2 &&
                   task["runs"][0]["threadId"] != task["runs"][1]["threadId"] &&
                   task["runs"][0]["revisionId"] == task["runs"][1]["revisionId"],
               "the replacement did not start a separate Session for the same revision");
@@ -3796,7 +3801,7 @@ void newSessionsReceivePersistedTaskDecisions() {
         f.reach(id, "deciding");
         f.reach(id, "running");
         const auto& follow = f.t3.sent.back();
-        check(follow.tool == "follow_up" && task["runs"][1]["threadId"] == follow.target.threadId &&
+        check(follow.tool == CommandTool::follow_up && task["runs"][1]["threadId"] == follow.target.threadId &&
                   follow.instruction.find(direction) == follow.instruction.npos &&
                   follow.instruction.find(userAnswer) == follow.instruction.npos,
               "the same-Thread follow-up replayed the new-Session handoff");
@@ -3823,7 +3828,7 @@ void revisedSessionDoesNotReplaySupersededDecisions() {
     f.t3.finish("run-1", "The prior Run settled");
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "the revised Session did not start");
     const auto& command = f.t3.sent.back();
-    check(command.tool == "delegate" && command.environmentId == "cloud" &&
+    check(command.tool == CommandTool::delegate && command.environmentId == "cloud" &&
               command.instruction.find("Measure the replacement dataset") != command.instruction.npos &&
               command.instruction.find("Report median throughput") != command.instruction.npos &&
               command.instruction.find("Use the replacement suite") != command.instruction.npos,
@@ -4042,7 +4047,7 @@ void existingSessionStartsNormalWork() {
         f.reach(taskId, "running");
         const auto& sent = f.t3.sent.back();
         const bool native = title == nativeTitle;
-        check(sent.tool == "start_in_session" && sent.target.runId.empty() &&
+        check(sent.tool == CommandTool::start_in_session && sent.target.runId.empty() &&
                   sent.target.threadId == (native ? "native-thread" : firstThreadId) &&
                   sent.environmentId == (native ? "cloud" : "desktop") && sent.projectId == (native ? "other-project" : "project"),
               "work lost the selected Thread or used the Bot's launch route");
@@ -4096,7 +4101,7 @@ void sessionMemoryFollowsTheAcceptedVersion() {
         f.t3.finish("run-" + std::to_string(run), "Prior evidence");
         f.advanceUntil([&] { return f.t3.sent.size() == static_cast<std::size_t>(run + 1); }, "the Session did not receive its follow-up");
         const auto& next = f.t3.sent.back();
-        check(next.tool == "follow_up" && next.target.threadId == "session-1", "work left the existing Session");
+        check(next.tool == CommandTool::follow_up && next.target.threadId == "session-1", "work left the existing Session");
         return next.instruction;
     };
     const auto unchanged = follow(1);
