@@ -4,6 +4,8 @@ import { actionLabel, approvalSummary } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
+import { createBotRoleCard } from '/bot-role.js';
+import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
@@ -13,17 +15,18 @@ import { replyArrivalId } from '/reply-arrival.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 import { mountConversationFind } from '/conversation-find.mjs';
+import { createRecurringRequests } from '/recurring-requests.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile-avatar', 'profile-avatar-button',
   'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
-  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-summary', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
-  'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
+  'bot-editor', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
   'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
@@ -135,9 +138,9 @@ const errors = {
   already_closed: 'This request was already answered or closed.',
   access_denied: 'You do not have permission to respond to this request.',
   bot_not_found: 'Bot not found.',
-  invalid_peer: 'Choose another Bot for this DM.',
-  peer_not_allowed: 'This Bot DM is unavailable.',
-  peer_not_found: 'This Bot DM is unavailable.',
+  invalid_peer: 'Choose another Bot.',
+  peer_not_allowed: 'This conversation between Bots isn’t available.',
+  peer_not_found: 'This conversation between Bots isn’t available.',
   peer_message_not_found: 'This message is unavailable.',
 };
 
@@ -223,13 +226,13 @@ function changed(key, ...values) {
   return true;
 }
 const responseViewers = new WeakMap();
-async function api(path, body, signal) {
-  const init = { credentials: 'same-origin', signal };
-  if (body) Object.assign(init, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Flock-Action': '1' },
-    body: JSON.stringify(body),
+async function api(path, body, { method = body ? 'POST' : 'GET', signal } = {}) {
+  const headers = new Headers();
+  if (method !== 'GET') headers.set('X-Flock-Action', '1');
+  if (body) headers.set('Content-Type', 'application/json');
+  const response = await fetch(`/api/${path}`, {
+    method, headers, credentials: 'same-origin', signal, body: body ? JSON.stringify(body) : undefined,
   });
-  const response = await fetch(`/api/${path}`, init);
   const data = await response.json();
   if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status });
   const viewer = response.headers.get('X-Flock-Viewer');
@@ -253,63 +256,6 @@ function setConnection(state) {
   elements.connection.dataset.state = state;
   elements['connection-text'].textContent = state === 'offline' ? 'Can’t reach Flock. Reconnecting…' : '';
   renderHeader();
-}
-let themeSwitchTimer = 0;
-function resolvedTheme(mode) {
-  return mode === 'system'
-    ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-    : mode;
-}
-function syncThemeIndicator(animate = false) {
-  const group = elements['theme-switch'];
-  const active = group?.querySelector('button[aria-pressed="true"]');
-  if (!group || !active || !active.offsetWidth) return;
-  const x = `${active.offsetLeft}px`;
-  const w = `${active.offsetWidth}px`;
-  const wasReady = group.classList.contains('seg-ready');
-  if (wasReady && group.style.getPropertyValue('--seg-x') === x && group.style.getPropertyValue('--seg-w') === w) {
-    return;
-  }
-  if (animate && wasReady && !reducedMotion.matches) {
-    if (!group.classList.contains('seg-animated')) {
-      group.classList.add('seg-animated');
-      void group.offsetWidth;
-    }
-  } else {
-    group.classList.remove('seg-animated');
-  }
-  group.style.setProperty('--seg-x', x);
-  group.style.setProperty('--seg-w', w);
-  group.classList.add('seg-ready');
-}
-function renderTheme(mode, animate = false) {
-  for (const option of elements['theme-switch'].querySelectorAll('button')) {
-    option.setAttribute('aria-pressed', option.dataset.themeMode === mode);
-  }
-  syncThemeIndicator(animate);
-}
-function setTheme(mode) {
-  const group = elements['theme-switch'];
-  const active = group.querySelector('button[aria-pressed="true"]');
-  const prevMode = active?.dataset.themeMode ?? 'system';
-  const prevResolved = resolvedTheme(prevMode);
-  const nextResolved = resolvedTheme(mode);
-  save('flock-theme', mode);
-  if (!reducedMotion.matches) {
-    if (group.classList.contains('seg-ready')) group.classList.add('seg-animated');
-    if (prevResolved !== nextResolved) {
-      const root = document.documentElement;
-      root.classList.add('theme-switching');
-      clearTimeout(themeSwitchTimer);
-      themeSwitchTimer = setTimeout(() => {
-        root.classList.remove('theme-switching');
-        themeSwitchTimer = 0;
-      }, 260);
-    }
-    void document.documentElement.offsetWidth;
-  }
-  renderTheme(mode, true);
-  document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
 }
 const mainElement = byId('main');
 const navBackdrop = byId('nav-backdrop');
@@ -684,15 +630,14 @@ function createSidebarEntry(botId) {
         toggle.setAttribute('aria-label', `${bot.name} menu`);
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
-      // A Bot blocked on the person says so in place of its last message, so the row reads at a glance.
-      const waiting = bot.presence === 'waiting';
-      const previewLabel = waiting ? 'Waiting for you' : bot.preview || '';
+      const showWaitingPreview = bot.presence === 'waiting' && !count;
+      const previewLabel = showWaitingPreview ? stateLabels.waiting : bot.preview || '';
       if (previewText.data !== previewLabel) previewText.data = previewLabel;
-      preview.classList.toggle('waiting', waiting);
-      if (waiting) preview.setAttribute('aria-hidden', 'true');
+      preview.classList.toggle('waiting', showWaitingPreview);
+      if (showWaitingPreview) preview.setAttribute('aria-hidden', 'true');
       else preview.removeAttribute('aria-hidden');
       const hasPresence = activePresence.has(bot.presence);
-      presenceDot.hidden = !waiting;
+      presenceDot.hidden = !showWaitingPreview;
       dots.hidden = !busyPresence.has(bot.presence);
       preview.hidden = !previewLabel && dots.hidden;
       pinPresence.hidden = !pinned || !hasPresence;
@@ -928,7 +873,6 @@ function renderHeader() {
     scopeAvatar?.destroy();
     scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
     if (bot) elements['activity-scope-name'].textContent = bot.name;
-    // Accent tokens follow the open Bot, including its Bot-to-Bot DMs; the empty state keeps Flock purple.
     if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
     else document.documentElement.style.removeProperty('--bot-accent');
   }
@@ -1085,7 +1029,7 @@ function renderActivity() {
     const rows = pending.map((item) => {
       const status = decisionKindLabels[item.itemKind] ?? 'Needs you';
       const title = item.itemKind === 'policy_approval' && item.action
-        ? [actionLabel(item.action), item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
+        ? [actionLabel(item.action), item.displayTarget ?? item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
       const row = activityRow('button', 'wait-row', title, status, 'waiting');
       row.type = 'button';
       row.title = item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title;
@@ -1295,11 +1239,6 @@ function channelLabel(kind) {
   if (kind === 'imessage') return 'via iMessage';
   return 'via external channel';
 }
-function reasonText(text) {
-  const reason = node('p', 'event-reason');
-  reason.append(node('span', 'sr-only', 'Reason: '), document.createTextNode(text));
-  return reason;
-}
 function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
   const time = node('time', 'msg-time', clock.format(timestamp));
@@ -1450,7 +1389,7 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     const request = context.pendingSource = { id };
     let page;
     try {
-      page = await api(botQuery('conversation', context.id, id + 1), undefined, signal);
+      page = await api(botQuery('conversation', context.id, id + 1), undefined, { signal });
     } catch {}
     if (context !== view || context.pendingSource !== request) return;
     context.pendingSource = null;
@@ -1588,7 +1527,6 @@ function eventCard(event, context, place, report) {
     copy = waitText(data, { spokenByBot: true });
     text.textContent = copy;
     bubble.append(text);
-    if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
     const choices = pendingWait?.wait.choices ?? data.choices;
     if (!context.canDecide && choices?.length) bubble.append(readOnlyChoices(choices));
     if (context.canDecide && pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
@@ -1634,7 +1572,7 @@ function eventCard(event, context, place, report) {
         bubble.append(link);
       }
     }
-    replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
+    replyTarget = ['Reply to this review', { kind: 'review', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
       : data.report || (data.destination ? 'No Session report is available.' : 'The session submitted a report.');
@@ -1665,7 +1603,6 @@ function eventCard(event, context, place, report) {
     if (link) text.append(link);
     bubble.append(text);
     if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
-    if (data.reason) bubble.append(reasonText(data.reason));
   } else {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     if (event.kind === 'conversation_message' && typeof data.textHtml === 'string') {
@@ -1740,7 +1677,7 @@ function eventCard(event, context, place, report) {
     actions.append(control);
   }
   if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
+    const reply = iconButton('reply', 'Answer this question', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
     reply.disabled = decisions.busy(taskWaitDecision(view.id, pendingWait));
     actions.append(reply);
   }
@@ -1839,7 +1776,7 @@ function leavePeerConversation(updateHistory = true) {
 
 function peerThread(events, dm, keep) {
   if (!events.length) {
-    const title = dm.error ? 'DM unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
+    const title = dm.error ? 'Conversation unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
     return [keep('empty', [title, dm.error], () => {
       const empty = node('div', 'empty-state');
       empty.append(node('h2', null, title));
@@ -1995,7 +1932,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const dm = view.dm;
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
     if (!changed('timeline', dm.id, dm.peerId, dm.anchor, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
-    scroller.setAttribute('aria-label', 'Bot DM history');
+    scroller.setAttribute('aria-label', 'Conversation between Bots');
     updateTimelineRows(dm, (keep) => peerThread(events, dm, keep));
     moveScroll();
     if (dm.pendingViewMotion && elements.timeline.childElementCount > 0) {
@@ -2218,7 +2155,6 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
 }
-const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
 const activeReply = (composer) => decisions.reviewReply() ?? composer.reply;
 const screenshotAnchor = (reply) => reply?.messageId ?? 0;
@@ -2316,6 +2252,35 @@ function fitMessage() {
   // Measuring the textarea briefly frees space and can clamp the timeline's scroll position.
   if (atBottom) scroller.scrollTop = scroller.scrollHeight;
 }
+
+function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
+  const answering = target?.kind === 'wait';
+  const reviewing = target?.kind === 'review';
+  const working = ['working', 'thinking'].includes(data.presence);
+  const fieldLabel = answering ? 'Write your answer' : reviewing ? 'Reply to this review' :
+    target ? 'Write a reply' : 'Message';
+  elements['decision-reply-context'].hidden = !inboxReply;
+  elements['reply-context'].hidden = !target || inboxReply;
+  elements['compose-label'].textContent = fieldLabel;
+  elements.message.placeholder = suggestion ? `${suggestion.text} (press Enter to use this suggestion)` :
+    target ? fieldLabel : working ? `Guide ${data.bot.name} while it works` : `Message ${data.bot.name}`;
+  const sendLabel = answering ? 'Send answer' : target ? 'Send reply' : 'Send message';
+  elements.send.setAttribute('aria-label', sendLabel);
+  elements.send.title = sendLabel;
+
+  const summaryId = inboxReply ? 'decision-reply-target' : 'reply-summary';
+  elements.message.setAttribute('aria-describedby', target ? `${summaryId} notice` : 'notice');
+  if (!target) return;
+
+  let summary = target.summary;
+  if (!summary && target.messageId) {
+    const source = events.get(target.messageId)?.data;
+    if (source) summary = answering ? waitText(source) : reviewing ? source.title : source.report ?? source.text;
+  }
+  elements[inboxReply ? 'decision-reply-label' : 'reply-label'].textContent = answering ? 'Answering' : 'Replying to';
+  elements[summaryId].textContent = summary || (answering ? waitLabel('user_question') : 'Earlier message');
+}
+
 function renderComposer() {
   const context = view;
   const readOnly = context?.data?.canDecide === false;
@@ -2326,7 +2291,6 @@ function renderComposer() {
   elements['view-only-notice'].hidden = !available || canDecide;
   const decision = canDecide ? decisions.composer() : null;
   const review = canDecide ? decisions.reviewReply() : null;
-  elements['decision-reply-context'].hidden = !decision && !review;
   if (!canDecide || !context.composer) {
     composition = null;
     elements['composer-ghost'].hidden = true;
@@ -2343,27 +2307,14 @@ function renderComposer() {
   const body = decision?.text ?? composer.textAt(screenshotAnchor(reply));
   const busy = !!decision?.busy || sendingMessages.has(composer);
   const closedReply = closedQuestion(context, reply);
-  const source = reply && context.events.get(reply.messageId)?.data;
-  const summary = reply?.summary ?? (source && (reply.kind === 'wait' ? waitText(source) : source.report ?? source.text));
-  if (decision || review) {
-    elements['decision-reply-label'].textContent = 'Replying to';
-    elements['decision-reply-target'].textContent = decision?.item.requestTitle ?? review.summary;
-  }
-  elements['reply-context'].hidden = !reply || !!review;
-  elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
-  elements['reply-question'].textContent = reply ? summary ?? 'Earlier message' : '';
-  elements['compose-label'].textContent = decision ? `Replying to ${decision.item.requestTitle}` :
-    review ? `Replying to ${review.summary}` : reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
-  const working = ['working', 'thinking'].includes(context.data.presence);
-  elements.message.placeholder = (decision || review) ? 'Ask a question or give direction' :
-    reply ? 'Write a reply' : working ? `Guide ${context.data.bot.name} while it works` : `Message ${context.data.bot.name}`;
   const suggestion = nextSuggestion(context);
+  const target = decision ? { kind: 'wait', summary: decision.item.prompt?.trim() } : reply;
+  renderComposerCopy(context, target, !!(decision || review), suggestion);
   const ghost = elements['composer-ghost'];
   ghost.hidden = !suggestion;
   ghost.firstElementChild.textContent = suggestion?.text ?? '';
   elements.message.classList.toggle('has-ghost', !!suggestion);
-  if (suggestion) elements.message.placeholder = `${suggestion.text} (press Enter to use this suggestion)`;
   if (!composition && elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
@@ -2377,9 +2328,6 @@ function renderComposer() {
   elements.send.disabled = busy || !!composition || closedReply || !!decision?.blocked || !!screenshots?.loading ||
     !body.trim() || byteLength(body) > (decision ? 8000 : composerLimit(reply));
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
-  const sendLabel = decision ? 'Send written answer' : reply ? 'Send reply' : 'Send message';
-  elements.send.setAttribute('aria-label', sendLabel);
-  elements.send.title = sendLabel;
   const screenshotError = !busy && !closedReply && screenshots?.error;
   elements.notice.textContent = notice?.isError ? notice.text :
     (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
@@ -2391,28 +2339,39 @@ function renderComposer() {
 const detailNav = byId('detail-nav');
 const settingsSections = {
   general: ['General', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
-  cron: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
+  recurring: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
 };
+const settingsTabs = Object.keys(settingsSections);
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
+let detailRole = null;
+let detailWorkspace = null;
 let detailOrigin = null;
+let recurringRequests = null;
 
 function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
   detailAvatar = null;
 }
-const roleSize = new ResizeObserver(([{ target: soul }]) => {
-  const lineHeight = parseFloat(getComputedStyle(soul).lineHeight);
-  soul.nextElementSibling.hidden = soul.scrollHeight <= Math.ceil(8 * lineHeight);
-});
+function releaseDetailRole() {
+  detailRole?.dispose();
+  detailRole = null;
+}
 let detailSectionTimer = 0;
 function clearDetailSectionTransition() {
   clearTimeout(detailSectionTimer);
   detailSectionTimer = 0;
   elements['detail-body'].classList.remove('section-switching');
 }
+function setDetail(selection) {
+  releaseDetailRole();
+  detailWorkspace = null;
+  recurringRequests?.close();
+  recurringRequests = selection?.kind === 'settings' ? createRecurringRequests(view.id, api) : null;
+  detail = selection;
+}
 function closeDetail() {
-  detail = null;
+  setDetail(null);
   clearDetailSectionTransition();
   releaseDetailAvatar();
   if (elements.detail.open) elements.detail.close();
@@ -2421,7 +2380,7 @@ function openDetail(selection) {
   if (!view?.data) return;
   decisions.close({ focus: false });
   clearDetailSectionTransition();
-  detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
+  setDetail(selection.kind === 'settings' ? { section: 'general', ...selection } : selection);
   signatures.delete('detail');
   renderDetail();
   if (elements.detail.open) return;
@@ -2437,18 +2396,15 @@ elements.detail.addEventListener('cancel', (event) => {
 });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
+  setDetail(null);
   clearDetailSectionTransition();
   releaseDetailAvatar();
-  roleSize.disconnect();
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
   if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
 });
 
-function sectionsFor(bot) {
-  return bot.cron.length ? ['general', 'cron'] : ['general'];
-}
 function selectSection(section, focus = false) {
   if (detail?.kind !== 'settings' || detail.section === section) return;
   detail.section = section;
@@ -2514,6 +2470,34 @@ function settingsRow(label, value, click) {
   if (click) row.insertAdjacentHTML('beforeend', chevron);
   return row;
 }
+function pullRequestSetting(bot) {
+  const row = node('label', 'settings-row');
+  const label = node('span', 'settings-row-label', 'Fix failing checks and review feedback');
+  const toggle = node('input', 'settings-row-switch');
+  const feedback = node('span', 'settings-card-feedback error');
+  feedback.setAttribute('role', 'status');
+  toggle.type = 'checkbox';
+  toggle.checked = bot.fixPullRequests;
+  toggle.disabled = !bot.canDelete;
+  toggle.addEventListener('change', async () => {
+    const fixPullRequests = toggle.checked;
+    toggle.disabled = true;
+    feedback.textContent = '';
+    try {
+      const saved = await api('bots/profile', { botId: bot.id, fixPullRequests });
+      toggle.checked = saved.fixPullRequests;
+      if (view?.id === bot.id) void view.refresh();
+    } catch {
+      toggle.checked = !fixPullRequests;
+      feedback.textContent = 'Couldn’t save this change. Try again.';
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+  label.append(feedback);
+  row.append(label, toggle);
+  return row;
+}
 let reopenSettingsOnClose = false;
 const botEditor = createBotEditor(elements['bot-editor'], {
   api,
@@ -2549,7 +2533,6 @@ function openNewBot(origin = elements['new-bot-button']) {
   botEditor.openCreate({ bots, origin });
 }
 
-// The header avatar is hidden in a Bot DM; the conversation menu stays visible there.
 function headerFocusTarget() {
   return elements['profile-identity'].hidden ? conversationActionsTrigger : elements['profile-avatar-button'];
 }
@@ -2672,14 +2655,14 @@ function generalContent(bot) {
   renderNameDisplay();
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
-  if (!bot.soul) rows.append(settingsRow('Role', 'None'));
-  rows.append(bot.cron.length
-    ? settingsRow('Recurring requests', String(bot.cron.length), () => selectSection('cron', true))
-    : settingsRow('Recurring requests', 'None'));
+  rows.append(pullRequestSetting(bot));
+  const requests = settingsRow('Recurring requests', '', () => selectSection('recurring', true));
+  requests.querySelector('.settings-row-value').append(recurringRequests.count);
+  rows.append(requests);
   const settings = document.createElement('a');
   settings.className = 'settings-row';
   settings.href = '/settings/' + encodeURIComponent(bot.id);
-  settings.append(node('span', 'settings-row-label', 'Sharing and connections'));
+  settings.append(node('span', 'settings-row-label', 'Access'));
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
   if (bot.canDelete) {
@@ -2688,45 +2671,32 @@ function generalContent(bot) {
     remove.setAttribute('aria-haspopup', 'dialog');
     rows.append(remove);
   }
-  if (!bot.soul) return [hero, rows];
-  const role = node('section', 'settings-card settings-role');
-  const heading = node('h3', 'settings-card-label', 'Role');
-  heading.id = 'settings-role-label';
-  role.setAttribute('aria-labelledby', heading.id);
-  const soul = node('p', 'settings-soul', bot.soul);
-  soul.id = 'settings-role-text';
-  soul.dataset.folded = 'true';
-  const toggle = button('Show all', 'text-button settings-soul-toggle', () => {
-    const folded = soul.dataset.folded === 'true';
-    soul.dataset.folded = String(!folded);
-    toggle.textContent = folded ? 'Show less' : 'Show all';
-    toggle.setAttribute('aria-expanded', String(folded));
-  });
-  toggle.hidden = true;
-  toggle.setAttribute('aria-expanded', 'false');
-  toggle.setAttribute('aria-controls', soul.id);
-  role.append(heading, soul, toggle);
-  return [hero, role, rows];
+  return [hero, workspaceCard(bot), roleCard(bot), rows];
 }
-function cronContent(bot) {
-  const list = node('div', 'settings-card cron-list');
-  for (const item of bot.cron) {
-    const row = node('div', 'cron-row');
-    const when = node('p', 'cron-when');
-    when.append(
-      node('span', null, item.active ? 'Active' : 'Configured only'),
-      node('code', 'cron-expression', item.schedule),
-      node('span', 'cron-zone', item.timezone),
-    );
-    row.append(when, node('p', 'cron-request', item.request));
-    list.append(row);
-  }
-  return [list];
+function workspaceCard(bot) {
+  detailWorkspace ??= createBotWorkspaceCard(async (workspace) => {
+    const saved = await api('bots/profile', { botId: bot.id, ...workspace });
+    if (view?.id === bot.id) void view.refresh();
+    return saved;
+  }, async () => (await api('settings')).t3?.environments ?? [],
+  async () => (await api(botQuery('settings/models', bot.id))).models);
+  return detailWorkspace.element;
+}
+function roleCard(bot) {
+  detailRole ??= createBotRoleCard(async (soul, originalSoul) => {
+    const saved = await api('bots/profile', { botId: bot.id, soul, originalSoul }).catch((error) => {
+      if (error.message === 'role_changed' && view?.id === bot.id) void view.refresh();
+      throw error;
+    });
+    void refreshBots();
+    if (view?.id === bot.id) void view.refresh();
+    return saved.soul;
+  });
+  return detailRole.element;
 }
 function settingsContent(bot, section = 'general') {
-  // Without recurring requests there are no section tabs, so "General" would name nothing.
-  elements['detail-title'].textContent = section === 'general' && !bot.cron.length ? 'Settings' : settingsSections[section][0];
-  if (section === 'cron') return cronContent(bot);
+  elements['detail-title'].textContent = settingsSections[section][0];
+  if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
   return generalContent(bot);
 }
 function waitForm(label, fields, submit, id) {
@@ -2762,7 +2732,6 @@ function waitContent(context, task, deadlineDraft) {
   if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
   const reason = node('div', 'wait-reason');
   reason.append(node('p', 'wait-text', waitText(wait)));
-  if (wait.decisionReason) reason.append(node('p', 'wait-why', wait.decisionReason));
   if (wait.reason === 'deadline' && task.deadline)
     reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
   const content = [request, reason];
@@ -2845,31 +2814,33 @@ function labelDetail(label) {
 }
 function replaceDetail(render) {
   releaseDetailAvatar();
-  roleSize.disconnect();
-  const body = elements['detail-body'];
-  body.replaceChildren(...render());
-  const soul = body.querySelector('.settings-soul');
-  if (soul) roleSize.observe(soul);
+  const content = render();
+  if (detailRole && !content.includes(detailRole.element)) releaseDetailRole();
+  if (detailWorkspace && !content.includes(detailWorkspace.element)) detailWorkspace = null;
+  placeRows(elements['detail-body'], content);
   if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
 }
 function renderDetail() {
   if (!detail || !view) return;
   if (detail.kind === 'settings') {
     const bot = view.data.bot;
-    const sections = sectionsFor(bot);
-    if (!sections.includes(detail.section)) detail.section = 'general';
     labelDetail(`${bot.name} settings`);
-    renderDetailNav(sections, detail.section);
-    if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
+    renderDetailNav(settingsTabs, detail.section);
+    const { soul, environmentId, projectId, model, ...settings } = bot;
+    if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
+    const canEdit = bot.canDelete === true;
+    detailRole?.update(soul, canEdit);
+    detailWorkspace?.update({ environmentId, projectId, model }, canEdit);
     return;
   }
   labelDetail(null);
   renderDetailNav([], null);
   if (detail.kind === 'peers') {
+    const botName = view.data.bot.name;
     const peers = botPeers(view.id).map(({ id }) => participant(id));
-    if (changed('detail', detail, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
+    if (changed('detail', detail, botName, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
       const active = document.activeElement?.dataset.peerChoice;
-      elements['detail-title'].textContent = 'Bot DMs';
+      elements['detail-title'].textContent = `${botName} talks with`;
       const list = node('ul', 'peer-picker-list');
       for (const bot of peers) {
         const item = node('li');
@@ -2879,7 +2850,7 @@ function renderDetail() {
         item.append(link);
         list.append(item);
       }
-      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', 'No Bot DMs available.')]);
+      replaceDetail(() => peers.length ? [list] : [node('p', 'prose', `${botName} hasn’t talked with other Bots yet.`)]);
       if (active) [...list.querySelectorAll('a')].find((link) => link.dataset.peerChoice === active)?.focus();
     }
     return;
@@ -3193,7 +3164,7 @@ const findPanel = byId('conversation-find');
 const conversationFind = mountConversationFind({
   toggle: byId('find-conversation'),
   panel: findPanel,
-  readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, signal),
+  readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, { signal }),
   describeAuthor: (context, event) => {
     const side = messageSide(event);
     return side === 'user' ? 'You' : side === 'external' ? 'Other sender' : side === 'system' ? 'System' : context.data.bot.name;
@@ -3238,18 +3209,6 @@ const decisions = mountBoardInbox({
   },
 });
 
-function reflectTheme() {
-  renderTheme(document.documentElement.dataset.theme ?? 'system');
-}
-reflectTheme();
-document.addEventListener('flock-theme', reflectTheme);
-if (typeof ResizeObserver !== 'undefined') {
-  new ResizeObserver(() => syncThemeIndicator(false)).observe(elements['theme-switch']);
-}
-elements['theme-switch'].addEventListener('click', (event) => {
-  const option = event.target.closest('button[data-theme-mode]');
-  if (option) setTheme(option.dataset.themeMode);
-});
 elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
@@ -3345,7 +3304,6 @@ elements.detail.addEventListener('click', (event) => {
     closeDetail();
   }
 });
-elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open || !settingsReturnFocus) return;
   if (narrow.matches) openNavigation(true, false);

@@ -1,42 +1,11 @@
+import { actionButton, element, row, rowLabel } from '/settings-ui.js';
+
 const $ = (id) => document.getElementById(id);
 const editor = $('installation-editor');
 const feedback = $('installation-editor-status');
 let installation;
 let saving = false;
 let returnFocus;
-
-function element(tag, text, className) {
-  const node = document.createElement(tag);
-  if (text) node.textContent = text;
-  if (className) node.className = className;
-  return node;
-}
-
-export function emptyLabel(title, ...detail) {
-  const label = element('span', '', 'row-label');
-  label.append(element('strong', title));
-  if (detail.length) {
-    const description = element('small');
-    description.append(...detail);
-    label.append(description);
-  }
-  return label;
-}
-
-export function row(list, content) {
-  const item = element('div', '', 'settings-row');
-  item.append(content);
-  (typeof list === 'string' ? $(list) : list).append(item);
-  return item;
-}
-
-export function actionButton(item, label, onclick, primary = false) {
-  const control = element('button', label, primary ? 'button primary' : 'button');
-  control.type = 'button';
-  control.onclick = onclick;
-  item.append(control);
-  return control;
-}
 
 export function postSettings(path, data) {
   return fetch('/api/settings/' + path, {
@@ -173,7 +142,7 @@ function appendConnectionStates(container, {
 }
 
 function connectionRow(group, title, description, {manage, readOnly, ...status}) {
-  const item = row(group, emptyLabel(title, description));
+  const item = row(group, rowLabel(title, description));
   const actions = element('div', '', 'connection-actions');
   appendConnectionStates(actions, status);
   if (manage) {
@@ -184,14 +153,14 @@ function connectionRow(group, title, description, {manage, readOnly, ...status})
 }
 
 function restartNotice(group) {
-  const item = row(group, emptyLabel('Restart required', 'Saved changes will take effect when Flock next starts.'));
+  const item = row(group, rowLabel('Restart required', 'Saved changes will take effect when Flock next starts.'));
   item.classList.add('restart-notice');
 }
 
 function entriesList(entries, description, {edit, remove, test, status} = {}) {
   const group = element('div', '', 'settings-group');
   for (const entry of entries) {
-    const item = row(group, emptyLabel(entry.id, description(entry)));
+    const item = row(group, rowLabel(entry.id, description(entry)));
     const actions = element('div', '', 'row-actions');
     const states = element('span', '', 'connection-states');
     const renderStates = () => {
@@ -342,7 +311,7 @@ function editChannel(type, entry = {}) {
     if (credential) body.credential = credential;
     return saveInstallation('channels', body);
   }, actions);
-  openEditor(title, 'Register a bridge running on the Flock host. Choose which Bot replies from that Bot’s sharing settings.',
+  openEditor(title, 'Register a bridge running on the Flock host. Choose which Bot replies from its Access page.',
     list, checkResult, form);
 }
 
@@ -622,7 +591,7 @@ async function activatePassword(person, password) {
 function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
   $('access').replaceChildren();
   if (mode === 'local') {
-    const item = row('access', emptyLabel('Private to this computer', 'Enable shared access to create sign-ins for other people.'));
+    const item = row('access', rowLabel('Private to this computer', 'Enable shared access to create sign-ins for other people.'));
     if (pendingUntil) {
       const actions = element('div', '', 'row-actions');
       actionButton(actions, 'Generate new password', prepareAccess);
@@ -632,18 +601,18 @@ function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
     } else actionButton(item, 'Enable sharing', prepareAccess, true);
     return;
   }
-  if (mode === 'external') row('access', emptyLabel('Managed on the host', 'The host supplies the login credentials for this Flock.'));
+  if (mode === 'external') row('access', rowLabel('Managed on the host', 'The host supplies the login credentials for this Flock.'));
   else if (mode === 'managed') {
-    const item = row('access', emptyLabel('Shared access', 'Sign-in is required to use this Flock.'));
+    const item = row('access', rowLabel('Shared access', 'Sign-in is required to use this Flock.'));
     actionButton(item, 'Invite someone', invitePerson, true);
   } else {
-    row('access', emptyLabel('Access settings unavailable', 'Sign in as an installation administrator to manage access.'));
+    row('access', rowLabel('Access settings unavailable', 'Sign in as an installation administrator to manage access.'));
     return;
   }
   for (const {person, adminRoot, pendingUntil: pendingPassword} of users) {
     const owner = person === 'local-owner';
     const role = owner ? 'Installation owner' : adminRoot ? 'Administrator' : 'Member';
-    const item = row('access', emptyLabel(person, person === currentPerson ? `${role} · You` : role));
+    const item = row('access', rowLabel(person, person === currentPerson ? `${role} · You` : role));
     if (mode !== 'managed') continue;
     const actions = element('div', '', 'row-actions');
     if (!owner) actionButton(actions, 'Change role', () => changeRole({person, adminRoot}));
@@ -685,13 +654,13 @@ function systemValues(title, current, next) {
     field.append(element('b', label), ' ', String(value));
     values.append(field);
   }
-  return emptyLabel(title, values);
+  return rowLabel(title, values);
 }
 
 function renderSystem(state) {
   $('system').replaceChildren();
   if (!state) {
-    row('system', emptyLabel('Server settings unavailable', 'Sign in as an installation administrator to manage this server.'));
+    row('system', rowLabel('Server settings unavailable', 'Sign in as an installation administrator to manage this server.'));
     return;
   }
   const {active, next, saved, overrides, restartRequired} = state;

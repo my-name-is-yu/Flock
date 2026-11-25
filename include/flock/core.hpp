@@ -280,7 +280,10 @@ using WebIdentityResolver = std::function<std::optional<bool>(std::string_view p
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
-    explicit Store(std::filesystem::path database, MemorySeed = {});
+    using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&,
+                                                       const std::function<void()>&)>;
+    using EditConfiguredSchedules = std::function<void(const CommitConfiguredSchedules&)>;
+    explicit Store(std::filesystem::path database, MemorySeed = {}, IntakeResolver automationIntake = {});
     ~Store();
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;
@@ -290,11 +293,13 @@ public:
     void deleteBot(const Person&, std::string_view bot);
     Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
     Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
-    Json automations(const Person&, std::string_view bot, Id before = 0) const;
+    Json automations(const Person&, std::string_view bot, Id before = 0, bool activeOnly = false) const;
     Json activeConfiguredSchedules(std::string_view bot) const;
     Json cancelAutomation(const Person&, std::string_view bot, Id id);
     [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
         std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
+    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
+        std::string_view bot, Seconds now, const EditConfiguredSchedules&);
     void pruneAutomations(const std::vector<std::string>& configuredBots);
     void fireDueAutomations(Seconds now);
     Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,

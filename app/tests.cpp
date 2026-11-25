@@ -884,6 +884,17 @@ void botProfilesAndAvatars() {
           renamed.at("avatar").at("version") == uploaded.at("avatar").at("version"),
           "renaming Bot lost existing uploaded image");
 
+    const auto described = bots.updateProfile("scout",{
+        {"soul"," \tScouts new releases.\n"},{"originalSoul",created.at("soul")},
+    });
+    check(described.at("soul") == "Scouts new releases." && bots.soul("scout") == "Scouts new releases." &&
+          described.at("name") == "Scout Renamed" &&
+          described.at("avatar").at("version") == uploaded.at("avatar").at("version"),
+          "role update failed to save the text or changed the name or avatar");
+    const auto cleared = bots.updateProfile("scout",{{"soul"," \n\t"},{"originalSoul",described.at("soul")}});
+    check(cleared.at("soul") == "" && !std::filesystem::exists(temp.path / "bots" / "scout" / "SOUL.md"),
+          "clearing a Bot role left SOUL.md behind");
+
     // Replacing with GIF deletes old PNG file and updates version hash.
     const auto replaced = bots.updateProfile("scout",{
         {"name","Scout Renamed"},
@@ -959,6 +970,32 @@ void botProfilesAndAvatars() {
     std::ifstream bigFile(bigDir / "config.json");
     check(std::string(std::istreambuf_iterator<char>(bigFile),{}) == bigText,"rejected save changed config.json");
 }
+
+void pullRequestSettings() {
+    Sandbox temp;
+    const auto root = temp.path / "bots";
+    const auto folder = root / "release";
+    const auto config = botConfig();
+    createBot(folder,config,"Review releases","");
+    Bots bots(root);
+    check(bots.get("release").settings.value("fixPullRequests",true),"PR follow-ups did not default to on");
+
+    const auto saved = bots.updateProfile("release",{{"fixPullRequests",false}});
+    check(saved.at("fixPullRequests") == false && saved.at("soul") == "Review releases",
+          "turning off PR follow-ups lost the Bot role");
+    std::ifstream file(folder / "config.json");
+    auto expected = config;
+    expected["fixPullRequests"] = false;
+    check(Json::parse(file) == expected && Bots(root).get("release").settings.at("fixPullRequests") == false,
+          "the PR setting was not persisted or an unrelated setting changed");
+
+    expected["fixPullRequests"] = true;
+    write(folder / "config.json",expected.dump());
+    check(bots.get("release").settings.at("fixPullRequests") == true,"the current PR setting was not read from config");
+    expected["fixPullRequests"] = "false";
+    write(folder / "config.json",expected.dump());
+    rejects<Conflict>([&] { bots.get("release"); },"a non-boolean PR setting was accepted");
+}
 }
 
 int main() {
@@ -982,6 +1019,7 @@ int main() {
         fixedDemoFollowUpKeepsTheExplainedResult();
         botCreationCollisionIsRecoverable();
         botProfilesAndAvatars();
+        pullRequestSettings();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

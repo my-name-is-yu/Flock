@@ -53,7 +53,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(
     const auto key = tool_batch::turnCallKey(message.id,step);
     const bool offered = decision.rejection.empty();
     if (offered || effectType == "object") {
-        if (tool == "message_session")
+        if (tool == "message_session" || tool == "fix_pull_request")
             return sendSessionMessage(message,step,decision,key,ctx.hasWebEvidence,ctx.t3,ctx.shutdown);
         if (tool == "interrupt_session")
             return runSessionEffect(message,step,decision,key,offered,ctx.hasWebEvidence,ctx.t3,ctx.shutdown);

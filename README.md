@@ -21,6 +21,8 @@ build concurrency.
 
 ## Configure a Bot
 
+Edit the Bot's instructions under **Role** in its Web settings.
+
 The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.
 
 ```json
@@ -34,6 +36,7 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
   },
   "runTimeoutSeconds": 1800,
   "modelCallLimit": 20,
+  "fixPullRequests": true,
   "session": {
     "runtimeMode": "approval-required"
   }
@@ -99,6 +102,8 @@ See [Ask a Bot from a T3 Session](web/README.md#ask-a-bot-from-a-t3-session) for
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. With T3, additional instructions for an active task are saved for its next safe point. Asking the Bot to implement a completed result starts a new task linked to that result.
 
 To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock message release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
+
+In a Bot’s settings, open **Recurring requests** to add or remove scheduled requests. You can also ask the Bot in its conversation. Requests defined in `config.json` appear in the list and are managed in that file.
 
 ```sh
 build/app/flock --help
@@ -236,6 +241,17 @@ as needed. Events with a matching watch go to the owning Bot, which needs
 `read` on the repository. A workflow job event without a PR number is matched
 by its commit SHA using the current watch and recorded PR synchronization events.
 
+When a Bot opens a PR you requested, it can ask the Session that prepared it
+to fix a failing check or address actionable review feedback on the same branch.
+The Bot cites comments and logs as evidence and reports whether it sent a fix
+request. The installation's Session-send policy applies. Supervised mode can
+ask for approval in Flock. The Bot makes up to two automatic requests per PR
+until it receives another message from the original requester, then reports the
+problem and asks how to proceed. Other watched PRs receive reports.
+
+Use **Fix failing checks and review feedback** in the Bot's **General** settings
+to turn this off. It is on by default.
+
 A lost PR creation response leaves a durable operation. Asking the Bot to retry
 with the same exact repository and branch pair checks for the original PR
 across all states. If its identity remains unresolved, the Decision Inbox shows
@@ -301,7 +317,7 @@ and proxy only its artifact preview path to Flock. Published links contain
 random access tokens, honor current workspace permission, and serve sandboxed HTML.
 
 Local machine entries name the Flock host and its owner. The owner can review
-requests under **Sharing and connections → Local machine connections**. Open
+requests under **Flock settings → Bots → Access → Connected computers**. Open
 approval links in a browser on the Flock host, where Web listens on loopback. Each
 approval lists exact absolute paths for `read_file` or `list_directory`
 within one active Session. A trusted Session bridge authenticates the caller

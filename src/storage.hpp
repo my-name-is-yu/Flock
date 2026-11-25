@@ -160,6 +160,7 @@ struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
     const MemorySeed memorySeed;
+    const IntakeResolver automationIntake;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     class SessionEvidence;
@@ -236,11 +237,14 @@ struct Store::Impl {
                 Seconds now, bool fromBot = false);
     Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
     Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
+    std::vector<ScheduleImportError> stageConfiguredSchedules(
+        std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
     void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
-    Json automations(std::string_view bot, Id before) const;
+    Json automations(std::string_view bot, Id before, bool activeOnly = false) const;
     Json cancelAutomation(std::string_view bot, Id id);
     void fireDueAutomations(Seconds now);
     void fireAutomation(Id, const Statement&, Seconds now);
+    Json automationRoute(std::string_view bot, Json routing) const;
     SecretRedactor sharedRedactor() const;
     void initializeBoardInboxSchema();
     Statement actionablePrReviews(std::string_view bot) const;
@@ -253,9 +257,20 @@ struct Store::Impl {
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
     Id latestGitWebhookId() const;
-    std::set<GitPrKey> gitPrMutationsInFlight;
+    std::multiset<GitPrKey> gitPrMutationsInFlight, gitFeedbackMutationsInFlight;
     class GitPrMutationClaim;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
+    struct GitPrFollowup {
+        enum class Status { available, attempted, limitReached };
+        SessionTarget session;
+        PolicyOrigin origin;
+        std::string operation;
+        Json target;
+        Status status;
+    };
+    std::optional<GitPrFollowup> gitPrFollowup(const conversation::Message&);
+    std::string gitPrFollowupInstruction(const conversation::Message&, const GitPrFollowup&, const Decision&) const;
+    void recordGitPrFollowup(const conversation::Message&, const GitPrFollowup&);
     bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
     bool watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest&,
                     GitWatchStart = GitWatchStart::operationIntent);
@@ -284,7 +299,7 @@ struct Store::Impl {
     bool permitsWorkSession(Id sourceMessageId, const WorkSession&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
-    explicit Impl(std::filesystem::path path, MemorySeed);
+    explicit Impl(std::filesystem::path path, MemorySeed, IntakeResolver);
     ~Impl();
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
@@ -356,6 +371,7 @@ struct Store::Impl {
         int step;
         Id taskId = 0;
         std::string actionId;
+        bool notify;
     };
     std::map<Id,SessionSendReceipt> sessionSendReceipts;
     void recordSessionSendRun(Id, const SessionSendReceipt&);

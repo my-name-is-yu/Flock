@@ -27,6 +27,7 @@ Example `bots/release/config.json`
   "projectId": "CANONICAL_T3_PROJECT_ID",
   "allowedBots": ["verifier"],
   "runTimeoutSeconds": 1800,
+  "fixPullRequests": true,
   "session": {
     "runtimeMode": "approval-required"
   },
@@ -57,6 +58,10 @@ optionally set `branch`. To use an existing worktree, set `type` to
 
 If a task is waiting for a Session settings correction, update its Bot's
 `config.json` and reconcile the task to retry the unsent action.
+
+Set `fixPullRequests` to `false` to receive PR notifications without automated
+fix requests. The setting defaults to `true` and can also be changed from the
+Bot's **General** settings. See [GitHub repositories and PR notifications](../README.md#github-repositories-and-pr-notifications).
 
 Add the IDs of Bots that this Bot may contact to `allowedBots`. It defaults
 to an empty list. For the example above, set up `bots/verifier/` with its own

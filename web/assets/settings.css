@@ -2,10 +2,10 @@ main { max-width: 40rem; margin: 0 auto; padding: var(--space-5) var(--space-4) 
 .settings-back {
   display: inline-flex; align-items: center; gap: .15rem; margin-inline-start: -.35rem;
   padding: .3rem .45rem .3rem .2rem; border-radius: var(--radius-sm);
-  color: var(--accent); font-size: var(--text-sm); font-weight: 600; text-decoration: none;
+  color: var(--text-2); font-size: var(--text-sm); font-weight: 600; text-decoration: none;
   transition: background-color .16s ease, color .16s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
 }
-.settings-back:hover { background: var(--hover); }
+.settings-back:hover { background: var(--hover); color: var(--text); }
 .settings-back:active { transform: scale(.97); }
 .settings-back svg {
   width: 1.1rem; height: 1.1rem;
@@ -26,31 +26,16 @@ section {
   margin-block-end: var(--space-5);
   animation: settings-section-in 220ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
 }
-:is(#administration, #policy) > section:nth-child(2 of :not([hidden])) { animation-delay: 40ms; }
-:is(#administration, #policy) > section:nth-child(3 of :not([hidden])) { animation-delay: 80ms; }
 @keyframes settings-section-in {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }
 }
 h2 { margin: 0 0 var(--space-2); padding-inline: .2rem; font-size: var(--text-sm); font-weight: 600; color: var(--text-2); }
-section > p, #machines > div, :is(#inputs, #rules, #people, #connections) > p, form {
-  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; padding: .7rem .9rem; background: var(--raised);
+section > p, form {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; padding: .7rem .9rem;
+  border-radius: var(--radius-lg); background: var(--raised);
 }
-:is(section > p, #machines > div, form, :is(#inputs, #rules, #people, #connections) > p) { border-radius: var(--radius-lg); }
-:is(#inputs, #rules, #people, #connections, #machines) > :is(p, div):not(:last-child) { border-end-start-radius: 0; border-end-end-radius: 0; }
-:is(#inputs, #rules, #people, #connections, #machines) > :is(p, div):not(:first-child) { border-start-start-radius: 0; border-start-end-radius: 0; }
-:is(#people):not(:empty) > p:last-child { border-end-start-radius: 0; border-end-end-radius: 0; }
-:is(#people):not(:empty) + form { border-start-start-radius: 0; border-start-end-radius: 0; }
 section > p { color: var(--text-2); font-size: var(--text-sm); }
-:is(#inputs, #rules, #people, #connections) > p {
-  justify-content: space-between; overflow-wrap: anywhere;
-  transition: background-color .15s ease;
-}
-@media (hover: hover) and (pointer: fine) {
-  :is(#inputs, #rules, #people, #connections) > p:hover { background: var(--hover); }
-}
-:is(#inputs, #rules, #people, #connections) > p:not(:last-child), :is(#people) > p:last-child { border-block-end: 1px solid var(--hairline); }
-:is(#inputs, #rules, #people, #connections) > p > button:first-of-type { margin-inline-start: auto; }
 form { align-items: end; }
 label { display: grid; gap: .25rem; font-size: var(--text-xs); color: var(--text-2); }
 label small { color: var(--text-3); }
@@ -72,22 +57,23 @@ input:focus-visible, select:focus-visible {
 .button {
   transition: background-color .15s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
 }
+:where(.settings-shell, .installation-dialog) .button:not(.primary, .danger, .quiet-danger) {
+  border: 1px solid var(--hairline); background: var(--canvas); color: var(--text);
+}
+:where(.settings-shell, .installation-dialog) .button:not(.primary, .danger, .quiet-danger):hover:not(:disabled) {
+  background: var(--hover);
+}
+.button.primary { background: var(--accent-fill); color: var(--on-accent); }
+.button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
 .button:active:not(:disabled) { transform: scale(.97); }
 form .button { min-height: 2.1rem; }
 .row-label { display: grid; gap: .1rem; min-width: 0; }
 .row-label strong { color: var(--text); font-size: var(--text-sm); font-weight: 600; }
 .row-label small { color: var(--text-3); font-size: var(--text-xs); overflow-wrap: anywhere; }
-.row-label code {
-  padding: .05rem .3rem; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text-2);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .95em;
-}
-#machines ul { margin: 0; padding-inline-start: 1.1rem; width: 100%; color: var(--text-2); font-size: var(--text-sm); }
-
 @media (prefers-reduced-motion: reduce) {
   section, #status:not(:empty) { animation: none; }
   .settings-back,
   .settings-back svg,
-  :is(#inputs, #rules, #people, #connections) > p,
   input,
   select,
   .button { transition: none; }
@@ -101,13 +87,6 @@ form .button { min-height: 2.1rem; }
 
 .not-found-home { display: inline-flex; text-decoration: none; }
 
-#people:has(+ form[hidden]) > p:last-child {
-  border-end-start-radius: var(--radius-lg); border-end-end-radius: var(--radius-lg); border-block-end: 0;
-}
-
-/* Flock settings: section headings over bordered groups of divided rows, each with its name and
-   description on the left and its control on the right. */
-/* A settings window: section list on the left, one section's grouped rows on the right. */
 .settings-shell { display: grid; grid-template-columns: 15rem minmax(0, 1fr); min-height: 100dvh; }
 .settings-nav {
   position: sticky; top: 0; align-self: start; display: grid; align-content: start; gap: 2px; height: 100dvh; overflow-y: auto;
@@ -127,7 +106,10 @@ form .button { min-height: 2.1rem; }
 main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var(--space-5) var(--space-5) var(--space-6); }
 .settings-header { margin-block-end: var(--space-5); }
 .settings-crumb { display: flex; align-items: baseline; gap: .55rem; margin: 0; font-size: var(--text-lg); font-weight: 600; }
-.settings-crumb > :first-child { color: var(--text-3); font-weight: 500; }
+.settings-crumb > :not(:last-child) { color: var(--text-3); font-weight: 500; }
+.settings-crumb a { text-decoration: none; }
+.settings-crumb a:hover { color: var(--text); }
+#crumb-bot { min-width: 0; overflow-wrap: anywhere; }
 .settings-crumb-sep { color: var(--text-3); font-weight: 400; }
 .settings-scope, .settings-help { color: var(--text-2); font-size: var(--text-sm); }
 .settings-scope { margin: .25rem 0 0; }
@@ -135,23 +117,23 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .settings-panel:not([hidden]) > section { animation: settings-section-in 220ms cubic-bezier(0.23, 1, 0.32, 1) backwards; }
 .row-actions { display: flex; flex-wrap: wrap; gap: .4rem; max-width: 100%; }
 .row-actions .button { text-decoration: none; }
-#rules:empty { display: none; }
-#rules:not(:empty) + .rule-form:not([hidden]),
-#connections:not(:empty) + .t3-connect-options:not([hidden]) { border-block-start: 1px solid var(--hairline); }
-#connections:empty { display: none; }
-#connections > .settings-row + .settings-row { border-block-start: 1px solid var(--hairline); }
+.settings-rows:empty { display: none; }
+.settings-rows:not(:empty) + .settings-row:not([hidden]) { border-block-start: 1px solid var(--hairline); }
 .settings-group form.rule-form { align-items: end; justify-content: flex-start; border-radius: 0; background: transparent; padding: .8rem 1rem; }
 .rule-form label { flex: 0 1 auto; }
 .rule-form .rule-target { flex: 1 1 12rem; }
 .rule-form .rule-target input { width: 100%; }
 .rule-form select { max-width: 15rem; }
 @media (max-width: 760px) {
-  .settings-shell { grid-template-columns: minmax(0, 1fr); }
+  .settings-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .settings-nav {
     position: sticky; z-index: 1; height: auto; display: flex; flex-wrap: wrap; align-items: center;
     padding: var(--space-2) var(--space-3); border-inline-end: 0; border-block-end: 1px solid var(--hairline);
   }
-  .settings-nav .settings-back { margin: 0 var(--space-2) 0 0; }
+  .settings-nav .settings-back {
+    flex: none; justify-content: center; gap: 0; min-width: 2rem; min-height: 2rem;
+    margin: 0; padding: 0; font-size: 0;
+  }
   .settings-nav a[data-section] { flex: none; }
   .settings-nav a[data-section] svg { display: none; }
   main.settings-page { padding: var(--space-4) var(--space-4) var(--space-6); }
@@ -173,6 +155,10 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .settings-row .row-label strong { font-weight: 550; }
 .settings-row .row-label small { color: var(--text-2); line-height: 1.45; }
 .settings-row > :not(.row-label) { flex: none; }
+.settings-row .secret-form { padding: 0; background: transparent; }
+.secret-form input { width: 14rem; max-width: 100%; }
+.machine-paths { margin: 0; padding-inline-start: 1rem; color: var(--text-2); font-size: var(--text-xs); }
+.machine-paths code { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .segmented { display: inline-flex; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
 .segmented label {
@@ -201,9 +187,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
   .segmented label, .settings-nav a[data-section] { transition: none; }
 }
 .settings-row-error .row-label strong { color: var(--danger); }
-.settings-row .button.primary { background: var(--accent-fill); color: var(--on-accent); }
-.settings-row .button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
-.settings-row a.button.primary { background: var(--accent-fill); color: var(--on-accent); }
 .settings-group .t3-connect-options { align-items: start; flex-direction: column; }
 .t3-connect-options details { width: 100%; }
 .t3-connect-options summary { cursor: pointer; width: fit-content; }
@@ -249,12 +232,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .installation-form :is(input, select) { width: 100%; }
 .installation-form-actions {
   display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2);
-}
-.installation-form-actions .primary, .installation-dialog .button.primary {
-  background: var(--accent-fill); color: var(--on-accent);
-}
-.installation-form-actions .primary:hover:not(:disabled), .installation-dialog .button.primary:hover:not(:disabled) {
-  background: var(--accent-fill-hover);
 }
 .installation-feedback {
   margin: var(--space-3) 0 0; padding: .55rem .7rem; border-radius: var(--radius-md);

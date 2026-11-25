@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS automations(
   UNIQUE(bot_id,config_id));
 CREATE INDEX IF NOT EXISTS automation_due ON automations(next_run_at) WHERE status='active' AND next_run_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS automation_bot ON automations(bot_id,id DESC);
+CREATE INDEX IF NOT EXISTS automation_active_bot ON automations(bot_id,id DESC) WHERE status='active';
 CREATE INDEX IF NOT EXISTS automation_source ON automations(json_extract(definition,'$.source'))
   WHERE status='active' AND kind='trigger';
 CREATE TABLE IF NOT EXISTS automation_firings(
@@ -142,20 +143,21 @@ VALUES(?,?,?,?,'active',?,?,?)
     return {{"id",last()},{"status","active"},{"nextRunAt",item.next ? Json(*item.next) : Json(nullptr)}};
 }
 
-Json Store::automations(const Person& actor, std::string_view bot, Id before) const {
+Json Store::automations(const Person& actor, std::string_view bot, Id before, bool activeOnly) const {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db,Transaction::Mode::read);
     if (!Policy(*p_).allows(actor,Action::bot_view,bot)) throw AccessDenied("Automation access denied");
-    auto result = p_->automations(bot,before);
+    auto result = p_->automations(bot,before,activeOnly);
     tx.commit();
     return result;
 }
 
-Json Store::Impl::automations(std::string_view bot, Id before) const {
-    auto rows = query(R"SQL(
+Json Store::Impl::automations(std::string_view bot, Id before, bool activeOnly) const {
+    const auto sql = std::string{R"SQL(
 SELECT id,bot_id,definition,status,next_run_at,created_by,created_at,config_id,error
-FROM automations WHERE bot_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 21
-)SQL",{bot,before,before});
+FROM automations WHERE bot_id=? AND (?=0 OR id<?)
+)SQL"} + (activeOnly ? "AND status='active' " : "") + "ORDER BY id DESC LIMIT 21";
+    auto rows = query(sql.c_str(),{bot,before,before});
     Json items = Json::array();
     Id next = 0;
     const auto scrub = redactor(bot);
@@ -208,11 +210,27 @@ Json Store::Impl::cancelAutomation(std::string_view bot, Id id) {
 
 std::vector<ScheduleImportError> Store::syncSchedules(
         std::string_view bot, const std::vector<ConfiguredSchedule>& schedules, Seconds now) {
+    return syncSchedules(bot,now,[&](const auto& commit) { commit(schedules,[] {}); });
+}
+
+std::vector<ScheduleImportError> Store::syncSchedules(
+        std::string_view bot, Seconds now, const EditConfiguredSchedules& edit) {
     if (now < 0 || now > lastAutomationTime) throw Conflict("Clock is outside the supported range");
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    if (p_->botDeleted(bot)) return {};
-    const auto scrub = p_->redactor(bot);
+    std::vector<ScheduleImportError> errors;
+    edit([&](const auto& schedules, const auto& publish) {
+        errors = p_->stageConfiguredSchedules(bot,schedules,now);
+        publish();
+        tx.commit();
+    });
+    return errors;
+}
+
+std::vector<ScheduleImportError> Store::Impl::stageConfiguredSchedules(
+        std::string_view bot, const std::vector<ConfiguredSchedule>& schedules, Seconds now) {
+    if (botDeleted(bot)) return {};
+    const auto scrub = redactor(bot);
     std::map<std::string_view,std::size_t> counts;
     for (const auto& schedule : schedules) ++counts[schedule.id];
 
@@ -223,17 +241,16 @@ std::vector<ScheduleImportError> Store::syncSchedules(
             if (!validBotId(schedule.id) || schedule.routing.botId != bot)
                 throw Conflict("Invalid configured schedule");
             if (counts.at(schedule.id) > 1) throw Conflict("Duplicate configured schedule ID");
-            p_->syncSchedule(schedule,now,scrub);
+            syncSchedule(schedule,now,scrub);
             configured.insert(schedule.id);
         } catch (const Conflict& error) {
             errors.push_back({scrub.text(schedule.id),error.what()});
         }
     }
-    p_->exec(R"SQL(
+    exec(R"SQL(
 UPDATE automations SET status='inactive',next_run_at=NULL,error=NULL WHERE bot_id=? AND status IN ('active','failed','delivered')
 AND config_id IS NOT NULL AND config_id NOT IN (SELECT value FROM json_each(?))
 )SQL",{bot,Json(configured)});
-    tx.commit();
     return errors;
 }
 
@@ -340,6 +357,22 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
     }
 }
 
+Json Store::Impl::automationRoute(std::string_view bot, Json routing) const {
+    if (!automationIntake) return routing;
+    try {
+        const auto current = automationIntake(bot,{}).config;
+        const auto model = field(current,"model");
+        const auto provider = field(current,"modelProvider");
+        if (!model.empty() && !provider.empty()) {
+            routing.at("config")["model"] = model;
+            routing.at("config")["modelProvider"] = provider;
+        }
+    } catch (const Conflict&) {
+        // Keep the saved model when the Bot configuration is temporarily unavailable.
+    }
+    return routing;
+}
+
 void Store::Impl::fireAutomation(Id id, const Statement& row, Seconds now) {
     const auto bot = row.string(0);
     const auto def = row.json(1);
@@ -360,7 +393,8 @@ void Store::Impl::fireAutomation(Id id, const Statement& row, Seconds now) {
             if (def.contains("label")) trigger["label"] = def.at("label");
             auto scrub = redactor(bot);
             trigger = scrub.record(std::move(trigger));
-            const auto task = submit(intake(bot,field(def,"request"),row.json(2)),0,nullptr,TaskSource::request,trigger);
+            const auto routing = automationRoute(bot,row.json(2));
+            const auto task = submit(intake(bot,field(def,"request"),routing),0,nullptr,TaskSource::request,trigger);
             const auto receipts = Json::array({{{"taskId",task},{"botId",bot},{"triggerId",id}}});
             exec("INSERT INTO automation_firings VALUES(?,?,?,?)",{key,bot,now,receipts});
         }
@@ -397,7 +431,7 @@ AND json_extract(definition,'$.source')=? ORDER BY id
         auto& receipts = received.try_emplace(bot,Json::array()).first->second;
         const auto def = rows.json(2);
         if (!matchesEvent(def.at("eventFilter"),event,scrub)) continue;
-        const auto routing = rows.json(3);
+        const auto routing = p_->automationRoute(bot,rows.json(3));
         const Json destination = {bot,routing};
         if (scrub.record(destination,SecretRedactor::Fields::external) != destination) continue;
         const auto request = bounded(scrub.text(field(def,"request")),maxRequestBytes);

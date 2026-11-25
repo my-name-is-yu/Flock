@@ -1,4 +1,5 @@
 #include "settings_routes.hpp"
+#include "views.hpp"
 #include "flock/memory_automation.hpp"
 
 #include <algorithm>
@@ -37,13 +38,31 @@ template<class F> void handle(const Request& req, Response& res, F run) {
     catch (const Conflict& error) { reply(res,409,{{"error",error.what()}}); }
 }
 
-std::string target(Store& store, const WebCallbacks& callbacks, const Person& actor,
-                   std::string bot, Action action) {
+Json requireBot(Store& store, const WebCallbacks& callbacks, const Person& actor,
+                std::string_view bot, Action action) {
     if (!store.policy().allows(actor,action,bot)) throw AccessDenied("Bot access denied");
-    const auto known = callbacks.bots();
-    if (std::ranges::none_of(known,[&](const Json& item) { return item.value("id",std::string{}) == bot; }))
-        throw Conflict("Bot not found");
-    return bot;
+    auto known = callbacks.bots();
+    const auto found = std::ranges::find_if(known,[&](const Json& item) { return field(item,"id") == bot; });
+    if (found == known.end()) throw Conflict("Bot not found");
+    return std::move(*found);
+}
+
+Json unscheduledRequests(Store& store, std::string_view bot, const Json& profile) {
+    auto requests = Json::array();
+    const auto configured = profile.find("cron");
+    if (configured == profile.end() || !configured->is_array() || configured->empty()) return requests;
+
+    const auto active = store.activeConfiguredSchedules(bot);
+    for (const auto& entry : *configured) {
+        if (!entry.is_object()) continue;
+        const auto request = field(entry,"request");
+        if (request.empty()) continue;
+        const auto saved = active.find(field(entry,"id"));
+        if (saved == active.end() || field(*saved,"cron") != field(entry,"schedule") ||
+            field(*saved,"timezone") != field(entry,"timezone") || field(*saved,"request") != request)
+            requests.push_back(request);
+    }
+    return store.policy().redactSecrets(bot,requests);
 }
 }
 
@@ -51,7 +70,8 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
     server.Get(R"(/api/memory(/history)?)",[&](const Request& req, Response& res) {
         handle(req,res,[&] {
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Action::bot_view);
+            const auto bot = req.get_param_value("bot");
+            requireBot(store,callbacks,actor,bot,Action::bot_view);
             Json args = Json::object();
             if (req.has_param("docId")) args["docId"] = req.get_param_value("docId");
             for (auto key : {"before","proposalsBefore","revisionId","proposalId"})
@@ -63,22 +83,34 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
         handle(req,res,[&] {
             const auto args = body(req);
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,args.at("botId").get<std::string>(),Action::bot_settings);
+            const auto bot = args.at("botId").get<std::string>();
+            requireBot(store,callbacks,actor,bot,Action::bot_settings);
             reply(res,200,store.memory(actor,bot,req.matches[1].str()+"_memory_edit",args));
         });
     });
     server.Get("/api/schedules",[&](const Request& req, Response& res) {
         handle(req,res,[&] {
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Action::bot_view);
-            reply(res,200,store.automations(actor,bot,req.has_param("before") ? queryId(req,"before") : 0));
+            const auto bot = req.get_param_value("bot");
+            const auto profile = requireBot(store,callbacks,actor,bot,Action::bot_view);
+            const auto before = req.has_param("before") ? queryId(req,"before") : 0;
+            const bool activeOnly = req.get_param_value("active") == "1";
+            auto page = store.automations(actor,bot,before,activeOnly);
+            if (activeOnly && !before) {
+                const auto policy = store.policy();
+                page["canManage"] = policy.allows(actor,Action::bot_settings,bot) && policy.allows(actor,Action::bot_decide,bot);
+                page["unscheduledRequests"] = unscheduledRequests(store,bot,profile);
+            }
+            res.set_header("Cache-Control","no-store");
+            reply(res,200,page);
         });
     });
     server.Post("/api/schedules",[&](const Request& req, Response& res) {
         handle(req,res,[&] {
             const auto args = body(req);
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,args.at("botId").get<std::string>(),Action::bot_settings);
+            const auto bot = args.at("botId").get<std::string>();
+            requireBot(store,callbacks,actor,bot,Action::bot_settings);
             auto routing = callbacks.intake(bot,args.at("request").get<std::string>());
             if (routing.botId != bot) throw Conflict("Bot route changed");
             reply(res,201,store.createAutomation(actor,routing,args,callbacks.clock()));
@@ -87,7 +119,8 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
     server.Delete("/api/schedules",[&](const Request& req, Response& res) {
         handle(req,res,[&] {
             const auto actor = person(callbacks,req);
-            const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Action::bot_settings);
+            const auto bot = req.get_param_value("bot");
+            requireBot(store,callbacks,actor,bot,Action::bot_settings);
             reply(res,200,store.cancelAutomation(actor,bot,queryId(req,"id")));
         });
     });

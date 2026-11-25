@@ -145,14 +145,26 @@ These endpoints require an installation root.
 
 ## Bot settings
 
-**Sharing and connections** contains shared members, pending protected inputs,
-and local machine connections for the Bot.
+In a Bot's **General** settings, **Fix failing checks and review feedback** lets
+the Bot ask the original Session to fix problems on PRs it opened for you. It is
+on by default. Turn it off to keep getting reports. If a fix request needs
+approval, review it in **Needs you**.
+
+Each Bot's **Access** page (Flock settings → Bots → Access) lists who can use
+the Bot, secrets it is waiting for, and connected computers.
 
 The creator owns the Bot. A root identity can manage all Bots. Shared members
 can view and talk to their Bot and answer its Decision Inbox items. With Web
 identities configured, the owner manages members in Bot settings.
 
 `GET /api/bot-settings?bot=ID` returns settings visible to that person.
+`GET /api/settings/models?bot=ID` returns `{models: [{slug, displayName}]}`
+for the Bot owner and installation roots. An unavailable catalog returns
+`503` with `{"error":"models_unavailable"}`.
+`POST /api/bots/profile` accepts `botId` and any of `environmentId`,
+`projectId`, or `model` in one request. Omitted fields are preserved and an
+empty string clears the supplied field. Save boolean `fixPullRequests` on its
+own with `botId`. Name, avatar, and role are saved separately.
 `POST /api/bot-settings/members` takes `botId`, `person` and boolean `add`.
 `POST /api/bot-settings/secret` accepts `botId`, `requestId` and `value`.
 Mutations use the usual same-origin JSON headers. Fulfilled secret values
@@ -187,7 +199,9 @@ the same Bot and document identifiers to `/api/memory/reject` to dismiss a
 pending proposal. Shared documents require the corresponding person scope
 unless the caller is the local owner or a root identity.
 
-Use `GET /api/schedules?bot=ID` with an optional `before` cursor. Create with
+Use `GET /api/schedules?bot=ID` with an optional `before` cursor. Add `active=1`
+to list only active entries. The first active page also includes `canManage`
+and `unscheduledRequests` from the Bot's configuration. Create with
 `POST /api/schedules` and `botId`, `kind`, and `request`. A `schedule` takes
 `cron` and `timezone`. A `reminder` takes a future `fireAt` in Unix seconds, `timezone`,
 and optional `label`. A `trigger` takes `source` and an optional object
