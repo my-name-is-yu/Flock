@@ -1368,7 +1368,8 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         if (botRunSettingCount(profile)) {
             check(!image,"run settings update carried an image");
             for (const auto& [key, value] : profile.items()) {
-                check(key == "environmentId" || key == "projectId" || key == "model","run settings update forwarded other settings");
+                check(std::find(std::begin(botRunSettingFields),std::end(botRunSettingFields),key) != std::end(botRunSettingFields),
+                      "run settings update forwarded other settings");
                 if (value == "") card.erase(key);
                 else card[key] = value;
             }
@@ -1513,6 +1514,16 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     check(modelOnly.at("model") == "next-model" && modelOnly.at("projectId") == "project-1",
           "model-only update lost the workspace");
     check(browser.get("/api/view?bot=bot-1").at("bot").at("model") == "next-model","Bot settings view lost its model");
+    for (const auto& invalid : {Json(nullptr),Json(1),Json("high effort"),Json(" low ")}) {
+        const auto rejected = browser.post("/api/bots/profile",{{"botId","bot-1"},{"reasoningEffort",invalid}},400);
+        check(rejected.at("error") == "invalid_reasoning_effort","invalid reasoning effort was accepted");
+    }
+    const auto effort = browser.post("/api/bots/profile",{{"botId","bot-1"},{"reasoningEffort","low"}},200);
+    check(effort.at("model") == "next-model" && effort.at("reasoningEffort") == "low" &&
+          browser.get("/api/view?bot=bot-1").at("bot").at("reasoningEffort") == "low",
+          "effort-only update changed the model or missed the Bot settings view");
+    const auto defaultEffort = browser.post("/api/bots/profile",{{"botId","bot-1"},{"reasoningEffort",""}},200);
+    check(!defaultEffort.contains("reasoningEffort"),"Model default did not clear the saved effort");
     const auto clearedModel = browser.post("/api/bots/profile",{{"botId","bot-1"},{"model",""}},200);
     check(!clearedModel.contains("model") && clearedModel.at("projectId") == "project-1",
           "clearing the model lost the workspace");
@@ -1602,7 +1613,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
     std::atomic<bool> registeredAccount = false;
     std::atomic<unsigned> statusCalls = 0;
     std::atomic<unsigned> catalogCalls = 0;
-    const auto catalog = Json::array({{{"slug","test-model"},{"displayName","Test model"}}});
+    const auto catalog = Json::array({{{"slug","test-model"},{"displayName","Test model"},{"reasoningEfforts",{"low","ultra"}}}});
+    const Json catalogResponse{{"models",catalog},{"fallbackReasoningEfforts",fallbackReasoningEfforts()}};
     cb.modelCatalog = [&] {
         ++catalogCalls;
         if (unavailable) throw std::runtime_error("private credential detail");
@@ -1650,7 +1662,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
     check(Browser::checked(browser.client.Get(modelsRoute),401) == Json{{"error","identity_required"}} && !catalogCalls,
           "unauthenticated request reached the model provider");
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
-    check(browser.get(modelsRoute) == Json{{"models",catalog}},"root could not fetch the model catalog");
+    check(browser.get(modelsRoute) == catalogResponse,"root could not fetch the model catalog");
     check(Browser::checked(browser.client.Get("/api/settings/models"),400) == Json{{"error","invalid_bot"}},
           "model catalog accepted a missing Bot ID");
     check(browser.get("/api/view?bot=release").at("composerPerson")=="owner","composer identity did not match owner");
@@ -1679,7 +1691,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
     unavailable = true;
     check(browser.get("/api/settings").at("model") == Json{{"unavailable",true}},
           "A failed credential check exposed details or broke the rest of settings");
-    check(Browser::checked(browser.client.Get(modelsRoute),503) == Json{{"error","models_unavailable"}},
+    check(Browser::checked(browser.client.Get(modelsRoute),503) ==
+          Json{{"error","models_unavailable"},{"fallbackReasoningEfforts",fallbackReasoningEfforts()}},
           "model catalog failure leaked provider details or used the wrong error");
     unavailable = false;
     signedOut = true;
@@ -1716,7 +1729,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
     store.policy().setOwner(Person{"bot-owner"},"triage");
     Browser botOwner(*server);
     botOwner.client.set_default_headers({{"Authorization","Bearer fixture-bot-owner"}});
-    check(botOwner.get("/api/settings/models?bot=triage") == Json{{"models",catalog}},
+    check(botOwner.get("/api/settings/models?bot=triage") == catalogResponse,
           "Bot owner needed installation access to fetch the model catalog");
     browser.post("/api/settings/mode",{{"mode","full"}},403);
     browser.post("/api/settings/rule",removal,403);

@@ -304,13 +304,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             syncSkills();
             return created;
         },
-        [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
-            auto updated = botRunSettingCount(profile)
-                ? bots.updateRunSettings(store,botId,profile,options.clock(),reportSchedule)
-                : bots.updateProfile(botId,profile,image);
-            syncSkills();
-            return updated;
-        },
+        {},
         [&](std::string_view botId) { return bots.avatarImage(botId); },
         options.peers,
         identities.authenticate,
@@ -326,6 +320,19 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         callbacks.modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
         callbacks.modelCatalog = [] { return Json::array({{{"slug","demo"},{"displayName","Demo"}}}); };
     }
+    callbacks.updateBot = [&, modelCatalog = callbacks.modelCatalog](
+        std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
+        auto catalog = Json::array();
+        if (!profile.value("reasoningEffort","").empty()) {
+            try { catalog = modelCatalog(); }
+            catch (const ModelError&) {}
+        }
+        auto updated = botRunSettingCount(profile)
+            ? bots.updateRunSettings(store,botId,profile,options.clock(),reportSchedule,catalog)
+            : bots.updateProfile(botId,profile,image);
+        syncSkills();
+        return updated;
+    };
     callbacks.installationSettings = [&](const Person& actor) {
         auto availableConnections = connections.view();
         availableConnections.at("channels")["canManageHost"] = actor == localOwner;

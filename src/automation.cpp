@@ -364,8 +364,11 @@ Json Store::Impl::automationRoute(std::string_view bot, Json routing) const {
         const auto model = field(current,"model");
         const auto provider = field(current,"modelProvider");
         if (!model.empty() && !provider.empty()) {
-            routing.at("config")["model"] = model;
-            routing.at("config")["modelProvider"] = provider;
+            auto& config = routing.at("config");
+            config["model"] = model;
+            config["modelProvider"] = provider;
+            if (current.contains("reasoningEffort")) config["reasoningEffort"] = current.at("reasoningEffort");
+            else config.erase("reasoningEffort");
         }
     } catch (const Conflict&) {
         // Keep the saved model when the Bot configuration is temporarily unavailable.

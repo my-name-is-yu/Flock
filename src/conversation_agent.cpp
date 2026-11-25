@@ -39,6 +39,7 @@ const std::vector<std::string> webTools{"start_workflow","workflow_status","inst
 std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
         case ModelErrorCode::authentication_required: return "authentication_required";
+        case ModelErrorCode::unsupported_reasoning_effort: return "unsupported_reasoning_effort";
         case ModelErrorCode::invalid_tool_count: return "invalid_tool_count";
         case ModelErrorCode::invalid_tool_output: return "invalid_tool_output";
         case ModelErrorCode::unavailable_tool: return "unavailable_tool";
@@ -46,6 +47,22 @@ std::string_view modelFailureReason(ModelErrorCode code) {
         case ModelErrorCode::inference_failed: return "inference_failed";
     }
     return "inference_failed";
+}
+
+bool repairableModelOutput(ModelErrorCode code) {
+    return code == ModelErrorCode::invalid_tool_count || code == ModelErrorCode::invalid_tool_output ||
+        code == ModelErrorCode::unavailable_tool || code == ModelErrorCode::invalid_tool_arguments;
+}
+
+std::string modelFailureReply(ModelErrorCode code, bool ja) {
+    if (code == ModelErrorCode::authentication_required)
+        return ja ? "ChatGPTへのサインインが必要です。Flockの設定でサインインしてから、もう一度メッセージを送ってください。"
+                  : "This Flock needs a ChatGPT sign-in. Open Flock Settings, sign in to ChatGPT, then send your message again.";
+    if (code == ModelErrorCode::unsupported_reasoning_effort)
+        return ja ? "このモデルは選択された推論レベルに対応していません。Botの設定で別のレベルか「Model default」を選んでください。"
+                  : "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.";
+    return ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
+              : "I couldn't process this message. Please send it again.";
 }
 
 bool japanese(std::string_view text) {
@@ -808,8 +825,6 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         if (authorizeTurn(message)) finishTurn(message,std::move(text),nullptr,route);
         transaction.commit();
     };
-    const auto failure = ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
-                            : "I couldn't process this message. Please send it again.";
     const auto encodeCalls = [](const std::vector<ModelCall>& calls) {
         auto saved = Json::array();
         for (const auto& call : calls) {
@@ -842,8 +857,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                 const bool isRepair = checkpoint.attempt && query(
                     "SELECT 1 FROM conversation_model_failures WHERE repair_attempt_id=?",{checkpoint.attempt}).next();
                 Id repair = 0;
-                if (checkpoint.attempt && error.code != ModelErrorCode::inference_failed &&
-                    error.code != ModelErrorCode::authentication_required &&
+                if (checkpoint.attempt && repairableModelOutput(error.code) &&
                     !query("SELECT 1 FROM conversation_model_failures WHERE message_id=? AND repair_attempt_id IS NOT NULL",
                            {id}).next()) {
                     repair = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
@@ -856,10 +870,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                           repair ? Json(repair) : Json(nullptr)});
                 if (!repair) {
                     if (error.retryFrom && !isRepair) deferConversation(id,*error.retryFrom);
-                    else finishTurn(message,error.code == ModelErrorCode::authentication_required
-                        ? (ja ? "ChatGPTへのサインインが必要です。Flockの設定でサインインしてから、もう一度メッセージを送ってください。"
-                              : "This Flock needs a ChatGPT sign-in. Open Flock Settings, sign in to ChatGPT, then send your message again.")
-                        : failure,nullptr,"error");
+                    else finishTurn(message,modelFailureReply(error.code,ja),nullptr,"error");
                 }
             }
         }
@@ -942,7 +953,7 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                         // A previous worker claimed the repair, but no result survived.
                         exec("INSERT INTO conversation_model_failures(attempt_id,message_id,step,reason) VALUES(?,?,?,?)",
                              {repair.number(0),id,step,"repair_interrupted"});
-                        finishTurn(message,failure,nullptr,"error");
+                        finishTurn(message,modelFailureReply(ModelErrorCode::inference_failed,ja),nullptr,"error");
                         transaction.commit();
                         return;
                     }

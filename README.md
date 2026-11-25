@@ -22,6 +22,8 @@ build concurrency.
 ## Configure a Bot
 
 Edit the Bot's instructions under **Role** in its Web settings.
+Under **How it runs**, choose its **Model** and **Reasoning effort**. Lower effort
+can reduce response time and reasoning tokens. **Model default** uses the model’s own setting.
 
 The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.
 

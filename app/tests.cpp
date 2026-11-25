@@ -334,6 +334,12 @@ void responseContract() {
         {{"modelProvider","chatgpt"},{"model","fixture-slug"},{"secret","must-stay-local"}},
     };
     const auto request = responseRequest(input);
+    check(!request.contains("reasoning"),"Model default sent a reasoning override");
+    input.config["reasoningEffort"] = "low";
+    check(responseRequest(input).at("reasoning") == Json{{"effort","low"}},"Configured reasoning effort was not sent");
+    input.config["reasoningEffort"] = "";
+    check(!responseRequest(input).contains("reasoning"),"Cleared reasoning effort was still sent");
+    input.config.erase("reasoningEffort");
     check(request["model"] == "fixture-slug" && request["store"] == false && request["stream"] == true &&
         request["tool_choice"] == "required" && request["parallel_tool_calls"] == false,"request policy");
     const auto& tool = request["tools"].at(0);

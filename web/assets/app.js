@@ -234,7 +234,7 @@ async function api(path, body, { method = body ? 'POST' : 'GET', signal } = {}) 
     method, headers, credentials: 'same-origin', signal, body: body ? JSON.stringify(body) : undefined,
   });
   const data = await response.json();
-  if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status });
+  if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status, data });
   const viewer = response.headers.get('X-Flock-Viewer');
   if (viewer !== null) responseViewers.set(data, viewer);
   return data;
@@ -2650,7 +2650,7 @@ function workspaceCard(bot) {
     if (view?.id === bot.id) void view.refresh();
     return saved;
   }, async () => (await api('settings')).t3?.environments ?? [],
-  async () => (await api(botQuery('settings/models', bot.id))).models);
+  () => api(botQuery('settings/models', bot.id)));
   return detailWorkspace.element;
 }
 function roleCard(bot) {
@@ -2797,11 +2797,11 @@ function renderDetail() {
     const bot = view.data.bot;
     labelDetail(`${bot.name} settings`);
     renderDetailNav(settingsTabs, detail.section);
-    const { soul, environmentId, projectId, model, ...settings } = bot;
+    const { soul, environmentId, projectId, model, reasoningEffort, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
     const canEdit = bot.canDelete === true;
     detailRole?.update(soul, canEdit);
-    detailWorkspace?.update({ environmentId, projectId, model }, canEdit);
+    detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort }, canEdit);
     return;
   }
   labelDetail(null);
