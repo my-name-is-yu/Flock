@@ -108,6 +108,7 @@ Json Store::Impl::openGitPr(GitHost& host, const GitContext& context, const GitO
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
+        if (botPaused(context.botId)) throw BotPaused{};
         auto operation = query(R"SQL(
 SELECT operation_id,task_id,bot_id,status,pr_number,url FROM git_pr_operations
 WHERE host=?1 AND base_repo=?2 AND base_ref=?3 AND head_repo=?4 AND head_ref=?5

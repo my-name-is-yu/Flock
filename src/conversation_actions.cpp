@@ -227,6 +227,35 @@ void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& rec
           sessionParticipationStopped(bot,target,message) ? 1 : 0,target.gatewayEnvironmentId});
 }
 
+void Store::Impl::stopPausedBotParticipation(std::string_view bot) {
+    for (const auto& [source,receipt] : sessionSendReceipts)
+        if (receipt.bot == bot) recordSessionSendRun(source,receipt);
+    exec("UPDATE session_message_waits SET notified=1,interrupt_at=coalesce(interrupt_at,?) WHERE bot=? AND run_finished=0",
+         {policyClock(),bot});
+}
+
+void Store::Impl::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
+    struct Pending { Id key; std::string environment; RunRef run; };
+    std::vector<Pending> pending;
+    {
+        std::lock_guard lock(mutex);
+        auto rows = query("SELECT rowid,environment,thread,run,gateway_environment FROM session_message_waits "
+                          "WHERE interrupt_at<=? ORDER BY interrupt_at,rowid",{policyClock()});
+        while (rows.next())
+            pending.push_back({rows.number(0),rows.string(1),{rows.string(2),rows.string(3),{},rows.string(4)}});
+    }
+    for (const auto& item : pending) {
+        if (shutdown.stop_requested()) return;
+        bool finished = false;
+        try {
+            finished = t3.interruptSessionMessage(item.environment,item.run) == InterruptOutcome::AlreadyTerminal;
+        } catch (const std::exception&) {}
+        std::lock_guard lock(mutex);
+        exec("UPDATE session_message_waits SET interrupt_at=?,run_finished=? WHERE rowid=?",
+             {finished ? Json(nullptr) : Json(policyClock()+5),finished ? 1 : 0,item.key});
+    }
+}
+
 Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
     const conversation::Message& message, int step, const Decision& decision, std::string_view key,
     bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
@@ -530,15 +559,19 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
     }
     for (const auto& wait : waits) {
         if (shutdown.stop_requested()) return;
+        const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::shared);
         const auto authorized = [&] {
+            if (botPaused(wait.bot) ||
+                !query("SELECT 1 FROM session_message_waits WHERE rowid=? AND notified=0",{wait.key}).next()) return false;
             const auto message = loadTurnMessage(wait.message);
             return !sessionParticipationStopped(wait.bot,wait.target,wait.message) &&
                 (message.principalSource != conversation::PrincipalSource::session || activeSessionOrigin(message)) &&
                 connectedSessionAccess(message,wait.target);
         };
         // A revoked connection settles the wait silently, including on restart.
-        const auto settle = [&] {
-            exec("UPDATE session_message_waits SET notified=1 WHERE rowid=? AND notified=0",{wait.key});
+        const auto settle = [&](bool finished = false) {
+            exec("UPDATE session_message_waits SET notified=1,run_finished=? WHERE rowid=? AND notified=0",
+                 {finished ? 1 : 0,wait.key});
         };
         {
             std::lock_guard lock(mutex);
@@ -557,7 +590,7 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
             transaction.commit();
             continue;
         }
-        settle();
+        settle(reason == "finished" || reason == "failed");
         if (!sqlite3_changes(db)) continue;
         const auto source = loadTurnMessage(wait.message);
         auto routing = source.routing;

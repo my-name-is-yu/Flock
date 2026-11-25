@@ -737,7 +737,7 @@ Person Store::Impl::turnActor(const Message& message) {
 }
 
 bool Store::Impl::authorizeTurn(const Message& message) {
-    if (!isNextTurn(message.id)) return false;
+    if (!isNextTurn(message.id) || botPaused(message.bot)) return false;
     if (message.principalSource == PrincipalSource::gitWebhook) {
         if (canReceiveGitWebhook(message.bot,message.routing.at("gitEvent"))) return true;
         releaseModelCall(takeReservedConversationCall(message.id));

@@ -388,6 +388,21 @@ void disconnectBlocksSendingAndRetry() {
     }
 }
 
+void pauseDuringPreflightPreventsSend() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.reach(id,"sending");
+    f.t3.onPreflight = [&] {
+        Store settings(f.directory/"state.db");
+        settings.setBotPaused(localOwner,"alpha",true,f.now);
+        settings.setBotPaused(localOwner,"alpha",false,f.now);
+    };
+    f.reach(id,"cancelled");
+    check(f.t3.seen.empty() && f.logs(id,"send_started") == 0,
+          "A send in preflight survived pause and resume");
+}
+
 void disconnectKeepsOwnedRunRecovery() {
     Fixture f(true);
     Store settingsStore(f.directory/"state.db");
@@ -2924,6 +2939,7 @@ int main() {
             {"selected work reconciles and cancels only its own queued Run",selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun},
             {"selected work rechecks its T3 connection after approval",selectedWorkRechecksConnectionAfterApproval},
             {"disconnect blocks new work and retries",disconnectBlocksSendingAndRetry},
+            {"pause during preflight prevents a send",pauseDuringPreflightPreventsSend},
             {"disconnect preserves owned Run recovery",disconnectKeepsOwnedRunRecovery},
             {"disconnect fences sends across Stores",disconnectWaitsForInFlightSend},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},

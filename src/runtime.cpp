@@ -362,7 +362,8 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
         task["state"] = "cancelled";
         db.journal(task["id"],"cancelled",Json::object());
         if (const auto peer = db.peerExchange(task["id"]); peer && peer->recipient == task["id"])
-            finishPeer(*peer,task,db.load(peer->sender),"cancelled","The receiving Bot's task was cancelled.",actionId());
+            finishPeer(*peer,task,db.load(peer->sender),"cancelled",task.value("cancelledByBotPause",false)
+                ? "The receiving Bot is paused." : "The receiving Bot's task was cancelled.",actionId());
     }
 
     void stopNote(const Json& snapshot, const std::string& detail) {
@@ -1173,13 +1174,18 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                                 cmd.tool == "answer_session_question"};
         }
         const bool destination = action.contains("destinationAction");
+        const bool firstSend = action["phase"] == "ready";
         std::optional<SessionDispatchFileLock> dispatch;
         if (destination) dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
-        if (destination) {
+        if (firstSend || destination) {
             std::lock_guard lock(db.mutex);
             const auto current = db.load(id);
-            const auto saved = db.outbox(current,cmd.actionId);
-            if (saved.is_object() && saved.value("stopRequested",false)) return;
+            if (firstSend && (db.botPaused(cmd.ownerBotId) || current.at("state") == "cancelling" ||
+                              current.at("generation") != task.at("generation"))) return;
+            if (destination) {
+                const auto saved = db.outbox(current,cmd.actionId);
+                if (saved.is_object() && saved.value("stopRequested",false)) return;
+            }
         }
         const auto operation = std::string(destination ? runOutboxOperation : "outbox/") + cmd.actionId;
         const auto refused = [&](ApprovalGate gate) {
@@ -1198,7 +1204,6 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 return true;
             });
         };
-        const bool firstSend = action["phase"] == "ready";
         const auto disconnected = [&] {
             return options.requireT3Connection && !db.t3EnvironmentConnected(cmd.environmentId);
         };
@@ -1287,15 +1292,14 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 stopped->definitelyUnsent = true;
                 return applyDelivery(id,action,*stopped);
             }
-            if (!dispatch && (options.requireT3Connection || sendsToSession || cmd.sessionOrigin))
-                dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
+            if (!dispatch) dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
             if (disconnected()) return connectionUnavailable();
             auto policyGate = ApprovalGate::allow;
             const auto startSend = [&](Json& current) {
-                if (shutdown.stop_requested()) return false;
+                if (shutdown.stop_requested() || terminal(current) || current.at("state") == "cancelling" ||
+                    db.botPaused(cmd.ownerBotId)) return false;
                 if (destination) {
-                    if (current.at("state") == "cancelling" || terminal(current) ||
-                        !db.projectRouteReady(id,cmd.actionId)) return false;
+                    if (!db.projectRouteReady(id,cmd.actionId)) return false;
                 } else if (current["actionId"] != action["id"]) return false;
                 if (!sessionActionAllowed(current)) {
                     policyGate = ApprovalGate::denied;
@@ -1869,6 +1873,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
     }
 
     void sendPeer(Json& sender, const Json& event, const TaskDecision& decision, PeerBot peer, const std::string& action) {
+        if (db.botPaused(peer.intake.botId)) throw BotPaused{};
         if (db.peerExchange(sender["id"])) throw Conflict("Finish the current Bot exchange first");
         const auto& args = decision.args;
         const auto note = field(args,"text");
@@ -2031,6 +2036,7 @@ AND json_extract(data,'$.resultRunId')=? AND json_extract(data,'$.status')=?
         const bool answering = type == "answer";
         const auto otherId = answering ? peer->recipient : peer->sender;
         auto other = db.load(otherId);
+        if (db.botPaused(field(other,"botId"))) throw BotPaused{};
         if (terminal(other) || other["state"] != "peer_waiting") throw Conflict("The other Bot is no longer waiting");
         const bool closing = type == "result" || type == "failed";
         if (closing && db.conversationPending(field(task,"botId"))) return false;

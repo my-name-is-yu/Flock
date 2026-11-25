@@ -406,7 +406,6 @@ class Fixture(BaseHTTPRequestHandler):
                 return result
             if state.get("sessionWakeFixture"):
                 assert args["threadId"] == "thread"
-                assert not args["untilDelegatedWorkSettled"]
                 if "stopRuns" in state:
                     run_id = args["runId"]
                     status = state["stopRuns"][run_id]
@@ -418,8 +417,10 @@ class Fixture(BaseHTTPRequestHandler):
                 status = state["botRunStatus"]
                 if state.get("differentWaitRun"):
                     return {"threadId": "thread", "runId": "root", "status": "completed", "timedOut": False}
+                delegated_pending = args["untilDelegatedWorkSettled"] and state.get("botRunDelegatesPending", False)
                 return {"threadId": "thread", "runId": state.get("botRunContinuation") or state["botRun"],
-                        "status": status, "timedOut": status != "completed" or state.get("botRunTimedOut", False)}
+                        "status": status,
+                        "timedOut": status != "completed" or state.get("botRunTimedOut", False) or delegated_pending}
             if scenario == "selected-session":
                 assert args["threadId"] in ("human-selected", "flock-selected") and args["runId"] == "selected-run"
                 status = state["selectedRunStatus"]

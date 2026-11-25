@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS session_message_waits(
   bot TEXT NOT NULL, environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL, title TEXT NOT NULL,
   gateway_environment TEXT NOT NULL DEFAULT '',
   notified INTEGER NOT NULL DEFAULT 0,
+  run_finished INTEGER NOT NULL DEFAULT 0,
+  interrupt_at INTEGER,
   PRIMARY KEY(message_id,environment,thread,run));
 CREATE TABLE IF NOT EXISTS task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -156,6 +158,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
         const auto existing = p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
         if (existing) receipt = *existing;
         else {
+            if (p_->botPaused(bot)) throw BotPaused{};
             const auto routing = route();
             if (routing.botId != bot) throw Conflict("Invalid Bot conversation route");
             const auto id = p_->enqueueConversation(actor,routing,source,clientId,text,replyTo);
@@ -171,6 +174,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
 Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
                                     std::string_view clientId, std::string_view text, Id replyTo,
                                     const SessionOrigin* origin, const Json& invitation) {
+    if (botPaused(routing.botId)) throw BotPaused{};
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     modelCallLimit(routing.config);
     Json saved{{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config}};

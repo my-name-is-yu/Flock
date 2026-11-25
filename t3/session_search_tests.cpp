@@ -254,7 +254,20 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     fixture({{"personFinished",true}});
     runtime->runConversations();
     check(model.wakes.empty() && sends() == before + 1,"The person's completion woke the Bot or resent the step");
-    fixture({{"differentWaitRun",true}});
+    const RunRef directRun{thread,"bot-run-" + std::to_string(sends()),{},{}};
+    fixture({{"botRunStatus","completed"},{"botRunDelegatesPending",true}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::NoActiveRun,
+          "A completed Session reply settled before its delegated work");
+    runtime->runConversations();
+    check(model.wakes.empty(),"A completed Session reply woke the Bot before its delegated work settled");
+    fixture({{"botRunDelegatesPending",false}});
+    check(t3.interruptSessionMessage("env-1",directRun) == InterruptOutcome::AlreadyTerminal,
+          "A completed Session reply did not settle after its delegated work");
+    fixture({{"botRunStatus","queued"},{"differentWaitRun",true}});
+    bool stopRejected = false;
+    try { t3.interruptSessionMessage("env-1",directRun); }
+    catch (const std::exception&) { stopRejected = true; }
+    check(stopRejected,"A different Run's wait response settled a Session message interruption");
     runtime->runConversations();
     check(model.wakes.empty(),"A different Run's wait response woke the Bot");
     fixture({{"differentWaitRun",false},{"transientWakeFailure",true}});

@@ -7,6 +7,7 @@ import { createBotEditor } from '/bot-editor.js';
 import { createBotRoleCard } from '/bot-role.js';
 import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
+import { mountBotPause } from '/bot-pause.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
 import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
@@ -25,6 +26,7 @@ const elements = Object.fromEntries([
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-summary', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'bot-paused-banner', 'bot-paused-description', 'resume-bot',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
@@ -84,7 +86,7 @@ const stateLabels = {
   queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for you',
   confirmation_pending: 'Confirmation pending',
   cancelling: 'Cancelling', stopping: 'Confirming stop',
-  idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
+  idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot', paused: 'Paused',
 };
 // Wait copy names the open Bot (`$BOT`) rather than a generic "the Bot". An optional third entry is the
 // Bot's own first-person wording for its conversation bubble.
@@ -138,6 +140,7 @@ const errors = {
   already_closed: 'This request was already answered or closed.',
   access_denied: 'You do not have permission to respond to this request.',
   bot_not_found: 'Bot not found.',
+  bot_paused: 'This Bot is paused.',
   invalid_peer: 'Choose another Bot.',
   peer_not_allowed: 'This conversation between Bots isn’t available.',
   peer_not_found: 'This conversation between Bots isn’t available.',
@@ -428,6 +431,8 @@ function peerLink(botId, peerId, label, className, anchor = 0) {
 }
 
 const sidebarIcons = {
+  pause: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>',
+  resume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M9 6V4h6v2M6 6l1 14h10l1-14M10 10v6m4-6v6"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>',
   pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z"/><path d="M12 14v6"/></svg>',
@@ -435,7 +440,7 @@ const sidebarIcons = {
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>',
   open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 16 16 8M10 8h6v6"/></svg>',
 };
-const activePresence = new Set(['working', 'thinking', 'waiting']);
+const activePresence = new Set(['working', 'thinking', 'waiting', 'paused']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
 const sidebarEntries = new Map();
@@ -509,6 +514,12 @@ function menuPopover(bot) {
     }],
     ['Open settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
+  if (bot.canDelete) {
+    actions.push([bot.paused ? 'Resume' : 'Pause…', bot.paused ? sidebarIcons.resume : sidebarIcons.pause, () => {
+      closeMenu();
+      botPause.open(bot, () => focusKey(`menu:${bot.id}`));
+    }]);
+  }
   const menuItem = ([label, icon, run], index) => {
     const item = button(null, null, run);
     item.innerHTML = icon;
@@ -553,6 +564,8 @@ function createSidebarEntry(botId) {
   const face = node('span');
   const avatarHost = node('span', 'avatar');
   const pinPresence = node('span');
+  pinPresence.innerHTML = sidebarIcons.pause;
+  pinPresence.setAttribute('aria-hidden', 'true');
   const pinUnread = node('span', 'unread-dot pin-unread');
   pinUnread.setAttribute('aria-hidden', 'true');
   face.append(avatarHost, pinPresence, pinUnread);
@@ -626,34 +639,36 @@ function createSidebarEntry(botId) {
       } else select.removeAttribute('aria-keyshortcuts');
 
       if (previousBot?.name !== bot.name) {
-        nameText.textContent = pinName.textContent = tooltipName.textContent = bot.name;
+        nameText.textContent = pinName.textContent = bot.name;
         toggle.setAttribute('aria-label', `${bot.name} menu`);
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
-      const showWaitingPreview = bot.presence === 'waiting' && !count;
-      const previewLabel = showWaitingPreview ? stateLabels.waiting : bot.preview || '';
+      const presence = bot.paused ? 'paused' : bot.presence;
+      tooltipName.textContent = bot.paused ? `${bot.name} · Paused` : bot.name;
+      const showWaitingPreview = presence === 'waiting' && !count;
+      const previewLabel = showWaitingPreview || bot.paused ? stateLabels[presence] : bot.preview || '';
       if (previewText.data !== previewLabel) previewText.data = previewLabel;
       preview.classList.toggle('waiting', showWaitingPreview);
-      if (showWaitingPreview) preview.setAttribute('aria-hidden', 'true');
+      if (showWaitingPreview || bot.paused) preview.setAttribute('aria-hidden', 'true');
       else preview.removeAttribute('aria-hidden');
-      const hasPresence = activePresence.has(bot.presence);
+      const hasPresence = activePresence.has(presence);
       presenceDot.hidden = !showWaitingPreview;
-      dots.hidden = !busyPresence.has(bot.presence);
+      dots.hidden = !busyPresence.has(presence);
       preview.hidden = !previewLabel && dots.hidden;
       pinPresence.hidden = !pinned || !hasPresence;
-      pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
+      pinPresence.className = hasPresence ? `pin-presence ${presence}` : 'pin-presence';
       const unread = hasUnread(bot);
       row.classList.toggle('unread', !!unread);
       pinUnread.hidden = !pinned || !unread;
       rowUnread.hidden = pinned || !unread;
-      const label = [unread && 'New reply', hasPresence && stateLabels[bot.presence]].filter(Boolean).join(', ');
+      const label = [unread && 'New reply', hasPresence && stateLabels[presence]].filter(Boolean).join(', ');
       status.hidden = !label;
       if (status.textContent !== label) status.textContent = label;
 
       toggle.setAttribute('aria-expanded', expanded);
       if (expanded) {
         toggle.setAttribute('aria-controls', 'bot-menu');
-        if (popover && previousBot?.canDelete !== bot.canDelete) {
+        if (popover && (previousBot?.canDelete !== bot.canDelete || previousBot?.paused !== bot.paused)) {
           if (popover.contains(document.activeElement)) toggle.focus();
           popover.remove();
           popover = null;
@@ -667,9 +682,9 @@ function createSidebarEntry(botId) {
         popover.remove();
         popover = null;
       }
-      if (!previousBot || JSON.stringify(previousBot.avatar) !== JSON.stringify(bot.avatar)) {
+      if (!previousBot || previousBot.paused !== bot.paused || JSON.stringify(previousBot.avatar) !== JSON.stringify(bot.avatar)) {
         avatarHandle?.destroy();
-        avatarHandle = showAvatar(avatarHost, bot, { still: false, state: presenceMotion(bot.presence) });
+        avatarHandle = showAvatar(avatarHost, bot, { still: !!bot.paused, state: presenceMotion(bot.paused ? 'idle' : bot.presence) });
       } else if (previousBot.presence !== bot.presence) {
         const nextMotion = presenceMotion(bot.presence);
         if (presenceMotion(previousBot.presence) !== nextMotion) avatarHandle?.update({ state: nextMotion });
@@ -836,7 +851,6 @@ function scheduleReadCheck() {
   });
 }
 
-const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for you', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
 const participant = (id) => bots.find((bot) => bot.id === id) ?? { id, name: id };
 const botPeers = (id) => participant(id).peers ?? [];
 
@@ -883,20 +897,20 @@ function renderHeader() {
     profileKey = '';
     return;
   }
-  const presence = view?.data?.presence ?? 'idle';
-  const motion = presenceMotion(presence);
+  const presence = bot.paused ? 'paused' : (view?.data?.presence ?? 'idle');
+  const motion = presenceMotion(bot.paused ? 'idle' : presence);
   const look = { state: motion, followPointer: motion === 'idle' };
-  const key = JSON.stringify([bot.id, bot.avatar]);
+  const key = JSON.stringify([bot.id, bot.avatar, bot.paused]);
   if (key !== profileKey) {
     profileAvatar?.destroy();
-    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, ...look });
+    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: !!bot.paused, ...look });
     profileKey = key;
   } else if (profileMotion !== motion) {
     profileAvatar?.update(look);
   }
   profileMotion = motion;
-  const offline = connection === 'offline';
-  const status = offline ? 'Offline' : presenceLabels[presence] ?? presence;
+  const offline = connection === 'offline' && !bot.paused;
+  const status = offline ? 'Offline' : stateLabels[presence] ?? presence;
   const showStatus = offline || (presence !== 'idle' && !(presence === 'waiting' && decisions.count(bot.id)));
   const settingsLabel = `${bot.name} settings`;
   const name = elements['profile-name'];
@@ -1699,7 +1713,7 @@ function syncTimelineAvatar(row, show, bot) {
   else if (!show && current?.classList.contains('msg-avatar')) current.replaceWith(node('span', 'msg-avatar-space'));
 }
 const workingText = (data) => data.presence === 'working'
-  ? data.activeSessions?.[0]?.request ?? presenceLabels.working : presenceLabels.thinking;
+  ? data.activeSessions?.[0]?.request ?? stateLabels.working : stateLabels.thinking;
 // The working row stays mounted while the Bot works; only its status changes, sliding the old one out.
 function workingLine(bot) {
   const row = node('div', 'msg bot working group-start');
@@ -2036,7 +2050,7 @@ function conversationRows(data, events, keep, source) {
     latestWebMessageId: data && !source ? events.findLast((event) =>
       event.kind === 'conversation_message' && !event.data.channel?.channelKind && messageSide(event) === 'user')?.id : undefined,
     // An earlier page opened from the inbox is for reading; answering happens at the latest messages.
-    canDecide: !source && data?.canDecide === true,
+    canDecide: !source && !!view?.composer,
     readOnly: !!source,
     revealedTimeRow: view?.revealedTimeRow,
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
@@ -2143,7 +2157,7 @@ function conversationRows(data, events, keep, source) {
       return empty;
     }));
   }
-  if (data && (data.presence === 'working' || data.presence === 'thinking')) {
+  if (data && !data.bot.paused && (data.presence === 'working' || data.presence === 'thinking')) {
     const row = keep('working', botVersion, () => workingLine(bot));
     setWorkingText(row, workingText(data));
     rows.push(row);
@@ -2284,18 +2298,32 @@ function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
 function renderComposer() {
   const context = view;
   const readOnly = context?.data?.canDecide === false;
-  const available = !!context?.data && !context.dm && (!!context.composer || readOnly);
-  const canDecide = available && context.data.canDecide === true;
+  const paused = !!context?.data?.bot?.paused && !context.dm;
+  const available = !!context?.data && !context.dm && (!!context.composer || readOnly || paused);
+  const canDecide = available && !!context.composer;
+  const wasComposing = elements.composer.contains(document.activeElement);
+  const resume = elements['resume-bot'];
+  const canResume = paused && context.data.bot.canDelete;
+  elements['bot-paused-banner'].hidden = !paused;
+  resume.hidden = !canResume;
+  const pauseDescription = elements['bot-paused-description'];
+  const description = !paused ? '' : context.resumeError ||
+    (canResume ? 'Resume to send a message.' : 'The Bot’s owner or a Flock administrator can resume it.');
+  if (pauseDescription.textContent !== description) pauseDescription.textContent = description;
+  pauseDescription.classList.toggle('error', paused && !!context.resumeError);
   elements['composer-container'].hidden = !available;
   elements.composer.hidden = !canDecide;
-  elements['view-only-notice'].hidden = !available || canDecide;
+  elements['view-only-notice'].hidden = !available || paused || canDecide;
+  if (paused && wasComposing) (canResume ? resume : headerFocusTarget()).focus({ preventScroll: true });
   const decision = canDecide ? decisions.composer() : null;
   const review = canDecide ? decisions.reviewReply() : null;
-  if (!canDecide || !context.composer) {
+  if (!canDecide) {
     composition = null;
     elements['composer-ghost'].hidden = true;
     elements.message.classList.remove('has-ghost');
     elements.message.value = '';
+    elements.message.readOnly = true;
+    elements.send.disabled = true;
     return renderScreenshots(null, true);
   }
   const { composer } = context;
@@ -2548,6 +2576,32 @@ const botDeletion = mountBotDeletion(byId('bot-delete'), {
   },
 });
 
+async function setBotPaused(bot, paused) {
+  await api('bots/pause', { botId: bot.id, paused });
+  await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
+}
+const botPause = mountBotPause(byId('bot-pause'), setBotPaused);
+
+elements['resume-bot'].addEventListener('click', async (event) => {
+  const control = event.currentTarget;
+  const context = view;
+  const bot = context?.data?.bot;
+  if (!bot?.paused || !bot.canDelete) return;
+  control.disabled = true;
+  context.resumeError = '';
+  renderComposer();
+  try {
+    await setBotPaused(bot, false);
+    if (view === context && !elements.composer.hidden) elements.message.focus({ preventScroll: true });
+  } catch {
+    context.resumeError = 'Could not resume this Bot. Try again.';
+    if (view === context) renderComposer();
+  } finally {
+    control.disabled = false;
+    if (view === context && !control.hidden) control.focus({ preventScroll: true });
+  }
+});
+
 const pencilIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 function generalContent(bot) {
   const hero = node('div', 'settings-hero');
@@ -2636,6 +2690,15 @@ function generalContent(bot) {
   settings.append(node('span', 'settings-row-label', 'Access'));
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
+  const activity = settingsRow('Bot activity', bot.paused ? 'Paused' : 'Active');
+  if (bot.canDelete) {
+    const pause = button(bot.paused ? 'Resume' : 'Pause', 'dialog-button quiet',
+      () => botPause.open(bot, () => byId('bot-pause-setting')?.focus({ preventScroll: true })));
+    pause.id = 'bot-pause-setting';
+    pause.setAttribute('aria-haspopup', 'dialog');
+    activity.append(pause);
+  }
+  rows.append(activity);
   if (bot.canDelete) {
     const remove = button('Delete', 'settings-row danger', (event) => botDeletion.open(bot, event.currentTarget));
     remove.id = 'delete-bot-settings';
@@ -2696,7 +2759,7 @@ function localDateTime(timestamp) {
 }
 function waitContent(context, task, deadlineDraft) {
   const wait = task.wait;
-  const canDecide = context.data.canDecide === true;
+  const canDecide = !!context.composer;
   elements['detail-title'].textContent = waitLabel(wait.reason);
   const request = node('blockquote', 'wait-request');
   request.append(node('p', 'wait-request-text', task.request));
@@ -2882,7 +2945,9 @@ function mergeLatest(context, latest) {
   if (!context.data) context.sessionsBefore = latest.sessionsBefore;
   mergeSessionTasks(context, latest.sessionTasks);
   context.data = latest;
-  const composer = context.composer = latest.canDecide === true ? composerDrafts(context.id, latest.composerPerson) : null;
+  if (!latest.bot.paused) delete context.resumeError;
+  const composer = context.composer = latest.canDecide === true && !latest.bot.paused
+    ? composerDrafts(context.id, latest.composerPerson) : null;
   if (!composer) return;
   if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text &&
       !screenshotsFor(composer)?.get(screenshotAnchor(composer.reply))?.images.length) {
@@ -3055,7 +3120,7 @@ function operate(context, task, operation, data) {
     current && taskWaitDecision(context.id, current), operation, data);
 }
 function submitConversationDecision(context, item, active, operation, data) {
-  if (view !== context || context.dm || context.data?.canDecide !== true ||
+  if (view !== context || context.dm || !context.composer ||
       (responseViewers.get(context.data) ?? null) !== sidebarViewer || !active) return;
   const selection = detail;
   const isOpen = () => !item.itemKind && view === context && detail === selection &&
@@ -3081,7 +3146,6 @@ function submitConversationDecision(context, item, active, operation, data) {
 }
 async function submit(event) {
   event.preventDefault();
-  if (view?.data?.canDecide !== true) return;
   const context = view;
   if (!context?.composer || context.dm || elements.send.disabled) return;
   if (decisions.composer()) return decisions.submitAnswer();
@@ -3122,6 +3186,7 @@ async function submit(event) {
       if (attachments.length) delete screenshots.pending;
       else composer.settleSend(payload, false);
     }
+    if (error.message === 'bot_paused') void Promise.all([refreshBots(), context.refresh()]);
     const message = error instanceof ScreenshotError ? error.message : errors[error.message];
     setNotice(context, message ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
@@ -3450,7 +3515,7 @@ document.addEventListener('click', (event) => {
   if (!conversationActions.contains(event.target)) closeConversationActions();
 });
 document.addEventListener('keydown', (event) => {
-  if (botDeletion.isOpen()) return;
+  if (botDeletion.isOpen() || botPause.isOpen()) return;
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
   if (digit && !event.isComposing && !elements.detail.open && !elements['bot-editor'].open &&
       !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {

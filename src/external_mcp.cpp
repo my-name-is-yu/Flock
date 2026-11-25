@@ -108,6 +108,7 @@ WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
         if (receipt.string(0) != fingerprint) throw Conflict("This requestId already has different arguments");
         return receipt.number(1);
     }
+    if (db.botPaused(bot)) throw BotPaused{};
 
     const auto scrub = db.sharedRedactor();
     scrub.requirePublic(requestId);

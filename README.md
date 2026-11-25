@@ -2,7 +2,7 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
-Flock reopens databases with the current schema version (8). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
+Flock reopens databases with the current schema version (9). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
 
 ## Build
 
@@ -22,6 +22,12 @@ build concurrency.
 ## Configure a Bot
 
 Edit the Bot's instructions under **Role** in its Web settings.
+
+Bot owners and installation administrators can pause a Bot from **General**
+in its settings. Pause closes unfinished requests, stops the T3 work they
+started, and refuses new messages. **Resume** opens the Bot to new work.
+Recurring requests, reminders, and triggers due during the pause are skipped.
+Flock keeps the pause across restarts.
 
 The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.
 

@@ -14,7 +14,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 8;
+constexpr Id schemaVersion = 9;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
 
 void Store::Impl::initializeSchema() {
     const char* schema = R"SQL(
+CREATE TABLE IF NOT EXISTS bot_pauses(bot TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, environment_id TEXT NOT NULL,
   project_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL);
@@ -611,6 +612,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), and environment are required");
     if (botDeleted(item.botId)) throw Conflict("Bot has been deleted");
+    if (botPaused(item.botId)) throw BotPaused{};
     const auto scrub = redactor(item.botId);
     scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.config});
     modelCallLimit(item.config);
@@ -679,6 +681,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
                           const Json& input, Id sourceMessage, std::optional<InboxKind> expectedKind) {
     const auto& [bot,id,waitId,revision,generation] = target;
     if (!Policy(*this).allows(actor,Action::bot_decide,bot)) throw DecisionDenied{};
+    if (operation != "cancel" && botPaused(bot)) throw BotPaused{};
     auto task = load(id);
     if (task.at("botId") != bot || task.value("currentRevision",Id{0}) != revision) throw RequestChanged{};
     const auto data = redactor(bot).payload(input);

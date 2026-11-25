@@ -56,6 +56,7 @@ void Store::Impl::gitInboxItem(const Json& task, std::string_view key, std::stri
 }
 
 bool Store::Impl::canReceiveGitWebhook(std::string_view bot, const Json& event) {
+    if (botPaused(bot)) return false;
     const auto repo = GitRepository::parse(field(event,"host"),field(event,"repo"));
     return query(R"SQL(
 SELECT 1 FROM git_pr_watches w JOIN tasks t ON t.id=w.task_id AND t.bot_id=w.bot_id
@@ -69,6 +70,17 @@ Id Store::Impl::latestGitWebhookId() const {
     auto row = query("SELECT coalesce(max(id),0) FROM git_webhook_events");
     row.next();
     return row.number(0);
+}
+
+void Store::Impl::skipPendingGitWebhooks(std::string_view bot) {
+    const auto cursor = latestGitWebhookId();
+    exec(R"SQL(
+INSERT INTO git_pr_watch_origins(host,repo,pr_number,event_cursor)
+SELECT host,repo,pr_number,event_cursor FROM git_pr_watches WHERE bot_id=? AND event_cursor<?
+ON CONFLICT DO NOTHING
+)SQL",{bot,cursor});
+    exec("UPDATE git_pr_watches SET event_cursor=?1 WHERE bot_id=?2 AND event_cursor<?1",{cursor,bot});
+    gitWebhooksDrainedAt.reset();
 }
 
 void Store::Impl::deliverGitWebhooks() {

@@ -548,6 +548,8 @@ void Store::Impl::recoverWorkspace() {
 void Store::Impl::persistWorkspaceResults() {
     std::lock_guard lock(mutex);
     for (auto it = workspaceJobs.begin(); it != workspaceJobs.end();) {
+        if (!it->second->stop && query("SELECT 1 FROM workspace_commands WHERE id=? AND state='stop_requested'",
+                                      {it->first}).next()) it->second->stop = true;
         const auto& completion = it->second->completion;
         if (const auto* error = std::get_if<std::exception_ptr>(&completion)) std::rethrow_exception(*error);
         if (const auto* outcome = std::get_if<WorkspaceOutcome>(&completion)) {
@@ -662,6 +664,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
 #endif
     Pipe out, err, lease;
     std::lock_guard lock(mutex);
+    if (botPaused(ctx.bot)) throw BotPaused{};
     persistWorkspaceResults();
     if (workspaceJobs.size() >= 8 || query("SELECT 1 FROM workspace_commands WHERE bot=? AND state IN "
                                           "('running','stop_requested')",{ctx.bot}).next())

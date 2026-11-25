@@ -227,6 +227,88 @@ void stopDuringSendDispatch() {
           "A send or wake passed the committed stop");
 }
 
+void pausedBotStopsSessionMessages() {
+    struct SessionT3 : FixedT3 {
+        int reads = 0, sends = 0, observations = 0;
+        std::vector<std::string> interrupted;
+        std::map<std::string,int> stopChecks;
+
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline) override {
+            ++reads;
+            return SessionMetadata{.title="Staging follow-up",.projectId="origin-project"};
+        }
+        Delivery send(const Command& command) override {
+            check(command.tool == "message_session","Unexpected command for a Session reply");
+            const auto run = "bot-reply-" + std::to_string(++sends);
+            return {Delivery::Kind::Accepted,{command.target.threadId,run,{}},{},false,sends == 1 ? "started" : "queued"};
+        }
+        std::string sessionMessageWake(const SessionTarget&, const RunRef& run) override {
+            ++observations;
+            return run.runId == "bot-reply-1" ? "waiting_for_person" : "";
+        }
+        InterruptOutcome interrupt(const std::string& environment, const Json&, const RunRef& run) override {
+            check(environment == "env-1" && run.threadId == "thread","Interrupted a different Session");
+            if (++stopChecks[run.runId] > 1) return InterruptOutcome::AlreadyTerminal;
+            interrupted.push_back(run.runId);
+            return InterruptOutcome::Requested;
+        }
+    } t3;
+    TestDirectory dir;
+    const auto database = dir.path/"flock.sqlite3";
+    auto cb = callbacks();
+    cb.sessionT3 = &t3;
+    AskModel model;
+    const auto soul = [](std::string_view) { return std::string{}; };
+    auto now = unixTime();
+    const RuntimeOptions options{.clock=[&] { return now; }};
+    Json ask{{"bot","release"},{"text","Review the existing checks"},{"threadId","thread"},{"requestId","before-pause"}};
+    std::string token;
+    {
+        Store store(database);
+        token = T3Connections(store).connect("env-1",localOwner.id,4173);
+        const auto server = startWeb(store,0,cb);
+        Mcp mcp(*server,token);
+        const auto receipt = mcp.call("flock_ask",ask).at("structuredContent");
+        Runtime runtime(store,model,t3,soul,options);
+        runtime.runConversations();
+        runtime.runConversations();
+        check(model.wakes == 1 && t3.sends == 1,"The first Bot reply did not reach the waiting state");
+        auto next = ask;
+        next["requestId"] = "second-reply";
+        mcp.call("flock_ask",next).at("structuredContent");
+        runtime.runConversations();
+        check(t3.sends == 2,"The second Bot reply was not queued");
+        store.setBotPaused(localOwner,"release",true,now);
+        check(mcp.call("flock_ask",ask).at("structuredContent") == receipt,"Pause changed an existing Session ask receipt");
+        ask["requestId"] = "while-paused";
+    }
+
+    Store store(database);
+    const auto server = startWeb(store,0,cb);
+    Mcp mcp(*server,token);
+    const auto reads = t3.reads, observations = t3.observations;
+    const auto refused = mcp.call("flock_ask",ask);
+    check(refused.value("isError",false) && refused.at("content").at(0).at("text") == botPausedMessage &&
+          t3.reads == reads,"A paused Session ask was admitted or checked T3");
+    Runtime runtime(store,model,t3,soul,options);
+    runtime.runConversations();
+    runtime.runConversations();
+    check(t3.interrupted == std::vector<std::string>{"bot-reply-1","bot-reply-2"} &&
+          t3.observations == observations && t3.sends == 2 && model.wakes == 1,
+          "Restart did not interrupt both Bot-owned Runs exactly once, or discarded work was revived");
+    now += 5;
+    runtime.runConversations();
+    check(t3.stopChecks == std::map<std::string,int>{{"bot-reply-1",2},{"bot-reply-2",2}},
+          "The accepted interruptions were not checked for settlement");
+    store.setBotPaused(localOwner,"release",false,now);
+    now += 5;
+    runtime.runConversations();
+    check(t3.stopChecks == std::map<std::string,int>{{"bot-reply-1",2},{"bot-reply-2",2}} &&
+          t3.observations == observations && t3.sends == 2 && model.wakes == 1,
+          "Resume revived a wake for a stopped Bot reply");
+    check(mcp.call("flock_ask",ask).contains("structuredContent"),"Resume did not admit a fresh Session ask");
+}
+
 void webSendParticipation() {
     struct SessionT3 : FixedT3 {
         unsigned sends = 0;
@@ -1253,6 +1335,8 @@ int main(int argc, char** argv) {
         stopDuringSendPreflight();
         scenario = "stop during send dispatch";
         stopDuringSendDispatch();
+        scenario = "Bot pause during Session participation";
+        pausedBotStopsSessionMessages();
         scenario = "Web send participation";
         webSendParticipation();
         scenario = "Session invitations";

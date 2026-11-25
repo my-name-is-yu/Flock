@@ -264,6 +264,60 @@ struct Fixture {
     Json lastTurn() { return model.turnInputs.back().event.at("turn"); }
 };
 
+void pauseCancelsOpenWorkAcrossRestart() {
+    Fixture f;
+    const auto active = f.store->submit(f.routing("Active"));
+    f.reach(active,"running");
+    const auto queued = f.store->submit(f.routing("Queued"));
+    const auto pending = f.enqueue("queued-before-pause","Queued message");
+    const auto pausedRun = f.task(active).at("activeRun").at("runId").get<std::string>();
+    {
+        Store writer(f.dir/"state.db");
+        writer.setBotPaused(localOwner,"alpha",true,f.now);
+    }
+    check(f.store->botPaused("alpha") && f.task(active)["state"] == "cancelling" &&
+          f.task(queued)["state"] == "cancelled", "pause did not cancel active and queued work");
+    check(f.response(pending).at("text") == botPausedMessage,"pause did not close a queued message");
+    try {
+        f.enqueue("paused","Refused message");
+        check(false,"pause accepted a new message");
+    } catch (const BotPaused&) {}
+    try {
+        f.store->submit(f.routing("Refused request"));
+        check(false,"pause accepted a new task");
+    } catch (const BotPaused&) {}
+
+    f.restart();
+    check(f.store->botPaused("alpha"),"pause did not survive a Runtime restart");
+    f.tick(3);
+    check(f.t3.interrupted == std::vector{std::pair{std::string("desktop"),pausedRun}},
+          "pause did not interrupt the exact Run through the stop path");
+    f.t3.finish(pausedRun,"Stopped");
+    f.reach(active,"cancelled");
+    check(f.t3.sent.size() == 1 && f.model.turnInputs.empty(),"paused work was processed");
+
+    f.store->setBotPaused(localOwner,"alpha",false,f.now);
+    f.script("New message",{say("Ready again.")});
+    check(f.response(f.receive("new","New message")).at("text") == "Ready again.",
+          "resume did not restore new conversations");
+    check(f.model.turnInputs.size() == 1 && f.task(queued)["state"] == "cancelled",
+          "resume replayed unfinished work");
+}
+
+void pauseDiscardsInFlightModelResult() {
+    Fixture f;
+    f.script("Start work",{start()});
+    f.model.beforeTurn = [&](const ModelInput&) {
+        Store writer(f.dir/"state.db");
+        writer.setBotPaused(localOwner,"alpha",true,f.now);
+        writer.setBotPaused(localOwner,"alpha",false,f.now);
+    };
+    const auto receipt = f.receive("in-flight","Start work");
+    f.tick(3);
+    check(f.response(receipt).at("text") == botPausedMessage && f.t3.sent.empty() &&
+          f.store->activeTasks("alpha").empty(),"an in-flight model response acted after pause and resume");
+}
+
 void durableInboxAndTargetedRevision() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -2417,6 +2471,8 @@ int main(int argc, char** argv) {
             std::cout << "Non-default-project move acceptance passed with simulated T3\n";
             return 0;
         }
+        pauseCancelsOpenWorkAcrossRestart();
+        pauseDiscardsInFlightModelResult();
         durableInboxAndTargetedRevision();
         existingSessionStartsNormalWork();
         linkedResultStartsANewSession();

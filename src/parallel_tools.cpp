@@ -236,6 +236,13 @@ private:
         const auto& call = calls_[slot];
         const bool bot = isBotTool(call.tool);
         try {
+            {
+                std::lock_guard lock(store_.mutex);
+                Transaction transaction(store_.db);
+                const bool allowed = authorize();
+                transaction.commit();
+                if (!allowed) return CompletedToolCall{toolFailure("This message has closed.")};
+            }
             if (bot) {
                 auto result = store_.executeBotTool(tools_,call);
                 if (!result.contains("ok")) result["ok"] = true;

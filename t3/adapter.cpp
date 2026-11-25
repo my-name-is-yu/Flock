@@ -1019,7 +1019,7 @@ public:
         try {
             const auto gateway = gatewayFor(target.environmentId,target.gatewayEnvironmentId);
             Client client(credential(gateway,Json::object()),{},targetRoute(target.environmentId,gateway));
-            const auto reply = wait(client,run,WaitFor::Run,1);
+            const auto reply = wait(client,run,WaitFor::DelegatedWork,1);
             const auto effective = str(reply,"runId");
             const auto status = str(reply,"status");
             if (boolean(reply,"timedOut") && !active(status)) return {};
@@ -1131,32 +1131,11 @@ public:
     }
 
     InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef& run) override {
-        if (!hasRun(run)) throw Failure(Failure::Kind::Settings, "The assigned T3 Run is missing");
-        const auto gateway = gatewayFor(environmentId,run.gatewayEnvironmentId);
-        auto connection = credential(gateway, config);
-        requireOperate(connection);
-        Client client(std::move(connection),{},targetRoute(environmentId,gateway));
-        if (gateway == environmentId) checkVerificationRoute(client,config,environmentId,run.threadId);
-        // An explicit wait can resolve T3's own restart continuation of the assigned Run.
-        const auto current = wait(client, run, WaitFor::Run, 1);
-        const auto effective = str(current, "runId");
-        if (config.contains("commitVerification") && effective != run.runId && !isRestartContinuation(client,run,effective))
-            throw Failure(Failure::Kind::Wire,"Could not identify the Run's restart continuation");
-        const auto status = str(current,"status");
-        if (terminal(status)) return InterruptOutcome::AlreadyTerminal;
-        if (status == "queued" && effective == run.runId) {
-            client.call("t3_queue",{{"action","cancel"},{"threadId",run.threadId},{"queuedRunId",run.runId}});
-            return InterruptOutcome::Requested;
-        }
-        if (!active(status)) invalidResponse();
-        const auto reply = client.call("t3_thread_interrupt", {{"threadId", run.threadId}, {"runId", effective}});
-        const auto replyStatus = str(reply, "status");
-        if (str(reply, "threadId") != run.threadId) invalidResponse();
-        if (replyStatus == "no_active_run") return InterruptOutcome::NoActiveRun;
-        if (str(reply, "runId") != effective) invalidResponse();
-        if (replyStatus == "interrupt_requested") return InterruptOutcome::Requested;
-        if (terminal(replyStatus)) return InterruptOutcome::AlreadyTerminal;
-        invalidResponse();
+        return interruptRun(environmentId,config,run,false);
+    }
+
+    InterruptOutcome interruptSessionMessage(const std::string& environmentId, const RunRef& run) override {
+        return interruptRun(environmentId,Json::object(),run,true);
     }
 
     QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget& target, std::string_view run) override {
@@ -1362,6 +1341,43 @@ public:
 
 private:
     std::filesystem::path directory_;
+
+    InterruptOutcome interruptRun(const std::string& environmentId, const Json& config, const RunRef& run,
+                                  bool exactSessionMessage) const {
+        if (!hasRun(run)) throw Failure(Failure::Kind::Settings, "The assigned T3 Run is missing");
+        const auto gateway = gatewayFor(environmentId,run.gatewayEnvironmentId);
+        auto connection = credential(gateway, config);
+        requireOperate(connection);
+        Client client(std::move(connection),{},targetRoute(environmentId,gateway));
+        if (gateway == environmentId) checkVerificationRoute(client,config,environmentId,run.threadId);
+        const auto current = wait(client,run,exactSessionMessage ? WaitFor::DelegatedWork : WaitFor::Run,1);
+        const auto effective = str(current, "runId");
+        if ((exactSessionMessage || config.contains("commitVerification")) && effective != run.runId &&
+            !isRestartContinuation(client,run,effective))
+            throw Failure(Failure::Kind::Wire,"Could not identify the Run's restart continuation");
+        const auto status = str(current,"status");
+        if (terminal(status)) {
+            if (!exactSessionMessage || !boolean(current,"timedOut")) return InterruptOutcome::AlreadyTerminal;
+            if (status == "cancelled" && effective == run.runId &&
+                confirmsQueueCancellation(client,run,threadHead(client,run.threadId,50)))
+                return InterruptOutcome::AlreadyTerminal;
+            return InterruptOutcome::NoActiveRun;
+        }
+        if (status == "queued" && (effective == run.runId || exactSessionMessage)) {
+            client.call("t3_queue",{{"action","cancel"},{"threadId",run.threadId},{"queuedRunId",effective}});
+            return InterruptOutcome::Requested;
+        }
+        if (!active(status)) invalidResponse();
+        const auto reply = client.call("t3_thread_interrupt", {{"threadId", run.threadId}, {"runId", effective}});
+        const auto replyStatus = str(reply, "status");
+        if (str(reply, "threadId") != run.threadId) invalidResponse();
+        if (replyStatus == "no_active_run") return InterruptOutcome::NoActiveRun;
+        if (str(reply, "runId") != effective) invalidResponse();
+        if (replyStatus == "interrupt_requested") return InterruptOutcome::Requested;
+        if (terminal(replyStatus))
+            return exactSessionMessage ? InterruptOutcome::NoActiveRun : InterruptOutcome::AlreadyTerminal;
+        invalidResponse();
+    }
 
     Credential credential(const std::string& environment, const Json& config) const {
         if (!config.is_object())

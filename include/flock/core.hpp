@@ -26,6 +26,8 @@ std::string actionId();
 
 struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
 struct BotBusy : Conflict { BotBusy() : Conflict("Bot has unfinished work") {} };
+inline constexpr char botPausedMessage[] = "This Bot is paused.";
+struct BotPaused : Conflict { BotPaused() : Conflict(botPausedMessage) {} };
 
 // Initial allowance from an intake's saved config. Each approval adds one attempt.
 Id modelCallLimit(const Json& config);
@@ -237,6 +239,9 @@ public:
         return evidence;
     }
     virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
+    virtual InterruptOutcome interruptSessionMessage(const std::string& environmentId, const RunRef& run) {
+        return interrupt(environmentId,Json::object(),run);
+    }
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
     virtual std::vector<T3Project> projects(std::string_view) { return {}; }
     virtual std::vector<T3Project> projects(const T3EnvironmentRoute& route) { return projects(route.environmentId); }
@@ -291,6 +296,8 @@ public:
     Policy policy();
     bool botDeleted(std::string_view bot) const;
     void deleteBot(const Person&, std::string_view bot);
+    bool botPaused(std::string_view bot) const;
+    void setBotPaused(const Person&, std::string_view bot, bool paused, Seconds now);
     Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
     Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
     Json automations(const Person&, std::string_view bot, Id before = 0, bool activeOnly = false) const;
