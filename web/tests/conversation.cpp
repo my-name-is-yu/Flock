@@ -569,14 +569,13 @@ void parallelVerificationInView(const std::filesystem::path& path) {
         "/api/messages", {{"botId", "release"}, {"clientMessageId", "verify-both"}, {"text", "Verify the release on both machines."}}, 201);
     tick(runtime, 3);
     const auto activePage = browser.get("/api/view?bot=release");
-    const auto& activeSessions = activePage.at("activeSessions");
-    check(activeSessions.size() == 1 && activeSessions.front().at("environmentId") == "local-env" &&
-              activeSessions.front().at("state") == "running" && activeSessions.front().at("name") == "local-env",
-          "a running destination was missing from live Session activity");
-    const auto& visibleSessions = activePage.at("sessionTasks").front().at("sessions");
-    check(visibleSessions.size() == 1 && visibleSessions.front().at("state") == "running" &&
-              visibleSessions.front().at("name") == "local-env",
-          "the saved Session row lost its active destination state or name");
+    const auto& activeRuns = activePage.at("parallelTasks").at(0).at("runs");
+    check(std::ranges::any_of(activeRuns,
+                              [](const Json& run) {
+                                  return run.at("environmentId") == "local-env" && run.at("state") == "running" &&
+                                         run.at("name") == "local-env" && run.contains("threadId");
+                              }),
+          "a running destination was missing its Session link, name or state");
     t3.localFinished = true;
     runtime.tick();
     now += 48 * 3600;
@@ -1255,7 +1254,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     check(firstRuns.back().run.environmentId == "local-env" && firstTask.task.projectId == "release" &&
               secondRuns.back().run.environmentId == "backup-env" && secondTask.task.projectId == "backup-release",
           "the composer Runs did not keep each request on its own destination");
-    const auto active = view().at("activeSessions");
+    const auto active = view().at("activeTasks");
     check(
         firstTask.task.state == TaskState::running && secondTask.task.state == TaskState::running && active.size() == 2 && t3.launches == 3,
         "ambiguous-stop fixture requires two active Runs: " + std::string(taskStateName(firstTask.task.state)) + ", " +
@@ -1270,7 +1269,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
               std::ranges::all_of(active,
                                   [&](const Json& run) { return std::ranges::find(suggestions, run.at("request")) != suggestions.end(); }),
           "ambiguous stop did not ask the user to choose between both running tasks");
-    check(afterStop.at("activeSessions") == active && TaskList(store).tasks().size() == taskCount && t3.launches == 3 &&
+    check(afterStop.at("activeTasks") == active && TaskList(store).tasks().size() == taskCount && t3.launches == 3 &&
               Tasks(store).task(firstTask.task.id).runs == firstTask.runs &&
               Tasks(store).task(secondTask.task.id).runs == secondTask.runs && t3.interruptions == 0,
           "ambiguous stop changed a Run or created work");

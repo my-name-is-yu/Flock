@@ -2,12 +2,15 @@
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
 #include "journal_peer.hpp"
+#include "journal.hpp"
+#include "journal_task.hpp"
 #include "flock/git_host.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
 #include "flock/json.hpp"
 #include "flock/decision.hpp"
+#include "flock/limits.hpp"
 #include "flock/session_ref.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
@@ -18,6 +21,7 @@
 #include "session_participation_storage.hpp"
 #include "journal_storage.hpp"
 #include "task_records.hpp"
+#include "task_events.hpp"
 #include "web_identity_state.hpp"
 
 #include <optional>
@@ -52,11 +56,6 @@ FROM git_pr_watches w JOIN git_pr_operations o
 JOIN runs r ON r.task_id=o.task_id AND r.thread_id=json_extract(o.run,'$.threadId')
  AND r.run_id=json_extract(o.run,'$.runId')
 WHERE (w.host,w.repo,w.pr_number,w.task_id,w.bot_id)=(?,?,?,?,?) AND o.status='created'
-AND coalesce((SELECT json_extract(e.data,'$.action') FROM git_webhook_events e
- WHERE e.host=w.host AND e.repo=w.repo AND e.id>o.event_cursor
- AND json_extract(e.data,'$.kind')='pull_request' AND json_extract(e.data,'$.action') IN ('closed','reopened')
- AND EXISTS (SELECT 1 FROM json_each(e.data,'$.prNumbers') n WHERE n.value=w.pr_number)
- ORDER BY e.id DESC LIMIT 1),'') <> 'closed'
 LIMIT 2
 )SQL",
                              {event.at("host"), event.at("repo"), event.at("prNumber"), taskId, message.bot});
@@ -119,15 +118,14 @@ SELECT coalesce(max(m.id),0) FROM messages m WHERE m.bot_id=? AND m.person_id=? 
                          alreadyRequested ? attempted : available};
 }
 
-bool GitStorage::currentGitPrCheck(GitHost& host, const conversation::Message& message) {
+bool GitStorage::gitPrReadyForFollowup(GitHost& host, const conversation::Message& message) {
     const auto& event = message.routing.at("gitEvent");
     const Decision status{
         "git_pr_status", {{"host", event.at("host")}, {"repo", event.at("repo")}, {"prNumber", event.at("prNumber")}}, {}};
-    // Webhook receipt order is not branch update order. Use the host's current head.
-    const auto result = gitConversationTool(&host, message, status, "git-pr-head/" + std::to_string(message.id));
+    const auto result = gitConversationTool(&host, message, status, "git-pr-followup/" + std::to_string(message.id));
     if (!result.value("ok", false)) return false;
     const auto& pr = result.at("data");
-    return field(pr, "state") == "open" && field(pr, "headSha") == field(event, "headSha");
+    return field(pr, "state") == "open" && (field(event, "followup") != "failed_check" || field(pr, "headSha") == field(event, "headSha"));
 }
 
 std::string GitStorage::gitPrFollowupInstruction(const conversation::Message& message, const GitPrFollowup& followup,
@@ -159,5 +157,39 @@ std::string GitStorage::gitPrFollowupInstruction(const conversation::Message& me
 void GitStorage::recordGitPrFollowup(const conversation::Message& message, const GitPrFollowup& followup) {
     const auto& eventId = message.routing.at("gitEvent").at("eventId").get_ref<const std::string&>();
     journalStorage.journal(followup.origin.task, GitPrFollowupEntry{followup.operation, eventId, message.id});
+}
+
+Json GitStorage::applyGitTaskDecision(const conversation::Message& message, const Decision& decision) {
+    using conversation_storage::text;
+    using conversation_storage::ToolError;
+    if (message.principalSource != conversation::PrincipalSource::gitWebhook) throw ToolError("Use this action on the task's own turn");
+    const auto& event = message.routing.at("gitEvent");
+    auto task = taskRecords.load(event.at("taskId").get<Id>());
+    if (!taskRecords.externalWaitingNote(task)) throw ToolError("The task is no longer waiting for an external event");
+    const bool replacesCheck = task.state != TaskState::external_waiting;
+    const auto& args = decision.args;
+    if (decision.tool == "wait_for_event") {
+        if (args.size() != 2 || !args.contains("note") || !args.contains("checkAgainAfterMinutes"))
+            throw ToolError("Provide a waiting note and a re-check time");
+        waitForExternalEvent(task, args, policyApprovals.now());
+        taskRecords.save(task);
+    } else {
+        if (!gitNotificationCanComplete(message)) throw ToolError("This notification does not confirm a pull request closed or merged");
+        if (args.size() != 1 || !validDecisionReason(decision.reason)) throw ToolError("Provide a report and a brief reason");
+        if (!task.pendingInstructions.empty()) throw ToolError("The task has new user input to process before completion");
+        auto report = text(args, "report", limits::session_prompt::maxDecisionTextBytes, true);
+        CompletionProvenance source;
+        if (task.lastRun) {
+            auto row = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
+            if (row.next()) {
+                const auto lastReport = decodeRunReport(row.number(0), row.json(1));
+                if (lastReport.matches(*task.lastRun)) source = reportSourceRun(lastReport);
+            }
+        }
+        taskRecords.complete(task,
+                             {std::move(report), task.currentRevision, TaskCompletion{decision.reason, task.doneWhen, std::move(source)}});
+    }
+    if (replacesCheck) TaskEvents(database).consumeEvent(task);
+    return {{"ok", true}, {"taskId", task.id}, {"effect", taskStateName(task.state)}};
 }
 }

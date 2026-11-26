@@ -609,9 +609,8 @@ CallOutcome SessionMessageStorage::sendSessionMessage(const conversation::Messag
     } catch (const std::exception&) {
         error = "Could not verify access to this T3 Session";
     }
-    if (error.empty() && followup && followup->target.contains("headSha") &&
-        (!ctx.gitHost || !gitStorage.currentGitPrCheck(*ctx.gitHost, message)))
-        error = "Could not confirm that the failing check belongs to this pull request's current head";
+    if (error.empty() && followup && (!ctx.gitHost || !gitStorage.gitPrReadyForFollowup(*ctx.gitHost, message)))
+        error = "Could not verify that the follow-up still applies to this pull request";
     const SessionDispatchFileLock dispatch(path, SessionDispatchFileLock::Mode::shared);
     {
         std::lock_guard lock(database.mutex);
@@ -1128,6 +1127,11 @@ bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, s
     if (task.question) task.question->suspendedDecision.reset();
     journalStorage.journal(task.id, pending);
     task.pendingInstructions.push_back(std::move(pending));
+    if (task.state == TaskState::external_waiting) {
+        const auto key = "instruction/" + std::to_string(messageId) + "/" + std::to_string(step);
+        taskEvents.event(task, key, {{"kind", "user_instruction"}});
+        task.state = TaskState::queued;
+    }
     taskRecords.save(task);
     return conflicting;
 }

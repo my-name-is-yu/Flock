@@ -58,9 +58,12 @@ function fixtures() {
   };
   const sessionTasks = [
     { id: 17, generation: 1, request: 'Review the release notes and report any regressions. '.repeat(40).trim(), createdAt: time,
+      state: 'completed',
       sessions: [{ environmentId: 'local', threadId: 'thread', state: 'completed', createdAt: sessionCreatedAt }] },
-    { id: 16, generation: 1, request: 'Historical work', createdAt: time,
+    { id: 16, generation: 1, request: 'Historical work', createdAt: time, state: 'completed',
       sessions: [{ environmentId: 'local', threadId: 'older', state: 'completed' }] },
+    { id: 15, generation: 1, request: 'Cancelled work', createdAt: time, state: 'cancelled',
+      sessions: [{ environmentId: 'local', threadId: 'cancelled', state: 'completed', createdAt: sessionCreatedAt }] },
   ];
   const events = [
     { id: 1, kind: 'conversation_message', time, data: { text: 'First message' } },
@@ -93,18 +96,33 @@ function fixtures() {
     dm(12, 1000, 'triage', { text: 'Triage resumes after a break' }),
     dm(13, 12 * 3600, 'triage', { text: 'Triage follows up tomorrow' }),
   ];
-  let activeSessions = [];
+  let activeTasks = [];
+  let parallelTasks = [];
   window.showWorking = (request) => {
-    activeSessions = request ? [{ taskId: 18, threadId: 'working', environmentId: 'local', state: 'running', request }] : [];
+    activeTasks = [{ id: 18, request, state: 'running', session: { threadId: 'working', environmentId: 'local' } }];
+    parallelTasks = [];
     document.dispatchEvent(new Event('visibilitychange'));
   };
+  const release = { id: 14, request: 'Prepare release' };
   window.showWorkingTargets = () => {
-    activeSessions = ['Local', 'Mini'].map((name) => ({ taskId: 19, threadId: `thread-${name.toLowerCase()}`,
-      environmentId: `env-${name.toLowerCase()}`, name, state: 'running', request: 'Compare release checks' }));
+    activeTasks = [{ id: 19, request: 'Compare release checks', state: 'running' }, { ...release, state: 'running' }];
+    parallelTasks = [{ id: 19, runs: ['Local', 'Mini'].map((name) => ({ threadId: `thread-${name.toLowerCase()}`,
+      environmentId: `env-${name.toLowerCase()}`, name, state: 'running' })) }];
     document.dispatchEvent(new Event('visibilitychange'));
+  };
+  window.waitForReview = () => {
+    activeTasks = activeTasks.map(task => task.id === release.id
+      ? { ...task, state: 'external_waiting', waitingNote: 'Waiting for review on #412' } : task);
+    window.replyMotionFixture.change();
+  };
+  window.finishReview = () => {
+    activeTasks = activeTasks.filter(task => task.id !== release.id);
+    sessionTasks.push({ ...release, state: 'completed', generation: 2, sessions: [] });
+    window.replyMotionFixture.change();
   };
   window.showSuggestion = () => {
-    activeSessions = [];
+    activeTasks = [];
+    parallelTasks = [];
     events.push({ id: 5, kind: 'conversation_reply', time: time + 1002, data: {
       text: 'I can check the logs.', suggestions: ['Check the logs.'],
     } });
@@ -114,8 +132,8 @@ function fixtures() {
     if (path === '/api/bots') return Response.json([bot, peer]);
     if (path.startsWith('/api/peer-conversation?')) return Response.json(path.includes('before=')
       ? { messages: [older], hasOlder: false } : { messages: peerEvents, hasOlder: true });
-    const response = Response.json({ bot, events, olderBefore: 0, presence: activeSessions.length ? 'working' : 'idle',
-      activeSessions, sessionTasks, sessionsBefore: 0, sessionCursor: 0, waits: [],
+    const response = Response.json({ bot, events, olderBefore: 0, presence: activeTasks.some(task => task.state === 'running') ? 'working' : 'idle',
+      activeTasks, parallelTasks, sessionTasks, sessionsBefore: 15, sessionCursor: 0, waits: [],
       canDecide: true, composerPerson: null, limits: { messageBytes: 16000, waitAnswerBytes: 8000, attachments: 4 } });
     if (holdView && path.startsWith('/api/view?')) {
       const held = holdView;
@@ -187,11 +205,13 @@ async function exercise() {
   const check = (value, message) => { if (!value) throw new Error(message); };
   const sessionRows = () => [...document.querySelectorAll('.session-row')];
   const sessionLabel = (row) => row?.querySelector('.activity-status span:last-child')?.textContent;
-  const [finished, historical] = sessionRows();
+  const [finished, historical, cancelled] = sessionRows();
   check(sessionLabel(finished) === '17:30' && finished.dataset.tooltip.includes('17:30') &&
     finished.querySelector(':scope > .sr-only')?.textContent.includes('Nov 20, 2026, 17:30') &&
     sessionLabel(historical) === 'Complete' && !historical.dataset.tooltip.includes('Started'),
     'The sidebar used the request time instead of the Session creation time');
+  check(sessionLabel(cancelled) === 'Cancelled · 17:30' && cancelled.dataset.tooltip.includes('17:30'),
+    'The Done row showed the Session result instead of the cancelled request');
   finished.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' }));
   await new Promise(resolve => setTimeout(resolve, 500));
   const sessionTip = document.querySelector('.tooltip:popover-open .tooltip-label');
@@ -210,13 +230,29 @@ async function exercise() {
   window.returnAfterMidnight();
   check(sessionLabel(sessionRows()[0]) === 'Nov 20', 'Returning to the tab did not refresh the relative Session time');
   window.showWorkingTargets();
-  const destinationRows = () => sessionRows().filter((row) => ['Local', 'Mini'].some((name) =>
-    row.querySelector('.activity-title')?.textContent.startsWith(`${name} · Compare release checks`)));
+  const group = name => document.querySelector(`[data-session-group="${name}"]`);
+  const destinationRows = () => [...document.querySelectorAll('.request-sessions .session-row')];
   for (let attempt = 0; attempt < 20 && destinationRows().length !== 2; attempt++)
     await new Promise(resolve => setTimeout(resolve, 10));
   const destinations = destinationRows();
-  check(destinations.length === 2 && destinations.every((row) => sessionLabel(row) === 'Working'),
+  check(group('working').querySelector(':scope > .request-task > .session-row .activity-title').textContent === 'Compare release checks' &&
+    destinations.map(row => row.querySelector('.activity-title').textContent).join(',') === 'Local,Mini' &&
+    destinations.every(row => sessionLabel(row) === 'Working'),
     'Running destination Sessions did not show distinct visible names and live status');
+  check(group('working').textContent.includes('Prepare release'), 'The request was not displayed before waiting');
+  window.replyMotionFixture.ready();
+  window.waitForReview();
+  for (let attempt = 0; attempt < 20 && !group('waiting'); attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check([...document.querySelectorAll('[data-session-group]')].map(section => section.dataset.sessionGroup).join(',') === 'working,waiting,done' &&
+    sessionLabel(group('waiting').querySelector('.session-row')) === 'Waiting for review on #412' &&
+    !group('working').textContent.includes('Prepare release') && !group('done').textContent.includes('Prepare release'),
+    'A waiting request must show the Bot’s note under Waiting alongside Working and Done');
+  window.finishReview();
+  for (let attempt = 0; attempt < 20 && group('waiting'); attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(!group('waiting') && group('done').textContent.includes('Prepare release'),
+    'A Bot-completed request without a Session did not move to Done');
   const sampleConversation = document.createElement('section');
   sampleConversation.className = 'conversation';
   sampleConversation.style.setProperty('--user-bubble', 'rgb(0, 122, 53)');

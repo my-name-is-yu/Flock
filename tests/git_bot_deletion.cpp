@@ -2,6 +2,7 @@
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
+#include "flock/task_control.hpp"
 #include "fake_git.hpp"
 #include "fake_git_sessions.hpp"
 #include "flock/tasks.hpp"
@@ -14,6 +15,7 @@
 #include "flock/runtime.hpp"
 #include "flock/store.hpp"
 #include "flock/task.hpp"
+#include "flock/task_target.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
@@ -78,7 +80,7 @@ private:
         if (event.at("kind") == "result") {
             if (input.task.at("botId") == "owner" && event.value("gitResults", Json::array()).empty())
                 return {"git_open_pr", openArgs(), {}};
-            return {"complete", {{"report", "Change shipped"}}, {}};
+            return {"wait_for_event", {{"note", "Waiting for review"}, {"checkAgainAfterMinutes", 5}}, {}};
         }
         if (!event.contains("gitEvent")) {
             const auto& steps = event.at("turn");
@@ -150,19 +152,19 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         Store store(path);
         Runtime runtime(store, model, sessions, soul, options(host));
         retired = TaskIntake(store).submit(intake());
-        for (int i = 0; i < 8 && Tasks(store).task(retired).task.state != TaskState::completed; ++i) runtime.tick();
-        check(Tasks(store).task(retired).task.state == TaskState::completed && host->createCalls == 1,
-              "The original PR task did not finish");
+        for (int i = 0; i < 8 && Tasks(store).task(retired).task.state != TaskState::external_waiting; ++i) runtime.tick();
+        check(Tasks(store).task(retired).task.state == TaskState::external_waiting && host->createCalls == 1,
+              "The original PR task did not wait");
         const auto pending = Inbox(store).inbox(localOwner, "owner");
         check(pending.size() == 1 && pending.at(0).at("prTitle") == "Pull request awaiting review",
-              "Expected a pending review on the completed task");
-        bool blockedByReview = false;
+              "Expected a pending review on the waiting task");
+        bool busy = false;
         try {
             BotLifecycle(store).deleteBot(localOwner, "owner");
         } catch (const BotBusy&) {
-            blockedByReview = true;
+            busy = true;
         }
-        check(blockedByReview && !BotLifecycle(store).botDeleted("owner"), "A pending Git review did not block Bot deletion");
+        check(busy && !BotLifecycle(store).botDeleted("owner"), "An open PR task did not block Bot deletion");
         Inbox(store).decideInbox(localOwner, target(pending.at(0)), "approve");
 
         sibling = TaskIntake(store).submit(intake("sibling", "sibling-project"));
@@ -172,9 +174,9 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
               "The sibling did not start watching another PR at the same commit");
         replacement = TaskIntake(store).submit(intake("replacement", "replacement-project"));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(Tasks(store).task(sibling).task.state == TaskState::completed &&
-                  Tasks(store).task(replacement).task.state == TaskState::completed,
-              "The competing PR tasks did not finish setup");
+        check(Tasks(store).task(sibling).task.state == TaskState::external_waiting &&
+                  Tasks(store).task(replacement).task.state == TaskState::external_waiting,
+              "The competing PR tasks did not start waiting");
         const auto calls = host->hostCalls;
         const auto blocked = model.runTool(store, runtime, "replacement", "claim-active-watch", mutation(replacement));
         check(blocked.at("ok") == false && host->hostCalls == calls, "An active Bot's PR became available to another task");
@@ -182,6 +184,8 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         check(GitEvents(store).receiveGitWebhook({hostName, "shared-commit", repoName, "ci", "completed", {}, sha, "Shared SHA", 0}),
               "Could not save the shared-commit event");
         runtime.runConversations();
+        TaskControl(store).operate(localOwner, TaskTarget::from(Tasks(store).task(retired).task, 0), "cancel");
+        runtime.tick();
         BotLifecycle(store).deleteBot(localOwner, "owner");
         check(GitEvents(store).receiveGitWebhook({hostName, "retired-watch", repoName, "ci", "completed", {1}, sha, "Retired PR", 0}),
               "Could not save an explicit event after deletion");
@@ -288,13 +292,14 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
                       {hostName, "after-handoff-commit", repoName, "ci", "completed", {}, delayedSyncHead, "New head", 0}),
               "Could not enqueue activity after handoff");
         runtime.runConversations();
-        check(historyCount(store, retired, "git_webhook") == 0 && historyCount(store, sibling, "git_webhook") == 0,
-              "Handoff delivered an old event to the retired task or changed a shared commit's attribution");
-        check(webhookWasUndelivered(path, "shared-head-during-handoff"), "Handoff backdated a head change past ambiguous CI activity");
+        const auto siblingHistory = TaskHistory(store).history(sibling).dump();
+        check(historyCount(store, retired, "git_webhook") == 0 && historyCount(store, sibling, "git_webhook") == 1 &&
+                  siblingHistory.find("shared-head-during-handoff") != std::string::npos,
+              "Handoff replayed an old shared event or lost a new event for the remaining watch");
         const auto history = TaskHistory(store).history(replacement, 0, 200).dump();
         check((history.find("\"ci-before-delayed-sync\"") != std::string::npos) == observedDelayedHead,
               "Delayed synchronization failed to recover matching CI or crossed a conflicting head observation");
-        const auto expectedNotifications = (requestsReview ? 6 : 4) + (observedDelayedHead ? 1 : 0);
+        const auto expectedNotifications = (requestsReview ? 6u : 4u) + (observedDelayedHead ? 1u : 0u);
         check(historyCount(store, replacement, "git_webhook") == expectedNotifications &&
                   history.find("\"during-handoff\"") != std::string::npos &&
                   history.find("synchronize-after-handoff") != std::string::npos &&

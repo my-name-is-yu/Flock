@@ -293,6 +293,7 @@ std::string_view displayState(const TaskData& task) {
 
 Json taskSummary(const TaskData& task) {
     Json result = {{"state", displayState(task)}, {"id", task.id}, {"request", task.request}, {"generation", task.generation}};
+    if (task.state == TaskState::external_waiting && task.waitingNote) result["waitingNote"] = *task.waitingNote;
     if (task.currentRevision) result["currentRevision"] = *task.currentRevision;
     result["createdAt"] = task.createdAt;
     if (const auto& workflow = task.workflow) {
@@ -380,10 +381,16 @@ Json activity(const std::vector<TaskList::ActiveTask>& activeTasks, std::string_
     Json result = {{"presence", botPresence(states)},
                    {"waits", Json::array()},
                    {"queued", Json::array()},
-                   {"activeSessions", Json::array()},
+                   {"activeTasks", Json::array()},
                    {"parallelTasks", Json::array()}};
     for (const auto& [task, wait, blocker] : activeTasks) {
-        if (task.state == TaskState::waiting && wait) result["waits"].push_back(currentWait(task, *wait));
+        if (task.state == TaskState::waiting && wait)
+            result["waits"].push_back(currentWait(task, *wait));
+        else {
+            auto request = taskSummary(task);
+            request["session"] = runView(task.activeRun ? task.activeRun : task.lastRun, task.environmentId);
+            result["activeTasks"].push_back(std::move(request));
+        }
         if (task.state == TaskState::queued && blocker) {
             auto queued = taskSummary(task);
             queued["blockedBy"] = Json::object();
@@ -403,24 +410,9 @@ Json activity(const std::vector<TaskList::ActiveTask>& activeTasks, std::string_
                 const bool activeRun = route.outstanding();
                 if (activeRun && task.state == TaskState::cancelling && !route.inPhase(DestinationRunPhase::confirmation_pending))
                     run["state"] = "stopping";
-                if (activeRun && !field(run, "threadId").empty()) {
-                    auto active = run;
-                    active["taskId"] = task.id;
-                    active["request"] = task.request;
-                    active["createdAt"] = task.createdAt;
-                    result["activeSessions"].push_back(std::move(active));
-                }
                 checks.push_back(std::move(run));
             }
             result["parallelTasks"].push_back({{"id", task.id}, {"runs", std::move(checks)}});
-        }
-        auto active = runView(task.activeRun, task.environmentId);
-        if (!active.is_null()) {
-            active["taskId"] = task.id;
-            active["request"] = task.request;
-            active["state"] = displayState(task);
-            active["createdAt"] = task.createdAt;
-            result["activeSessions"].push_back(std::move(active));
         }
     }
     return result;
@@ -519,7 +511,7 @@ Json peerConversation(Store& store, std::string_view bot, std::string_view peer,
 }
 
 Json sessions(Store& store, std::string_view bot, Id before) {
-    const auto tasks = TaskHistory(store).sessionTasks(bot, before, sessionsSize + 1);
+    const auto tasks = TaskHistory(store).finishedTasks(bot, before, sessionsSize + 1);
     Json result = {{"sessionTasks", Json::array()}, {"sessionsBefore", 0}};
     auto& page = result["sessionTasks"];
     for (const auto& task : tasks) {

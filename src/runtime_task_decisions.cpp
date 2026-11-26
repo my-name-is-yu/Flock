@@ -52,11 +52,11 @@ runtime::TaskDecisions::TaskDecisions(Database& database, ConversationStorage& c
                                       SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,
                                       WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
                                       PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead,
-                                      GitHost* gitHost)
+                                      GitHost* gitHost, const std::function<Seconds()>& clock)
     : database(database), conversationTurns(conversationTurns), gitStorage(gitStorage), journalStorage(journalStorage),
       memoryStorage(memoryStorage), peerStorage(peerStorage), secretStorage(secretStorage), taskEvents(taskEvents),
       taskRecords(taskRecords), waitStorage(waitStorage), updates(updates), reports(reports), history(history),
-      peerExchanges(peerExchanges), dispatch(dispatch), sessionRead(sessionRead), gitHost(gitHost) {}
+      peerExchanges(peerExchanges), dispatch(dispatch), sessionRead(sessionRead), gitHost(gitHost), clock(clock) {}
 
 bool runtime::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
     if (task.replanning) return false;
@@ -119,27 +119,17 @@ void runtime::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, c
 }
 
 void runtime::TaskDecisions::complete(TaskData& current, const Json& event, const TaskDecision& decision) {
-    const auto& pending = current.pendingInstructions;
-    auto ids = Json::array();
-    for (const auto& item : pending) ids.push_back({{"messageId", item.messageId}, {"step", item.step}});
-    const bool requiresAcknowledgment = !pending.empty();
-    if (requiresAcknowledgment != decision.args.contains("acknowledgedInstructions") ||
-        decision.args.value("acknowledgedInstructions", Json::array()) != ids)
-        throw Conflict("Completion must acknowledge each pending instruction by messageId and step, oldest first");
+    requireInstructionAcknowledgments(current, decision.args);
     if (conversationTurns.conversationPending(current.botId)) return;
     auto source = completionProvenance(current, event);
     const auto learnings = decision.args.find("learnings");
     const auto learning = learnings == decision.args.end() ? std::nullopt : learningSource(current, event);
     updates.consumeEvent(current);
     updates.recordDecision(current, event, decision, actionId());
-    current.pendingInstructions.clear();
-    current.newSessionRequired = false;
-    current.state = TaskState::completed;
     const auto completion =
-        journalStorage.journal(current.id, CompletionEntry{field(decision.args, "report"), current.currentRevision,
-                                                           TaskCompletion{decision.reason, current.doneWhen, std::move(source)}});
+        taskRecords.complete(current, CompletionEntry{field(decision.args, "report"), current.currentRevision,
+                                                      TaskCompletion{decision.reason, current.doneWhen, std::move(source)}});
     if (learning) memoryStorage.learnFromWork(current, completion, learning->reportId, learning->runId, *learnings, unixTime());
-    updates.saveTask(current);
 }
 
 void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision,
@@ -181,6 +171,7 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         {"answer_session_question", {"requestId", "answers"}},
         {"follow_up", {"instruction"}},
         {"complete", {"report", "acknowledgedInstructions", "learnings"}},
+        {"wait_for_event", {"note", "checkAgainAfterMinutes", "acknowledgedInstructions"}},
         {"ask_user", {"question", "choices"}},
         {"session_read", {"threadId", "runId", "itemId", "cursor", "view", "offset"}},
         {"send_bot_message", {"botId", "kind", "text", "doneWhen", "forwardUserMessage"}},
@@ -242,6 +233,12 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         sessionQuestionAnswers(snapshot.question->fields, args.value("answers", Json::object()));
     }
     updates.change(snapshot, [&](TaskData& current) {
+        if (tool == "wait_for_event") {
+            waitForExternalEvent(current, args, clock());
+            updates.consumeEvent(current);
+            updates.recordDecision(current, event, decision, actionId());
+            return true;
+        }
         if (tool == "follow_up" && current.newSessionRequired) throw Conflict("Start a new Session in the current environment");
         if (work) updates.establishCriteria(current, args);
         updates.consumeEvent(current);

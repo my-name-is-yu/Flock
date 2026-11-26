@@ -498,8 +498,10 @@ async function exerciseLiveRetry() {
       approvalCard().querySelector('button[value=always_allow]') ||
       ![...approvalCard().querySelectorAll('button')].some(button => button.textContent === 'Allow once'))
     throw new Error('The approval card duplicated the request or displayed the wrong action');
-  const review = [...document.querySelectorAll('#wait-list .wait-row')].find(row => row.textContent.includes('Approval needed'));
-  if (!review) throw new Error('The approval disappeared from Needs you');
+  const needsYou = [...document.querySelectorAll('#wait-list .wait-row')];
+  const review = needsYou.find(row => row.textContent.includes('Approval needed'));
+  if (!review || !needsYou.some(row => row.textContent.includes('Question for you')))
+    throw new Error('The question or approval disappeared from Needs you');
   review.click();
   if (panel.hidden || !panel.textContent.includes('Pull request: 42') || !panel.textContent.includes('State: closed') ||
       panel.querySelector('button[value=always_allow]') ||

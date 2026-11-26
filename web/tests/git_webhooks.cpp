@@ -3,6 +3,7 @@
 #include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/git_events.hpp"
 #include "flock/web.hpp"
 #include "../../tests/fake_git.hpp"
 #include "../../tests/fake_git_sessions.hpp"
@@ -20,6 +21,7 @@
 #include <httplib.h>
 #include <openssl/hmac.h>
 
+#include <algorithm>
 #include <exception>
 #include <iostream>
 #include <map>
@@ -35,6 +37,9 @@ using namespace git_fixture;
 namespace {
 constexpr auto webhookPath = "/api/git/webhooks/github.com";
 constexpr auto key = "fixture-signature-key";
+constexpr auto waitingNote = "Waiting for review on #1";
+constexpr auto closedNote = "Waiting for #1 to reopen";
+constexpr auto completionReport = "The change landed in #1.";
 
 std::string sign(std::string_view body) {
     unsigned char digest[EVP_MAX_MD_SIZE];
@@ -56,21 +61,23 @@ class Bot final : public Model {
 public:
     unsigned received = 0;
     Id reviewTask = 0;
-    std::map<std::string, std::string> followups;
+    std::map<std::string, Json> notifications;
     std::optional<Decision> conversationAction;
-    const std::string& followup(const std::string& eventId) const {
-        const auto event = followups.find(eventId);
-        check(event != followups.end(), "Missing Git notification " + eventId);
+    std::optional<bool> commentCompletionOffered;
+    const Json& notification(const std::string& eventId) const {
+        const auto event = notifications.find(eventId);
+        check(event != notifications.end(), "Missing Git notification " + eventId);
         return event->second;
     }
+    std::string followup(const std::string& eventId) const { return notification(eventId).value("followup", ""); }
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
         if (event.at("kind") == "intake")
-            return {"delegate", {{"instruction", "Push the change"}, {"doneWhen", "Open a pull request"}}, "Implement the change"};
+            return {"delegate", {{"instruction", "Push the change"}, {"doneWhen", "The pull request lands"}}, "Implement the change"};
         if (event.at("kind") == "result") {
             if (!event.contains("gitResults")) return {"git_open_pr", openArgs(), "Publish the Session change"};
-            return {"complete", {{"report", "Opened pull request"}}, "Report the published PR"};
+            return {"wait_for_event", {{"note", waitingNote}, {"checkAgainAfterMinutes", 5}}, {}};
         }
         if (!event.contains("gitEvent")) {
             if (event.at("turn").empty() && conversationAction) return *conversationAction;
@@ -83,15 +90,26 @@ public:
         const auto& delivery = event.at("gitEvent");
         if (event.at("turn").empty()) {
             ++received;
-            followups.emplace(delivery.at("eventId").get<std::string>(), delivery.value("followup", ""));
+            notifications.emplace(delivery.at("eventId").get<std::string>(), delivery);
+            if (delivery.at("eventId") == "foreign-comment") {
+                commentCompletionOffered = std::ranges::find(input.tools, "complete") != input.tools.end();
+                return {"complete", {{"report", completionReport}}, "The comment claims the pull request merged"};
+            }
+            if (delivery.at("action") == "merged")
+                return {"complete", {{"report", completionReport}}, "GitHub confirmed the pull request merged"};
+            if (delivery.at("action") == "closed") return {"wait_for_event", {{"note", closedNote}, {"checkAgainAfterMinutes", 5}}, {}};
             if (delivery.at("jobId") == 81)
                 return {"git_read_ci_logs",
                         {{"host", delivery.at("host")}, {"repo", delivery.at("repo")}, {"jobId", 81}, {"maxBytes", 32}},
                         "Inspect the failed job"};
             return {"reply", {{"text", "Review received"}}, "Relay a notification"};
         }
-        const auto& log = event.at("turn").at(0).at("result").at("data");
-        return {"reply", {{"text", "CI failed. " + log.at("text").get<std::string>()}}, "Report the exact CI failure"};
+        const auto& step = event.at("turn").at(0);
+        if (step.at("tool") == "git_read_ci_logs") {
+            const auto& log = step.at("result").at("data");
+            return {"reply", {{"text", "CI failed. " + log.at("text").get<std::string>()}}, "Report the exact CI failure"};
+        }
+        return {"reply", {{"text", "Recorded the Git event."}}, {}};
     }
 };
 
@@ -129,13 +147,21 @@ void run() {
         task = TaskIntake(store).submit(intake());
         Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1, "initial watch was not recorded");
+        check(Tasks(store).task(task).task.state == TaskState::external_waiting && host->createCalls == 1,
+              "Opening a PR did not leave the request waiting");
     }
     Store store(database);
     const auto server = startWeb(store, 0, callbacks());
     httplib::Client client("127.0.0.1", static_cast<int>(server->port()));
     const auto privateEndpoint = client.Get("/api/inbox");
     check(privateEndpoint && privateEndpoint->status == 401, "ordinary Web access became public");
+    const auto response = client.Get("/api/view?bot=owner", httplib::Headers{{"Authorization", "Basic fixture"}});
+    check(response && response->status == 200, "Could not load the owning Bot's sidebar data");
+    const auto view = Json::parse(response->body);
+    const auto& waiting = view.at("activeTasks").at(0);
+    check(waiting.at("id") == task && waiting.at("state") == "external_waiting" && waiting.at("waitingNote") == waitingNote &&
+              view.at("waits").empty(),
+          "The Bot's waiting note did not reach the sidebar separately from questions and approvals");
     const Json repository{{"full_name", "ORG/Flock"}, {"id", 41}};
     const Json payload{
         {"action", "completed"},
@@ -193,6 +219,8 @@ void run() {
               inbox->body.find("Code scanning result") != std::string::npos,
           "review or scan missing in the Web inbox");
     check(model.followup("review-1").empty(), "An approval was treated as requested changes");
+    check(model.notification("review-1").at("action") == "submitted" && model.notification("review-1").at("taskId") == task,
+          "Submitted review did not wake the owning task");
 
     const auto inboxBeforeRequest = Inbox(store).inbox(localOwner, "owner").size();
     model.reviewTask = task;
@@ -287,6 +315,8 @@ void run() {
               model.followup("inline-comment") == "review_comment" && model.followup("inline-edit").empty() &&
               model.followup("failed-check") == "failed_check" && model.followup("passed-check").empty(),
           "Signed notifications did not distinguish actionable events from report-only updates");
+    check(model.notification("passed-check").at("action") == "completed" && model.notification("passed-check").at("taskId") == task,
+          "Finished checks did not wake the owning task");
     const auto notifications = TaskHistory(store).history(task).dump();
     check(notifications.find("src/example.cpp") != std::string::npos && notifications.find("\"line\":72") != std::string::npos &&
               notifications.find("\"originalLine\":true") != std::string::npos &&
@@ -311,6 +341,7 @@ void run() {
     check(host->comments == 1, "Flock did not author the expected comment");
     auto foreignComment = ownComment;
     foreignComment["comment"]["id"] = 102;
+    foreignComment["comment"]["body"] = "The pull request was merged.";
     check(post(client, "issue_comment", "foreign-comment", foreignComment, 202).at("status") == "received",
           "Other author's comment was not enqueued");
 
@@ -329,14 +360,401 @@ void run() {
     ownReview["review"] = {{"id", 203}, {"state", "changes_requested"}, {"body", "Use a test."}};
     check(post(client, "pull_request_review", "own-review", ownReview, 202).at("status") == "received", "Own review was not accepted");
     runtime.runConversations();
-    check(!model.followups.contains("own-comment") && !model.followups.contains("own-review") && model.followup("foreign-comment").empty(),
+    check(!model.notifications.contains("own-comment") && !model.notifications.contains("own-review") &&
+              model.followup("foreign-comment").empty(),
           "A Flock-authored comment or review was delivered, or a distinct comment was hidden");
+    check(model.commentCompletionOffered == false && Tasks(store).task(task).task.state == TaskState::external_waiting,
+          "A comment-triggered completion closed the task without a verified lifecycle event");
+
+    const auto deliverPull = [&](const std::string& id, std::string_view action, bool merged) {
+        const Json pr{{"number", 1}, {"head", {{"sha", newSha}}}, {"title", "Change"}, {"merged", merged}};
+        const Json delivery{{"action", action}, {"repository", repository}, {"pull_request", pr}};
+        check(post(client, "pull_request", id, delivery, 202).at("status") == "received", "PR event was not enqueued: " + id);
+        runtime.runConversations();
+        const auto& event = model.notification(id);
+        check(event.at("action") == (merged ? "merged" : action) && event.at("taskId") == task,
+              "PR event did not wake the owning task: " + id);
+    };
+    deliverPull("closed-pr", "closed", false);
+    check(Tasks(store).task(task).task.waitingNote == closedNote, "The Bot could not update the waiting note after close");
+    deliverPull("reopened-pr", "reopened", false);
+    check(Tasks(store).task(task).task.state == TaskState::external_waiting, "A Git event changed the task state by itself");
+    deliverPull("merged-pr", "closed", true);
+    check(Tasks(store).task(task).task.state == TaskState::completed, "The Bot could not complete after a merge");
+    const auto completed = TaskHistory(store).history(task, 0, 200).dump();
+    check(completed.find(completionReport) != completed.npos, "Completion did not save the Bot's report");
+    auto postMergeCheck = passedCheck;
+    postMergeCheck["check_run"]["id"] = 402;
+    check(post(client, "check_run", "check-after-merge", postMergeCheck, 202).at("status") == "received", "Post-merge check not saved");
+    runtime.runConversations();
+    check(!model.notifications.contains("check-after-merge"), "A completed task still received PR events");
+}
+
+void mergeDuringPullRequestCreation() {
+    Directory directory;
+    Store store(directory.path / "state.db");
+    auto host = std::make_shared<FakeHost>();
+    Sessions sessions;
+    Bot model;
+    const auto task = TaskIntake(store).submit(intake());
+    host->inspect = [&](const GitContext&, const GitOpenPr&) {
+        check(GitEvents(store).receiveGitWebhook({hostName, "early-merge", repoName, "pull_request", "merged", {1}, sha, "Change", 0}),
+              "Could not save a merge while the PR was being created");
+    };
+    Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    for (int i = 0; i < 12 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    check(model.notification("early-merge").at("taskId") == task && Tasks(store).task(task).task.state == TaskState::completed,
+          "The merge arrived before the Bot could wait and was lost");
+}
+
+void completeAfterPostMergeCI() {
+    class SmokeBot final : public Model {
+    public:
+        Bot fallback;
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& event = input.event;
+            if (event.at("kind") == "intake")
+                return {{Decision{"delegate",
+                                  {{"instruction", "Push the change"}, {"doneWhen", "The PR merges and smoke CI verifies version 2"}},
+                                  "Implement the change"}}};
+            if (!event.contains("gitEvent")) return fallback.decide(input);
+            const auto& delivery = event.at("gitEvent");
+            const auto& turn = event.at("turn");
+            if (delivery.at("action") == "merged" && turn.empty())
+                return {{Decision{"wait_for_event", {{"note", "Merged. Waiting for smoke CI."}, {"checkAgainAfterMinutes", 15}}, {}}}};
+            if (delivery.at("action") != "completed") return fallback.decide(input);
+            if (turn.empty())
+                return {{Decision{"git_read_ci_logs",
+                                  {{"host", delivery.at("host")}, {"repo", delivery.at("repo")}, {"jobId", 81}, {"maxBytes", 32}},
+                                  "Verify the deployed version"}}};
+            const auto& log = turn.at(0).at("result").at("data");
+            check(log.at("text") == "smoke: served v2" && event.at("watchedPullRequests").at(0).at("priorLifecycleAction") == "merged",
+                  "The CI turn did not receive the smoke log and the prior merge");
+            check(std::ranges::find(input.tools, "complete") != input.tools.end(), "The post-merge CI turn could not offer completion");
+            return {{Decision{"complete", {{"report", "The PR merged and smoke verified version 2."}}, "Verified both criteria"}}};
+        }
+    } model;
+    Directory directory;
+    Store store(directory.path / "state.db");
+    auto host = std::make_shared<FakeHost>();
+    host->log = {"smoke: served v2", false};
+    Sessions sessions;
+    const auto task = TaskIntake(store).submit(intake());
+    Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    for (int i = 0; i < 8; ++i) runtime.tick();
+    const auto server = startWeb(store, 0, callbacks());
+    httplib::Client client("127.0.0.1", static_cast<int>(server->port()));
+    const Json repo{{"full_name", repoName}, {"id", 41}};
+    const Json merged{{"action", "closed"},
+                      {"repository", repo},
+                      {"pull_request", {{"number", 1}, {"head", {{"sha", sha}}}, {"title", "Change"}, {"merged", true}}}};
+    check(post(client, "pull_request", "merge-before-ci", merged, 202).at("status") == "received", "The merge was not accepted");
+    runtime.runConversations();
+    check(Tasks(store).task(task).task.waitingNote == "Merged. Waiting for smoke CI.", "The Bot did not wait for CI after merge");
+    const Json passed{
+        {"action", "completed"},
+        {"repository", repo},
+        {"workflow_job", {{"id", 81}, {"head_sha", sha}, {"name", "Smoke"}, {"status", "completed"}, {"conclusion", "success"}}}};
+    check(post(client, "workflow_job", "post-merge-ci", passed, 202).at("status") == "received",
+          "The post-merge CI event was not accepted");
+    runtime.runConversations();
+    check(host->logCalls == 1 && Tasks(store).task(task).task.state == TaskState::completed,
+          "The signed post-merge CI result did not complete the waiting task");
+}
+
+void scheduledPullRequestCheck(bool connected, bool webhookFirst, bool waitForCI = false) {
+    class CheckBot final : public Model {
+    public:
+        bool waitForCI = false;
+        Bot fallback;
+        std::vector<Json> checks;
+        ModelTurn decide(const ModelInput& input) override {
+            if (waitForCI && input.event.at("kind") == "intake")
+                return {{Decision{"delegate",
+                                  {{"instruction", "Push the change"}, {"doneWhen", "The PR's Build check passes"}},
+                                  "Implement the change"}}};
+            if (input.event.at("kind") != "external_check") return fallback.decide(input);
+            checks.push_back(input.event);
+            const auto& pr = input.event.at("watchedPullRequests").at(0);
+            check(pr.at("host") == hostName && pr.at("repo") == repoName && pr.at("prNumber") == 1,
+                  "The check did not target the watched PR");
+            const auto& ci = pr.at("checks");
+            const bool finished = waitForCI
+                                      ? ci.at("status") == "available" && ci.at("data").at("checks").at(0).at("conclusion") == "success"
+                                      : pr.at("status") == "available" && pr.at("data").at("merged") == true;
+            if (finished) {
+                if (input.event.at("decisionFeedback").empty())
+                    return {{Decision{"wait_for_event", {{"note", waitingNote}, {"checkAgainAfterMinutes", 1441}}, {}}}};
+                return {{Decision{"complete",
+                                  {{"report", waitForCI ? "Build passed." : completionReport}},
+                                  waitForCI ? "The status read confirmed the Build check passed" : "The status read confirmed the merge"}}};
+            }
+            return {{Decision{"wait_for_event", {{"note", "Waiting for GitHub status"}, {"checkAgainAfterMinutes", 10}}, {}}}};
+        }
+    } model;
+    model.waitForCI = waitForCI;
+    Directory directory;
+    const auto path = directory.path / "state.db";
+    auto host = std::make_shared<FakeHost>();
+    const std::string currentHead(40, 'b');
+    std::string conclusion = "pending";
+    bool checksAvailable = true;
+    std::vector<Decision> reads;
+    host->responseForCall = [&](const GitRepository& repo, const Decision& request) -> Json {
+        reads.push_back(request);
+        check(repo.host == hostName && repo.repo == repoName, "The scheduled read targeted a different repository");
+        if (request.tool == "git_pr_status") return host->result;
+        check(request.tool == "git_commit_status" && request.args.at("sha") == currentHead,
+              "Scheduled checks did not use the current PR head");
+        if (!checksAvailable) throw GitRejected("Checks unavailable");
+        return {{"checks", Json::array({{{"name", "Build"}, {"status", "completed"}, {"conclusion", conclusion}}})}};
+    };
+    Sessions sessions;
+    Seconds now = 1'800'000'000;
+    RuntimeOptions config{.clock = [&] { return now; }, .gitHost = host};
+    const auto soul = [](std::string_view) { return std::string{}; };
+    Id task;
+    {
+        Store store(path);
+        task = TaskIntake(store).submit(intake());
+        Runtime runtime(store, model, sessions, soul, config);
+        for (int i = 0; i < 8; ++i) runtime.tick();
+        check(Tasks(store).task(task).task.state == TaskState::external_waiting, "The task did not schedule its first check");
+    }
+    if (!connected) config.gitHost.reset();
+    host->result = {{"state", waitForCI ? "open" : "closed"}, {"merged", !waitForCI}, {"headSha", currentHead}};
+    Store store(path);
+    Runtime runtime(store, model, sessions, soul, config);
+    now += 299;
+    runtime.tick();
+    check(model.checks.empty() && reads.empty(), "A re-check ran before its deadline");
+    if (webhookFirst) {
+        check(GitEvents(store).receiveGitWebhook({hostName, "closed-early", repoName, "pull_request", "closed", {1}, sha, "Change", 0}),
+              "The earlier signed event was not accepted");
+        ++now;
+        runtime.tick();
+        check(Tasks(store).task(task).task.waitingNote == closedNote, "The earlier webhook did not wake the task");
+        runtime.tick();
+        check(model.checks.empty() && reads.empty(), "The superseded deadline still ran");
+        now += 300;
+        host->result["merged"] = false;
+        checksAvailable = false;
+    } else {
+        conclusion = "success";
+        ++now;
+    }
+    for (int i = 0; i < 5; ++i) runtime.tick();
+    const auto state = Tasks(store).task(task).task;
+    if (connected && !webhookFirst) {
+        check(model.checks.size() == 2 && reads.size() == 2 && state.state == TaskState::completed &&
+                  reads.front().tool == "git_pr_status" && reads.front().args.at("prNumber") == 1 &&
+                  reads.back().tool == "git_commit_status" && reads.back().args.at("sha") == currentHead,
+              "The re-check did not reuse the PR and current-head CI status through model retry and completion");
+        return;
+    }
+    check(model.checks.size() == 1 && reads.size() == (connected ? 2 : 0) && state.state == TaskState::external_waiting &&
+              state.waitingNote == "Waiting for GitHub status" &&
+              model.checks.front().at("watchedPullRequests").at(0).at("status") == (connected ? "available" : "unavailable") &&
+              model.checks.front().at("watchedPullRequests").at(0).at("checks").at("status") == "unavailable",
+          "Unavailable checks hid PR status or prevented the task from deciding again");
+    now += 599;
+    runtime.tick();
+    check(model.checks.size() == 1, "A new check ran before the new model-chosen deadline");
+    ++now;
+    for (int i = 0; i < 3; ++i) runtime.tick();
+    check(model.checks.size() == 2, "Waiting again did not schedule the next one-shot check");
+}
+
+void acknowledgeInstructionsBeforeWaitingAgain() {
+    class InstructionBot final : public Model {
+    public:
+        Bot fallback;
+        int instructionDecisions = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") != "user_instruction") return fallback.decide(input);
+            const auto& instruction = input.task.at("userInstructions").at(0);
+            check(instruction.at("text") == "Wait for the merge", "The Bot did not see the new instruction");
+            Json args{{"note", "Still waiting for the merge"}, {"checkAgainAfterMinutes", 5}};
+            if (++instructionDecisions == 2)
+                args["acknowledgedInstructions"] =
+                    Json::array({{{"messageId", instruction.at("messageId")}, {"step", instruction.at("step")}}});
+            return {{Decision{"wait_for_event", std::move(args), {}}}};
+        }
+    } model;
+    Directory directory;
+    Store store(directory.path / "state.db");
+    auto host = std::make_shared<FakeHost>();
+    Sessions sessions;
+    const auto task = TaskIntake(store).submit(intake());
+    Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    for (int i = 0; i < 8; ++i) runtime.tick();
+    const auto waiting = Tasks(store).task(task).task;
+    check(waiting.state == TaskState::external_waiting, "The task did not initially wait");
+    model.fallback.conversationAction =
+        Decision{"send_to_task",
+                 {{"taskId", task}, {"generation", waiting.generation}, {"instruction", "Wait for the merge"}},
+                 "Apply the instruction"};
+    ConversationIntake(store).receive(localOwner, intake(), "keep-waiting", "Wait for the merge");
+    runtime.runConversations();
+    for (int i = 0; i < 6; ++i) runtime.tick();
+    const auto updated = Tasks(store).task(task).task;
+    check(model.instructionDecisions == 2 && updated.state == TaskState::external_waiting && updated.pendingInstructions.empty(),
+          "Waiting again did not require and consume exact instruction acknowledgments");
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "merge-after-instruction", repoName, "pull_request", "merged", {1}, sha, "Change", 0}),
+          "The merge notification was not accepted");
+    runtime.runConversations();
+    check(Tasks(store).task(task).task.state == TaskState::completed, "Acknowledged instructions still blocked completion");
+}
+
+void multipleWatchedPullRequests() {
+    constexpr auto relatedRepo = "org/related";
+    constexpr auto mainUrl = "https://github.com/org/flock/pull/1";
+    constexpr auto relatedUrl = "https://github.com/org/related/pull/1";
+    const auto watch = [](const Json& event, std::string_view repo) {
+        const auto& watches = event.at("watchedPullRequests");
+        const auto matched = std::ranges::find_if(watches, [&](const Json& candidate) {
+            return candidate.at("host") == hostName && candidate.at("repo") == repo && candidate.at("prNumber") == 1;
+        });
+        check(matched != watches.end(), "A watched pull request was missing from the notification");
+        return *matched;
+    };
+    class LandingBot final : public Model {
+    public:
+        Bot fallback;
+        std::map<std::string, Json> events;
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& event = input.event;
+            if (!event.contains("gitEvent")) return fallback.decide(input);
+            if (event.at("turn").empty()) {
+                const auto id = event.at("gitEvent").at("eventId").get<std::string>();
+                events.emplace(id, event);
+                if (id == "land-main" && std::ranges::any_of(event.value("watchedPullRequests", Json::array()), [](const Json& pr) {
+                        return pr.at("repo") == "org/related" && pr.value("priorLifecycleAction", "") == "merged";
+                    }))
+                    return {{Decision{"complete", {{"report", "Both changes landed."}}, "Both pull requests merged"}}};
+            }
+            return {{Decision{"reply", {{"text", "Recorded the Git event."}}, {}}}};
+        }
+    } model;
+    Directory directory;
+    Store store(directory.path / "state.db");
+    Sessions sessions;
+    auto host = std::make_shared<FakeHost>();
+    const auto task = TaskIntake(store).submit(intake());
+    Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    for (int i = 0; i < 8; ++i) runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::external_waiting, "The task did not enter external waiting");
+    const auto doGit = [&](const std::string& id, Decision action) {
+        model.fallback.conversationAction = std::move(action);
+        ConversationIntake(store).receive(localOwner, intake(), id, "Work on another pull request");
+        runtime.runConversations();
+    };
+    doGit("watch-related", {"git_request_review",
+                            {{"host", hostName}, {"repo", relatedRepo}, {"taskId", task}, {"prNumber", 1}, {"reviewers", {"alice"}}},
+                            "Request review for the related pull request"});
+    host->create = FakeHost::Create::lostRequest;
+    auto another = openArgs("another-change");
+    another["taskId"] = task;
+    doGit("unresolved-create", {"git_open_pr", std::move(another), "Publish another change"});
+    const auto inboxHas = [&](std::string_view kind, std::string_view url = {}) {
+        return std::ranges::any_of(Inbox(store).inbox(localOwner, "owner"), [&](const Json& row) {
+            return row.at("taskId") == task && row.at("itemKind") == kind && (url.empty() || row.value("prUrl", "") == url);
+        });
+    };
+    check(inboxHas("pr_review", mainUrl) && inboxHas("pr_review", relatedUrl) && inboxHas("pr_reconciliation"),
+          "The fixture did not create both PR cards and an unresolved creation item");
+    const auto server = startWeb(store, 0, callbacks());
+    httplib::Client client("127.0.0.1", static_cast<int>(server->port()));
+    const auto queue = [&](std::string_view id, std::string_view repo, std::string_view action, bool merged = false) {
+        const Json pr{{"number", 1}, {"head", {{"sha", sha}}}, {"title", "Change"}, {"merged", merged}};
+        const Json delivery{{"action", action}, {"repository", {{"full_name", repo}, {"id", 41}}}, {"pull_request", pr}};
+        check(post(client, "pull_request", id, delivery, 202).at("status") == "received", "PR event was not enqueued");
+    };
+    queue("close-main", repoName, "closed");
+    runtime.runConversations();
+    check(!inboxHas("pr_review", mainUrl) && inboxHas("pr_review", relatedUrl) && inboxHas("pr_reconciliation"),
+          "Closing a PR did not remove exactly its review cards");
+    check(!watch(model.events.at("close-main"), relatedRepo).contains("priorLifecycleAction"),
+          "A watch without earlier signed events appeared to have lifecycle evidence");
+    queue("reopen-main", repoName, "reopened");
+    const auto related = GitRepository{hostName, relatedRepo}.resource();
+    const auto denyRelatedReads = [&](bool add) {
+        const Json rule{{"kind", "never"}, {"action", "repository.read"}, {"target", related}, {"add", add}};
+        const httplib::Headers headers{
+            {"Authorization", "Basic fixture"}, {"Origin", "http://127.0.0.1:" + std::to_string(server->port())}, {"X-Flock-Action", "1"}};
+        const auto response = client.Post("/api/settings/rule", headers, rule.dump(), "application/json");
+        check(response && response->status == 200, "The Web policy route did not update repository access");
+    };
+    denyRelatedReads(true);
+    queue("review-main", repoName, "ready_for_review");
+    runtime.runConversations();
+    check(inboxHas("pr_review", mainUrl), "A reopened PR could not receive a fresh review card");
+    check(model.events.at("review-main").at("watchedPullRequests").size() == 1,
+          "A notification exposed a watch after repository read access was revoked");
+    denyRelatedReads(false);
+    queue("land-related", relatedRepo, "closed", true);
+    queue("land-main", repoName, "closed", true);
+    runtime.runConversations();
+    check(watch(model.events.at("land-related"), repoName).at("priorLifecycleAction") == "reopened",
+          "The first merge turn missed the reopen or saw the later merge");
+    check(watch(model.events.at("land-main"), relatedRepo).at("priorLifecycleAction") == "merged" &&
+              Tasks(store).task(task).task.state == TaskState::completed,
+          "The second merge turn could not verify both merges to complete the task");
+    check(!inboxHas("pr_review", mainUrl) && !inboxHas("pr_review", relatedUrl) && inboxHas("pr_reconciliation"),
+          "Merging the PRs left stale review cards or removed an unrelated creation item");
+}
+
+void mergeWhileScheduledCheckWaitsForProject() {
+    class BusyBot final : public Model {
+    public:
+        Bot fallback;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") == "intake" && input.task.at("request") == "Another request")
+                return {{Decision{"ask_user", {{"question", "Which release?"}}, "The request needs a release name"}}};
+            return fallback.decide(input);
+        }
+    } model;
+    Directory directory;
+    Store store(directory.path / "state.db");
+    auto host = std::make_shared<FakeHost>();
+    Sessions sessions;
+    Seconds now = 1'800'000'000;
+    const auto task = TaskIntake(store).submit(intake());
+    Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; },
+                    {.clock = [&] { return now; }, .gitHost = host});
+    for (int i = 0; i < 8; ++i) runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::external_waiting, "The PR task did not release its project");
+    auto other = intake();
+    other.request = "Another request";
+    const auto blocker = TaskIntake(store).submit(other);
+    for (int i = 0; i < 4; ++i) runtime.tick();
+    check(Tasks(store).task(blocker).task.state == TaskState::waiting, "Another request did not hold the project");
+    now += 5 * 60;
+    runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::queued, "The check did not queue behind the active project request");
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "merge-with-busy-project", repoName, "pull_request", "merged", {1}, sha, "Change", 0}),
+          "The merge was not accepted");
+    runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::completed && Tasks(store).task(blocker).task.state == TaskState::waiting &&
+              host->hostCalls == 0,
+          "A queued re-check blocked merge completion or disturbed the other request");
 }
 }
 
 int main() {
     try {
         run();
+        mergeDuringPullRequestCreation();
+        completeAfterPostMergeCI();
+        scheduledPullRequestCheck(true, false);
+        scheduledPullRequestCheck(true, false, true);
+        scheduledPullRequestCheck(false, false);
+        scheduledPullRequestCheck(true, true);
+        acknowledgeInstructionsBeforeWaitingAgain();
+        multipleWatchedPullRequests();
+        mergeWhileScheduledCheckWaitsForProject();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

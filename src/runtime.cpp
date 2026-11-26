@@ -23,6 +23,7 @@
 #include "wait_storage.hpp"
 #include "policy_approvals.hpp"
 #include "task_routing.hpp"
+#include "task_events.hpp"
 #include "flock/workspace_tools.hpp"
 #include "outbox_storage.hpp"
 
@@ -41,6 +42,8 @@ struct Runtime::Impl {
     ChannelStorage& channelStorage;
     ConversationStorage& conversationTurns;
     GitStorage& gitStorage;
+    TaskEvents& taskEvents;
+    TaskRecords& taskRecords;
     WorkflowStorage& workflowStorage;
     Policy policy;
     Model& model;
@@ -67,10 +70,15 @@ struct Runtime::Impl {
                                   options.reconcileBotCreation, options.intake, options.peers, workers.stopToken());
     }
 
+    void wakeExternalEvents() {
+        gitStorage.deliverGitWebhooks();
+        taskEvents.wakeExternalChecks(taskRecords, options.clock());
+    }
+
     Impl(StoreAccess::Impl& storage, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
         : channelStorage(storage.channelStorage), conversationTurns(storage.conversationTurns), gitStorage(storage.gitStorage),
-          workflowStorage(storage.workflowStorage), policy(storage.permissions), model(m), t3(adapter), soul(std::move(loader)),
-          options(withDefaultBotTools(std::move(opts))),
+          taskEvents(storage.taskEvents), taskRecords(storage.taskRecords), workflowStorage(storage.workflowStorage),
+          policy(storage.permissions), model(m), t3(adapter), soul(std::move(loader)), options(withDefaultBotTools(std::move(opts))),
           maintenance(storage.database, storage.automationStorage, storage.workflowStorage, storage.policyApprovals, options.clock,
                       options.automationError, options.storageContention),
           prompts(storage.database, storage.secretStorage, storage.memoryStorage, storage.taskEvents, storage.workflowStorage, soul),
@@ -92,7 +100,7 @@ struct Runtime::Impl {
                    updates, questions, reports, runs, prompts, options.clock, options.requireT3Connection, workers.stopToken()),
           decisions(storage.database, storage.conversationTurns, storage.gitStorage, storage.journalStorage, storage.memoryStorage,
                     storage.peerStorage, storage.secretStorage, storage.taskEvents, storage.taskRecords, storage.waitStorage, updates,
-                    reports, history, peerExchanges, dispatch, options.sessionRead, options.gitHost.get()),
+                    reports, history, peerExchanges, dispatch, options.sessionRead, options.gitHost.get(), options.clock),
           taskTurn(storage.database, storage.gitStorage, storage.modelCalls, storage.peerStorage, storage.secretStorage, storage.taskEvents,
                    storage.taskRecords, storage.taskRouting, storage.waitStorage, storage.memoryStorage, model, soul, options.clock,
                    options.gitHost.get(), options.sessionRead, workers.stopToken(), updates, reports, history, peerExchanges, runs, prompts,
@@ -143,7 +151,7 @@ void Runtime::requestStop() {
 void Runtime::runConversations() {
     if (p_->workers.stopToken().stop_requested()) return;
     p_->maintenance.settleApprovals();
-    p_->gitStorage.deliverGitWebhooks();
+    p_->wakeExternalEvents();
     p_->workers.wakeSessions();
     p_->channelStorage.deliverChannels(p_->workers.stopToken());
     constexpr auto messagesPerTick = 20;
@@ -159,7 +167,7 @@ void Runtime::tick() {
     p_->maintenance.settleApprovals();
     p_->taskTurn.persistTaskInferences();
     p_->maintenance.fireDueAutomations();
-    p_->gitStorage.deliverGitWebhooks();
+    p_->wakeExternalEvents();
     p_->workers.wakeSessions();
     for (const auto& [bot, id] : p_->conversationTurns.pendingConversations(runtime::Workers::batchLimit, p_->options.clock()))
         p_->runTurn(id);
@@ -174,7 +182,7 @@ void Runtime::tickConcurrent() {
     p_->maintenance.settleApprovalsIfChanged();
     p_->workers.collectCompleted();
     p_->maintenance.fireDueAutomationsIfChanged();
-    p_->maintenance.deferContendedWork("Git webhooks", [&] { p_->gitStorage.deliverGitWebhooks(); });
+    p_->maintenance.deferContendedWork("external task events", [&] { p_->wakeExternalEvents(); });
     p_->workers.startChannels();
     p_->workers.stepSessionWake();
     p_->workers.startConversations(p_->options.clock, [impl = p_.get()](Id id) { impl->runTurn(id); });

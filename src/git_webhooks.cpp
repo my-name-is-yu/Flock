@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -54,6 +55,23 @@ std::string_view followupType(GitFollowup followup) {
     case GitFollowup::none: return {};
     }
     throw std::invalid_argument("Invalid Git follow-up type");
+}
+
+std::string priorLifecycleAction(Database& database, Id task, Id message, const GitRepository& repo, Id pr) {
+    auto event = database.query(R"SQL(
+SELECT json_extract(data,'$.action') AS action
+FROM journal
+WHERE task_id=? AND id<? AND kind='git_webhook' AND json_extract(data,'$.kind')='pull_request'
+  AND (json_extract(data,'$.host'),json_extract(data,'$.repo'),json_extract(data,'$.prNumber'))=(?,?,?)
+  AND action IN ('merged','closed','reopened')
+ORDER BY (action='merged') DESC,id DESC LIMIT 1
+)SQL",
+                                {task, message, repo.host, repo.repo, pr});
+    return event.next() ? event.string(0) : std::string{};
+}
+bool gitPrEndedEvent(const Json& event) {
+    const auto action = field(event, "action");
+    return field(event, "kind") == "pull_request" && (action == "closed" || action == "merged");
 }
 }
 
@@ -116,29 +134,43 @@ bool GitStorage::canReceiveGitWebhook(std::string_view bot, const Json& event) {
                .query(R"SQL(
 SELECT 1 FROM git_pr_watches w JOIN tasks t ON t.id=w.task_id AND t.bot_id=w.bot_id
 WHERE w.host=? AND w.repo=? AND w.pr_number=? AND w.task_id=? AND w.bot_id=?
-AND t.state NOT IN ('cancelled','cancelling')
+AND t.state NOT IN ('completed','cancelled','cancelling')
 )SQL",
                       {repo.host, repo.repo, event.at("prNumber"), event.at("taskId"), bot})
                .next() &&
            permissions.allows(bot, Action::repository_read, repo.resource());
 }
 
+Json GitStorage::watchedPullRequests(const conversation::Message& message) {
+    const auto task = message.routing.at("gitEvent").at("taskId").get<Id>();
+    auto watches = database.query(
+        "SELECT host,repo,pr_number FROM git_pr_watches WHERE task_id=? AND bot_id=? ORDER BY host,repo,pr_number", {task, message.bot});
+    auto pullRequests = Json::array();
+    while (watches.next()) {
+        const GitRepository repo{watches.string(0), watches.string(1)};
+        if (!permissions.allows(message.bot, Action::repository_read, repo.resource())) continue;
+        const auto pr = watches.number(2);
+        Json pullRequest{{"host", repo.host}, {"repo", repo.repo}, {"prNumber", pr}};
+        if (auto action = priorLifecycleAction(database, task, message.id, repo, pr); !action.empty())
+            pullRequest["priorLifecycleAction"] = std::move(action);
+        pullRequests.push_back(std::move(pullRequest));
+    }
+    return pullRequests;
+}
+
+bool GitStorage::gitNotificationCanComplete(const conversation::Message& message) {
+    const auto& event = message.routing.at("gitEvent");
+    if (gitPrEndedEvent(event)) return true;
+    const auto kind = field(event, "kind");
+    if ((kind != "ci" && kind != "check") || field(event, "action") != "completed") return false;
+    const GitRepository repo{field(event, "host"), field(event, "repo")};
+    return priorLifecycleAction(database, event.at("taskId").get<Id>(), message.id, repo, event.at("prNumber").get<Id>()) == "merged";
+}
+
 Id GitStorage::latestGitWebhookId() const {
     auto row = database.query("SELECT coalesce(max(id),0) FROM git_webhook_events");
     row.next();
     return row.number(0);
-}
-
-void GitStorage::skipPendingGitWebhooks(std::string_view bot) {
-    const auto cursor = latestGitWebhookId();
-    database.exec(R"SQL(
-INSERT INTO git_pr_watch_origins(host,repo,pr_number,event_cursor)
-SELECT host,repo,pr_number,event_cursor FROM git_pr_watches WHERE bot_id=? AND event_cursor<?
-ON CONFLICT DO NOTHING
-)SQL",
-                  {bot, cursor});
-    database.exec("UPDATE git_pr_watches SET event_cursor=?1 WHERE bot_id=?2 AND event_cursor<?1", {cursor, bot});
-    gitWebhooksDrainedAt.reset();
 }
 
 void GitStorage::deliverGitWebhooks() {
@@ -148,36 +180,47 @@ void GitStorage::deliverGitWebhooks() {
     constexpr unsigned batchSize = 100;
     Transaction transaction(database.db);
     auto rows = database.query(R"SQL(
-WITH watches AS (
- SELECT w.host,w.repo,w.pr_number,w.task_id,w.bot_id,w.run,w.url,
-        w.event_cursor AS delivery_cursor,coalesce(o.event_cursor,w.event_cursor) AS attribution_cursor
- FROM git_pr_watches w LEFT JOIN git_pr_watch_origins o USING(host,repo,pr_number)
-), matches AS (
- SELECT e.id,e.host,e.event_id,e.repo,e.data,w.pr_number,w.task_id,w.bot_id,w.run,w.url,w.delivery_cursor,
+WITH matches AS (
+ SELECT e.id,e.host,e.event_id,e.repo,e.data,w.pr_number,w.task_id,w.bot_id,w.run,w.url,
+        t.state='deciding' AND coalesce(json_extract(task_event.data,'$.kind'),'')<>'external_check' AS deciding,
         json_array_length(e.data,'$.prNumbers')>0 AS explicit_pr,
-        count(*) OVER (PARTITION BY e.id) AS watch_count
- FROM git_webhook_events e JOIN watches w ON w.host=e.host AND w.repo=e.repo AND e.id>w.attribution_cursor
+        count(*) OVER event_watches AS watch_count, min(w.pr_number) OVER event_watches AS first_watch
+ FROM git_webhook_events e JOIN git_pr_watches w ON w.host=e.host AND w.repo=e.repo AND e.id>w.event_cursor
+ JOIN tasks t ON t.id=w.task_id
+ LEFT JOIN events task_event ON task_event.task_id=t.id AND task_event.id=json_extract(t.data,'$.eventId')
  WHERE EXISTS (SELECT 1 FROM json_each(e.data,'$.prNumbers') p WHERE p.value=w.pr_number)
     OR (json_array_length(e.data,'$.prNumbers')=0 AND json_extract(e.data,'$.headSha') IN (
         (SELECT h.head_sha FROM git_pr_heads h
          WHERE (h.host,h.repo,h.pr_number)=(w.host,w.repo,w.pr_number)
-           AND h.event_cursor BETWEEN w.attribution_cursor AND e.id-1
+           AND h.event_cursor BETWEEN w.event_cursor AND e.id-1
          ORDER BY h.event_cursor DESC LIMIT 1),
         (SELECT CASE WHEN h.synchronized THEN h.head_sha END FROM git_pr_heads h
          WHERE (h.host,h.repo,h.pr_number)=(w.host,w.repo,w.pr_number) AND h.event_cursor>e.id
            AND (h.synchronized OR h.head_sha<>json_extract(e.data,'$.headSha'))
          ORDER BY h.event_cursor LIMIT 1)))
+ WINDOW event_watches AS (PARTITION BY e.id)
 )
-SELECT id,host,event_id,repo,data,pr_number,task_id,bot_id,run,url FROM matches m
-WHERE id>delivery_cursor AND (explicit_pr OR watch_count=1)
- AND NOT EXISTS (SELECT 1 FROM deleted_bots retired WHERE retired.bot=m.bot_id)
+SELECT id,host,event_id,repo,data,pr_number,task_id,bot_id,run,url,
+       deciding AND (explicit_pr OR watch_count=1) AS deferred, NOT explicit_pr AND watch_count>1 AS ambiguous
+FROM matches m
+WHERE (explicit_pr OR pr_number=first_watch)
  AND NOT EXISTS (SELECT 1 FROM git_webhook_deliveries d
                  WHERE d.event=m.id AND (NOT m.explicit_pr OR d.pr_number=m.pr_number))
-ORDER BY id,pr_number LIMIT ?
+ORDER BY deferred,id,pr_number LIMIT ?
 )SQL",
                                {batchSize});
     Json deliveries = Json::array();
+    std::vector<std::pair<Id, Id>> ambiguous;
+    bool deferred = false;
     while (rows.next()) {
+        if (rows.number(10)) {
+            deferred = true;
+            break;
+        }
+        if (rows.number(11)) {
+            ambiguous.emplace_back(rows.number(0), rows.number(5));
+            continue;
+        }
         auto event = rows.json(4);
         event.erase("prNumbers");
         event.update({{"deliveryId", rows.number(0)},
@@ -191,6 +234,7 @@ ORDER BY id,pr_number LIMIT ?
                       {"url", rows.string(9)}});
         deliveries.push_back(std::move(event));
     }
+    for (const auto& [event, pr] : ambiguous) database.exec("INSERT INTO git_webhook_deliveries VALUES(?,?)", {event, pr});
     for (auto& event : deliveries) {
         const auto delivery = event.at("deliveryId");
         const auto pr = event.at("prNumber");
@@ -231,6 +275,10 @@ WHERE json_extract(result,'$.data.id')=?1
         const auto key = "webhook/" + std::to_string(delivery.get<Id>()) + "/" + std::to_string(pr.get<Id>());
         auto inboxKey = key;
         const auto url = field(event, "url");
+        if (gitPrEndedEvent(event))
+            database.exec(
+                "UPDATE pr_review_items SET status='superseded' WHERE task_id=? AND url=? AND status='pending' AND operation_id IS NULL",
+                {taskId, url});
         if (const auto location = event.find("reviewLocation"); location != event.end()) {
             const auto commentId = location->at("commentId").get<Id>();
             location->erase("commentId");
@@ -272,7 +320,7 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0,? FROM messag
         database.exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')", {message});
     }
     transaction.commit();
-    if (deliveries.size() < batchSize) gitWebhooksDrainedAt = version;
+    if (!deferred && deliveries.size() + ambiguous.size() < batchSize) gitWebhooksDrainedAt = version;
 }
 
 bool GitEvents::receiveGitWebhook(const GitWebhook& event) {

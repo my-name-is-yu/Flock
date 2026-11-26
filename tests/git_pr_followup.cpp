@@ -73,6 +73,7 @@ private:
             return {"delegate", {{"instruction", "Push change"}, {"doneWhen", "Open a PR for the pushed branch"}}, {}};
         if (event.at("kind") == "result") {
             if (openPullRequest && event.value("gitResults", Json::array()).empty()) return {"git_open_pr", openArgs(), {}};
+            if (openPullRequest) return {"wait_for_event", {{"note", "Waiting for the pull request"}, {"checkAgainAfterMinutes", 5}}, {}};
             return {"complete", {{"report", "Change checked"}}, {}};
         }
         const auto& steps = event.at("turn");
@@ -120,6 +121,7 @@ struct Fixture {
     std::shared_ptr<FakeHost> host = std::make_shared<FakeHost>();
     Sessions sessions;
     FollowupModel model;
+    Seconds now = unixTime();
     Runtime runtime;
     Id task;
     std::optional<T3Connection> sessionConnection;
@@ -129,6 +131,7 @@ struct Fixture {
                                                   store, model, sessions, [](std::string_view) { return std::string{}; },
                                                   [&] {
                                                       auto settings = options(host);
+                                                      settings.clock = [this] { return now; };
                                                       settings.intake = std::move(liveIntake);
                                                       return settings;
                                                   }()) {
@@ -150,7 +153,7 @@ struct Fixture {
         } else
             task = TaskIntake(store).submit(request, person ? &testRequester : nullptr);
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1, "Could not open fixture PR");
+        check(Tasks(store).task(task).task.state == TaskState::external_waiting && host->createCalls == 1, "Could not open fixture PR");
     }
 
     void ask(std::string_view requestId, std::string_view text) {
@@ -194,6 +197,7 @@ void keepsWorkInOriginatingSession() {
               includes(sends.back().instruction, "/pull/1#discussion_r301"),
           "Review location and feedback were not quoted as evidence");
     f.notify({hostName, "closed", repoName, "pull_request", "closed", {1}, sha, "Closed", 0});
+    f.host->result["state"] = "closed";
     f.notify(review("review-after-close"));
     check(sends.size() == 2 && !f.model.canFix, "A closed PR received an automatic fix request");
 }
@@ -303,6 +307,14 @@ void checksAgainBeforeSending() {
           "A check for an obsolete commit started work after the fix was offered");
 }
 
+void checksOpenPullRequestBeforeSendingReviewFix() {
+    Fixture f;
+    f.model.beforeFix = [&] { f.host->result["state"] = "closed"; };
+    f.notify(review("closed-before-review-fix"));
+    check(f.model.canFix && f.sessions.sessionSends.empty() && historyCount(f.store, f.task, "git_pr_followup_requested") == 0,
+          "A pull request that closed before dispatch received a review fix");
+}
+
 void waitsForSupervisedApproval() {
     Fixture f;
     PolicyRules{f.store}.setMode(localOwner, "supervised");
@@ -317,10 +329,20 @@ void waitsForSupervisedApproval() {
     check(card->at("displayTarget") == "https://github.com/org/flock/pull/1" &&
               preview == Json{{"diagnosis", "The migration test needs attention."}, {"pullRequest", card->at("displayTarget")}},
           "Approval did not show the PR and diagnosis");
+    const auto waiting = Tasks(f.store).task(f.task).task;
+    check(waiting.externalCheckAt == f.now + 5 * 60, "The fixture did not schedule the PR check");
+    f.now += 5 * 60;
+    f.runtime.runConversations();
+    const auto awaitingApproval = Tasks(f.store).task(f.task).task;
+    check(awaitingApproval.state == TaskState::external_waiting && awaitingApproval.generation == waiting.generation &&
+              awaitingApproval.externalCheckAt == waiting.externalCheckAt && f.sessions.sessionSends.empty(),
+          "The due PR check disturbed the pending fix approval");
     Inbox(f.store).decideInbox(testRequester, target(*card), "allow_once");
     f.runtime.runConversations();
     check(f.sessions.sessionSends.size() == 1 && includes(TaskHistory(f.store).history(f.task).dump(), "I asked the original Session"),
           "Approved follow-up was not sent and reported");
+    f.runtime.runConversations();
+    check(Tasks(f.store).task(f.task).task.state == TaskState::queued, "The due PR check did not wake the task after the fix approval");
 }
 void rejectsStaleSupervisedApproval(bool disconnect) {
     Fixture f;
@@ -348,6 +370,7 @@ void testGitPrFollowup() {
     followsCurrentChecksAcrossWebhookOrdering();
     readsLiveFixSettingBeforeSending();
     checksAgainBeforeSending();
+    checksOpenPullRequestBeforeSendingReviewFix();
     waitsForSupervisedApproval();
     rejectsStaleSupervisedApproval(true);
     rejectsStaleSupervisedApproval(false);
