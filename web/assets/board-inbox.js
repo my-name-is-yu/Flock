@@ -448,7 +448,6 @@ export function mountBoardInbox({
         actionsList.push(copyBtn);
       }
     }
-    // History is a direct toggle; the overflow menu holds only the pull request actions.
     if (historyToggle) {
       const viewingHistory = mode === 'history';
       historyToggle.hidden = !(viewingHistory ? pending().length : mode === 'pending' && item);
