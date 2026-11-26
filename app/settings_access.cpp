@@ -1,6 +1,7 @@
 #include "settings_access.hpp"
-#include "../src/storage.hpp"
+#include "../src/database.hpp"
 #include "flock/base64.hpp"
+#include "flock/board_inbox.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
@@ -131,7 +132,7 @@ void keepAdministrator(const auto& db, std::string_view person, bool admin) {
 }
 
 SettingsAccess::SettingsAccess(Store& store, const std::filesystem::path&, const char* externalFile) : store_(store) {
-    auto& db = *store_.p_;
+    auto& db = Database::of(store_);
     std::lock_guard lock(db.mutex);
     if (externalFile) {
         Transaction transaction(db.db);
@@ -151,7 +152,7 @@ bool SettingsAccess::canManageInstallation(const Person& actor) const {
 }
 
 void SettingsAccess::commitIfAdministrator(const Person& actor, const std::function<void()>& commit) {
-    auto& db = *store_.p_;
+    auto& db = Database::of(store_);
     std::lock_guard lock(db.mutex);
     Transaction transaction(db.db);
     if (!canManageInstallation(actor)) throw DecisionDenied{};
@@ -160,13 +161,13 @@ void SettingsAccess::commitIfAdministrator(const Person& actor, const std::funct
 }
 
 bool SettingsAccess::enabled() const {
-    const auto& db = *store_.p_;
+    const auto& db = Database::of(store_);
     std::lock_guard lock(db.mutex);
     return external_.authenticate || accessMode(db) != Mode::local;
 }
 
 std::optional<bool> SettingsAccess::resolve(Store& store, std::string_view person) {
-    const auto& db = *store.p_;
+    const auto& db = Database::of(store);
     std::lock_guard lock(db.mutex);
     const auto mode = accessMode(db);
     if (mode == Mode::managed) return currentRole(db, person);
@@ -175,7 +176,7 @@ std::optional<bool> SettingsAccess::resolve(Store& store, std::string_view perso
 }
 
 Person SettingsAccess::authenticate(Store& store, std::string_view authorization) {
-    const auto& db = *store.p_;
+    const auto& db = Database::of(store);
     std::lock_guard lock(db.mutex);
     if (authorization.empty()) return accessMode(db) == Mode::local ? localOwner : Person{};
     if (!authorization.starts_with(basicPrefix) || accessMode(db) != Mode::managed) return {};
@@ -209,7 +210,7 @@ ConfiguredIdentities SettingsAccess::identities() const {
 }
 
 Json SettingsAccess::view(const Person& actor) const {
-    const auto& db = *store_.p_;
+    const auto& db = Database::of(store_);
     std::lock_guard lock(db.mutex);
     auto users = Json::array();
     if (external_.authenticate) {
@@ -242,7 +243,7 @@ WHERE u.revoked=0 ORDER BY u.person
 
 Json SettingsAccess::change(const Person& actor, const Json& args) {
     if (external_.authenticate) throw Conflict("Web access is managed by the host's identity file");
-    auto& db = *store_.p_;
+    auto& db = Database::of(store_);
     std::lock_guard lock(db.mutex);
     Transaction transaction(db.db);
     const auto mode = accessMode(db);

@@ -12,12 +12,14 @@
 #include <string>
 
 namespace flockv0 {
+class OutboxStorage;
+
 class Runtime::Components::RunObserver {
 public:
-    RunObserver(Store::Impl& db, T3& t3, TaskUpdates& updates, TaskQuestions& questions, RunReports& reports, PeerExchanges& peerExchanges,
-                const std::function<Seconds()>& clock, std::stop_token shutdown)
-        : db(db), t3(t3), updates(updates), questions(questions), reports(reports), peerExchanges(peerExchanges), clock(clock),
-          shutdown(shutdown) {}
+    RunObserver(Store::Impl& db, OutboxStorage& outboxStorage, T3& t3, TaskUpdates& updates, TaskQuestions& questions, RunReports& reports,
+                PeerExchanges& peerExchanges, const std::function<Seconds()>& clock, std::stop_token shutdown)
+        : db(db), outboxStorage(outboxStorage), t3(t3), updates(updates), questions(questions), reports(reports),
+          peerExchanges(peerExchanges), clock(clock), shutdown(shutdown) {}
 
     bool shouldStop(const TaskData& task);
     Observation observeRun(const std::string& bot, const std::string& environment, const Json& config, const RunRef& run);
@@ -31,6 +33,7 @@ private:
     void stopNote(const TaskData& snapshot, const std::string& detail);
 
     Store::Impl& db;
+    OutboxStorage& outboxStorage;
     T3& t3;
     TaskUpdates& updates;
     TaskQuestions& questions;

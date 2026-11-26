@@ -595,7 +595,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                 if (selected.actionId != savedActionId || selected.environmentId != target.environmentId ||
                     selected.ref.threadId != target.threadId || selected.ref.runId.empty())
                     throw ToolError("The destination Session is unavailable");
-                const auto action = outbox(task, selected.actionId);
+                const auto action = outboxStorage.outbox(task, selected.actionId);
                 if (!action || !action->destinationAction || action->phase != OutboxPhase::accepted || action->stop ||
                     action->command.environmentId != selected.environmentId || action->command.projectId != selected.assignment.projectId ||
                     action->command.gatewayEnvironmentId != selected.ref.gatewayEnvironmentId)
@@ -759,7 +759,7 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
             const auto task = ownTask(taskId, message);
             if (generation != task.generation) throw ToolError("stale", {{"taskId", taskId}, {"current", taskState(task, message)}});
             const auto& selected = selectSavedDestination(task, decision.args, false);
-            auto action = outbox(task, selected.actionId);
+            auto action = outboxStorage.outbox(task, selected.actionId);
             if (!action || !action->destinationAction || action->command.environmentId != selected.environmentId ||
                 action->command.projectId != selected.assignment.projectId)
                 throw ToolError("The destination is unavailable");
@@ -811,7 +811,7 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
                                                        .background = origin.background};
                 }
                 action->stop = std::move(stop);
-                if (!saveOutbox(*action, phase)) throw ToolError("The destination changed before its stop request was saved");
+                if (!outboxStorage.saveOutbox(*action, phase)) throw ToolError("The destination changed before its stop request was saved");
                 exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL AND effect IS NULL",
                      {Json{{"kind", "destination_cancel"},
                            {"taskId", taskId},

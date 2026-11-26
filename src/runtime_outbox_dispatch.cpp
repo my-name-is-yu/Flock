@@ -52,7 +52,7 @@ void Runtime::Components::OutboxDispatch::stop(TaskData task) {
     std::optional<Outbox> action;
     {
         std::lock_guard lock(db.mutex);
-        action = db.outbox(task);
+        action = outboxStorage.outbox(task);
     }
     if (task.activeRun || (action && action->phase == OutboxPhase::started)) {
         const auto& saved = task.runStop;
@@ -83,7 +83,7 @@ void Runtime::Components::OutboxDispatch::stop(TaskData task) {
     }
     if (!cancel && action && action->phase == OutboxPhase::ready) {
         updates.change(task, [&](TaskData& current) {
-            if (!db.setOutboxPhase(action->command.actionId, OutboxPhase::superseded, OutboxPhase::ready)) return false;
+            if (!outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::superseded, OutboxPhase::ready)) return false;
             updates.refundUnsentWork(current, *action);
             current.actionId.clear();
             db.clearWait(current, "superseded_instruction");
@@ -193,7 +193,7 @@ AssignedRun Runtime::Components::OutboxDispatch::recordRunAssignment(const TaskD
 void Runtime::Components::OutboxDispatch::rememberRunCandidate(Outbox action, const RunRef& ref) {
     action.command.candidate = ref;
     if (action.command.tool == CommandTool::delegate) action.command.launchReceiptThreadId = ref.threadId;
-    db.saveOutbox(action);
+    outboxStorage.saveOutbox(action);
 }
 
 void Runtime::Components::OutboxDispatch::writeDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed) {
@@ -226,7 +226,7 @@ bool Runtime::Components::OutboxDispatch::deferDestinationDelivery(TaskData& tas
     const bool closeUnsentDelivery =
         delivery == DeliveryOutcome::DefinitelyUnsent && (cancelling || phase == OutboxPhase::started || rejected);
     if (closeUnsentDelivery) {
-        db.setOutboxPhase(key, OutboxPhase::closed);
+        outboxStorage.setOutboxPhase(key, OutboxPhase::closed);
         Observation observed;
         observed.status = cancelling ? "cancelled" : "failed";
         observed.detail = detail;
@@ -248,7 +248,7 @@ void Runtime::Components::OutboxDispatch::applyDelivery(Id id, const Outbox& act
         if (terminal(task)) return false;
         const auto& key = action.command.actionId;
         const bool destination = action.destinationAction;
-        auto saved = destination ? db.outbox(task, key) : std::nullopt;
+        auto saved = destination ? outboxStorage.outbox(task, key) : std::nullopt;
         if (destination ? (!saved || (saved->phase != OutboxPhase::ready && saved->phase != OutboxPhase::started))
                         : task.actionId != action.command.actionId)
             return false;
@@ -266,13 +266,13 @@ void Runtime::Components::OutboxDispatch::applyDelivery(Id id, const Outbox& act
         const auto delivery = classifyDelivery(task, action, outcome, reply);
 
         const bool accepted = delivery == DeliveryOutcome::Accepted && (!destination || saved->phase == OutboxPhase::started);
-        if (accepted) db.setOutboxPhase(key, OutboxPhase::accepted);
+        if (accepted) outboxStorage.setOutboxPhase(key, OutboxPhase::accepted);
         if (destination) {
             auto& run = destinationRun(task, key);
             if (!accepted) return deferDestinationDelivery(task, run, *saved, outcome, delivery);
             if (saved->stop && !saved->stop->run) {
                 saved->stop->run = OutboxRunIdentity{outcome.run.threadId, outcome.run.runId};
-                db.saveOutbox(*saved);
+                outboxStorage.saveOutbox(*saved);
             }
             run.status = DestinationRunPhase::running;
             run.detail.reset();
@@ -314,7 +314,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             return true;
         }
         if (outcome.kind == Delivery::Kind::QuestionGone && reply) {
-            db.setOutboxPhase(key, OutboxPhase::closed);
+            outboxStorage.setOutboxPhase(key, OutboxPhase::closed);
             questions.closeQuestion(task, "question_gone", "resolved_or_expired");
             task.actionId.clear();
             if (!cancelling) task.state = TaskState::running;
@@ -332,7 +332,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         auto detail = outcome.detail.empty() ? "The assigned side effect could not be confirmed" : bounded(outcome.detail, 2048);
         if (reply && delivery == DeliveryOutcome::DefinitelyUnsent) detail = bounded("The Session answer was not sent. " + detail, 2048);
         if (delivery == DeliveryOutcome::DefinitelyUnsent) {
-            db.setOutboxPhase(key, cancelling ? OutboxPhase::closed : OutboxPhase::ready);
+            outboxStorage.setOutboxPhase(key, cancelling ? OutboxPhase::closed : OutboxPhase::ready);
             if (!reply) task.deadline = 0;
             if (cancelling) {
                 updates.refundUnsentWork(task, action);
@@ -405,7 +405,7 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
         if (firstSend && (db.botPaused(cmd.ownerBotId) || current.state == TaskState::cancelling || current.generation != task.generation))
             return;
         if (destination) {
-            const auto saved = db.outbox(current, cmd.actionId);
+            const auto saved = outboxStorage.outbox(current, cmd.actionId);
             if (saved && saved->stop) return;
         }
     }
@@ -414,7 +414,7 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
         if (destination) return applyDelivery(id, action, {Delivery::Kind::NotAccepted, {}, std::string(approvalError(gate)), true});
         updates.change(task, [&](TaskData& current) {
             if (current.actionId != action.command.actionId) return false;
-            if (!db.setOutboxPhase(action.command.actionId, OutboxPhase::closed, OutboxPhase::ready)) return false;
+            if (!outboxStorage.setOutboxPhase(action.command.actionId, OutboxPhase::closed, OutboxPhase::ready)) return false;
             updates.refundUnsentWork(current, action);
             current.actionId.clear();
             current.state = !current.activeRun ? TaskState::deciding : TaskState::running;
@@ -442,8 +442,8 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
                 std::lock_guard lock(db.mutex);
                 if (action.instructionBase) {
                     prompts.prepareDelegation(task, action);
-                    if (!db.prepareOutbox(action)) {
-                        auto saved = db.outbox(task, cmd.actionId);
+                    if (!outboxStorage.prepareOutbox(action)) {
+                        auto saved = outboxStorage.outbox(task, cmd.actionId);
                         if (!saved || saved->phase != OutboxPhase::ready || saved->instructionBase) return;
                         action = std::move(*saved);
                     }
@@ -560,7 +560,7 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                     cmd.instruction = SessionPrompts::dispatchedWorkPrompt(action);
                 }
             }
-            if (!db.startOutbox(action, cmd.authGeneration)) return false;
+            if (!outboxStorage.startOutbox(action, cmd.authGeneration)) return false;
             if (cmd.tool != CommandTool::answer_session_question) {
                 auto* run = destination ? &destinationRun(current, cmd.actionId) : nullptr;
                 if (!(run ? run->deadline.value_or(0) : current.deadline)) {
@@ -601,7 +601,7 @@ void Runtime::Components::OutboxDispatch::step(const TaskData& task) {
     std::optional<Outbox> action;
     {
         std::lock_guard lock(db.mutex);
-        action = db.outbox(task);
+        action = outboxStorage.outbox(task);
     }
     if (!action) return;
     if (reconcile) {
@@ -668,7 +668,7 @@ void Runtime::Components::OutboxDispatch::queueAction(TaskData& task, const std:
         action.instructionBase = db.redactor(task.botId).text(instruction);
     } else
         cmd.instruction = std::move(instruction);
-    db.insertOutbox(taskId, action);
+    outboxStorage.insertOutbox(taskId, action);
     if (destination) return;
     task.actionId = id;
     task.state = TaskState::sending;

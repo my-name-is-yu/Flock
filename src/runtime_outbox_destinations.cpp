@@ -48,7 +48,7 @@ void Runtime::Components::OutboxDispatch::stepDestination(const TaskData& task, 
     std::optional<Outbox> action;
     {
         std::lock_guard lock(db.mutex);
-        action = db.outbox(task, key);
+        action = outboxStorage.outbox(task, key);
     }
     if (!action) return;
     const auto phase = action->phase;
@@ -116,7 +116,7 @@ void Runtime::Components::OutboxDispatch::stepDestination(const TaskData& task, 
     updates.changeTask(id, [&](TaskData& current) {
         auto& saved = destinationRun(current, key);
         if (!saved.outstanding() || saved.ref.threadId != ref.threadId || saved.ref.runId != ref.runId) return false;
-        const auto savedAction = db.outbox(current, key);
+        const auto savedAction = outboxStorage.outbox(current, key);
         const bool stopping = current.state == TaskState::cancelling || destinationStopRequested(savedAction, ref);
         bool changed = false;
         if (observed.kind == Kind::Unavailable) {
@@ -142,7 +142,7 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
     });
     if (!stopping || observed.kind == Kind::Settling || observed.kind == Kind::Unavailable || now < run.stopRetryAt.value_or(0)) return;
     if (!updates.changeTask(id, [&](TaskData& current) {
-            const auto savedAction = db.outbox(current, key);
+            const auto savedAction = outboxStorage.outbox(current, key);
             auto& saved = destinationRun(current, key);
             if (shutdown.stop_requested() || (current.state != TaskState::cancelling && !destinationStopRequested(savedAction, ref)) ||
                 saved.ref.threadId != ref.threadId || saved.ref.runId != ref.runId)
@@ -172,13 +172,13 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
             gate = db.approveAction(origin, resource, std::string(runStopOperation) + operationId, stopPolicyJson(approval), now, true,
                                     Store::Impl::ApprovalWait::defer);
             if (gate != ApprovalGate::waiting) {
-                auto saved = db.outbox(current, key);
+                auto saved = outboxStorage.outbox(current, key);
                 if (saved && saved->stop && saved->stop->operation == operationId) {
                     if (gate == ApprovalGate::allow)
                         saved->stop->approval.reset();
                     else
                         saved->stop.reset();
-                    db.saveOutbox(*saved);
+                    outboxStorage.saveOutbox(*saved);
                 }
             }
             tx.commit();

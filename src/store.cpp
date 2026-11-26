@@ -243,7 +243,7 @@ Id Store::Impl::wait(TaskData& task, Wait waiting) {
     clearWait(task, "superseded");
     waiting.eventId = task.eventId;
     if (!waiting.run && waiting.reason() == WaitReason::unknown_delivery) {
-        const auto action = outbox(task);
+        const auto action = outboxStorage.outbox(task);
         if (action && action->command.candidate && !action->command.candidate->link.empty())
             waiting.run = WaitRun{*action->command.candidate};
     }
@@ -276,6 +276,9 @@ std::string effectiveDoneWhen(const TaskData& task) {
 Store::Store(std::filesystem::path db, MemorySeed seed, AutomationModelResolver automationModel)
     : p_(std::make_unique<Impl>(std::move(db), std::move(seed), std::move(automationModel))) {}
 Store::~Store() = default;
+Database& Database::of(Store& store) {
+    return *store.p_;
+}
 const std::filesystem::path& Store::path() const {
     return p_->path;
 }
@@ -449,7 +452,7 @@ Json Store::reconciliationData(Id id, Id waitId, Json target, const IntakeResolv
         const auto wait = p_->currentWait(id);
         if (!wait || wait->id != waitId || wait->reason() != WaitReason::settings) return target;
         task = p_->load(id);
-        const auto pending = p_->outbox(task);
+        const auto pending = p_->outboxStorage.outbox(task);
         if (pending && (pending->phase != OutboxPhase::ready || pending->command.tool == CommandTool::start_in_session)) return target;
         transaction.commit();
     }
@@ -570,7 +573,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     } else if (operation == "reconcile" &&
                (reason == WaitReason::unknown_delivery || reason == WaitReason::auth || reason == WaitReason::settings)) {
         if (data.contains("session")) {
-            const auto action = outbox(task);
+            const auto action = outboxStorage.outbox(task);
             if (reason != WaitReason::settings || (action && action->phase != OutboxPhase::ready))
                 throw Conflict("Session settings can only be corrected before an unsent action");
             task.config["session"] = normalizeSessionSettings(data["session"]);
@@ -581,7 +584,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
             else if (task.projectId.empty())
                 next = TaskState::queued;
         } else {
-            auto action = outbox(task);
+            auto action = outboxStorage.outbox(task);
             if (!action) throw Conflict("No delivery to reconcile");
             auto& command = action->command;
             if (action->phase == OutboxPhase::ready && command.tool == CommandTool::answer_session_question) {
@@ -599,7 +602,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
             else
                 command.candidate.reset();
             command.candidateQuestionId = field(data, "questionId");
-            saveOutbox(*action);
+            outboxStorage.saveOutbox(*action);
             next = TaskState::sending;
         }
         journal(id, "reconcile_requested", {{"waitId", waitId}});

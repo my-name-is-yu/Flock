@@ -1,11 +1,12 @@
 #include "../src/outbox_storage.hpp"
-#include "../src/storage.hpp"
+#include "../src/database.hpp"
 
 #include "flock/record_decode_error.hpp"
 #include "flock/command.hpp"
 #include "flock/json.hpp"
 
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 #include <array>
 #include <exception>

@@ -1,6 +1,8 @@
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
-#include "storage.hpp"
+#include "database.hpp"
+#include "run_ref_storage.hpp"
+#include "flock/secrets.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/command.hpp"
@@ -8,6 +10,7 @@
 #include "flock/outbox.hpp"
 #include "flock/outbox_instruction.hpp"
 
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <span>
@@ -17,6 +20,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 namespace flockv0 {
 namespace {
@@ -378,16 +382,16 @@ Outbox decodeOutboxRow(const Statement& columns) {
     return outbox;
 }
 
-std::optional<Outbox> Store::Impl::outbox(const TaskData& task, std::string_view actionId) const {
+std::optional<Outbox> OutboxStorage::outbox(const TaskData& task, std::string_view actionId) const {
     const auto id = actionId.empty() ? task.actionId : std::string(actionId);
     if (id.empty()) return std::nullopt;
     static const auto sql = "SELECT id,phase,auth_generation," + std::string(outboxColumns) + " FROM outbox WHERE id=? AND task_id=?";
-    auto row = query(sql.c_str(), {id, task.id});
+    auto row = db_.query(sql.c_str(), {id, task.id});
     if (!row.next()) return std::nullopt;
     return decodeOutboxRow(row);
 }
 
-void Store::Impl::insertOutbox(Id task, const Outbox& action) {
+void OutboxStorage::insertOutbox(Id task, const Outbox& action) {
     static const auto sql =
         "INSERT INTO outbox(" + std::string(outboxColumns) + ",id,task_id,phase,auth_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
     auto values = outboxColumnValues(action);
@@ -395,40 +399,40 @@ void Store::Impl::insertOutbox(Id task, const Outbox& action) {
     values.push_back(task);
     values.push_back(outboxPhaseName(action.phase));
     values.push_back(action.authGeneration);
-    exec(sql.c_str(), values);
+    db_.exec(sql.c_str(), values);
 }
 
-bool Store::Impl::saveOutbox(const Outbox& action, std::optional<OutboxPhase> expected) {
+bool OutboxStorage::saveOutbox(const Outbox& action, std::optional<OutboxPhase> expected) {
     static const auto sql = outboxUpdate + " WHERE id=? AND phase=coalesce(?,phase)";
     auto values = outboxColumnValues(action);
     values.push_back(action.command.actionId);
     values.push_back(expected ? Json(outboxPhaseName(*expected)) : Json(nullptr));
-    exec(sql.c_str(), values);
-    return sqlite3_changes(db) == 1;
+    db_.exec(sql.c_str(), values);
+    return sqlite3_changes(db_.db) == 1;
 }
 
-bool Store::Impl::setOutboxPhase(std::string_view id, OutboxPhase phase, std::optional<OutboxPhase> expected) {
+bool OutboxStorage::setOutboxPhase(std::string_view id, OutboxPhase phase, std::optional<OutboxPhase> expected) {
     if (expected)
-        exec("UPDATE outbox SET phase=? WHERE id=? AND phase=?", {outboxPhaseName(phase), id, outboxPhaseName(*expected)});
+        db_.exec("UPDATE outbox SET phase=? WHERE id=? AND phase=?", {outboxPhaseName(phase), id, outboxPhaseName(*expected)});
     else
-        exec("UPDATE outbox SET phase=? WHERE id=?", {outboxPhaseName(phase), id});
-    return sqlite3_changes(db) == 1;
+        db_.exec("UPDATE outbox SET phase=? WHERE id=?", {outboxPhaseName(phase), id});
+    return sqlite3_changes(db_.db) == 1;
 }
 
-bool Store::Impl::startOutbox(const Outbox& action, std::string_view authGeneration) {
+bool OutboxStorage::startOutbox(const Outbox& action, std::string_view authGeneration) {
     static const auto sql = outboxUpdate + ",phase='started',auth_generation=? WHERE id=? AND phase='ready'";
     auto values = outboxColumnValues(action);
     values.push_back(authGeneration);
     values.push_back(action.command.actionId);
-    exec(sql.c_str(), values);
-    return sqlite3_changes(db) == 1;
+    db_.exec(sql.c_str(), values);
+    return sqlite3_changes(db_.db) == 1;
 }
 
-bool Store::Impl::prepareOutbox(const Outbox& action) {
+bool OutboxStorage::prepareOutbox(const Outbox& action) {
     static const auto sql = outboxUpdate + " WHERE id=? AND phase='ready' AND instruction_deferred=1";
     auto values = outboxColumnValues(action);
     values.push_back(action.command.actionId);
-    exec(sql.c_str(), values);
-    return sqlite3_changes(db) == 1;
+    db_.exec(sql.c_str(), values);
+    return sqlite3_changes(db_.db) == 1;
 }
 }

@@ -1,4 +1,5 @@
 #include "runtime_run_observer.hpp"
+#include "outbox_storage.hpp"
 #include "journal.hpp"
 #include "runtime_peer_exchanges.hpp"
 #include "runtime_run_reports.hpp"
@@ -78,10 +79,10 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
         if (observed.kind == Observation::Kind::Finished) {
             questions.closeQuestion(task, "run_finished");
             if (!task.actionId.empty()) {
-                const auto action = db.outbox(task);
+                const auto action = outboxStorage.outbox(task);
                 const bool supersededAnswer = action && action->command.tool == CommandTool::answer_session_question;
                 if (supersededAnswer) {
-                    db.setOutboxPhase(action->command.actionId, OutboxPhase::closed);
+                    outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::closed);
                     task.actionId.clear();
                 }
             }
@@ -245,8 +246,8 @@ void Runtime::Components::RunObserver::interruptRun(const TaskData& task) {
 void Runtime::Components::RunObserver::cancelDone(TaskData& task) {
     questions.closeQuestion(task, "cancelled");
     if (!task.actionId.empty()) {
-        const auto action = db.outbox(task);
-        if (action && db.setOutboxPhase(action->command.actionId, OutboxPhase::closed, OutboxPhase::ready))
+        const auto action = outboxStorage.outbox(task);
+        if (action && outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::closed, OutboxPhase::ready))
             updates.refundUnsentWork(task, *action);
         task.actionId.clear();
     }

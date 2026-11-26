@@ -195,7 +195,7 @@ void Store::Impl::authorizeBotToolHistory(std::string_view bot, Id message, Mode
             std::erase_if(skills, [&](const auto& skill) { return !policy.allows(bot, Action::skill_read, field(skill, "name")); });
         }
     }
-    auto images = inspectedImages(bot, message, steps);
+    auto images = attachments.inspectedImages(bot, message, steps);
     input.images.insert(input.images.end(), std::make_move_iterator(images.begin()), std::make_move_iterator(images.end()));
 }
 
@@ -252,7 +252,7 @@ void Store::Impl::validateBotTool(const ToolContext& ctx, const Decision& call) 
         if (!ctx.settings.skills.contains(resource->target)) throw Conflict("Skill is unavailable");
         skillFile(ctx, *resource, args, path);
     }
-    if (call.tool == "inspect_attachment" && !scopedAttachment(ctx.bot, ctx.messageId, args).next())
+    if (call.tool == "inspect_attachment" && !attachments.hasAttachment(ctx.bot, ctx.messageId, args))
         throw Conflict("Attachment is unavailable in this conversation");
 }
 
@@ -294,7 +294,7 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
         const auto [root, relative] = skillFile(ctx, *resource, args, path);
         content = readToolFile(root, relative, sharedRedactor());
     } else
-        content = inspectAttachment(ctx.bot, ctx.messageId, args);
+        content = attachments.inspectAttachment(ctx.bot, ctx.messageId, args);
     const auto scrub = call.tool == "inspect_attachment" ? redactor(ctx.bot) : sharedRedactor();
     if (call.tool == "web_fetch" && content.value("truncated", false)) content["text"] = scrub.text(field(content, "text"), true);
     auto data = scrub.payload(content);

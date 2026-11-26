@@ -530,7 +530,7 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
     for (const auto* key : {"sessionWake", "sessionInvitation"})
         if (message.routing.contains(key)) event[key] = message.routing.at(key);
     event.update(channel);
-    if (web) event["attachments"] = attachmentViews(message.id);
+    if (web) event["attachments"] = attachments.attachmentViews(message.id);
     Json task{{"tasks", std::move(tasks)},
               {"moreTasks", moreTasks},
               {"environments", std::move(environments)},

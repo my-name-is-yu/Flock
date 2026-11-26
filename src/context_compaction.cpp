@@ -124,7 +124,7 @@ ORDER BY entry.id DESC LIMIT 24
             else if (const auto* invite = std::get_if<ConversationInvitationEntry>(&decoded.detail))
                 entry["sessionInvitation"] = scrub.record(encodeConversationInvitation(*invite));
             if (message.channelScope.empty()) {
-                auto media = attachmentViews(id);
+                auto media = attachments.attachmentViews(id);
                 if (!media.empty()) entry["attachments"] = std::move(media);
             }
         }

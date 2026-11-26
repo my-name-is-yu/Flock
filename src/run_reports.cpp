@@ -77,10 +77,10 @@ ORDER BY w.rowid LIMIT 1)SQL",
     run.explicitDirectGateway = run.ref.gatewayEnvironmentId.empty();
     if (!link.empty()) run.ref.link = link;
     run.status = delivery == "queued" ? DestinationRunPhase::queued : DestinationRunPhase::running;
-    auto action = outbox(task, run.actionId);
+    auto action = outboxStorage.outbox(task, run.actionId);
     if (action && action->stop) {
         action->stop.reset();
-        saveOutbox(*action);
+        outboxStorage.saveOutbox(*action);
     }
     run.report.reset();
     run.detail.reset();
@@ -101,7 +101,7 @@ bool Store::Impl::recordDestinationReport(TaskData& task, DestinationRun& run, c
     }
     std::optional<bool> stopRequested;
     if (status == "interrupted" || status == "cancelled") {
-        const auto action = outbox(task, run.actionId);
+        const auto action = outboxStorage.outbox(task, run.actionId);
         stopRequested = task.state == TaskState::cancelling || destinationStopRequested(action, ref);
     }
     const RunReportEntry entry{

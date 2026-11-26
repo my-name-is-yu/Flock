@@ -2,7 +2,7 @@
 #include "../src/journal.hpp"
 #include "../src/journal_task.hpp"
 #include "../src/outbox_storage.hpp"
-#include "../src/storage.hpp"
+#include "../src/database.hpp"
 
 #include "flock/record_decode_error.hpp"
 #include "flock/json.hpp"
@@ -13,6 +13,7 @@
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 #include <array>
 #include <cstdlib>
