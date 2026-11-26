@@ -3,7 +3,7 @@
   background: var(--sidebar); display: flex; flex-direction: column; min-height: 0; min-width: 0;
   overflow: hidden;
   border-inline-end: 1px solid color-mix(in srgb, var(--hairline) 75%, transparent);
-  transition: opacity .2s ease-out, transform .26s cubic-bezier(0.32, 0.72, 0, 1), visibility .26s;
+  transition: opacity .2s ease-out, transform .26s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s;
 }
 .sidebar-resizer {
   position: relative; z-index: 6; width: 0; height: 100%;
@@ -32,6 +32,7 @@
   .workspace.sidebar-collapsed > .sidebar {
     opacity: 0; transform: translateX(-20px); pointer-events: none; visibility: hidden;
     border-inline-end-width: 0;
+    transition: opacity .2s ease-out, transform .26s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s linear .26s;
   }
   .workspace.sidebar-collapsed > .sidebar-resizer { pointer-events: none; }
 }
