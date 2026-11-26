@@ -234,7 +234,7 @@ private:
         Transaction transaction(store_.database.db);
         if (authorize()) {
             auto result = store_.conversationTurns.applyLocalConversationCall(message_, step_, calls_[slot], callKey(slot), ctx_.clock(),
-                                                                              ApprovalWait::defer, nullptr, LinkedTaskDestinations{});
+                                                                              ApprovalWait::defer, nullptr, TaskDestinations{});
             if (result)
                 saveSlot(slot, store_.secretStorage.redactor(message_.bot).record(std::move(*result)));
             else

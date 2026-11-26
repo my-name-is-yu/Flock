@@ -2838,6 +2838,35 @@ void replacingAStalePeerProjectReservationRechecksCycles() {
           "the moved task did not recover into a viable project");
 }
 
+void botProjectChoiceCannotCreatePeerCycle() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender();
+    f.reach(f.remoteSender, "peer_waiting");
+    check(f.move(f.cloudRecipient, f.verifier, "remote").at("effect") == "replanning",
+          "the recipient could not request an unpinned destination");
+    f.t3.projectsByEnvironment["remote"] = {
+        {"remote-project", "Remote project", {}}, {"active-project", "Active project", {}}, {"other-project", "Other project", {}}};
+    const auto decideWork = f.model.script;
+    int decisions = 0;
+    f.model.script = [&](const ModelInput& input) {
+        if (input.task.at("id") != f.cloudRecipient || !input.task.contains("projects")) return decideWork(input);
+        auto result = work("delegate", false);
+        if (++decisions == 1)
+            result.args["projectId"] = "remote-project";
+        else {
+            const auto& feedback = input.event.at("decisionFeedback").at(0);
+            check(feedback.at("result").at("error").get<std::string>().find("project queues") != std::string::npos && f.t3.launches == 1,
+                  "the Bot did not receive actionable feedback about its cyclic choice");
+            result.args["projectId"] = "active-project";
+        }
+        return result;
+    };
+    f.t3.finish(f.task(f.cloudRecipient).at("activeRun").at("runId"));
+    for (int tick = 0; tick < 16 && f.t3.launches == 1; ++tick) f.runtime->tick();
+    check(decisions == 2 && f.t3.launches == 2 && f.t3.seen.back().projectId == "active-project",
+          "the Bot's corrected choice did not launch on the safe project");
+}
+
 void staleCyclicPeerProjectDoesNotRejectMove() {
     PeerMoveCycleFixture f;
     f.startRemoteSender();
@@ -3121,6 +3150,8 @@ int main() {
                                                                                     pendingPeerMovePreventsNewExchange},
                                                                                    {"Replacing a stale peer reservation rechecks cycles",
                                                                                     replacingAStalePeerProjectReservationRechecksCycles},
+                                                                                   {"Bot project choice cannot make a peer cycle",
+                                                                                    botProjectChoiceCannotCreatePeerCycle},
                                                                                    {"A stale cyclic peer project does not reject a move",
                                                                                     staleCyclicPeerProjectDoesNotRejectMove},
                                                                                    {"Accepted peer move constrains other moves",

@@ -438,7 +438,6 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
     if (task.generation != generation) throw RequestChanged{};
     const auto kind = inboxWaitKind(reason);
     if (expectedKind && kind != expectedKind) throw RequestChanged{};
-    auto next = TaskState::deciding;
     if (operation == "answer" && reason == WaitReason::user_question) {
         const auto owner = task.question ? task.question->target : waitQuestionTarget(*wait);
         if (owner != questionTarget(task, waitId)) throw RequestChanged{};
@@ -446,32 +445,19 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > limits::messages::maxWaitAnswerBytes)
             throw Conflict("A nonempty answer (up to " + std::to_string(limits::messages::maxWaitAnswerBytes) + " bytes) is required");
         const UserAnswerEntry entry{answer, waitId, sourceMessage ? std::optional{sourceMessage} : std::nullopt};
-        if (const auto* question = std::get_if<ProjectQuestionWait>(&wait->details)) {
-            const auto choice = question->projects.find(answer);
-            if (choice == question->projects.end()) throw Conflict("Choose one of the listed T3 projects");
-            const auto environment = task.environmentId;
-            const auto& project = choice->second;
-            if (peerStorage.recipientRouteWouldCycle(id, environment, project))
-                throw Conflict("This project would make project queues wait for one another. Choose another project or move the task.");
-            task.projectId = project;
-            taskRouting.rememberT3Project(bot, environment, project);
-            next = TaskState::queued;
-            database.writeJournal(id, "project_selected", encodeUserAnswer(entry));
-        } else {
-            auto updated = taskEvents.currentEvent(task);
-            updated["userAnswer"] = answer;
-            updated["userQuestion"] = wait->text;
-            for (const auto* metadata : {"id", "failures", "retryAt", "evidence", "consumed"}) updated.erase(metadata);
-            taskEvents.consumeEvent(task);
-            taskEvents.event(task, "answer/" + std::to_string(waitId), updated);
-            journalStorage.journal(id, entry);
-        }
+        auto updated = taskEvents.currentEvent(task);
+        updated["userAnswer"] = answer;
+        updated["userQuestion"] = wait->text;
+        for (const auto* metadata : {"id", "failures", "retryAt", "evidence", "consumed"}) updated.erase(metadata);
+        taskEvents.consumeEvent(task);
+        taskEvents.event(task, "answer/" + std::to_string(waitId), updated);
+        journalStorage.journal(id, entry);
     } else {
         throw Conflict("Operation is unavailable for this waiting item");
     }
     waitStorage.clearWait(task, operation);
     if (operation == "answer" && task.question) task.question->target = questionTarget(task);
-    task.state = next;
+    task.state = TaskState::deciding;
     taskRecords.save(task);
     if (kind) inboxStorage.recordInboxDecision(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
 }

@@ -104,6 +104,18 @@ class DemoModel final : public Model {
                 return {{{"ask_user", {{"question", question}}, "The demo request calls for a user answer before work begins."}}};
             }
             Json args = {{"instruction", request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
+            if (const auto projects = in.task.find("projects"); projects != in.task.end()) {
+                const auto& choice = answer.empty() ? request : answer;
+                const auto selected = std::ranges::find_if(*projects, [&](const Json& project) {
+                    const auto title = field(project, "title");
+                    return !title.empty() && choice.find(title) != choice.npos;
+                });
+                if (selected == projects->end())
+                    return {{{"ask_user",
+                              {{"question", "Should I use Demo project or Demo documentation?"}},
+                              "The request does not identify a project."}}};
+                args["projectId"] = selected->at("projectId");
+            }
             if (in.needsDoneWhen) args["doneWhen"] = "The demo Session returns a completion report.";
             return {{{"delegate", std::move(args), "A demo Session can handle this request."}}};
         }

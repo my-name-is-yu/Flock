@@ -34,6 +34,8 @@ class SecretStorage;
 class TaskEvents;
 class TaskRecords;
 class TaskRouting;
+class T3;
+struct T3Project;
 class WaitStorage;
 struct Wait;
 
@@ -47,7 +49,7 @@ public:
              MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock, GitHost* gitHost,
              const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
              SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs, SessionPrompts& prompts,
-             TaskDecisions& decisions, BotSetupStorage& botSetup, const IntakeResolver& intake);
+             TaskDecisions& decisions, BotSetupStorage& botSetup, const IntakeResolver& intake, T3&, bool requireT3Connection);
 
     void decide(const TaskData& task);
     std::optional<Json> launchDefaults(const TaskData& task) const;
@@ -76,7 +78,7 @@ private:
     std::optional<TaskDecision> persistTaskInference(Id id);
     std::optional<TaskDecision> inferDecision(const TaskData& task, Json event, const Json& history, const std::vector<std::string>& tools,
                                               std::span<const OutboxInstruction> pending, Json choices,
-                                              const std::optional<PeerExchange>& peer);
+                                              const std::optional<PeerExchange>& peer, const std::vector<T3Project>& projects);
 
     Database& database;
     GitStorage& gitStorage;
@@ -103,6 +105,8 @@ private:
     TaskDecisions& decisions;
     BotSetupStorage& botSetup;
     const IntakeResolver& intake;
+    T3& t3;
+    bool requireT3Connection;
     std::map<Id, TaskInference> taskInferences;
 };
 }

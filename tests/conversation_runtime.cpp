@@ -146,7 +146,7 @@ struct Script : Model {
     std::function<void(const ModelInput&)> beforeIntake;
     std::function<void(const ModelInput&)> beforeComplete;
     std::map<Id, Json> questions;
-    std::function<Decision(const ModelInput&)> onResult;
+    std::function<Decision(const ModelInput&)> onIntake, onResult;
     std::vector<ModelInput> turnInputs;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
@@ -163,6 +163,7 @@ struct Script : Model {
         }
         if (kind == "intake") {
             if (beforeIntake) beforeIntake(input);
+            if (onIntake) return onIntake(input);
             const auto question = questions.find(input.task["id"].get<Id>());
             if (question != questions.end() && !input.event.contains("userAnswer"))
                 return {"ask_user", question->second, "The fixture needs a user answer"};
@@ -973,97 +974,156 @@ void destinationClarificationContinuesFromConversationHistory() {
           "a destination clarification lost its original request or selected environment");
 }
 
-void connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot() {
+Decision delegateInProject(const ModelInput& input, std::string_view project) {
+    Json args{{"instruction", input.task.at("request")}};
+    if (!project.empty()) args["projectId"] = project;
+    if (input.needsDoneWhen) args["doneWhen"] = "Report the result";
+    return {"delegate", std::move(args), "The requested work belongs in this project"};
+}
+
+void firstDecisionChoosesProjectBeforeTakingItsQueueSlot() {
     Fixture f;
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
-    f.t3.projectsByEnvironment["desktop"] = {{"docs", "Docs", "docs"}, {"release", "Release", "release"}};
+    f.t3.projectsByEnvironment["desktop"] = {{"docs", "Release", "/work/docs"}, {"release", "Release", "/work/app"}};
     const auto held = TaskIntake(*f.store).submit(f.routing("Keep the release project occupied", "beta", "desktop", "release"));
     f.reach(held, "running");
 
-    const Intake automatic{"alpha", "", "", ""};
-    const auto request = "Check the build";
+    constexpr auto request = "Check the build in /work/app";
     f.script(request, {start()});
-    ConversationIntake(*f.store).receive(localOwner, automatic, "new-project", request);
+    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "", ""}, "new-project", request);
     f.runtime->runConversations();
     const Id task = TaskList(*f.store).tasks("alpha").front().task.id;
-    f.reach(task, "waiting");
-    const auto waiting = Tasks(*f.store).task(task);
-    check(waiting.task.environmentId == "desktop" && waiting.task.projectId.empty() && waiting.wait &&
-              std::ranges::equal(waiting.wait->choices(), std::array{"Docs", "Release"}) && f.t3.sent.size() == 1,
-          "first work on the connected environment did not wait for a named project");
-    const auto target = TaskTarget::from(waiting.task, waiting.wait.value().id);
-    bool invalid = false;
-    try {
-        TaskControl(*f.store).operate(localOwner, target, "answer", {{"text", "Arbitrary project"}});
-    } catch (const Conflict&) {
-        invalid = true;
-    }
-    check(invalid && f.task(task).at("state") == "waiting", "an answer selected an unlisted project");
-
+    int selectionCalls = 0, rememberedCalls = 0;
+    f.model.onIntake = [&](const ModelInput& input) {
+        if (input.task["id"] != task) {
+            ++rememberedCalls;
+            check(!input.task.contains("projects"), "a remembered project still required selection");
+            return delegateInProject(input, "");
+        }
+        ++selectionCalls;
+        const auto& choices = input.task.at("projects");
+        check(input.task.at("environmentId") == "desktop" && choices.size() == 2 && choices.at(0).at("directory") == "/work/docs" &&
+                  choices.at(1) == Json{{"projectId", "release"}, {"title", "Release"}, {"directory", "/work/app"}},
+              "the first decision could not distinguish projects with the same title");
+        return delegateInProject(input, "release");
+    };
+    f.advanceUntil([&] { return f.task(task).at("projectId") == "release"; }, "the first decision did not save its project");
+    check(f.task(task).at("state") == "queued" && !Tasks(*f.store).task(task).wait && f.task(task).at("blockedBy").at("id") == held &&
+              f.t3.sent.size() == 1 && selectionCalls == 1,
+          "the Bot's choice opened a question, added a decision, or bypassed the occupied slot");
     f.restart();
-    TaskControl(*f.store).operate(localOwner, target, "answer", {{"text", "Release"}});
-    f.tick(3);
-    check(f.task(task).at("state") == "queued" && f.task(task).at("projectId") == "release" &&
-              f.task(task).at("blockedBy").at("id") == held && f.t3.sent.size() == 1,
-          "selecting a project bypassed its occupied execution slot");
     f.t3.finish("run-1", "Release check complete");
     f.reach(task, "running");
-    check(f.t3.sent.back().projectId == "release", "first launch did not use the selected project");
+    check(f.t3.sent.back().projectId == "release" && selectionCalls == 1, "the saved decision did not launch exactly once");
     f.t3.finish("run-2", "Build checked");
     f.reach(task, "completed");
 
     const auto next = TaskIntake(*f.store).submit({"alpha", "Verify the fix", "desktop", ""});
     f.reach(next, "running");
-    check(f.t3.sent.back().projectId == "release", "a later task did not use the remembered project");
+    check(f.t3.sent.back().projectId == "release" && rememberedCalls == 1,
+          "a later task failed to use the remembered project in one model call");
 
     T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud only", "cloud"}};
     const auto remote = TaskIntake(*f.store).submit({"alpha", "Verify remotely", "cloud", ""});
     f.reach(remote, "running");
-    check(f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().projectId == "cloud-project",
-          "the remembered project crossed environments or the sole project needed an answer");
+    check(f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().projectId == "cloud-project" && rememberedCalls == 2,
+          "the remembered project crossed environments or the sole project added a decision");
 }
 
-void unansweredProjectChoiceDoesNotBlockAnotherBot() {
+void projectDiscoveryRecoversIntoFirstDecision() {
+    Fixture f;
+    f.t3.projectsByEnvironment["desktop"] = {};
+    const auto id = TaskIntake(*f.store).submit(f.routing("Check the Docs project", "alpha", "desktop", ""));
+    f.reach(id, "waiting");
+    check(Tasks(*f.store).task(id).wait->reason() == WaitReason::settings, "empty catalog did not report the setup problem");
+    f.t3.projectsByEnvironment["desktop"] = {{"docs", "Docs", {}}, {"release", "Release", {}}};
+    f.model.onIntake = [](const ModelInput& input) {
+        check(input.task.at("projects").size() == 2, "recovery did not supply the new project catalog");
+        return delegateInProject(input, "docs");
+    };
+    f.now += 5;
+    f.reach(id, "running");
+    check(f.t3.sent.size() == 1 && f.t3.sent.front().projectId == "docs" && !Tasks(*f.store).task(id).wait,
+          "project discovery did not recover without a user action");
+}
+
+void projectClarificationUsesConversation() {
     Fixture f;
     f.t3.projectsByEnvironment["desktop"] = {{"docs", "Docs", {}}, {"release", "Release", {}}};
-    const auto first = TaskIntake(*f.store).submit({"alpha", "Choose a project first", "desktop", ""});
+    constexpr auto question = "Is the build you want checked in Docs or Release?";
+    const auto first = TaskIntake(*f.store).submit(f.routing("Check the build", "alpha", "desktop", ""));
+    f.model.onIntake = [&](const ModelInput& input) -> Decision {
+        const auto& choices = input.task.at("projects");
+        check(choices.at(0) == Json{{"projectId", "docs"}, {"title", "Docs"}} && choices.at(1).at("projectId") == "release",
+              "the Bot could not read both project choices");
+        if (input.task.at("id") != first) return delegateInProject(input, "docs");
+        if (!input.event.contains("userAnswer")) return {"ask_user", {{"question", question}}, "Two projects fit"};
+        check(input.event.at("userAnswer") == "Please use Release" && input.event.at("userQuestion") == question &&
+                  input.task.at("requestedDoneWhen") == "Include the test results",
+              "the task decision lost the conversation answer or the revised criteria");
+        return delegateInProject(input, "release");
+    };
     f.reach(first, "waiting");
-    const auto second = TaskIntake(*f.store).submit({"beta", "Check the documentation", "desktop", ""});
-    check(f.task(second)["blockedBy"].is_null(), "a projectless task appeared to hold an execution slot");
-    f.reach(second, "waiting");
-    const auto choice = Tasks(*f.store).task(second);
-    check(choice.wait && std::ranges::equal(choice.wait->choices(), std::array{"Docs", "Release"}),
-          "the second Bot did not reach project selection");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(choice.task, choice.wait.value().id), "answer", {{"text", "Docs"}});
+    const auto original = Tasks(*f.store).task(first);
+    check(original.wait && original.wait->text == question && original.wait->choices().empty(),
+          "the task did not show the Bot's free-form question");
+    const auto second = TaskIntake(*f.store).submit({"beta", "Check Docs", "desktop", ""});
     f.reach(second, "running");
     check(f.task(first)["state"] == "waiting" && f.t3.sent.size() == 1 && f.t3.sent.front().projectId == "docs",
-          "an independent project could not start before the first Bot's answer");
-}
+          "waiting for clarification blocked another Bot's launch");
 
-void revisingWorkKeepsTheProjectChoice() {
-    Fixture f;
-    f.t3.projectsByEnvironment["desktop"] = {{"docs", "Docs", {}}, {"release", "Release", {}}};
-    const auto id = TaskIntake(*f.store).submit(f.routing("Check the release", "alpha", "desktop", ""));
-    f.reach(id, "waiting");
-    const auto original = f.task(id);
     constexpr auto revision = "Include the test results";
-    f.script(revision, {change(id, {{"doneWhen", revision}})});
+    f.script(revision, {change(first, {{"doneWhen", revision}})});
     f.receive("revise-before-project", revision);
     f.advanceUntil(
         [&] {
-            const auto task = f.task(id);
-            return task["state"] == "waiting" && task["wait"]["id"] != original["wait"]["id"] && task["wait"].contains("choices");
+            const auto task = Tasks(*f.store).task(first);
+            return task.wait && task.wait->id != original.wait->id && task.wait->text == question;
         },
-        "revising the task did not open a new project choice");
-    const auto revised = Tasks(*f.store).task(id);
-    check(revised.wait && std::ranges::equal(revised.wait->choices(), std::array{"Docs", "Release"}) && f.t3.sent.empty(),
-          "revising the task bypassed its project choice");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(revised.task, revised.wait.value().id), "answer", {{"text", "Release"}});
+        "the revised task stopped asking about the project");
+    const auto open = Tasks(*f.store).task(first).wait.value();
+    check(open.messageId.has_value(), "the question was not anchored in the conversation");
+    f.restart();
+    f.script("Please use Release", {answer(first)});
+    f.receive("answer-project", "Please use Release", *open.messageId);
+    f.reach(first, "running");
+    check(f.t3.sent.size() == 2 && f.t3.sent.back().projectId == "release" &&
+              f.t3.sent.back().instruction.find(revision) != std::string::npos,
+          "the conversation answer did not launch work with its revised criteria");
+}
+
+void conversationCanNameProjectsInStartAndChange() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
+    f.t3.projectsByEnvironment["desktop"] = {{"docs", "Docs", {}}, {"release", "Release", {}}};
+    const Intake automatic{"alpha", "", "", ""};
+    constexpr auto request = "Check the Release project";
+    f.script(request, {[](const ModelInput& input) {
+                 check(input.task.at("environments").at(0).at("projects").at(1).at("title") == "Release",
+                       "the conversation could not see the available projects");
+                 return start({{"projectId", "release"}})(input);
+             }});
+    ConversationIntake(*f.store).receive(localOwner, automatic, "start-with-project", request);
+    f.runtime->runConversations();
+    const auto id = TaskList(*f.store).tasks("alpha").front().task.id;
     f.reach(id, "running");
-    check(f.t3.sent.size() == 1 && f.t3.sent.front().projectId == "release" &&
-              f.t3.sent.front().instruction.find(revision) != std::string::npos,
-          "launch after project selection lost the revised criteria");
+    check(f.t3.sent.size() == 1 && f.t3.sent.back().projectId == "release", "start_task did not launch on the named project");
+
+    constexpr auto invalid = "Move to a missing project";
+    f.script(invalid, {change(id, {{"projectId", "missing"}})});
+    f.receive("change-to-missing", invalid);
+    const auto invalidResult = f.lastTurn().at(0).at("result");
+    check(invalidResult.at("ok") == false && f.task(id).at("state") == "running" && f.t3.sent.size() == 1,
+          "change_task accepted a project outside the environment's catalog");
+
+    constexpr auto move = "Move to Docs";
+    f.script(move, {change(id, {{"projectId", "docs"}})});
+    f.receive("change-project", move);
+    f.t3.finish("run-1", "Original work settled");
+    f.model.onResult = [](const ModelInput& input) { return delegateInProject(input, ""); };
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "change_task did not launch again on the same environment");
+    check(f.t3.sent.back().environmentId == "desktop" && f.t3.sent.back().projectId == "docs", "change_task launched on the wrong project");
 }
 
 void suggestionsStayWithTheBotMessage() {
@@ -2196,6 +2256,13 @@ void canonicalMoveKeepsProjectAndGateway() {
     const auto moving = TaskIntake(*f.store).submit(initial);
     f.reach(moving, "running");
     check(f.task(moving).at("projectId") == "project", "the task did not start in its conversation's default project");
+
+    constexpr auto withoutAlias = "Start additional work on the cloud project";
+    f.script(withoutAlias, {start({{"environment", "cloud"}, {"projectId", "cloud-project"}})});
+    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "desktop", "project"}, "unlisted-linked-project", withoutAlias);
+    f.runtime->runConversations();
+    check(f.lastTurn().at(0).at("result").at("ok") == false && TaskList(*f.store).tasks("alpha").size() == 1,
+          "a project ID provided an undiscovered gateway route");
 
     const auto text = "Move this work to cloud";
     f.script(text, {change(moving, {{"environment", "cloud"}})});
@@ -3724,7 +3791,7 @@ void queuedMoveWaitsForTheNewerDestinationOwner() {
           "the queued Task did not retain its route through restart");
 }
 
-void moveAsksForTheDestinationProjectAfterSettlement() {
+void moveChoosesTheDestinationProjectAfterSettlement() {
     Fixture f;
     T3Connections connections(*f.store);
     connections.connect("desktop", localOwner.id, 48123);
@@ -3753,16 +3820,19 @@ void moveAsksForTheDestinationProjectAfterSettlement() {
 
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-docs", "Cloud Docs", "docs"}, {"cloud-release", "Cloud Release", "release"}};
     f.t3.finish("run-2", "Old Run settled");
-    f.reach(moving, "waiting");
-    const auto waiting = Tasks(*f.store).task(moving);
-    check(waiting.task.environmentId == "cloud" && waiting.task.projectId.empty() && waiting.wait &&
-              std::ranges::equal(waiting.wait->choices(), std::array{"Cloud Docs", "Cloud Release"}) && !waiting.task.pendingDestination &&
-              f.t3.sent.size() == 2,
-          "the move kept a project that had disappeared or skipped the new choice");
-    const auto target = TaskTarget::from(waiting.task, waiting.wait.value().id);
+    const auto choose = [](const ModelInput& input) {
+        check(input.task.at("projects").at(1).at("title") == "Cloud Release",
+              "the decision after settlement did not receive the destination catalog");
+        return delegateInProject(input, "cloud-release");
+    };
+    f.model.onIntake = choose;
+    f.model.onResult = [&](const ModelInput& input) {
+        if (input.task.at("id") == moving) return choose(input);
+        return Decision{"complete", {{"report", input.event.at("report")}}, "The original work settled"};
+    };
     f.restart();
-    TaskControl(*f.store).operate(localOwner, target, "answer", {{"text", "Cloud Release"}});
-    f.tick(3);
+    f.advanceUntil([&] { return f.task(moving).at("projectId") == "cloud-release"; },
+                   "the task did not choose a project in the new environment");
     check(f.task(moving).at("state") == "queued" && f.task(moving).at("blockedBy").at("id") == owner && f.t3.sent.size() == 2,
           "a move with a new project choice bypassed the destination owner");
     f.t3.finish("run-1", "The destination's existing Run settled");
@@ -4625,9 +4695,10 @@ int main(int argc, char** argv) {
         resumedChoicesRecoverSavedSessionCalls();
         directChoiceRechecksWebAuthority();
         destinationClarificationContinuesFromConversationHistory();
-        connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot();
-        unansweredProjectChoiceDoesNotBlockAnotherBot();
-        revisingWorkKeepsTheProjectChoice();
+        firstDecisionChoosesProjectBeforeTakingItsQueueSlot();
+        projectDiscoveryRecoversIntoFirstDecision();
+        projectClarificationUsesConversation();
+        conversationCanNameProjectsInStartAndChange();
         directAnswersRemainInConversationHistory();
         queuedTurnsSeeEarlierReplies();
         finishedTurnDoesNotHoldCompletion();
@@ -4684,7 +4755,7 @@ int main(int argc, char** argv) {
         recoveredDestinationStopHonorsPolicy();
         startedRunOutboxApprovalIsStale();
         queuedDestinationStopsReleaseSlots();
-        moveAsksForTheDestinationProjectAfterSettlement();
+        moveChoosesTheDestinationProjectAfterSettlement();
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();
         revisionOfProvablyUnsentAction();

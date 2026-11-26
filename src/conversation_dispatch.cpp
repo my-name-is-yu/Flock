@@ -339,7 +339,7 @@ CallOutcome ConversationStorage::executeLocalConversationCall(const Message& mes
     using enum CallOutcome;
     Json result;
     std::optional<WorkSession> selectedSession;
-    LinkedTaskDestinations linked;
+    TaskDestinations linked;
     if (decision.tool == "start_task" && decision.args.is_object() && !field(decision.args, "sessionRef").empty()) {
         try {
             selectedSession = sessionReadStorage.resolveWorkSession(message, field(decision.args, "sessionRef"), ctx.t3);
@@ -350,7 +350,10 @@ CallOutcome ConversationStorage::executeLocalConversationCall(const Message& mes
         }
     }
     if ((decision.tool == "start_task" || decision.tool == "change_task") && !selectedSession && result.is_null())
-        linked = taskRouting.discoverLinkedTaskDestinations(ctx.t3, message.bot);
+        linked = taskRouting.discoverTaskDestinations(ctx.t3, message,
+                                                      decision.args.contains("projectId") || decision.args.contains("environments") ||
+                                                          decision.args.contains("commit"),
+                                                      decision.tool == "change_task" ? &decision.args : nullptr);
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);
     if (!authorizeTurn(message)) {
@@ -372,8 +375,7 @@ CallOutcome ConversationStorage::executeLocalConversationCall(const Message& mes
 
 std::optional<Json> ConversationStorage::applyLocalConversationCall(const Message& message, int step, const Decision& decision,
                                                                     std::string_view key, Seconds now, ApprovalWait waitMode,
-                                                                    const WorkSession* selectedSession,
-                                                                    const LinkedTaskDestinations& linked) {
+                                                                    const WorkSession* selectedSession, const TaskDestinations& linked) {
     if (const auto resource = conversationCallResource(message, decision)) {
         using enum Action;
         const bool writesMemory = resource->action == private_memory_write || resource->action == shared_memory_write;

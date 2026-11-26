@@ -25,6 +25,7 @@
 #include "secret_storage.hpp"
 #include "task_events.hpp"
 #include "task_records.hpp"
+#include "task_routing.hpp"
 #include "wait_storage.hpp"
 
 #include <algorithm>
@@ -49,12 +50,12 @@ std::string gitInvocation(const TaskDecision& decision) {
 runtime::TaskDecisions::TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage,
                                       JournalStorage& journalStorage, MemoryStorage& memoryStorage, PeerStorage& peerStorage,
                                       SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,
-                                      WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
-                                      PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead,
-                                      GitHost* gitHost, const std::function<Seconds()>& clock)
+                                      TaskRouting& taskRouting, WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports,
+                                      SessionHistory& history, PeerExchanges& peerExchanges, OutboxDispatch& dispatch,
+                                      const std::string& sessionRead, GitHost* gitHost, const std::function<Seconds()>& clock)
     : database(database), conversationTurns(conversationTurns), gitStorage(gitStorage), journalStorage(journalStorage),
       memoryStorage(memoryStorage), peerStorage(peerStorage), secretStorage(secretStorage), taskEvents(taskEvents),
-      taskRecords(taskRecords), waitStorage(waitStorage), updates(updates), reports(reports), history(history),
+      taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), updates(updates), reports(reports), history(history),
       peerExchanges(peerExchanges), dispatch(dispatch), sessionRead(sessionRead), gitHost(gitHost), clock(clock) {}
 
 bool runtime::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
@@ -131,7 +132,7 @@ void runtime::TaskDecisions::complete(TaskData& current, const Json& event, cons
 }
 
 void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision,
-                                    std::string_view approvedInvocation, const Json* launchDefaults) {
+                                    std::string_view approvedInvocation, const Json* launchDefaults, std::span<const T3Project> projects) {
     const auto& args = decision.args;
     const auto& tool = decision.tool;
     if (isGitTool(tool)) {
@@ -165,7 +166,7 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         return;
     }
     static const std::map<std::string_view, std::set<std::string_view>> arguments{
-        {"delegate", {"instruction", "doneWhen"}},
+        {"delegate", {"instruction", "doneWhen", "projectId"}},
         {"answer_session_question", {"requestId", "answers"}},
         {"follow_up", {"instruction"}},
         {"complete", {"report", "acknowledgedInstructions", "learnings"}},
@@ -210,6 +211,11 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         return;
     }
     const bool work = tool == "delegate" || tool == "follow_up";
+    const auto project = field(args, "projectId");
+    const bool choosingProject = tool == "delegate" && snapshot.projectId.empty();
+    if (choosingProject && (project.empty() || std::ranges::find(projects, project, &T3Project::id) == projects.end()))
+        throw Conflict("Choose a listed projectId or ask which project to use.");
+    if (!choosingProject && args.contains("projectId")) throw Conflict("This task already has a T3 project.");
     const auto instruction = field(args, "instruction");
     if (work && !present(instruction)) throw Conflict("A delegate/follow-up instruction is required");
     if (tool == "ask_user") {
@@ -239,6 +245,7 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
             return true;
         }
         if (tool == "follow_up" && current.newSessionRequired) throw Conflict("Start a new Session in the current environment");
+        if (choosingProject) taskRouting.assignProject(current, project);
         if (work) updates.establishCriteria(current, args);
         if (launchDefaults) applyLaunchDefaults(current, *launchDefaults);
         updates.consumeEvent(current);
@@ -254,6 +261,7 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
             dispatch.queueDestinations(current, action, instruction, args, event);
         } else {
             dispatch.queueAction(current, action, commandToolFromName(tool).value(), instruction, args, event);
+            if (choosingProject) current.state = TaskState::queued;
         }
         return true;
     });
@@ -275,7 +283,8 @@ void runtime::TaskDecisions::applyLaunchDefaults(TaskData& task, const Json& def
 }
 
 bool runtime::TaskDecisions::continueStage(const TaskData& task, const Json* launchDefaults) {
-    if ((!task.workflow && !task.freshContextRequested) || !RunReports::hasSettledRun(task) || task.pendingInstructions.empty())
+    if (task.projectId.empty() || (!task.workflow && !task.freshContextRequested) || !RunReports::hasSettledRun(task) ||
+        task.pendingInstructions.empty())
         return false;
     return updates.change(task, [&](TaskData& current) {
         auto event = taskEvents.currentEvent(current);

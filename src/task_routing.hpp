@@ -1,13 +1,16 @@
 #pragma once
 
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
 #include <variant>
+#include <utility>
 #include <vector>
 #include "flock/json.hpp"
 #include "flock/session_ref.hpp"
 #include "flock/task.hpp"
+#include "flock/t3.hpp"
 #include "flock/types.hpp"
 
 namespace flockv0 {
@@ -17,8 +20,8 @@ class Policy;
 class PeerStorage;
 class WaitStorage;
 class T3;
-struct T3Project;
 struct TaskData;
+class SecretRedactor;
 struct WorkSession;
 namespace conversation {
 struct Message;
@@ -28,9 +31,17 @@ std::string conversationEnvironmentId(const Json& alias);
 std::string conversationGatewayEnvironmentId(const Json& alias);
 std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name = {});
 
-struct LinkedTaskDestinations {
-    std::vector<RunTarget> choices;
+using ProjectCatalog = std::variant<std::vector<T3Project>, std::string>;
+Json projectChoices(const std::vector<T3Project>&, const SecretRedactor&);
+
+struct TaskDestinations {
+    std::vector<RunTarget> configured;
+    std::vector<RunTarget> linked;
     std::vector<std::string> unavailable;
+    std::map<std::pair<std::string, std::string>, std::vector<T3Project>> catalogs;
+
+    const std::vector<T3Project>* projects(const TaskRoute&) const;
+    void chooseProject(TaskRoute&, std::string_view project) const;
 };
 struct StartDestinations {
     TaskRoute primary;
@@ -41,8 +52,6 @@ struct TaskChange {
     std::string intent, doneWhen;
     TaskRoute route;
 };
-using ProjectCatalog = std::variant<std::vector<T3Project>, std::string>;
-
 class SessionReadStorage;
 class SessionParticipationStorage;
 class TaskRouting {
@@ -57,17 +66,17 @@ public:
     bool projectRouteReady(Id task, std::string_view action) const;
     std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;
     void rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project);
-    bool projectQuestionOpen(std::string_view bot, std::string_view environment) const;
-    ProjectCatalog readProjectCatalog(T3&, std::string_view bot, std::string_view environment, bool requireConnection);
-    bool applyProjectCatalog(TaskData& task, ProjectCatalog catalog);
+    ProjectCatalog readProjectCatalog(T3&, std::string_view bot, const TaskRoute&, bool requireConnection);
+    void applyProjectCatalog(TaskData& task, const ProjectCatalog& catalog);
+    void assignProject(TaskData&, std::string_view project);
     std::set<std::string> registeredT3Environments(std::string_view bot);
     std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {});
     TaskRoute taskRoute(std::string_view bot, const Json& routing, std::string_view name, const TaskData* movingTask = nullptr,
-                        const LinkedTaskDestinations* linked = nullptr);
+                        const TaskDestinations* linked = nullptr);
     StartDestinations startDestinations(const conversation::Message&, const Json& args, bool resume, const WorkSession* selectedSession,
-                                        const LinkedTaskDestinations& linked);
-    LinkedTaskDestinations discoverLinkedTaskDestinations(T3&, std::string_view bot);
-    TaskChange taskChange(const conversation::Message&, const Json& args, const TaskData& task, const LinkedTaskDestinations& linked);
+                                        const TaskDestinations& linked);
+    TaskDestinations discoverTaskDestinations(T3&, const conversation::Message&, bool listProjects, const Json* change = nullptr);
+    TaskChange taskChange(const conversation::Message&, const Json& args, const TaskData& task, const TaskDestinations& linked);
     std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
 private:
     Database& database;
