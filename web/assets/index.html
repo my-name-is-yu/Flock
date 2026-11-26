@@ -186,12 +186,12 @@
       </button>
       <div class="composer-container" id="composer-container" hidden>
         <p id="view-only-notice" class="view-only-notice" role="status" hidden>View only</p>
-        <div id="bot-paused-banner" class="bot-paused-banner" hidden>
+        <div id="composer-banner" class="composer-banner" hidden>
           <div>
-            <p class="bot-paused-title">This Bot is paused</p>
-            <p id="bot-paused-description" class="bot-paused-description" role="status"></p>
+            <p id="composer-banner-title" class="composer-banner-title"></p>
+            <p id="composer-banner-description" class="composer-banner-description" role="status"></p>
           </div>
-          <button id="resume-bot" class="dialog-button primary" type="button" aria-describedby="bot-paused-description">Resume</button>
+          <button id="composer-banner-action" class="dialog-button primary" type="button" aria-describedby="composer-banner-description"></button>
         </div>
         <form id="composer" class="composer">
           <div id="decision-reply-context" class="decision-reply-context" hidden>

@@ -8,11 +8,15 @@ import { promisify } from 'node:util';
 
 function fixtures() {
   window.EventSource = undefined;
-  const bot = { id: 'release', name: 'Release', paused: false, canDelete: true, presence: 'idle' };
+  const bot = { id: 'release', name: 'Release', model: 'demo', paused: false, canDelete: true, presence: 'idle' };
   window.pauseChanges = [];
   window.sentMessages = [];
   window.sharePausedBot = () => {
     Object.assign(bot, { canDelete: false, paused: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  window.unconfigureBot = (canDelete) => {
+    Object.assign(bot, { canDelete, paused: false, model: '' });
     document.dispatchEvent(new Event('visibilitychange'));
   };
   window.fetch = async (path, { body } = {}) => {
@@ -51,8 +55,8 @@ async function exercise() {
   const settings = $('#detail');
   const confirmation = $('#bot-pause');
   const pauseSetting = () => $('#bot-pause-setting');
-  const pauseBanner = $('#bot-paused-banner');
-  const resume = $('#resume-bot');
+  const pauseBanner = $('#composer-banner');
+  const resume = $('#composer-banner-action');
   const composer = $('#composer');
   const message = $('#message');
   const menuItems = () => [...document.querySelectorAll('#bot-menu [role="menuitem"]')];
@@ -102,6 +106,17 @@ async function exercise() {
   menu.click();
   $('#profile-avatar-button').click();
   check(settings.open && !pauseSetting(), 'A member could manage pause from settings');
+  $('#close-detail').click();
+
+  window.unconfigureBot(false);
+  await waitFor(() => pauseBanner.dataset.state === 'setup', 'A Bot without a model still showed its composer');
+  check(composer.hidden && resume.hidden && $('#composer-banner-title').textContent === 'Release isn’t set up yet',
+    'A member could send to, or set up, a Bot without a model');
+  window.unconfigureBot(true);
+  await waitFor(() => !resume.hidden, 'The owner could not set up a Bot without a model');
+  check(resume.textContent === 'Choose a model', 'The setup action did not say what it does');
+  resume.click();
+  check(settings.open && !$('.settings-workspace-form').hidden, 'Choose a model did not open the model editor');
 }
 
 const assets = new URL('../assets/', import.meta.url);

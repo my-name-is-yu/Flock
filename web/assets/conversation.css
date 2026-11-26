@@ -11,6 +11,8 @@
   padding: 0 clamp(.75rem, 2vw, 1.25rem);
 }
 .conversation-header:has(.header-identity:not([hidden])) { height: auto; }
+/* With nothing to title, the header shouldn't draw an empty bar. */
+.conversation-header:not(:has(:is(.header-identity, .profile-placeholder):not([hidden]))) { box-shadow: none; }
 .header-inner:has(> .header-identity:not([hidden])) { position: relative; padding-block: var(--profile-header-padding); }
 .header-menu { position: absolute; left: clamp(.75rem, 2vw, 1.25rem); top: .75rem; }
 .main:has(:is(#profile-identity, #peer-identity):not([hidden])) {

@@ -313,7 +313,7 @@ async function exercise(mountBoardInbox) {
 }
 
 function liveFixture() {
-  const bot = { id: 'release', name: 'Release', latestIncomingEventId: 0,
+  const bot = { id: 'release', name: 'Release', model: 'demo', latestIncomingEventId: 0,
     presence: 'waiting', preview: 'Which branch?' };
   const decision = { botId: bot.id, botName: bot.name, itemKind: 'user_question', itemId: 1, waitId: 1,
     taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'ask:Which branch?', prompt: 'Which branch?', canDecide: true };
