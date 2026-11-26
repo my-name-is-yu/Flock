@@ -1,12 +1,15 @@
 #include "runtime_task_scheduler.hpp"
+#include "outbox_storage.hpp"
 #include "runtime_outbox_dispatch.hpp"
 #include "runtime_task_updates.hpp"
-#include "storage.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/t3.hpp"
 #include "flock/command.hpp"
 #include "flock/task.hpp"
+#include "database.hpp"
+#include "task_events.hpp"
+#include "task_routing.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -18,13 +21,15 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::TaskScheduler::TaskScheduler(Store::Impl& db, T3& t3, TaskUpdates& updates, OutboxDispatch& dispatch,
-                                                  bool requireT3Connection, std::stop_token shutdown)
-    : db(db), t3(t3), updates(updates), dispatch(dispatch), requireT3Connection(requireT3Connection), shutdown(shutdown) {}
+Runtime::Components::TaskScheduler::TaskScheduler(Database& database, TaskEvents& taskEvents, TaskRouting& taskRouting, T3& t3,
+                                                  TaskUpdates& updates, OutboxDispatch& dispatch, bool requireT3Connection,
+                                                  std::stop_token shutdown)
+    : database(database), taskEvents(taskEvents), taskRouting(taskRouting), t3(t3), updates(updates), dispatch(dispatch),
+      requireT3Connection(requireT3Connection), shutdown(shutdown) {}
 
 std::vector<Runtime::Components::TaskScheduler::Work> Runtime::Components::TaskScheduler::eligible() {
-    std::lock_guard lock(db.mutex);
-    auto rows = db.query(R"SQL(
+    std::lock_guard lock(database.mutex);
+    auto rows = database.query(R"SQL(
 WITH slots AS MATERIALIZED (
   SELECT id,action_id,blocker_id FROM project_route_slots
 ), runnable AS (
@@ -60,7 +65,7 @@ WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR EXISTS (
   )
 ))
 ORDER BY 1,2)SQL",
-                         {runOutboxOperation});
+                               {runOutboxOperation});
     std::vector<Work> result;
     while (rows.next()) {
         auto action = rows.string(1);
@@ -86,14 +91,14 @@ bool Runtime::Components::TaskScheduler::selectProject(TaskData& task) {
     const auto bot = task.botId;
     const auto environment = task.environmentId;
     {
-        std::lock_guard lock(db.mutex);
-        if (db.taskRouting.projectQuestionOpen(bot, environment)) return false;
+        std::lock_guard lock(database.mutex);
+        if (taskRouting.projectQuestionOpen(bot, environment)) return false;
     }
-    auto catalog = db.taskRouting.readProjectCatalog(t3, bot, environment, requireT3Connection);
+    auto catalog = taskRouting.readProjectCatalog(t3, bot, environment, requireT3Connection);
     return updates.change(
                task,
                [&](TaskData& current) {
-                   return !shutdown.stop_requested() && db.taskRouting.applyProjectCatalog(current, std::move(catalog));
+                   return !shutdown.stop_requested() && taskRouting.applyProjectCatalog(current, std::move(catalog));
                },
                &task) &&
            !task.projectId.empty();
@@ -102,13 +107,13 @@ bool Runtime::Components::TaskScheduler::selectProject(TaskData& task) {
 void Runtime::Components::TaskScheduler::activate(TaskData task) {
     if (task.projectId.empty() && !selectProject(task)) return;
     updates.change(task, [&](TaskData& current) {
-        auto turn = db.query("SELECT 1 FROM task_project_slots WHERE id=? AND blocker_id IS NULL", {current.id});
+        auto turn = database.query("SELECT 1 FROM task_project_slots WHERE id=? AND blocker_id IS NULL", {current.id});
         if (!turn.next()) return false;
         if (current.workflow && !current.lastRun) {
             dispatch.queueAction(current, actionId(), CommandTool::delegate, "", Json::object(), Json::object(), false);
             return true;
         }
-        if (current.eventId == 0) db.taskEvents.event(current, "intake", {{"kind", "intake"}});
+        if (current.eventId == 0) taskEvents.event(current, "intake", {{"kind", "intake"}});
         current.state = TaskState::deciding;
         return true;
     });

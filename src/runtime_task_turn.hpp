@@ -2,14 +2,13 @@
 
 #include "runtime_components.hpp"
 #include "peer_storage.hpp"
-#include "storage.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/model_error.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "model_calls.hpp"
 
 #include <functional>
 #include <map>
@@ -24,14 +23,27 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
+class Database;
+class GitStorage;
+class JournalStorage;
+class ModelCalls;
+class PeerStorage;
+class SecretStorage;
+class TaskEvents;
+class TaskRecords;
+class TaskRouting;
+class WaitStorage;
+
 class MemoryStorage;
 
 class Runtime::Components::TaskTurn {
 public:
-    TaskTurn(Store::Impl& db, MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock,
-             GitHost* gitHost, const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
-             SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs, SessionPrompts& prompts,
-             TaskDecisions& decisions);
+    TaskTurn(Database& database, GitStorage& gitStorage, JournalStorage& journalStorage, ModelCalls& modelCalls, PeerStorage& peerStorage,
+             SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting,
+             WaitStorage& waitStorage, MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul,
+             const std::function<Seconds()>& clock, GitHost* gitHost, const std::string& sessionRead, std::stop_token stop,
+             TaskUpdates& updates, RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs,
+             SessionPrompts& prompts, TaskDecisions& decisions);
 
     void decide(const TaskData& task);
     void persistTaskInferences();
@@ -54,7 +66,16 @@ private:
                                               std::span<const OutboxInstruction> pending, Json choices,
                                               const std::optional<PeerExchange>& peer);
 
-    Store::Impl& db;
+    Database& database;
+    GitStorage& gitStorage;
+    JournalStorage& journalStorage;
+    ModelCalls& modelCalls;
+    PeerStorage& peerStorage;
+    SecretStorage& secretStorage;
+    TaskEvents& taskEvents;
+    TaskRecords& taskRecords;
+    TaskRouting& taskRouting;
+    WaitStorage& waitStorage;
     MemoryStorage& memoryStorage;
     Model& model;
     const SoulLoader& soul;

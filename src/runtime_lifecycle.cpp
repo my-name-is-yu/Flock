@@ -4,8 +4,10 @@
 #include "flock/participation.hpp"
 #include "runtime_maintenance.hpp"
 #include "runtime_task_turn.hpp"
-#include "storage.hpp"
 #include "flock/types.hpp"
+#include "conversation_turns.hpp"
+#include "session_message_storage.hpp"
+#include "session_participation_storage.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -87,8 +89,8 @@ void Runtime::Components::Workers::startChannels() {
 }
 
 void Runtime::Components::Workers::wakeSessions() {
-    db.sessionParticipationStorage.settleSessionQueueCancellations(t3, stopToken());
-    db.sessionMessageStorage.wakeSessionMessages(t3, stopToken());
+    sessionParticipationStorage.settleSessionQueueCancellations(t3, stopToken());
+    sessionMessageStorage.wakeSessionMessages(t3, stopToken());
 }
 
 void Runtime::Components::Workers::stepSessionWake() {
@@ -98,7 +100,7 @@ void Runtime::Components::Workers::stepSessionWake() {
 
 void Runtime::Components::Workers::startConversations(const std::function<Seconds()>& clock, const std::function<void(Id)>& run) {
     if (conversations.size() >= batchLimit) return;
-    for (const auto& [bot, id] : db.conversationTurns.pendingConversations(batchLimit, clock())) {
+    for (const auto& [bot, id] : conversationTurns.pendingConversations(batchLimit, clock())) {
         if (conversations.size() >= batchLimit) break;
         if (!conversations.contains(bot)) {
             conversations.emplace(bot, std::async(std::launch::async, run, id));

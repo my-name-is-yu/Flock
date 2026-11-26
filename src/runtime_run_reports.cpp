@@ -1,17 +1,24 @@
 #include "runtime_run_reports.hpp"
+#include "task_run_reports.hpp"
 #include "workflow_storage.hpp"
 #include "runtime_session_history.hpp"
 #include "runtime_task_state.hpp"
 #include "runtime_task_updates.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/t3.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/run_report.hpp"
+#include "database.hpp"
+#include "flock/policy.hpp"
+#include "flock/secrets.hpp"
+#include "journal_storage.hpp"
+#include "json_fields.hpp"
+#include "secret_storage.hpp"
+#include "task_events.hpp"
 
 #include <functional>
 #include <optional>
@@ -22,17 +29,19 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::RunReports::RunReports(Store::Impl& db, WorkflowStorage& workflowStorage, T3& t3, const Policy& policy,
+Runtime::Components::RunReports::RunReports(Database& database, JournalStorage& journalStorage, SecretStorage& secretStorage,
+                                            TaskEvents& taskEvents, WorkflowStorage& workflowStorage, T3& t3, const Policy& policy,
                                             TaskUpdates& updates, SessionHistory& history, const std::function<Seconds()>& clock)
-    : db(db), workflowStorage(workflowStorage), t3(t3), policy(policy), updates(updates), history(history), clock(clock) {}
+    : database(database), journalStorage(journalStorage), secretStorage(secretStorage), taskEvents(taskEvents),
+      workflowStorage(workflowStorage), t3(t3), policy(policy), updates(updates), history(history), clock(clock) {}
 
 void Runtime::Components::RunReports::writeRunReport(TaskData& task, const SettledRunReport& report) {
     const auto entry = runReportEntry(report);
     const auto& run = report.run.ref;
     if (task.state != TaskState::cancelling && !task.replanning) {
-        db.taskEvents.event(task, "result/" + report.run.environmentId + "/" + run.threadId + "/" + run.runId, encodeRunReport(entry));
+        taskEvents.event(task, "result/" + report.run.environmentId + "/" + run.threadId + "/" + run.runId, encodeRunReport(entry));
     }
-    const auto reportId = db.journalStorage.journal(task.id, entry);
+    const auto reportId = journalStorage.journal(task.id, entry);
     if (task.workflow) {
         task.pendingStageReport = reportId;
         workflowStorage.settleStageReport(task);
@@ -49,7 +58,7 @@ RunEvidence Runtime::Components::RunReports::fetchRunEvidence(const TaskData& ta
         evidence.availability = RunEvidence::Availability::ReportUnavailable;
         evidence.detail = error.what();
     }
-    const auto scrub = db.secretStorage.redactor(task.botId);
+    const auto scrub = secretStorage.redactor(task.botId);
     evidence.report = scrub.text(evidence.report);
     evidence.detail = scrub.text(evidence.detail);
     if (scrub.text(evidence.itemId) != evidence.itemId) evidence.itemId.clear();
@@ -82,7 +91,7 @@ std::optional<Runtime::Components::RunReports::JournalReport>
 Runtime::Components::RunReports::settledSessionReport(const TaskData& task) const {
     if (!task.lastRun || !hasRun(task.lastRun->ref)) return std::nullopt;
     const auto& run = task.lastRun->ref;
-    auto report = db.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
+    auto report = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
     if (!report.next()) return std::nullopt;
     auto data = decodeRunReport(report.number(0), report.json(1));
     if (data.run.threadId != run.threadId || data.run.runId != run.runId) return std::nullopt;
@@ -114,13 +123,13 @@ std::optional<Runtime::Components::RunReports::JournalReport> Runtime::Component
             !matches("revisionId", revisionJson(report.revisionId)))
             return std::nullopt;
     }
-    auto settled = db.query(R"SQL(
+    auto settled = database.query(R"SQL(
 SELECT id,data FROM journal WHERE task_id=? AND kind='run_settled'
 AND run_environment_id=? AND run_thread_id=? AND run_id=? AND result_run_id=? AND run_status=?
 AND revision_id IS ?
 )SQL",
-                            {task.id, report.environmentId, report.run.threadId, report.run.runId, report.resultRunId, report.status,
-                             revisionJson(report.revisionId)});
+                                  {task.id, report.environmentId, report.run.threadId, report.run.runId, report.resultRunId, report.status,
+                                   revisionJson(report.revisionId)});
     while (settled.next())
         if (decodeRunReport(settled.number(0), settled.json(1)).matches(*task.lastRun)) return retry;
     return std::nullopt;
@@ -128,7 +137,7 @@ AND revision_id IS ?
 
 void Runtime::Components::RunReports::retryRunReport(const TaskData& task, const Json& event, const TaskDecision& decision) {
     const auto retry = [&] {
-        std::lock_guard lock(db.mutex);
+        std::lock_guard lock(database.mutex);
         return reportRetry(task, event);
     }();
     const auto& args = decision.args;
@@ -142,7 +151,7 @@ void Runtime::Components::RunReports::retryRunReport(const TaskData& task, const
     const auto evidence = fetchRunEvidence(task, env, report.run, report.resultRunId, report.status);
     const bool available = evidence.availability != RunEvidence::Availability::ReportUnavailable;
     updates.change(task, [&](TaskData& current) {
-        const auto latest = db.taskEvents.currentEvent(current);
+        const auto latest = taskEvents.currentEvent(current);
         if (latest.is_null() || latest.at("consumed") == true || current.state != TaskState::deciding) return false;
         const auto target = reportRetry(current, latest);
         if (!target || target->id != retry->id || target->data != report) return false;
@@ -151,13 +160,13 @@ void Runtime::Components::RunReports::retryRunReport(const TaskData& task, const
             auto updated = target->data;
             updated.evidence = boundedEvidence;
             if (updated.evidence.sessionCreatedAt.empty()) updated.evidence.sessionCreatedAt = report.evidence.sessionCreatedAt;
-            db.exec("UPDATE journal SET data=? WHERE id=?", {encodeRunReport(updated), target->id});
+            database.exec("UPDATE journal SET data=? WHERE id=?", {encodeRunReport(updated), target->id});
             if (latest.at("kind") == "result") {
-                auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?", {latest.at("id"), current.id});
+                auto row = database.query("SELECT data FROM events WHERE id=? AND task_id=?", {latest.at("id"), current.id});
                 if (!row.next()) throw Conflict("The settled result event is no longer available");
                 auto data = row.json(0);
                 setReportEvidence(data, boundedEvidence);
-                db.exec("UPDATE events SET data=? WHERE id=? AND task_id=?", {data, latest.at("id"), current.id});
+                database.exec("UPDATE events SET data=? WHERE id=? AND task_id=?", {data, latest.at("id"), current.id});
             }
         }
         history.recordSessionRead(current, latest,

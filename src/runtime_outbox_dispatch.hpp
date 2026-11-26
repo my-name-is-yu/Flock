@@ -1,10 +1,8 @@
 #pragma once
 
 #include "runtime_components.hpp"
-#include "storage.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/t3_command.hpp"
 #include "flock/command.hpp"
@@ -13,21 +11,50 @@
 #include "flock/outbox.hpp"
 
 #include <functional>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <filesystem>
 
 namespace flockv0 {
+struct Observation;
+
+class BotLifecycleStorage;
+class BotSettingsStorage;
+class ConversationStorage;
+class Database;
+class JournalStorage;
+class Policy;
+class PolicyApprovals;
+class SecretStorage;
+class SessionParticipationStorage;
+class SessionReadStorage;
+class TaskEvents;
+class TaskRecords;
+class TaskRouting;
+class TaskRunReports;
+class WaitStorage;
+
 class MemoryStorage;
 class OutboxStorage;
 
 class Runtime::Components::OutboxDispatch {
 public:
-    OutboxDispatch(Store::Impl& db, OutboxStorage& outboxStorage, MemoryStorage& memoryStorage, T3& t3, const Policy& policy,
-                   TaskUpdates& updates, TaskQuestions& questions, RunReports& reports, RunObserver& runs, SessionPrompts& prompts,
-                   const std::function<Seconds()>& clock, const IntakeResolver& intake, bool requireT3Connection, std::stop_token shutdown)
-        : db(db), outboxStorage(outboxStorage), memoryStorage(memoryStorage), t3(t3), policy(policy), updates(updates),
-          questions(questions), reports(reports), runs(runs), prompts(prompts), clock(clock), intake(intake),
-          requireT3Connection(requireT3Connection), shutdown(shutdown) {}
+    OutboxDispatch(Database& database, BotLifecycleStorage& botLifecycle, BotSettingsStorage& botSettingsStorage,
+                   ConversationStorage& conversationTurns, JournalStorage& journalStorage, const std::filesystem::path& path,
+                   PolicyApprovals& policyApprovals, SecretStorage& secretStorage, SessionParticipationStorage& sessionParticipationStorage,
+                   SessionReadStorage& sessionReadStorage, TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting,
+                   TaskRunReports& taskRunReports, WaitStorage& waitStorage, OutboxStorage& outboxStorage, MemoryStorage& memoryStorage,
+                   T3& t3, const Policy& policy, TaskUpdates& updates, TaskQuestions& questions, RunReports& reports, RunObserver& runs,
+                   SessionPrompts& prompts, const std::function<Seconds()>& clock, const IntakeResolver& intake, bool requireT3Connection,
+                   std::stop_token shutdown)
+        : database(database), botLifecycle(botLifecycle), botSettingsStorage(botSettingsStorage), conversationTurns(conversationTurns),
+          journalStorage(journalStorage), path(path), policyApprovals(policyApprovals), secretStorage(secretStorage),
+          sessionParticipationStorage(sessionParticipationStorage), sessionReadStorage(sessionReadStorage), taskEvents(taskEvents),
+          taskRecords(taskRecords), taskRouting(taskRouting), taskRunReports(taskRunReports), waitStorage(waitStorage),
+          outboxStorage(outboxStorage), memoryStorage(memoryStorage), t3(t3), policy(policy), updates(updates), questions(questions),
+          reports(reports), runs(runs), prompts(prompts), clock(clock), intake(intake), requireT3Connection(requireT3Connection),
+          shutdown(shutdown) {}
 
     void stop(TaskData task);
     void step(const TaskData& task);
@@ -54,7 +81,21 @@ private:
     bool deferDestinationDelivery(TaskData& task, DestinationRun& run, const Outbox& action, const Delivery& outcome,
                                   DeliveryOutcome delivery);
 
-    Store::Impl& db;
+    Database& database;
+    BotLifecycleStorage& botLifecycle;
+    BotSettingsStorage& botSettingsStorage;
+    ConversationStorage& conversationTurns;
+    JournalStorage& journalStorage;
+    const std::filesystem::path& path;
+    PolicyApprovals& policyApprovals;
+    SecretStorage& secretStorage;
+    SessionParticipationStorage& sessionParticipationStorage;
+    SessionReadStorage& sessionReadStorage;
+    TaskEvents& taskEvents;
+    TaskRecords& taskRecords;
+    TaskRouting& taskRouting;
+    TaskRunReports& taskRunReports;
+    WaitStorage& waitStorage;
     OutboxStorage& outboxStorage;
     MemoryStorage& memoryStorage;
     T3& t3;

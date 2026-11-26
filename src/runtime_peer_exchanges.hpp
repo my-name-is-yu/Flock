@@ -1,12 +1,10 @@
 #pragma once
 
 #include "runtime_components.hpp"
-#include "storage.hpp"
 #include "journal_peer.hpp"
 #include "journal_task.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
-#include "flock/store.hpp"
 #include "flock/runtime.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
@@ -18,6 +16,18 @@
 #include <vector>
 
 namespace flockv0 {
+class BotLifecycleStorage;
+class ConversationStorage;
+class Database;
+class JournalStorage;
+class PeerStorage;
+class Policy;
+class TaskEvents;
+class TaskOperations;
+class TaskRecords;
+class TaskRouting;
+class WaitStorage;
+
 struct PeerExchange;
 
 class Runtime::Components::PeerExchanges {
@@ -27,7 +37,8 @@ public:
         std::string kind, environment;
     };
 
-    PeerExchanges(Store::Impl&, const Policy&, TaskUpdates&, RunReports&, SessionHistory&, const PeerResolver&);
+    PeerExchanges(Database&, BotLifecycleStorage&, ConversationStorage&, JournalStorage&, PeerStorage&, TaskEvents&, TaskOperations&,
+                  TaskRecords&, TaskRouting&, WaitStorage&, const Policy&, TaskUpdates&, RunReports&, SessionHistory&, const PeerResolver&);
     std::optional<PeerResult> peerResult(const TaskData&, const Json& event) const;
     std::vector<PeerBot> peersFor(std::string_view bot) const;
     PeerBot allowedPeer(std::string_view sender, std::string_view botId) const;
@@ -46,7 +57,16 @@ private:
     void transitionPeer(const PeerExchange&, TaskData& actor, TaskData& task, const BotMessageEntry&,
                         std::optional<Id> forwardedSource = {});
 
-    Store::Impl& db;
+    Database& database;
+    BotLifecycleStorage& botLifecycle;
+    ConversationStorage& conversationTurns;
+    JournalStorage& journalStorage;
+    PeerStorage& peerStorage;
+    TaskEvents& taskEvents;
+    TaskOperations& taskOperations;
+    TaskRecords& taskRecords;
+    TaskRouting& taskRouting;
+    WaitStorage& waitStorage;
     const Policy& policy;
     TaskUpdates& updates;
     RunReports& reports;

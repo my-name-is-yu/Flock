@@ -11,6 +11,9 @@
 #include <vector>
 
 namespace flockv0 {
+inline constexpr std::string_view runOutboxOperation = "run-outbox/";
+inline constexpr std::string_view runStopOperation = "run-stop/";
+
 class Database;
 class RecordDecoder;
 class SecretRedactor;

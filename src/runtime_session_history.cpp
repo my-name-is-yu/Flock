@@ -2,12 +2,18 @@
 #include "runtime_task_updates.hpp"
 #include "flock/limits.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/model_error.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_session.hpp"
 #include "flock/task.hpp"
+#include "database.hpp"
+#include "flock/policy.hpp"
+#include "flock/secrets.hpp"
+#include "journal_storage.hpp"
+#include "json_fields.hpp"
+#include "run_ref_storage.hpp"
+#include "secret_storage.hpp"
 
 #include <cstddef>
 #include <string>
@@ -23,9 +29,10 @@ struct HistoryUnavailable : ModelError {
 };
 }
 
-Runtime::Components::SessionHistory::SessionHistory(Store::Impl& db, T3& t3, const Policy& policy, TaskUpdates& updates,
-                                                    const std::string& mode)
-    : db(db), t3(t3), policy(policy), updates(updates), mode(mode) {}
+Runtime::Components::SessionHistory::SessionHistory(Database& database, JournalStorage& journalStorage, SecretStorage& secretStorage,
+                                                    T3& t3, const Policy& policy, TaskUpdates& updates, const std::string& mode)
+    : database(database), journalStorage(journalStorage), secretStorage(secretStorage), t3(t3), policy(policy), updates(updates),
+      mode(mode) {}
 
 std::size_t Runtime::Components::SessionHistory::readOffset(const Json& args) {
     if (args.contains("offset") && (!args["offset"].is_number_integer() || args["offset"].get<Id>() < 0))
@@ -34,7 +41,7 @@ std::size_t Runtime::Components::SessionHistory::readOffset(const Json& args) {
 }
 
 SessionExcerptEntry Runtime::Components::SessionHistory::readExcerpt(std::string_view bot, const ReadRequest& req) {
-    const auto scrub = db.secretStorage.redactor(bot);
+    const auto scrub = secretStorage.redactor(bot);
     const auto excerpt = [&] {
         try {
             return t3.read(req);
@@ -80,9 +87,9 @@ bool Runtime::Components::SessionHistory::readEvidence(const TaskData& task, con
         req.gatewayEnvironmentId = active.gatewayEnvironmentId;
         if (req.gatewayEnvironmentId.empty() && !task.hasDestinations()) req.gatewayEnvironmentId = task.gatewayEnvironmentId.value_or("");
     } else {
-        std::lock_guard lock(db.mutex);
-        auto row = db.query("SELECT DISTINCT environment_id FROM runs WHERE task_id=? AND thread_id=? AND run_id=? LIMIT 2",
-                            {task.id, req.threadId, req.runId});
+        std::lock_guard lock(database.mutex);
+        auto row = database.query("SELECT DISTINCT environment_id FROM runs WHERE task_id=? AND thread_id=? AND run_id=? LIMIT 2",
+                                  {task.id, req.threadId, req.runId});
         if (!row.next()) throw Conflict("History reference does not belong to this task");
         req.environmentId = row.string(0);
         if (row.next()) throw Conflict("History reference matches more than one Session");
@@ -100,13 +107,13 @@ void Runtime::Components::SessionHistory::appendEventEvidence(const TaskData& ta
     auto evidence = event.at("evidence");
     if (evidence.size() >= maxEvidenceReads) throw Conflict("History read allowance exhausted");
     evidence.push_back(entry);
-    db.exec("UPDATE events SET evidence=? WHERE id=? AND task_id=?", {evidence, event["id"], task.id});
+    database.exec("UPDATE events SET evidence=? WHERE id=? AND task_id=?", {evidence, event["id"], task.id});
 }
 
 void Runtime::Components::SessionHistory::recordSessionRead(const TaskData& task, const Json& event, Json entry, const Json& usage) {
     appendEventEvidence(task, event, entry);
     if (!usage.empty()) entry["usage"] = usage;
-    db.journalStorage.journal(task.id, "session_read", entry);
+    journalStorage.journal(task.id, "session_read", entry);
 }
 
 Runtime::Components::SessionHistory::PrefillResult Runtime::Components::SessionHistory::prefillHistory(const TaskData& task,

@@ -3,7 +3,6 @@
 #include "runtime_components.hpp"
 #include "database.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/runtime.hpp"
 
 #include <functional>
@@ -13,6 +12,8 @@
 #include <utility>
 
 namespace flockv0 {
+class Database;
+
 class AutomationStorage;
 class WorkflowStorage;
 class PolicyApprovals;
@@ -20,7 +21,7 @@ class PolicyApprovals;
 class Runtime::Components::Maintenance {
     using ErrorReporter = std::function<void(std::string_view)>;
 public:
-    Maintenance(Store::Impl&, AutomationStorage&, WorkflowStorage&, PolicyApprovals&, const std::function<Seconds()>& clock,
+    Maintenance(Database&, AutomationStorage&, WorkflowStorage&, PolicyApprovals&, const std::function<Seconds()>& clock,
                 const ErrorReporter& automationError, const ErrorReporter& storageContention);
 
     Seconds settleApprovals();
@@ -47,7 +48,7 @@ private:
 
     void scanIfChanged(std::optional<ScanStamp>& completed, std::string_view operation, const auto& work);
 
-    Store::Impl& db;
+    Database& database;
     AutomationStorage& automationStorage;
     WorkflowStorage& workflowStorage;
     PolicyApprovals& approvals;

@@ -1,4 +1,5 @@
 #include "conversation_turns.hpp"
+#include "outbox_storage.hpp"
 #include "conversation_storage.hpp"
 #include "web_identity_state.hpp"
 #include "wait_storage.hpp"

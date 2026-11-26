@@ -1,4 +1,6 @@
 #include "runtime_session_prompts.hpp"
+#include "wait_storage.hpp"
+#include "task_storage.hpp"
 #include "workflow_storage.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
@@ -13,6 +15,11 @@
 #include "flock/task.hpp"
 #include "flock/outbox.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "json_fields.hpp"
+#include "secret_storage.hpp"
+#include "task_events.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -70,7 +77,7 @@ void includeInstructions(std::string& instruction, std::span<const OutboxInstruc
 }
 
 Runtime::Components::SessionPrompts::SessionContract Runtime::Components::SessionPrompts::sessionContract(const TaskData& task) {
-    auto row = db.query(R"SQL(
+    auto row = database.query(R"SQL(
 SELECT r.intent,r.done_when,
        coalesce((SELECT max(j.id) FROM journal j WHERE j.task_id=r.task_id AND
          ((r.number=1 AND j.kind='task_contract_changed') OR
@@ -78,7 +85,7 @@ SELECT r.intent,r.done_when,
          r.source_message_id,0)
 FROM task_revisions r WHERE r.id=? AND r.task_id=?
 )SQL",
-                        {revisionJson(task.currentRevision), task.id});
+                              {revisionJson(task.currentRevision), task.id});
     if (!row.next()) throw Conflict("The new Session needs an established task revision");
     return {row.string(0), row.string(1), row.number(2)};
 }
@@ -89,7 +96,7 @@ std::vector<OutboxSource> Runtime::Components::SessionPrompts::appendSessionDire
     using InstructionId = std::pair<Id, int>;
     std::set<InstructionId> pendingIds;
     for (const auto& item : pending) pendingIds.emplace(item.messageId, item.step);
-    auto rows = db.query(R"SQL(
+    auto rows = database.query(R"SQL(
 SELECT j.id,j.kind,j.data,w.id,w.reason,w.data,
        CASE j.kind WHEN 'instruction_accepted' THEN EXISTS (
          SELECT 1 FROM journal d WHERE d.task_id=j.task_id AND d.kind='instruction_delivered'
@@ -102,7 +109,7 @@ WHERE j.task_id=?1 AND
        (j.kind='user_answer' AND j.id>?3 AND w.resolution='answer'))
 ORDER BY j.id
 )SQL",
-                         {task.id, revisionJson(task.currentRevision), answersAfter});
+                               {task.id, revisionJson(task.currentRevision), answersAfter});
     std::vector<OutboxSource> sources;
     bool first = true;
     while (rows.next()) {
@@ -135,7 +142,7 @@ Runtime::Components::SessionPrompts::WorkPrompt Runtime::Components::SessionProm
                                                                                                 const SessionContract* contract) {
     WorkPrompt prompt;
     auto& [instruction, pending, contextIds, resultReferences] = prompt;
-    const auto scrub = db.secretStorage.redactor(task.botId);
+    const auto scrub = secretStorage.redactor(task.botId);
     std::size_t reservedBytes =
         limits::session_prompt::instructionReserveBytes + std::max(limits::session_prompt::minActionIdReserveBytes, actionIdBytes);
     if (!contract && event.contains("userAnswer")) {
@@ -185,8 +192,8 @@ Runtime::Components::SessionPrompts::WorkPrompt Runtime::Components::SessionProm
     }
     quotes.remaining += recentReportBudget;
     if (moved) {
-        auto reports = db.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT ?",
-                                {task.id, recentReportLimit});
+        auto reports = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT ?",
+                                      {task.id, recentReportLimit});
         auto remainingReports = recentReportLimit;
         while (reports.next()) {
             const auto report = decodeRunReport(reports.number(0), reports.json(1));
@@ -224,9 +231,9 @@ Runtime::Components::SessionPrompts::WorkPrompt Runtime::Components::SessionProm
 void Runtime::Components::SessionPrompts::prepareDelegation(const TaskData& task, Outbox& action) {
     auto instruction = *action.instructionBase;
     const auto contract = sessionContract(task);
-    const auto event = db.taskEvents.currentEvent(task);
+    const auto event = taskEvents.currentEvent(task);
     auto prompt = workPrompt(task, event, action.command.actionId.size(), &contract);
-    const auto scrub = db.secretStorage.redactor(task.botId);
+    const auto scrub = secretStorage.redactor(task.botId);
     instruction += prompt.instruction;
     action.command.instruction = scrub.text(instruction);
     redactInstructions(prompt.pending, scrub);

@@ -1,10 +1,8 @@
 #pragma once
 
 #include "runtime_components.hpp"
-#include "storage.hpp"
 #include "journal.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
@@ -17,6 +15,12 @@
 #include <string_view>
 
 namespace flockv0 {
+class Database;
+class JournalStorage;
+class Policy;
+class SecretStorage;
+class TaskEvents;
+
 class WorkflowStorage;
 
 class Runtime::Components::RunReports {
@@ -26,7 +30,8 @@ public:
         RunReportEntry data;
     };
 
-    RunReports(Store::Impl&, WorkflowStorage&, T3&, const Policy&, TaskUpdates&, SessionHistory&, const std::function<Seconds()>& clock);
+    RunReports(Database&, JournalStorage&, SecretStorage&, TaskEvents&, WorkflowStorage&, T3&, const Policy&, TaskUpdates&, SessionHistory&,
+               const std::function<Seconds()>& clock);
     static bool hasSettledRun(const TaskData&);
     void writeRunReport(TaskData&, const SettledRunReport&);
     void recoverRunReport(const TaskData&);
@@ -38,7 +43,10 @@ private:
     RunEvidence fetchRunEvidence(const TaskData&, const std::string& environment, RunRef source, std::string_view resultRunId,
                                  std::string_view status);
 
-    Store::Impl& db;
+    Database& database;
+    JournalStorage& journalStorage;
+    SecretStorage& secretStorage;
+    TaskEvents& taskEvents;
     WorkflowStorage& workflowStorage;
     T3& t3;
     const Policy& policy;

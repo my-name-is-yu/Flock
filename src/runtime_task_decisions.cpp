@@ -1,4 +1,6 @@
+#include "task_interaction_storage.hpp"
 #include "runtime_task_decisions.hpp"
+#include "flock/git_host.hpp"
 #include "runtime_outbox_dispatch.hpp"
 #include "runtime_peer_exchanges.hpp"
 #include "runtime_run_reports.hpp"
@@ -6,13 +8,24 @@
 #include "runtime_task_state.hpp"
 #include "runtime_task_updates.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/session_question.hpp"
 #include "flock/command.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "conversation_turns.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "git_storage.hpp"
+#include "journal_storage.hpp"
+#include "json_fields.hpp"
+#include "peer_storage.hpp"
+#include "run_ref_storage.hpp"
+#include "secret_storage.hpp"
+#include "task_events.hpp"
+#include "task_records.hpp"
+#include "wait_storage.hpp"
 
 #include <algorithm>
 #include <map>
@@ -34,11 +47,16 @@ std::string gitInvocation(const TaskDecision& decision) {
 }
 }
 
-Runtime::Components::TaskDecisions::TaskDecisions(Store::Impl& db, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
+Runtime::Components::TaskDecisions::TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage,
+                                                  JournalStorage& journalStorage, PeerStorage& peerStorage, SecretStorage& secretStorage,
+                                                  TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage,
+                                                  TaskUpdates& updates, RunReports& reports, SessionHistory& history,
                                                   PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead,
                                                   GitHost* gitHost)
-    : db(db), updates(updates), reports(reports), history(history), peerExchanges(peerExchanges), dispatch(dispatch),
-      sessionRead(sessionRead), gitHost(gitHost) {}
+    : database(database), conversationTurns(conversationTurns), gitStorage(gitStorage), journalStorage(journalStorage),
+      peerStorage(peerStorage), secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords), waitStorage(waitStorage),
+      updates(updates), reports(reports), history(history), peerExchanges(peerExchanges), dispatch(dispatch), sessionRead(sessionRead),
+      gitHost(gitHost) {}
 
 bool Runtime::Components::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
     if (task.replanning) return false;
@@ -54,7 +72,7 @@ bool Runtime::Components::TaskDecisions::canComplete(const TaskData& task, const
 void Runtime::Components::TaskDecisions::rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision,
                                                         std::string_view message, bool replay) {
     updates.change(task, [&](TaskData& current) {
-        const bool unknown = replay && isGitTool(decision.tool) && db.gitStorage.gitEffectStarted(gitInvocation(decision), current.id);
+        const bool unknown = replay && isGitTool(decision.tool) && gitStorage.gitEffectStarted(gitInvocation(decision), current.id);
         const auto why = unknown ? "The host outcome is unknown. Check the target before retrying." : bounded(message, 2048);
         ToolErrorEntry entry{event.at("id").get<Id>(), bounded(decision.tool, 128), why, unknown, {}};
         const auto args = decision.args.dump();
@@ -62,27 +80,27 @@ void Runtime::Components::TaskDecisions::rejectDecision(const TaskData& task, co
             entry.arguments = decision.args;
         else
             entry.arguments = bounded(args, 2048);
-        db.journalStorage.journal(current.id, entry);
-        db.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {event["id"]});
+        journalStorage.journal(current.id, entry);
+        database.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {event["id"]});
         current.feedback.reset();
-        if (event.at("decisionFeedback").size() + 1 >= maxToolErrors) db.waitStorage.wait(current, ModelFailureWait{}, why);
+        if (event.at("decisionFeedback").size() + 1 >= maxToolErrors) waitStorage.wait(current, ModelFailureWait{}, why);
         return true;
     });
 }
 
 void Runtime::Components::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, const Json& event,
                                                                  const TaskDecision& decision) {
-    std::lock_guard lock(db.mutex);
-    Transaction transaction(db.db);
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
     const auto id = snapshot.id;
-    auto current = db.taskRecords.load(id);
+    auto current = taskRecords.load(id);
     if (current.generation != snapshot.generation || current.eventId != event["id"] ||
         current.currentRevision != snapshot.currentRevision || current.state != TaskState::deciding)
         return;
     if (decision.tool == "reply_to_bot") {
         if (peerExchanges.replyPeer(current, event, decision, actionId())) updates.saveTask(current);
     } else {
-        if (db.peerStorage.peerExchange(id) || !canComplete(current, event)) return;
+        if (peerStorage.peerExchange(id) || !canComplete(current, event)) return;
         complete(current, event, decision);
     }
     transaction.commit();
@@ -96,15 +114,15 @@ void Runtime::Components::TaskDecisions::complete(TaskData& current, const Json&
     if (requiresAcknowledgment != decision.args.contains("acknowledgedInstructions") ||
         decision.args.value("acknowledgedInstructions", Json::array()) != ids)
         throw Conflict("Completion must acknowledge each pending instruction by messageId and step, oldest first");
-    if (db.conversationTurns.conversationPending(current.botId)) return;
+    if (conversationTurns.conversationPending(current.botId)) return;
     updates.consumeEvent(current);
     updates.recordDecision(current, event, decision, actionId());
     current.pendingInstructions.clear();
     current.newSessionRequired = false;
     current.state = TaskState::completed;
-    db.journalStorage.journal(current.id,
-                              CompletionEntry{field(decision.args, "report"), current.currentRevision,
-                                              TaskCompletion{decision.reason, current.doneWhen, completionProvenance(current, event)}});
+    journalStorage.journal(current.id,
+                           CompletionEntry{field(decision.args, "report"), current.currentRevision,
+                                           TaskCompletion{decision.reason, current.doneWhen, completionProvenance(current, event)}});
     updates.saveTask(current);
 }
 
@@ -116,17 +134,18 @@ void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const 
         Json result;
         const auto invocation = approvedInvocation.empty() ? gitInvocation(decision) : std::string(approvedInvocation);
         try {
-            result = db.gitStorage.gitTool(*gitHost, snapshot.botId, snapshot.id, snapshot.environmentId, snapshot.projectId, decision,
-                                           invocation, snapshot.generation);
+            result = gitStorage.gitTool(*gitHost, snapshot.botId, snapshot.id, snapshot.environmentId, snapshot.projectId, decision,
+                                        invocation, snapshot.generation);
         } catch (const StorageError&) {
             throw;
         } catch (const std::exception& error) {
-            result = {{"ok", false}, {"error", db.secretStorage.sharedRedactor().text(error.what())}};
+            result = {{"ok", false}, {"error", secretStorage.sharedRedactor().text(error.what())}};
         }
         if (result.value("policyWaiting", false)) return;
         updates.change(snapshot, [&](TaskData& current) {
-            db.exec("UPDATE policy_approvals SET resume=NULL WHERE operation=?", {"git/" + std::to_string(current.id) + "/" + invocation});
-            auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?", {event.at("id"), current.id});
+            database.exec("UPDATE policy_approvals SET resume=NULL WHERE operation=?",
+                          {"git/" + std::to_string(current.id) + "/" + invocation});
+            auto row = database.query("SELECT data FROM events WHERE id=? AND task_id=?", {event.at("id"), current.id});
             if (!row.next()) return false;
             auto data = row.json(0);
             if (!data.contains("gitResults")) data["gitResults"] = Json::array();
@@ -134,9 +153,9 @@ void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const 
                 data["gitResults"].push_back({{"tool", tool}, {"readId", result.at("readId")}});
             else
                 data["gitResults"].push_back(
-                    db.secretStorage.redactor(current.botId).record(Json{{"tool", tool}, {"result", std::move(result)}}));
+                    secretStorage.redactor(current.botId).record(Json{{"tool", tool}, {"result", std::move(result)}}));
             if (data["gitResults"].size() > 4) data["gitResults"].erase(data["gitResults"].begin());
-            db.exec("UPDATE events SET data=? WHERE id=?", {data, event.at("id")});
+            database.exec("UPDATE events SET data=? WHERE id=?", {data, event.at("id")});
             return true;
         });
         return;
@@ -215,11 +234,10 @@ void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const 
         const auto action = actionId();
         updates.recordDecision(current, event, decision, action);
         if (tool == "ask_user") {
-            const auto waitId =
-                db.waitStorage.wait(current,
-                                    ModelQuestionWait{args.value("choices", std::vector<std::string>{}), decision.reason,
-                                                      current.question ? current.question->target.requestId : std::string{}},
-                                    field(args, "question"));
+            const auto waitId = waitStorage.wait(current,
+                                                 ModelQuestionWait{args.value("choices", std::vector<std::string>{}), decision.reason,
+                                                                   current.question ? current.question->target.requestId : std::string{}},
+                                                 field(args, "question"));
             if (current.question) current.question->target = questionTarget(current, waitId);
         } else if (work && !current.runTargets().empty()) {
             dispatch.queueDestinations(current, action, instruction, args, event, charge);
@@ -234,7 +252,7 @@ bool Runtime::Components::TaskDecisions::continueStage(const TaskData& task) {
     if ((!task.workflow && !task.freshContextRequested) || !RunReports::hasSettledRun(task) || task.pendingInstructions.empty())
         return false;
     return updates.change(task, [&](TaskData& current) {
-        auto event = db.taskEvents.currentEvent(current);
+        auto event = taskEvents.currentEvent(current);
         if (!event.is_null() && event.at("consumed") != true && (event.at("kind") != "result" || event.contains("userAnswer")))
             return false;
         if (event.is_null()) event = Json::object();
@@ -254,13 +272,13 @@ bool Runtime::Components::TaskDecisions::continueStage(const TaskData& task) {
 bool Runtime::Components::TaskDecisions::resumeGitApproval(const TaskData& task) {
     Json saved, event;
     {
-        std::lock_guard lock(db.mutex);
-        auto row = db.query("SELECT resume FROM policy_approvals WHERE task=? AND generation=?"
-                            " AND turn=0 AND resume IS NOT NULL AND status<>'pending' ORDER BY id LIMIT 1",
-                            {task.id, task.generation});
+        std::lock_guard lock(database.mutex);
+        auto row = database.query("SELECT resume FROM policy_approvals WHERE task=? AND generation=?"
+                                  " AND turn=0 AND resume IS NOT NULL AND status<>'pending' ORDER BY id LIMIT 1",
+                                  {task.id, task.generation});
         if (!row.next()) return false;
         saved = row.json(0);
-        event = db.taskEvents.currentEvent(task);
+        event = taskEvents.currentEvent(task);
     }
     if (!gitHost || event.is_null()) return false;
     const TaskDecision decision{{field(saved, "tool"), saved.at("args"), field(saved, "reason")}};
