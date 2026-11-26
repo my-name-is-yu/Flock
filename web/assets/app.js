@@ -10,7 +10,7 @@ import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { mountBotPause } from '/bot-pause.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
-import { mountBoardInbox, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
+import { mountBoardInbox, pendingKindLabels, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
 import { screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
@@ -1015,18 +1015,6 @@ function workflowInspectors(data, open) {
   }
   return sections;
 }
-const decisionKindLabels = {
-  user_question: 'Question for you',
-  pr_review: 'Review requested',
-  pr_reconciliation: 'Confirm the pull request',
-  extra_run: 'Follow-up allowance used',
-  deadline: 'Deadline reached',
-  model_budget: 'Step allowance used',
-  conversation_model_budget: 'Step allowance used',
-  unknown_delivery: 'Message to T3 unconfirmed',
-  protected_input: 'Secret needed',
-  policy_approval: 'Approval needed',
-};
 let activityBotId = null;
 let activitySeen = false;
 let activityReveal = null;
@@ -1043,7 +1031,7 @@ function renderActivity() {
     elements['wait-count'].hidden = !pending.length;
     elements['wait-list'].setAttribute('aria-busy', loading);
     const rows = pending.map((item) => {
-      const status = decisionKindLabels[item.itemKind] ?? 'Needs you';
+      const status = pendingKindLabels[item.itemKind] ?? 'Needs you';
       const title = item.itemKind === 'policy_approval' && item.action
         ? [actionLabel(item.action), item.displayTarget ?? item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
       const row = activityRow('button', 'wait-row', title, status, 'waiting');
