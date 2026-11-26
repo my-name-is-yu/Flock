@@ -1,9 +1,3 @@
-// One tooltip for every control. Give an element data-tooltip="Label" and, for a
-// keyboard shortcut, data-shortcut="Esc" (space-separated keys); data-tooltip-side="top"
-// prefers the space above, and data-tooltip-anchor="selector" places it against
-// the closest matching ancestor. Mouse hover
-// shows it after a short delay, moving between controls keeps it warm, and
-// keyboard focus shows it at once. Touch never shows it.
 const showDelay = 450;
 const warmPeriod = 600;
 const gap = 6;
@@ -56,7 +50,6 @@ function place() {
 
 function show(next) {
   clearTimeout(timer);
-  // Skip controls whose menu or popup is already open.
   if (!next.isConnected || !next.dataset.tooltip || next.matches('[aria-haspopup][aria-expanded="true"], details[open] > summary'))
     return;
   target = next;
