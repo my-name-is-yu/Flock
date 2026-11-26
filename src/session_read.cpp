@@ -101,14 +101,6 @@ bool humanSessionRequest(const conversation::Message& message) {
                                             message.principalSource == conversation::PrincipalSource::session);
 }
 
-std::set<std::string> configuredSessionEnvironments(const Json& routing) {
-    std::set<std::string> result;
-    const auto environment = field(routing, "environmentId");
-    if (!environment.empty()) result.insert(environment);
-    for (const auto& alias : routing.at("config").value("conversationEnvironments", Json::object()))
-        if (auto id = conversationEnvironmentId(alias); !id.empty()) result.insert(std::move(id));
-    return result;
-}
 }
 
 class SessionReadStorage::SessionEvidence {
@@ -125,7 +117,9 @@ public:
         auto environments = channelScope_.empty() ? store_.connectedSessionEnvironments(message_) : std::set<std::string>{};
         const bool connected = !environments.empty();
         const auto configuredProject = connected ? std::string{} : field(message_.routing, "projectId");
-        if (!connected && channelScope_.empty()) environments = configuredSessionEnvironments(message_.routing);
+        if (!connected && channelScope_.empty())
+            if (auto environment = field(message_.routing, "environmentId"); !environment.empty())
+                environments.insert(std::move(environment));
         auto scopedKey = Json::array({key, channelScope_, configuredProject, environments});
         if (connected) scopedKey.push_back(connectedScope);
         const Json sessionScope = connected ? Json(connectedScope) : Json(nullptr);
@@ -751,7 +745,7 @@ bool SessionReadStorage::permitsWorkSession(const conversation::Message& message
         !database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next())
         return false;
     if (connectedSessionAccess(message, {environment, thread, {}})) return true;
-    return field(message.routing, "projectId") == session.projectId && configuredSessionEnvironments(message.routing).contains(environment);
+    return field(message.routing, "projectId") == session.projectId && field(message.routing, "environmentId") == environment;
 }
 
 bool SessionReadStorage::permitsWorkSession(Id sourceMessageId, const WorkSession& session) {

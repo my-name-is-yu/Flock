@@ -120,14 +120,14 @@ struct Script final : Model {
                  text == "Send linked instruction through other gateway" || text == "Send instruction without destination" ||
                  text == "Send instruction with conflicting selectors")) {
                 Json args{{"taskId", followUpTask}, {"generation", followUpGeneration}, {"instruction", "Check the Mini result"}};
-                if (text == "Send instruction to Mini") args["destination"] = "mini";
+                if (text == "Send instruction to Mini") args["destination"] = linkedOnly ? nativeChoice : "env-mini";
                 if (text == "Send linked instruction" || text == "Send linked instruction through other gateway") {
                     args["environmentId"] = nativeTargetEnvironment;
                     args["projectId"] = nativeProject;
                     args["gatewayEnvironmentId"] = text == "Send linked instruction" ? nativeGateway : nativeTargetEnvironment;
                 }
                 if (text == "Send instruction with conflicting selectors") {
-                    args["destination"] = "mini";
+                    args["destination"] = linkedOnly ? nativeChoice : "env-mini";
                     args["environmentId"] = "env-local";
                     args["projectId"] = "project-local";
                 }
@@ -142,9 +142,10 @@ struct Script final : Model {
                            {"gatewayEnvironmentId", nativeGateway}},
                           "Stop only the selected linked target"}}};
             if (input.event.at("turn").empty() && (text == "Stop Mini" || text == "Stop Mini again"))
-                return {{{"cancel_task",
-                          {{"taskId", cancelTask}, {"generation", cancelGeneration}, {"destination", "mini"}},
-                          "Stop only Mini"}}};
+                return {
+                    {{"cancel_task",
+                      {{"taskId", cancelTask}, {"generation", cancelGeneration}, {"destination", linkedOnly ? nativeChoice : "env-mini"}},
+                      "Stop only Mini"}}};
             const auto& turn = input.event.at("turn");
             if (turn.empty() && input.event.value("text", "") == request) {
                 Json args{{"request", request}};
@@ -168,10 +169,15 @@ struct Script final : Model {
                     nativeGatewayOptionsSeen = localGateway && secondGateway && !localGatewayName.empty();
                     nativeChoice = localGatewayName;
                 }
+                if (linkedOnly) {
+                    const auto& choices = input.task.at("environments");
+                    const auto linked = std::ranges::find_if(choices, [](const Json& choice) { return choice.value("linked", false); });
+                    check(linked != choices.end(), "the gateway did not list Mini");
+                    nativeChoice = linked->at("name");
+                }
                 if (parallel) {
-                    args["environments"] = nativeLinked ? Json::array({nativeChoice})
-                                           : linkedOnly ? Json::array({"mini"})
-                                                        : Json::array({"local", "mini"});
+                    args["environments"] =
+                        nativeLinked || linkedOnly ? Json::array({nativeChoice}) : Json::array({"env-local", "env-mini"});
                     if (!commit.empty()) args["commit"] = commit;
                 }
                 return {{{"start_task", std::move(args), "Run the release verification"}}};
@@ -221,15 +227,12 @@ struct Scenario {
     void start(bool parallel = true, bool loseMiniReply = false) {
         model.parallel = parallel;
         model.selectedEnvironment.clear();
+        T3Connections connections(store);
+        connections.connect(local.id(), localOwner.id, 3210);
+        connections.connect(mini.id(), localOwner.id, 3210);
         local.configure({{"multiReset", true}, {"multiSingle", !parallel}, {"multiCommit", model.commit}});
         mini.configure({{"multiReset", true}, {"multiHoldLaunchReply", loseMiniReply}, {"multiCommit", model.commit}});
-        const Intake routing{bot,
-                             {},
-                             local.id(),
-                             local.project(),
-                             {{"conversationEnvironments",
-                               {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
-                                {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
+        const Intake routing{bot, {}, local.id(), local.project()};
         ConversationIntake(store).receive(localOwner, routing, "start-fixture", request);
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok", false),
@@ -242,20 +245,15 @@ struct Scenario {
         model.linkedOnly = true;
         model.selectedEnvironment.clear();
         T3Connections(store).connect(local.id(), localOwner.id, 3210);
-        local.configure({{"multiReset", true},
-                         {"multiSingle", true},
-                         {"multiCommit", model.commit},
-                         {"multiExpectedTarget", mini.id()},
-                         {"multiForwardingUnavailable", forwardingUnavailable}});
+        local.configure(
+            {{"multiReset", true},
+             {"multiSingle", true},
+             {"multiCommit", model.commit},
+             {"multiExpectedTarget", mini.id()},
+             {"multiLinkedEnvironments", Json::array({{{"environmentId", mini.id()}, {"label", "Mini"}, {"status", "reachable"}}})},
+             {"multiForwardingUnavailable", forwardingUnavailable}});
         mini.configure({{"multiReset", true}, {"multiHoldLaunchReply", false}, {"multiCommit", model.commit}});
-        const Intake routing{
-            bot,
-            {},
-            local.id(),
-            local.project(),
-            {{"conversationEnvironments",
-              {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
-               {"mini", {{"environmentId", mini.id()}, {"projectId", local.project()}, {"gatewayEnvironmentId", local.id()}}}}}}};
+        const Intake routing{bot, {}, local.id(), local.project()};
         ConversationIntake(store).receive(localOwner, routing, "linked-fixture", request);
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok", false),
@@ -334,7 +332,7 @@ struct Scenario {
     }
 
     void checkResult(const Endpoint& endpoint, const Json& outcome, std::string_view status, std::string_view commit) {
-        check(outcome.at("name") == endpoint.name && outcome.at("projectId") == endpoint.project() && outcome.at("status") == status &&
+        check(outcome.at("name") == endpoint.id() && outcome.at("projectId") == endpoint.project() && outcome.at("status") == status &&
                   outcome.at("commit") == commit && outcome.at("threadId") == threadId && outcome.at("runId") == runId &&
                   outcome.at("link") == endpoint.link(),
               "incorrect per-environment Run outcome: " + outcome.dump());
@@ -383,14 +381,7 @@ void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const 
           "a linked launch URL must use the target environment, not its credential gateway");
     fixture.model.followUpTask = fixture.taskId;
     fixture.model.followUpGeneration = fixture.task().task.generation;
-    const Intake routing{
-        bot,
-        {},
-        local.id(),
-        local.project(),
-        {{"conversationEnvironments",
-          {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
-           {"mini", {{"environmentId", mini.id()}, {"projectId", local.project()}, {"gatewayEnvironmentId", local.id()}}}}}}};
+    const Intake routing{bot, {}, local.id(), local.project()};
     ConversationIntake(fixture.store).receive(localOwner, routing, "linked-send-fixture", "Send instruction to Mini");
     fixture.runtime.runConversations();
     check(fixture.model.sendResult.value("ok", false) && local.effects("t3_thread_send").size() == 1 &&
@@ -524,13 +515,7 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
     const auto original = Scenario::result(fixture.task(), fixture.local);
     fixture.model.followUpTask = fixture.taskId;
     fixture.model.followUpGeneration = fixture.task().task.generation;
-    const Intake routing{bot,
-                         {},
-                         local.id(),
-                         local.project(),
-                         {{"conversationEnvironments",
-                           {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
-                            {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
+    const Intake routing{bot, {}, local.id(), local.project()};
     ConversationIntake(fixture.store)
         .receive(localOwner, routing, "conflicting-follow-up-fixture", "Send instruction with conflicting selectors");
     fixture.runtime.runConversations();
@@ -571,13 +556,7 @@ void cancelOneDestination(const Endpoint& local, const Endpoint& mini, const std
     fixture.awaitBothRunning();
     fixture.mini.configure({{"multiDisconnected", true}, {"multiHoldSettlement", true}});
     fixture.model.cancelTask = fixture.taskId;
-    const Intake routing{bot,
-                         {},
-                         local.id(),
-                         local.project(),
-                         {{"conversationEnvironments",
-                           {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
-                            {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
+    const Intake routing{bot, {}, local.id(), local.project()};
     const auto miniTarget = Resource::sessionRead(mini.id(), threadId).target;
     PolicyRules{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, true);
     fixture.model.cancelGeneration = fixture.task().task.generation;
@@ -639,13 +618,7 @@ void cancelUnknownAcceptance(const Endpoint& local, const Endpoint& mini, const 
         "the held Mini launch reply should remain uncertain");
     fixture.model.cancelTask = fixture.taskId;
     fixture.model.cancelGeneration = fixture.task().task.generation;
-    const Intake routing{bot,
-                         {},
-                         local.id(),
-                         local.project(),
-                         {{"conversationEnvironments",
-                           {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
-                            {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
+    const Intake routing{bot, {}, local.id(), local.project()};
     ConversationIntake(fixture.store).receive(localOwner, routing, "cancel-unknown-mini-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     check(fixture.model.cancelResult.value("ok", false), "an uncertain saved destination must accept a local stop intent");

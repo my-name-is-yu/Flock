@@ -3284,7 +3284,8 @@ async function submit(event) {
       else composer.settleSend(payload, false);
     }
     if (error.message === 'bot_paused') void Promise.all([refreshBots(), context.refresh()]);
-    setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
+    const notice = error.message === 'removed_bot_setting' ? error.data.message : errors[error.message];
+    setNotice(context, notice ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
     sendingMessages.delete(composer);

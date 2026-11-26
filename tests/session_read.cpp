@@ -227,9 +227,7 @@ struct Fixture {
         runtime =
             std::make_unique<Runtime>(*store, model, t3, [](auto) { return std::string{}; }, RuntimeOptions{.clock = [&] { return now; }});
     }
-    Intake intake(std::string bot) {
-        return {std::move(bot), "Investigate staging", env, "release", {{"conversationEnvironments", {{"Remote", otherEnv}}}}};
-    }
+    Intake intake(std::string bot) { return {std::move(bot), "Investigate staging", env, "release"}; }
     Json call(std::string tool, Json args, std::string bot = "alpha") {
         model.result = nullptr;
         model.next = {std::move(tool), std::move(args), "Inspect the requested investigation"};
@@ -332,6 +330,9 @@ void acceptance() {
               log.at("attachment").at("content").get<std::string>().size() == 8192 && log.at("truncated") == true,
           "attachment content or truncation was lost");
     PolicyRules{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, false);
+    T3Connections connections(*f.store);
+    connections.connect(env, localOwner.id, 48120);
+    connections.connect(otherEnv, localOwner.id, 48120);
     const auto acrossEnvironments = f.call(search, Json::object()).at("sessions");
     const auto remoteRef = acrossEnvironments.back().at("sessionRef");
     check(acrossEnvironments.size() == 3 && remoteRef != sessionRef &&
@@ -341,6 +342,8 @@ void acceptance() {
                   missingAttachment.dump(),
           "references crossed environments for the same T3 thread identifier");
     PolicyRules{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
+    connections.disconnect(otherEnv);
+    connections.disconnect(env);
     auto tampered = sessionRef.get<std::string>();
     tampered.back() = tampered.back() == 'a' ? 'b' : 'a';
     check(f.call(events, {{"sessionRef", tampered}, {"operation", "counts"}}).dump() == missing.dump() &&

@@ -103,7 +103,7 @@ public:
                  const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&, const PeerResolver&, std::stop_token);
     std::optional<Json> applyLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
                                                    Seconds now, ApprovalWait, const WorkSession* selectedSession,
-                                                   const TaskDestinations& linked);
+                                                   const TaskDestinations& linked, const BotTools&);
     bool isNextTurn(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
     Person turnActor(const conversation::Message&);
@@ -125,7 +125,7 @@ private:
     CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&, std::string_view key,
                                          const std::function<Seconds()>&, const Json* setup = nullptr);
     CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                             const ConversationCallContext&);
+                                             const ConversationCallContext&, const BotTools&);
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
     void saveConversationCallResult(const conversation::Message&, int step, Json result);
     const char* questionAnswerError(const TaskData& task, const conversation::Message&, const std::optional<Wait>&) const;
@@ -133,7 +133,7 @@ private:
     Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
                    const TaskDestinations& linked);
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now, const WorkSession* selectedSession,
-                       const TaskDestinations& linked);
+                       const TaskDestinations& linked, const BotTools&);
     std::map<Id, ConversationModelCheckpoint> conversationCheckpoints;
     Database& database;
     AttachmentStorage& attachments;

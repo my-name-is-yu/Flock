@@ -26,7 +26,6 @@ namespace flockv0::app {
 struct Bot {
     std::string id, name, environmentId, projectId;
     Json settings = Json::object();
-    std::vector<std::string> allowedBots;
     std::string role;
     Intake intake(std::string_view request) const;
 };
@@ -42,7 +41,7 @@ public:
     std::optional<PlannerModel> plannerModel(std::string_view id) const;
     std::string soul(std::string_view id) const;
     std::string initialMemory(std::string_view id) const;
-    std::vector<PeerBot> peers(std::string_view id) const;
+    std::vector<PeerBot> peers(Store&, std::string_view id) const;
     Json cards() const;
     Json skillCards() const;
     void apply(const BotChange&);

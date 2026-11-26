@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -42,6 +43,7 @@ class McpTools {
 public:
     virtual ~McpTools() = default;
     virtual bool hasServer(std::string_view server) const = 0;
+    virtual std::vector<std::string> serverNames() const = 0;
     virtual bool readOnlyHint(std::string_view, std::string_view) { return false; }
     virtual Json discover(std::string_view bot, std::string_view server, McpCollection, std::string_view cursor) = 0;
     virtual McpToolResult invoke(std::string_view server, std::string_view tool, const Json& args) = 0;
@@ -52,6 +54,7 @@ struct BotTools {
     std::map<std::string, std::filesystem::path, std::less<>> skills;
     std::shared_ptr<WebTools> web;
     std::shared_ptr<McpTools> mcp;
+    bool webSearchConfigured = false;
 };
 
 }

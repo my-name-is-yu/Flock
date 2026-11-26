@@ -9,7 +9,7 @@
 
 namespace flockv0 {
 struct BotProfileError : Conflict {
-    BotProfileError(std::string code, const char* message) : Conflict(message), code(std::move(code)) {}
+    BotProfileError(std::string code, const std::string& message) : Conflict(message), code(std::move(code)) {}
     std::string code;
 };
 

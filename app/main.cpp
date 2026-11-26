@@ -235,15 +235,15 @@ int externalMcpCommand(Arguments& args, const std::filesystem::path& home, const
     const auto action = args.pop("external MCP command");
     if (action == "connect") {
         const auto person = args.pop("Flock person");
-        std::vector<std::string> allowedBots;
+        std::vector<std::string> authorizedBots;
         do {
             const auto bot = args.pop("Bot ID");
             bots.get(bot);
-            allowedBots.emplace_back(bot);
+            authorizedBots.emplace_back(bot);
         } while (!args.empty());
         auto store = openStore(home);
         const SettingsAccess access(store, home, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
-        const auto credential = ExternalMcp(store).connect(person, allowedBots);
+        const auto credential = ExternalMcp(store).connect(person, authorizedBots);
         print({{"connectionId", credential.connectionId}, {"bearerToken", credential.bearerToken}});
     } else if (action == "disconnect") {
         const auto id = args.pop("external MCP connection ID");
@@ -324,11 +324,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     }
     options.requireT3Connection = !fixed;
     options.botTools = connections.loadTools();
-    options.peers = [&](std::string_view botId) {
-        auto peers = bots.peers(botId);
-        std::erase_if(peers, [&](const PeerBot& peer) { return BotLifecycle(store).botDeleted(peer.intake.botId); });
-        return peers;
-    };
+    options.peers = [&](std::string_view botId) { return bots.peers(store, botId); };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
     options.intake = intake;

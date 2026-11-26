@@ -519,10 +519,9 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
     }
 
     Json environments = Json::array();
-    for (const auto& [name, route] : linked.configured) {
+    for (const auto& [name, route] : linked.direct) {
         Json choice{{"name", name.empty() ? route.environmentId : name}, {"environmentId", route.environmentId}};
         if (name.empty()) choice["default"] = true;
-        if (route.gatewayEnvironmentId != route.environmentId) choice["gatewayEnvironmentId"] = route.gatewayEnvironmentId;
         if (const auto* projects = linked.projects(route); projects && !projects->empty()) {
             choice["projects"] = projectChoices(*projects, scrub);
             const auto preferred =
@@ -567,7 +566,7 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
 }
 
 Json ConversationStorage::applyTurnTool(const Message& message, int step, const Decision& decision, Seconds now,
-                                        const WorkSession* selectedSession, const TaskDestinations& linked) {
+                                        const WorkSession* selectedSession, const TaskDestinations& linked, const BotTools& settings) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -616,7 +615,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
             tool == "stop_workflow")
             return workflowStorage.workflowTool(tool, args, bot, message.id, step, routing);
         const auto actor = turnActor(message);
-        auto result = botSettingsStorage.botSettingsTool(bot, message.id, routing, decision);
+        auto result = botSettingsStorage.botSettingsTool(bot, message.id, settings, decision);
         if (result.is_null()) result = automationStorage.automationTool(bot, actor, routing, decision, now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
         result["ok"] = true;

@@ -315,10 +315,6 @@ void exercise(const std::filesystem::path& dir) {
     };
     for (const auto* removed : {"list_grants", "request_access"})
         check(turn(removed).find("Tool unavailable") != std::string::npos, "removed tool was offered");
-    ernest.config["services"] = {"github"};
-    ernest.config["mcpServers"] = {"docs"};
-    auto connections = turn("list_connections");
-    check(connections.find("github") != std::string::npos && connections.find("docs") != std::string::npos, "connection metadata");
     check(turn("request_secret_input", {{"name", "repo-token"}}).find("pending") != std::string::npos, "protected input request");
     auto metadata = botAccess.botSettings(owner, "Ernest");
     Id input = metadata.at("secretInputs").at(0).at("id");

@@ -1,3 +1,4 @@
+#include "flock/t3_connection.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task.hpp"
 #include "flock/task_intake.hpp"
@@ -63,7 +64,8 @@ struct RoutingT3 final : T3 {
     std::vector<Command> commands;
     std::string authGeneration(const std::string&, const Json&) override { return "test-auth"; }
     std::vector<T3Project> projects(std::string_view environment) override {
-        check(environment == "mini-env", "unexpected project catalog");
+        if (environment == "env-canonical") return {{"project-canonical", "Local", {}}};
+        if (environment == "cloud-env") return {{"cloud-project", "Cloud", {}}};
         return {{"mini-project", "Mini", {}}, {"remembered-project", "Remembered", {}}};
     }
     Delivery send(const Command& command) override {
@@ -79,16 +81,9 @@ struct RoutingT3 final : T3 {
 
 Intake pinnedBot(const Sandbox& temp) {
     auto config = botConfig();
-    config["conversationEnvironments"] = {{"mini", {{"environmentId", "mini-env"}, {"projectId", "mini-project"}}},
-                                          {"mini-legacy", "mini-env"},
-                                          {"local", "env-canonical"},
-                                          {"cloud", {{"environmentId", "cloud-env"}, {"projectId", "cloud-project"}}}};
     const auto folder = temp.path / "bots";
     createBot(folder / "release", config, "Verify revisions.", "");
-    const auto intake = Bots(folder).get("release").intake("");
-    check(intake.config.at("conversationEnvironments") == config.at("conversationEnvironments"),
-          "Bot config must preserve canonical project aliases and legacy environment aliases");
-    return intake;
+    return Bots(folder).get("release").intake("");
 }
 
 void parallelDestinations() {
@@ -97,26 +92,32 @@ void parallelDestinations() {
     RoutingModel model;
     RoutingT3 t3;
     Store store(temp.path / "state.db");
+    T3Connections(store).connect("mini-env", localOwner.id, 48123);
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     model.action = {"start_task",
-                    {{"request", "Verify the release"}, {"environments", {"mini", "local"}}, {"commit", std::string(40, 'A')}},
+                    {{"request", "Verify the release"},
+                     {"environments", {{{"environment", "mini-env"}, {"projectId", "mini-project"}}, "env-canonical"}},
+                     {"commit", std::string(40, 'A')}},
                     "Use the requested destinations."};
     ConversationIntake(store).receive(localOwner, intake, "parallel-verification", "Verify the release on both Macs");
     runtime.runConversations();
     const auto tasks = TaskList(store).tasks();
     check(tasks.size() == 1 && t3.commands.empty(), "one conversation request must save exactly one task before dispatch");
     const auto& task = tasks.front().task;
-    const Json expected = Json::array({{{"name", "mini"}, {"environmentId", "mini-env"}, {"projectId", "mini-project"}},
-                                       {{"name", "local"}, {"environmentId", "env-canonical"}, {"projectId", "project-canonical"}}});
+    const Json expected =
+        Json::array({{{"name", "mini-env"}, {"environmentId", "mini-env"}, {"projectId", "mini-project"}},
+                     {{"name", "env-canonical"}, {"environmentId", "env-canonical"}, {"projectId", "project-canonical"}}});
     check(taskJson(tasks.front()).at("runTargets") == expected && task.requestedCommit == std::string(40, 'a'),
           "the task must pin the selected canonical routes and normalized SHA");
 
-    model.action.args["environments"] = {"local", "env-canonical"};
+    const Json mini = {{"environment", "mini-env"}, {"projectId", "mini-project"}};
+    model.action.args["environments"] = Json::array({mini, mini});
     ConversationIntake(store).receive(localOwner, intake, "duplicate-environment", "Verify again on both Macs");
     runtime.runConversations();
-    check(TaskList(store).tasks().size() == 1, "two aliases for one environment must not create a parallel task");
+    check(TaskList(store).tasks().size() == 1, "two selections for one route must not create a parallel task");
 
-    model.action.args = {{"request", "Verify on the Mini"}, {"environment", "mini"}, {"commit", std::string(40, 'a')}};
+    model.action.args = {
+        {"request", "Verify on the Mini"}, {"environment", "mini-env"}, {"projectId", "mini-project"}, {"commit", std::string(40, 'a')}};
     ConversationIntake(store).receive(localOwner, intake, "single-verification", "Verify on the Mini");
     runtime.runConversations();
     const auto singleNamed = Tasks(store).task(model.receipt.at("taskId"));
@@ -124,7 +125,8 @@ void parallelDestinations() {
               singleNamed.task.requestedCommit == std::string(40, 'a') && singleNamed.task.runTargets().size() == 1 &&
               singleNamed.task.runTargets().front().route.environmentId == "mini-env",
           "a single named destination must retain optional verification and its saved route");
-    model.action.args = {{"request", "Verify on the Mini"}, {"environments", Json::array({"mini"})}};
+    model.action.args = {{"request", "Verify on the Mini"},
+                         {"environments", Json::array({{{"environment", "mini-env"}, {"projectId", "mini-project"}}})}};
     ConversationIntake(store).receive(localOwner, intake, "single-array", "Verify on the Mini");
     runtime.runConversations();
     const auto singleArray = Tasks(store).task(model.receipt.at("taskId"));
@@ -154,8 +156,12 @@ void genericDestinationCounts() {
     RoutingModel model;
     RoutingT3 t3;
     Store store(temp.path / "state.db");
+    T3Connections(store).connect("mini-env", localOwner.id, 48123);
+    T3Connections(store).connect("cloud-env", localOwner.id, 48123);
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
-    model.action = {"start_task", {{"request", "Run on the Mini"}, {"environments", {"mini"}}}, "Use the one selected destination."};
+    model.action = {"start_task",
+                    {{"request", "Run on the Mini"}, {"environments", {{{"environment", "mini-env"}, {"projectId", "mini-project"}}}}},
+                    "Use the one selected destination."};
     ConversationIntake(store).receive(localOwner, intake, "single-route-work", "Run this on the Mini");
     runtime.runConversations();
     auto tasks = TaskList(store).tasks();
@@ -163,7 +169,8 @@ void genericDestinationCounts() {
     const auto& single = tasks.front().task;
     check(single.runTargets().size() == 1 && !single.requestedCommit, "ordinary one-destination work must not require commit verification");
 
-    model.action.args = {{"request", "Run on all three"}, {"environments", {"mini", "local", "cloud"}}};
+    model.action.args = {{"request", "Run on all three"},
+                         {"environments", {{{"environment", "mini-env"}, {"projectId", "mini-project"}}, "env-canonical", "cloud-env"}}};
     ConversationIntake(store).receive(localOwner, intake, "three-route-work", "Run this on all three destinations");
     runtime.runConversations();
     tasks = TaskList(store).tasks();
@@ -173,42 +180,30 @@ void genericDestinationCounts() {
           "ordinary multi-destination work must persist all routes without a SHA policy");
 }
 
-void manyConfiguredDestinations() {
+void manyConnectedDestinations() {
     Sandbox temp;
-    auto config = botConfig();
-    Json aliases = Json::object();
-    Json selected = Json::array();
-    Json expected = Json::array();
-    for (int i = 0; i < 17; ++i) {
-        const auto suffix = std::to_string(i);
-        const auto alias = "destination-" + suffix;
-        const auto environment = "environment-" + suffix;
-        const auto project = "project-" + suffix;
-        aliases[alias] = {{"environmentId", environment}, {"projectId", project}};
-        selected.push_back(alias);
-        expected.push_back({{"name", alias}, {"environmentId", environment}, {"projectId", project}});
-    }
-    config["conversationEnvironments"] = std::move(aliases);
-    const auto folder = temp.path / "bots";
-    createBot(folder / "release", config, "Verify revisions.", "");
-    const auto intake = Bots(folder).get("release").intake("");
-    check(intake.config.at("conversationEnvironments").size() >= 17, "Bot registration must retain more than 16 configured destinations");
-
     RoutingModel model;
     RoutingT3 t3;
     Store store(temp.path / "state.db");
+    Json selected = Json::array();
+    Json expected = Json::array();
+    for (int i = 0; i < 17; ++i) {
+        const auto environment = "environment-" + std::to_string(i);
+        T3Connections(store).connect(environment, localOwner.id, 48123);
+        selected.push_back({{"environment", environment}, {"projectId", "mini-project"}});
+        expected.push_back({{"name", environment}, {"environmentId", environment}, {"projectId", "mini-project"}});
+    }
+    const auto intake = pinnedBot(temp);
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     model.action = {
         "start_task", {{"request", "Verify on every destination"}, {"environments", selected}}, "Use all selected destinations."};
     ConversationIntake(store).receive(localOwner, intake, "seventeen-destinations", "Verify on all 17 destinations");
     runtime.runConversations();
     bool allOptionsOffered = model.offeredEnvironments.size() >= 17;
-    for (const auto& alias : selected) {
-        bool offered = false;
-        for (const auto& choice : model.offeredEnvironments) offered |= choice.value("name", "") == alias.get<std::string>();
-        allOptionsOffered &= offered;
-    }
-    check(allOptionsOffered, "all 17 configured destinations must be offered as choices to one request");
+    for (const auto& selection : selected)
+        allOptionsOffered &= std::ranges::any_of(model.offeredEnvironments,
+                                                 [&](const auto& choice) { return choice.at("name") == selection.at("environment"); });
+    check(allOptionsOffered, "all 17 connected environments must be offered as choices to one request");
     const auto tasks = TaskList(store).tasks();
     check(tasks.size() == 1, "one request across 17 destinations must create one task");
     check(taskJson(tasks.front()).at("runTargets") == expected && t3.commands.empty(),
@@ -249,7 +244,7 @@ VALUES(?,0,'mini','mini-env','mini-project','saved-action','running','{}')
           "a destination without a saved T3 Thread must be rejected as unavailable");
 }
 
-void moveWithProject(std::string_view alias, std::string_view project, bool sameEnvironment = false) {
+void moveWithProject(std::string_view project, bool explicitProject, bool sameEnvironment = false) {
     Sandbox temp;
     auto intake = pinnedBot(temp);
     intake.request = "Verify the release";
@@ -268,6 +263,7 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
 
     RoutingModel model;
     RoutingT3 t3;
+    T3Connections(store).connect("mini-env", localOwner.id, 48123);
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     const auto id = TaskIntake(store).submit(intake);
     const auto task = Tasks(store).task(id).task;
@@ -276,14 +272,15 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
                      {"generation", task.generation},
                      {"revisionId", task.currentRevision.value_or(0)},
                      {"instruction", "Move verification to the Mini"},
-                     {"environment", alias}},
+                     {"environment", "mini-env"}},
                     "Use the requested Mini destination."};
+    if (explicitProject) model.action.args["projectId"] = project;
     ConversationIntake(store).receive(localOwner, intake, "move-to-mini", "Move verification to the Mini");
     runtime.runConversations();
     check(model.receipt.value("ok", false), "change_task rejected the named destination");
     for (int i = 0; i < 12 && t3.commands.empty(); ++i) runtime.tick();
     check(t3.commands.size() == 1 && t3.commands.front().environmentId == "mini-env" && t3.commands.front().projectId == project,
-          "the move did not use the requested or remembered project for " + std::string(alias));
+          "the move did not use the requested or remembered project");
 }
 
 void modelFailureGivesGuidance(ModelErrorCode code, std::string_view guidance) {
@@ -308,11 +305,11 @@ void modelFailureGivesGuidance(ModelErrorCode code, std::string_view guidance) {
 void pinnedConversationDestinations() {
     parallelDestinations();
     genericDestinationCounts();
-    manyConfiguredDestinations();
+    manyConnectedDestinations();
     destinationWithoutSessionIsUnavailable();
-    moveWithProject("mini", "mini-project");
-    moveWithProject("mini-legacy", "remembered-project");
-    moveWithProject("mini", "mini-project", true);
+    moveWithProject("mini-project", true);
+    moveWithProject("remembered-project", false);
+    moveWithProject("mini-project", true, true);
     modelFailureGivesGuidance(ModelErrorCode::authentication_required, "Open Flock Settings");
     modelFailureGivesGuidance(ModelErrorCode::unsupported_reasoning_effort, "Model default");
     modelFailureGivesGuidance(ModelErrorCode::image_rejected, "Replace it or remove it");

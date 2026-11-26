@@ -13,6 +13,7 @@ class SessionParticipationStorage;
 class TaskRouting;
 class T3;
 struct Decision;
+struct BotTools;
 
 class BotSettingsStorage {
 public:
@@ -21,7 +22,7 @@ public:
         : database(database), permissions(permissions), secretRequests(secretRequests),
           sessionParticipationStorage(sessionParticipationStorage), taskRouting(taskRouting) {}
 
-    Json botSettingsTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision&);
+    Json botSettingsTool(std::string_view bot, Id sourceMessage, const BotTools&, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
 private:
     Database& database;

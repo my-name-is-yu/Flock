@@ -27,15 +27,11 @@ namespace conversation {
 struct Message;
 }
 
-std::string conversationEnvironmentId(const Json& alias);
-std::string conversationGatewayEnvironmentId(const Json& alias);
-std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name = {});
-
 using ProjectCatalog = std::variant<std::vector<T3Project>, std::string>;
 Json projectChoices(const std::vector<T3Project>&, const SecretRedactor&);
 
 struct TaskDestinations {
-    std::vector<RunTarget> configured;
+    std::vector<RunTarget> direct;
     std::vector<RunTarget> linked;
     std::vector<std::string> unavailable;
     std::map<std::pair<std::string, std::string>, std::vector<T3Project>> catalogs;

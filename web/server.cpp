@@ -837,6 +837,8 @@ private:
                 Intake intake;
                 try {
                     intake = callbacks_.intake(bot, request);
+                } catch (const BotProfileError& e) {
+                    if (e.code == "removed_bot_setting") return json(res, 400, {{"error", e.code}, {"message", e.what()}});
                 } catch (const std::exception&) {
                 }
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
