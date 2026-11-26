@@ -1733,7 +1733,6 @@ function eventCard(event, context, place, report) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
   }
-  // An open question already shows Write an answer under it; a second hover control would repeat it.
 
   if (context.canDecide && replyTarget) {
     const [label, target] = replyTarget;
