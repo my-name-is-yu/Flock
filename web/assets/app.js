@@ -2117,9 +2117,9 @@ function conversationRows(data, events, keep, source) {
       anchoredToWait.add(item.itemId);
     }
   }
-  const shown = timelineMessages(events, dayLabel);
   // A task's step-allowance pause that resumes with a paused reply would repeat that reply's Continue.
   const sharedBudgetWaits = new Set((data?.pausedConversations ?? []).flatMap((turn) => turn.sharedWaitIds ?? []));
+  const shown = timelineMessages(events, dayLabel);
   const rows = [];
   let peerMessages = [];
   const appendPeerMessages = () => {
@@ -2135,6 +2135,7 @@ function conversationRows(data, events, keep, source) {
   let day = '';
   let previous = null;
   shown.forEach(({ event, report }, index) => {
+    if (event.kind === 'waiting' && sharedBudgetWaits.has(event.data.id)) return;
     const eventDay = dayLabel(event.time);
     if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
@@ -2143,7 +2144,6 @@ function conversationRows(data, events, keep, source) {
       previous = null;
     }
     if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
-    if (event.kind === 'waiting' && sharedBudgetWaits.has(event.data.id)) return;
     const place = messagePlacement(previous, event, shown[index + 1]?.event);
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const approval = replacements.get(event.id);
