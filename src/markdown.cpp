@@ -360,12 +360,20 @@ cmark_node* containingParagraph(cmark_node* node) {
     return nullptr;
 }
 
+int inlineLineBreaks(cmark_node* node) {
+    const auto type = cmark_node_get_type(node);
+    if (type == CMARK_NODE_SOFTBREAK || type == CMARK_NODE_LINEBREAK) return 1;
+    int childBreaks = 0;
+    for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child)) childBreaks += inlineLineBreaks(child);
+    return std::max(childBreaks, cmark_node_get_end_line(node) - cmark_node_get_start_line(node));
+}
+
 int physicalSourceLine(cmark_node* node, cmark_node* paragraph) {
-    const int line = cmark_node_get_start_line(node);
-    if (!paragraph) return line;
-    auto* last = cmark_node_last_child(paragraph);
-    while (last && cmark_node_get_end_line(last) == 0) last = cmark_node_previous(last);
-    return last ? line + std::max(0, cmark_node_get_end_line(paragraph) - cmark_node_get_end_line(last)) : line;
+    if (!paragraph) return cmark_node_get_start_line(node);
+    int line = cmark_node_get_end_line(paragraph);
+    for (; node != paragraph; node = cmark_node_parent(node))
+        for (auto* next = cmark_node_next(node); next; next = cmark_node_next(next)) line -= inlineLineBreaks(next);
+    return line;
 }
 
 std::string decodeBareUrl(std::string_view url) {
@@ -487,11 +495,11 @@ std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::ve
     auto* adjacent = cmark_node_next(node);
     if (!adjacent || !isTextFormatting(adjacent) || value(cmark_node_get_literal(node)).find("http") == std::string::npos)
         return std::nullopt;
-    const int logicalLine = cmark_node_get_start_line(node);
-    const int lastLine = physicalSourceLine(node, containingParagraph(node));
-    for (int line = logicalLine; line <= lastLine && line > 0 && static_cast<std::size_t>(line) <= lines.size(); ++line)
-        if (auto span = formattedBareUrlOnLine(node, lines[line - 1])) return span;
-    return std::nullopt;
+    const int line = physicalSourceLine(node, containingParagraph(node));
+    if (line < 1 || static_cast<std::size_t>(line) > lines.size()) return std::nullopt;
+    auto raw = lines[line - 1];
+    if (static_cast<std::size_t>(line) < lines.size() && raw.ends_with('\\')) raw.remove_suffix(1);
+    return formattedBareUrlOnLine(node, raw);
 }
 
 void promoteBareLinks(cmark_node* node, const std::vector<std::string_view>& lines) {

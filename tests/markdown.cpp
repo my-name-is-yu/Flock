@@ -351,6 +351,15 @@ Thanks)") == "<p><a href=\"https://example.com/__init__.py\">https://example.com
                                                "\">" + secondUrl + "</a></p>",
               "A backslash break made a second bare link reuse the previous line's destination");
     }
+    check(markdown::toHtml(R"(https://example.com/__init__ details\
+https://example.com/__init__?view=full)") ==
+              "<p><a href=\"https://example.com/__init__\">https://example.com/__init__</a> details<br>\n"
+              "<a href=\"https://example.com/__init__?view=full\">https://example.com/__init__?view=full</a></p>",
+          "A backslash break truncated a link after emphasis shared with the previous line");
+    check(markdown::toHtml(R"(https://example.com/*test*\
+https://example.com/_test_)") == "<p><a href=\"https://example.com/*test*\">https://example.com/*test*</a><br>\n"
+                                 "<a href=\"https://example.com/_test_\">https://example.com/_test_</a></p>",
+          "Matching text on either side of a hard break changed the link spelling");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");
