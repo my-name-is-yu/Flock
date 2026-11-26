@@ -296,7 +296,6 @@ a.settings-row svg { margin-left: auto; }
 .settings-row.danger { color: var(--danger); }
 button.settings-row.danger:hover { background: var(--danger-soft); }
 .bot-delete-dialog { width: min(26rem, calc(100% - 2rem)); }
-/* Pause and Delete confirmations share one body style. */
 .bot-pause-dialog p:not(.dialog-feedback), .bot-delete-dialog p { color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; }
 .bot-delete-feedback:empty { position: absolute; }
 .bot-delete-dialog .bot-delete-feedback.error { color: var(--danger); }
