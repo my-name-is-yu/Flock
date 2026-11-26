@@ -48,6 +48,9 @@ if(BUILD_TESTING)
     add_test(NAME flock_web_message_time_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/message-time.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     set_tests_properties(flock_web_message_time_dom PROPERTIES TIMEOUT 30)
+    add_test(NAME flock_web_message_links_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/message-links.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    set_tests_properties(flock_web_message_links_dom PROPERTIES TIMEOUT 30)
     add_test(NAME flock_web_question_choices_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/question-choices.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_conversation_find_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"

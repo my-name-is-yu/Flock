@@ -1151,6 +1151,13 @@ function icon(name, className = 'glyph') {
   host.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
   return host;
 }
+function setMessageHtml(element, html) {
+  element.innerHTML = html;
+  for (const link of element.querySelectorAll('a[href]')) {
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
+}
 function iconButton(name, label, click) {
   const control = button(null, 'icon-button msg-action', click);
   control.dataset.timelineAction = name;
@@ -1605,7 +1612,7 @@ function eventCard(event, context, place, report) {
     if (paused) text.textContent = copy = paused.text;
     else if (typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
-      text.innerHTML = data.textHtml;
+      setMessageHtml(text, data.textHtml);
     } else text.textContent = data.text ?? '';
     text.classList.add('foldable-text');
     bubble.append(text);
@@ -1661,7 +1668,7 @@ function eventCard(event, context, place, report) {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     if (event.kind === 'conversation_message' && typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
-      text.innerHTML = data.textHtml;
+      setMessageHtml(text, data.textHtml);
     } else text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
     text.classList.add('foldable-text');
