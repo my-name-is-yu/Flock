@@ -1,6 +1,7 @@
 #include "fixtures.hpp"
 #include "../../t3/internal.hpp"
 #include "../bots.hpp"
+#include "flock/tasks.hpp"
 #include "flock/command.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
@@ -82,14 +83,14 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
         Store store(database);
         auto saved = config;
         saved["session"] = legacy;
-        id = store.submit({"release", "Verify the fixture", "env-1", "project", saved});
+        id = Tasks(store).submit({"release", "Verify the fixture", "env-1", "project", saved});
     }
     Store store(database);
     auto adapter = makeT3Mcp(credentials);
     LaunchModel model;
     Runtime runtime(store, model, *adapter, {});
     for (int i = 0; i < 3; ++i) runtime.tick();
-    const auto waiting = store.task(id);
+    const auto waiting = Tasks(store).task(id);
     check(waiting.task.state == TaskState::waiting && waiting.wait && waiting.wait->reason() == WaitReason::settings,
           "legacy settings did not leave an actionable settings wait");
     check(effects().empty(), "invalid persisted settings reached T3");
@@ -97,15 +98,15 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
     const Id waitId = waiting.wait.value().id;
     const auto target = TaskTarget::from(waiting.task, waitId);
     for (const auto& session : malformed) {
-        rejects<Conflict>([&] { store.operate(owner, target, "reconcile", {{"session", session}}); },
+        rejects<Conflict>([&] { Tasks(store).operate(owner, target, "reconcile", {{"session", session}}); },
                           "settings correction accepted " + session.dump());
     }
-    check(taskJson(store.task(id)).at("wait") == taskJson(waiting).at("wait"), "invalid corrections cleared the settings wait");
+    check(taskJson(Tasks(store).task(id)).at("wait") == taskJson(waiting).at("wait"), "invalid corrections cleared the settings wait");
 
     createBot(folder / "release", config, "", "");
-    store.operate(owner, target, "reconcile", store.reconciliationData(id, waitId, Json::object(), intake));
+    Tasks(store).operate(owner, target, "reconcile", Tasks(store).reconciliationData(id, waitId, Json::object(), intake));
     for (int i = 0; i < 2; ++i) runtime.tick();
-    const auto resumed = store.task(id);
+    const auto resumed = Tasks(store).task(id);
     check(resumed.task.state == TaskState::running, "corrected task state was " + std::string(taskStateName(resumed.task.state)));
     const auto observed = effects();
     const auto& launches = observed.at("t3_thread_launch");

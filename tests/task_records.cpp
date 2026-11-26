@@ -4,6 +4,7 @@
 #include "../src/outbox_storage.hpp"
 #include "../src/database.hpp"
 
+#include "flock/tasks.hpp"
 #include "flock/record_decode_error.hpp"
 #include "flock/json.hpp"
 #include "flock/run_report.hpp"
@@ -50,7 +51,7 @@ struct SavedTask {
         ~Directory() { std::filesystem::remove_all(path); }
     } directory;
     Store store{directory.path / "state.db"};
-    Id task = store.submit({.botId = "bot", .request = "Original request", .environmentId = "net", .projectId = "project"});
+    Id task = Tasks(store).submit({.botId = "bot", .request = "Original request", .environmentId = "net", .projectId = "project"});
 
     void exec(const char* sql, Json args = Json::array()) {
         sqlite3* raw = nullptr;
@@ -60,7 +61,7 @@ struct SavedTask {
         Statement(db.get(), sql, args).next();
     }
 
-    TaskData load() const { return store.task(task).task; }
+    TaskData load() { return Tasks(store).task(task).task; }
 };
 
 Json stored() {
@@ -249,7 +250,7 @@ VALUES(?,1,'Local','local','other','send-local','rolled_back',?)
           "Destination progress and order changed on round-trip");
 
     saved.exec("UPDATE tasks SET run_outcome='partial_failure' WHERE id=?", {saved.task});
-    const auto wire = taskJson(saved.store.task(saved.task));
+    const auto wire = taskJson(Tasks(saved.store).task(saved.task));
     auto settled = report;
     settled.update(
         {{"name", "Local"}, {"environmentId", "local"}, {"projectId", "other"}, {"actionId", "send-local"}, {"status", "rolled_back"}});

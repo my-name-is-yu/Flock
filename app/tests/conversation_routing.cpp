@@ -1,5 +1,6 @@
 #include "fixtures.hpp"
 #include "../bots.hpp"
+#include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
@@ -98,7 +99,7 @@ void parallelDestinations() {
                     "Use the requested destinations."};
     Conversations(store).receive(localOwner, intake, "parallel-verification", "Verify the release on both Macs");
     runtime.runConversations();
-    const auto tasks = store.tasks();
+    const auto tasks = Tasks(store).tasks();
     check(tasks.size() == 1 && t3.commands.empty(), "one conversation request must save exactly one task before dispatch");
     const auto& task = tasks.front().task;
     const Json expected = Json::array({{{"name", "mini"}, {"environmentId", "mini-env"}, {"projectId", "mini-project"}},
@@ -109,12 +110,12 @@ void parallelDestinations() {
     model.action.args["environments"] = {"local", "env-canonical"};
     Conversations(store).receive(localOwner, intake, "duplicate-environment", "Verify again on both Macs");
     runtime.runConversations();
-    check(store.tasks().size() == 1, "two aliases for one environment must not create a parallel task");
+    check(Tasks(store).tasks().size() == 1, "two aliases for one environment must not create a parallel task");
 
     model.action.args = {{"request", "Verify on the Mini"}, {"environment", "mini"}, {"commit", std::string(40, 'a')}};
     Conversations(store).receive(localOwner, intake, "single-verification", "Verify on the Mini");
     runtime.runConversations();
-    const auto singleNamed = store.task(model.receipt.at("taskId"));
+    const auto singleNamed = Tasks(store).task(model.receipt.at("taskId"));
     check(model.receipt.value("ok", false) && singleNamed.task.projectId == "mini-project" &&
               singleNamed.task.requestedCommit == std::string(40, 'a') && singleNamed.task.runTargets().size() == 1 &&
               singleNamed.task.runTargets().front().route.environmentId == "mini-env",
@@ -122,7 +123,7 @@ void parallelDestinations() {
     model.action.args = {{"request", "Verify on the Mini"}, {"environments", Json::array({"mini"})}};
     Conversations(store).receive(localOwner, intake, "single-array", "Verify on the Mini");
     runtime.runConversations();
-    const auto singleArray = store.task(model.receipt.at("taskId"));
+    const auto singleArray = Tasks(store).task(model.receipt.at("taskId"));
     check(singleArray.task.runTargets().size() == 1 && taskJson(singleArray).at("runTargets") == taskJson(singleNamed).at("runTargets"),
           "a one-item environments list must route like a named single destination");
     model.action.args = {
@@ -137,7 +138,7 @@ void parallelDestinations() {
     for (const auto& target : task.runTargets()) {
         follower.environmentId = target.route.environmentId;
         follower.projectId = target.route.projectId;
-        const auto queued = store.task(store.submit(follower));
+        const auto queued = Tasks(store).task(Tasks(store).submit(follower));
         check(queued.blockedBy && queued.blockedBy->id == task.id,
               "a saved destination must reserve its project before dispatch creates an outbox action");
     }
@@ -153,7 +154,7 @@ void genericDestinationCounts() {
     model.action = {"start_task", {{"request", "Run on the Mini"}, {"environments", {"mini"}}}, "Use the one selected destination."};
     Conversations(store).receive(localOwner, intake, "single-route-work", "Run this on the Mini");
     runtime.runConversations();
-    auto tasks = store.tasks();
+    auto tasks = Tasks(store).tasks();
     check(tasks.size() == 1, "one destination must create one conversation task");
     const auto& single = tasks.front().task;
     check(single.runTargets().size() == 1 && !single.requestedCommit, "ordinary one-destination work must not require commit verification");
@@ -161,7 +162,7 @@ void genericDestinationCounts() {
     model.action.args = {{"request", "Run on all three"}, {"environments", {"mini", "local", "cloud"}}};
     Conversations(store).receive(localOwner, intake, "three-route-work", "Run this on all three destinations");
     runtime.runConversations();
-    tasks = store.tasks();
+    tasks = Tasks(store).tasks();
     check(tasks.size() == 2, "three destinations must remain one additional conversation task");
     const auto& multi = tasks.front().task;
     check(multi.runTargets().size() == 3 && !multi.requestedCommit,
@@ -204,7 +205,7 @@ void manyConfiguredDestinations() {
         allOptionsOffered &= offered;
     }
     check(allOptionsOffered, "all 17 configured destinations must be offered as choices to one request");
-    const auto tasks = store.tasks();
+    const auto tasks = Tasks(store).tasks();
     check(tasks.size() == 1, "one request across 17 destinations must create one task");
     check(taskJson(tasks.front()).at("runTargets") == expected && t3.commands.empty(),
           "one request must save all 17 selected destinations without dropping or dispatching any early");
@@ -216,8 +217,8 @@ void destinationWithoutSessionIsUnavailable() {
     intake.request = "Verify the release";
     const auto database = temp.path / "state.db";
     Store store(database);
-    const auto id = store.submit(intake);
-    const auto generation = store.task(id).task.generation;
+    const auto id = Tasks(store).submit(intake);
+    const auto generation = Tasks(store).task(id).task.generation;
     sqlite3* raw = nullptr;
     const auto opened = sqlite3_open(database.c_str(), &raw);
     const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
@@ -264,8 +265,8 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
     RoutingModel model;
     RoutingT3 t3;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
-    const auto id = store.submit(intake);
-    const auto task = store.task(id).task;
+    const auto id = Tasks(store).submit(intake);
+    const auto task = Tasks(store).task(id).task;
     model.action = {"change_task",
                     {{"taskId", id},
                      {"generation", task.generation},

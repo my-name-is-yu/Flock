@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/conversations.hpp"
 #include "flock/web.hpp"
@@ -122,10 +123,10 @@ void run() {
     Id task;
     {
         Store store(database);
-        task = store.submit(intake());
+        task = Tasks(store).submit(intake());
         Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(store.task(task).task.state == TaskState::completed && host->createCalls == 1, "initial watch was not recorded");
+        check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1, "initial watch was not recorded");
     }
     Store store(database);
     const auto server = startWeb(store, 0, callbacks());
@@ -155,7 +156,7 @@ void run() {
     Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
     runtime.runConversations();
     check(model.received == 1 && host->logCalls == 1 && model.followup("job-run-1") == "failed_check" &&
-              store.history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
+              Tasks(store).history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
           "authenticated webhook did not wake the persisted task and produce a CI report");
     const std::string newSha(40, 'b');
     auto nextJob = payload;
@@ -205,7 +206,7 @@ void run() {
     host->beforeCall = {};
     runtime.runConversations();
     check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
-              store.history(task).dump().find("tool-review-request") != std::string::npos,
+              Tasks(store).history(task).dump().find("tool-review-request") != std::string::npos,
           "A signed review webhook duplicated the tool's inbox item or was lost from the conversation");
 
     auto lateReview = reviewRequested;
@@ -214,7 +215,7 @@ void run() {
           "delayed review request webhook was not enqueued");
     runtime.runConversations();
     check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
-              store.history(task).dump().find("delayed-review-request") != std::string::npos,
+              Tasks(store).history(task).dump().find("delayed-review-request") != std::string::npos,
           "A late webhook for the same request created another card or lost the notification");
 
     auto externalReview = lateReview;
@@ -238,7 +239,7 @@ void run() {
           "later review request webhook was not enqueued");
     runtime.runConversations();
     check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeMissingWebhook + 1 &&
-              store.history(task).dump().find("review-after-prior-decision") != std::string::npos,
+              Tasks(store).history(task).dump().find("review-after-prior-decision") != std::string::npos,
           "A handled review with a missing webhook hid a later request");
 
     auto changes = review;
@@ -283,7 +284,7 @@ void run() {
               model.followup("inline-comment") == "review_comment" && model.followup("inline-edit").empty() &&
               model.followup("failed-check") == "failed_check" && model.followup("passed-check").empty(),
           "Signed notifications did not distinguish actionable events from report-only updates");
-    const auto notifications = store.history(task).dump();
+    const auto notifications = Tasks(store).history(task).dump();
     check(notifications.find("src/example.cpp") != std::string::npos && notifications.find("\"line\":72") != std::string::npos &&
               notifications.find("\"originalLine\":true") != std::string::npos &&
               notifications.find("/pull/1#discussion_r301") != std::string::npos,

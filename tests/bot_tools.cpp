@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
@@ -317,7 +318,7 @@ void workspaceFiles(Fixture& f) {
     write(history, historyMarker);
     auto privateIntake = f.intake("beta");
     privateIntake.request = dbMarker;
-    f.store->submit(privateIntake);
+    Tasks(*f.store).submit(privateIntake);
     for (int i = 0; i < 12 && !f.t3.launched; ++i) f.runtime->tick();
     check(f.t3.launched, "Private T3 fixture did not start");
     const auto sessionScope = Resource::sessionRead("test-environment", "private-thread");
@@ -514,7 +515,7 @@ void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
     const auto read = call("workspace_read_file", {{"path", "allowed.txt"}});
     const auto start = call("start_task", {{"request", "Run a task"}, {"doneWhen", "Done"}});
     const auto path = f.home / "workspaces" / "alpha" / "unapproved.txt";
-    const auto taskCount = f.store->tasks("alpha").size();
+    const auto taskCount = Tasks(*f.store).tasks("alpha").size();
     f.model.followStep = [&](const Json& steps) {
         if (steps.size() == 1) return std::vector{write, read};
         if (steps.size() == 3) return std::vector{start};
@@ -523,7 +524,7 @@ void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
     const auto steps = f.batch({fetch});
     f.model.followStep = {};
     check(steps.size() == 4 && steps[1].at("result").at("ok") == false && steps[2].at("result").at("ok") == true &&
-              steps[3].at("result").at("ok") == false && !fs::exists(path) && f.store->tasks("alpha").size() == taskCount,
+              steps[3].at("result").at("ok") == false && !fs::exists(path) && Tasks(*f.store).tasks("alpha").size() == taskCount,
           "A web evidence turn reached a privileged action or lost an independent read");
     check(f.run(write).at("ok") == true && fs::is_regular_file(path), "A new user message could not request an action");
 }

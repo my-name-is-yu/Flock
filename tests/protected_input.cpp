@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
@@ -107,8 +108,8 @@ void runningSessions(const std::filesystem::path& path) {
         return {};
     };
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; }, options);
-    store.submit({"Ernest", "read repository", "env", "project"});
-    store.submit({"Ernest", "ask reviewer", "env", "other-project"});
+    Tasks(store).submit({"Ernest", "read repository", "env", "project"});
+    Tasks(store).submit({"Ernest", "ask reviewer", "env", "other-project"});
     for (int i = 0; i < 30 && adapter.running.size() < 2; ++i) runtime.tick();
     check(adapter.running.size() == 2, "peer and sender did not launch under distinct owners");
     std::vector<std::string> completed;
@@ -116,7 +117,7 @@ void runningSessions(const std::filesystem::path& path) {
         policy.executeSessionResource(
             "env", adapter.running.at(bot), readRepo, [&] { return upstream; },
             [&](Id task) {
-                check(store.task(task).task.botId == bot, "execution callback received the wrong owner");
+                check(Tasks(store).task(task).task.botId == bot, "execution callback received the wrong owner");
                 completed.push_back(bot);
             });
     };
@@ -177,10 +178,10 @@ void freshLaunch(const std::filesystem::path& path) {
     RunningAdapter adapter;
     WorkModel model;
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; });
-    auto task = store.submit({"Fresh", "read repository", "env", "project"});
+    auto task = Tasks(store).submit({"Fresh", "read repository", "env", "project"});
     store.policy().changeNeverRule(owner, Action::environment_launch, "env", true);
     for (int i = 0; i < 6; ++i) runtime.tick();
-    check(adapter.running.empty() && taskJson(store.task(task)).at("wait").at("reason") == "settings",
+    check(adapter.running.empty() && taskJson(Tasks(store).task(task)).at("wait").at("reason") == "settings",
           "pending launch permission reached T3");
 }
 
@@ -285,7 +286,7 @@ void exercise(const std::filesystem::path& dir) {
     Store store(path);
     auto policy = store.policy();
     Intake ernest{"Ernest", "read", "env", "project"}, reviewer{"Reviewer", "review", "env", "project"};
-    auto child = store.submit(ernest), peerChild = store.submit(reviewer);
+    auto child = Tasks(store).submit(ernest), peerChild = Tasks(store).submit(reviewer);
     ToolModel model;
     Adapter t3;
     std::vector<BotChange> applied;

@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
@@ -81,7 +82,7 @@ int main(int argc, char** argv) {
                 check(http(origin + "/fixture", "POST", {{"Content-Type", "application/json"}}, body).status == 200,
                       "fixture rejected OAuth");
             });
-            store.submit({"release", "Check the fixture", "env-1", "project"});
+            Tasks(store).submit({"release", "Check the fixture", "env-1", "project"});
         } else
             check(phase == "recover", "unknown recovery phase");
 
@@ -92,10 +93,10 @@ int main(int argc, char** argv) {
             if (bot == "release") return std::vector<PeerBot>{{"Verifier", {"verifier", "", "env-1", "project"}}};
             return std::vector<PeerBot>{};
         };
-        const Id source = store.tasks("release").at(0).task.id;
-        const auto originalRecipients = store.tasks("verifier");
+        const Id source = Tasks(store).tasks("release").at(0).task.id;
+        const auto originalRecipients = Tasks(store).tasks("verifier");
         if (phase == "recover") {
-            check(store.task(source).task.state == TaskState::peer_waiting && originalRecipients.size() == 1,
+            check(Tasks(store).task(source).task.state == TaskState::peer_waiting && originalRecipients.size() == 1,
                   "the original Bot exchange did not survive the crash");
             const auto& pending = originalRecipients.at(0);
             check(pending.task.state == TaskState::sending && pending.runs.empty(),
@@ -105,7 +106,7 @@ int main(int argc, char** argv) {
         for (int tick = 0; tick < 20; ++tick) runtime.tick();
         check(phase == "recover", "T3 sent back a response before the Runtime was killed");
 
-        const auto recipients = store.tasks("verifier");
+        const auto recipients = Tasks(store).tasks("verifier");
         check(recipients.size() == 1 && originalRecipients.size() == 1 && recipients.at(0).task.id == originalRecipients.at(0).task.id,
               "recovery created a different recipient task");
         const auto& verifier = recipients.at(0);
@@ -118,7 +119,7 @@ int main(int argc, char** argv) {
         const auto releaseHistory = Conversations(store).conversation("release");
         check(eventTexts(releaseHistory, "bot_message", "text") == std::vector<std::string>{"Verify the fixture", "root report"} &&
                   eventTexts(releaseHistory, "completed", "text") == std::vector<std::string>{"root report"} &&
-                  store.task(source).task.state == TaskState::completed && model.received == 1,
+                  Tasks(store).task(source).task.state == TaskState::completed && model.received == 1,
               "Release did not consume exactly one result");
         return 0;
     } catch (const std::exception& error) {

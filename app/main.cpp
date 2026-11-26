@@ -8,6 +8,7 @@
 #include "settings_system.hpp"
 #include "t3_connection_setup.hpp"
 #include "t3_setup.hpp"
+#include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
@@ -436,7 +437,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
 void operate(const std::filesystem::path& home, const Bots& bots, const std::string& operation, Arguments& args) {
     const auto task = number(args, "task ID");
     auto store = openStore(home);
-    const auto status = store.task(task);
+    const auto status = Tasks(store).task(task);
     auto target = TaskTarget::from(status.task, 0);
     if (operation != "cancel" || !args.empty()) {
         target.waitId = number(args, "wait ID");
@@ -464,11 +465,12 @@ void operate(const std::filesystem::path& home, const Bots& bots, const std::str
     args.end();
 
     if (operation == "reconcile") {
-        details = store.reconciliationData(task, target.waitId, std::move(details),
-                                           [&](std::string_view id, std::string_view request) { return bots.get(id).intake(request); });
+        details =
+            Tasks(store).reconciliationData(task, target.waitId, std::move(details),
+                                            [&](std::string_view id, std::string_view request) { return bots.get(id).intake(request); });
     }
-    store.operate(localOwner, target, operation, details);
-    print(taskJson(store.task(task)));
+    Tasks(store).operate(localOwner, target, operation, details);
+    print(taskJson(Tasks(store).task(task)));
 }
 
 void taskCommand(const std::filesystem::path& home, const std::string& command, Arguments& args) {
@@ -488,12 +490,12 @@ void taskCommand(const std::filesystem::path& home, const std::string& command, 
         else
             throw Conflict("Unknown pagination option: " + flag);
     }
-    const auto store = openStore(home);
+    auto store = openStore(home);
     if (command == "history") {
-        if (!store.hasTask(task)) throw Conflict("Task does not exist");
-        print(store.history(task, cursor, limit));
+        if (!Tasks(store).hasTask(task)) throw Conflict("Task does not exist");
+        print(Tasks(store).history(task, cursor, limit));
     } else
-        print(taskJson(store.tasks(bot, cursor, limit)));
+        print(taskJson(Tasks(store).tasks(bot, cursor, limit)));
 }
 
 void rulesCommand(const std::filesystem::path& home, Arguments& args) {
@@ -566,7 +568,8 @@ int runCli(Arguments& args) {
     } else if (command == "status") {
         const auto id = number(args, "task ID");
         args.end();
-        print(taskJson(openStore(home).task(id)));
+        auto store = openStore(home);
+        print(taskJson(Tasks(store).task(id)));
     } else if (command == "history" || command == "tasks")
         taskCommand(home, command, args);
     else if (command == "answer" || command == "approve" || command == "retry" || command == "extend" || command == "reconcile" ||

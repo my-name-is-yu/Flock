@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/session_read.hpp"
@@ -341,9 +342,9 @@ void acceptance() {
     check(fetchLog() == log && request("list", {{"cursor", cursor}, {"limit", 2}}) == secondPage && f.call(search, nextSearch) == next,
           "restart lost scoped references or read access");
 
-    const auto task = f.store->submit(f.intake("beta"));
-    for (int i = 0; i < 8 && f.store->task(task).task.state != TaskState::running; ++i) f.runtime->tick();
-    const auto running = taskJson(f.store->task(task));
+    const auto task = Tasks(*f.store).submit(f.intake("beta"));
+    for (int i = 0; i < 8 && Tasks(*f.store).task(task).task.state != TaskState::running; ++i) f.runtime->tick();
+    const auto running = taskJson(Tasks(*f.store).task(task));
     check(running.at("state") == "running" && f.t3.writes.size() == 1, "foreign task did not start");
     const auto foreign = Resource::sessionRead(env, "foreign-thread");
     check(f.store->policy().allows("beta", foreign) && f.store->policy().allows("alpha", foreign),
@@ -397,7 +398,7 @@ void acceptance() {
 void catalogResultsAreDeduplicatedAcrossRecordedBatches() {
     Fixture f;
     f.t3.overlappingCatalog = true;
-    f.store->submit(f.intake("alpha"));
+    Tasks(*f.store).submit(f.intake("alpha"));
     {
         sqlite3* raw = nullptr;
         check(sqlite3_open(f.store->path().c_str(), &raw) == SQLITE_OK, "could not open fixture database");

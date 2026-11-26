@@ -1,3 +1,5 @@
+#include "flock/tasks.hpp"
+#include "task_operations.hpp"
 #include "model_calls.hpp"
 #include "conversation_storage.hpp"
 #include "journal_storage.hpp"
@@ -688,9 +690,9 @@ std::optional<TaskBlocker> TaskRecords::queueBlocker(Id id) const {
     return row.next() ? taskBlocker(row) : std::nullopt;
 }
 
-TaskView Store::task(Id id) const {
-    std::lock_guard lock(p_->mutex);
-    return p_->taskRecords.taskDetails(id, true);
+TaskView Tasks::task(Id id) const {
+    std::lock_guard lock(database_.mutex);
+    return records_.taskDetails(id, true);
 }
 
 TaskView TaskRecords::taskDetails(Id id, bool includeBlocker) const {
@@ -728,32 +730,30 @@ void TaskRecords::addTaskDetails(TaskView& view) const {
     }
 }
 
-std::vector<TaskView> Store::tasks(std::string_view bot, Id before, unsigned limit) const {
-    std::lock_guard lock(p_->mutex);
+std::vector<TaskView> Tasks::tasks(std::string_view bot, Id before, unsigned limit) const {
+    std::lock_guard lock(database_.mutex);
     static const auto sql = taskPageSql("(?='' OR bot_id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?");
-    auto rows = p_->query(sql.c_str(), {bot, bot, before, before, std::clamp(limit, 1u, 200u)});
+    auto rows = database_.query(sql.c_str(), {bot, bot, before, before, std::clamp(limit, 1u, 200u)});
     std::vector<TaskView> result;
     while (rows.next()) {
-        auto& view = result.emplace_back(p_->taskRecords.readTask(rows, 7), p_->waitStorage.projectedWait(rows.number(7), rows, 4),
-                                         taskBlocker(rows));
-        p_->taskRecords.addTaskDetails(view);
+        auto& view = result.emplace_back(records_.readTask(rows, 7), waits_.projectedWait(rows.number(7), rows, 4), taskBlocker(rows));
+        records_.addTaskDetails(view);
     }
     return result;
 }
 
-std::vector<Store::ActiveTask> Store::activeTasks(std::string_view bot) const {
-    std::lock_guard lock(p_->mutex);
+std::vector<Tasks::ActiveTask> Tasks::activeTasks(std::string_view bot) const {
+    std::lock_guard lock(database_.mutex);
     static const auto sql = taskPageSql("bot_id=? AND state NOT IN ('completed','cancelled')");
-    auto rows = p_->query(sql.c_str(), {bot});
+    auto rows = database_.query(sql.c_str(), {bot});
     std::vector<ActiveTask> result;
-    while (rows.next())
-        result.push_back({p_->taskRecords.readTask(rows, 7), p_->waitStorage.projectedWait(rows.number(7), rows, 4), taskBlocker(rows)});
+    while (rows.next()) result.push_back({records_.readTask(rows, 7), waits_.projectedWait(rows.number(7), rows, 4), taskBlocker(rows)});
     return result;
 }
 
-std::map<std::string, std::vector<TaskPresence>> Store::activeTaskStatesByBot() const {
-    std::lock_guard lock(p_->mutex);
-    auto rows = p_->query(R"SQL(
+std::map<std::string, std::vector<TaskPresence>> Tasks::activeTaskStatesByBot() const {
+    std::lock_guard lock(database_.mutex);
+    auto rows = database_.query(R"SQL(
 SELECT bot_id,state,replanning,min(id)
 FROM tasks WHERE state NOT IN ('completed','cancelled')
 GROUP BY bot_id,state,replanning)SQL");
@@ -793,30 +793,30 @@ FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
     return view;
 }
 
-std::vector<TaskView> Store::sessionTasks(std::string_view bot, Id before, unsigned limit) const {
-    std::lock_guard lock(p_->mutex);
-    auto rows = p_->query("SELECT id FROM tasks WHERE bot_id=? AND (?=0 OR id<?)"
-                          " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
-                          " ORDER BY id DESC LIMIT ?",
-                          {bot, before, before, std::clamp(limit, 1u, 200u)});
+std::vector<TaskView> Tasks::sessionTasks(std::string_view bot, Id before, unsigned limit) const {
+    std::lock_guard lock(database_.mutex);
+    auto rows = database_.query("SELECT id FROM tasks WHERE bot_id=? AND (?=0 OR id<?)"
+                                " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
+                                " ORDER BY id DESC LIMIT ?",
+                                {bot, before, before, std::clamp(limit, 1u, 200u)});
     std::vector<TaskView> result;
-    while (rows.next()) result.push_back(p_->taskRecords.sessionTask(rows.number(0)));
+    while (rows.next()) result.push_back(records_.sessionTask(rows.number(0)));
     return result;
 }
 
-std::pair<Id, std::vector<TaskView>> Store::sessionChangesSince(std::string_view bot, std::optional<Id> after) const {
-    std::lock_guard lock(p_->mutex);
-    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal WHERE kind IN ('run_started','report')");
+std::pair<Id, std::vector<TaskView>> Tasks::sessionChangesSince(std::string_view bot, std::optional<Id> after) const {
+    std::lock_guard lock(database_.mutex);
+    auto newest = database_.query("SELECT coalesce(max(id),0) FROM journal WHERE kind IN ('run_started','report')");
     newest.next();
     const auto through = newest.number(0);
     std::vector<TaskView> tasks;
     if (after && *after < through) {
-        auto rows = p_->query(R"SQL(
+        auto rows = database_.query(R"SQL(
 SELECT DISTINCT j.task_id FROM journal j CROSS JOIN tasks t ON t.id=j.task_id
 WHERE j.kind IN ('run_started','report') AND j.id>? AND j.id<=? AND t.bot_id=?
 )SQL",
-                              {*after, through, bot});
-        while (rows.next()) tasks.push_back(p_->taskRecords.sessionTask(rows.number(0)));
+                                    {*after, through, bot});
+        while (rows.next()) tasks.push_back(records_.sessionTask(rows.number(0)));
     }
     return {through, std::move(tasks)};
 }

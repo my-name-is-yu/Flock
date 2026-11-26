@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
@@ -166,12 +167,12 @@ void workflowLaunchUsesPolicyAndRedactsQueuedPrompt() {
            {{"request", "Collect the release notes " + secret}, {"stages", Json::array({{{"stageId", "collect"}, {"role", "collect"}}})}});
     f.ticks(2);
     const Id task = f.status()["stages"][0]["taskId"];
-    const auto wait = taskJson(f.store->task(task)).at("wait");
+    const auto wait = taskJson(Tasks(*f.store).task(task)).at("wait");
     require(wait.at("reason") == "settings" && f.t3.commands.empty(), "unapproved workflow launch reached T3");
     const auto input = policy.requestSecret("bot", {"workflow-credential"});
     policy.submitSecret(owner, "bot", input, secret);
     policy.changeNeverRule(owner, Action::environment_launch, "env", false);
-    f.store->operate(owner, TaskTarget::from(f.store->task(task).task, wait.at("id")), "reconcile");
+    Tasks(*f.store).operate(owner, TaskTarget::from(Tasks(*f.store).task(task).task, wait.at("id")), "reconcile");
     f.t3.loseReceipt = true;
     f.ticks(1);
     require(f.t3.commands.size() == 1 && f.t3.commands[0].instruction.find(secret) == std::string::npos &&
@@ -179,7 +180,7 @@ void workflowLaunchUsesPolicyAndRedactsQueuedPrompt() {
             "the approved workflow prompt included newly protected text or lost the stage request");
     f.now += 5;
     f.ticks(2);
-    require(f.t3.commands.size() == 1 && f.store->task(task).task.state == TaskState::running,
+    require(f.t3.commands.size() == 1 && Tasks(*f.store).task(task).task.state == TaskState::running,
             "the redacted workflow launch was not reconciled");
 }
 
@@ -296,7 +297,7 @@ void freshStandaloneSessionIncludesEarlierEvidence() {
     const Id sourceTask = f.status()["stages"][0]["taskId"];
     f.t3.finish("run-1", "Option B must preserve the retry window");
     f.ticks(1);
-    const auto history = f.store->history(sourceTask);
+    const auto history = Tasks(*f.store).history(sourceTask);
     const auto report = std::ranges::find_if(history, [](const Json& item) { return item.at("kind") == "report"; });
     require(report != history.end(), "fixture did not save the source report");
     f.bot.work = [](const ModelInput& input) -> Decision {
@@ -330,7 +331,7 @@ void stageRequestKeepsEmbeddedNul() {
     f.call("start_workflow", {{"request", "Inspect the binary marker"},
                               {"stages", Json::array({{{"stageId", "inspect"}, {"role", "collect"}, {"request", request}}})}});
     f.ticks(2);
-    const auto task = taskJson(f.store->task(f.status()["stages"][0]["taskId"]));
+    const auto task = taskJson(Tasks(*f.store).task(f.status()["stages"][0]["taskId"]));
     require(task["request"] == request && task["intent"] == request && task["doneWhen"] == request,
             "stage request changed before the first revision was saved");
     require(f.t3.commands.size() == 1 && f.t3.commands.front().instruction.find("Task intent:\n" + request + "\n\nCompletion criteria:\n" +
@@ -408,7 +409,7 @@ void reviseQueuedVerifier() {
     f.t3.finish("run-1", {{"artifactVersion", shaA}});
     f.ticks(3);
     const auto blocked = f.call("workflow_status", {{"workflowId", workflow}});
-    const auto task = taskJson(f.store->task(blocked["stages"][1]["taskId"]));
+    const auto task = taskJson(Tasks(*f.store).task(blocked["stages"][1]["taskId"]));
     require(task["state"] == "queued" && task["blockedBy"]["id"] == f.status()["stages"][0]["taskId"],
             "verifier was not queued behind the other workflow");
     f.call("change_task", {{"taskId", task["id"]},
@@ -441,7 +442,7 @@ void rerunRevisedDependentStage() {
     f.ticks(2);
     f.t3.finish("run-1", {{"artifactVersion", shaA}});
     f.ticks(3);
-    const auto task = taskJson(f.store->task(f.status()["stages"][1]["taskId"]));
+    const auto task = taskJson(Tasks(*f.store).task(f.status()["stages"][1]["taskId"]));
     const std::string intent = "Verify backward compatibility", criteria = "Run the migration suite";
     f.call("change_task", {{"taskId", task["id"]},
                            {"generation", task["generation"]},
@@ -469,7 +470,7 @@ void rerunRevisedDependentStage() {
     f.restart();
     f.ticks(3);
     const Id rerun = f.status()["stages"][1]["taskId"];
-    const auto revised = taskJson(f.store->task(rerun));
+    const auto revised = taskJson(Tasks(*f.store).task(rerun));
     require(revised["id"] != task["id"] && revised["intent"] == intent && revised["doneWhen"] == criteria,
             "dependent rerun lost the task revision");
     const auto& assignment = f.t3.commands.back().instruction;
@@ -603,7 +604,7 @@ void missingStageReportCannotAdvanceWorkflow() {
         f.ticks(1);
         const auto pending = f.status();
         const Id task = pending["stages"][0]["taskId"];
-        require(!f.store->task(task).task.activeRun && pending["stages"][0]["lastConfirmedState"] == "completed" &&
+        require(!Tasks(*f.store).task(task).task.activeRun && pending["stages"][0]["lastConfirmedState"] == "completed" &&
                     pending["stages"][0]["needsAttention"] == true && pending["stages"][1]["taskId"] == 0 && pending["artifacts"].empty(),
                 "workflow either lost settlement or advanced without the stage report");
         if (recover)
@@ -668,7 +669,8 @@ void reopenedStageWaitsForProject() {
     f.ticks(2);
     const auto revised = f.call("instruct_workflow_stage", {{"workflowId", first}, {"stageId", "only"}, {"instruction", "Check again"}});
     const Id task = revised["stages"][0]["taskId"];
-    require(taskJson(f.store->task(task))["blockedBy"]["id"] == f.status()["stages"][0]["taskId"], "reopened task bypassed the queue");
+    require(taskJson(Tasks(*f.store).task(task))["blockedBy"]["id"] == f.status()["stages"][0]["taskId"],
+            "reopened task bypassed the queue");
     f.ticks(4);
     require(f.t3.commands.size() == 2, "older stage took another workflow's active slot");
     f.t3.finish("run-2", "Second workflow done");
@@ -737,12 +739,12 @@ void settledWhileReadingInstruction() {
         f.bot.action = {"continue_fresh_session", {{"taskId", task}}, "Continue the same task"};
     };
     f.ticks(1);
-    require(f.store->task(task).task.state != TaskState::completed && f.status()["stages"][1]["taskId"] == 0,
+    require(Tasks(*f.store).task(task).task.state != TaskState::completed && f.status()["stages"][1]["taskId"] == 0,
             "stage closed before the pending message was read");
     f.restart();
     f.ticks(6);
     const auto& next = f.t3.commands.back();
-    require(f.t3.commands.size() == 2 && next.tool == CommandTool::delegate && f.store->task(task).runs.size() == 2 &&
+    require(f.t3.commands.size() == 2 && next.tool == CommandTool::delegate && Tasks(*f.store).task(task).runs.size() == 2 &&
                 next.instruction.find("Keep the original row count") != std::string::npos &&
                 next.instruction.find("run-1") != std::string::npos && f.status()["artifacts"][0]["artifactVersion"] == shaA &&
                 f.status()["stages"][1]["taskId"] == 0,
@@ -767,7 +769,7 @@ void observeAfterUnsentAnswer() {
     run.question = {"q", {{.id = "choice"}}};
     f.ticks(3);
     const Id task = f.status()["stages"][0]["taskId"];
-    const auto pending = f.store->task(task);
+    const auto pending = Tasks(*f.store).task(task);
     require(pending.wait && pending.wait->reason() == WaitReason::unknown_delivery && pending.pendingAction &&
                 pending.pendingAction->phase == OutboxPhase::ready,
             "unsent answer fixture did not reach its safe retry point");
@@ -893,18 +895,18 @@ void compactAndContinue() {
     f.t3.finish("run-1", {{"artifactVersion", shaA}});
     f.ticks(3);
     const Id task = f.status()["stages"][1]["taskId"];
-    auto before = taskJson(f.store->task(task));
-    const auto history = f.store->history(task);
+    auto before = taskJson(Tasks(*f.store).task(task));
+    const auto history = Tasks(*f.store).history(task);
     f.call("continue_fresh_session", {{"taskId", task}, {"instruction", "Repeat checks with fresh context"}});
     f.ticks(3);
     require(f.t3.commands.size() == 2 && f.t3.interrupts.contains("run-2"), "fresh handoff bypassed settlement");
     f.t3.finish("run-2", Json::object(), "cancelled");
     f.ticks(6);
-    auto after = taskJson(f.store->task(task));
+    auto after = taskJson(Tasks(*f.store).task(task));
     require(after["doneWhen"] == before["doneWhen"] && after["currentRevision"] == before["currentRevision"] &&
                 after["inputArtifactVersion"] == shaA && after["activeRun"]["threadId"] == "thread-3" &&
                 f.t3.commands.back().tool == CommandTool::delegate && f.t3.commands.back().instruction.find(shaA) != std::string::npos &&
-                f.store->history(task, 0, static_cast<unsigned>(history.size())) == history,
+                Tasks(*f.store).history(task, 0, static_cast<unsigned>(history.size())) == history,
             "fresh continuation lost task provenance");
 }
 }

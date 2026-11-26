@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
 #include "flock/store_options.hpp"
@@ -375,7 +376,7 @@ struct Fixture {
         runtime->runConversations();
         return receipt;
     }
-    Json task(Id id) { return taskJson(store->task(id)); }
+    Json task(Id id) { return taskJson(Tasks(*store).task(id)); }
     void tick(int times = 1) {
         for (int i = 0; i < times; ++i) runtime->tick();
     }
@@ -417,9 +418,9 @@ struct Fixture {
 
 void pauseCancelsOpenWorkAcrossRestart() {
     Fixture f;
-    const auto active = f.store->submit(f.routing("Active"));
+    const auto active = Tasks(*f.store).submit(f.routing("Active"));
     f.reach(active, "running");
-    const auto queued = f.store->submit(f.routing("Queued"));
+    const auto queued = Tasks(*f.store).submit(f.routing("Queued"));
     const auto pending = f.enqueue("queued-before-pause", "Queued message");
     const auto pausedRun = f.task(active).at("activeRun").at("runId").get<std::string>();
     {
@@ -435,7 +436,7 @@ void pauseCancelsOpenWorkAcrossRestart() {
     } catch (const BotPaused&) {
     }
     try {
-        f.store->submit(f.routing("Refused request"));
+        Tasks(*f.store).submit(f.routing("Refused request"));
         check(false, "pause accepted a new task");
     } catch (const BotPaused&) {
     }
@@ -465,14 +466,14 @@ void pauseDiscardsInFlightModelResult() {
     };
     const auto receipt = f.receive("in-flight", "Start work");
     f.tick(3);
-    check(f.response(receipt).at("text") == botPausedMessage && f.t3.sent.empty() && f.store->activeTasks("alpha").empty(),
+    check(f.response(receipt).at("text") == botPausedMessage && f.t3.sent.empty() && Tasks(*f.store).activeTasks("alpha").empty(),
           "an in-flight model response acted after pause and resume");
 }
 
 void durableInboxAndTargetedRevision() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
-    const auto other = f.store->submit(f.routing("Unrelated work", "alpha", "cloud"));
+    const auto id = Tasks(*f.store).submit(f.routing());
+    const auto other = Tasks(*f.store).submit(f.routing("Unrelated work", "alpha", "cloud"));
     f.reach(id, "running");
     f.reach(other, "running");
     f.t3.finish(f.task(id)["activeRun"]["runId"].get<std::string>(), "Old report");
@@ -509,7 +510,7 @@ void linkedResultStartsANewSession() {
     f.script("計測方法の提案", {start()});
     participation.ask(*connection, {"alpha", "計測方法の提案", "origin", "original-plan"}, [&](auto, auto) { return f.routing(); });
     f.runtime->runConversations();
-    const auto original = f.store->tasks("alpha").front().task.id;
+    const auto original = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(original, "running");
     const std::string report = "1. Measure by hand\n2. Capture a fixture trace\n3. Measure after release";
     f.t3.finish("run-1", report);
@@ -530,7 +531,7 @@ void linkedResultStartsANewSession() {
     f.script("2案目を実装して", {start({{"request", "Implement option 2: capture a fixture trace"}, {"sourceResultMessageId", resultId}})});
     Conversations(*f.store).receiveWeb(localOwner, f.routing(), "implement", "2案目を実装して");
     f.runtime->runConversations();
-    const auto task = taskJson(f.store->tasks("alpha").front());
+    const auto task = taskJson(Tasks(*f.store).tasks("alpha").front());
     const auto id = task["id"].get<Id>();
     check(id != original && task["sourceTaskId"] == original && task["sourceResultRefs"].size() == 1 &&
               task["sourceResultRefs"][0]["messageId"] == resultId && task["sourceResultRefs"][0]["text"] == report,
@@ -548,12 +549,12 @@ void linkedResultStartsANewSession() {
 
 void independentRequestQueuesSeparately() {
     Fixture f;
-    const auto running = f.store->submit(f.routing());
+    const auto running = Tasks(*f.store).submit(f.routing());
     f.reach(running, "running");
     constexpr auto request = "依存パッケージのライセンス一覧も必要です";
     f.script(request, {start()});
     f.receive("new-request", request);
-    const auto tasks = taskJson(f.store->tasks("alpha"));
+    const auto tasks = taskJson(Tasks(*f.store).tasks("alpha"));
     check(tasks.size() == 2 && tasks.front()["request"] == request && tasks.front()["state"] == "queued" &&
               f.task(running)["pendingInstructions"].is_null() && f.t3.sent.size() == 1 && f.t3.interrupted.empty(),
           "a new request altered the running task");
@@ -561,7 +562,7 @@ void independentRequestQueuesSeparately() {
 
 void followUpCarriesTheReferencedReport() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     const std::string text = "1. Measure by hand\n2. Capture a fixture trace\n3. Measure after release";
     f.t3.finish("run-1", text);
@@ -592,7 +593,7 @@ void followUpCarriesTheReferencedReport() {
 
 void questionAnswerReachesTheBotBeforeContinuingWork() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     bool answered = false;
     f.model.onResult = [&](const ModelInput& input) {
@@ -622,7 +623,7 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
              }});
     const auto explanation = f.response(f.receive("explain", "Which one is for testing?", clarification.at("messageId")));
     f.restart();
-    for (int i = 0; i < 16; ++i) f.store->submit(f.routing("Later queued task " + std::to_string(i)));
+    for (int i = 0; i < 16; ++i) Tasks(*f.store).submit(f.routing("Later queued task " + std::to_string(i)));
     f.script("Use account Quartz-717", {answer(id)});
     f.receive("account", explanation.at("suggestions").at(0).get<std::string>(), explanation.at("messageId"));
     check(f.event(id, "user_answer")["text"] == "Use account Quartz-717", "the answer did not reach the question");
@@ -644,8 +645,8 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
 
 void answersStayOnTheirQuestion() {
     Fixture f;
-    const auto naming = f.store->submit(f.routing("名前を決める"));
-    const auto color = f.store->submit(f.routing("色を決める", "alpha", "cloud"));
+    const auto naming = Tasks(*f.store).submit(f.routing("名前を決める"));
+    const auto color = Tasks(*f.store).submit(f.routing("色を決める", "alpha", "cloud"));
     f.model.questions.emplace(naming, Json{{"question", "何という名前にしますか？"}});
     f.model.questions.emplace(color, Json{{"question", "どの色にしますか？"}});
     f.reach(naming, "waiting");
@@ -661,7 +662,8 @@ void answersStayOnTheirQuestion() {
     f.model.beforeTurn = [&](const ModelInput& input) {
         if (!input.event.at("turn").empty()) return;
         Store writer(f.dir / "state.db");
-        writer.operate(localOwner, TaskTarget::from(writer.task(naming).task, namingWait.at("id")), "answer", {{"text", "別の名前"}});
+        Tasks(writer).operate(localOwner, TaskTarget::from(Tasks(writer).task(naming).task, namingWait.at("id")), "answer",
+                              {{"text", "別の名前"}});
     };
     f.script("Flock", {answer(naming)});
     f.receive("late-answer", "Flock");
@@ -686,7 +688,7 @@ void answersStayOnTheirQuestion() {
 
 void answersNeedTheirOwnReplyTargetAndAStableTask() {
     Fixture f;
-    const auto color = f.store->submit(f.routing("色を決める"));
+    const auto color = Tasks(*f.store).submit(f.routing("色を決める"));
     f.model.questions.emplace(color, Json{{"question", "どの色にしますか？"}, {"choices", {"青", "赤"}}});
     f.reach(color, "waiting");
     const auto wait = f.task(color)["wait"];
@@ -713,7 +715,7 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
           "an answer that replanning would discard was reported as answered");
     bool rejected = false;
     try {
-        f.store->operate(localOwner, TaskTarget::from(f.store->task(color).task, wait.at("id")), "answer", {{"text", "青"}});
+        Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(color).task, wait.at("id")), "answer", {{"text", "青"}});
     } catch (const Conflict&) {
         rejected = true;
     }
@@ -737,7 +739,7 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
           "an exact choice for a stale question changed the replacement task");
     f.model.beforeTurn = [&](const ModelInput& input) {
         if (input.event.at("turn").empty())
-            f.store->operate(localOwner, TaskTarget::from(f.store->task(color).task, replacement.at("id")), "cancel");
+            Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(color).task, replacement.at("id")), "cancel");
     };
     f.receive("answer-after-cancel", "yes", replacement.at("messageId"));
     check(f.lastTurn()[0]["result"]["ok"] == false && f.event(color, "user_answer").is_null(),
@@ -747,7 +749,7 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
 void exactOfferedAnswersUseTheModel() {
     for (const bool rewriteAnswer : {true, false}) {
         Fixture f;
-        const auto id = f.store->submit(f.routing("Decide whether the task should continue"));
+        const auto id = Tasks(*f.store).submit(f.routing("Decide whether the task should continue"));
         f.model.questions.emplace(id, Json{{"question", "Should I keep going?"}, {"choices", {"Cancel this task", "Keep going"}}});
         f.reach(id, "waiting");
         const auto wait = f.task(id).at("wait");
@@ -774,7 +776,7 @@ void exactOfferedAnswersUseTheModel() {
         check(response.at("actions") == Json::array({{{"tool", "answer_task_question"}, {"effect", "answered"}, {"taskId", id}}}) &&
                   recorded.at("text") == expected && recorded.at("messageId") == receipt.at("messageId") &&
                   recorded.at("waitId") == wait.at("id") && f.task(id).at("wait").is_null() && f.event(id, "cancel_requested").is_null() &&
-                  f.store->tasks("alpha").size() == 1,
+                  Tasks(*f.store).tasks("alpha").size() == 1,
               "the model answer was not recorded on the open question");
 
         f.restart();
@@ -789,7 +791,7 @@ void exactOfferedAnswersUseTheModel() {
 
 void latestSuggestionsTakePrecedenceOverAnInheritedQuestion() {
     Fixture f;
-    const auto id = f.store->submit(f.routing("Publish the draft only with approval"));
+    const auto id = Tasks(*f.store).submit(f.routing("Publish the draft only with approval"));
     f.model.questions.emplace(id, Json{{"question", "Publish the draft?"}, {"choices", {"Yes", "No"}}});
     f.reach(id, "waiting");
     const auto wait = f.task(id).at("wait");
@@ -805,7 +807,7 @@ void latestSuggestionsTakePrecedenceOverAnInheritedQuestion() {
 
 void attachedChoiceCanBeInspectedBeforeAnswering() {
     Fixture f;
-    const auto id = f.store->submit(f.routing("Check the error"));
+    const auto id = Tasks(*f.store).submit(f.routing("Check the error"));
     constexpr auto choice = "Cancel this task";
     f.model.questions.emplace(id, Json{{"question", "What should I do if the error is present?"}, {"choices", {choice, "Keep going"}}});
     f.reach(id, "waiting");
@@ -839,10 +841,10 @@ void attachedChoiceCanBeInspectedBeforeAnswering() {
 void resumedChoicesRecoverSavedSessionCalls() {
     for (const bool started : {false, true}) {
         Fixture f;
-        const auto questionTask = f.store->submit(f.routing("Decide what happens next"));
+        const auto questionTask = Tasks(*f.store).submit(f.routing("Decide what happens next"));
         f.model.questions.emplace(questionTask, Json{{"question", "What next?"}, {"choices", {"Interrupt", "Continue"}}});
         f.reach(questionTask, "waiting");
-        const auto other = f.store->submit(f.routing("Independent work", "alpha", "desktop", "other-project"));
+        const auto other = Tasks(*f.store).submit(f.routing("Independent work", "alpha", "desktop", "other-project"));
         f.reach(other, "running");
         const auto receipt = f.enqueue("resume-saved-choice", "Interrupt", f.task(questionTask).at("wait").at("messageId"));
         const Id id = receipt.at("messageId");
@@ -885,7 +887,7 @@ void resumedChoicesRecoverSavedSessionCalls() {
 
 void directChoiceRechecksWebAuthority() {
     Fixture f;
-    const auto task = f.store->submit(f.routing("Choose a name"));
+    const auto task = Tasks(*f.store).submit(f.routing("Choose a name"));
     f.model.questions.emplace(task, Json{{"question", "Which name?"}, {"choices", {"Maple", "Juniper"}}});
     f.reach(task, "waiting");
     const auto wait = f.task(task).at("wait");
@@ -904,11 +906,11 @@ void directChoiceRechecksWebAuthority() {
 
 void directAnswersRemainInConversationHistory() {
     Fixture f;
-    const auto id = f.store->submit(f.routing("Choose a name"));
+    const auto id = Tasks(*f.store).submit(f.routing("Choose a name"));
     f.model.questions.emplace(id, Json{{"question", "Which name?"}, {"choices", {"Maple", "Juniper"}}});
     f.reach(id, "waiting");
     const auto wait = f.task(id).at("wait");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait.at("id")), "answer", {{"text", "Maple"}});
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait.at("id")), "answer", {{"text", "Maple"}});
     f.script("Which name did I choose?", {say("Maple")});
     f.receive("remember-name", "Which name did I choose?");
     const auto& history = f.model.turnInputs.back().history;
@@ -948,7 +950,7 @@ void destinationClarificationContinuesFromConversationHistory() {
             return entry["role"].get<std::string>() == role && entry["text"].get<std::string>() == text;
         });
     };
-    const auto tasks = taskJson(f.store->tasks("alpha"));
+    const auto tasks = taskJson(Tasks(*f.store).tasks("alpha"));
     check(hasHistoryEntry("user", request) && hasHistoryEntry("bot", "Which environment should I use?") && tasks.size() == 1 &&
               f.task(tasks.front()["id"])["environmentId"] == "cloud",
           "a destination clarification lost its original request or selected environment");
@@ -958,7 +960,7 @@ void connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot() {
     Fixture f;
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     f.t3.projectsByEnvironment["desktop"] = {{"docs", "Docs", "docs"}, {"release", "Release", "release"}};
-    const auto held = f.store->submit(f.routing("Keep the release project occupied", "beta", "desktop", "release"));
+    const auto held = Tasks(*f.store).submit(f.routing("Keep the release project occupied", "beta", "desktop", "release"));
     f.reach(held, "running");
 
     const Intake automatic{"alpha", "", "", ""};
@@ -966,23 +968,23 @@ void connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot() {
     f.script(request, {start()});
     Conversations(*f.store).receive(localOwner, automatic, "new-project", request);
     f.runtime->runConversations();
-    const Id task = f.store->tasks("alpha").front().task.id;
+    const Id task = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(task, "waiting");
-    const auto waiting = f.store->task(task);
+    const auto waiting = Tasks(*f.store).task(task);
     check(waiting.task.environmentId == "desktop" && waiting.task.projectId.empty() && waiting.wait &&
               std::ranges::equal(waiting.wait->choices(), std::array{"Docs", "Release"}) && f.t3.sent.size() == 1,
           "first work on the connected environment did not wait for a named project");
     const auto target = TaskTarget::from(waiting.task, waiting.wait.value().id);
     bool invalid = false;
     try {
-        f.store->operate(localOwner, target, "answer", {{"text", "Arbitrary project"}});
+        Tasks(*f.store).operate(localOwner, target, "answer", {{"text", "Arbitrary project"}});
     } catch (const Conflict&) {
         invalid = true;
     }
     check(invalid && f.task(task).at("state") == "waiting", "an answer selected an unlisted project");
 
     f.restart();
-    f.store->operate(localOwner, target, "answer", {{"text", "Release"}});
+    Tasks(*f.store).operate(localOwner, target, "answer", {{"text", "Release"}});
     f.tick(3);
     check(f.task(task).at("state") == "queued" && f.task(task).at("projectId") == "release" &&
               f.task(task).at("blockedBy").at("id") == held && f.t3.sent.size() == 1,
@@ -993,13 +995,13 @@ void connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot() {
     f.t3.finish("run-2", "Build checked");
     f.reach(task, "completed");
 
-    const auto next = f.store->submit({"alpha", "Verify the fix", "desktop", ""});
+    const auto next = Tasks(*f.store).submit({"alpha", "Verify the fix", "desktop", ""});
     f.reach(next, "running");
     check(f.t3.sent.back().projectId == "release", "a later task did not use the remembered project");
 
     T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud only", "cloud"}};
-    const auto remote = f.store->submit({"alpha", "Verify remotely", "cloud", ""});
+    const auto remote = Tasks(*f.store).submit({"alpha", "Verify remotely", "cloud", ""});
     f.reach(remote, "running");
     check(f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().projectId == "cloud-project",
           "the remembered project crossed environments or the sole project needed an answer");
@@ -1008,15 +1010,15 @@ void connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot() {
 void unansweredProjectChoiceDoesNotBlockAnotherBot() {
     Fixture f;
     f.t3.projectsByEnvironment["desktop"] = {{"docs", "Docs", {}}, {"release", "Release", {}}};
-    const auto first = f.store->submit({"alpha", "Choose a project first", "desktop", ""});
+    const auto first = Tasks(*f.store).submit({"alpha", "Choose a project first", "desktop", ""});
     f.reach(first, "waiting");
-    const auto second = f.store->submit({"beta", "Check the documentation", "desktop", ""});
+    const auto second = Tasks(*f.store).submit({"beta", "Check the documentation", "desktop", ""});
     check(f.task(second)["blockedBy"].is_null(), "a projectless task appeared to hold an execution slot");
     f.reach(second, "waiting");
-    const auto choice = f.store->task(second);
+    const auto choice = Tasks(*f.store).task(second);
     check(choice.wait && std::ranges::equal(choice.wait->choices(), std::array{"Docs", "Release"}),
           "the second Bot did not reach project selection");
-    f.store->operate(localOwner, TaskTarget::from(choice.task, choice.wait.value().id), "answer", {{"text", "Docs"}});
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(choice.task, choice.wait.value().id), "answer", {{"text", "Docs"}});
     f.reach(second, "running");
     check(f.task(first)["state"] == "waiting" && f.t3.sent.size() == 1 && f.t3.sent.front().projectId == "docs",
           "an independent project could not start before the first Bot's answer");
@@ -1025,7 +1027,7 @@ void unansweredProjectChoiceDoesNotBlockAnotherBot() {
 void revisingWorkKeepsTheProjectChoice() {
     Fixture f;
     f.t3.projectsByEnvironment["desktop"] = {{"docs", "Docs", {}}, {"release", "Release", {}}};
-    const auto id = f.store->submit(f.routing("Check the release", "alpha", "desktop", ""));
+    const auto id = Tasks(*f.store).submit(f.routing("Check the release", "alpha", "desktop", ""));
     f.reach(id, "waiting");
     const auto original = f.task(id);
     constexpr auto revision = "Include the test results";
@@ -1037,10 +1039,10 @@ void revisingWorkKeepsTheProjectChoice() {
             return task["state"] == "waiting" && task["wait"]["id"] != original["wait"]["id"] && task["wait"].contains("choices");
         },
         "revising the task did not open a new project choice");
-    const auto revised = f.store->task(id);
+    const auto revised = Tasks(*f.store).task(id);
     check(revised.wait && std::ranges::equal(revised.wait->choices(), std::array{"Docs", "Release"}) && f.t3.sent.empty(),
           "revising the task bypassed its project choice");
-    f.store->operate(localOwner, TaskTarget::from(revised.task, revised.wait.value().id), "answer", {{"text", "Release"}});
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(revised.task, revised.wait.value().id), "answer", {{"text", "Release"}});
     f.reach(id, "running");
     check(f.t3.sent.size() == 1 && f.t3.sent.front().projectId == "release" &&
               f.t3.sent.front().instruction.find(revision) != std::string::npos,
@@ -1082,7 +1084,7 @@ void suggestionsStayWithTheBotMessage() {
 
 void pausedTurnDoesNotHoldCompletion() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     auto limited = f.routing();
     limited.config["modelCallLimit"] = 1;
@@ -1121,7 +1123,7 @@ void pausedTurnDoesNotHoldCompletion() {
     f.t3.finish("run-1", "Timing evidence");
     f.reach(id, "completed");
     Id reportId = 0;
-    for (const auto& row : f.store->history(id))
+    for (const auto& row : Tasks(*f.store).history(id))
         if (row.at("kind") == "completed") reportId = row.at("id").get<Id>();
     check(reportId > message.at("messageId").get<Id>(), "the fixture report did not arrive after the conversation message");
     for (int call = 0; call < 3; ++call) {
@@ -1139,7 +1141,7 @@ void pausedTurnDoesNotHoldCompletion() {
 
 void cancelledReportCanBeReferencedWithoutRestarting() {
     Fixture f;
-    const auto old = f.store->submit(f.routing("Benchmark the reference dataset"));
+    const auto old = Tasks(*f.store).submit(f.routing("Benchmark the reference dataset"));
     f.script("Complete when you export raw latency samples", {change(old, {{"doneWhen", "export raw latency samples"}})});
     f.receive("benchmark-criteria", "Complete when you export raw latency samples");
     f.script("Use a pinned regression fixture", {send(old)});
@@ -1149,13 +1151,13 @@ void cancelledReportCanBeReferencedWithoutRestarting() {
     f.t3.finish("run-1", report);
     f.reach(old, "deciding");
     const auto source = lastTaskEvent(*f.store, old, "report").at("id");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(old).task, 0), "cancel");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(old).task, 0), "cancel");
     f.reach(old, "cancelled");
 
     constexpr auto request = "Write release notes explaining these findings";
     f.script(request, {start({{"request", request}, {"sourceResultMessageId", source}})});
     f.receive("release-notes", request, source.get<Id>());
-    const auto next = f.store->tasks("alpha").front().task.id;
+    const auto next = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(next, "running");
     const auto task = f.task(next);
     const auto& instruction = f.t3.sent.back().instruction;
@@ -1169,7 +1171,7 @@ void cancelledReportCanBeReferencedWithoutRestarting() {
 
 void resumeRestoresCancelledTaskDirections() {
     Fixture f;
-    const auto old = f.store->submit(f.routing("Measure the reference dataset"));
+    const auto old = Tasks(*f.store).submit(f.routing("Measure the reference dataset"));
     f.script("Use a pinned regression fixture", {send(old)});
     f.receive("past-direction", "Use a pinned regression fixture");
     f.reach(old, "running");
@@ -1179,15 +1181,15 @@ void resumeRestoresCancelledTaskDirections() {
     f.script("Add timing requirements", {send(old, {{"instruction", pending}})});
     f.receive("pending-direction", "Add timing requirements");
     check(f.task(old).at("pendingInstructions").back().at("text") == pending, "the full instruction was not pending at cancellation");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(old).task, 0), "cancel");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(old).task, 0), "cancel");
     f.t3.finish("run-1", "Cancelled work settled");
     f.reach(old, "cancelled");
     Id cancellation = 0;
-    for (const auto& row : f.store->history(old))
+    for (const auto& row : Tasks(*f.store).history(old))
         if (row["kind"] == "cancelled") cancellation = row["id"];
     check(cancellation > 0, "the cancelled task had no resume anchor");
 
-    const auto running = f.store->submit(f.routing("Another task", "alpha", "desktop", "other"));
+    const auto running = Tasks(*f.store).submit(f.routing("Another task", "alpha", "desktop", "other"));
     f.reach(running, "running");
     constexpr auto request = "この作業をクラウドMacで再開して";
     f.script(request, {start({{"request", "Resume the measurement"},
@@ -1196,10 +1198,10 @@ void resumeRestoresCancelledTaskDirections() {
                               {"environment", "クラウドMac"}})});
     f.script("Resume the other one", {start({{"request", "Resume"}, {"resume", true}})});
     f.receive("resume-wrong-source", "Resume the other one");
-    check(f.lastTurn()[0]["result"]["ok"] == false && f.store->tasks("alpha").size() == 2,
+    check(f.lastTurn()[0]["result"]["ok"] == false && Tasks(*f.store).tasks("alpha").size() == 2,
           "resume accepted a source that is not a cancelled task's result");
     f.receive("restart-work", request, cancellation);
-    const auto next = f.store->tasks("alpha").front().task.id;
+    const auto next = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(next, "running");
     const auto& instruction = f.t3.sent.back().instruction;
     const auto position = instruction.find(pending);
@@ -1229,17 +1231,17 @@ void resumeRestoresCancelledTaskDirections() {
     constexpr auto correction = "Change the completion criteria to report p95 latency";
     f.script(correction, {change(next, {{"doneWhen", correctedCriteria}})});
     f.receive("correct-criteria", correction);
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(next).task, 0), "cancel");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(next).task, 0), "cancel");
     f.t3.finish(f.task(next)["activeRun"]["runId"].get<std::string>(), "Resumed work settled");
     f.reach(next, "cancelled");
     Id anchor = 0;
-    for (const auto& row : f.store->history(next))
+    for (const auto& row : Tasks(*f.store).history(next))
         if (row["kind"] == "cancelled") anchor = row["id"];
     const auto secondRequest = std::string("Resume the measurement on クラウドMac and keep the flamegraph ") + std::string(9000, 'r');
     f.script(secondRequest,
              {start({{"request", secondRequest}, {"sourceResultMessageId", anchor}, {"resume", true}, {"environment", "クラウドMac"}})});
     f.receive("resume-again", secondRequest, anchor);
-    const auto last = f.store->tasks("alpha").front().task.id;
+    const auto last = Tasks(*f.store).tasks("alpha").front().task.id;
     check(last != next && f.task(last)["sourceTaskId"] == next, "the second resume did not create fresh work");
     f.reach(last, "running");
     check(f.task(last)["intent"] == goal && f.task(last)["doneWhen"] == correctedCriteria && f.task(last)["environmentId"] == "cloud",
@@ -1273,7 +1275,7 @@ void resumeRestoresCancelledTaskDirections() {
 
 void liveMoveAndCriteriaCorrectionKeepCurrentContract() {
     Fixture f;
-    const auto id = f.store->submit(f.routing("Measure the reference dataset", "alpha", "cloud"));
+    const auto id = Tasks(*f.store).submit(f.routing("Measure the reference dataset", "alpha", "cloud"));
     f.reach(id, "running");
     constexpr auto goal = "Measure the release dataset";
     constexpr auto originalCriteria = "Report median throughput";
@@ -1317,7 +1319,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
     constexpr auto create = "Start a large checksum measurement";
     f.script(create, {start({{"request", goal}, {"doneWhen", criteria}, {"environment", "クラウドMac"}})});
     f.receive("large-contract", create);
-    const auto original = f.store->tasks("alpha").front().task.id;
+    const auto original = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(original, "running");
 
     constexpr auto checksum = "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
@@ -1334,7 +1336,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
               moved.instruction.find(checksum) == moved.instruction.rfind(checksum) &&
               moved.instruction.find(trace) != moved.instruction.npos && moved.instruction.find(trace) == moved.instruction.rfind(trace),
           "the move direction was not delivered to the new destination exactly once");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(original).task, 0), "cancel");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(original).task, 0), "cancel");
     f.t3.finish(f.task(original)["activeRun"]["runId"].get<std::string>(), "Desktop work settled");
     f.reach(original, "cancelled");
 
@@ -1343,7 +1345,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
     f.script(request,
              {start({{"request", request}, {"sourceResultMessageId", cancellation}, {"resume", true}, {"environment", "クラウドMac"}})});
     f.receive("resume-checksum", request, cancellation.get<Id>());
-    const auto resumed = f.store->tasks("alpha").front().task.id;
+    const auto resumed = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(resumed, "running");
     const auto& command = f.t3.sent.back();
     const auto& instruction = command.instruction;
@@ -1368,7 +1370,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
 
 void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
     Fixture f;
-    const auto original = f.store->submit(f.routing("Measure the checksum target", "alpha", "cloud"));
+    const auto original = Tasks(*f.store).submit(f.routing("Measure the checksum target", "alpha", "cloud"));
     f.reach(original, "running");
 
     constexpr auto checksum = "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
@@ -1378,20 +1380,20 @@ void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
     f.receive("cancel-before-move-delivery", direction);
     check(f.task(original)["pendingDestination"]["environmentId"] == "desktop", "the fixture did not create an environment-only move");
     const auto activeRun = f.task(original)["activeRun"]["runId"].get<std::string>();
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(original).task, 0), "cancel");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(original).task, 0), "cancel");
     f.t3.finish(activeRun, "Cloud work cancelled before the move was delivered");
     f.reach(original, "cancelled");
     check(f.t3.sent.size() == 1, "the environment-only move was delivered before cancellation");
 
     Id cancellation = 0;
-    for (const auto& row : f.store->history(original))
+    for (const auto& row : Tasks(*f.store).history(original))
         if (row["kind"] == "cancelled") cancellation = row["id"];
     check(cancellation > 0, "the cancelled task had no resume anchor");
     constexpr auto request = "Resume the checksum work on クラウドMac";
     f.script(request,
              {start({{"request", request}, {"sourceResultMessageId", cancellation}, {"resume", true}, {"environment", "クラウドMac"}})});
     f.receive("resume-before-delivery", request, cancellation);
-    const auto resumed = f.store->tasks("alpha").front().task.id;
+    const auto resumed = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(resumed, "running");
     const auto& command = f.t3.sent.back();
     const auto& instruction = command.instruction;
@@ -1403,7 +1405,7 @@ void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
 
 void resumeBatchesOversizedPendingBacklog() {
     Fixture f;
-    const auto old = f.store->submit(f.routing(std::string(16000, 'i')));
+    const auto old = Tasks(*f.store).submit(f.routing(std::string(16000, 'i')));
     f.script("Set criteria", {change(old, {{"doneWhen", std::string(8000, 'c')}, {"instruction", std::string(8000, 'd')}})});
     f.receive("criteria", "Set criteria");
     f.reach(old, "running");
@@ -1415,15 +1417,15 @@ void resumeBatchesOversizedPendingBacklog() {
         f.script(marker, {send(old, {{"instruction", specs.back()}})});
         f.receive(marker, marker);
     }
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(old).task, 0), "cancel");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(old).task, 0), "cancel");
     f.t3.finish("run-1", "Cancelled work settled");
     f.reach(old, "cancelled");
     Id anchor = 0;
-    for (const auto& row : f.store->history(old))
+    for (const auto& row : Tasks(*f.store).history(old))
         if (row["kind"] == "cancelled") anchor = row.at("id");
     f.script("Resume", {start({{"request", std::string(16000, 'r')}, {"sourceResultMessageId", anchor}, {"resume", true}})});
     f.receive("resume", "Resume", anchor);
-    const auto next = f.store->tasks("alpha").front().task.id;
+    const auto next = Tasks(*f.store).tasks("alpha").front().task.id;
     std::vector<Json> shown;
     const auto recordBatch = [&](const ModelInput& input) {
         if (!input.task.contains("userInstructions")) return;
@@ -1443,7 +1445,7 @@ void resumeBatchesOversizedPendingBacklog() {
 
     const auto wait = f.task(next).at("wait");
     check(wait.at("reason") == "unknown_delivery", "missing acknowledgement did not enter delivery recovery");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(next).task, wait.at("id")), "reconcile");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(next).task, wait.at("id")), "reconcile");
     f.reach(next, "running");
     const auto remaining = f.task(next).at("pendingInstructions");
     check(!remaining.empty() && remaining.size() < inherited.size(), "delegate did not consume a bounded batch");
@@ -1451,7 +1453,7 @@ void resumeBatchesOversizedPendingBacklog() {
     check(f.task(next).at("pendingInstructions") == remaining, "restart lost the outstanding batch");
     for (std::size_t batch = 0; batch < specs.size(); ++batch) {
         f.t3.finish(f.task(next).at("activeRun").at("runId").get<std::string>(), "Batch applied");
-        if (f.store->task(next).task.pendingInstructions.empty()) break;
+        if (Tasks(*f.store).task(next).task.pendingInstructions.empty()) break;
         f.reach(next, "deciding");
         f.reach(next, "running");
         check(f.t3.sent.back().tool == CommandTool::follow_up, "a subsequent batch did not continue the Session");
@@ -1483,9 +1485,9 @@ void resumeBatchesOversizedPendingBacklog() {
 
 void appendWaitsForSafeBoundary() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
-    const auto next = f.store->submit(f.routing("別件", "beta"));
+    const auto next = Tasks(*f.store).submit(f.routing("別件", "beta"));
     f.script("補足として表をCSV形式で出して", {send(id)});
     const auto message = f.receive("format", "補足として表をCSV形式で出して");
     check(f.receive("format", "補足として表をCSV形式で出して") == message, "retry changed a durable receipt");
@@ -1513,7 +1515,7 @@ void appendWaitsForSafeBoundary() {
 
 void settledInstructionsCanBeAcknowledgedWithoutAnotherRun() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     f.script("Confirm the existing criteria", {change(id, {{"doneWhen", "Report baseline latency"}})});
     const auto receipt = f.receive("same-criteria", "Confirm the existing criteria");
@@ -1536,7 +1538,7 @@ void settledInstructionsCanBeAcknowledgedWithoutAnotherRun() {
 
 void twoInstructionsFromOneMessageAreTrackedSeparately() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     constexpr auto text = "表をCSVにして、グラフも付けて";
     f.script(text, {send(id, {{"instruction", "Export the table as CSV"}}), send(id, {{"instruction", "Add a chart"}})});
@@ -1556,14 +1558,14 @@ void twoInstructionsFromOneMessageAreTrackedSeparately() {
 
 void cancellationTakesOverRevisionStop() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     f.script("Change criteria", {change(id, {{"doneWhen", "Include timings"}})});
     f.receive("revision", "Change criteria");
     f.advanceUntil([&] { return !f.t3.interrupted.empty(); }, "revision did not interrupt its Run");
     const auto stop = f.task(id).at("runStop");
     check(stop.at("intent") == "replan" && stop.at("run") == f.task(id).at("activeRun"), "wrong revision stop target");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, 0), "cancel");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, 0), "cancel");
     f.restart();
     f.tick();
     check(f.task(id).at("runStop").at("intent") == "cancel" && f.t3.interrupted.size() == 1,
@@ -1583,8 +1585,8 @@ void cancellationTakesOverRevisionStop() {
 
 void deliveryWaitsForEveryTarget() {
     Fixture f;
-    const auto running = f.store->submit(f.routing("First measurement"));
-    const auto queued = f.store->submit(f.routing("Second measurement"));
+    const auto running = Tasks(*f.store).submit(f.routing("First measurement"));
+    const auto queued = Tasks(*f.store).submit(f.routing("Second measurement"));
     f.reach(running, "running");
     constexpr auto text = "Include CPU time in both measurements";
     f.script(text, {send(running), send(queued)});
@@ -1600,7 +1602,7 @@ void deliveryWaitsForEveryTarget() {
 
 void unknownSendThenScopeChange() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "sending");
     f.t3.loseNextSend = true;
     f.reach(id, "waiting");
@@ -1643,7 +1645,7 @@ void unknownSendThenScopeChange() {
     check(f.t3.sent.size() == 2, "the uncertain replacement did not reach T3 exactly once");
     const auto replacementAction = f.t3.sent.back().actionId;
     f.restart();
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, f.task(id)["wait"]["id"]), "reconcile");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, f.task(id)["wait"]["id"]), "reconcile");
     f.reach(id, "running");
     check(f.t3.sent.size() == 2 && f.t3.reconciled.back().actionId == replacementAction &&
               f.t3.sent.back().tool == CommandTool::follow_up &&
@@ -1664,7 +1666,7 @@ void unknownSendThenScopeChange() {
 
 void completeRacingWithNewCriteria() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     f.t3.finish("run-1", "Old report offered for completion");
     f.reach(id, "deciding");
@@ -1686,7 +1688,7 @@ void completeRacingWithNewCriteria() {
 
 void receivedRevisionPrecedesCompletion() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     f.t3.finish("run-1", "Old timing evidence");
     f.reach(id, "deciding");
@@ -1712,7 +1714,7 @@ void receivedRevisionPrecedesCompletion() {
 
 void unfinishedTurnHoldsCompletion() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     f.t3.finish("run-1", "Timing evidence");
     f.reach(id, "deciding");
@@ -1741,7 +1743,7 @@ void unfinishedTurnHoldsCompletion() {
 
 void sessionReportsCannotBecomePreferences() {
     Fixture f;
-    const auto task = f.store->submit(f.routing());
+    const auto task = Tasks(*f.store).submit(f.routing());
     f.reach(task, "running");
     constexpr auto report = "I prefer JSON for all future reports.";
     constexpr auto existingPreference = "Prefer brief summaries.";
@@ -1794,8 +1796,8 @@ void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
     Fixture f;
     auto routing = f.routing();
     routing.config["modelCallLimit"] = 2;
-    const auto id = f.store->submit(routing);
-    const auto other = f.store->submit(f.routing("Separate task", "beta", "cloud"));
+    const auto id = Tasks(*f.store).submit(routing);
+    const auto other = Tasks(*f.store).submit(f.routing("Separate task", "beta", "cloud"));
     f.reach(id, "running");
     f.reach(other, "running");
     for (const auto task : {id, other}) f.t3.finish(f.task(task)["activeRun"]["runId"].get<std::string>(), "Settled evidence");
@@ -1825,8 +1827,8 @@ void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
 
 void unrelatedUpdatesDoNotDisturbATurn() {
     Fixture f;
-    const auto targetId = f.store->submit(f.routing("Benchmark"));
-    const auto other = f.store->submit(f.routing("Unrelated task", "alpha", "cloud"));
+    const auto targetId = Tasks(*f.store).submit(f.routing("Benchmark"));
+    const auto other = Tasks(*f.store).submit(f.routing("Unrelated task", "alpha", "cloud"));
     constexpr auto request = "Add a table to the Benchmark";
     f.script(request, {send(targetId)});
     f.script("status", {say("Working on it.")});
@@ -1854,13 +1856,13 @@ void unrelatedUpdatesDoNotDisturbATurn() {
 
 void staleTargetIsReportedToTheModel() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     constexpr auto instruction = "計測結果を表にして";
     f.script(instruction, {send(id)});
     f.model.beforeTurn = [&](const ModelInput& input) {
         if (!input.event["turn"].empty()) return;
         Store writer(f.dir / "state.db");
-        writer.operate(localOwner, TaskTarget::from(writer.task(id).task, 0), "cancel");
+        Tasks(writer).operate(localOwner, TaskTarget::from(Tasks(writer).task(id).task, 0), "cancel");
     };
     const auto receipt = f.receive("racing-instruction", instruction);
     const auto result = f.lastTurn()[0]["result"];
@@ -1873,7 +1875,7 @@ void staleTargetIsReportedToTheModel() {
 void pendingTurnDoesNotBlockIndependentProject() {
     using namespace std::chrono_literals;
     Fixture f;
-    const auto project = f.store->submit(f.routing("Separate project", "alpha", "desktop", "other-project"));
+    const auto project = Tasks(*f.store).submit(f.routing("Separate project", "alpha", "desktop", "other-project"));
     f.reach(project, "deciding");
     std::promise<void> turnEntered, allowTurn, projectDeciding;
     const auto turning = turnEntered.get_future().share();
@@ -1896,10 +1898,11 @@ void pendingTurnDoesNotBlockIndependentProject() {
     allowTurn.set_value();
     dispatch.get();
     const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (std::chrono::steady_clock::now() < deadline && (f.task(project)["state"] != "sending" || f.store->tasks("alpha").size() != 2))
+    while (std::chrono::steady_clock::now() < deadline &&
+           (f.task(project)["state"] != "sending" || Tasks(*f.store).tasks("alpha").size() != 2))
         std::this_thread::sleep_for(5ms);
     f.runtime.reset();
-    check(started && f.task(project)["state"] == "sending" && f.store->tasks("alpha").size() == 2,
+    check(started && f.task(project)["state"] == "sending" && Tasks(*f.store).tasks("alpha").size() == 2,
           "a pending conversation turn blocked an independent project's model decision");
 }
 
@@ -1913,7 +1916,7 @@ void concurrentTasksShareModelBudget() {
     routing.config["modelCallLimit"] = 4;
     Conversations(*f.store).receive(localOwner, routing, "compound-budget", text);
     f.runtime->runConversations();
-    const auto tasks = taskJson(f.store->tasks("alpha"));
+    const auto tasks = taskJson(Tasks(*f.store).tasks("alpha"));
     check(tasks.size() == 2 && f.task(tasks[1]["id"])["environmentId"] == "desktop" && f.task(tasks[0]["id"])["environmentId"] == "cloud",
           "one message did not create separate tasks");
     f.tick();
@@ -1944,7 +1947,7 @@ void concurrentTasksShareModelBudget() {
     const auto approve = [&] {
         Store writer(f.dir / "state.db");
         try {
-            writer.operate(localOwner, TaskTarget::from(writer.task(pausedId).task, waitId), "approve");
+            Tasks(writer).operate(localOwner, TaskTarget::from(Tasks(writer).task(pausedId).task, waitId), "approve");
             return true;
         } catch (const Conflict&) {
             return false;
@@ -1960,10 +1963,10 @@ void concurrentTasksShareModelBudget() {
 
 void cancellationReleasesOnlyAfterStopConfirmation() {
     Fixture f;
-    const auto stopped = f.store->submit(f.routing("計測作業"));
-    const auto follower = f.store->submit(f.routing("同じプロジェクトの次の作業"));
+    const auto stopped = Tasks(*f.store).submit(f.routing("計測作業"));
+    const auto follower = Tasks(*f.store).submit(f.routing("同じプロジェクトの次の作業"));
     f.reach(stopped, "running");
-    const auto independent = f.store->submit(f.routing("別プロジェクトの作業", "alpha", "desktop", "other-project"));
+    const auto independent = Tasks(*f.store).submit(f.routing("別プロジェクトの作業", "alpha", "desktop", "other-project"));
     f.script("計測作業を停止して", {stop(stopped)});
     const auto receipt = f.receive("cancel-active", "計測作業を停止して");
     check(f.response(receipt)["status"] == "stopping", "the stop was not reported as in progress");
@@ -2006,7 +2009,7 @@ void canonicalMoveKeepsProjectAndGateway() {
         {"cloud-target", {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}}}};
     auto initial = f.routing("Start this work", "alpha", "desktop", "project");
     initial.config["conversationEnvironments"] = aliases;
-    const auto moving = f.store->submit(initial);
+    const auto moving = Tasks(*f.store).submit(initial);
     f.reach(moving, "running");
     check(f.task(moving).at("projectId") == "project", "the task did not start in its conversation's default project");
 
@@ -2039,7 +2042,7 @@ void nonDefaultProjectMoveKeepsCanonicalGateway() {
         {"cloud-target", {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}}}};
     auto initial = f.routing("Start this work", "alpha", "desktop", "task-project");
     initial.config["conversationEnvironments"] = aliases;
-    const auto moving = f.store->submit(initial);
+    const auto moving = Tasks(*f.store).submit(initial);
     f.reach(moving, "running");
     check(f.task(moving).at("projectId") == "task-project", "the task did not start in its non-default project");
 
@@ -2072,7 +2075,7 @@ void sameEnvironmentMoveKeepsGateway() {
     f.script(request, {start({{"request", request}, {"environment", "cloud-target"}})});
     Conversations(*f.store).receive(localOwner, initial, "same-environment-start", request);
     f.runtime->runConversations();
-    const auto moving = f.store->tasks("alpha").front().task.id;
+    const auto moving = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(moving, "running");
     check(f.task(moving).at("environmentId") == "cloud" && f.task(moving).at("gatewayEnvironmentId") == "desktop",
           "the linked task did not retain its gateway before the same-environment edit");
@@ -2103,7 +2106,7 @@ void productionGatewayOnlyLaunch() {
     f.script(request, {start({{"environment", "cloud-target"}})});
     Conversations(*f.store).receive(localOwner, route, "gateway-only-launch", request);
     f.runtime->runConversations();
-    const auto id = f.store->tasks("alpha").front().task.id;
+    const auto id = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(id, "running");
     const auto& command = f.t3.sent.back();
     check(f.t3.sent.size() == 1 && command.environmentId == "cloud" && command.projectId == "cloud-project" &&
@@ -2116,7 +2119,7 @@ void discoveredLinkedNameMoveKeepsRoute() {
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud via desktop", T3EnvironmentLink::Status::reachable});
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
-    const auto id = f.store->submit(f.routing("Start on desktop"));
+    const auto id = Tasks(*f.store).submit(f.routing("Start on desktop"));
     f.reach(id, "running");
     constexpr auto text = "Move to the discovered cloud Session";
     f.script(text, {[id, text](const ModelInput& input) {
@@ -2175,7 +2178,7 @@ void conflictingDiscoveryDoesNotMoveTask() {
         f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
         auto intake = f.routing("Start on desktop");
         intake.config["conversationEnvironments"] = configured;
-        const auto id = f.store->submit(intake);
+        const auto id = Tasks(*f.store).submit(intake);
         f.reach(id, "running");
         const auto original = f.task(id);
         constexpr auto request = "Move the existing work to cloud";
@@ -2187,7 +2190,7 @@ void conflictingDiscoveryDoesNotMoveTask() {
               "a canonical route used discovery despite conflicting configured routing");
         const auto unchanged = f.task(id);
         check(!unchanged.contains("pendingDestination") && unchanged.at("generation") == original.at("generation") &&
-                  unchanged.at("activeRun") == original.at("activeRun") && f.store->tasks("alpha").size() == 1,
+                  unchanged.at("activeRun") == original.at("activeRun") && Tasks(*f.store).tasks("alpha").size() == 1,
               "a rejected destination changed persisted task routing");
         f.t3.finish("run-1", "Desktop work settled");
         f.reach(id, "completed");
@@ -2207,7 +2210,7 @@ Id twoLinkedDestinationTask(Fixture& f) {
     f.script(request, {start({{"environments", {"cloud-target", "other-target"}}})});
     Conversations(*f.store).receive(localOwner, route, "two-linked-targets", request);
     f.runtime->runConversations();
-    const auto id = f.store->tasks("alpha").front().task.id;
+    const auto id = Tasks(*f.store).tasks("alpha").front().task.id;
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "both linked destinations were not dispatched");
     return id;
 }
@@ -2378,7 +2381,7 @@ void savedDestinationFollowupStopTargetsOnlyItsRun(const std::string& stopStatus
     f.t3.finish(otherRun, "Unexpectedly stopped", true, stopStatus);
     f.advanceUntil([&] { return f.task(id).at("state") == "completed"; }, "the stopped Runs did not settle");
     const auto alerts = f.store->notificationEventsSince(localOwner, {"alpha"}, cursor.through, cursor.scope);
-    const auto history = f.store->history(id, cursor.through, 100);
+    const auto history = Tasks(*f.store).history(id, cursor.through, 100);
     const auto hasFailureAlert = [&](const std::string& runId) {
         const auto report = std::ranges::find_if(
             history, [&](const Json& event) { return event.at("kind") == "report" && event.at("data").at("run").at("runId") == runId; });
@@ -2738,7 +2741,7 @@ void destinationFollowupValidatesAndRedactsSourceReport() {
     const Id reportId = reportEvent.at("id");
     const auto revision = reportEvent.at("data").at("revisionId").get<Id>();
 
-    const auto otherTask = f.store->submit(f.routing("Create an unrelated source result"));
+    const auto otherTask = Tasks(*f.store).submit(f.routing("Create an unrelated source result"));
     f.reach(otherTask, "running");
     const auto otherRun = f.task(otherTask).at("activeRun").at("runId").get<std::string>();
     f.t3.finish(otherRun, "Unrelated report");
@@ -3402,7 +3405,7 @@ void queuedDestinationStopsReleaseSlots() {
     {
         Fixture f;
         T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
-        const auto blocker = f.store->submit(f.routing("Hold the cloud project", "alpha", "cloud", "cloud-project"));
+        const auto blocker = Tasks(*f.store).submit(f.routing("Hold the cloud project", "alpha", "cloud", "cloud-project"));
         f.reach(blocker, "running");
         const auto destination = otherAndCloudDestinationTask(f, "queued-stop", "Queue linked cloud work");
         f.advanceUntil(
@@ -3464,8 +3467,8 @@ void cloudDestinationWaitsForItsProject() {
                  return Decision{"update_bot_settings", {{"environmentId", "desktop"}, {"runTimeoutSeconds", 123}}, "Set timeout"};
              }});
     f.receive("set-timeout", "Set the desktop timeout");
-    const auto occupied = f.store->submit(f.routing("Cloud work", "beta", "cloud", "cloud-project"));
-    const auto moving = f.store->submit(f.routing());
+    const auto occupied = Tasks(*f.store).submit(f.routing("Cloud work", "beta", "cloud", "cloud-project"));
+    const auto moving = Tasks(*f.store).submit(f.routing());
     f.script("Include the table as CSV", {send(moving)});
     f.receive("format-before-launch", "Include the table as CSV");
     f.reach(occupied, "running");
@@ -3473,8 +3476,8 @@ void cloudDestinationWaitsForItsProject() {
     check(f.task(moving).at("deadline") == f.now + 123, "desktop launch missed its own timeout");
     f.script("Run the measurement on the cloud Mac", {change(moving, {{"environment", "クラウドMac"}})});
     f.receive("where", "Run the measurement on the cloud Mac");
-    const auto following = f.store->submit(f.routing("Cloud follower", "beta", "cloud", "cloud-project"));
-    const auto desktopFollowing = f.store->submit(f.routing("Desktop follower", "beta"));
+    const auto following = Tasks(*f.store).submit(f.routing("Cloud follower", "beta", "cloud", "cloud-project"));
+    const auto desktopFollowing = Tasks(*f.store).submit(f.routing("Desktop follower", "beta"));
     f.tick(3);
     check(f.t3.interrupted.size() == 1 && f.t3.interrupted[0] == std::pair<std::string, std::string>{"desktop", "run-2"} &&
               f.task(moving)["revisions"].size() == 1,
@@ -3509,7 +3512,7 @@ void cloudDestinationWaitsForItsProject() {
               task["runs"][0]["threadId"] != task["runs"][1]["threadId"] && f.task(following)["state"] == "queued" &&
               f.task(following)["blockedBy"]["id"] == moving,
           "the Task switched Session or budget incorrectly");
-    const auto nextDesktop = f.store->submit(f.routing("Next desktop task", "beta"));
+    const auto nextDesktop = Tasks(*f.store).submit(f.routing("Next desktop task", "beta"));
     f.t3.finish("run-3", "Desktop follower complete");
     f.reach(nextDesktop, "running");
     check(f.t3.sent.size() == 5 && f.t3.sent.back().environmentId == "desktop" && f.task(moving)["state"] == "running",
@@ -3519,9 +3522,9 @@ void cloudDestinationWaitsForItsProject() {
 void queuedMoveWaitsForTheNewerDestinationOwner() {
     Fixture f;
     rememberCloudProject(f);
-    const auto local = f.store->submit(f.routing("Existing local work", "beta"));
-    const auto moving = f.store->submit(f.routing("Transfer this task"));
-    const auto remote = f.store->submit(f.routing("Newer destination owner", "beta", "cloud", "cloud-project"));
+    const auto local = Tasks(*f.store).submit(f.routing("Existing local work", "beta"));
+    const auto moving = Tasks(*f.store).submit(f.routing("Transfer this task"));
+    const auto remote = Tasks(*f.store).submit(f.routing("Newer destination owner", "beta", "cloud", "cloud-project"));
     f.reach(local, "running");
     f.reach(remote, "running");
     f.script("Transfer this task to cloud", {change(moving, {{"environment", "cloud"}})});
@@ -3531,7 +3534,7 @@ void queuedMoveWaitsForTheNewerDestinationOwner() {
                    "the queued transfer stayed behind unrelated work in its old queue");
     check(f.task(moving)["blockedBy"]["id"] == remote && f.t3.sent.size() == 2 && f.t3.interrupted.empty(),
           "the transferred Task bypassed the newer active destination owner");
-    const auto page = taskJson(f.store->tasks("alpha", 0, 1));
+    const auto page = taskJson(Tasks(*f.store).tasks("alpha", 0, 1));
     const Json owner = {{"id", remote}, {"botId", "beta"}, {"request", "Newer destination owner"}, {"state", "running"}};
     check(page.size() == 1 && page[0].at("id") == moving && page[0].at("blockedBy") == owner,
           "the queued transfer's task page still pointed to its old environment");
@@ -3548,13 +3551,13 @@ void moveAsksForTheDestinationProjectAfterSettlement() {
     connections.connect("desktop", localOwner.id, 48123);
     connections.connect("cloud", localOwner.id, 48123);
     rememberCloudProject(f);
-    const auto owner = f.store->submit(f.routing("Existing cloud work", "beta", "cloud", "cloud-release"));
+    const auto owner = Tasks(*f.store).submit(f.routing("Existing cloud work", "beta", "cloud", "cloud-release"));
     const Intake automatic{"alpha", "", "", ""};
     constexpr auto request = "Start work on desktop";
     f.script(request, {start({{"environment", "desktop"}})});
     Conversations(*f.store).receive(localOwner, automatic, "create-on-desktop", request);
     f.runtime->runConversations();
-    const Id moving = f.store->tasks("alpha").front().task.id;
+    const Id moving = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(owner, "running");
     f.reach(moving, "running");
     f.script("Move the work to cloud", {change(moving, {{"environment", "cloud"}})});
@@ -3572,14 +3575,14 @@ void moveAsksForTheDestinationProjectAfterSettlement() {
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-docs", "Cloud Docs", "docs"}, {"cloud-release", "Cloud Release", "release"}};
     f.t3.finish("run-2", "Old Run settled");
     f.reach(moving, "waiting");
-    const auto waiting = f.store->task(moving);
+    const auto waiting = Tasks(*f.store).task(moving);
     check(waiting.task.environmentId == "cloud" && waiting.task.projectId.empty() && waiting.wait &&
               std::ranges::equal(waiting.wait->choices(), std::array{"Cloud Docs", "Cloud Release"}) && !waiting.task.pendingDestination &&
               f.t3.sent.size() == 2,
           "the move kept a project that had disappeared or skipped the new choice");
     const auto target = TaskTarget::from(waiting.task, waiting.wait.value().id);
     f.restart();
-    f.store->operate(localOwner, target, "answer", {{"text", "Cloud Release"}});
+    Tasks(*f.store).operate(localOwner, target, "answer", {{"text", "Cloud Release"}});
     f.tick(3);
     check(f.task(moving).at("state") == "queued" && f.task(moving).at("blockedBy").at("id") == owner && f.t3.sent.size() == 2,
           "a move with a new project choice bypassed the destination owner");
@@ -3592,7 +3595,7 @@ void moveAsksForTheDestinationProjectAfterSettlement() {
 
 void latestTargetPrecedesABatchedBacklog() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     f.script("計測はクラウドMacで", {change(id, {{"environment", "クラウドMac"}})});
     f.receive("old-location", "計測はクラウドMacで");
@@ -3633,7 +3636,7 @@ void checkUnsentRevision(UnsentAction action);
 
 void continuationUsesTheCurrentBudget() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     for (int run = 1; run <= 4; ++run) {
         const auto instruction = "補足として表をCSV形式で出して for fixture " + std::to_string(run);
@@ -3644,7 +3647,7 @@ void continuationUsesTheCurrentBudget() {
         f.reach(id, run < 4 ? "running" : "waiting");
     }
     check(f.task(id)["wait"]["reason"] == "budget" && f.task(id)["remaining"] == 0 && f.t3.sent.size() == 4 &&
-              f.store->tasks("alpha").size() == 1,
+              Tasks(*f.store).tasks("alpha").size() == 1,
           "the exhausted budget still permitted a new Run or Task");
     const auto wait = f.task(id)["wait"];
     f.script("はい", {answer(id)});
@@ -3652,9 +3655,10 @@ void continuationUsesTheCurrentBudget() {
     check(f.lastTurn()[0]["result"]["ok"] == false && f.task(id)["wait"] == wait && f.task(id)["remaining"] == 0 &&
               f.event(id, "budget_granted").is_null(),
           "a conversation turn approved a budget wait");
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait["id"]), "approve");
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait["id"]), "approve");
     f.reach(id, "running");
-    check(f.t3.sent.size() == 5 && f.task(id)["remaining"] == 2 && f.task(id)["additionalUsed"] == 4 && f.store->tasks("alpha").size() == 1,
+    check(f.t3.sent.size() == 5 && f.task(id)["remaining"] == 2 && f.task(id)["additionalUsed"] == 4 &&
+              Tasks(*f.store).tasks("alpha").size() == 1,
           "the resumed Run did not spend one round from the renewed allowance");
     check(f.t3.sent.back().instruction.find("for fixture 4") != std::string::npos,
           "the approved Run lost the instruction that was held for approval");
@@ -3667,7 +3671,7 @@ void revisionOfProvablyUnsentAction() {
 
 void checkUnsentRevision(UnsentAction action) {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     if (action == UnsentAction::FollowUp) {
         f.model.onResult = [](const ModelInput&) {
             return Decision{"follow_up", {{"instruction", "Verify the report"}}, "The report needs verification"};
@@ -3692,7 +3696,7 @@ void checkUnsentRevision(UnsentAction action) {
 
 void queuedCriteriaAreUsedForFirstDelegation() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.script("完了条件は p99 レイテンシを報告", {change(id, {{"doneWhen", "p99 レイテンシを報告"}})});
     const auto receipt = f.receive("criteria-before-launch", "完了条件は p99 レイテンシを報告");
     f.reach(id, "running");
@@ -3708,7 +3712,7 @@ void startCriteriaAreUsedForFirstDelegation() {
     constexpr auto request = "Measure startup and report p95";
     f.script(request, {start({{"request", "Measure startup"}, {"doneWhen", "Report p95 startup time"}})});
     const auto receipt = f.receive("start-with-criteria", request);
-    const auto id = f.store->tasks("alpha").front().task.id;
+    const auto id = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(id, "running");
     const auto task = f.task(id);
     check(task["doneWhen"] == "Report p95 startup time" && task["revisions"].size() == 1 &&
@@ -3720,7 +3724,7 @@ void conversationCanReadAndChangeTheFullCurrentContract() {
     Fixture f;
     f.script("Start a release audit", {start({{"doneWhen", "Report on staging"}})});
     f.receive("create-audit", "Start a release audit");
-    const Id id = f.store->tasks("alpha").front().task.id;
+    const Id id = Tasks(*f.store).tasks("alpha").front().task.id;
     const std::string intent = std::string(999, 'i') + "監査の対象";
     const std::string criteria = std::string(1599, 'c') + "公開しない";
     f.script("Use the updated contract", {change(id, {{"intent", intent}, {"doneWhen", criteria}})});
@@ -3789,7 +3793,7 @@ void newSessionsReceivePersistedTaskDecisions() {
         constexpr auto startText = "Measure the cold-start fixture";
         f.script(startText, {start({{"request", intent}, {"doneWhen", criteria}})});
         f.receive("start-handoff", startText);
-        const Id id = f.store->tasks("alpha").front().task.id;
+        const Id id = Tasks(*f.store).tasks("alpha").front().task.id;
         const auto direction = "Use the pinned input. " + std::string(5000, 'd') + " Keep its checksum in the report.";
         f.script("Use the pinned input", {send(id, {{"instruction", direction}})});
         f.receive("pinned-input", "Use the pinned input");
@@ -3797,7 +3801,8 @@ void newSessionsReceivePersistedTaskDecisions() {
         f.reach(id, "waiting");
         const auto wait = f.task(id).at("wait");
         constexpr auto userAnswer = "Use dataset Cobalt-492";
-        f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait.at("id")), "answer", {{"text", userAnswer}});
+        Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait.at("id")), "answer",
+                                {{"text", userAnswer}});
         f.reach(id, "running");
 
         if (explicitFresh) {
@@ -3851,7 +3856,7 @@ void newSessionsReceivePersistedTaskDecisions() {
 
 void revisedSessionDoesNotReplaySupersededDecisions() {
     Fixture f;
-    const auto id = f.store->submit(f.routing("Measure the retired dataset"));
+    const auto id = Tasks(*f.store).submit(f.routing("Measure the retired dataset"));
     constexpr auto oldDirection = "Use the retired runner";
     f.script(oldDirection, {send(id)});
     f.receive("old-direction", oldDirection);
@@ -3859,7 +3864,7 @@ void revisedSessionDoesNotReplaySupersededDecisions() {
     f.reach(id, "waiting");
     const auto wait = f.task(id).at("wait");
     constexpr auto oldAnswer = "Use account Old-149";
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, wait.at("id")), "answer", {{"text", oldAnswer}});
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait.at("id")), "answer", {{"text", oldAnswer}});
     f.reach(id, "running");
     f.script("Use the replacement suite", {change(id, {{"intent", "Measure the replacement dataset"},
                                                        {"doneWhen", "Report median throughput"},
@@ -3887,7 +3892,7 @@ void authoritativeHandoffFitsBeforeMemory() {
     Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", memory}});
     auto policy = f.store->policy();
     policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"fixture-key"}), protectedValue);
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     const auto checkMemory = [&](const Command& command, std::size_t sectionBudget) {
         const auto& prompt = command.instruction;
@@ -3950,17 +3955,17 @@ void authoritativeHandoffFitsBeforeMemory() {
 
 void intakeChangeScopesTheFirstSessionAnswers() {
     Fixture f;
-    const auto id = f.store->submit(f.routing("Measure frontend startup"));
+    const auto id = Tasks(*f.store).submit(f.routing("Measure frontend startup"));
     f.model.questions[id] = {{"question", "Which browser?"}};
     f.reach(id, "waiting");
-    auto task = f.store->task(id);
-    f.store->operate(localOwner, TaskTarget::from(task.task, task.wait.value().id), "answer", {{"text", "Use Firefox Nightly"}});
+    auto task = Tasks(*f.store).task(id);
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(task.task, task.wait.value().id), "answer", {{"text", "Use Firefox Nightly"}});
     f.script("Measure worker startup instead", {change(id, {{"intent", "Measure worker startup"}})});
     f.receive("replace-intake-intent", "Measure worker startup instead");
     f.model.questions[id] = {{"question", "Which worker?"}};
     f.reach(id, "waiting");
-    task = f.store->task(id);
-    f.store->operate(localOwner, TaskTarget::from(task.task, task.wait.value().id), "answer", {{"text", "Use worker Green-32"}});
+    task = Tasks(*f.store).task(id);
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(task.task, task.wait.value().id), "answer", {{"text", "Use worker Green-32"}});
     f.restart();
     f.reach(id, "running");
     const auto& prompt = f.t3.sent.front().instruction;
@@ -3971,7 +3976,7 @@ void intakeChangeScopesTheFirstSessionAnswers() {
 
 void interruptLeavesTheTaskOpen() {
     Fixture f;
-    const auto id = f.store->submit(f.routing());
+    const auto id = Tasks(*f.store).submit(f.routing());
     f.reach(id, "running");
     const auto run = f.task(id)["activeRun"]["runId"].get<std::string>();
     f.script("Pause that run", {interrupt(id)});
@@ -3993,8 +3998,8 @@ void interruptLeavesTheTaskOpen() {
 void interruptNoOpsDoNotAcknowledgeARequest() {
     for (const auto outcome : {InterruptOutcome::AlreadyTerminal, InterruptOutcome::NoActiveRun}) {
         Fixture f;
-        const auto id = f.store->submit(f.routing());
-        const auto queued = f.store->submit(f.routing("Next project task"));
+        const auto id = Tasks(*f.store).submit(f.routing());
+        const auto queued = Tasks(*f.store).submit(f.routing("Next project task"));
         f.reach(id, "running");
         const auto run = f.task(id).at("activeRun");
         f.t3.interruptOutcome = outcome;
@@ -4008,7 +4013,7 @@ void interruptNoOpsDoNotAcknowledgeARequest() {
                   f.task(id)["state"] == "running" && f.task(id)["activeRun"] == run,
               "an interrupt no-op was recorded as a stop or changed the Task");
 
-        f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, 0), "cancel");
+        Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, 0), "cancel");
         f.advanceUntil([&] { return f.t3.interrupted.size() == 2; }, "cancellation did not contact T3");
         check(f.task(id)["state"] == "cancelling" && f.task(id)["activeRun"] == run && f.task(queued)["state"] == "queued" &&
                   f.event(id, "interrupt_requested").is_null(),
@@ -4040,7 +4045,7 @@ void environmentsResolveByNameOrId() {
                     start({{"request", "Archive"}, {"environment", "z-final"}}), start({{"request", "Audit"}, {"environment", "mars"}})});
     const auto message = Conversations(*f.store).receive(localOwner, routing, "environments", text);
     f.runtime->runConversations();
-    const auto tasks = taskJson(f.store->tasks("alpha"));
+    const auto tasks = taskJson(Tasks(*f.store).tasks("alpha"));
     const auto cloudTask = tasks.size() > 1 ? f.task(tasks[1]["id"]) : Json::object();
     check(tasks.size() == 2 && cloudTask["environmentId"] == "cloud" && cloudTask["projectId"] == "cloud-project" &&
               cloudTask.value("gatewayEnvironmentId", "") == "desktop" && f.task(tasks[0]["id"])["environmentId"] == "executor-final" &&
@@ -4056,7 +4061,7 @@ void existingSessionStartsNormalWork() {
 
     f.script("Create the initial Flock task", {start()});
     f.receive("initial", "Create the initial Flock task");
-    const auto initial = f.store->tasks("alpha").front().task.id;
+    const auto initial = Tasks(*f.store).tasks("alpha").front().task.id;
     f.reach(initial, "running");
     const auto firstRun = f.task(initial).at("activeRun");
     const auto firstRunId = firstRun.at("runId").get<std::string>();
@@ -4084,7 +4089,7 @@ void existingSessionStartsNormalWork() {
                   }});
         Conversations(*f.store).receive(localOwner, f.routing(request, "alpha", "", ""), request, request);
         f.runtime->runConversations();
-        const auto taskId = f.store->tasks("alpha").front().task.id;
+        const auto taskId = Tasks(*f.store).tasks("alpha").front().task.id;
         f.reach(taskId, "running");
         const auto& sent = f.t3.sent.back();
         const bool native = title == nativeTitle;
@@ -4120,7 +4125,7 @@ void sessionMemoryFollowsTheAcceptedVersion() {
     f.t3.deliveryVisible = false;
     auto routing = f.routing();
     routing.config["botDisplayName"] = "Release";
-    const auto id = f.store->submit(routing);
+    const auto id = Tasks(*f.store).submit(routing);
     f.advanceUntil([&] { return f.t3.sent.size() == 1; }, "the initial Session did not receive work");
     const auto first = f.t3.sent.front().instruction;
     check(first.find("\n\nNotes from Release's memory:\nUse baseline A.") != first.npos &&
@@ -4173,7 +4178,7 @@ void existingAutomationUsesLiveMemorySharing() {
 
     f.now = schedule.at("nextRunAt");
     Automations(*f.store).fireDueAutomations(f.now);
-    const auto id = f.store->tasks("alpha").at(0).task.id;
+    const auto id = Tasks(*f.store).tasks("alpha").at(0).task.id;
     check(!f.task(id).at("config").contains("shareMemoryWithSessions"),
           "The schedule fixture did not preserve the settings saved before opt-in");
     f.reach(id, "running");
@@ -4185,7 +4190,7 @@ void privateMemoryStaysInFlockByDefault() {
     Fixture f([](std::string_view) { return "Private convention in a project other Bots can read."; });
     auto routing = f.routing();
     routing.config.erase("shareMemoryWithSessions");
-    f.reach(f.store->submit(routing), "running");
+    f.reach(Tasks(*f.store).submit(routing), "running");
     check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find("Private convention") == std::string::npos,
           "a Session received private memory without an explicit opt-in");
 
@@ -4199,13 +4204,13 @@ void privateMemoryStaysInFlockByDefault() {
     f.runtime.reset();
     f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, Runtime::SoulLoader{}, options);
     routing.config["shareMemoryWithSessions"] = true;
-    f.reach(f.store->submit(routing), "running");
+    f.reach(Tasks(*f.store).submit(routing), "running");
     check(f.t3.sent.size() == 2 && f.t3.sent.back().instruction.find("Private convention") == std::string::npos,
           "a queued task sent private memory after the Bot disabled sharing");
 
     f.t3.finish("run-2", "Prior request completed");
     profileReadable = false;
-    f.reach(f.store->submit(routing), "running");
+    f.reach(Tasks(*f.store).submit(routing), "running");
     check(f.t3.sent.size() == 3 && f.t3.sent.back().instruction.find("Private convention") == std::string::npos,
           "an unreadable Bot profile fell back to the saved memory-sharing opt-in");
 }
