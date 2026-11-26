@@ -290,7 +290,8 @@ void notesAndRoutingOnRestart() {
     t3.finished = true;
     {
         Store store(db, {.memorySeed = seed});
-        Memory(store).memory({"fixture", true}, "first", "apply_memory_edit", {{"baseVersion", 0}, {"content", "First updated memory"}});
+        Memory(store).memory({"fixture", true}, "first", "write_memory",
+                             {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", "First updated memory"}});
         Runtime runtime(store, model, t3, soul);
         for (int i = 0; i < 4; ++i) runtime.tick();
         check(Tasks(store).task(firstId).task.state == TaskState::completed, "first Bot did not complete with its original criterion");
@@ -443,13 +444,9 @@ void notesAcrossConversationAndWork() {
         const std::string_view readText = requestText(read), responseText = requestText(respond);
         constexpr std::string_view eventField = ",\"event\":";
         const auto event = readText.find(eventField);
-        auto expectedTools = read.at("tools");
-        auto& functions = expectedTools.at(0).at("tools");
-        const auto review = std::ranges::find_if(functions, [](const Json& tool) { return tool.at("name") == "review_preference"; });
-        check(review != functions.end(), "the first Bot-owner step did not offer preference review");
-        functions.erase(review);
         check(event != readText.npos && responseText.starts_with(readText.substr(0, event + eventField.size())) &&
-                  readText != responseText && expectedTools == respond.at("tools") && read.at("instructions") == respond.at("instructions"),
+                  readText != responseText && read.at("tools") == respond.at("tools") &&
+                  read.at("instructions") == respond.at("instructions"),
               "a read-only turn step changed the prompt prefix before event data");
         check(TaskList(store).tasks().size() == taskCount && t3.commands.size() == commands && taskJson(Tasks(store).task(task)) == before,
               "explaining a result must preserve the Task and its Runs without starting any new work");
@@ -468,7 +465,8 @@ void notesAcrossConversationAndWork() {
     first = {"Use the verified report.", "Lead with the evidence."};
     write(folder / "first" / "SOUL.md", first.soul);
     const auto stored = expectedNotes(first);
-    Memory(store).memory({"fixture", true}, "first", "apply_memory_edit", {{"baseVersion", 0}, {"content", stored.memory}});
+    Memory(store).memory({"fixture", true}, "first", "write_memory",
+                         {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", stored.memory}});
     checkResultAnswer(firstIntake, firstTask, edited, stored, std::string(explanation) + " " + conclusion);
     const auto deleted = askAboutResult(firstIntake, firstTask, "deleted-notes");
     std::filesystem::remove(folder / "first" / "SOUL.md");
@@ -608,8 +606,7 @@ void responseContract() {
                    "check_environment_readiness",
                    "request_bot_change",
                    "read_memory",
-                   "propose_memory_edit",
-                   "apply_memory_edit",
+                   "write_memory",
                    "revert_memory_edit",
                    "memory_history",
                    "create_schedule",
@@ -662,8 +659,7 @@ void responseContract() {
           "Bot change schema does not match dispatch");
     const std::map<std::string, Json> memoryAutomationRequired{{"read_memory", Json::array()},
                                                                {"memory_history", Json::array()},
-                                                               {"propose_memory_edit", {"baseVersion", "content", "rationale"}},
-                                                               {"apply_memory_edit", {"baseVersion"}},
+                                                               {"write_memory", {"baseVersion", "content", "summary"}},
                                                                {"revert_memory_edit", {"baseVersion", "revisionId"}},
                                                                {"create_schedule", {"request", "cron", "timezone"}},
                                                                {"list_schedules", Json::array()},
@@ -672,7 +668,7 @@ void responseContract() {
                                                                {"create_trigger", {"request", "source"}}};
     for (const auto& [name, required] : memoryAutomationRequired)
         check(turnTool(name).at("required") == required, "memory or automation schema does not match dispatch");
-    check(turnTool("apply_memory_edit")["properties"]["baseVersion"]["minimum"] == 0 &&
+    check(turnTool("write_memory")["properties"]["baseVersion"]["minimum"] == 0 &&
               turnTool("create_trigger")["properties"]["eventFilter"]["type"] == "object",
           "incorrect schema constraints");
     const auto& search = turnTool("flock_session_search");

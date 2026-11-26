@@ -8,6 +8,7 @@
 #include "session_participation_storage.hpp"
 #include "session_message_storage.hpp"
 #include "secret_storage.hpp"
+#include "memory_storage.hpp"
 #include "policy_approvals.hpp"
 #include "git_storage.hpp"
 #include "conversation_tools.hpp"
@@ -273,8 +274,7 @@ std::optional<Resource> ConversationStorage::conversationCallResource(const Mess
     if (tool == "create_schedule" || tool == "create_reminder" || tool == "create_trigger" || tool == "remove_schedule")
         return Resource{Action::automation_change, message.bot};
     const bool shared = decision.args.contains("docId");
-    if (tool == "remember_preference") return Resource{Action::private_memory_write, message.bot};
-    if (tool == "propose_memory_edit" || tool == "apply_memory_edit" || tool == "revert_memory_edit")
+    if (tool == "write_memory" || tool == "revert_memory_edit")
         return shared ? Resource{Action::shared_memory_write, field(decision.args, "docId")}
                       : Resource{Action::private_memory_write, message.bot};
     if (!shared) return channelStorage.channelToolPolicy(message.id, tool);
@@ -324,13 +324,17 @@ std::optional<Json> ConversationStorage::applyLocalConversationCall(const Messag
                                                                     const WorkSession* selectedSession,
                                                                     const LinkedTaskDestinations& linked) {
     if (const auto resource = conversationCallResource(message, decision)) {
-        if (resource->action == Action::private_memory_write &&
-            !permissions.allows(turnActor(message), Action::bot_settings, resource->target))
-            return toolFailure("Memory access denied");
-        const auto gate = policyApprovals.approveAction(policyApprovals.policyOrigin(message), *resource, key,
-                                                        Json::array({decision.tool, decision.args}), now, true, waitMode);
-        if (gate == ApprovalGate::waiting) return std::nullopt;
-        if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
+        using enum Action;
+        const bool writesMemory = resource->action == private_memory_write || resource->action == shared_memory_write;
+        if (writesMemory && !memoryStorage.canEditFrom(message)) return toolFailure("Memory access denied");
+        if (resource->action == private_memory_write && decision.tool == "write_memory") {
+            if (!permissions.allows(message.bot, private_memory_write, message.bot)) return toolFailure("The action was denied by policy.");
+        } else {
+            const auto gate = policyApprovals.approveAction(policyApprovals.policyOrigin(message), *resource, key,
+                                                            Json::array({decision.tool, decision.args}), now, true, waitMode);
+            if (gate == ApprovalGate::waiting) return std::nullopt;
+            if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
+        }
     }
     database.exec("SAVEPOINT turn_tool");
     try {

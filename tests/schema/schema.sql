@@ -45,7 +45,6 @@ VALUES
     ('index', 'local_machine_open_request', 'local_machine_connections', 'CREATE UNIQUE INDEX local_machine_open_request
       ON local_machine_connections(bot_id,task_id,environment_id,thread_id,machine_id)
       WHERE status IN (''pending'',''approved'')'),
-    ('index', 'memory_proposals_document', 'memory_proposals', 'CREATE INDEX memory_proposals_document ON memory_proposals(doc_key,id DESC)'),
     ('index', 'memory_revisions_document', 'memory_revisions', 'CREATE INDEX memory_revisions_document ON memory_revisions(doc_key,id DESC)'),
     ('index', 'outbox_task', 'outbox', 'CREATE INDEX outbox_task ON outbox(task_id)'),
     ('index', 'peer_sender_open', 'peer_exchanges', 'CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>''closed'''),
@@ -295,12 +294,6 @@ VALUES
   doc_key TEXT PRIMARY KEY, scope_kind TEXT NOT NULL, owner_bot TEXT, doc_id TEXT NOT NULL,
   content TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   CHECK((scope_kind=''private'' AND owner_bot IS NOT NULL) OR (scope_kind=''shared'' AND owner_bot IS NULL)))'),
-    ('table', 'memory_proposals', 'memory_proposals', 'CREATE TABLE memory_proposals(
-  id INTEGER PRIMARY KEY, doc_key TEXT NOT NULL REFERENCES memory_documents(doc_key),
-  base_version INTEGER NOT NULL, proposed_content TEXT NOT NULL, rationale TEXT NOT NULL,
-  author TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN (''pending'',''applied'',''rejected'')),
-  created_at INTEGER NOT NULL, decided_by TEXT, decided_at INTEGER,
-  diff_summary TEXT NOT NULL)'),
     ('table', 'memory_revisions', 'memory_revisions', 'CREATE TABLE memory_revisions(
   id INTEGER PRIMARY KEY, doc_key TEXT NOT NULL REFERENCES memory_documents(doc_key),
   version INTEGER NOT NULL, base_version INTEGER NOT NULL, author TEXT NOT NULL,

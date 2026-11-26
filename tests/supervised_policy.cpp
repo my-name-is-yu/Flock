@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_intake.hpp"
@@ -171,7 +172,8 @@ void reopenDirectTask(const std::filesystem::path& path) {
         Store store(path);
         BotAccess{store}.setOwner(requester, "release");
         PolicyRules{store}.setMode(localOwner, "supervised");
-        Memory(store).memory(requester, "release", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the old signing process."}});
+        Memory(store).memory(requester, "release", "write_memory",
+                             {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Use the old signing process."}});
         task = TaskIntake(store).submit({"release", "Build the release", "env", "project", Json::object()}, &requester);
     }
     Store reopened(path);
@@ -183,8 +185,8 @@ void reopenDirectTask(const std::filesystem::path& path) {
     check(items.size() == 1 && items.at(0).at("taskId") == task && items.at(0).at("expiresAt") == 0 && adapter.sends == 0,
           "A saved direct request lost its approval for the original requester");
     check(items.dump().find("Use the old signing process.") == std::string::npos, "The approval displayed the Bot's private memory");
-    Memory(reopened).memory(requester, "release", "apply_memory_edit",
-                            {{"baseVersion", 1}, {"content", "Use the current signing process."}});
+    Memory(reopened).memory(requester, "release", "write_memory",
+                            {{"baseVersion", 1}, {"summary", "Update memory"}, {"content", "Use the current signing process."}});
     Inbox(reopened).decideInbox(requester, target(items.at(0)), "allow_once");
     for (int i = 0; i < 6; ++i) runtime.tick();
     check(adapter.sends == 1, "The saved direct request did not launch after approval");
@@ -330,7 +332,6 @@ void downstreamApproval(const std::filesystem::path& path) {
     PolicyRules policyRules{store};
     policyRules.setMode(localOwner, "supervised");
     policyRules.changeRule(localOwner, RuleKind::ask, Action::shared_memory_write, "shared-playbook", true);
-    policyRules.changeRule(localOwner, RuleKind::ask, Action::private_memory_write, "release", true);
     BotAccess{store}.setMember(localOwner, "release", member.id, true);
     FixtureModel model;
     Adapter adapter;
@@ -348,20 +349,37 @@ void downstreamApproval(const std::filesystem::path& path) {
     };
     approve("reminder",
             {"create_reminder", {{"fireAt", unixTime() + 600}, {"timezone", "Etc/UTC"}, {"request", "Check release"}}, "Schedule"});
-    approve("playbook", {"apply_memory_edit", {{"docId", "shared-playbook"}, {"baseVersion", 0}, {"content", "Verify staging"}}, "Edit"});
+    approve("playbook",
+            {"write_memory",
+             {{"docId", "shared-playbook"}, {"baseVersion", 0}, {"content", "Verify staging"}, {"summary", "Update the playbook"}},
+             "Edit"});
     check(Memory(store).memory(localOwner, "release", "read_memory", {{"docId", "shared-playbook"}}).at("content") == "Verify staging",
           "Approved shared memory edit did not persist");
 
-    const Decision privateEdit{"apply_memory_edit", {{"baseVersion", 0}, {"content", "Use Markdown"}}, "Edit"};
+    const auto conversation = Conversations(store).conversation("release");
+    const auto notice = std::ranges::find_if(conversation, [](const Json& event) { return event.at("kind") == "memory_remembered"; });
+    check(notice != conversation.end() && notice->at("data").at("docId") == "shared-playbook" && notice->at("data").at("canUndo") == true,
+          "A shared memory edit did not offer Undo for its document");
+    const auto& saved = notice->at("data");
+    const auto restricted = Conversations(store).conversation("release", 0, 50, Conversations::ConversationEvents::all, &member);
+    check(std::ranges::any_of(restricted,
+                              [](const Json& event) {
+                                  return event.at("kind") == "memory_remembered" &&
+                                         event.at("data") == Json{{"text", "Shared memory updated."}};
+                              }),
+          "The shared edit exposed its summary or document ID to a Bot member");
+    Memory(store).memory(localOwner, "release", "revert_memory_edit",
+                         {{"docId", saved.at("docId")}, {"baseVersion", saved.at("version")}, {"revisionId", saved.at("revisionId")}});
+    check(Memory(store).memory(localOwner, "release", "read_memory", {{"docId", "shared-playbook"}}).at("content") == "",
+          "A person could not undo an approved shared memory edit");
+
+    const Decision privateEdit{"write_memory", {{"baseVersion", 0}, {"content", "Use Markdown"}, {"summary", "Use Markdown"}}, "Edit"};
     model.action = privateEdit;
     ConversationIntake(store).receive(member, intake, "member-edit", "Remember to use Markdown");
     runtime.runConversations();
     check(Inbox(store).inbox(localOwner).empty(), "An ineligible private memory edit requested approval");
-    check(model.outcome.at(0).at("result") == Json{{"ok", false}, {"error", "Memory access denied"}},
+    check(model.outcome.at(0).at("result") == Json{{"ok", false}, {"error", "Tool unavailable for this turn"}},
           "The shared member's private memory edit was not denied");
-    approve("private-edit", privateEdit);
-    check(Memory(store).memory(localOwner, "release", "read_memory", Json::object()).at("content") == "Use Markdown",
-          "Approved private memory edit did not persist");
 }
 
 void scheduled(const std::filesystem::path& path) {

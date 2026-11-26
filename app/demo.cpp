@@ -19,6 +19,8 @@
 
 namespace flockv0::app {
 namespace {
+constexpr std::string_view fridayRequest = "Remember that we deploy on Fridays.";
+constexpr std::string_view fridayMemory = "Deploy on Fridays.";
 constexpr std::string_view verifyProjectRequest = "Show me how to verify this project";
 constexpr std::string_view verificationReport = "The demo project's full check runs with ./scripts/verify.sh.";
 constexpr std::string_view verificationRunSuffix = "-verify-project";
@@ -33,11 +35,22 @@ class DemoModel final : public Model {
                 const bool ok = last.at("result").value("ok", false);
                 const auto tool = last.value("tool", "");
                 std::string text = !ok                              ? "The demo could not apply that request."
+                                   : tool == "write_memory"         ? "I’ll remember that."
                                    : tool == "answer_task_question" ? "I passed your answer to the task."
                                    : tool == "read_result"          ? "The demo result records successful completion of simulated work. "
                                                                       "It contains no implementation details."
                                                                     : "I queued your request.";
                 return {{{"reply", {{"text", text}}, {}}}};
+            }
+            if (in.event.at("text") == fridayRequest && std::ranges::find(in.tools, "write_memory") != in.tools.end()) {
+                auto content = in.notes.memory;
+                if (content.find(fridayMemory) == content.npos) {
+                    if (!content.empty() && !content.ends_with('\n')) content += '\n';
+                    content.append(fridayMemory);
+                }
+                return {{{"write_memory",
+                          {{"baseVersion", in.event.at("memoryVersion")}, {"content", content}, {"summary", fridayMemory}},
+                          {}}}};
             }
             const auto& reply = in.event.at("replyTo");
             if (reply.is_object() && reply.value("kind", "") == "task_question" && reply.value("current", false)) {

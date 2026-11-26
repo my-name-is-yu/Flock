@@ -379,7 +379,7 @@ public:
                         setViewer(res, callbacks_, actor);
                         json(res, 200, withConversationAccess(actor, id, std::move(view)));
                     } else if (req.path == "/api/conversation")
-                        json(res, 200, Policy{store_}.redactSecrets(id, web::conversation(store_, id, before, actor.id)));
+                        json(res, 200, Policy{store_}.redactSecrets(id, web::conversation(store_, id, before, &actor)));
                     else
                         json(res, 200, Policy{store_}.redactSecrets(id, web::sessions(store_, id, before)));
                 } catch (const InputError& e) {
@@ -706,7 +706,7 @@ private:
         auto bot = findBot(view.bot);
         if (bot.is_null()) return bot;
         auto data =
-            withConversationAccess(person, view.bot, Policy{store_}.redactSecrets(view.bot, web::botView(store_, bot, nullptr, person.id)));
+            withConversationAccess(person, view.bot, Policy{store_}.redactSecrets(view.bot, web::botView(store_, bot, nullptr, &person)));
         if (stamp && stamp == Notifications(store_).botViewStamp())
             return {std::move(data), ChangeFeed::BotVersion{*stamp, std::move(bot)}};
         return data;
@@ -729,7 +729,7 @@ private:
                 return view;
             }
         }
-        return policy.redactSecrets(id, web::botView(store_, bot, changedSessionTasks, person.id));
+        return policy.redactSecrets(id, web::botView(store_, bot, changedSessionTasks, &person));
     }
 
     Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {

@@ -1476,7 +1476,7 @@ function memoryUndo(event, context, status) {
     undo.setAttribute('aria-disabled', 'true');
     status.textContent = 'Undoing…';
     try {
-      await api('memory/revert', { botId: context.id, revisionId: data.revisionId, baseVersion: data.version });
+      await api('memory/revert', { botId: context.id, docId: data.docId, revisionId: data.revisionId, baseVersion: data.version });
     } catch (error) {
       if (error.status === 409) {
         status.textContent = 'Memory has changed.';
@@ -1514,7 +1514,7 @@ function memoryNotice(event, canUndo, context) {
     source.dataset.timelineAction = 'show-learning-source';
     note.append(' · from ', source);
   }
-  const stale = learned && !data.canUndo && !data.undone;
+  const stale = !!data.revisionId && !data.canUndo && !data.undone;
   const status = node('span', 'memory-notice-status', stale ? 'Memory has changed.' : '');
   status.setAttribute('role', 'status');
   if (canUndo) note.append(' · ', memoryUndo(event, context, status));
@@ -2869,7 +2869,8 @@ function settingsContent(bot, section = 'general') {
         closeDetail();
         void showConversationMessage(context, eventId, { preferLoaded: true });
       },
-      (run) => linkToRun(run, 'Open Session')
+      (run) => linkToRun(run, 'Open Session'),
+      bot.name
     )];
   }
   if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];

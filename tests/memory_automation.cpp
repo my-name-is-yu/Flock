@@ -89,7 +89,7 @@ struct Adapter : T3 {
 struct Script : Model {
     std::vector<Decision> choices;
     std::vector<ModelInput> inputs;
-    bool deferReply = false;
+    bool deferReply = false, checkOffered = true;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         inputs.push_back(input);
@@ -98,7 +98,7 @@ struct Script : Model {
             throw ModelError("Temporary model outage", true);
         }
         if (!choices.empty()) {
-            check(input.tools.end() != std::find(input.tools.begin(), input.tools.end(), choices.front().tool),
+            check(!checkOffered || std::ranges::find(input.tools, choices.front().tool) != input.tools.end(),
                   "Conversation tool was not advertised");
             auto choice = std::move(choices.front());
             choices.erase(choices.begin());
@@ -112,10 +112,8 @@ Decision reply() {
     return {"reply", {{"text", "Done"}}, "Confirmed"};
 }
 
-Decision remember(Id version, std::string_view content, std::string_view summary, std::string_view quote) {
-    return {"remember_preference",
-            {{"baseVersion", version}, {"content", content}, {"summary", summary}, {"sourceQuote", quote}},
-            "User preference"};
+Decision writeMemory(Id version, std::string_view content, std::string_view summary) {
+    return {"write_memory", {{"baseVersion", version}, {"content", content}, {"summary", summary}}, {}};
 }
 
 const Json& lastResult(const ModelInput& input) {
@@ -144,29 +142,17 @@ void memoryFlow(const std::filesystem::path& db) {
         check(bot.choices.empty(), "Conversation did not complete");
         return start;
     };
-    const auto step = turn(
-        alpha, "Remember to use staging-eu for staging checks",
-        {
-            {"read_memory", Json::object(), "Read current conventions"},
-            {"propose_memory_edit",
-             {{"baseVersion", 0}, {"content", "Prefer CSV.\nUse staging-eu.\n"}, {"rationale", "User specified the staging environment"}},
-             "Propose convention"},
-        });
-    check(lastResult(bot.inputs.at(step + 1)).at("version") == 0 && lastResult(bot.inputs.at(step + 1)).at("content") == "Prefer CSV.\n",
-          "Private memory did not come from notes");
-    const auto proposal = lastResult(bot.inputs.at(step + 2)).at("proposalId");
-    const auto apply = turn(alpha, "Apply the convention",
-                            {
-                                {"apply_memory_edit", {{"baseVersion", 0}, {"proposalId", proposal}}, "Apply"},
-                                {"memory_history", Json::object(), "Verify change"},
-                            });
-    const auto history = lastResult(bot.inputs.at(apply + 2));
+    const auto step = turn(alpha, "Remember to use staging-eu for staging checks",
+                           {writeMemory(0, "Prefer CSV.\nUse staging-eu.\n", "Use staging-eu for staging checks"),
+                            {"memory_history", Json::object(), "Verify change"}});
+    const auto history = lastResult(bot.inputs.at(step + 2));
     const auto first = history.at("revisions").at(0);
-    check(bot.inputs.at(apply + 1).notes.memory == "Prefer CSV.\nUse staging-eu.\n",
-          "An active conversation used memory from before its own edit");
-    check(first.at("author") == "bot:alpha" && first.at("diffSummary") == "-0 +1 lines" &&
-              history.at("proposals").at(0).at("status") == "applied",
-          "Memory proposal and diff were not recorded");
+    check(bot.inputs.at(step).event.at("memoryVersion") == 0 && bot.inputs.at(step).notes.memory == "Prefer CSV.\n" &&
+              bot.inputs.at(step + 1).event.at("memoryVersion") == 1 &&
+              bot.inputs.at(step + 1).notes.memory == "Prefer CSV.\nUse staging-eu.\n",
+          "A private edit did not use the version of memory in context");
+    check(history.at("revisions").size() == 1 && first.at("author") == "bot:alpha" && first.at("diffSummary") == "-0 +1 lines",
+          "The direct memory edit did not record its author and diff");
     const auto followup = turn(alpha, "Which staging environment is standard?", {});
     check(bot.inputs.at(followup).notes.memory == "Prefer CSV.\nUse staging-eu.\n", "BotNotes did not load edited memory");
 
@@ -187,20 +173,21 @@ void memoryFlow(const std::filesystem::path& db) {
     }
     check(sharedDenied, "Bot membership granted shared memory access");
     const auto memberStep = bot.inputs.size();
-    bot.choices = {{"apply_memory_edit", {{"baseVersion", 2}, {"content", "Member edit"}}, "Change memory"},
-                   {"remove_schedule", {{"id", 1}}, "Remove schedule"},
-                   reply()};
+    bot.checkOffered = false;
+    bot.choices = {writeMemory(2, "Member edit", "Change memory"), {"remove_schedule", {{"id", 1}}, "Remove schedule"}, reply()};
     ConversationIntake(store).receive(member, alpha, "member-mutation", "Change memory and schedules");
     runtime.runConversations();
-    check(lastResult(bot.inputs.at(memberStep + 1)).at("error") == "Memory access denied" &&
+    bot.checkOffered = true;
+    check(lastResult(bot.inputs.at(memberStep + 1)).at("error") == "Tool unavailable for this turn" &&
               lastResult(bot.inputs.at(memberStep + 2)).at("error") == "Automation change denied",
           "Member chat bypassed owner-only mutations");
 
-    const auto shared =
-        turn(alpha, "Update the staging playbook",
-             {
-                 {"apply_memory_edit", {{"docId", path}, {"baseVersion", 0}, {"content", "Staging playbook"}}, "Update shared file"},
-             });
+    const auto shared = turn(alpha, "Update the staging playbook",
+                             {
+                                 {"write_memory",
+                                  {{"docId", path}, {"baseVersion", 0}, {"content", "Staging playbook"}, {"summary", "Staging playbook"}},
+                                  "Update shared file"},
+                             });
     check(lastResult(bot.inputs.at(shared + 1)).at("ok") == true, "Writable shared file denied");
     const auto reader = turn(beta, "Read the staging playbook",
                              {
@@ -222,12 +209,13 @@ void memoryFlow(const std::filesystem::path& db) {
     policyRules.changeNeverRule(owner, Action::shared_memory_read, path, true);
     policyRules.changeNeverRule(owner, Action::shared_memory_write, path, true);
     const Intake gamma{"gamma", "", "env", "gamma-project"};
-    const auto denied =
-        turn(gamma, "Try the staging playbook",
-             {
-                 {"read_memory", {{"docId", path}}, "Try unauthorized read"},
-                 {"apply_memory_edit", {{"docId", path}, {"baseVersion", 1}, {"content", "Unauthorized"}}, "Try unauthorized write"},
-             });
+    const auto denied = turn(gamma, "Try the staging playbook",
+                             {
+                                 {"read_memory", {{"docId", path}}, "Try unauthorized read"},
+                                 {"write_memory",
+                                  {{"docId", path}, {"baseVersion", 1}, {"content", "Unauthorized"}, {"summary", "Unauthorized"}},
+                                  "Try unauthorized write"},
+                             });
     check(lastResult(bot.inputs.at(denied + 1)).at("ok") == false && lastResult(bot.inputs.at(denied + 2)).at("ok") == false,
           "Blocked Bot accessed a shared file");
 
@@ -239,7 +227,8 @@ void memoryFlow(const std::filesystem::path& db) {
         start.arrive_and_wait();
         try {
             Memory(connection)
-                .memory(person, target.botId, "apply_memory_edit", {{"docId", path}, {"baseVersion", 1}, {"content", content}});
+                .memory(person, target.botId, "write_memory",
+                        {{"docId", path}, {"baseVersion", 1}, {"summary", "Update memory"}, {"content", content}});
             return true;
         } catch (const Conflict& error) {
             check(std::string_view(error.what()).starts_with("Memory version conflict"), "Wrong concurrent edit failure");
@@ -254,11 +243,12 @@ void memoryFlow(const std::filesystem::path& db) {
     const auto final = Memory(store).memory(owner, "alpha", "read_memory", {{"docId", path}});
     check(final.at("version") == 2 && final.at("content") == (alphaWon ? "Alpha version" : "Beta version"),
           "A concurrent shared edit silently overwrote the winner");
-    const auto stale =
-        turn(beta, "Try a stale shared edit",
-             {
-                 {"apply_memory_edit", {{"docId", path}, {"baseVersion", 1}, {"content", "Stale edit"}}, "Apply stale snapshot"},
-             });
+    const auto stale = turn(beta, "Try a stale shared edit",
+                            {
+                                {"write_memory",
+                                 {{"docId", path}, {"baseVersion", 1}, {"content", "Stale edit"}, {"summary", "Stale edit"}},
+                                 "Apply stale snapshot"},
+                            });
     check(lastResult(bot.inputs.at(stale + 1)).at("error").get<std::string>().starts_with("Memory version conflict"),
           "Bot accepted a stale shared version");
 
@@ -266,8 +256,11 @@ void memoryFlow(const std::filesystem::path& db) {
     secretRequests.submitSecret(owner, "beta", secret, "fixture-protected-token");
     const auto redact = turn(alpha, "Record a sanitized staging example",
                              {
-                                 {"apply_memory_edit",
-                                  {{"docId", path}, {"baseVersion", 2}, {"content", "Example: fixture-protected-token"}},
+                                 {"write_memory",
+                                  {{"docId", path},
+                                   {"baseVersion", 2},
+                                   {"content", "Example: fixture-protected-token"},
+                                   {"summary", "Example: fixture-protected-token"}},
                                   "Example includes fixture-protected-token"},
                              });
     check(bot.inputs.at(redact + 1).event.dump().find("fixture-protected-token") == std::string::npos,
@@ -299,9 +292,13 @@ void proactiveMemory(const std::filesystem::path& db) {
     Adapter adapter;
     Runtime runtime(store, model, adapter, {});
     const auto send = [&](std::string_view key, std::string_view message, Decision edit) {
-        model.choices = {{"review_preference", Json::object(), "Review a lasting preference"}, std::move(edit), reply()};
+        const auto calls = model.inputs.size();
+        model.choices = {std::move(edit), reply()};
         ConversationIntake(store).receive(localOwner, alpha, key, message);
         runtime.runConversations();
+        check(model.choices.empty() && model.inputs.size() == calls + 2 && model.inputs.back().event.at("turn").size() == 1 &&
+                  model.inputs.back().event.at("turn").front().at("tool") == "write_memory",
+              "A memory edit should take one write and one reply request");
     };
     const auto notices = [&] {
         Json result = Json::array();
@@ -311,44 +308,31 @@ void proactiveMemory(const std::filesystem::path& db) {
     };
     const auto memory = [&] { return Memory(store).memory(owner, alpha.botId, "read_memory", Json::object()); };
 
-    send("preferred", preference, remember(0, preferred, "Keep release notes under one page.", preference));
+    send("preferred", preference, writeMemory(0, preferred, "Keep release notes under one page."));
     auto saved = notices();
     check(model.choices.empty() && saved.size() == 1 && saved.front().at("text") == "Keep release notes under one page." &&
               saved.front().at("canUndo") == true && memory().at("content") == preferred && memory().at("version") == 1,
           "A direct preference did not update memory and show an Undo notice");
     const auto firstRevision = saved.front().at("revisionId");
 
-    send("same-preference", preference, remember(1, preferred, "Keep release notes under one page.", preference));
+    send("same-preference", preference, writeMemory(1, preferred, "Keep release notes under one page."));
     check(model.choices.empty() && notices().size() == 1 && memory().at("version") == 1,
           "An unchanged preference created another revision or notice");
-
-    send("skip-preference", "What is the release date?", {"skip_preference", Json::object(), "No lasting preference"});
-    check(model.choices.empty() && notices().size() == 1 && memory().at("version") == 1,
-          "Skipping an unrelated message changed memory or interrupted the reply");
-
-    send("unrelated", "What is the release date?", remember(1, corrected, correction, correction));
-    check(model.choices.empty() && lastResult(model.inputs.back()).at("ok") == false && memory().at("content") == preferred &&
-              notices().size() == 1,
-          "A preference missing from the person's message changed memory");
 
     PolicyRules policyRules{store};
     policyRules.setMode(owner, "supervised");
     policyRules.changeRule(owner, RuleKind::ask, Action::private_memory_write, alpha.botId, true);
-    send("correction", correction, remember(1, corrected, "Use Markdown for release notes.", correction));
-    const auto pending = Inbox(store).inbox(localOwner);
-    check(pending.size() == 1 && pending.front().at("status") == "pending" &&
-              pending.front().at("prompt") == "\"Use Markdown for release notes.\"" && notices().size() == 1 && memory().at("version") == 1,
-          "A private memory correction bypassed approval");
-    const auto& item = pending.front();
-    Inbox(store).decideInbox(localOwner,
-                             {alpha.botId, InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), item.at("taskId"),
-                              item.at("targetRevision"), item.at("targetGeneration")},
-                             "allow_once");
-    runtime.runConversations();
+    const auto correctionEdit = writeMemory(1, corrected, "Use Markdown for release notes.");
+    send("ask-rule", correction, correctionEdit);
+    check(lastResult(model.inputs.back()).at("ok") == false && memory().at("version") == 1 && Inbox(store).inbox(localOwner).empty(),
+          "An Ask rule did not block a private write without opening an approval");
+    policyRules.changeRule(owner, RuleKind::ask, Action::private_memory_write, alpha.botId, false);
+    send("correction", correction, correctionEdit);
+    check(Inbox(store).inbox(localOwner).empty(), "A direct private memory edit requested approval");
     saved = notices();
     check(model.choices.empty() && saved.size() == 2 && saved.back().at("text") == "Use Markdown for release notes." &&
               !saved.front().value("canUndo", false) && saved.back().at("canUndo") == true && memory().at("content") == corrected,
-          "The approved correction did not replace the old preference");
+          "The correction did not replace the old preference");
     rejectsWithConflict(
         [&] {
             Memory(store).memory(owner, alpha.botId, "revert_memory_edit",
@@ -364,28 +348,17 @@ void proactiveMemory(const std::filesystem::path& db) {
     check(memory().at("content") == preferred && reverted.size() == 2 && reverted.back().at("undone") == true &&
               !reverted.back().value("canUndo", false) && history.size() == 3 && history.front().at("revertedFrom") == revision,
           "Undo did not persist the restored memory and identify the reverted edit");
-}
-
-void unavailablePreferenceReviewStillReplies(const std::filesystem::path& db) {
-    Store store(db, {.memorySeed = [](auto) { return "Prefer CSV."; }});
-    SecretRequests secretRequests{store};
-    secretRequests.submitSecret(owner, alpha.botId, secretRequests.requestSecret(alpha.botId, {"fixture-token"}), "memory");
-    Script model;
-    Adapter adapter;
-    Runtime runtime(store, model, adapter, {});
-    model.choices = {{"review_preference", Json::object(), "Review a lasting preference"}, reply()};
-    const auto receipt = ConversationIntake(store).receive(localOwner, alpha, "unavailable-review", "I prefer short release notes.");
-    runtime.runConversations();
-
-    const auto events = Conversations(store).conversation(alpha.botId);
-    check(model.choices.empty() && model.inputs.size() == 2 && model.inputs.back().event.at("kind") == "conversation_turn" &&
-              std::ranges::any_of(events,
-                                  [&](const auto& event) {
-                                      return event.at("kind") == "conversation_reply" &&
-                                             event.at("data").at("replyToMessageId") == receipt.at("messageId") &&
-                                             event.at("data").at("text") == "Done";
-                                  }),
-          "Unavailable preference review interrupted the ordinary reply");
+    policyRules.changeNeverRule(owner, Action::private_memory_write, alpha.botId, true);
+    send("blocked-edit", "Remember that we deploy on Fridays.", writeMemory(3, "Deploy on Fridays.", "Remember Friday deployments."));
+    check(lastResult(model.inputs.back()).at("ok") == false && notices().size() == 2 && memory().at("version") == 3,
+          "A private edit bypassed a Never rule");
+    policyRules.changeNeverRule(owner, Action::private_memory_write, alpha.botId, false);
+    send("remember", "Remember that we deploy on Fridays.",
+         writeMemory(3, std::string(preferred) + "Deploy on Fridays.", "Deploy on Fridays."));
+    check(memory().at("version") == 4 && notices().size() == 3, "Explicit remember did not create a single revision and notice");
+    send("forget", "Forget all my saved preferences.", writeMemory(4, "", "Cleared saved preferences."));
+    check(memory().at("content") == "" && memory().at("version") == 5 && notices().size() == 4,
+          "An explicit forget did not replace memory with empty content");
 }
 
 void memoryRedactionLimit(const std::filesystem::path& db) {
@@ -395,15 +368,16 @@ void memoryRedactionLimit(const std::filesystem::path& db) {
     secretRequests.submitSecret(owner, alpha.botId, secret, "z9q7");
 
     const std::string suffix(8192 - 10, 'x');
-    const Json tooLong{{"baseVersion", 0}, {"content", "z9q7" + suffix + "tail"}};
-    rejectsWithConflict([&] { Memory(store).memory(owner, alpha.botId, "apply_memory_edit", tooLong); },
+    const Json tooLong{{"baseVersion", 0}, {"content", "z9q7" + suffix + "tail"}, {"summary", "Edit memory"}};
+    rejectsWithConflict([&] { Memory(store).memory(owner, alpha.botId, "write_memory", tooLong); },
                         "Redacted memory content exceeds 8192 bytes");
     const auto current = Memory(store).memory(owner, alpha.botId, "read_memory", Json::object());
     const auto history = Memory(store).memory(owner, alpha.botId, "memory_history", Json::object());
     check(current.at("version") == 0 && current.at("content") == "Original" && history.at("revisions").empty(),
           "An oversized redacted edit changed the memory document or its history");
 
-    Memory(store).memory(owner, alpha.botId, "apply_memory_edit", {{"baseVersion", 0}, {"content", "z9q7" + suffix}});
+    Memory(store).memory(owner, alpha.botId, "write_memory",
+                         {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", "z9q7" + suffix}});
     const auto saved = Memory(store).memory(owner, alpha.botId, "read_memory", Json::object());
     check(saved.at("version") == 1 && saved.at("content") == "[redacted]" + suffix,
           "An edit at exactly 8,192 redacted bytes was not stored intact");
@@ -791,8 +765,7 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
           "The task model lost webhook provenance or received protected metadata");
     const auto& input = model.inputs.front();
     check(input.task.at("trigger").at("event").at("text") == payloadText &&
-              std::ranges::find(input.tools, "review_preference") == input.tools.end() &&
-              std::ranges::find(input.tools, "remember_preference") == input.tools.end() &&
+              std::ranges::find(input.tools, "write_memory") == input.tools.end() &&
               Memory(store).memory(owner, alpha.botId, "memory_history", Json::object()).at("revisions").empty(),
           "A webhook payload can be used as a preference source");
 
@@ -838,7 +811,6 @@ int main() {
         Directory temp;
         memoryFlow(temp.path / "memory.sqlite3");
         proactiveMemory(temp.path / "proactive-memory.sqlite3");
-        unavailablePreferenceReviewStillReplies(temp.path / "unavailable-review.sqlite3");
         memoryRedactionLimit(temp.path / "memory-limit.sqlite3");
         configuredRequestLimit(temp.path / "schedule-limit.sqlite3");
         downtime(temp.path / "downtime.sqlite3");

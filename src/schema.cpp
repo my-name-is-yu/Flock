@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 21;
+constexpr Id schemaVersion = 22;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -359,14 +359,6 @@ CREATE TABLE memory_revisions(
   reverted_from INTEGER REFERENCES memory_revisions(id), created_at INTEGER NOT NULL, source TEXT,
   UNIQUE(doc_key,version));
 CREATE INDEX memory_revisions_document ON memory_revisions(doc_key,id DESC);
-CREATE TABLE memory_proposals(
-  id INTEGER PRIMARY KEY, doc_key TEXT NOT NULL REFERENCES memory_documents(doc_key),
-  base_version INTEGER NOT NULL, proposed_content TEXT NOT NULL, rationale TEXT NOT NULL,
-  author TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','applied','rejected')),
-  created_at INTEGER NOT NULL, decided_by TEXT, decided_at INTEGER,
-  diff_summary TEXT NOT NULL);
-CREATE INDEX memory_proposals_document ON memory_proposals(doc_key,id DESC);
-
 CREATE TABLE automations(
   id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('schedule','reminder','trigger')),
   definition TEXT NOT NULL, routing TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('active','inactive','canceled','delivered','failed')),

@@ -135,9 +135,8 @@ const std::vector<std::string> webTools{
     "start_workflow",     "workflow_status",      "instruct_workflow_stage", "stop_workflow_stage",
     "stop_workflow",      "compact_conversation", "expand_context",          "continue_fresh_session",
     "list_secrets",       "request_secret_input", "list_connections",        "check_environment_readiness",
-    "request_bot_change", "read_memory",          "propose_memory_edit",     "apply_memory_edit",
-    "revert_memory_edit", "memory_history",       "create_schedule",         "list_schedules",
-    "remove_schedule",    "create_reminder",      "create_trigger"};
+    "request_bot_change", "read_memory",          "memory_history",          "create_schedule",
+    "list_schedules",     "remove_schedule",      "create_reminder",         "create_trigger"};
 
 std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
@@ -593,12 +592,11 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
     const auto& bot = message.bot;
     const auto& routing = message.routing;
     if (tool == "wait_for_event" || tool == "complete") return gitStorage.applyGitTaskDecision(message, decision);
-    if (tool == "review_preference") {
-        if (step != 1 || !memoryStorage.canReviewPreference(message)) throw ToolError("Automatic memory is unavailable");
-        return {{"ok", true}};
+    if (tool == "read_memory" || tool == "memory_history" || tool == "write_memory" || tool == "revert_memory_edit") {
+        auto result = memoryStorage.conversationMemory(message, tool, args, now);
+        result["ok"] = true;
+        return result;
     }
-    if (tool == "remember_preference") return memoryStorage.rememberPreference(message, step, args, now);
-    if (tool == "skip_preference") return {{"ok", true}};
     if (tool == "read_tool_result") {
         const auto sourceMessage = identifier(args, "messageId", true);
         const auto sourceStep = identifier(args, "step", true);
@@ -637,7 +635,6 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
             return workflowStorage.workflowTool(tool, args, bot, message.id, step, routing);
         const auto actor = turnActor(message);
         auto result = botSettingsStorage.botSettingsTool(bot, message.id, routing, decision);
-        if (result.is_null()) result = memoryStorage.memory(bot, actor, tool, args, now, true);
         if (result.is_null()) result = automationStorage.automationTool(bot, actor, routing, decision, now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
         result["ok"] = true;
@@ -991,14 +988,12 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         }
     }
     const bool currentPr = shouldVerifyFollowup && gitStorage.gitPrReadyForFollowup(*gitHost, message);
-    const auto available = [&](int step, bool reviewPreference) {
-        if (reviewPreference) {
-            std::vector<std::string> reviewTools{"skip_preference"};
-            if (memoryStorage.canReviewPreference(message)) reviewTools.push_back("remember_preference");
-            return std::tuple{std::move(reviewTools), Json::array(), std::string_view{}};
-        }
+    const auto available = [&] {
         auto offered = tools;
-        if (step == 1 && memoryStorage.canReviewPreference(message)) offered.push_back("review_preference");
+        if (web && memoryStorage.canEditFrom(message)) {
+            offered.push_back("write_memory");
+            offered.push_back("revert_memory_edit");
+        }
         auto machines = Json::array();
         std::string_view followupStatus;
         if (notification) {
@@ -1091,7 +1086,6 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         if (!message.channelScope.empty()) channelStorage.deliverChannels(shutdown);
         std::vector<ModelCall> calls;
         std::string effectType;
-        bool reviewPreference = false;
         {
             std::lock_guard lock(database.mutex);
             Transaction transaction(database.db);
@@ -1099,14 +1093,13 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                 transaction.commit();
                 return;
             }
-            reviewPreference = memoryStorage.preferenceReviewPending(id, step);
             auto row = database.query("SELECT decision,result,json_type(effect) FROM conversation_steps WHERE message_id=? AND step=?",
                                       {id, step});
             if (row.next()) {
                 if (!row.string(1).empty()) continue;
                 effectType = row.string(2);
                 if (!row.string(0).empty()) {
-                    const auto [offered, machines, followupStatus] = available(step, reviewPreference);
+                    const auto [offered, machines, followupStatus] = available();
                     bool rejectionChanged = false;
                     for (const auto& saved : row.json(0)) {
                         Decision call{saved.at("tool"), saved.at("args"), field(saved, "reason")};
@@ -1129,7 +1122,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
             const auto now = clock();
             BotNotes botNotes;
             try {
-                if (!notification && !reviewPreference) botNotes = memoryStorage.loadNotes(message.bot, soul, now);
+                if (!notification) botNotes = memoryStorage.loadNotes(message.bot, soul, now);
             } catch (const StorageError&) {
                 throw;
             } catch (const std::exception& error) {
@@ -1140,8 +1133,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                                : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.");
                 return;
             }
-            const auto linkedDestinations =
-                reviewPreference ? LinkedTaskDestinations{} : taskRouting.discoverLinkedTaskDestinations(t3, message.bot);
+            const auto linkedDestinations = taskRouting.discoverLinkedTaskDestinations(t3, message.bot);
             ModelInput input;
             {
                 std::lock_guard lock(database.mutex);
@@ -1174,43 +1166,25 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                                ". Return offered tools with valid arguments. "
                                "Batch independent reads, and propose replies or actions that make changes on their own.";
                 }
-                auto [offered, machines, followupStatus] = available(step, reviewPreference);
-                if (reviewPreference) {
-                    auto prepared = memoryStorage.preferenceReviewInput(message, std::move(offered), std::move(feedback), now);
-                    if (!prepared) {
-                        const std::vector<ModelCall> skipped{ModelCall{Decision{"skip_preference", Json::object(), {}}, {}}};
-                        database.exec(R"SQL(
-INSERT INTO conversation_steps(message_id,step,decision,result) VALUES(?,?,?,?)
-ON CONFLICT(message_id,step) DO UPDATE SET decision=excluded.decision,result=excluded.result
-WHERE conversation_steps.result IS NULL
-)SQL",
-                                      {id, step, encodeCalls(skipped), Json::array({{{"ok", true}}})});
-                        transaction.commit();
-                        continue;
-                    }
-                    input = std::move(*prepared);
-                }
-                if (!reviewPreference) {
-                    std::vector<ModelImage> images;
-                    auto context = turnInput(message, step, now, std::move(machines), images, linkedDestinations);
-                    if (!followupStatus.empty()) context["event"]["gitFollowupStatus"] = followupStatus;
-                    input = {.task = context.at("task"),
-                             .event = context.at("event"),
-                             .history = context.at("history"),
-                             .notes = botNotes,
-                             .tools = std::move(offered),
-                             .feedback = std::move(feedback),
-                             .config = message.routing.at("config"),
-                             .images = std::move(images)};
-                }
+                auto [offered, machines, followupStatus] = available();
+                std::vector<ModelImage> images;
+                auto context = turnInput(message, step, now, std::move(machines), images, linkedDestinations);
+                if (!followupStatus.empty()) context["event"]["gitFollowupStatus"] = followupStatus;
+                if (std::ranges::find(offered, "write_memory") != offered.end()) context["event"]["memoryVersion"] = botNotes.memoryVersion;
+                input = {.task = context.at("task"),
+                         .event = context.at("event"),
+                         .history = context.at("history"),
+                         .notes = std::move(botNotes),
+                         .tools = std::move(offered),
+                         .feedback = std::move(feedback),
+                         .config = message.routing.at("config"),
+                         .images = std::move(images)};
                 transaction.commit();
             }
             ConversationModelCheckpoint checkpoint{0, step, Json::object(), ConversationModelFailure{{}, ModelErrorCode::inference_failed}};
             try {
-                if (!reviewPreference) {
-                    sessionReadStorage.authorizeSessionHistory(message, input.event.at("turn"), t3);
-                    conversationTools.authorizeBotToolHistory(message.bot, id, input);
-                }
+                sessionReadStorage.authorizeSessionHistory(message, input.event.at("turn"), t3);
+                conversationTools.authorizeBotToolHistory(message.bot, id, input);
                 {
                     std::lock_guard lock(database.mutex);
                     Transaction transaction(database.db);
