@@ -4,6 +4,7 @@
 #include "peer_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
+#include "flock/soul_loader.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 #include "flock/outbox_instruction.hpp"
@@ -40,10 +41,10 @@ class runtime::TaskTurn {
 public:
     TaskTurn(Database& database, GitStorage& gitStorage, ModelCalls& modelCalls, PeerStorage& peerStorage, SecretStorage& secretStorage,
              TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
-             MemoryStorage& memoryStorage, Model& model, const std::function<std::string(std::string_view)>& soul,
-             const std::function<Seconds()>& clock, GitHost* gitHost, const std::string& sessionRead, std::stop_token stop,
-             TaskUpdates& updates, RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs,
-             SessionPrompts& prompts, TaskDecisions& decisions);
+             MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock, GitHost* gitHost,
+             const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
+             SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs, SessionPrompts& prompts,
+             TaskDecisions& decisions);
 
     void decide(const TaskData& task);
     void persistTaskInferences();
@@ -82,7 +83,7 @@ private:
     WaitStorage& waitStorage;
     MemoryStorage& memoryStorage;
     Model& model;
-    const std::function<std::string(std::string_view)>& soul;
+    const SoulLoader& soul;
     const std::function<Seconds()>& clock;
     GitHost* gitHost;
     const std::string& sessionRead;

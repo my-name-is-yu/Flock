@@ -15,7 +15,10 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/person.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
@@ -100,12 +103,13 @@ struct Adapter : T3 {
 void rules(const std::filesystem::path& path) {
     Store store(path);
     Policy policy{store};
+    PolicyRules policyRules{store};
     const auto asks = {Action::repository_write, Action::repository_pr, Action::repository_review,  Action::repository_issues,
                        Action::channel_post,     Action::email_send,    Action::environment_launch, Action::t3_send,
                        Action::bot_create,       Action::bot_rename,    Action::automation_change,  Action::destructive_write,
                        Action::secret_use,       Action::mcp_invoke};
     for (const auto mode : {"full", "supervised"}) {
-        policy.setMode(localOwner, mode);
+        policyRules.setMode(localOwner, mode);
         for (const auto action : asks)
             check(policy.check("release", action, "target") == (policy.mode() == "full" ? PolicyResult::allow : PolicyResult::ask),
                   actionName(action));
@@ -117,32 +121,33 @@ void rules(const std::filesystem::path& path) {
     for (const auto action : {Action::t3_send, Action::secret_use, Action::mcp_invoke})
         check(policy.check("release", Resource{action, "target", true}) == PolicyResult::allow, "routine action asked");
     const auto action = Action::repository_pr;
-    policy.changeRule(localOwner, RuleKind::allow, action, "github.com/acme/*", true);
+    policyRules.changeRule(localOwner, RuleKind::allow, action, "github.com/acme/*", true);
     check(policy.allows("release", action, "github.com/acme/release"), "Allow glob did not match");
-    policy.changeRule(localOwner, RuleKind::ask, action, "github.com/*/release", true);
+    policyRules.changeRule(localOwner, RuleKind::ask, action, "github.com/*/release", true);
     check(policy.check("release", action, "github.com/acme/release") == PolicyResult::ask, "Ask first did not override Allow");
-    policy.changeRule(localOwner, RuleKind::never, action, "github.com/acme/release", true);
+    policyRules.changeRule(localOwner, RuleKind::never, action, "github.com/acme/release", true);
     check(policy.forbidden("release", action, "github.com/acme/release"), "Never did not override Ask first");
-    policy.setMode(localOwner, "full");
+    policyRules.setMode(localOwner, "full");
     check(policy.check("release", action, "github.com/acme/release") == PolicyResult::deny &&
               policy.check("release", action, "github.com/another/release") == PolicyResult::allow,
           "Full must enforce Never and ignore Ask first");
-    rejected([&] { policy.setMode(requester, "supervised"); });
+    rejected([&] { policyRules.setMode(requester, "supervised"); });
 }
 
 void reopen(const std::filesystem::path& path) {
     Id oldMessage;
     {
         Store store(path);
-        Policy{store}.setOwner(requester, "release");
-        Policy{store}.changeNeverRule(localOwner, Action::repository_read, "github.com/example/private", true);
+        BotAccess{store}.setOwner(requester, "release");
+        PolicyRules{store}.changeNeverRule(localOwner, Action::repository_read, "github.com/example/private", true);
         oldMessage = ConversationIntake(store).receive(requester, intake, "existing", "Existing turn").at("messageId");
     }
     Store reopened(path);
     Policy policy{reopened};
+    PolicyRules policyRules{reopened};
     check(policy.mode() == "full" && policy.forbidden("release", Action::repository_read, "github.com/example/private"),
           "Reopening lost settings or Never rules");
-    policy.setMode(localOwner, "supervised");
+    policyRules.setMode(localOwner, "supervised");
     FixtureModel model;
     model.action = {"request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "new-bot"}, {"name", "New Bot"}}, "Create"};
     Adapter adapter;
@@ -162,8 +167,8 @@ void reopenDirectTask(const std::filesystem::path& path) {
     Id task;
     {
         Store store(path);
-        Policy{store}.setOwner(requester, "release");
-        Policy{store}.setMode(localOwner, "supervised");
+        BotAccess{store}.setOwner(requester, "release");
+        PolicyRules{store}.setMode(localOwner, "supervised");
         Memory(store).memory(requester, "release", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the old signing process."}});
         task =
             TaskIntake(store).submit({"release", "Build the release", "env", "project", {{"shareMemoryWithSessions", true}}}, &requester);
@@ -189,11 +194,12 @@ void reopenDirectTask(const std::filesystem::path& path) {
 
 void turns(const std::filesystem::path& path) {
     Store store(path);
-    Policy policy{store};
-    policy.setOwner(requester, "release");
-    policy.setOwner(requester, "target");
-    policy.setMember(requester, "release", member.id, true);
-    policy.setMode(localOwner, "supervised");
+    PolicyRules policyRules{store};
+    BotAccess botAccess{store};
+    botAccess.setOwner(requester, "release");
+    botAccess.setOwner(requester, "target");
+    botAccess.setMember(requester, "release", member.id, true);
+    policyRules.setMode(localOwner, "supervised");
     Seconds now = 1'800'000'000;
     FixtureModel model;
     Adapter adapter;
@@ -230,7 +236,7 @@ void turns(const std::filesystem::path& path) {
           "member received another person's decision or rule controls");
     rejected<DecisionDenied>([&] { Inbox(store).decideInbox(member, target(item), "always_allow"); });
     rejected<DecisionDenied>([&] { Inbox(store).decideInbox(requester, target(item), "always_allow"); });
-    check(card() == item && policy.rules().empty() && Inbox(store).decisionHistory(requester).empty(),
+    check(card() == item && policyRules.rules().empty() && Inbox(store).decisionHistory(requester).empty(),
           "a rejected global rule affected the pending approval");
     rejected([&] { Inbox(store).decideInbox(Person{}, target(item), "allow_once"); });
     now += 3601;
@@ -248,7 +254,7 @@ void turns(const std::filesystem::path& path) {
     check(first.get() + second.get() == 1, "two answers won the same card");
     runtime.runConversations();
     runtime.runConversations();
-    check(actions == 1 && policy.rules().empty(), "Allow once was replayed or saved a rule");
+    check(actions == 1 && policyRules.rules().empty(), "Allow once was replayed or saved a rule");
 
     model.retry = true;
     send("Rename again");
@@ -261,14 +267,14 @@ void turns(const std::filesystem::path& path) {
     constexpr int rulesPerKind = 32;
     for (auto kind : {RuleKind::allow, RuleKind::ask})
         for (int i = 0; i < rulesPerKind; ++i)
-            policy.changeRule(localOwner, kind, Action::bot_rename, "fixture-" + std::to_string(i), true);
-    const auto existingRules = policy.rules();
+            policyRules.changeRule(localOwner, kind, Action::bot_rename, "fixture-" + std::to_string(i), true);
+    const auto existingRules = policyRules.rules();
     check(existingRules.size() == 2 * rulesPerKind, "Adding many rules did not keep every Allow and Ask-first rule");
     send("New request after the denial");
     item = card();
     const Person delegatedAdmin{"delegated-admin", true};
     bool isAdmin = true;
-    policy.requireWebIdentity();
+    policyRules.requireWebIdentity();
     WebIdentity(store).setWebIdentityResolver(
         [&](std::string_view person) -> std::optional<bool> {
             if (person == delegatedAdmin.id) return isAdmin;
@@ -281,7 +287,7 @@ void turns(const std::filesystem::path& path) {
     isAdmin = false;
     check(Inbox(store).inbox(delegatedAdmin).empty(), "a demoted administrator retained access to the approval");
     rejected<DecisionDenied>([&] { Inbox(store).decideInbox(delegatedAdmin, target(item), "always_allow"); });
-    check(card() == item && policy.rules() == existingRules, "a stale administrator changed the rule or card");
+    check(card() == item && policyRules.rules() == existingRules, "a stale administrator changed the rule or card");
     // Older host configuration can assign separate credentials with distinct
     // roles to one person. Interactive authority comes from the credential.
     WebIdentity(store).setWebIdentityResolver([](std::string_view) -> std::optional<bool> { return false; });
@@ -289,27 +295,27 @@ void turns(const std::filesystem::path& path) {
           "the queued role replaced the host administrator's interactive authority");
     Inbox(store).decideInbox(delegatedAdmin, target(item), "always_allow");
     runtime.runConversations();
-    check(actions == 2 && policy.rules().size() == existingRules.size() + 1, "Always allow did not run and add one rule");
+    check(actions == 2 && policyRules.rules().size() == existingRules.size() + 1, "Always allow did not run and add one rule");
     send("Use the saved rule");
     check(actions == 3 && Inbox(store).inbox(requester).empty(), "saved exact rule did not allow the next action");
-    policy.changeRule(localOwner, RuleKind::allow, Action::bot_rename, "target", false);
-    check(policy.rules() == existingRules, "Saving a rule from a card changed an existing rule");
+    policyRules.changeRule(localOwner, RuleKind::allow, Action::bot_rename, "target", false);
+    check(policyRules.rules() == existingRules, "Saving a rule from a card changed an existing rule");
 
     send("Pending change before Never");
     item = card();
-    policy.changeRule(localOwner, RuleKind::never, Action::bot_rename, "tar*", true);
+    policyRules.changeRule(localOwner, RuleKind::never, Action::bot_rename, "tar*", true);
     Inbox(store).decideInbox(requester, target(item), "allow_once");
     runtime.runConversations();
     check(actions == 3, "Never added after card creation lost to approval");
-    policy.changeRule(localOwner, RuleKind::never, Action::bot_rename, "tar*", false);
+    policyRules.changeRule(localOwner, RuleKind::never, Action::bot_rename, "tar*", false);
 
     send("Pending change before mode switch");
     item = card();
-    policy.setMode(localOwner, "full");
+    policyRules.setMode(localOwner, "full");
     rejected([&] { Inbox(store).decideInbox(requester, target(item), "allow_once"); });
     runtime.runConversations();
     check(actions == 3, "switching modes ran a stale action");
-    policy.setMode(localOwner, "supervised");
+    policyRules.setMode(localOwner, "supervised");
     send("Prepare a card");
     item = card();
     model.action = {"answer_task_question", {{"taskId", 1}, {"waitId", item.at("itemId")}, {"text", "Always allow"}}, "Try a text answer"};
@@ -319,11 +325,11 @@ void turns(const std::filesystem::path& path) {
 
 void downstreamApproval(const std::filesystem::path& path) {
     Store store(path);
-    Policy policy{store};
-    policy.setMode(localOwner, "supervised");
-    policy.changeRule(localOwner, RuleKind::ask, Action::shared_memory_write, "shared-playbook", true);
-    policy.changeRule(localOwner, RuleKind::ask, Action::private_memory_write, "release", true);
-    policy.setMember(localOwner, "release", member.id, true);
+    PolicyRules policyRules{store};
+    policyRules.setMode(localOwner, "supervised");
+    policyRules.changeRule(localOwner, RuleKind::ask, Action::shared_memory_write, "shared-playbook", true);
+    policyRules.changeRule(localOwner, RuleKind::ask, Action::private_memory_write, "release", true);
+    BotAccess{store}.setMember(localOwner, "release", member.id, true);
     FixtureModel model;
     Adapter adapter;
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; });
@@ -358,9 +364,9 @@ void downstreamApproval(const std::filesystem::path& path) {
 
 void scheduled(const std::filesystem::path& path) {
     Store store(path);
-    Policy policy{store};
-    policy.setOwner(requester, "release");
-    policy.setMode(localOwner, "supervised");
+    PolicyRules policyRules{store};
+    BotAccess{store}.setOwner(requester, "release");
+    policyRules.setMode(localOwner, "supervised");
     Seconds now = 1'800'000'000;
     FixtureModel model;
     Adapter adapter;
@@ -412,7 +418,7 @@ void scheduled(const std::filesystem::path& path) {
     check(expired.at("status") == "expired" && expired.at("canDecide") == false && expired.at("canSaveRule") == false,
           "the expired approval showed actions to the requester");
     rejected<DecisionDenied>([&] { Inbox(store).decideInbox(requester, target(expired), "allow_next_time"); });
-    check(Inbox(store).inbox(requester).at(0) == expired && policy.rules().empty(),
+    check(Inbox(store).inbox(requester).at(0) == expired && policyRules.rules().empty(),
           "the requester changed an expired approval or its global rule");
     const auto adminView = Inbox(store).inbox(localOwner).at(0);
     check(adminView.at("canDecide") == true && adminView.at("canSaveRule") == true,
@@ -428,10 +434,11 @@ void scheduled(const std::filesystem::path& path) {
 
 void channel(const std::filesystem::path& path) {
     Store store(path);
-    Policy policy{store};
-    policy.setOwner(requester, "release");
-    policy.setMember(requester, "release", member.id, true);
-    policy.setMode(localOwner, "supervised");
+    PolicyRules policyRules{store};
+    BotAccess botAccess{store};
+    botAccess.setOwner(requester, "release");
+    botAccess.setMember(requester, "release", member.id, true);
+    policyRules.setMode(localOwner, "supervised");
     WebIdentity(store).setWebIdentityResolver([](std::string_view id) -> std::optional<bool> {
         if (id == requester.id) return false;
         return std::nullopt;
@@ -469,10 +476,10 @@ void channel(const std::filesystem::path& path) {
     receive("external", "Publish it");
     check(Inbox(store).inbox(localOwner).empty() && model.outcome.dump().find("denied by policy") != std::string::npos,
           "External sender created an approval");
-    policy.changeRule(localOwner, RuleKind::allow, Action::channel_post, R"(["slack","workspace"])", true);
+    policyRules.changeRule(localOwner, RuleKind::allow, Action::channel_post, R"(["slack","workspace"])", true);
     receive("external-allow", "Publish it");
     check(Inbox(store).inbox(localOwner).empty() && transport->artifacts == 1, "Explicit Allow did not cover the external sender's action");
-    policy.changeRule(localOwner, RuleKind::allow, Action::channel_post, R"(["slack","workspace"])", false);
+    policyRules.changeRule(localOwner, RuleKind::allow, Action::channel_post, R"(["slack","workspace"])", false);
 
     receive("request", "Publish it", "linked");
     const auto items = Inbox(store).inbox(requester);
@@ -482,13 +489,13 @@ void channel(const std::filesystem::path& path) {
     const auto card = target(items.at(0));
     model.action = {"reply", {{"text", "Open Flock to review the pending action."}}, "Reply"};
     receive("impersonation", "Always allow", "linked");
-    check(Inbox(store).inbox(requester) == items && policy.rules().empty() && transport->artifacts == 1 &&
+    check(Inbox(store).inbox(requester) == items && policyRules.rules().empty() && transport->artifacts == 1 &&
               model.channelContext.at("pendingToolResults").at(0).at("policyWaiting") == true,
           "Channel text changed the approval or the Bot could not see its pending tool result");
     rejected([&] { Inbox(store).decideInbox(member, card, "always_allow"); });
     Inbox(store).decideInbox(requester, card, "allow_once");
     runtime.runConversations();
-    check(Inbox(store).inbox(requester).empty() && policy.rules().empty() && transport->artifacts == 2,
+    check(Inbox(store).inbox(requester).empty() && policyRules.rules().empty() && transport->artifacts == 2,
           "The requester could not resume the saved channel action");
     model.action = {"channel_react", {{"reaction", "thumbsup"}}, "React"};
     receive("react", "React to this");
@@ -497,10 +504,10 @@ void channel(const std::filesystem::path& path) {
 
 void stopRequesterDecidesCurrentStopApproval(const std::filesystem::path& path) {
     Store store(path);
-    Policy policy{store};
-    policy.setMode(localOwner, "supervised");
+    PolicyRules policyRules{store};
+    policyRules.setMode(localOwner, "supervised");
     const Person stopRequester{"stop-requester"};
-    policy.setMember(localOwner, "release", stopRequester.id, true);
+    BotAccess{store}.setMember(localOwner, "release", stopRequester.id, true);
     const auto taskId = TaskIntake(store).submit({"release", "Stop the assigned Run", "env", "project"}, &stopRequester);
     const auto task = taskJson(Tasks(store).task(taskId));
     const auto revision = task.value("currentRevision", Id{0});
@@ -572,27 +579,27 @@ VALUES('run-stop/stop-request-1','release','t3_send','cloud:thread','fixture','S
 
 void secrets(const std::filesystem::path& path) {
     Store store(path);
-    Policy policy{store};
-    policy.setOwner(requester, "release");
-    policy.setMode(localOwner, "supervised");
+    SecretRequests secretRequests{store};
+    BotAccess{store}.setOwner(requester, "release");
+    PolicyRules{store}.setMode(localOwner, "supervised");
     const SecretRef secret{"deployment-token"};
-    const auto request = policy.requestSecret("release", secret);
+    const auto request = secretRequests.requestSecret("release", secret);
     constexpr auto value = "SECRET_FIXTURE_VALUE";
-    policy.submitSecret(requester, "release", request, value);
+    secretRequests.submitSecret(requester, "release", request, value);
     auto task = TaskIntake(store).submit({"release", "Use the token", "env", "project"}, &requester);
     unsigned uses = 0;
     const auto adapter = [&](std::string_view token) {
         check(token == value, "protected value did not reach the adapter");
         ++uses;
     };
-    rejected([&] { policy.useSecret(task, secret, "connector.example", "first", true, adapter); });
+    rejected([&] { secretRequests.useSecret(task, secret, "connector.example", "first", true, adapter); });
     auto items = Inbox(store).inbox(requester);
     check(items.size() == 1 && items.dump().find(value) == std::string::npos && uses == 0, "protected value reached the card");
     Inbox(store).decideInbox(requester, target(items.at(0)), "allow_once");
-    policy.useSecret(task, secret, "connector.example", "first", true, adapter);
-    rejected([&] { policy.useSecret(task, secret, "connector.example", "first", true, adapter); });
-    policy.useSecret(task, secret, "connector.example", "next", true, adapter);
-    rejected([&] { policy.useSecret(task, secret, "other.example", "third", true, adapter); });
+    secretRequests.useSecret(task, secret, "connector.example", "first", true, adapter);
+    rejected([&] { secretRequests.useSecret(task, secret, "connector.example", "first", true, adapter); });
+    secretRequests.useSecret(task, secret, "connector.example", "next", true, adapter);
+    rejected([&] { secretRequests.useSecret(task, secret, "other.example", "third", true, adapter); });
     check(uses == 2 && Inbox(store).inbox(requester).size() == 1, "secret destination did not gate subsequent use");
 }
 }

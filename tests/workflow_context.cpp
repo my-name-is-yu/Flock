@@ -7,7 +7,8 @@
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/command.hpp"
 #include "flock/decision.hpp"
 #include "flock/json.hpp"
@@ -167,9 +168,10 @@ const std::string shaA(40, 'a'), shaB(40, 'b');
 
 void workflowLaunchUsesPolicyAndRedactsQueuedPrompt() {
     Fixture f;
-    Policy policy{*f.store};
+    PolicyRules policyRules{*f.store};
+    SecretRequests secretRequests{*f.store};
     const Person owner{"owner", true};
-    policy.changeNeverRule(owner, Action::environment_launch, "env", true);
+    policyRules.changeNeverRule(owner, Action::environment_launch, "env", true);
     const std::string secret = "workflow-credential-registered-after-queueing";
     f.call("start_workflow",
            {{"request", "Collect the release notes " + secret}, {"stages", Json::array({{{"stageId", "collect"}, {"role", "collect"}}})}});
@@ -177,9 +179,9 @@ void workflowLaunchUsesPolicyAndRedactsQueuedPrompt() {
     const Id task = f.status()["stages"][0]["taskId"];
     const auto wait = taskJson(Tasks(*f.store).task(task)).at("wait");
     require(wait.at("reason") == "settings" && f.t3.commands.empty(), "unapproved workflow launch reached T3");
-    const auto input = policy.requestSecret("bot", {"workflow-credential"});
-    policy.submitSecret(owner, "bot", input, secret);
-    policy.changeNeverRule(owner, Action::environment_launch, "env", false);
+    const auto input = secretRequests.requestSecret("bot", {"workflow-credential"});
+    secretRequests.submitSecret(owner, "bot", input, secret);
+    policyRules.changeNeverRule(owner, Action::environment_launch, "env", false);
     TaskControl(*f.store).operate(owner, TaskTarget::from(Tasks(*f.store).task(task).task, wait.at("id")), "reconcile");
     f.t3.loseReceipt = true;
     f.ticks(1);
@@ -199,8 +201,8 @@ void expansionRedactsBeforeSearchAndPaging() {
     const auto original = f.turn(prefix + secret + " tail");
     const auto compacted = f.call("compact_conversation", {{"endMessageId", original}, {"summary", "Notes: " + secret}});
     const auto compaction = compacted.at("compaction").at("compactionId");
-    Policy policy{*f.store};
-    policy.submitSecret({"owner", true}, "bot", policy.requestSecret("bot", {"context-credential"}), secret);
+    SecretRequests secretRequests{*f.store};
+    secretRequests.submitSecret({"owner", true}, "bot", secretRequests.requestSecret("bot", {"context-credential"}), secret);
     const auto first = f.call("expand_context", {{"compactionId", compaction}, {"startMessageId", original}});
     const auto second = f.call("expand_context", {{"cursor", first.at("nextCursor")}});
     require(first.at("messages").at(0).at("text").get<std::string>() + second.at("messages").at(0).at("text").get<std::string>() ==
@@ -234,8 +236,8 @@ void expansionRejectsStaleCursors() {
         const auto& steps = input.event.at("turn");
         if (steps.empty()) return {"expand_context", range, "Read the first page"};
         if (steps.size() == 1) {
-            Policy policy{*f.store};
-            policy.submitSecret({"owner", true}, "bot", policy.requestSecret("bot", {"paging-fixture"}), secret);
+            SecretRequests secretRequests{*f.store};
+            secretRequests.submitSecret({"owner", true}, "bot", secretRequests.requestSecret("bot", {"paging-fixture"}), secret);
             return {"expand_context", continuation, "Continue the first page"};
         }
         require(steps.at(0).at("result").at("cursorStale") == true && !steps.at(0).at("result").contains("messages") &&

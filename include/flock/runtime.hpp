@@ -1,9 +1,8 @@
 #pragma once
 
-#include <functional>
+#include "flock/soul_loader.hpp"
+
 #include <memory>
-#include <string>
-#include <string_view>
 
 namespace flockv0 {
 class Model;
@@ -13,7 +12,6 @@ struct RuntimeOptions;
 
 class Runtime {
 public:
-    using SoulLoader = std::function<std::string(std::string_view)>;
     Runtime(Store&, Model&, T3&, SoulLoader);
     Runtime(Store&, Model&, T3&, SoulLoader, RuntimeOptions);
     ~Runtime();

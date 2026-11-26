@@ -1,3 +1,4 @@
+#include "flock/policy_rules.hpp"
 #include "settings_access.hpp"
 #include "flock/decision_errors.hpp"
 #include "../src/database.hpp"
@@ -138,7 +139,7 @@ SettingsAccess::SettingsAccess(Store& store, const std::filesystem::path&, const
         Transaction transaction(db.db);
         if (accessMode(db) == Mode::managed) throw Conflict("Remove the external Web identity file setting to use managed users");
         external_ = loadIdentities(store_, externalFile);
-        Policy{store_}.requireWebIdentity();
+        PolicyRules{store_}.requireWebIdentity();
         transaction.commit();
     }
     WebIdentity(store_).setWebIdentityResolver(identities().resolveRoot, !external_.authenticate);

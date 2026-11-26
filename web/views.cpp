@@ -548,6 +548,7 @@ Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changed
     for (const auto& turn : Conversations(store).pausedConversations(id)) {
         Json view = Json::object();
         copyFields(view, turn, {"messageId", "replyToMessageId", "text", "route", "allowance"});
+        if (const auto shared = turn.find("sharedWaitIds"); shared != turn.end()) view["sharedWaitIds"] = *shared;
         paused.push_back(std::move(view));
     }
     if (!paused.empty() && (result["presence"] == "idle" || result["presence"] == "queued")) result["presence"] = "waiting";

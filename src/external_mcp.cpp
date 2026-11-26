@@ -7,7 +7,7 @@
 #include "connector_credentials.hpp"
 #include "journal_task.hpp"
 #include "outbox_storage.hpp"
-#include "storage.hpp"
+#include "store_access.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
@@ -56,7 +56,7 @@ Json currentRun(const TaskData& task) {
 
 ExternalMcpCredential ExternalMcp::connect(std::string_view person, const std::vector<std::string>& bots) {
     if (bots.empty()) throw Conflict("At least one Bot is required");
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     Transaction tx(storage.database.db);
     const auto actor = storage.sessionParticipationStorage.sessionActor(person);
@@ -74,7 +74,7 @@ ExternalMcpCredential ExternalMcp::connect(std::string_view person, const std::v
 }
 
 void ExternalMcp::disconnect(std::string_view connectionId) {
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     storage.database.exec("UPDATE external_mcp_connections SET token_digest=NULL WHERE id=? AND token_digest IS NOT NULL", {connectionId});
     if (!sqlite3_changes(storage.database.db)) throw Conflict("No active external MCP connection with this ID");
@@ -82,7 +82,7 @@ void ExternalMcp::disconnect(std::string_view connectionId) {
 
 std::optional<ExternalMcpConnection> ExternalMcp::authenticate(std::string_view token) const {
     if (!connector_credentials::validBearer(token, tokenPrefix)) return std::nullopt;
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     auto row = storage.database.query("SELECT id,person_id FROM external_mcp_connections WHERE token_digest=?",
                                       {connector_credentials::digest(token)});
@@ -98,7 +98,7 @@ Id ExternalMcp::submit(const ExternalMcpConnection& connection, std::string_view
         text.find('\0') != text.npos || text.find_first_not_of(" \t\r\n") == text.npos)
         throw Conflict("Invalid task request");
 
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     Transaction tx(storage.database.db);
     auto grant = storage.database.query(R"SQL(
@@ -139,7 +139,7 @@ WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
 }
 
 ExternalMcp::OwnedTask ExternalMcp::authorizeTask(const ExternalMcpConnection& connection, Id taskId) const {
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     auto row = storage.database.query(R"SQL(
 SELECT c.person_id,t.bot_id FROM external_mcp_receipts r
 JOIN external_mcp_connections c ON c.id=r.connection_id
@@ -177,19 +177,19 @@ Json ExternalMcp::completionRun(const OwnedTask& owner, const CompletionEntry& c
     if (environment.empty() || thread.empty() || resultRunId.empty() || !policy.allows(peerBot, Resource::sessionRead(environment, thread)))
         return nullptr;
 
-    auto row = store_.p_->database.query(R"SQL(
+    auto row = Database::of(store_).query(R"SQL(
 SELECT json_extract(j.data,'$.run.link') FROM journal j JOIN tasks t ON t.id=j.task_id
 WHERE j.task_id=? AND t.bot_id=? AND j.kind='report' AND j.run_environment_id=?
   AND j.run_thread_id=? AND j.result_run_id=?
 ORDER BY j.id DESC LIMIT 1
 )SQL",
-                                         {dependency->taskId, peerBot, environment, thread, resultRunId});
+                                          {dependency->taskId, peerBot, environment, thread, resultRunId});
     if (!row.next()) return nullptr;
     return {{"environmentId", environment}, {"threadId", thread}, {"link", row.string(0)}};
 }
 
 Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) const {
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     Transaction tx(storage.database.db, Transaction::Mode::read);
     const auto owner = authorizeTask(connection, taskId);
@@ -238,7 +238,7 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
 
 void ExternalMcp::answer(const ExternalMcpConnection& connection, Id taskId, Id waitId, Id revision, Id generation, std::string_view text) {
     if (text.find('\0') != text.npos) throw Conflict("Invalid task answer");
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     Transaction tx(storage.database.db);
     const auto owner = authorizeTask(connection, taskId);

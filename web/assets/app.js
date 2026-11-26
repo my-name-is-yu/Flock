@@ -28,9 +28,9 @@ const elements = Object.fromEntries([
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-summary', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
-  'bot-paused-banner', 'bot-paused-description', 'resume-bot',
+  'composer-banner', 'composer-banner-title', 'composer-banner-description', 'composer-banner-action',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
-  'bot-editor', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
+  'bot-editor', 'bot-activity', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
   'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
@@ -100,7 +100,7 @@ const waitLabels = {
   model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
     'I couldn’t choose my next step after several attempts. Try again to continue.'],
   bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s role and memory, then try again.'],
-  t3_input: ['Action in T3', 'Open the Session in T3 to approve or answer.'],
+  t3_input: ['Action in T3', 'Open the thread in T3 to approve or answer.'],
   deadline: ['Deadline extension', 'This request reached its deadline. You can set a new one.'],
   unknown_delivery: ['Message to T3 unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Check again asks T3 without resending anything.'],
   auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then check again.'],
@@ -113,8 +113,8 @@ const pendingActionLabels = {
   deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
 };
 const closedLabels = {
-  answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
-  session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
+  answer: 'Answered', run_finished: 'Work ended', cancel: 'Stop requested',
+  session_question: 'The question changed in T3', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
   approve: 'Approved', extend: 'Deadline extended', reconcile: 'Check requested', supply: 'Secret saved',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock', deny: 'Denied', expired: 'Approval expired',
   stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
@@ -176,7 +176,6 @@ let detail = null;
 let profileAvatar = null;
 let profileKey = '';
 let profileMotion;
-let scopeAvatar = null;
 let scopeKey = '';
 let connection = 'loading';
 
@@ -716,20 +715,6 @@ function skeletonRows(count, className = 'skeleton-row') {
   });
 }
 
-let emptyBotRow;
-function newBotRow() {
-  if (emptyBotRow) return emptyBotRow;
-  emptyBotRow = node('div', 'bot-row new-bot-row');
-  const select = button(null, 'bot-select', () => openNewBot(emptyBotRow.querySelector('button')));
-  const mark = node('span', 'new-bot-mark');
-  mark.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
-  const text = node('span', 'bot-text');
-  text.append(node('span', 'bot-name', 'New Bot'), node('span', 'bot-preview', 'No Bots yet'));
-  select.append(mark, text);
-  emptyBotRow.append(select);
-  return emptyBotRow;
-}
-
 function draftRow(draft) {
   const row = node('div', 'bot-row draft');
   row.setAttribute('aria-hidden', 'true');
@@ -807,7 +792,6 @@ function renderBots() {
   const rows = unpinned.map(rowFor);
   if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
   if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length && !botDraft) rows.push(newBotRow());
   placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
   unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
@@ -891,9 +875,7 @@ function renderHeader() {
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
   if (nextScopeKey !== scopeKey) {
-    scopeAvatar?.destroy();
-    scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
-    if (bot) elements['activity-scope-name'].textContent = bot.name;
+    if (bot) elements['activity-scope-name'].textContent = `${bot.name} activity`;
     if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
     else document.documentElement.style.removeProperty('--bot-accent');
   }
@@ -943,7 +925,9 @@ function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
   const title = [session.name, request].filter(Boolean).join(' · ');
   const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
-  row.dataset.tooltip = [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · ');
+  const details = [Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean);
+  row.dataset.tooltip = [...details, title].filter(Boolean).join(' · ');
+  if (details.length) row.append(node('span', 'sr-only', ` · ${details.join(' · ')}`));
   if (link) {
     row.href = link;
     row.target = '_blank';
@@ -1008,8 +992,9 @@ function workflowInspectors(data, open) {
       const link = linkToRun(stage.runRef, 'Open');
       if (link) head.append(link);
       row.append(node('span', 'workflow-stage-mark'), text);
-      row.dataset.tooltip = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
-        .filter(Boolean).join('\n');
+      const versions = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
+        .filter(Boolean).join(' · ');
+      if (versions) row.setAttribute('aria-description', versions);
       list.append(row);
     }
     item.append(list);
@@ -1053,7 +1038,7 @@ function renderActivity() {
         ? [actionLabel(item.action), item.displayTarget ?? item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
       const row = activityRow('button', 'wait-row', title, status, 'waiting');
       row.type = 'button';
-      row.dataset.tooltip = item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title;
+      row.setAttribute('aria-description', item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title);
       row.addEventListener('click', () => {
         openNavigation(false);
         decisions.openItem(item, row);
@@ -1158,6 +1143,13 @@ function icon(name, className = 'glyph') {
   host.setAttribute('aria-hidden', 'true');
   host.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
   return host;
+}
+function setMessageHtml(element, html) {
+  element.innerHTML = html;
+  for (const link of element.querySelectorAll('a[href]')) {
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
 }
 function iconButton(name, label, click) {
   const control = button(null, 'icon-button msg-action', click);
@@ -1264,7 +1256,7 @@ function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
   const time = node('time', 'msg-time', clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
-  time.dataset.tooltip = [fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
+  time.setAttribute('aria-description', [fullTime.format(timestamp), extra].filter(Boolean).join(' · '));
   return time;
 }
 
@@ -1518,7 +1510,7 @@ function eventCard(event, context, place, report) {
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
-    const name = `T3 Session “${session.title || session.threadId}”`;
+    const name = `T3 thread “${session.title || session.threadId}”`;
     const wakeText = {
       finished: `Work finished in ${name}`,
       failed: `Work stopped before finishing in ${name}`,
@@ -1614,7 +1606,7 @@ function eventCard(event, context, place, report) {
     if (paused) text.textContent = copy = paused.text;
     else if (typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
-      text.innerHTML = data.textHtml;
+      setMessageHtml(text, data.textHtml);
     } else text.textContent = data.text ?? '';
     text.classList.add('foldable-text');
     bubble.append(text);
@@ -1638,7 +1630,7 @@ function eventCard(event, context, place, report) {
     replyTarget = ['Reply to this review', { kind: 'review', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
-      : data.report || (data.destination ? 'No Session report is available.' : 'The session submitted a report.');
+      : data.report || (data.destination ? 'No report is available.' : 'The work is done.');
     text.textContent = copy;
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
@@ -1656,10 +1648,10 @@ function eventCard(event, context, place, report) {
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
     if (outcome === 'completed') {
-      text.append(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Session complete: '));
+      text.append(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Work complete: '));
     } else if (['failed', 'cancelled', 'interrupted', 'rolled_back'].includes(outcome)) {
       const tone = outcome === 'failed' ? 'result-failed' : 'result-interrupted';
-      text.append(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Session ${stateLabels[outcome].toLowerCase()}: `));
+      text.append(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Work ${stateLabels[outcome].toLowerCase()}: `));
     }
     text.append(document.createTextNode(data.text ?? ''));
     const link = runIcon(data.run);
@@ -1670,7 +1662,7 @@ function eventCard(event, context, place, report) {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     if (event.kind === 'conversation_message' && typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
-      text.innerHTML = data.textHtml;
+      setMessageHtml(text, data.textHtml);
     } else text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
     text.classList.add('foldable-text');
@@ -1712,7 +1704,7 @@ function eventCard(event, context, place, report) {
       const note = node('p', 'msg-note msg-queued');
       note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
       if (blocker.botId !== context.bot?.id) note.append(node('span', 'msg-queued-owner', `· ${owner}`));
-      note.dataset.tooltip = `Starts when “${blocker.request}” (${owner}) finishes`;
+      note.setAttribute('aria-description', `Starts when “${blocker.request}” (${owner}) finishes`);
       extras.push(note);
     }
   }
@@ -1739,11 +1731,6 @@ function eventCard(event, context, place, report) {
   if (copy) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
-  }
-  if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Answer this question', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
-    reply.disabled = decisions.busy(taskWaitDecision(view.id, pendingWait));
-    actions.append(reply);
   }
 
   if (context.canDecide && replyTarget) {
@@ -2124,6 +2111,7 @@ function conversationRows(data, events, keep, source) {
       anchoredToWait.add(item.itemId);
     }
   }
+  const sharedBudgetWaits = new Set((data?.pausedConversations ?? []).flatMap((turn) => turn.sharedWaitIds ?? []));
   const shown = timelineMessages(events, dayLabel);
   const eventsById = new Map(events.map((event) => [event.id, event]));
   const rows = [];
@@ -2142,6 +2130,7 @@ function conversationRows(data, events, keep, source) {
   let previous = null;
   let previousReport = null;
   shown.forEach(({ event, report }, index) => {
+    if (event.kind === 'waiting' && sharedBudgetWaits.has(event.data.id)) return;
     const eventDay = dayLabel(event.time);
     if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
@@ -2206,7 +2195,7 @@ function conversationRows(data, events, keep, source) {
         flock.setAttribute('aria-hidden', 'true');
         for (const example of ['chat', 'sprout', 'controller']) flock.append(avatar({ id: example, avatar: { example } }));
         empty.append(flock, node('h2', null, 'Create your first Bot'),
-          node('p', null, 'A Bot takes your requests, runs the work in T3 Sessions and reports back here.'),
+          node('p', null, 'A Bot takes your requests, gets the work done and reports back here.'),
           button('New Bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
       } else {
         empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
@@ -2356,23 +2345,32 @@ function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
 function renderComposer() {
   const context = view;
   const readOnly = context?.data?.canDecide === false;
-  const paused = !!context?.data?.bot?.paused && !context.dm;
-  const available = !!context?.data && !context.dm && (!!context.composer || readOnly || paused);
-  const canDecide = available && !!context.composer;
+  const bot = context?.data?.bot;
+  const paused = !!bot?.paused && !context.dm;
+  const needsModel = !!bot && !context.dm && !paused && !readOnly && !bot.model;
+  const banner = paused ? 'paused' : needsModel ? 'setup' : null;
+  const available = !!context?.data && !context.dm && (!!context.composer || readOnly || !!banner);
+  const canDecide = available && !!context.composer && !banner;
   const wasComposing = elements.composer.contains(document.activeElement);
-  const resume = elements['resume-bot'];
-  const canResume = paused && context.data.bot.canDelete;
-  elements['bot-paused-banner'].hidden = !paused;
-  resume.hidden = !canResume;
-  const pauseDescription = elements['bot-paused-description'];
-  const description = !paused ? '' : context.resumeError ||
-    (canResume ? 'Resume to send a message.' : 'The Bot’s owner or a Flock administrator can resume it.');
-  if (pauseDescription.textContent !== description) pauseDescription.textContent = description;
-  pauseDescription.classList.toggle('error', paused && !!context.resumeError);
+  const action = elements['composer-banner-action'];
+  const canAct = !!banner && bot.canDelete === true;
+  elements['composer-banner'].hidden = !banner;
+  elements['composer-banner'].dataset.state = banner ?? '';
+  action.hidden = !canAct;
+  action.textContent = banner === 'setup' ? 'Choose a model' : 'Resume';
+  const title = banner === 'paused' ? 'This Bot is paused' : banner === 'setup' ? `${bot.name} isn’t set up yet` : '';
+  if (elements['composer-banner-title'].textContent !== title) elements['composer-banner-title'].textContent = title;
+  const bannerDescription = elements['composer-banner-description'];
+  const description = banner === 'paused' ? context.resumeError ||
+      (canAct ? 'Resume to send a message.' : 'The Bot’s owner or a Flock administrator can resume it.')
+    : banner === 'setup' ? (canAct ? 'Choose a model to start talking.' : 'The Bot’s owner or a Flock administrator can set it up.')
+    : '';
+  if (bannerDescription.textContent !== description) bannerDescription.textContent = description;
+  bannerDescription.classList.toggle('error', paused && !!context.resumeError);
   elements['composer-container'].hidden = !available;
   elements.composer.hidden = !canDecide;
-  elements['view-only-notice'].hidden = !available || paused || canDecide;
-  if (paused && wasComposing) (canResume ? resume : headerFocusTarget()).focus({ preventScroll: true });
+  elements['view-only-notice'].hidden = !available || !!banner || canDecide;
+  if (banner && wasComposing) (canAct ? action : headerFocusTarget()).focus({ preventScroll: true });
   const decision = canDecide ? decisions.composer() : null;
   const review = canDecide ? decisions.reviewReply() : null;
   if (!canDecide) {
@@ -2530,6 +2528,13 @@ function renderDetailNav(sections, current) {
       return tab;
     }));
   }
+  const recurringTab = detailNav.querySelector('[data-section="recurring"]');
+  if (recurringTab && recurringRequests && !recurringTab.contains(recurringRequests.count)) {
+    recurringTab.querySelector('.detail-tab-count')?.remove();
+    const count = node('span', 'detail-tab-count');
+    count.append(recurringRequests.count);
+    recurringTab.append(count);
+  }
   detailNav.setAttribute('aria-orientation', narrow.matches ? 'horizontal' : 'vertical');
   for (const tab of detailNav.children) {
     const selected = tab.dataset.section === current;
@@ -2558,11 +2563,12 @@ function settingsRow(label, value, click) {
 }
 function pullRequestSetting(bot) {
   const row = node('label', 'settings-row');
-  const label = node('span', 'settings-row-label', 'Fix failing checks and review feedback');
+  const label = node('span', 'settings-row-label', 'Fix failing checks and review feedback on its pull requests');
   const toggle = node('input', 'settings-row-switch');
   const feedback = node('span', 'settings-card-feedback error');
   feedback.setAttribute('role', 'status');
   toggle.type = 'checkbox';
+  toggle.setAttribute('role', 'switch');
   toggle.checked = bot.fixPullRequests;
   toggle.disabled = !bot.canDelete;
   toggle.addEventListener('change', async () => {
@@ -2686,11 +2692,17 @@ async function setBotPaused(bot, paused) {
 }
 const botPause = mountBotPause(byId('bot-pause'), setBotPaused);
 
-elements['resume-bot'].addEventListener('click', async (event) => {
+elements['composer-banner-action'].addEventListener('click', async (event) => {
   const control = event.currentTarget;
   const context = view;
   const bot = context?.data?.bot;
-  if (!bot?.paused || !bot.canDelete) return;
+  if (!bot?.canDelete) return;
+  if (!bot.paused && !bot.model) {
+    openDetail({ kind: 'settings', section: 'general' });
+    detailWorkspace?.edit();
+    return;
+  }
+  if (!bot.paused) return;
   control.disabled = true;
   context.resumeError = '';
   renderComposer();
@@ -2724,7 +2736,7 @@ function generalContent(bot) {
 
   function renderNameDisplay() {
     const nameBtn = button(null, 'settings-name-button', beginInlineRename);
-    nameBtn.dataset.tooltip = 'Rename Bot';
+    nameBtn.setAttribute('aria-description', 'Rename Bot');
     nameBtn.append(node('span', 'settings-name', bot.name));
     nameBtn.insertAdjacentHTML('beforeend', pencilIcon);
     nameWrap.replaceChildren(nameBtn);
@@ -2786,9 +2798,6 @@ function generalContent(bot) {
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
   rows.append(pullRequestSetting(bot));
-  const requests = settingsRow('Recurring requests', '', () => selectSection('recurring', true));
-  requests.querySelector('.settings-row-value').append(recurringRequests.count);
-  rows.append(requests);
   const settings = document.createElement('a');
   settings.className = 'settings-row';
   settings.href = '/settings/' + encodeURIComponent(bot.id);
@@ -2834,7 +2843,7 @@ function roleCard(bot) {
   return detailRole.element;
 }
 function settingsContent(bot, section = 'general') {
-  elements['detail-title'].textContent = settingsSections[section][0];
+  elements['detail-title'].textContent = `${bot.name} settings`;
   if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
   return generalContent(bot);
 }
@@ -2870,7 +2879,8 @@ function waitContent(context, task, deadlineDraft) {
   request.append(node('p', 'wait-request-text', task.request));
   if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
   const reason = node('div', 'wait-reason');
-  reason.append(node('p', 'wait-text', waitText(wait)));
+  if (!['budget', 'model_budget'].includes(wait.reason) || (wait.text && wait.text !== waitLabels[wait.reason][1]))
+    reason.append(node('p', 'wait-text', waitText(wait)));
   if (wait.reason === 'deadline' && task.deadline)
     reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
   const content = [request, reason];
@@ -3212,7 +3222,7 @@ async function loadSessions() {
     if (context !== view) return;
     mergeSessionTasks(context, page.sessionTasks);
     context.sessionsBefore = page.sessionsBefore;
-  } catch { if (context === view) setNotice(context, 'Could not load earlier sessions.', true); }
+  } catch { if (context === view) setNotice(context, 'Could not load earlier requests.', true); }
   finally {
     context.loadingSessions = false;
     if (context === view) renderActivity();
