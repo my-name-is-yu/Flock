@@ -6,7 +6,8 @@ import {
 import {
   confirmSetting, loadInstallation, postSettings, showInstallationUnavailable, statusBadge,
 } from '/installation-settings.js';
-import { actionButton, element, quietSavedStatus, row, rowLabel, settingsNavigation } from '/settings-ui.js';
+import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
+import { quietSavedStatus } from '/settings-ui.js';
 
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
