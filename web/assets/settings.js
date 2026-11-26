@@ -9,6 +9,7 @@ import {
 } from '/installation-settings.js';
 import { showAvatar } from '/avatars.js';
 import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
+import { quietSavedStatus } from '/settings-ui.js';
 
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
@@ -110,6 +111,7 @@ async function load() {
 }
 
 const navigation = settingsNavigation();
+quietSavedStatus(document.getElementById('status'));
 function showSection() {
   const active = navigation.get(location.hash.slice(1)) ?? navigation.get('appearance');
   const section = active.dataset.section;

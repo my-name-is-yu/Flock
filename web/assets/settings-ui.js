@@ -13,6 +13,15 @@ export function settingsNavigation(conversations = '/') {
   return new Map([...nav.querySelectorAll('[data-section]')].map(link => [link.dataset.section, link]));
 }
 
+// A plain "Saved." only confirms what the control already shows, so screen readers hear it
+// but it doesn't push the page down. Errors and messages with more to say stay visible.
+export function quietSavedStatus(status) {
+  if (!status) return;
+  const sync = () => status.classList.toggle('sr-only', status.textContent === 'Saved.');
+  new MutationObserver(sync).observe(status, { childList: true, characterData: true, subtree: true });
+  sync();
+}
+
 export function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text) node.textContent = text;
