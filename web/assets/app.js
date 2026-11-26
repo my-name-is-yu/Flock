@@ -2643,7 +2643,7 @@ function focusAfterBotDeletion() {
     return;
   }
   if (!narrow.matches && workspace.classList.contains('sidebar-collapsed')) {
-    byId('toggle-chat-sidebar').focus();
+    sidebarShow.focus();
     return;
   }
   if (view) focusKey(`bot:${view.id}`);
@@ -3341,6 +3341,7 @@ elements['close-navigation'].addEventListener('click', () => openNavigation(fals
 navBackdrop?.addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
 const sidebarToggle = byId('toggle-chat-sidebar');
+const sidebarShow = byId('show-chat-sidebar');
 const sidebarResizer = elements['sidebar-resizer'];
 const sidebarMinWidth = 216;
 const sidebarMaxWidth = 416;
@@ -3351,19 +3352,18 @@ function setSidebarWidth(px, persist = false) {
   if (persist) save('flock-sidebar-width', clamped);
 }
 function setSidebarCollapsed(collapsed) {
+  const moveFocus = document.activeElement === (collapsed ? sidebarToggle : sidebarShow);
   workspace.classList.toggle('sidebar-collapsed', collapsed);
-  const label = collapsed ? 'Show Bot list' : 'Hide Bot list';
   sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
-  sidebarToggle.setAttribute('aria-label', label);
-  sidebarToggle.dataset.tooltip = label;
+  sidebarShow.hidden = !collapsed;
+  if (moveFocus) (collapsed ? sidebarShow : sidebarToggle).focus({ preventScroll: true });
 }
 const storedSidebarWidth = saved('flock-sidebar-width', null);
 if (Number.isFinite(storedSidebarWidth) && storedSidebarWidth >= sidebarMinWidth && storedSidebarWidth <= sidebarMaxWidth) {
   setSidebarWidth(storedSidebarWidth, false);
 }
-sidebarToggle.addEventListener('click', () => {
-  setSidebarCollapsed(!workspace.classList.contains('sidebar-collapsed'));
-});
+sidebarToggle.addEventListener('click', () => setSidebarCollapsed(true));
+sidebarShow.addEventListener('click', () => setSidebarCollapsed(false));
 if (sidebarResizer) {
   let dragPointer = null;
   let lastWidth = storedSidebarWidth ?? 296;

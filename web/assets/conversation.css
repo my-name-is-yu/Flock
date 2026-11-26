@@ -49,9 +49,6 @@
 }
 .profile-toolbar .icon-button { width: 1.95rem; height: 1.95rem; transition: background-color .15s ease, color .15s ease; }
 .profile-toolbar .icon-button svg { width: 1.04rem; height: 1.04rem; transition: transform .22s cubic-bezier(0.23, 1, 0.32, 1); }
-.profile-toolbar .toggle-chat-sidebar[aria-expanded="false"] { background: var(--accent-soft); color: var(--accent); }
-.profile-toolbar .toggle-chat-sidebar[aria-expanded="false"]:hover { background: var(--accent-soft-hover); }
-.profile-toolbar .toggle-chat-sidebar[aria-expanded="false"] svg { transform: scaleX(-1); }
 .conversation-actions { position: relative; }
 .conversation-actions > summary { list-style: none; cursor: pointer; }
 .conversation-actions > summary::-webkit-details-marker { display: none; }
@@ -520,7 +517,6 @@
 @media (max-width: 700px) {
   .conversation-header { --profile-avatar-size: 2.625rem; }
   .main:has(:is(#profile-identity, #peer-identity):not([hidden])) { --chat-avatar-size: 2.625rem; }
-  .profile-toolbar .toggle-chat-sidebar { display: none; }
   .conversation { scrollbar-gutter: auto; }
   .timeline { --avatar-size: 1.5rem; --avatar-gap: .45rem; }
   .bubble { max-width: calc(100% - 2.2rem); }
