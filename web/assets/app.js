@@ -1701,11 +1701,9 @@ function eventCard(event, context, place, report) {
     if (blocker) {
       const note = node('p', 'msg-note msg-queued');
       if (blocker.request) {
-        // Truncate only the blocking request so "Queued after" stays readable on narrow screens.
         note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
         note.dataset.tooltip = `Starts when “${blocker.request}” finishes`;
       } else {
-        // The server names only this Bot's own requests; another Bot's work in the project stays private.
         note.append(icon('clock'), node('span', null, 'Waiting for another Bot to finish in this project'));
       }
       extras.push(note);
@@ -3271,7 +3269,6 @@ async function submit(event) {
     if (review && view === context && decisions.reviewReply()?.messageId === review.messageId) {
       decisions.close({ focus: false });
     }
-    // The bubble shows Received; the notice only tells screen readers.
     setNotice(context, 'Message received.', false, { quiet: true });
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
