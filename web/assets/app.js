@@ -1415,6 +1415,17 @@ function cardSourceAction(item, close) {
     void showConversationMessage(view, id, { bot: participant(item.conversationBotId ?? item.botId), preferLoaded: true });
   });
 }
+function appendTrailingIcon(text, icon) {
+  const last = text.lastChild;
+  const at = last?.nodeType === Node.TEXT_NODE ? last.data.trimEnd().search(/\S+$/) : -1;
+  // Long URLs and unspaced CJK text still need to wrap inside the bubble.
+  if (at >= 0 && last.data.trimEnd().length - at <= 24) {
+    const word = last.splitText(at);
+    const glued = node('span', 'trailing-icon');
+    glued.append(word, icon);
+    text.append(glued);
+  } else text.append(icon);
+}
 function runIcon(run) {
   const link = linkToRun(run);
   if (!link) return null;
@@ -1606,7 +1617,7 @@ function eventCard(event, context, place, report) {
     text.textContent = copy;
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
-    if (link) text.append(link);
+    if (link) appendTrailingIcon(text, link);
     bubble.append(text);
     if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
     if (data.destination) {
@@ -1627,7 +1638,7 @@ function eventCard(event, context, place, report) {
     }
     text.append(document.createTextNode(data.text ?? ''));
     const link = runIcon(data.run);
-    if (link) text.append(link);
+    if (link) appendTrailingIcon(text, link);
     bubble.append(text);
     if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
   } else {
