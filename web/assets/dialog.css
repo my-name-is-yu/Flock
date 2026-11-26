@@ -116,7 +116,7 @@
   from { opacity: 0; transform: scale(.96); }
   to { opacity: 1; transform: none; }
 }
-.settings-name-input:focus { outline: none; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline)); }
+.settings-name-input:focus { outline: 2px solid transparent; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline)); }
 .settings-status {
   color: var(--text-2); font-size: var(--text-xs); text-align: center;
   animation: settings-note-in .18s ease-out;
@@ -147,7 +147,7 @@
   font: inherit; font-size: var(--text-md); line-height: 1.6;
 }
 .settings-role-input:focus-visible {
-  outline: none; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline));
+  outline: 2px solid transparent; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
 }
 .settings-card-actions { display: flex; justify-content: flex-end; gap: .5rem; }
@@ -183,7 +183,7 @@
   background: var(--field, var(--canvas)); color: var(--text); font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 400;
 }
 .settings-workspace-field :is(input, select):focus-visible {
-  outline: none; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline));
+  outline: 2px solid transparent; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
 }
 .settings-workspace-field select { font-family: var(--font-sans); }
@@ -251,6 +251,7 @@ a.settings-row svg { margin-left: auto; }
 .cron-text { display: grid; gap: .25rem; min-width: 0; }
 .cron-note { color: var(--text-3); font-size: var(--text-xs); }
 .cron-error { color: var(--danger); font-size: var(--text-sm); }
+.cron-poll-error { padding: .65rem 1.1rem; border-bottom: 1px solid var(--hairline); }
 .cron-empty { padding: .95rem 1.1rem; color: var(--text-3); }
 .cron-remove { color: var(--text-2); }
 .cron-form { gap: .6rem; }
@@ -266,7 +267,7 @@ a.settings-row svg { margin-left: auto; }
 }
 .cron-form-when .dialog-button { margin-inline-start: auto; }
 :is(.cron-request-input, .cron-form-when :is(select, input)):focus-visible {
-  outline: none; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline));
+  outline: 2px solid transparent; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
 }
 

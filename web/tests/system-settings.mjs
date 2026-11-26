@@ -62,36 +62,190 @@ async function exercise() {
   check(rows.every(item => item.badge === 'Set at launch' && !item.change), 'Launch settings could be changed here');
 }
 
+function fixturesUx() {
+  window.__settingsUx = { disconnectCalls: [], failRule: false };
+  const state = window.__settingsUx;
+  const installation = {
+    access: { mode: 'local', users: [] },
+    connections: {
+      channels: {
+        hostManaged: false,
+        canManageHost: true,
+        bridges: [],
+        localMachines: [{ id: 'mac', personId: 'owner' }],
+      },
+      tools: {
+        hostManaged: false,
+        searchKeySet: false,
+        mcpServers: [{ id: 'docs', url: 'https://example.com' }],
+        skills: [{ id: 'write', path: 'writing', available: true }],
+      },
+    },
+    system: {
+      active: { port: 52011, sessionRead: 'off' },
+      saved: { port: null, sessionRead: null },
+      next: { port: null, sessionRead: 'off' },
+      overrides: { port: false, sessionRead: false },
+      pending: { port: false, sessionRead: false },
+    },
+  };
+  window.fetch = async (path, options = {}) => {
+    if (path === '/api/settings') {
+      return Response.json({
+        mode: 'supervised',
+        rules: [],
+        canManagePolicy: true,
+        model: { demo: true },
+        personOnlyActions: [],
+        t3Setup: { running: false },
+        canDisconnectT3: true,
+        t3: { environments: [{ environmentId: 'local', authorization: { label: 'Mac Studio' } }] },
+      });
+    }
+    if (path === '/api/settings/installation') return Response.json(installation);
+    if (path === '/api/settings/rule' && options.method === 'POST' && state.failRule) {
+      return Response.json({ error: 'failed' }, { status: 500 });
+    }
+    if (path === '/api/settings/t3-disconnect' && options.method === 'POST') {
+      state.disconnectCalls.push(JSON.parse(options.body));
+      return Response.json({ ok: true });
+    }
+    return Response.json({ error: 'unknown_path' }, { status: 404 });
+  };
+}
+
+async function exerciseUx() {
+  const $ = (id) => document.getElementById(id);
+  const q = (selector) => document.querySelector(selector);
+  const check = (value, message) => { if (!value) throw new Error(message); };
+  async function waitFor(predicate, message) {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    check(predicate(), message);
+  }
+  const btn = (root, text) => [...root.querySelectorAll('button')].find((el) => el.textContent === text);
+
+  await waitFor(() => $('rule-action')?.options.length && q('#connections button') && q('#integrations button') && q('#tools button'),
+    'Settings UX fixture did not finish loading');
+
+  // 1. Dynamic #rule-form target placeholder.
+  const action = $('rule-action');
+  const target = $('rule-form').elements.target;
+  action.value = 'repository.pr';
+  action.dispatchEvent(new Event('change', { bubbles: true }));
+  check(target.placeholder === 'github.com/acme/app', `Unexpected repository placeholder: ${target.placeholder}`);
+  action.value = 'web.fetch';
+  action.dispatchEvent(new Event('change', { bubbles: true }));
+  check(target.placeholder === 'example.com', `Unexpected web placeholder: ${target.placeholder}`);
+  action.value = 'mcp.invoke';
+  action.dispatchEvent(new Event('change', { bubbles: true }));
+  check(target.placeholder === 'server-name', `Unexpected mcp placeholder: ${target.placeholder}`);
+  action.value = 'skill.read';
+  action.dispatchEvent(new Event('change', { bubbles: true }));
+  check(target.placeholder === 'skill-name', `Unexpected skill placeholder: ${target.placeholder}`);
+  action.value = 'secret.use';
+  action.dispatchEvent(new Event('change', { bubbles: true }));
+  check(target.placeholder === 'SECRET_NAME', `Unexpected secret placeholder: ${target.placeholder}`);
+
+  // 2. #status.error styling and clear on tab switch.
+  window.__settingsUx.failRule = true;
+  target.value = 'MY_SECRET';
+  $('rule-form').requestSubmit();
+  await waitFor(() => $('status').textContent.includes('Couldn’t save') && $('status').classList.contains('error'),
+    'Failed rule save did not mark #status as error');
+  location.hash = '#connections';
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
+  check($('status').textContent === '' && !$('status').classList.contains('error'),
+    'Switching settings tabs did not clear #status error');
+
+  // 3. T3 Disconnect confirmation dialog.
+  const disconnect = btn($('connections'), 'Disconnect');
+  check(disconnect, 'Disconnect button missing');
+  disconnect.click();
+  await waitFor(() => $('installation-editor').open && $('installation-editor-title').textContent === 'Disconnect Mac Studio?',
+    'T3 Disconnect did not open confirmation dialog');
+  check(window.__settingsUx.disconnectCalls.length === 0, 'Disconnect ran before confirmation');
+  btn($('installation-editor'), 'Disconnect').click();
+  await waitFor(() => window.__settingsUx.disconnectCalls.length === 1 && !$('installation-editor').open,
+    'Confirming T3 disconnect did not submit or close');
+  check(window.__settingsUx.disconnectCalls[0].environmentId === 'local', 'Disconnect submitted wrong environmentId');
+
+  // 4. Cancel edit in editMachines, editMcp, and editSkill.
+  const verifyCancelEdit = async (section, manageRowText, submitEditLabel, submitAddLabel) => {
+    const row = [...section.querySelectorAll('.settings-row')].find((el) => el.textContent.includes(manageRowText));
+    row.querySelector('button').click();
+    await waitFor(() => $('installation-editor').open && btn($('installation-editor'), 'Edit'),
+      `Could not open editor for ${manageRowText}`);
+    btn($('installation-editor'), 'Edit').click();
+    await waitFor(() => btn($('installation-editor'), 'Cancel edit') &&
+      $('installation-editor').querySelector('input[name="id"]')?.readOnly === true &&
+      btn($('installation-editor'), submitEditLabel),
+    `Edit mode for ${manageRowText} missed Cancel edit or readonly id`);
+    btn($('installation-editor'), 'Cancel edit').click();
+    await waitFor(() => !btn($('installation-editor'), 'Cancel edit') &&
+      $('installation-editor').querySelector('input[name="id"]')?.readOnly === false &&
+      $('installation-editor').querySelector('input[name="id"]')?.value === '' &&
+      btn($('installation-editor'), submitAddLabel),
+    `Cancel edit for ${manageRowText} did not reset the form`);
+    $('installation-editor-close').click();
+  };
+  await verifyCancelEdit($('integrations'), 'Local machines', 'Save machine', 'Add machine');
+  await verifyCancelEdit($('tools'), 'MCP servers', 'Save server', 'Add server');
+  await verifyCancelEdit($('tools'), 'Skills', 'Save skill', 'Add skill');
+}
+
 const assets = new URL('../assets/', import.meta.url);
 const read = (path) => readFile(new URL(`.${path}`, assets));
-const page = (await read('/settings.html')).toString().replace('<script type="module" src="/settings.js"></script>', `
+const page = (await read('/settings.html')).toString().replace('<script type="module" src="/settings.js"></script>', () => `
   <script type="module">
     try {
       await (${exercise})();
       document.documentElement.dataset.flockResult = 'pass';
     } catch (error) {
-      document.documentElement.dataset.flockResult = error.message;
+      document.documentElement.dataset.flockResult = error?.stack || error?.message || String(error);
+    }
+  </script>`);
+const uxPage = (await read('/settings.html')).toString().replace('<script type="module" src="/settings.js"></script>', () => `
+  <script>(${fixturesUx})();</script>
+  <script type="module">
+    import '/settings.js';
+    try {
+      await (${exerciseUx})();
+      document.documentElement.dataset.flockResult = 'pass';
+    } catch (error) {
+      document.documentElement.dataset.flockResult = error?.stack || error?.message || String(error);
     }
   </script>`);
 const contentTypes = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 const server = createServer(async (request, response) => {
   const { pathname } = new URL(request.url, 'http://localhost');
   try {
-    response.setHeader('Content-Type', pathname === '/settings' ? 'text/html' : contentTypes[extname(pathname)] ?? 'application/octet-stream');
-    response.end(pathname === '/settings' ? page : await read(pathname));
+    if (pathname === '/settings' || pathname === '/settings-ux') {
+      response.setHeader('Content-Type', 'text/html');
+      response.end(pathname === '/settings-ux' ? uxPage : page);
+      return;
+    }
+    response.setHeader('Content-Type', contentTypes[extname(pathname)] ?? 'application/octet-stream');
+    response.end(await read(pathname));
   } catch {
     response.writeHead(404).end();
   }
 });
 const directory = await mkdtemp(join(tmpdir(), 'flock-system-settings-dom-'));
+const runPage = async (path) => {
+  const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
+    '--disable-background-networking', `--user-data-dir=${directory}`, '--virtual-time-budget=3000', '--dump-dom',
+    `http://127.0.0.1:${server.address().port}${path}`], { encoding: 'utf8', timeout: 25000 });
+  const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
+  if (result?.[1] !== 'pass') throw new Error(`${path}: ${result?.[1] ?? 'The browser did not finish the System settings checks'}`);
+};
 try {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', `--user-data-dir=${directory}`, '--virtual-time-budget=3000', '--dump-dom',
-    `http://127.0.0.1:${server.address().port}/settings#system`], { encoding: 'utf8', timeout: 25000 });
-  const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the System settings checks');
+  await runPage('/settings#system');
+  await runPage('/settings-ux#permissions');
 } finally {
   server.close();
   await rm(directory, { recursive: true, force: true });

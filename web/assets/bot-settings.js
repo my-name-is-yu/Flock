@@ -1,13 +1,14 @@
 import '/tooltip.js';
 import { accentColor } from '/avatars.js';
 import { listenForBrowserNotifications } from '/browser-notifications.mjs';
-import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
+import { actionButton, element, row, rowLabel, setSettingsStatus, settingsNavigation } from '/settings-ui.js';
 
 const botId = decodeURIComponent(location.pathname.split('/')[2]);
 listenForBrowserNotifications(() => botId);
 const botQuery = new URLSearchParams({bot: botId});
 const $ = (id) => document.getElementById(id);
 const status = $('status');
+const setStatus = (text, isError = false) => setSettingsStatus(status, text, isError);
 const navigation = settingsNavigation('/?' + botQuery);
 navigation.get('bots').setAttribute('aria-current', 'page');
 
@@ -42,13 +43,13 @@ async function save(section, url, data, refresh, success) {
     if (!(await post(url, data)).ok) throw new Error();
     try {
       await refresh();
-      status.textContent = success;
+      setStatus(success);
     } catch {
-      status.textContent = 'Saved. Reload this page to see the change.';
+      setStatus('Saved. Reload this page to see the change.');
     }
     return true;
   } catch {
-    status.textContent = 'Couldn’t save this change.';
+    setStatus('Couldn’t save this change.', true);
     return false;
   } finally {
     for (const control of controls) control.disabled = false;
@@ -77,7 +78,7 @@ memberForm.onsubmit = async (event) => {
   event.preventDefault();
   const person = memberForm.elements.person.value.trim();
   if (!person) {
-    status.textContent = 'Enter a person’s ID.';
+    setStatus('Enter a person’s ID.', true);
     return;
   }
   if (await saveMember(person, true)) memberForm.reset();
@@ -190,7 +191,7 @@ async function submitChannelLink(action, bridge, sender) {
     const response = await post('/api/bot-settings/channels', {botId,action,type:bridge.type,id:bridge.id,sender});
     const data = await response.json();
     if (!response.ok) {
-      $('status').textContent = data.message || 'Could not update the channel link.';
+      setStatus(data.message || 'Could not update the channel link.', true);
       return;
     }
     renderChannelLinks(data.bridges);
@@ -198,9 +199,9 @@ async function submitChannelLink(action, bridge, sender) {
       channelForm.elements.sender.value = '';
       channelForm.elements.person.value = '';
     }
-    $('status').textContent = 'Channel links saved.';
+    setStatus('Channel links saved.');
   } catch {
-    $('status').textContent = 'Could not update the channel link.';
+    setStatus('Could not update the channel link.', true);
     return;
   } finally {
     setLinkSaving(false);
@@ -213,7 +214,7 @@ channelForm.onsubmit = (event) => {
   const id = channelForm.elements.sender.value.trim();
   const personId = channelForm.elements.person.value.trim();
   if (!bridge || !id || !personId) {
-    $('status').textContent = 'Choose a channel and enter both sender and person IDs.';
+    setStatus('Choose a channel and enter both sender and person IDs.', true);
     return;
   }
   void submitChannelLink('setSender',bridge,{id,personId});
@@ -268,9 +269,9 @@ async function loadMachines() {
 }
 
 const [machines, access, channels] = await Promise.allSettled([loadMachines(), loadAccess(), loadChannelLinks()]);
-if (machines.status === 'rejected') status.textContent = 'Couldn’t load connected computers.';
+if (machines.status === 'rejected') setStatus('Couldn’t load connected computers.', true);
 else if (access.status === 'rejected' && (access.reason.cause !== 403 || !machines.value)) {
-  status.textContent = 'Couldn’t load this Bot’s access.';
-} else if (channels.status === 'rejected') status.textContent = 'Couldn’t load channel senders.';
+  setStatus('Couldn’t load this Bot’s access.', true);
+} else if (channels.status === 'rejected') setStatus('Couldn’t load channel senders.', true);
 const target = $(location.hash.slice(1));
 if (target && !target.hidden) target.scrollIntoView({block: 'nearest'});
