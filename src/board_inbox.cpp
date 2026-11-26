@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -198,6 +199,16 @@ Json InboxStorage::inbox(const Person& actor, std::string_view bot) const {
                  {"prompt", std::move(prompt)}},
                 messageAnchor(database, id, message), createdAt);
         };
+        std::set<Id> sharedBudgetWaits;
+        auto pausedTurns = database.query(R"SQL(
+SELECT t.message_id FROM conversation_turns t CROSS JOIN messages m ON m.id=t.message_id
+WHERE t.pause_id IS NOT NULL AND t.status='paused' AND m.bot_id=?
+)SQL",
+                                          {id});
+        while (pausedTurns.next())
+            for (const auto wait :
+                 modelCalls.taskWaitsCoveredByConversationApproval(id, modelCalls.messageModelBudget(pausedTurns.number(0))))
+                sharedBudgetWaits.insert(wait);
         static const auto waitSql = "SELECT w.id,w.reason,w.data," + taskProjection() + R"SQL(
 FROM tasks t JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL
 WHERE t.bot_id=? AND t.state='waiting'
@@ -211,6 +222,7 @@ ORDER BY w.id DESC
             const auto reason = wait.reason();
             const auto kind = inboxWaitKind(reason);
             if (!kind || !waitStorage.waitIsActionable(task)) continue;
+            if (reason == WaitReason::model_budget && sharedBudgetWaits.contains(waitId)) continue;
             Json view{{"requestTitle", taskTitle(task)}, {"request", task.request}, {"prompt", wait.text}, {"choices", wait.choices()}};
             if (const auto allowance = waitStorage.waitAllowance(task.id, reason); allowance) view["allowance"] = allowance;
             add({id, *kind, waitId, waitId, task.id, task.currentRevision.value_or(0), task.generation}, std::move(view),
