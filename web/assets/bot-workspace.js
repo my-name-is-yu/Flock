@@ -93,7 +93,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     workspace = current;
     if (!editable) draft = null;
     showView();
-    if (workspace.model && !catalogRequested && !catalog.models.length) {
+    if (editable && workspace.model && !catalogRequested && !catalog.models.length) {
       catalogRequested = true;
       loadModels().then((data) => {
         if (catalog.models.length || !data?.models?.length) return;

@@ -169,11 +169,21 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   check(JSON.stringify(patches[6]) === '{"model":"no-reasoning","reasoningEffort":""}' &&
     facts[1].textContent === 'Model default', 'Changing the model left an unsupported effort saved');
 
-  const viewer = createBotWorkspaceCard(async () => ({}), async () => [], async () => catalog);
-  viewer.update({ model: 'next-model', modelCallLimit: 20 });
+  let viewModelLoads = 0;
+  const viewer = createBotWorkspaceCard(async () => ({}), async () => [], async () => {
+    viewModelLoads++;
+    return catalog;
+  });
+  const current = { model: 'next-model', modelCallLimit: 20 };
+  const modelLabel = viewer.element.querySelector('.settings-workspace-facts dd');
+  viewer.update(current);
   await settle();
-  check(viewer.element.querySelector('.settings-workspace-facts dd').textContent === 'Next model',
-    'The settings showed the model slug instead of its name');
+  check(viewModelLoads === 0 && modelLabel.textContent === 'next-model',
+    'Read-only settings requested the editor-only model catalog');
+  viewer.update(current, true);
+  await settle();
+  check(viewModelLoads === 1 && modelLabel.textContent === 'Next model',
+    'Editable settings did not show the model name before opening the editor');
 }
 
 const directory = mkdtempSync(join(tmpdir(), 'flock-bot-workspace-'));
