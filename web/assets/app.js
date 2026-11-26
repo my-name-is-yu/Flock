@@ -20,6 +20,7 @@ import { createComposerDraftStore } from '/composer-drafts.mjs';
 import { mountConversationFind } from '/conversation-find.mjs';
 import { createRecurringRequests } from '/recurring-requests.js';
 import { createMemoryHistory } from '/memory-history.js';
+import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -3423,18 +3424,22 @@ byId('conversation-recent-decisions').addEventListener('click', () => {
 elements['peer-back'].addEventListener('click', () => leavePeerConversation());
 elements['peer-parent-link']?.addEventListener('click', () => leavePeerConversation());
 elements.conversation.addEventListener('click', (event) => {
-  if (!view?.dm || window.getSelection?.()?.toString()) return;
-  if (!event.target.closest('.bubble, button, a, input, textarea, summary, .msg-actions, .msg-meta, .peer-exchange-link, .older, .empty-state')) {
-    leavePeerConversation();
-  }
+  if (window.getSelection?.()?.toString()) return;
+  if (event.target.closest('.bubble, button, a, input, textarea, summary, .msg-actions, .msg-meta, .peer-exchange-link, .older, .empty-state')) return;
+  if (view?.dm) leavePeerConversation();
+  else if (!findPanel.hidden) conversationFind.close(false);
 });
 elements['close-detail'].addEventListener('click', closeDetail);
-elements.detail.addEventListener('click', (event) => {
-  if (event.target !== elements.detail) return;
-  const rect = elements.detail.getBoundingClientRect();
-  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
-    closeDetail();
-  }
+enableBackdropDismiss(elements.detail, {
+  canDismiss: () => {
+    const keep = elements.detail.querySelector('.wait-stop-keep');
+    if (keep) {
+      if (!keep.disabled) keep.click();
+      return false;
+    }
+    return true;
+  },
+  close: closeDetail,
 });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open || !settingsReturnFocus) return;
