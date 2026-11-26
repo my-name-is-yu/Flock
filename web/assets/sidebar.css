@@ -213,6 +213,21 @@ a.session-row:hover .activity-open, a.session-row:focus-visible .activity-open {
 .activity-group-count { font-variant-numeric: tabular-nums; opacity: .8; }
 .request-group { display: grid; gap: 2px; }
 .request-group + .request-group { margin-top: .4rem; }
+.request-entry { display: flex; align-items: center; gap: .15rem; min-width: 0; }
+.request-entry > :first-child { flex: 1; min-width: 0; }
+.request-task.has-stop { position: relative; }
+.request-task.has-stop > .session-row { padding-right: 2.1rem; }
+.request-task.has-stop > .request-stop { position: absolute; top: .25rem; right: .2rem; }
+.request-stop {
+  flex: none; width: 1.65rem; height: 1.65rem; border-radius: var(--radius-sm);
+  color: var(--text-3); opacity: 0;
+  transition: opacity var(--dur-fast) ease, background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.request-stop svg { width: .82rem; height: .82rem; }
+.request-entry:hover .request-stop, .request-entry:focus-within .request-stop,
+.request-task:hover > .request-stop, .request-task:focus-within > .request-stop { opacity: 1; }
+.request-stop:hover { background: var(--danger-soft); color: var(--danger); }
+@media (hover: none) { .request-stop { opacity: 1; } }
 .request-sessions { margin-inline-start: .8rem; }
 .activity-empty { color: var(--text-3); font-size: var(--text-xs); line-height: 1.5; padding: .2rem .65rem; }
 .load-sessions { margin: .3rem .2rem 0; }

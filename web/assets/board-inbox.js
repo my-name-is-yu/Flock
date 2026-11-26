@@ -9,7 +9,7 @@ export const pendingKindLabels = {
 };
 const labels = {
   ...pendingKindLabels,
-  answer: 'Answered', deny: 'Denied', supply: 'Supplied',
+  answer: 'Answered', cancel: 'Stop requested', deny: 'Denied', supply: 'Supplied',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
   allow_next_time: 'Allow rule saved for this Flock',
 };
@@ -93,6 +93,37 @@ function button(text, className, click) {
 }
 function setCardBusy(card, busy) {
   for (const control of card.querySelector('.board-inbox-form')?.elements ?? []) control.disabled = busy;
+  for (const control of card.querySelectorAll('.board-inbox-stop button')) control.disabled = busy;
+}
+
+function stopSection(item, submit, busy) {
+  const container = element('div', '', 'board-inbox-stop');
+  const showDefault = (restoreFocus = false) => {
+    const stop = button('Stop this request', 'wait-cancel', showConfirm);
+    stop.disabled = busy;
+    container.replaceChildren(stop);
+    if (restoreFocus) stop.focus();
+  };
+  function showConfirm() {
+    const confirm = element('div', '', 'wait-stop-confirm');
+    confirm.setAttribute('role', 'group');
+    const prompt = element('p', '', 'wait-stop-text');
+    prompt.id = `inbox-stop-text-${item.waitId}`;
+    prompt.append(element('strong', 'Stop this request?'),
+      ' This requests a stop for this work, including any T3 work assigned to it.');
+    confirm.setAttribute('aria-labelledby', prompt.id);
+    const keep = button('Keep working', 'dialog-button quiet wait-stop-keep', () => showDefault(true));
+    const confirmStop = button('Stop request', 'dialog-button danger', () => void submit(item, 'cancel', {}));
+    keep.disabled = busy;
+    confirmStop.disabled = busy;
+    const choices = element('div', '', 'board-inbox-actions');
+    choices.append(keep, confirmStop);
+    confirm.append(prompt, choices);
+    container.replaceChildren(confirm);
+    keep.focus();
+  }
+  showDefault();
+  return container;
 }
 
 function decisionCard(item, submit, source, question, busy) {
@@ -134,6 +165,7 @@ function decisionCard(item, submit, source, question, busy) {
   }
   if (item.itemKind === 'user_question') {
     article.append(question());
+    if (isTaskWait(item)) article.append(stopSection(item, submit, busy));
     return article;
   }
   const form = element('form', '', 'board-inbox-form');
@@ -162,6 +194,7 @@ function decisionCard(item, submit, source, question, busy) {
     void submit(item, event.submitter.value, data);
   });
   article.append(form);
+  if (isTaskWait(item)) article.append(stopSection(item, submit, busy));
   setCardBusy(article, busy);
   return article;
 }
@@ -614,8 +647,10 @@ export function mountBoardInbox({
       onChange();
       let failure;
       try {
-        const response = await (item.itemKind ? api('inbox/decide', { ...target, decision, data })
-          : api('operations', { ...data, ...target, operation: decision }));
+        const useOperation = !item.itemKind || decision === 'cancel';
+        const response = await (useOperation
+          ? api('operations', { ...data, ...target, operation: decision })
+          : api('inbox/decide', { ...target, decision, data }));
         if (response?.accepted !== true) throw new Error('decision_unconfirmed');
       } catch (error) {
         failure = error;

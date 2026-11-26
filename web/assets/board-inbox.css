@@ -230,3 +230,16 @@
   background: var(--raised);
 }
 .board-inbox-target { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; }
+.board-inbox-stop {
+  display: grid; gap: .55rem; margin-top: .25rem; padding-top: .55rem;
+  border-top: 1px solid var(--hairline);
+}
+.board-inbox-stop .wait-cancel {
+  justify-self: start; padding: 0; border: 0; background: none;
+  color: var(--danger); font-size: var(--text-sm); font-weight: 500;
+}
+.board-inbox-stop .wait-cancel:hover:not(:disabled) { text-decoration: underline; }
+.board-inbox-stop .wait-cancel:disabled { color: var(--text-3); opacity: .6; cursor: default; }
+.board-inbox-stop .wait-stop-confirm { display: grid; gap: .6rem; padding: .75rem .85rem; border-radius: var(--radius-md); background: var(--danger-soft); }
+.board-inbox-stop .wait-stop-text { font-size: var(--text-sm); color: var(--text-2); }
+.board-inbox-stop .wait-stop-text strong { color: var(--text); font-weight: 600; }

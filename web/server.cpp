@@ -852,7 +852,7 @@ private:
             }
             const auto operation = requiredText(body, "operation", 32);
             const auto id = bodyId(body, "taskId");
-            const auto wait = bodyId(body, "waitId");
+            const auto wait = bodyId(body, "waitId", operation == "cancel" ? 0 : 1);
             auto data = operationData(body, operation);
             const auto task = Tasks(store_).task(id);
             if (task.task.botId != bot) return error(res, 404, "task_not_found");
