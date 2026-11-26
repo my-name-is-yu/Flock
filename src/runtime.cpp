@@ -19,7 +19,7 @@
 #include "flock/types.hpp"
 #include "flock/store.hpp"
 #include "flock/task.hpp"
-#include "storage.hpp"
+#include "store_access.hpp"
 #include "wait_storage.hpp"
 #include "policy_approvals.hpp"
 #include "task_routing.hpp"
@@ -67,9 +67,9 @@ struct Runtime::Impl {
                                   options.reconcileBotCreation, options.intake, options.peers, workers.stopToken());
     }
 
-    Impl(Store::Impl& storage, Policy permissions, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
+    Impl(StoreAccess::Impl& storage, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
         : channelStorage(storage.channelStorage), conversationTurns(storage.conversationTurns), gitStorage(storage.gitStorage),
-          workflowStorage(storage.workflowStorage), policy(permissions), model(m), t3(adapter), soul(std::move(loader)),
+          workflowStorage(storage.workflowStorage), policy(storage.permissions), model(m), t3(adapter), soul(std::move(loader)),
           options(withDefaultBotTools(std::move(opts))),
           maintenance(storage.database, storage.automationStorage, storage.workflowStorage, storage.policyApprovals, options.clock,
                       options.automationError, options.storageContention),
@@ -136,7 +136,7 @@ struct Runtime::Impl {
 Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul) : Runtime(store, model, t3, std::move(soul), {}) {}
 
 Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOptions options)
-    : p_(std::make_unique<Impl>(*store.p_, Policy{store}, model, t3, std::move(soul), std::move(options))) {}
+    : p_(std::make_unique<Impl>(StoreAccess::get(store), model, t3, std::move(soul), std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::requestStop() {
     p_->workers.requestStop();
