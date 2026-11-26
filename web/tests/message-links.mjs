@@ -10,7 +10,7 @@ function fixtures() {
   window.EventSource = undefined;
   const bot = { id: 'release', name: 'Release', model: 'demo', paused: false, canDelete: true, presence: 'idle' };
   const time = Math.floor(Date.now() / 1000) - 600;
-  const link = '<p>See <a href="https://example.com/pull/12">https://example.com/pull/12</a></p>';
+  const link = '<h1>Heading</h1><blockquote><p>Quoted</p></blockquote><p>See <a href="https://example.com/pull/12">https://example.com/pull/12</a> and <code>inline</code></p><pre><code>block</code></pre><hr>';
   const events = [
     { id: 1, kind: 'conversation_message', time, data: { text: 'See https://example.com/pull/12', textHtml: link } },
     { id: 2, kind: 'conversation_reply', time: time + 10, data: { text: 'See https://example.com/pull/12', textHtml: link } },
@@ -36,6 +36,25 @@ async function exercise() {
   check(links.length === 2, 'The message links did not render');
   check(links.every((link) => link.target === '_blank' && link.rel === 'noopener noreferrer'),
     'A message link would replace the conversation');
+  const rootStyle = getComputedStyle(document.documentElement);
+  check(rootStyle.getPropertyValue('--dur-medium').trim() === '240ms', 'Missing --dur-medium token');
+  const botQuote = getComputedStyle(document.querySelector('#event-2 blockquote'));
+  check(botQuote.borderInlineStartWidth === '2px' && botQuote.borderInlineStartColor !== 'rgba(0, 0, 0, 0)',
+    'Bot blockquote border is missing');
+  const probe = document.createElement('span');
+  probe.style.color = 'var(--accent)';
+  document.body.append(probe);
+  const accentColor = getComputedStyle(probe).color;
+  probe.remove();
+  check(getComputedStyle(document.querySelector('#event-2 a')).color === accentColor,
+    'Bot Markdown link did not use the accent color');
+  const userBubble = document.querySelector('#event-1 .bubble');
+  check(getComputedStyle(document.querySelector('#event-1 a')).color === getComputedStyle(userBubble).color,
+    'User Markdown link did not inherit the bubble text color');
+  const inlineCode = getComputedStyle(document.querySelector('#event-2 p code'));
+  const blockCode = getComputedStyle(document.querySelector('#event-2 pre code'));
+  check(inlineCode.backgroundColor !== 'rgba(0, 0, 0, 0)' && blockCode.backgroundColor === 'rgba(0, 0, 0, 0)',
+    'Markdown code block styling did not differentiate inline and fenced code');
 }
 
 const assets = new URL('../assets/', import.meta.url);
