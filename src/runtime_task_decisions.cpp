@@ -133,7 +133,7 @@ void runtime::TaskDecisions::complete(TaskData& current, const Json& event, cons
 }
 
 void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision,
-                                    std::string_view approvedInvocation) {
+                                    std::string_view approvedInvocation, const Json* launchDefaults) {
     const auto& args = decision.args;
     const auto& tool = decision.tool;
     if (isGitTool(tool)) {
@@ -241,6 +241,20 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         }
         if (tool == "follow_up" && current.newSessionRequired) throw Conflict("Start a new Session in the current environment");
         if (work) updates.establishCriteria(current, args);
+        if (launchDefaults) {
+            auto session = current.config.value("session", Json::object());
+            if (!session.is_object()) session = Json::object();
+            for (const auto* key : {"model", "providerInstanceId", "workspaceStrategy"}) {
+                if (launchDefaults->contains(key))
+                    session[key] = launchDefaults->at(key);
+                else
+                    session.erase(key);
+            }
+            if (session.empty())
+                current.config.erase("session");
+            else
+                current.config["session"] = std::move(session);
+        }
         updates.consumeEvent(current);
         const auto action = actionId();
         updates.recordDecision(current, event, decision, action);

@@ -7,7 +7,7 @@
 
 namespace flockv0 {
 struct BotChange {
-    std::string operation, target, name, requestKey;
+    std::string target, name, requestKey;
 };
 
 using ApplyBotChange = std::function<void(const BotChange&)>;

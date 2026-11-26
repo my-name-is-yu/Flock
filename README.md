@@ -35,7 +35,9 @@ commit in blame.
    enter a name, and optionally choose a T3 project under **Where does it
    work?**. Flock preselects the last project you assigned if it is available.
    Choose **Create**, then set a **Model** under **How it runs**. You can also
-   change the project there and edit **Role** to tell the Bot how to help you.
+   change the project there and edit **Role** to tell the Bot how to help you. Once the Bot
+   can reply, ask it to change its setup in conversation. An **Updated** note
+   shows what changed and offers **Undo**.
 4. Send a message such as “What can you help me with?” to see the reply in
    the Bot's conversation.
 

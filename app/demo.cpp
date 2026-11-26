@@ -1,5 +1,6 @@
 #include "demo.hpp"
 #include "flock/command.hpp"
+#include "flock/bot_setup.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
@@ -19,6 +20,7 @@
 
 namespace flockv0::app {
 namespace {
+constexpr std::string_view setupRequest = "Rename yourself to Release Scout and always run ./scripts/verify.sh before reporting.";
 constexpr std::string_view verifyProjectRequest = "Show me how to verify this project";
 constexpr std::string_view verificationReport = "The demo project's full check runs with ./scripts/verify.sh.";
 constexpr std::string_view verificationRunSuffix = "-verify-project";
@@ -38,6 +40,13 @@ class DemoModel final : public Model {
                                                                       "It contains no implementation details."
                                                                     : "I queued your request.";
                 return {{{"reply", {{"text", text}}, {}}}};
+            }
+            if (in.event.value("text", "") == setupRequest && std::ranges::find(in.tools, botSetupTool) != in.tools.end()) {
+                auto role = in.notes.soul;
+                if (!role.empty() && !role.ends_with('\n')) role += '\n';
+                role += "Always run ./scripts/verify.sh before reporting.";
+                return {{{std::string(botSetupTool), {{"name", "Release Scout"}, {"soul", std::move(role)}}, {}},
+                         {"reply", {{"text", "I’m now Release Scout. I’ll run ./scripts/verify.sh before reporting."}}, {}}}};
             }
             const auto& reply = in.event.at("replyTo");
             if (reply.is_object() && reply.value("kind", "") == "task_question" && reply.value("current", false)) {

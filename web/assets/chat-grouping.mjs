@@ -4,8 +4,12 @@ export function isMemoryNotice(event) {
   return event.kind === 'memory_remembered' || event.kind === 'memory_learned';
 }
 
+export function isSystemNotice(event) {
+  return isMemoryNotice(event) || event.kind === 'bot_setup_updated';
+}
+
 export function messageSide(event) {
-  if (event.kind === 'cancelled' || isMemoryNotice(event) || event.data.sessionWake || event.data.sessionInvitation)
+  if (event.kind === 'cancelled' || isSystemNotice(event) || event.data.sessionWake || event.data.sessionInvitation)
     return 'system';
   if (event.kind === 'bot_message') return 'peer';
   if (event.kind === 'conversation_message' && event.data.channel?.channelKind)

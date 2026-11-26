@@ -974,35 +974,184 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
         check(browser.get(anchored).at("messages") == shared, "a forwarded quote with a mismatched timestamp was attributed to the author");
     }
 }
-void fullModeProfiles(const std::filesystem::path& directory) {
-    Store store(directory / "state.db");
+void conversationBotSetup(const std::filesystem::path& directory) {
     app::Bots bots(directory / "bots");
+    const auto report = [](auto, auto) {};
+    const auto catalog = Json::array({{{"slug", "planner-next"}, {"reasoningEfforts", Json::array({"high", "xhigh"})}}});
+    Store store(directory / "state.db",
+                {.automationModel = [&](std::string_view bot) { return bots.plannerModel(bot); },
+                 .saveBotSetup = [&](Store& target, std::string_view bot, const BotSetupEdit& edit,
+                                     const Json& choices) { bots.saveSetup(&target, bot, edit, unixTime(), report, choices); },
+                 .botSetupCatalog = [&] { return catalog; }});
     const Person creator{"creator"};
     BotAccess{store}.setOwner(creator, "release");
     struct ProfileModel final : Model {
         Decision change;
+        Json replyConfig;
+        bool changedRoleSeen = false;
+        unsigned taskCalls = 0, conversationCalls = 0;
+        bool pairReply = false;
+        std::string taskRole = "Verify the release.";
         ModelTurn decide(const ModelInput& input) override {
-            if (input.event.at("turn").empty()) return {{change}};
-            return {{{"reply", {{"text", "Processed the profile change"}}, ""}}};
+            if (input.event.at("kind") == "conversation_turn") {
+                ++conversationCalls;
+                if (input.event.at("turn").empty()) {
+                    if (pairReply) return {{{"reply", {{"text", "I updated my setup"}}, ""}, change}};
+                    return {{change}};
+                }
+                replyConfig = input.config;
+                changedRoleSeen = input.notes.soul == "Run make check before reporting.";
+                return {{{"reply", {{"text", "Processed the setup request"}}, ""}}};
+            }
+            ++taskCalls;
+            check(std::ranges::find(input.tools, "update_bot_setup") != input.tools.end(), "The task cannot update its Bot");
+            return {
+                {{"update_bot_setup", {{"soul", taskRole}, {"workspaceStrategy", {{"type", "root"}}}}, ""},
+                 {"delegate", {{"instruction", "Verify the release"}, {"doneWhen", "A verification report"}}, "Verification is needed"}}};
         }
     } model;
+    struct SetupT3 : FixedT3 {
+        Command launched;
+        Delivery send(const Command& command) override {
+            launched = command;
+            return FixedT3::send(command);
+        }
+    } t3;
     RuntimeOptions options;
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
-    FixedT3 t3;
-    Runtime runtime(store, model, t3, [](auto) { return std::string{}; }, options);
-    const auto send = [&](std::string_view operation, std::string_view name) {
-        model.change = {"request_bot_change", {{"operation", operation}, {"targetBotId", "reviewer"}, {"name", name}}, ""};
-        ConversationIntake(store).receive(creator, {"release", "", "local-env", "release"}, name, name);
+    options.intake = [&](std::string_view id, std::string_view text) { return bots.get(id).intake(text); };
+    Runtime runtime(store, model, t3, [&](auto id) { return id == "release" ? std::string{} : bots.soul(id); }, options);
+    model.change = {"request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "reviewer"}, {"name", "Review team"}}, ""};
+    ConversationIntake(store).receive(creator, {"release", "", "local-env", "release"}, "create", "Create a reviewer");
+    runtime.runConversations();
+    check(bots.ids() == std::vector<std::string>{"reviewer"} && Policy{store}.allows(creator, Action::bot_settings, "reviewer"),
+          "Full did not apply Bot creation with the requesting person's ownership");
+    bots.updateRunSettings(store, "reviewer", {{"model", "planner"}, {"environmentId", "env"}, {"projectId", "project"}}, unixTime(),
+                           report);
+
+    auto cb = callbacks();
+    cb.bots = [&] { return bots.cards(); };
+    cb.intake = options.intake;
+    cb.updateBot = [&](const Person&, std::string_view bot, const Json& profile, const std::optional<AvatarImage>&) {
+        return bots.saveSetup(&store, bot, {profile, {}}, unixTime(), report, catalog);
+    };
+    const auto server = startWeb(store, 0, cb);
+    Browser browser(*server);
+    const auto send = [&](std::string_view key, Json patch) {
+        model.change = {"update_bot_setup", std::move(patch), ""};
+        browser.post("/api/messages", {{"botId", "reviewer"}, {"clientMessageId", key}, {"text", "Change how you work"}}, 201);
         runtime.runConversations();
     };
-    send("create_bot", "Review team");
-    check(bots.ids() == std::vector<std::string>{"reviewer"} && Policy{store}.allows(creator, Action::bot_settings, "reviewer"),
-          "Full did not apply a Bot creation with the requesting person's ownership");
-    send("rename_bot", "Reviewer");
-    check(bots.cards().at(0).at("name") == "Reviewer" && Inbox(store).inbox(creator).empty(), "Full did not apply a Bot rename directly");
-    PolicyRules{store}.changeNeverRule(localOwner, Action::bot_rename, "review*", true);
-    send("rename_bot", "Other name");
-    check(bots.cards().at(0).at("name") == "Reviewer", "Never rule did not block the profile write");
+    const auto bot = [&] { return browser.get("/api/view?bot=reviewer").at("bot"); };
+    const auto updates = [&] {
+        Json notes = Json::array();
+        const auto events = browser.get("/api/conversation?bot=reviewer").at("events");
+        for (const auto& event : events)
+            if (event.at("kind") == "bot_setup_updated") notes.push_back(event);
+        return notes;
+    };
+    const auto undo = [&](const Json& note, int status = 200) {
+        return browser.post("/api/bots/setup/undo", {{"botId", "reviewer"}, {"eventId", note.at("id")}}, status);
+    };
+    const Json patch{{"name", "Release Scout"},
+                     {"soul", "Run make check before reporting."},
+                     {"model", "planner-next"},
+                     {"reasoningEffort", "high"},
+                     {"environmentId", "next-env"},
+                     {"projectId", "next-project"},
+                     {"sessionModel", {{"model", "session-model"}, {"providerInstanceId", "provider"}}},
+                     {"workspaceStrategy", {{"type", "worktree"}, {"baseRef", "origin/main"}}},
+                     {"fixPullRequests", false},
+                     {"avatar", {{"kind", "icon"}, {"icon", "compass"}}}};
+    send("setup-all", patch);
+    auto notes = updates();
+    const auto updated = bot();
+    check(notes.size() == 1 && notes.at(0).at("data").at("after").size() == patch.size() && updated.at("name") == "Release Scout" &&
+              updated.at("sessionModel") == patch.at("sessionModel") && updated.at("workspaceStrategy") == patch.at("workspaceStrategy") &&
+              updated.at("fixPullRequests") == false && updated.at("setupChangedBy").at("soul") == "bot" &&
+              updated.at("setupChangedBy").size() == patch.size() && Inbox(store).inbox(localOwner).empty(),
+          "Full did not update all settings with one attributed and reversible note");
+    check(model.changedRoleSeen && model.replyConfig.at("model") == "planner-next" && model.replyConfig.at("reasoningEffort") == "high",
+          "The next decision did not use the saved Role, model and effort");
+    const auto cursor = browser.get("/api/view?bot=reviewer").at("historyCursor").get<Id>();
+    undo(notes.at(0));
+    check(browser.get("/api/view?bot=reviewer&changesAfter=" + std::to_string(cursor)).at("changedMessageIds") ==
+              Json::array({notes.at(0).at("id")}),
+          "Undo did not invalidate the original note for other tabs");
+    check(bot().at("name") == "Review team" && bot().at("soul") == "" && bot().at("model") == "planner" &&
+              !bot().contains("sessionModel") && updates().at(0).at("data").at("undone"),
+          "Undo did not restore the previous settings and mark the note");
+
+    const auto beforeRename = model.conversationCalls;
+    model.pairReply = true;
+    send("new-name", {{"name", "Reviewer"}});
+    model.pairReply = false;
+    check(model.conversationCalls == beforeRename + 1, "A setup-only turn made an additional model call");
+    const auto renamed = updates().back();
+    browser.post("/api/bots/profile", {{"botId", "reviewer"}, {"name", "Human override"}});
+    browser.post("/api/bots/profile", {{"botId", "reviewer"}, {"name", "Reviewer"}});
+    check(undo(renamed, 409).at("error") == "setup_changed" && bot().at("setupChangedBy").at("name") == "person",
+          "Undo ignored an intervening edit to the same field");
+    send("role-only", {{"soul", "Check the latest release."}});
+    const auto roleChange = updates().back();
+    browser.post("/api/bots/profile", {{"botId", "reviewer"}, {"name", "New display name"}});
+    undo(roleChange);
+    check(bot().at("name") == "New display name" && bot().at("soul") == "", "Undo overwrote or blocked an unrelated edit");
+
+    browser.post("/api/bots/profile", {{"botId", "reviewer"}, {"model", "planner-next"}, {"reasoningEffort", "xhigh"}});
+    send("clear-effort", {{"reasoningEffort", ""}});
+    const auto clearedEffort = updates().back();
+    browser.post("/api/bots/profile", {{"botId", "reviewer"}, {"model", "planner"}});
+    check(undo(clearedEffort, 409).at("error") == "setup_changed" && !bot().contains("reasoningEffort"),
+          "Undo restored effort for a different model");
+
+    const auto noticeCount = [&] {
+        return std::ranges::count_if(Conversations(store).conversation("reviewer", 0, 200),
+                                     [](const Json& event) { return event.at("kind") == "bot_setup_updated"; });
+    };
+    const auto count = noticeCount();
+    for (const auto* key : {"targetBotId", "runtimeMode", "members", "sharing", "channels", "secrets", "mode", "rules"}) {
+        send(key, {{"name", "Invalid"}, {key, "restricted"}});
+    }
+    send("session-escalation", {{"sessionModel", {{"model", "t3"}, {"providerInstanceId", "x"}, {"runtimeMode", "full-access"}}}});
+    send("large-role", {{"soul", std::string(8193, 'a')}, {"name", "Invalid"}});
+    send("bad-session", {{"workspaceStrategy", {{"type", "worktree"}}}, {"name", "Invalid"}});
+    send("bad-routing", {{"projectId", "has space"}, {"name", "Invalid"}});
+    PolicyRules{store}.changeNeverRule(localOwner, Action::bot_settings, "review*", true);
+    send("denied", {{"name", "Invalid"}});
+    PolicyRules{store}.changeNeverRule(localOwner, Action::bot_settings, "review*", false);
+    check(noticeCount() == count && bot().at("name") == "New display name",
+          "A forbidden or invalid setup update wrote some settings or emitted a notice");
+
+    model.change = {"start_task", {{"request", "Verify the release"}}, ""};
+    browser.post("/api/messages", {{"botId", "reviewer"}, {"clientMessageId", "work"}, {"text", "Verify the release"}}, 201);
+    tick(runtime, 6);
+    const auto taskNote = updates().back();
+    check(model.taskCalls == 1, "Autonomous setup used additional task model calls: " + std::to_string(model.taskCalls));
+    check(t3.launches == 1, "The task did not launch a Session: " + browser.get("/api/view?bot=reviewer").dump());
+    check(t3.launched.config.at("session").at("workspaceStrategy").at("type") == "root", "The launch used stale Session defaults");
+    check(t3.launched.instruction.find("Verify the release.") != std::string::npos, "The launch did not receive the new Role");
+    check(taskNote.at("taskId").get<Id>() > 0 && noticeCount() == count + 1 && bot().at("soul") == "Verify the release.",
+          "Autonomous setup did not emit one notice and save the Role");
+
+    browser.post("/api/bots/profile", {{"botId", "reviewer"}, {"projectId", "supervised-project"}});
+    model.taskRole = "Verify before handing work back.";
+    PolicyRules{store}.setMode(localOwner, "supervised");
+    PolicyRules{store}.changeRule(localOwner, RuleKind::allow, Action::environment_launch, "env", true);
+    browser.post("/api/messages", {{"botId", "reviewer"}, {"clientMessageId", "supervised-work"}, {"text", "Verify in Supervised mode"}},
+                 201);
+    tick(runtime, 6);
+    const auto approvals = Inbox(store).inbox(localOwner, "reviewer");
+    check(approvals.size() == 1 && t3.launches == 1 && model.taskCalls == 2 && bot().at("soul") == "Verify the release.",
+          "Supervised setup did not wait for approval before applying or launching");
+    const auto& card = approvals.front();
+    Inbox(store).decideInbox(localOwner,
+                             {"reviewer", InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
+                              card.at("targetRevision"), card.at("targetGeneration")},
+                             "allow_once");
+    tick(runtime, 6);
+    check(t3.launches == 2 && model.taskCalls == 2 && noticeCount() == count + 2 && bot().at("soul") == model.taskRole,
+          "Approving a task setup change did not resume the saved decision exactly once");
 }
 
 constexpr auto blockers = "Summarize the release blockers.";
@@ -1809,7 +1958,7 @@ int main(int argc, char** argv) {
             std::cout << "web ChatGPT conversation behavior passed\n";
             return 0;
         }
-        fullModeProfiles(directory.path / "full-mode-profiles");
+        conversationBotSetup(directory.path / "full-mode-profiles");
         botPauseEndpoints(directory.path / "bot-pause.sqlite");
         inspectors(directory.path / "inspectors.db");
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");

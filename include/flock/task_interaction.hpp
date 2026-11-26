@@ -24,6 +24,7 @@ struct TaskDecision : Decision {
     nlohmann::json usage = nlohmann::json::object();
     std::int64_t attemptId = 0;
     std::string rejection{};
+    std::optional<nlohmann::json> setup{};
 };
 
 struct DecisionCheckpoint {

@@ -12,6 +12,7 @@
 #include "flock/board_inbox.hpp"
 #include "database.hpp"
 #include "policy_approvals.hpp"
+#include "bot_setup_storage.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
@@ -169,13 +170,14 @@ void PolicyApprovals::releasePolicyTurn(Id turn) {
 }
 
 void PolicyApprovals::releasePolicyTask(Id approval, std::string_view resolution) {
-    auto row = database.query("SELECT task,wait_id,resume_state FROM policy_approvals WHERE id=? AND wait_id<>0", {approval});
+    auto row = database.query("SELECT task,wait_id,resume_state,operation FROM policy_approvals WHERE id=? AND wait_id<>0", {approval});
     if (!row.next()) return;
     auto task = taskRecords.load(row.number(0));
     const auto wait = waitStorage.currentWait(row.number(0));
     if (task.state != TaskState::waiting || !wait || wait->id != row.number(1)) return;
     waitStorage.clearWait(task, resolution);
     task.state = decodeTaskState(task.id, row.string(2));
+    if (row.string(3).starts_with(taskSetupOperation) && task.pendingDecision) task.pendingDecision->generation = task.generation + 1;
     taskRecords.save(task);
     database.exec("UPDATE policy_approvals SET generation=? WHERE id=?", {task.generation, approval});
 }
@@ -289,7 +291,8 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
     if (origin.turn && waitMode == ApprovalWait::pause)
         database.exec("UPDATE conversation_turns SET status='policy_waiting' WHERE message_id=? AND status='running'", {origin.turn});
     if (origin.task) {
-        if (!origin.turn && (operation.starts_with("outbox/") || operation.starts_with("git/"))) {
+        if (!origin.turn &&
+            (operation.starts_with("outbox/") || operation.starts_with("git/") || operation.starts_with(taskSetupOperation))) {
             auto task = taskRecords.load(origin.task);
             if (task.state != TaskState::waiting) {
                 const auto resume = taskStateName(task.state);

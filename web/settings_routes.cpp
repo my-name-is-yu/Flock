@@ -48,7 +48,7 @@ std::vector<T3Project> availableProjects(Store& store, const WebCallbacks& callb
     return callbacks.sessionT3->projects(environment);
 }
 
-constexpr Action personOnlyActions[] = {Action::bot_view, Action::bot_talk, Action::bot_decide, Action::bot_settings, Action::rules_manage};
+constexpr Action personOnlyActions[] = {Action::bot_view, Action::bot_talk, Action::bot_decide, Action::rules_manage};
 
 void reply(httplib::Response& res, int status, const Json& value) {
     res.status = status;

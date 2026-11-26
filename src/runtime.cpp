@@ -104,7 +104,7 @@ struct Runtime::Impl {
           taskTurn(storage.database, storage.gitStorage, storage.modelCalls, storage.peerStorage, storage.secretStorage, storage.taskEvents,
                    storage.taskRecords, storage.taskRouting, storage.waitStorage, storage.memoryStorage, model, soul, options.clock,
                    options.gitHost.get(), options.sessionRead, workers.stopToken(), updates, reports, history, peerExchanges, runs, prompts,
-                   decisions),
+                   decisions, storage.botSetup, options.intake),
           taskScheduler(storage.database, storage.taskEvents, storage.taskRouting, t3, updates, dispatch, options.requireT3Connection,
                         workers.stopToken()),
           lock(storage.database, storage.path, storage.policyApprovals, options.clock) {}

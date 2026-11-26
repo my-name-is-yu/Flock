@@ -8,6 +8,7 @@
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "flock/intake.hpp"
 #include "model_calls.hpp"
 
 #include <functional>
@@ -36,6 +37,7 @@ class TaskRouting;
 class WaitStorage;
 
 class MemoryStorage;
+class BotSetupStorage;
 
 class runtime::TaskTurn {
 public:
@@ -44,7 +46,7 @@ public:
              MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock, GitHost* gitHost,
              const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
              SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs, SessionPrompts& prompts,
-             TaskDecisions& decisions);
+             TaskDecisions& decisions, BotSetupStorage& botSetup, const IntakeResolver& intake);
 
     void decide(const TaskData& task);
     void persistTaskInferences();
@@ -59,7 +61,7 @@ private:
         Id generation, eventId, attemptId;
         std::optional<Id> revisionId;
         Json usage = Json::object();
-        std::variant<ModelCall, InferenceFailure> outcome{};
+        std::variant<TaskDecision, InferenceFailure> outcome{};
     };
 
     std::vector<std::string> available(const TaskData& task, const Json& event, const std::optional<PeerExchange>& peer, bool canSend,
@@ -95,6 +97,8 @@ private:
     RunObserver& runs;
     SessionPrompts& prompts;
     TaskDecisions& decisions;
+    BotSetupStorage& botSetup;
+    const IntakeResolver& intake;
     std::map<Id, TaskInference> taskInferences;
 };
 }

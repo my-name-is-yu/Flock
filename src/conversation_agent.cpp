@@ -20,6 +20,7 @@
 #include "conversation_turns.hpp"
 #include "channel_storage.hpp"
 #include "bot_settings_storage.hpp"
+#include "bot_setup_storage.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "automation_storage.hpp"
 #include "attachment_storage.hpp"
@@ -969,6 +970,14 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         message = loadTurnMessage(id);
         transaction.commit();
     }
+    const auto refreshSetup = [&] {
+        if (message.principalSource != PrincipalSource::web && message.principalSource != PrincipalSource::trusted) return;
+        if (const auto live = botSetup.liveIntake(intake, message.bot, message.text)) {
+            message.routing["environmentId"] = live->environmentId;
+            message.routing["projectId"] = live->projectId;
+            message.routing["config"] = live->config;
+        }
+    };
     const bool notification = message.principalSource == PrincipalSource::gitWebhook;
     const bool web = message.channelScope.empty() && !notification;
     auto tools = notification ? std::vector<std::string>{"reply", "read_tool_result"} : turnTools;
@@ -980,6 +989,8 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         tools.insert(tools.end(), webTools.begin(), webTools.end());
         tools.insert(tools.end(), botToolNames().begin(), botToolNames().end());
     }
+    if (botSetup && (message.principalSource == PrincipalSource::web || message.principalSource == PrincipalSource::trusted))
+        tools.emplace_back(botSetupTool);
     if (!message.channelScope.empty()) tools.insert(tools.end(), channelTools.begin(), channelTools.end());
     bool shouldVerifyFollowup = false;
     if (gitHost && notification) {
@@ -1088,6 +1099,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
     };
     if (!persistModelCheckpoint()) return;
     for (int step = 1; !shutdown.stop_requested(); ++step) {
+        refreshSetup();
         if (!message.channelScope.empty()) channelStorage.deliverChannels(shutdown);
         std::vector<ModelCall> calls;
         std::string effectType;
@@ -1230,6 +1242,7 @@ WHERE conversation_steps.result IS NULL
                 auto response = modelCalls.callModel(message.bot, model, input);
                 checkpoint.usage = std::move(response.usage);
                 calls = std::move(response.calls);
+                if (calls.size() == 2 && calls[0].tool == "reply" && calls[1].tool == botSetupTool) std::swap(calls[0], calls[1]);
                 if (calls.empty() || calls.size() > maxToolCalls)
                     throw ModelError("Invalid Flock call count", ModelErrorCode::invalid_tool_count);
                 checkpoint.outcome = calls;

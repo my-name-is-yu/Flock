@@ -183,6 +183,12 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
         copyFields(details, data, {"text", "revisionId", "version", "canUndo", "undone", "taskTitle", "requestEventId", "diffSummary"});
         if (kind == "memory_learned")
             for (const auto* key : {"added", "removed"}) details[key] = data.at(key);
+    } else if (kind == "bot_setup_updated") {
+        copyFields(details, data, {"undone", "sourceMessageId"});
+        details["after"] = data.at("after");
+        if (data.at("before").contains("soul")) details["before"] = {{"soul", data.at("before").at("soul")}};
+        if (auto avatar = details["after"].find("avatar"); avatar != details["after"].end() && avatar->is_object())
+            *avatar = avatarView(*avatar, {});
     } else if (kind == "pr_review_requested")
         copyFields(details, data, {"itemId", "title", "text", "prUrl"});
     else if (kind == "completed") {
@@ -433,6 +439,8 @@ Json botSettings(const Json& bot) {
     view["soul"] = field(bot, "soul");
     view["fixPullRequests"] = bot.value("fixPullRequests", true);
     copyFields(view, bot, {"environmentId", "projectId", "model", "reasoningEffort"});
+    for (const auto* key : {"sessionModel", "workspaceStrategy", "setupChangedBy"})
+        if (const auto value = bot.find(key); value != bot.end() && value->is_object()) view[key] = *value;
     return view;
 }
 
