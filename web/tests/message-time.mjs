@@ -57,7 +57,7 @@ function fixtures() {
     document.dispatchEvent(new Event('visibilitychange'));
   };
   const sessionTasks = [
-    { id: 17, generation: 1, request: 'Completed work', createdAt: time,
+    { id: 17, generation: 1, request: 'Review the release notes and report any regressions. '.repeat(40).trim(), createdAt: time,
       sessions: [{ environmentId: 'local', threadId: 'thread', state: 'completed', createdAt: sessionCreatedAt }] },
     { id: 16, generation: 1, request: 'Historical work', createdAt: time,
       sessions: [{ environmentId: 'local', threadId: 'older', state: 'completed' }] },
@@ -192,6 +192,19 @@ async function exercise() {
     finished.querySelector(':scope > .sr-only')?.textContent.includes('Nov 20, 2026, 17:30') &&
     sessionLabel(historical) === 'Complete' && !historical.dataset.tooltip.includes('Started'),
     'The sidebar used the request time instead of the Session creation time');
+  finished.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' }));
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const sessionTip = document.querySelector('.tooltip:popover-open .tooltip-label');
+  const exactStart = 'Started Nov 20, 2026, 17:30';
+  const start = sessionTip?.textContent.indexOf(exactStart) ?? -1;
+  check(start >= 0, 'The Session tooltip omitted the exact start time');
+  const startRange = document.createRange();
+  startRange.setStart(sessionTip.firstChild, start);
+  startRange.setEnd(sessionTip.firstChild, start + exactStart.length);
+  check(startRange.getBoundingClientRect().bottom <= sessionTip.getBoundingClientRect().bottom,
+    'The long Session request clipped its exact start time');
+  finished.dispatchEvent(new PointerEvent('pointerout', { bubbles: true, pointerType: 'mouse', relatedTarget: document.body }));
+
   window.rollSessionDate();
   check(sessionLabel(sessionRows()[0]) === 'Yesterday', 'An open tab did not refresh Session time at local midnight');
   window.returnAfterMidnight();
@@ -474,7 +487,7 @@ try {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', `--user-data-dir=${directory}`, '--virtual-time-budget=1500', '--dump-dom',
+    '--disable-background-networking', `--user-data-dir=${directory}`, '--virtual-time-budget=2500', '--dump-dom',
     `http://127.0.0.1:${server.address().port}/?bot=release`], { encoding: 'utf8', timeout: 25000 });
   const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
   if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the timestamp checks');
