@@ -329,6 +329,14 @@ void bareUrls() {
             markdown::toHtml(std::string(prefix) + "https://example.com/__init__.py") ==
                 "<blockquote><p>See<br>\n<a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a></p></blockquote>",
             "A space before a quoted continuation changed the bare link target");
+    check(markdown::toHtml("> See\n>  https://example.com/__foo__ https://example.com/__bar__") ==
+              "<blockquote><p>See<br>\n<a href=\"https://example.com/__foo__\">https://example.com/__foo__</a> "
+              "<a href=\"https://example.com/__bar__\">https://example.com/__bar__</a></p></blockquote>",
+          "Two similar URLs on a continuation line shared the wrong destination");
+    check(markdown::toHtml("> See\n>  <https://example.com/__foo__> https://example.com/__bar__") ==
+              "<blockquote><p>See<br>\n<a href=\"https://example.com/__foo__\">https://example.com/__foo__</a> "
+              "<a href=\"https://example.com/__bar__\">https://example.com/__bar__</a></p></blockquote>",
+          "A nearby explicit link replaced the bare link destination");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");
