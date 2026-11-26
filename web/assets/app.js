@@ -1440,6 +1440,17 @@ function cardSourceAction(item, close) {
     void showConversationMessage(view, id, { bot: participant(item.conversationBotId ?? item.botId), preferLoaded: true });
   });
 }
+// Keep a trailing icon on the same line as the word before it, so a wrap never leaves it alone.
+function appendTrailingIcon(text, icon) {
+  const last = text.lastChild;
+  if (last?.nodeType === Node.TEXT_NODE && last.data.trim()) {
+    const at = last.data.trimEnd().search(/\S+$/);
+    const word = last.splitText(at);
+    const glued = node('span', 'trailing-icon');
+    glued.append(word, icon);
+    text.append(glued);
+  } else text.append(icon);
+}
 function runIcon(run) {
   const link = linkToRun(run);
   if (!link) return null;
@@ -1633,7 +1644,7 @@ function eventCard(event, context, place, report) {
     text.textContent = copy;
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
-    if (link) text.append(link);
+    if (link) appendTrailingIcon(text, link);
     bubble.append(text);
     if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
     if (data.destination) {
@@ -1654,7 +1665,7 @@ function eventCard(event, context, place, report) {
     }
     text.append(document.createTextNode(data.text ?? ''));
     const link = runIcon(data.run);
-    if (link) text.append(link);
+    if (link) appendTrailingIcon(text, link);
     bubble.append(text);
     if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
   } else {

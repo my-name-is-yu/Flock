@@ -393,6 +393,7 @@
   transition: background-color .14s ease, color .14s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
 }
 .run-link:hover { color: var(--accent); background: var(--hover); }
+.trailing-icon { white-space: nowrap; }
 .msg.user .bubble .run-link,
 .msg.user .bubble .run-link:hover { color: inherit; }
 .msg.user .bubble .run-link:hover { background: transparent; }
