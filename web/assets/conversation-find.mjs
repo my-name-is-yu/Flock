@@ -17,7 +17,7 @@ export function matchTimeLabel(date, now = new Date()) {
 }
 const textFields = new Map([
   ['conversation_message', 'text'], ['conversation_reply', 'text'], ['request', 'text'],
-  ['user_answer', 'text'], ['waiting', 'text'], ['report', 'report'], ['completed', 'text'], ['pr_review_requested', 'text'],
+  ['user_answer', 'text'], ['waiting', 'text'], ['report', 'report'], ['completed', 'text'],
 ]);
 
 function snippetFor(event, pattern) {

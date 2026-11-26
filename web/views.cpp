@@ -184,9 +184,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
                    {"text", "revisionId", "version", "canUndo", "undone", "taskTitle", "requestEventId", "diffSummary", "docId"});
         if (kind == "memory_learned")
             for (const auto* key : {"added", "removed"}) details[key] = data.at(key);
-    } else if (kind == "pr_review_requested")
-        copyFields(details, data, {"itemId", "title", "text", "prUrl"});
-    else if (kind == "completed") {
+    } else if (kind == "completed") {
         copyFields(details, data, {"text", "revisionId", "runOutcome", "requestedCommit"});
         if (data.contains("source")) {
             const auto& source = data.at("source");
@@ -258,7 +256,7 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
         const auto kind = field(*event, "kind");
         const auto& data = event->at("data");
         const auto wait = kind == "waiting" ? std::optional{TaskHistory::waitingEvent(*event)} : std::nullopt;
-        const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" || kind == "pr_review_requested" ||
+        const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" ||
                               (wait && (wait->reason() == WaitReason::user_question || wait->reason() == WaitReason::model_failure));
         auto text = wait ? wait->text : field(data, kind == "report" ? "report" : "text");
         if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage")) text = field(data.at("forwardedMessage"), "text");

@@ -2,7 +2,6 @@
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
-#include "flock/board_inbox.hpp"
 #include "flock/git_events.hpp"
 #include "flock/web.hpp"
 #include "../../tests/fake_git.hpp"
@@ -214,15 +213,10 @@ void run() {
         {"alert", {{"html_url", "https://github.com/org/flock/security/code-scanning/1"}, {"rule", {{"description", "Rule result"}}}}}};
     check(post(client, "code_scanning_alert", "scan-1", scan, 202).at("status") == "received", "scan not enqueued");
     runtime.runConversations();
-    const auto inbox = client.Get("/api/inbox?bot=owner", httplib::Headers{{"Authorization", "Basic fixture"}});
-    check(inbox && inbox->status == 200 && inbox->body.find("Pull request review submitted") != std::string::npos &&
-              inbox->body.find("Code scanning result") != std::string::npos,
-          "review or scan missing in the Web inbox");
     check(model.followup("review-1").empty(), "An approval was treated as requested changes");
     check(model.notification("review-1").at("action") == "submitted" && model.notification("review-1").at("taskId") == task,
           "Submitted review did not wake the owning task");
 
-    const auto inboxBeforeRequest = Inbox(store).inbox(localOwner, "owner").size();
     model.reviewTask = task;
     const Json reviewRequested{{"action", "review_requested"},
                                {"repository", repository},
@@ -236,42 +230,14 @@ void run() {
     runtime.runConversations();
     host->beforeCall = {};
     runtime.runConversations();
-    check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
-              TaskHistory(store).history(task).dump().find("tool-review-request") != std::string::npos,
-          "A signed review webhook duplicated the tool's inbox item or was lost from the conversation");
-
-    auto lateReview = reviewRequested;
-    lateReview["requested_reviewer"]["login"] = "Bob";
-    check(post(client, "pull_request", "delayed-review-request", lateReview, 202).at("status") == "received",
-          "delayed review request webhook was not enqueued");
-    runtime.runConversations();
-    check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
-              TaskHistory(store).history(task).dump().find("delayed-review-request") != std::string::npos,
-          "A late webhook for the same request created another card or lost the notification");
-
-    auto externalReview = lateReview;
-    externalReview["pull_request"]["title"] = "Review requested again";
-    check(post(client, "pull_request", "external-review-request", externalReview, 202).at("status") == "received",
-          "external review request webhook was not enqueued");
-    runtime.runConversations();
-    check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 2, "A distinct review request was suppressed");
-
-    const auto inboxBeforeMissingWebhook = Inbox(store).inbox(localOwner, "owner").size();
-    ConversationIntake(store).receive(localOwner, intake(), "review-without-webhook", "Request another review");
-    runtime.runConversations();
-    const auto afterRequest = Inbox(store).inbox(localOwner, "owner");
-    check(afterRequest.size() == inboxBeforeMissingWebhook + 1 && afterRequest.front().at("prompt") == "Review requested on the Git host.",
-          "The tool should create a card even if no webhook arrives");
-    Inbox(store).decideInbox(localOwner, target(afterRequest.front()), "approve");
-
-    auto laterReview = reviewRequested;
-    laterReview["pull_request"]["title"] = "Another review requested";
-    check(post(client, "pull_request", "review-after-prior-decision", laterReview, 202).at("status") == "received",
-          "later review request webhook was not enqueued");
-    runtime.runConversations();
-    check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeMissingWebhook + 1 &&
-              TaskHistory(store).history(task).dump().find("review-after-prior-decision") != std::string::npos,
-          "A handled review with a missing webhook hid a later request");
+    check(model.notification("tool-review-request").at("action") == "review_requested", "Review request did not wake the owning task");
+    check(model.notification("scan-1").at("taskId") == task, "Code scanning did not wake the owning task");
+    const httplib::Headers auth{{"Authorization", "Basic fixture"}};
+    const auto inbox = client.Get("/api/inbox?bot=owner", auth);
+    const auto history = client.Get("/api/inbox/history?bot=owner", auth);
+    check(inbox && inbox->status == 200 && Json::parse(inbox->body).at("items").empty() && history && history->status == 200 &&
+              Json::parse(history->body).at("decisions").empty(),
+          "PR creation, review request, submitted review or code scanning appeared in Needs you or History");
 
     auto changes = review;
     changes["review"] = {{"id", 202}, {"state", "changes_requested"}, {"body", "Please check the empty input."}};
@@ -653,17 +619,6 @@ void multipleWatchedPullRequests() {
     doGit("watch-related", {"git_request_review",
                             {{"host", hostName}, {"repo", relatedRepo}, {"taskId", task}, {"prNumber", 1}, {"reviewers", {"alice"}}},
                             "Request review for the related pull request"});
-    host->create = FakeHost::Create::lostRequest;
-    auto another = openArgs("another-change");
-    another["taskId"] = task;
-    doGit("unresolved-create", {"git_open_pr", std::move(another), "Publish another change"});
-    const auto inboxHas = [&](std::string_view kind, std::string_view url = {}) {
-        return std::ranges::any_of(Inbox(store).inbox(localOwner, "owner"), [&](const Json& row) {
-            return row.at("taskId") == task && row.at("itemKind") == kind && (url.empty() || row.value("prUrl", "") == url);
-        });
-    };
-    check(inboxHas("pr_review", mainUrl) && inboxHas("pr_review", relatedUrl) && inboxHas("pr_reconciliation"),
-          "The fixture did not create both PR cards and an unresolved creation item");
     const auto server = startWeb(store, 0, callbacks());
     httplib::Client client("127.0.0.1", static_cast<int>(server->port()));
     const auto queue = [&](std::string_view id, std::string_view repo, std::string_view action, bool merged = false) {
@@ -673,8 +628,6 @@ void multipleWatchedPullRequests() {
     };
     queue("close-main", repoName, "closed");
     runtime.runConversations();
-    check(!inboxHas("pr_review", mainUrl) && inboxHas("pr_review", relatedUrl) && inboxHas("pr_reconciliation"),
-          "Closing a PR did not remove exactly its review cards");
     check(!watch(model.events.at("close-main"), relatedRepo).contains("priorLifecycleAction"),
           "A watch without earlier signed events appeared to have lifecycle evidence");
     queue("reopen-main", repoName, "reopened");
@@ -689,7 +642,6 @@ void multipleWatchedPullRequests() {
     denyRelatedReads(true);
     queue("review-main", repoName, "ready_for_review");
     runtime.runConversations();
-    check(inboxHas("pr_review", mainUrl), "A reopened PR could not receive a fresh review card");
     check(model.events.at("review-main").at("watchedPullRequests").size() == 1,
           "A notification exposed a watch after repository read access was revoked");
     denyRelatedReads(false);
@@ -701,8 +653,6 @@ void multipleWatchedPullRequests() {
     check(watch(model.events.at("land-main"), relatedRepo).at("priorLifecycleAction") == "merged" &&
               Tasks(store).task(task).task.state == TaskState::completed,
           "The second merge turn could not verify both merges to complete the task");
-    check(!inboxHas("pr_review", mainUrl) && !inboxHas("pr_review", relatedUrl) && inboxHas("pr_reconciliation"),
-          "Merging the PRs left stale review cards or removed an unrelated creation item");
 }
 
 void mergeWhileScheduledCheckWaitsForProject() {

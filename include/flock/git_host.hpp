@@ -31,7 +31,6 @@ struct GitPullRequest {
     GitPrTarget target;
     Id number;
     std::string url, operationId, headSha;
-    bool awaitingReview = false;
 };
 
 struct GitOpenPr {
@@ -85,7 +84,6 @@ struct GitWebhook {
     std::string headSha, summary;
     Id jobId = 0;
     std::string payloadDigest = {};
-    std::string requestedReviewer = {};
     GitFollowup followup = GitFollowup::none;
     Id feedbackId = 0;
     std::optional<GitReviewLocation> reviewLocation = {};

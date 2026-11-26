@@ -4,37 +4,24 @@ import { actionLabel, approvalSummary } from './action-labels.mjs';
 // One name per pending item, said as what the person needs to do; the sidebar and this panel share it.
 export const pendingKindLabels = {
   user_question: 'Question for you',
-  pr_review: 'Review requested',
-  pr_reconciliation: 'Confirm the pull request',
   unknown_delivery: 'Message to T3 unconfirmed',
   protected_input: 'Secret needed',
   policy_approval: 'Approval needed',
 };
 const labels = {
   ...pendingKindLabels,
-  answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
-  reconcile: 'Checked again', request_changes: 'Changes requested',
-  link_pr: 'Pull request linked', reject_pr: 'Rejected',
+  answer: 'Answered', deny: 'Denied', supply: 'Supplied',
+  reconcile: 'Checked again',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
   allow_next_time: 'Allow rule saved for this Flock',
 };
 const actions = {
   unknown_delivery: [['reconcile', 'Check T3 again']],
   protected_input: [['supply', 'Save secret']],
-  pr_reconciliation: [['reject_pr', 'Reject']],
   policy_approval: [['allow_once', 'Allow once'], ['always_allow', 'Allow for this Flock'], ['deny', 'Deny']],
-  pr_review: [['request_changes', 'Request changes'], ['approve', 'Approve review']],
 };
 const identity = ['botId', 'itemKind', 'itemId', 'waitId', 'taskId', 'targetRevision', 'targetGeneration'];
 const draftStorage = 'flock-inbox-answer-drafts';
-
-const svgIcons = {
-  pr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V10a3 3 0 0 0-3-3h-3.5m2-2-2 2 2 2"/></svg>',
-  external: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 5h5v5M10 14 19 5M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>',
-  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
-  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.2 4.2L19 7"/></svg>',
-  history: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>',
-};
 
 const itemKey = (item) => JSON.stringify([item.botId, item.itemKind, item.itemId]);
 const decisionTarget = (item) => JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices, item.status]);
@@ -56,11 +43,6 @@ function element(tag, text, className) {
   if (text) node.textContent = text;
   if (className) node.className = className;
   return node;
-}
-function iconSpan(markup) {
-  const host = document.createElement('span');
-  host.innerHTML = markup;
-  return host.firstElementChild;
 }
 function labeled(text, control) {
   const label = element('label', text);
@@ -92,27 +74,6 @@ function relativeTime(seconds) {
   if (days < 30) return `${days} ${days === 1 ? 'day' : 'days'} ago`;
   return new Date(seconds * 1000).toLocaleDateString();
 }
-function parsePrInfo(raw) {
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-    const displayUrl = `${url.host}${url.pathname}`.replace(/\/+$/, '');
-    const match = url.pathname.match(/\/([^/]+)\/pull\/(\d+)/i) || url.pathname.match(/\/([^/]+)\/merge_requests\/(\d+)/i);
-    const repoTag = match ? `${match[1]}#${match[2]}` : url.host;
-    return { href: url.href, displayUrl, repoTag, host: url.host };
-  } catch {
-    return null;
-  }
-}
-export function pullRequestLink(raw, title) {
-  const info = parsePrInfo(raw);
-  if (!info) return element('span', title);
-  const link = element('a', title);
-  link.href = info.href;
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
-  return link;
-}
 function historyCard(entry) {
   const article = element('article', '', 'board-inbox-card history-card');
   const approval = entry.itemKind === 'policy_approval' && entry.action;
@@ -133,60 +94,12 @@ function button(text, className, click) {
   node.addEventListener('click', click);
   return node;
 }
-function prPreviewCard(rawUrl, title) {
-  const info = parsePrInfo(rawUrl);
-  if (!info) return element('span', title || 'Pull request', 'board-inbox-meta');
-  const box = element('div', '', 'board-inbox-pr-card');
-  const head = element('div', '', 'board-inbox-pr-head');
-  const link = pullRequestLink(info.href, title || 'Pull request');
-  link.className = 'board-inbox-pr-link';
-  const tools = element('div', '', 'board-inbox-pr-tools');
-  const openBtn = element('a', '', 'board-inbox-pr-tool');
-  openBtn.href = info.href;
-  openBtn.target = '_blank';
-  openBtn.rel = 'noopener noreferrer';
-  openBtn.setAttribute('aria-label', 'Open pull request in new tab');
-  openBtn.dataset.tooltip = 'Open pull request';
-  openBtn.append(iconSpan(svgIcons.external));
-  const copyBtn = element('button', '', 'board-inbox-pr-tool');
-  copyBtn.type = 'button';
-  copyBtn.setAttribute('aria-label', 'Copy pull request link');
-  copyBtn.dataset.tooltip = 'Copy link';
-  copyBtn.append(iconSpan(svgIcons.copy));
-  let copyTimer = null;
-  copyBtn.addEventListener('click', async (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    try {
-      await navigator.clipboard?.writeText(info.href);
-      clearTimeout(copyTimer);
-      copyBtn.classList.remove('is-copied');
-      copyBtn.replaceChildren(iconSpan(svgIcons.check));
-      copyBtn.classList.add('is-copied');
-      copyTimer = setTimeout(() => {
-        copyBtn.classList.remove('is-copied');
-        copyBtn.replaceChildren(iconSpan(svgIcons.copy));
-      }, 1200);
-    } catch {}
-  });
-  tools.append(openBtn, copyBtn);
-  head.append(link, tools);
-
-  const meta = element('div', '', 'board-inbox-pr-meta');
-  meta.append(iconSpan(svgIcons.pr), element('span', info.repoTag));
-  if (info.repoTag !== info.host) {
-    meta.append(element('span', '·', 'board-inbox-submeta-sep'), element('span', info.host));
-  }
-  box.append(head, meta);
-  return box;
-}
 function setCardBusy(card, busy) {
   for (const control of card.querySelector('.board-inbox-form')?.elements ?? []) control.disabled = busy;
 }
 
 function decisionCard(item, submit, source, question, busy) {
   const article = element('article', '', 'board-inbox-card');
-  const prInfo = item.prUrl ? parsePrInfo(item.prUrl) : null;
 
   const titleGroup = element('div', '', 'board-inbox-title-group');
   const approval = item.itemKind === 'policy_approval' && item.action;
@@ -194,7 +107,6 @@ function decisionCard(item, submit, source, question, busy) {
 
   const submeta = element('div', '', 'board-inbox-submeta');
   const parts = [];
-  // The pull request card below carries the link; the header only names the kind of decision.
   if (item.itemKind !== 'policy_approval' && labels[item.itemKind]) {
     parts.push(element('span', labels[item.itemKind]));
   }
@@ -215,15 +127,8 @@ function decisionCard(item, submit, source, question, busy) {
   if (item.request && item.request !== item.requestTitle) bodyLines.push(item.request);
   const prompt = approval ? approvalSummary(item.prompt, item) : item.prompt;
   if (prompt && prompt !== item.requestTitle && prompt !== item.request) bodyLines.push(prompt);
-  // A bare pull request URL in the text repeats the card, so drop that line.
-  const text = bodyLines.join('\n').split('\n')
-    .filter((line) => !prInfo || ![item.prUrl, prInfo.href].includes(line.trim())).join('\n').trim();
+  const text = bodyLines.join('\n').trim();
   if (text) article.append(element('p', text, 'board-inbox-body'));
-
-  if (item.prUrl) {
-    article.append(prPreviewCard(item.prUrl, item.prTitle || 'Pull request'));
-  }
-  for (const pr of item.candidates || []) article.append(prPreviewCard(pr.url, `Pull request #${pr.prNumber}`));
 
   const expiredApproval = item.itemKind === 'policy_approval' && item.status === 'expired';
   if (!item.canDecide || (expiredApproval && item.canSaveRule !== true)) {
@@ -244,20 +149,10 @@ function decisionCard(item, submit, source, question, busy) {
     inputs.value.required = true;
     form.append(labeled('Secret value', inputs.value));
   }
-  for (const pr of item.candidates || []) {
-    const btn = element('button', `Link #${pr.prNumber}`);
-    btn.type = 'submit';
-    btn.value = 'link_pr';
-    btn.dataset.prNumber = pr.prNumber;
-    buttons.append(btn);
-  }
   const choices = expiredApproval ? [['allow_next_time', 'Allow next time for this Flock']] : actions[item.itemKind];
   for (const [decision, title] of choices) {
     if (savesFlockRule(decision) && item.canSaveRule !== true) continue;
-    const style = item.itemKind === 'pr_review' ? (decision === 'approve' ? 'primary' : 'secondary')
-      // Keep the Flock-wide rule secondary to an available one-time approval.
-      : (['deny', 'reject_pr', 'always_allow'].includes(decision) ? 'secondary' : 'primary');
-    const btn = element('button', title, style);
+    const btn = element('button', title, ['deny', 'always_allow'].includes(decision) ? 'secondary' : 'primary');
     btn.value = decision;
     btn.type = 'submit';
     buttons.append(btn);
@@ -267,7 +162,6 @@ function decisionCard(item, submit, source, question, busy) {
     event.preventDefault();
     if (!event.submitter || event.submitter.disabled) return;
     const data = Object.fromEntries(Object.entries(inputs).map(([field, input]) => [field, input.value]));
-    if (event.submitter.dataset.prNumber) data.prNumber = Number(event.submitter.dataset.prNumber);
     void submit(item, event.submitter.value, data);
   });
   article.append(form);
@@ -291,8 +185,6 @@ export function mountBoardInbox({
   const position = byId('decision-position');
   const previous = byId('decision-previous');
   const next = byId('decision-next');
-  const more = byId('decision-more');
-  const moreList = byId('decision-more-list');
   const historyToggle = byId('decision-history');
   const message = byId('decision-message');
   const host = byId('decision-item');
@@ -415,43 +307,14 @@ export function mountBoardInbox({
     cardAnim.oncancel = finish;
   }
 
-  function closeMoreMenu() {
-    if (more?.open) more.open = false;
-  }
-
-  function syncMoreMenu() {
-    if (!more || !moreList) return;
-    const actionsList = [];
-    const item = current();
-    if (mode === 'pending' && item) {
-      const prInfo = item.prUrl ? parsePrInfo(item.prUrl) : null;
-      if (prInfo) {
-        const openLink = element('a', '', 'decision-more-item');
-        openLink.href = prInfo.href;
-        openLink.target = '_blank';
-        openLink.rel = 'noopener noreferrer';
-        openLink.append(iconSpan(svgIcons.external), element('span', 'Open pull request'));
-        openLink.addEventListener('click', closeMoreMenu);
-        actionsList.push(openLink);
-
-        const copyBtn = element('button', '', 'decision-more-item');
-        copyBtn.type = 'button';
-        copyBtn.append(iconSpan(svgIcons.copy), element('span', 'Copy pull request link'));
-        copyBtn.addEventListener('click', () => {
-          void navigator.clipboard?.writeText(prInfo.href);
-          closeMoreMenu();
-        });
-        actionsList.push(copyBtn);
-      }
-    }
+  function syncHistoryControl() {
     if (historyToggle) {
+      const item = current();
       const viewingHistory = mode === 'history';
       historyToggle.hidden = !(viewingHistory ? pending().length : mode === 'pending' && item);
       historyToggle.setAttribute('aria-pressed', String(viewingHistory));
       historyToggle.dataset.tooltip = viewingHistory ? 'Back to Needs you' : 'History';
     }
-    more.hidden = !actionsList.length;
-    moreList.replaceChildren(...actionsList);
   }
 
   function remember(key, draft) {
@@ -484,13 +347,6 @@ export function mountBoardInbox({
     const saved = drafts.get(key);
     return { item, key: target, text: saved?.text ?? '', busy: busy(item),
       blocked: !!saved && (saved.target !== target || saved.stale), draftKey: key };
-  }
-
-  function reviewReply() {
-    const item = current();
-    const id = item?.conversationEventId;
-    if (item?.itemKind !== 'pr_review' || !item.canDecide || !canCompose() || !Number.isSafeInteger(id) || id <= 0) return null;
-    return { kind: 'review', messageId: id, summary: item.prTitle };
   }
 
   function reviewDraft(item, targetHost) {
@@ -552,7 +408,7 @@ export function mountBoardInbox({
     position.textContent = `${index + 1}/${list.length}`;
     previous.disabled = index <= 0;
     next.disabled = index < 0 || index >= list.length - 1;
-    syncMoreMenu();
+    syncHistoryControl();
     if (!item) return;
     const pendingWrite = busy(item);
     const questionState = item.itemKind === 'user_question' && [pendingWrite,
@@ -571,7 +427,6 @@ export function mountBoardInbox({
 
   function openLayer(nextMode, opener) {
     clearMorph();
-    closeMoreMenu();
     const wasClosed = !mode;
     const pillRect = wasClosed && caption && !caption.hidden ? caption.getBoundingClientRect() : null;
     if (!mode) origin = opener ?? trigger;
@@ -587,7 +442,7 @@ export function mountBoardInbox({
   }
 
   function focusAfterOpen() {
-    if (composer() || reviewReply()) {
+    if (composer()) {
       focusComposer();
     } else {
       panel.focus({ preventScroll: true });
@@ -616,7 +471,7 @@ export function mountBoardInbox({
     historyRequest?.abort();
     const pillRect = openLayer('history', opener);
     syncTrigger();
-    syncMoreMenu();
+    syncHistoryControl();
     host.replaceChildren();
     onChange();
     if (pillRect) animateOpenFromPill(pillRect);
@@ -641,7 +496,6 @@ export function mountBoardInbox({
   function dismiss({ animate = false } = {}) {
     const cardRect = animate && mode && panel ? panel.getBoundingClientRect() : null;
     const pillRect = animate && mode && caption && !caption.hidden ? caption.getBoundingClientRect() : null;
-    closeMoreMenu();
     mode = null;
     selected = rendered = null;
     historyRequest?.abort();
@@ -671,7 +525,6 @@ export function mountBoardInbox({
     const index = list.indexOf(current());
     if (!list[index + direction]) return;
     const focused = document.activeElement;
-    closeMoreMenu();
     selected = itemKey(list[index + direction]);
     message.textContent = '';
     panel.scrollTop = 0;
@@ -808,17 +661,12 @@ export function mountBoardInbox({
   trigger.addEventListener('click', () => mode === 'pending' ? close() : open(trigger));
   byId('decision-close').addEventListener('click', () => close());
   historyToggle?.addEventListener('click', () => {
-    closeMoreMenu();
     if (mode === 'history') open(historyToggle);
     else void openHistory(historyToggle);
   });
   byId('decision-shade').addEventListener('click', () => close());
   previous.addEventListener('click', () => move(-1));
   next.addEventListener('click', () => move(1));
-  document.addEventListener('click', (event) => {
-    if (more?.open && !more.contains(event.target)) closeMoreMenu();
-  });
-
   // Double-tap Option (Alt Alt) toggles the Needs you card, matching the reference shortcut.
   let lastAltTap = 0;
   let altInterrupted = false;
@@ -831,12 +679,7 @@ export function mountBoardInbox({
     if (event.key === 'Escape' && mode && canDismiss() && !event.defaultPrevented && !event.isComposing && event.keyCode !== 229 &&
         !document.querySelector('dialog[open]')) {
       event.preventDefault();
-      if (more?.open) {
-        closeMoreMenu();
-        more.querySelector('summary')?.focus({ preventScroll: true });
-      } else {
-        close();
-      }
+      close();
     }
   });
   document.addEventListener('keyup', (event) => {
@@ -856,7 +699,7 @@ export function mountBoardInbox({
   });
 
   return {
-    setContext, refresh, count, itemsFor: scoped, pendingItemsFor: pending, open, openItem, openHistory, close, isOpen, composer, reviewReply,
+    setContext, refresh, count, itemsFor: scoped, pendingItemsFor: pending, open, openItem, openHistory, close, isOpen, composer,
     busy, choice, selectChoice,
     pendingKeys: () => [...inFlight()?.keys() ?? []],
     pendingForBot: (botId) => [...inFlight()?.values() ?? []].includes(botId),

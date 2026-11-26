@@ -33,8 +33,8 @@ async function exercise(mountBoardInbox) {
     prompt: 'Which release branch should we use?', choices: ['main', 'release'] };
   const secret = { ...question, itemKind: 'protected_input', itemId: 3, requestTitle: 'Protected input',
     prompt: 'Supply a value', waitId: 0, taskId: 0, targetRevision: 0, targetGeneration: 0 };
-  const review = { ...question, itemKind: 'pr_review', itemId: 4, canDecide: false,
-    requestTitle: 'Review a change', prompt: 'Review requested', prTitle: 'Review link', prUrl: 'data:text/plain,ignored' };
+  const readOnly = { ...question, itemId: 4, waitId: 4, canDecide: false,
+    requestTitle: 'Publish the release', prompt: 'Which tag?' };
   const docs = { ...question, botId: 'docs', botName: 'Docs', itemId: 6, waitId: 6, taskId: 2,
     requestTitle: 'Publish docs', request: 'Publish docs', prompt: 'Which guide?', choices: [] };
   const nextDocs = { ...docs, itemId: 7, waitId: 7, targetGeneration: 5,
@@ -45,7 +45,7 @@ async function exercise(mountBoardInbox) {
   const calls = [];
   const sources = [];
   const outcomes = [];
-  let questions = [question, docs, secret, review];
+  let questions = [question, docs, secret, readOnly];
   let finishDocs;
   let rejectApproval;
   let readInbox;
@@ -121,8 +121,8 @@ async function exercise(mountBoardInbox) {
   check(choices().querySelector('legend').textContent === prompt && sendChoice().disabled && !selected(),
     'The structured question did not start with a labeled, unselected radio group');
   const historyToggle = byId('decision-history');
-  check(!historyToggle.hidden && historyToggle.getAttribute('aria-pressed') === 'false' && byId('decision-more').hidden,
-    'History hid behind an overflow menu with nothing else in it');
+  check(!historyToggle.hidden && historyToggle.getAttribute('aria-pressed') === 'false',
+    'History was unavailable from Needs you');
 
   await browse(button('Show in conversation'));
   check(layer.hidden && !conversation.inert && sources.length === 1 && sources[0][0] === 'release' && sources[0][1] === 18,
@@ -177,7 +177,7 @@ async function exercise(mountBoardInbox) {
     selected() === 'main' && document.activeElement === editor,
     'Finishing a different Bot’s answer changed this card, focus, or draft');
 
-  questions = [question, nextDocs, secret, review];
+  questions = [question, nextDocs, secret, readOnly];
   await board.refresh();
   await open('docs');
   check(board.composer()?.text === '' && !choices(), 'A heterogeneous question lost its written answer route or inherited a decided draft');
@@ -323,8 +323,6 @@ function liveFixture() {
   const decision = { botId: bot.id, botName: bot.name, itemKind: 'user_question', itemId: 1, waitId: 1,
     taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'ask:Which branch?', prompt: 'Which branch?', canDecide: true };
   const question = { id: 1, reason: 'user_question', text: decision.prompt, messageId: 2 };
-  const review = { ...decision, itemKind: 'pr_review', itemId: 3, waitId: 0, taskId: 4, conversationEventId: 3,
-    requestTitle: 'Prepare the release', prTitle: 'Release notes', prompt: 'Review these notes.' };
   const approval = { ...decision, itemKind: 'policy_approval', itemId: 2, taskId: 2, waitId: 2,
     action: 'repository.pr', target: 'team/guide', requestTitle: 'repository.pr · team/guide',
     prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true, canSaveRule: false, status: 'pending' };
@@ -332,7 +330,7 @@ function liveFixture() {
   const stopWait = { id: 9, reason: 'model_failure', text: 'The last attempt failed.' };
   const stopTask = { id: 3, currentRevision: 5, generation: 7, request: 'Check the release', wait: stopWait };
   const limits = { messageBytes: 45, waitAnswerBytes: 33, attachments: 1 };
-  const fixture = window.inboxFixture = { bot, decision, review, limits, reads: 0, approvalReady: false, updated: false, failed: false,
+  const fixture = window.inboxFixture = { bot, decision, limits, reads: 0, approvalReady: false, updated: false, failed: false,
     showStop: false, canDecide: true, stopRequests: [], answers: [] };
   window.EventSource = class extends EventTarget {
     constructor(path) {
@@ -360,9 +358,7 @@ function liveFixture() {
         data: { waitId: 2, resolution: 'allow_once' }});
       const waits = fixture.updated ? [] : [{id: 2, wait}];
       if (!fixture.updated) {
-        events.unshift({ id: question.messageId, taskId: decision.taskId, time: 1, kind: 'waiting', data: question },
-          { id: review.conversationEventId, taskId: review.taskId, time: 1, kind: 'pr_review_requested',
-            data: { title: review.prTitle, text: review.prompt } });
+        events.unshift({ id: question.messageId, taskId: decision.taskId, time: 1, kind: 'waiting', data: question });
         waits.push({ id: decision.taskId, wait: question });
       }
       if (fixture.showStop) {
@@ -385,7 +381,7 @@ function liveFixture() {
         return Response.json({ error: 'server_error' }, { status: 503 });
       }
       if (fixture.question) return Response.json({ items: [fixture.question] });
-      const items = fixture.approvalReady ? [decision, review, approval] : [decision, review];
+      const items = fixture.approvalReady ? [decision, approval] : [decision];
       return Response.json({ items: fixture.updated ? [] : items });
     }
     throw new Error('Unexpected route ' + path);
@@ -407,7 +403,7 @@ async function exerciseLiveRetry() {
     'The Inbox did not load on the Bot stream');
   const badge = document.querySelector('#bot-list .decision-count');
   const preview = document.querySelector('#bot-list .bot-preview');
-  if (badge.hidden || badge.textContent !== '2' || preview.textContent !== fixture.bot.preview ||
+  if (badge.hidden || badge.textContent !== '1' || preview.textContent !== fixture.bot.preview ||
       !preview.querySelector('.presence-dot').hidden)
     throw new Error('The Bot row did not show the last message and a single waiting indicator');
   const { offsetWidth: width, offsetHeight: height } = badge;
@@ -459,7 +455,6 @@ async function exerciseLiveRetry() {
       throw new Error(`The ${inbox ? 'Inbox' : 'conversation'} composer did not present ${label} ${summary}`);
   };
   const answerCopy = { label: 'Answering', summary: fixture.decision.prompt, placeholder: 'Write your answer', send: 'Send answer' };
-  const reviewCopy = { label: 'Replying to', summary: fixture.review.prTitle, placeholder: 'Reply to this review', send: 'Send reply' };
   trigger.click();
   const write = panel.querySelector('button.question-reply');
   if (write?.textContent !== 'Write an answer') throw new Error('The Inbox question did not offer to write an answer');
@@ -472,8 +467,6 @@ async function exerciseLiveRetry() {
   await waitFor(() => byId('decision-reply-target').textContent === `Question from ${fixture.bot.name}`,
     'The Inbox exposed the task request when the question text was missing');
   fixture.decision.prompt = prompt;
-  byId('decision-next').click();
-  expectComposer({ ...reviewCopy, inbox: true });
   byId('decision-close').click();
   const writeInline = document.querySelector('#event-2 button.question-reply');
   if (writeInline?.textContent !== 'Write an answer') throw new Error('The conversation question did not offer to write an answer');
@@ -482,8 +475,6 @@ async function exerciseLiveRetry() {
   expectComposerLimit(waitAnswerBytes);
   if (document.querySelector('#event-2 .msg-actions [data-timeline-action="reply"]'))
     throw new Error('The open question repeated Write an answer as a hover control');
-  document.querySelector('#event-3 button[aria-label="Reply to this review"]').click();
-  expectComposer(reviewCopy);
   byId('cancel-reply').click();
   if (byId('compose-label').textContent !== 'Message' || byId('message').getAttribute('aria-describedby') !== 'notice')
     throw new Error('Canceling the reply retained the reply composer copy');

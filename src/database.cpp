@@ -30,7 +30,6 @@ constexpr std::array kinds{
     std::pair{JournalKind::task_revision, std::string_view{"task_revision"}},
     std::pair{JournalKind::bot_message, std::string_view{"bot_message"}},
     std::pair{JournalKind::read_bot_evidence, std::string_view{"read_bot_evidence"}},
-    std::pair{JournalKind::pr_review_requested, std::string_view{"pr_review_requested"}},
     std::pair{JournalKind::git_pr_followup_requested, std::string_view{"git_pr_followup_requested"}},
     std::pair{JournalKind::conversation_message, std::string_view{"conversation_message"}},
     std::pair{JournalKind::conversation_reply, std::string_view{"conversation_reply"}},
@@ -178,10 +177,10 @@ Id Database::writeJournal(std::optional<Id> task, JournalKind kind, const Json& 
     exec(R"SQL(
 INSERT INTO journal(task_id,time,kind,data,conversation_bot_id,wait_id,wait_reason,user_answer_conversation,
                     action_id,run_environment_id,run_thread_id,run_id,run_gateway_id,result_run_id,run_status,revision_id,stop_requested,
-                    message_id,instruction_step,exchange_id,peer_message_id,forwarded_source_message_id,pr_review_item_id,
+                    message_id,instruction_step,exchange_id,peer_message_id,forwarded_source_message_id,
                     git_event_id,operation_id,reply_to_message_id,task_question_message_id,conversation_route,
                     conversation_status,session_participation_id,session_stop_id,feedback_event_id,workflow_outcome)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 )SQL",
          {sqlValue(task),
           unixTime(),
@@ -205,7 +204,6 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           sqlValue(keys.exchangeId),
           sqlValue(keys.peerMessageId),
           sqlValue(keys.forwardedSourceMessageId),
-          sqlValue(keys.prReviewItemId),
           sqlValue(keys.gitEventId),
           sqlValue(keys.operationId),
           sqlValue(keys.replyToMessageId),

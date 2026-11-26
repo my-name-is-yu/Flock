@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 22;
+constexpr Id schemaVersion = 23;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -45,11 +45,10 @@ CREATE TABLE journal(
   result_run_id TEXT, run_status TEXT, revision_id INTEGER, stop_requested INTEGER CHECK(stop_requested IN (0,1)),
   message_id INTEGER, instruction_step INTEGER,
   exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
-  pr_review_item_id INTEGER, git_event_id TEXT, operation_id TEXT,
+  git_event_id TEXT, operation_id TEXT,
   reply_to_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
   session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER, workflow_outcome TEXT,
-  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL),
-  CHECK(kind<>'pr_review_requested' OR (task_id IS NOT NULL AND pr_review_item_id IS NOT NULL)));
+  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
 CREATE INDEX journal_task ON journal(task_id,id);
 CREATE INDEX journal_wait_anchor ON journal(task_id,wait_id,id)
   WHERE kind='waiting' AND conversation_bot_id IS NULL;
@@ -377,10 +376,10 @@ CREATE TABLE git_pr_operations(
  operation_id TEXT PRIMARY KEY NOT NULL, host TEXT NOT NULL, base_repo TEXT NOT NULL,
  base_ref TEXT NOT NULL, head_repo TEXT NOT NULL, head_ref TEXT NOT NULL,
  task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL, invocation TEXT NOT NULL,
- event_cursor INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','created','ambiguous','failed','rejected')),
- pr_number INTEGER, url TEXT);
+ event_cursor INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','created','ambiguous','failed')),
+ pr_number INTEGER, url TEXT, candidates TEXT NOT NULL DEFAULT '[]');
 CREATE UNIQUE INDEX unresolved_git_pr_target
- ON git_pr_operations(host,base_repo,base_ref,head_repo,head_ref) WHERE status IN ('pending','ambiguous','rejected');
+ ON git_pr_operations(host,base_repo,base_ref,head_repo,head_ref) WHERE status IN ('pending','ambiguous');
 CREATE INDEX git_pr_history ON git_pr_operations(task_id,host,base_repo,base_ref,head_repo,head_ref);
 CREATE TABLE git_pr_watches(
  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
@@ -408,17 +407,6 @@ CREATE TABLE git_webhook_deliveries(
  PRIMARY KEY(event,pr_number));
 CREATE INDEX git_events_repo ON git_webhook_events(host,repo);
 
-CREATE TABLE pr_review_items(
-    id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
-    target_revision INTEGER NOT NULL,
-    url TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL,
-    git_key TEXT, operation_id TEXT REFERENCES git_pr_operations(operation_id), candidates TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','changes_requested','linked','rejected','superseded')),
-    UNIQUE(task_id,git_key), CHECK((git_key IS NULL) <> (operation_id IS NULL)));
-CREATE UNIQUE INDEX pending_pr_reconciliation ON pr_review_items(operation_id) WHERE status='pending';
-CREATE INDEX pr_reviews_by_task ON pr_review_items(task_id,id);
-CREATE UNIQUE INDEX journal_pr_review_anchor ON journal(task_id,pr_review_item_id)
-    WHERE kind='pr_review_requested';
 CREATE TABLE inbox_decisions(
     id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, item_kind TEXT NOT NULL, item_id INTEGER NOT NULL,
     wait_id INTEGER NOT NULL, task_id INTEGER REFERENCES tasks(id),
@@ -489,12 +477,6 @@ CREATE INDEX session_message_sends_by_message ON session_message_sends(message_i
 CREATE INDEX session_message_sends_due ON session_message_sends(interrupt_at) WHERE interrupt_at IS NOT NULL;
 CREATE TABLE bot_pauses(bot TEXT PRIMARY KEY);
 
-CREATE TABLE git_review_receipts(
-  inbox_key TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
-  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
-  reviewer TEXT NOT NULL, after_event INTEGER NOT NULL,
-  PRIMARY KEY(inbox_key,reviewer));
-CREATE INDEX git_review_receipts_target ON git_review_receipts(task_id,host,repo,pr_number,reviewer,after_event);
 CREATE TRIGGER stop_terminal_pr_watches AFTER UPDATE OF state ON tasks
 WHEN new.state IN ('completed','cancelled','cancelling') AND old.state<>new.state
 BEGIN

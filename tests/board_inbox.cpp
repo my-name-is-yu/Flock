@@ -8,7 +8,6 @@
 #include "flock/decision_errors.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
-#include "fake_git.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
@@ -49,7 +48,6 @@ using namespace flockv0;
 namespace {
 const Person owner{"owner", true}, alice{"alice"}, bob{"bob"}, reader{"reader"};
 constexpr auto originalCriteria = "Verify the published report";
-constexpr auto prReviewTitle = "Pull request awaiting review";
 
 void check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -97,23 +95,11 @@ struct Database {
 
 struct Script : Model {
     Id managed = 0;
-    Json reviewContext;
-    Json openPrArgs;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
         if (event.at("kind") == "conversation_turn") {
             const auto prompt = event.at("text").get<std::string>();
-            if (prompt == "Open a pull request for review.") {
-                const auto& turn = event.at("turn");
-                if (turn.empty()) return {"git_open_pr", openPrArgs, "Prepare the review fixture"};
-                check(turn.front().at("result").at("status") == "created", "could not open the fixture PR");
-                return {"reply", {{"text", "Ready for review."}}, "Report the pull request"};
-            }
-            if (prompt == "Which checks ran?") {
-                reviewContext = event.at("replyTo");
-                return {"reply", {{"text", "The smoke checks ran."}}, "Answer the review question"};
-            }
             if (event.at("turn").empty()) {
                 for (const auto& task : input.task.at("tasks")) {
                     if (task.at("taskId") != managed) continue;
@@ -198,15 +184,6 @@ InboxTarget pending(Store& store, InboxKind kind, std::string_view bot = {}) {
     return target(row(Inbox(store).inbox(owner, bot), "itemKind", inboxKindName(kind)));
 }
 
-Id openReview(Store& store, Runtime& runtime, Script& script, const Intake& routing, Id task, std::string branch,
-              std::string_view reviewPrompt) {
-    script.openPrArgs = git_fixture::openArgs(branch);
-    script.openPrArgs.update({{"taskId", task}, {"title", reviewPrompt}});
-    ConversationIntake(store).receive(owner, routing, branch, "Open a pull request for review.");
-    runtime.runConversations();
-    return row(Inbox(store).inbox(owner, routing.botId), "prompt", reviewPrompt).at("itemId");
-}
-
 void exercise(const std::filesystem::path& path) {
     using enum InboxKind;
     Store store(path);
@@ -228,16 +205,14 @@ void exercise(const std::filesystem::path& path) {
     Script script;
     Sessions sessions;
     sessions.questionProject = "question";
-    auto options = git_fixture::options(std::make_shared<git_fixture::FakeHost>());
-    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options);
+    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; });
     for (int step = 0; step < 12; ++step) runtime.tick();
     check(taskJson(Tasks(store).task(unknown)).at("wait").at("reason") == "unknown_delivery", "fixture did not pause on delivery");
 
     const auto report = taskJson(Tasks(store).task(question));
-    const auto review =
-        openReview(store, runtime, script, intake("report", "unused", "turn"), question, "published-report", "Check the report and source");
     const auto secret = secretRequests.requestSecret("review", {"report-credential"});
-    for (const auto* kind : {"extra_run", "deadline", "model_budget", "conversation_model_budget", "stuck", "conversation_stuck"})
+    for (const auto* kind : {"extra_run", "deadline", "model_budget", "conversation_model_budget", "stuck", "conversation_stuck",
+                             "pr_review", "pr_reconciliation"})
         rejected<std::invalid_argument>([kind] { parseInboxKind(kind); }, "a removed inbox kind was accepted");
     const auto before = db.exec("PRAGMA data_version");
     const auto inbox = Inbox(store).inbox(alice);
@@ -251,8 +226,7 @@ void exercise(const std::filesystem::path& path) {
           "inbox membership restrictions were ignored");
     check(row(inbox, "itemKind", "user_question").at("choices") == Json::array({"Draft", "Final"}) &&
               row(inbox, "itemKind", "protected_input").at("itemId") == secret &&
-              row(inbox, "itemKind", "pr_review").at("itemId") == review &&
-              row(inbox, "itemKind", "unknown_delivery").at("taskId") == unknown && inbox.size() == 4,
+              row(inbox, "itemKind", "unknown_delivery").at("taskId") == unknown && inbox.size() == 3,
           "inbox omitted a pending decision or its prompt");
     const auto readerQuestion = row(Inbox(store).inbox(reader), "itemKind", "user_question");
     const auto waitAnchor = report.at("wait").at("messageId");
@@ -279,10 +253,6 @@ SELECT )SQL" +
     db.exec("DELETE FROM journal WHERE kind='fixture_activity' AND task_id=" + std::to_string(question));
     check(!row(inbox, "itemKind", "protected_input").contains("conversationEventId"),
           "inbox invented an anchor for an item without a visible source");
-    const auto reviewEvent =
-        row(Conversations(store).conversation("report"), "id", row(inbox, "itemKind", "pr_review").at("conversationEventId"));
-    check(reviewEvent.at("kind") == "pr_review_requested" && reviewEvent.at("data").at("itemId") == review,
-          "PR review did not point to its own conversation event");
     const auto questionBefore = pending(store, user_question);
     rejected<DecisionDenied>([&] { Inbox(store).decideInbox(bob, questionBefore, "answer", {{"text", "Final"}}); },
                              "nonmember answered a question");
@@ -294,14 +264,9 @@ SELECT )SQL" +
     rejected<RequestChanged>([&] { Inbox(store).decideInbox(alice, forged, "answer", {{"text", "Final"}}); },
                              "someone could submit a different task generation");
 
-    Inbox(store).decideInbox(alice, pending(store, pr_review), "approve");
-    check(db.exec("SELECT status='approved' FROM pr_review_items WHERE id=" + std::to_string(review)) == 1,
-          "PR approval failed to update the linked review");
     Inbox(store).decideInbox(owner, pending(store, protected_input), "supply", {{"value", "test-vault-value"}});
     check(Inbox(store).decisionHistory(owner).dump().find("test-vault-value") == std::string::npos, "secret was journaled");
     const auto old = TaskTarget::from(Tasks(store).task(changed).task, 0);
-    const auto staleReview =
-        openReview(store, runtime, script, intake("report", "unused", "turn"), changed, "revision-a", "Review the first source");
     script.managed = changed;
     ConversationIntake(store).receive(localOwner, intake("report", "unused", "turn"), "change", "Switch the scope");
     runtime.runConversations();
@@ -311,12 +276,9 @@ SELECT )SQL" +
     const auto sent = sessions.sends;
     const auto interrupted = sessions.interrupts;
     rejected<RequestChanged>([&] { TaskControl(store).operate(alice, old, "cancel"); }, "old stop applied to revision B");
-    rejected<RequestChanged>(
-        [&] { Inbox(store).decideInbox(alice, {"report", pr_review, staleReview, 0, changed, old.revision, old.generation}, "approve"); },
-        "an old PR review approved a new revision");
     check(taskJson(Tasks(store).task(changed)) == revisionB && sessions.sends == sent && sessions.interrupts == interrupted &&
-              Inbox(store).decisionHistory(owner).size() == 2,
-          "rejected approval changed task, delivery, or history");
+              Inbox(store).decisionHistory(owner).size() == 1,
+          "rejected stop changed task, delivery, or history");
 
     script.managed = question;
     ConversationIntake(store).receive(localOwner, intake("report", "unused", "turn"), "block", "Report the blocker");
@@ -443,54 +405,6 @@ void chatDecision(const std::filesystem::path& path) {
           "replanning changed the historical decision title");
 }
 
-void reviewReply(const std::filesystem::path& path) {
-    Store store(path);
-    const auto routing = intake("report", "Prepare the report", "review");
-    const auto task = TaskIntake(store).submit(routing);
-    {
-        Script script;
-        Sessions sessions;
-        Runtime runtime(
-            store, script, sessions, [](std::string_view) { return std::string{}; },
-            git_fixture::options(std::make_shared<git_fixture::FakeHost>()));
-        openReview(store, runtime, script, routing, task, "report", "Check the report");
-        openReview(store, runtime, script, routing, task, "source", "Check the source");
-    }
-    const auto items = Inbox(store).inbox(owner, "report");
-    const auto firstAnchor = row(items, "prompt", "Check the report").at("conversationEventId");
-    const auto review = row(items, "prompt", "Check the source");
-    const auto second = review.at("itemId");
-    const auto anchor = review.at("conversationEventId");
-    check(firstAnchor != anchor, "two PR reviews of the same task shared a reply target");
-
-    Database db(path);
-    const auto anchoredRow = " FROM journal WHERE id=" + std::to_string(anchor.get<Id>());
-    check(db.exec("SELECT pr_review_item_id" + anchoredRow) == second.get<Id>(), "PR review anchor did not save the item lookup key");
-    db.exec("INSERT OR IGNORE INTO journal(task_id,time,kind,data,pr_review_item_id)"
-            " SELECT task_id,time,kind,'{}',pr_review_item_id" +
-            anchoredRow);
-    Store restarted(path);
-    check(row(Inbox(restarted).inbox(owner, "report"), "itemId", second) == review &&
-              db.exec("SELECT count(*) FROM journal WHERE kind='pr_review_requested'") == 2,
-          "reopening the store changed the review or its conversation anchor");
-
-    Script script;
-    Sessions sessions;
-    Runtime runtime(restarted, script, sessions, [](std::string_view) { return std::string{}; });
-    const auto message = ConversationIntake(restarted).receive(owner, routing, "review-reply", "Which checks ran?", anchor).at("messageId");
-    runtime.runConversations();
-    const auto line = row(Conversations(restarted).conversation("report"), "id", message);
-    check(line.at("data").at("replyToMessageId") == anchor &&
-              script.reviewContext == Json{{"messageId", anchor},
-                                           {"kind", "pr_review"},
-                                           {"taskId", task},
-                                           {"itemId", second},
-                                           {"title", prReviewTitle},
-                                           {"text", "Check the source"},
-                                           {"prUrl", "https://github.com/org/flock/pull/2"}} &&
-              Inbox(restarted).inbox(owner, "report").size() == 2 && Inbox(restarted).decisionHistory(owner).empty(),
-          "reply did not carry the exact pending PR context to the Bot");
-}
 }
 
 int main() {
@@ -500,11 +414,10 @@ int main() {
         exercise(path);
         protectedInputSource(directory.path / "protected-input.db");
         chatDecision(directory.path / "chat.db");
-        reviewReply(directory.path / "review-reply.db");
         Store restarted(path);
         const auto history = Inbox(restarted).decisionHistory(alice);
         const auto delivery = row(history, "itemKind", "unknown_delivery");
-        check(history.size() == 3 && delivery.at("decidedAt").get<Id>() > 0 &&
+        check(history.size() == 2 && delivery.at("decidedAt").get<Id>() > 0 &&
                   (delivery.at("decidedBy") == "alice" || delivery.at("decidedBy") == "bob") &&
                   row(Inbox(restarted).inbox(alice), "itemKind", "protected_input").at("prompt") == "Supply a value for after-restart",
               "restart lost pending requests or recorded decisions");

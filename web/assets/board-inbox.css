@@ -80,31 +80,10 @@
 }
 .decision-controls .icon-button:hover:not(:disabled) { color: var(--text); background: var(--hover); }
 .decision-controls .icon-button:active:not(:disabled) { transform: scale(.92); }
-.decision-controls button svg, .decision-controls summary svg { width: 1rem; height: 1rem; }
+.decision-controls button svg { width: 1rem; height: 1rem; }
 .decision-controls button:disabled:hover { background: transparent; }
 
-.decision-more { position: relative; }
-.decision-more > summary { list-style: none; cursor: pointer; }
-.decision-more > summary::-webkit-details-marker { display: none; }
-.decision-more[open] > summary, .decision-history[aria-pressed="true"] { background: var(--selected); color: var(--text); }
-.decision-more-list {
-  position: absolute; z-index: 5; inset-block-start: calc(100% + .35rem); inset-inline-end: 0;
-  display: grid; gap: .12rem; min-width: 11.5rem; padding: .3rem;
-  border: 1px solid var(--hairline); border-radius: var(--radius-md);
-  background: var(--overlay); box-shadow: var(--shadow-lg);
-  transform-origin: top right;
-  animation: popover-enter .18s cubic-bezier(0.22, 1.2, 0.36, 1);
-}
-.decision-more-item {
-  display: flex; align-items: center; gap: .5rem; min-height: 2rem; padding: .3rem .6rem;
-  border: 0; border-radius: var(--radius-sm); background: transparent;
-  color: var(--text-2); font-size: var(--text-sm); text-align: start; text-decoration: none;
-  white-space: nowrap;
-  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
-}
-.decision-more-item:hover { background: var(--hover); color: var(--text); }
-.decision-more-item:active { transform: scale(.98); }
-.decision-more-item svg { width: .95rem; height: .95rem; flex: none; }
+.decision-history[aria-pressed="true"] { background: var(--selected); color: var(--text); }
 
 .decision-message { color: var(--text-2); font-size: var(--text-sm); }
 .decision-message:not(:empty) { margin-block: 0 .6rem; }
@@ -131,62 +110,6 @@
 .history-card h3 .board-inbox-target { color: var(--text-3); font-weight: 400; letter-spacing: 0; }
 .history-about { color: var(--text-2); font-size: var(--text-sm); }
 .history-card .board-inbox-meta { margin-top: .15rem; }
-
-.board-inbox-pr-card {
-  position: relative; display: grid; gap: .35rem;
-  padding: .82rem .95rem;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-lg);
-  background: var(--raised);
-  transition: background-color .16s ease, border-color .16s ease, transform .18s cubic-bezier(0.23, 1, 0.32, 1), box-shadow .18s ease;
-}
-.board-inbox-pr-card:hover {
-  background: var(--hover);
-  border-color: color-mix(in srgb, var(--text-3) 35%, var(--hairline));
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
-}
-.board-inbox-pr-card:active { transform: translateY(0); }
-.board-inbox-pr-head { display: flex; align-items: flex-start; gap: .5rem; min-width: 0; }
-.board-inbox-pr-link {
-  flex: 1; min-width: 0;
-  color: var(--text); font-size: .92rem; font-weight: 600; line-height: 1.4;
-  text-decoration: none;
-}
-.board-inbox-pr-link::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
-.board-inbox-pr-link:hover { text-decoration: none; }
-.board-inbox-pr-tools {
-  position: relative; z-index: 1;
-  display: flex; align-items: center; gap: .15rem; flex: none;
-  opacity: 0; transform: translateX(4px);
-  transition: opacity .16s ease, transform .18s cubic-bezier(0.23, 1, 0.32, 1);
-}
-.board-inbox-pr-card:hover .board-inbox-pr-tools,
-.board-inbox-pr-card:focus-within .board-inbox-pr-tools { opacity: 1; transform: translateX(0); }
-@media (hover: none) { .board-inbox-pr-tools { opacity: 1; transform: none; } }
-.board-inbox-pr-tool {
-  width: 1.65rem; height: 1.65rem; padding: 0; border: 0; border-radius: var(--radius-sm);
-  display: grid; place-items: center; background: transparent; color: var(--text-2);
-  text-decoration: none;
-  transition: background-color .14s ease, color .14s ease, transform .12s cubic-bezier(0.23, 1, 0.32, 1);
-}
-.board-inbox-pr-tool:hover { background: color-mix(in srgb, var(--text) 9%, transparent); color: var(--text); }
-.board-inbox-pr-tool:active { transform: scale(.92); }
-.board-inbox-pr-tool svg { width: .95rem; height: .95rem; }
-.board-inbox-pr-tool.is-copied { color: var(--success); }
-.board-inbox-pr-tool.is-copied svg {
-  animation: board-inbox-check-pop 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-@keyframes board-inbox-check-pop {
-  0% { transform: scale(.75); opacity: .5; }
-  58% { transform: scale(1.12); opacity: 1; }
-  100% { transform: scale(1); opacity: 1; }
-}
-.board-inbox-pr-meta {
-  display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
-  font-size: .8rem; color: var(--text-3); font-variant-numeric: tabular-nums;
-}
-.board-inbox-pr-meta svg { width: .92rem; height: .92rem; color: var(--success); flex: none; }
 
 .board-inbox-actions {
   display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
@@ -281,19 +204,13 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .decision-panel, .decision-panel-body, .decision-morph-card,
-  .decision-more-list,
   .decision-controls .icon-button,
-  .board-inbox-pr-card, .board-inbox-pr-tools, .board-inbox-pr-tool, .board-inbox-pr-tool.is-copied svg,
   .board-inbox-question .question-option, .board-inbox-question .question-reply,
   .board-inbox-question .question-confirm, .board-inbox-form button, .decision-count {
     transition: none;
     animation: none;
   }
-  .board-inbox-pr-card:hover,
-  .board-inbox-pr-tools {
-    transform: none;
-  }
-  .decision-more-item:active, .board-inbox-question .question-reply:active:not(:disabled),
+  .board-inbox-question .question-reply:active:not(:disabled),
   .board-inbox-question .question-confirm:active:not(:disabled), .board-inbox-form button:active:not(:disabled) { transform: none; }
 }
 @media (forced-colors: active) {

@@ -37,11 +37,6 @@ struct PeerEvidenceEntry {
     SessionExcerptEntry excerpt;
 };
 
-struct PrReviewRequestedEntry {
-    Id itemId;
-    std::string title, text, prUrl;
-};
-
 struct GitPrFollowupEntry {
     std::string_view operationId, eventId;
     Id messageId;
@@ -53,5 +48,4 @@ BotMessageEntry decodeBotMessage(Id, const Json&);
 Json encodeSessionExcerpt(const SessionExcerptEntry&);
 Json encodePeerEvidence(const PeerEvidenceEntry&);
 PeerEvidenceEntry decodePeerEvidence(Id, const Json&);
-PrReviewRequestedEntry decodePrReviewRequested(Id, const Json&);
 }

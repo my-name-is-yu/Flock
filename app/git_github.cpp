@@ -141,8 +141,7 @@ GitPullRequest pull(const Json& value) {
             number,
             "https://" + baseRepo.resource() + "/pull/" + std::to_string(number),
             correlation(str(value, "body")),
-            str(head, "sha"),
-            value.at("state") == "open" && !value.value("draft", false)};
+            str(head, "sha")};
 }
 
 Json compactPr(const Json& value) {

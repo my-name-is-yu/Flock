@@ -17,7 +17,6 @@ VALUES
     ('index', 'git_events_repo', 'git_webhook_events', 'CREATE INDEX git_events_repo ON git_webhook_events(host,repo)'),
     ('index', 'git_pr_history', 'git_pr_operations', 'CREATE INDEX git_pr_history ON git_pr_operations(task_id,host,base_repo,base_ref,head_repo,head_ref)'),
     ('index', 'git_pr_watches_by_task', 'git_pr_watches', 'CREATE INDEX git_pr_watches_by_task ON git_pr_watches(task_id)'),
-    ('index', 'git_review_receipts_target', 'git_review_receipts', 'CREATE INDEX git_review_receipts_target ON git_review_receipts(task_id,host,repo,pr_number,reviewer,after_event)'),
     ('index', 'git_task_reads_by_task', 'git_task_reads', 'CREATE INDEX git_task_reads_by_task ON git_task_reads(task_id,id)'),
     ('index', 'inbox_decisions_by_bot', 'inbox_decisions', 'CREATE INDEX inbox_decisions_by_bot ON inbox_decisions(bot_id,id)'),
     ('index', 'journal_bot', 'journal', 'CREATE INDEX journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL'),
@@ -28,8 +27,6 @@ VALUES
     ('index', 'journal_peer_evidence', 'journal', 'CREATE INDEX journal_peer_evidence ON journal(task_id,exchange_id,peer_message_id,id) WHERE kind=''read_bot_evidence'''),
     ('index', 'journal_peer_message', 'journal', 'CREATE INDEX journal_peer_message ON journal(task_id,exchange_id,id) WHERE kind=''bot_message'''),
     ('index', 'journal_pr_followup', 'journal', 'CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,git_event_id) WHERE kind=''git_pr_followup_requested'''),
-    ('index', 'journal_pr_review_anchor', 'journal', 'CREATE UNIQUE INDEX journal_pr_review_anchor ON journal(task_id,pr_review_item_id)
-    WHERE kind=''pr_review_requested'''),
     ('index', 'journal_report_result', 'journal', 'CREATE INDEX journal_report_result ON journal(task_id,run_environment_id,run_thread_id,result_run_id,id)
   WHERE kind=''report'''),
     ('index', 'journal_report_run', 'journal', 'CREATE INDEX journal_report_run ON journal(task_id,run_environment_id,run_thread_id,run_id,revision_id)
@@ -48,11 +45,9 @@ VALUES
     ('index', 'memory_revisions_document', 'memory_revisions', 'CREATE INDEX memory_revisions_document ON memory_revisions(doc_key,id DESC)'),
     ('index', 'outbox_task', 'outbox', 'CREATE INDEX outbox_task ON outbox(task_id)'),
     ('index', 'peer_sender_open', 'peer_exchanges', 'CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>''closed'''),
-    ('index', 'pending_pr_reconciliation', 'pr_review_items', 'CREATE UNIQUE INDEX pending_pr_reconciliation ON pr_review_items(operation_id) WHERE status=''pending'''),
     ('index', 'pending_secret', 'protected_inputs', 'CREATE UNIQUE INDEX pending_secret ON protected_inputs(bot,name) WHERE status=''pending'''),
     ('index', 'policy_denied', 'policy_approvals', 'CREATE INDEX policy_denied ON policy_approvals(bot,scope,action,target,status)'),
     ('index', 'policy_pending', 'policy_approvals', 'CREATE INDEX policy_pending ON policy_approvals(status,bot)'),
-    ('index', 'pr_reviews_by_task', 'pr_review_items', 'CREATE INDEX pr_reviews_by_task ON pr_review_items(task_id,id)'),
     ('index', 'runs_task', 'runs', 'CREATE INDEX runs_task ON runs(task_id,action_id)'),
     ('index', 'session_invitations_inviter', 'session_invitations', 'CREATE INDEX session_invitations_inviter ON session_invitations(inviter_participation_id)'),
     ('index', 'session_message_interrupts_due', 'session_message_waits', 'CREATE INDEX session_message_interrupts_due ON session_message_waits(interrupt_at) WHERE interrupt_at IS NOT NULL'),
@@ -92,7 +87,6 @@ VALUES
     ('index', 'sqlite_autoindex_git_pr_heads_1', 'git_pr_heads', NULL),
     ('index', 'sqlite_autoindex_git_pr_operations_1', 'git_pr_operations', NULL),
     ('index', 'sqlite_autoindex_git_pr_watches_1', 'git_pr_watches', NULL),
-    ('index', 'sqlite_autoindex_git_review_receipts_1', 'git_review_receipts', NULL),
     ('index', 'sqlite_autoindex_git_task_reads_1', 'git_task_reads', NULL),
     ('index', 'sqlite_autoindex_git_webhook_deliveries_1', 'git_webhook_deliveries', NULL),
     ('index', 'sqlite_autoindex_git_webhook_events_1', 'git_webhook_events', NULL),
@@ -108,7 +102,6 @@ VALUES
     ('index', 'sqlite_autoindex_peer_exchanges_2', 'peer_exchanges', NULL),
     ('index', 'sqlite_autoindex_policy_approvals_1', 'policy_approvals', NULL),
     ('index', 'sqlite_autoindex_policy_rules_1', 'policy_rules', NULL),
-    ('index', 'sqlite_autoindex_pr_review_items_1', 'pr_review_items', NULL),
     ('index', 'sqlite_autoindex_protected_inputs_1', 'protected_inputs', NULL),
     ('index', 'sqlite_autoindex_recent_project_assignments_1', 'recent_project_assignments', NULL),
     ('index', 'sqlite_autoindex_runs_1', 'runs', NULL),
@@ -136,7 +129,7 @@ VALUES
     ('index', 'tasks_route', 'tasks', 'CREATE INDEX tasks_route ON tasks(environment_id,project_id,id)
   WHERE state NOT IN (''completed'',''cancelled'')'),
     ('index', 'unresolved_git_pr_target', 'git_pr_operations', 'CREATE UNIQUE INDEX unresolved_git_pr_target
- ON git_pr_operations(host,base_repo,base_ref,head_repo,head_ref) WHERE status IN (''pending'',''ambiguous'',''rejected'')'),
+ ON git_pr_operations(host,base_repo,base_ref,head_repo,head_ref) WHERE status IN (''pending'',''ambiguous'')'),
     ('index', 'waits_open', 'waits', 'CREATE UNIQUE INDEX waits_open ON waits(task_id) WHERE resolution IS NULL'),
     ('table', 'automation_firings', 'automation_firings', 'CREATE TABLE automation_firings(
   dedupe_key TEXT NOT NULL, bot_id TEXT NOT NULL, fired_at INTEGER NOT NULL, receipts TEXT NOT NULL,
@@ -235,18 +228,13 @@ VALUES
  operation_id TEXT PRIMARY KEY NOT NULL, host TEXT NOT NULL, base_repo TEXT NOT NULL,
  base_ref TEXT NOT NULL, head_repo TEXT NOT NULL, head_ref TEXT NOT NULL,
  task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL, invocation TEXT NOT NULL,
- event_cursor INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN (''pending'',''created'',''ambiguous'',''failed'',''rejected'')),
- pr_number INTEGER, url TEXT)'),
+ event_cursor INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN (''pending'',''created'',''ambiguous'',''failed'')),
+ pr_number INTEGER, url TEXT, candidates TEXT NOT NULL DEFAULT ''[]'')'),
     ('table', 'git_pr_watches', 'git_pr_watches', 'CREATE TABLE git_pr_watches(
  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
  task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL,
  url TEXT NOT NULL, event_cursor INTEGER NOT NULL,
  PRIMARY KEY(host,repo,pr_number))'),
-    ('table', 'git_review_receipts', 'git_review_receipts', 'CREATE TABLE git_review_receipts(
-  inbox_key TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
-  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
-  reviewer TEXT NOT NULL, after_event INTEGER NOT NULL,
-  PRIMARY KEY(inbox_key,reviewer))'),
     ('table', 'git_task_reads', 'git_task_reads', 'CREATE TABLE git_task_reads(
  id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id),
  invocation TEXT NOT NULL, tool TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL,
@@ -272,11 +260,10 @@ VALUES
   result_run_id TEXT, run_status TEXT, revision_id INTEGER, stop_requested INTEGER CHECK(stop_requested IN (0,1)),
   message_id INTEGER, instruction_step INTEGER,
   exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
-  pr_review_item_id INTEGER, git_event_id TEXT, operation_id TEXT,
+  git_event_id TEXT, operation_id TEXT,
   reply_to_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
   session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER, workflow_outcome TEXT,
-  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL),
-  CHECK(kind<>''pr_review_requested'' OR (task_id IS NOT NULL AND pr_review_item_id IS NOT NULL)))'),
+  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL))'),
     ('table', 'local_machine_connections', 'local_machine_connections', 'CREATE TABLE local_machine_connections(
       id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
       environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, requested_run_id TEXT NOT NULL,
@@ -343,13 +330,6 @@ VALUES
     ('table', 'policy_rules', 'policy_rules', 'CREATE TABLE policy_rules(id INTEGER PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN (''allow'',''ask'',''never'')),
  action TEXT NOT NULL,target TEXT NOT NULL,created_at INTEGER NOT NULL,exact INTEGER NOT NULL,UNIQUE(kind,action,target))'),
     ('table', 'policy_settings', 'policy_settings', 'CREATE TABLE policy_settings(id INTEGER PRIMARY KEY CHECK(id=1),mode TEXT NOT NULL CHECK(mode IN (''full'',''supervised'')), revision INTEGER NOT NULL)'),
-    ('table', 'pr_review_items', 'pr_review_items', 'CREATE TABLE pr_review_items(
-    id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
-    target_revision INTEGER NOT NULL,
-    url TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL,
-    git_key TEXT, operation_id TEXT REFERENCES git_pr_operations(operation_id), candidates TEXT NOT NULL DEFAULT ''[]'',
-    status TEXT NOT NULL DEFAULT ''pending'' CHECK(status IN (''pending'',''approved'',''changes_requested'',''linked'',''rejected'',''superseded'')),
-    UNIQUE(task_id,git_key), CHECK((git_key IS NULL) <> (operation_id IS NULL)))'),
     ('table', 'protected_inputs', 'protected_inputs', 'CREATE TABLE protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEXT NOT NULL UNIQUE,
  status TEXT DEFAULT ''pending'',source_message_id INTEGER REFERENCES messages(id))'),
     ('table', 'recent_project_assignments', 'recent_project_assignments', 'CREATE TABLE recent_project_assignments(person TEXT PRIMARY KEY,environment_id TEXT NOT NULL,project_id TEXT NOT NULL)'),

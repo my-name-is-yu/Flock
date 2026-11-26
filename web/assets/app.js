@@ -11,7 +11,7 @@ import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { mountBotPause } from '/bot-pause.js';
 import { isMemoryNotice, messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
-import { mountBoardInbox, pendingKindLabels, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
+import { mountBoardInbox, pendingKindLabels, taskWaitDecision } from '/board-inbox.js';
 import { screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
@@ -113,7 +113,7 @@ const pendingActionLabels = {
 const closedLabels = {
   answer: 'Answered', run_finished: 'Work ended', cancel: 'Stop requested',
   session_question: 'The question changed in T3', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
-  approve: 'Approved', reconcile: 'Check requested', supply: 'Secret saved',
+  reconcile: 'Check requested', supply: 'Secret saved',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock', deny: 'Denied', expired: 'Approval expired',
   stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
   superseded: 'Replaced', superseded_instruction: 'Replaced by a newer instruction',
@@ -125,12 +125,8 @@ const decisionConfirmations = {
   always_allow: () => 'Allowed and saved as a rule for this Flock.',
   allow_next_time: () => 'Allow rule saved for this Flock.',
   deny: () => 'Denied.',
-  approve: () => 'Approved.',
-  request_changes: (name) => `Change request recorded for ${name}.`,
   reconcile: () => 'Check requested.',
   supply: () => 'Secret saved.',
-  link_pr: () => 'Pull request linked.',
-  reject_pr: () => 'Pull request link rejected.',
 };
 const errors = {
   invalid_text: 'Check the message and its length.',
@@ -1217,7 +1213,7 @@ function readOnlyChoices(choices) {
 function nextSuggestion(context) {
   const composer = context?.composer;
   if (context?.data?.canDecide !== true || context.dm || context.source || !composer) return null;
-  const composerBusy = sendingMessages.has(composer) || composition || decisions.composer() || activeReply(composer);
+  const composerBusy = sendingMessages.has(composer) || composition || decisions.composer() || composer.reply;
   if (composerBusy || composer.textAt(0)) return null;
   if (['working', 'thinking'].includes(context.data.presence)) return null;
   let latest = null;
@@ -1636,18 +1632,6 @@ function eventCard(event, context, place, report) {
       else bubble.append(readOnlyChoices(data.suggestions));
     }
     replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
-  } else if (event.kind === 'pr_review_requested') {
-    text.textContent = data.title;
-    bubble.append(text);
-    if (data.text && data.text !== data.title) bubble.append(node('p', 'event-reason', data.text));
-    if (data.prUrl) {
-      const link = pullRequestLink(data.prUrl, 'View pull request');
-      if (link instanceof HTMLAnchorElement) {
-        link.className = 'link';
-        bubble.append(link);
-      }
-    }
-    replyTarget = ['Reply to this review', { kind: 'review', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
       : data.report || (data.destination ? 'No report is available.' : 'The work is done.');
@@ -2232,7 +2216,6 @@ function setNotice(context, text, isError = false, { quiet = false } = {}) {
 }
 const composerLimit = (limits, reply, decision) =>
   decision || reply?.kind === 'wait' ? limits.waitAnswerBytes : limits.messageBytes;
-const activeReply = (composer) => decisions.reviewReply() ?? composer.reply;
 const screenshotAnchor = (reply) => reply?.messageId ?? 0;
 const screenshotsFor = (composer) => screenshotDrafts.get(composer);
 let pickerTarget = null;
@@ -2249,7 +2232,7 @@ function clearScreenshots(composer, reply) {
 async function addScreenshots(context, composer, reply, files) {
   const anchor = screenshotAnchor(reply);
   const isCurrent = () => view === context && context.composer === composer && context.data.canDecide === true && !context.dm &&
-    !decisions.composer() && screenshotAnchor(activeReply(composer)) === anchor && !closedQuestion(context, reply) && !sendingMessages.has(composer);
+    !decisions.composer() && screenshotAnchor(composer.reply) === anchor && !closedQuestion(context, reply) && !sendingMessages.has(composer);
   if (!files.length || !composer || !isCurrent()) return;
   let drafts = screenshotsFor(composer);
   if (!drafts) screenshotDrafts.set(composer, drafts = new Map());
@@ -2331,9 +2314,8 @@ function fitMessage() {
 
 function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
   const answering = target?.kind === 'wait';
-  const reviewing = target?.kind === 'review';
   const working = ['working', 'thinking'].includes(data.presence);
-  const fieldLabel = answering ? 'Write your answer' : reviewing ? 'Reply to this review' :
+  const fieldLabel = answering ? 'Write your answer' :
     target ? 'Write a reply' : 'Message';
   elements['decision-reply-context'].hidden = !inboxReply;
   elements['reply-context'].hidden = !target || inboxReply;
@@ -2387,7 +2369,6 @@ function renderComposer() {
   elements['view-only-notice'].hidden = !available || !!banner || canDecide;
   if (banner && wasComposing) (canAct ? action : headerFocusTarget()).focus({ preventScroll: true });
   const decision = canDecide ? decisions.composer() : null;
-  const review = canDecide ? decisions.reviewReply() : null;
   if (!canDecide) {
     composition = null;
     elements['composer-ghost'].hidden = true;
@@ -2398,7 +2379,7 @@ function renderComposer() {
     return renderScreenshots(null, true);
   }
   const { composer } = context;
-  const reply = decision ? null : review ?? composer.reply;
+  const reply = decision ? null : composer.reply;
   const anchor = decision?.key ?? reply?.messageId;
   if (composition && (composition.composer !== composer || composition.anchor !== anchor)) composition = null;
   const screenshots = decision ? null : screenshotsFor(composer)?.get(screenshotAnchor(reply));
@@ -2409,7 +2390,7 @@ function renderComposer() {
   elements['cancel-reply'].disabled = busy;
   const suggestion = nextSuggestion(context);
   const target = decision ? { kind: 'wait', summary: decision.item.prompt?.trim() } : reply;
-  renderComposerCopy(context, target, !!(decision || review), suggestion);
+  renderComposerCopy(context, target, !!decision, suggestion);
   const ghost = elements['composer-ghost'];
   ghost.hidden = !suggestion;
   ghost.firstElementChild.textContent = suggestion?.text ?? '';
@@ -3251,8 +3232,7 @@ async function submit(event) {
     render('bottom');
   }
   const { composer } = context;
-  const review = decisions.reviewReply();
-  const reply = review ?? composer.reply;
+  const reply = composer.reply;
   const fields = { botId: context.id, text: composer.textAt(screenshotAnchor(reply)) };
   if (reply) fields.replyToMessageId = reply.messageId;
   const screenshots = screenshotsFor(composer)?.get(screenshotAnchor(reply));
@@ -3272,9 +3252,6 @@ async function submit(event) {
       composer.settleScreenshotSend(payload);
       clearScreenshots(composer, reply);
     } else composer.settleSend(payload, true);
-    if (review && view === context && decisions.reviewReply()?.messageId === review.messageId) {
-      decisions.close({ focus: false });
-    }
     setNotice(context, 'Message received.', false, { quiet: true });
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
@@ -3488,7 +3465,7 @@ elements['cancel-reply'].addEventListener('click', () => {
 });
 elements['attach-screenshots'].addEventListener('click', () => {
   if (elements['attach-screenshots'].getAttribute('aria-disabled') === 'true') return;
-  pickerTarget = { context: view, composer: view.composer, reply: activeReply(view.composer) };
+  pickerTarget = { context: view, composer: view.composer, reply: view.composer.reply };
   elements['screenshot-input'].click();
 });
 elements['screenshot-input'].addEventListener('change', (event) => {
@@ -3503,12 +3480,12 @@ elements.message.addEventListener('paste', (event) => {
   const files = Array.from(event.clipboardData?.files ?? []);
   if (!files.length || elements.message.readOnly || decisions.composer()) return;
   event.preventDefault();
-  void addScreenshots(view, view.composer, activeReply(view.composer), files);
+  void addScreenshots(view, view.composer, view.composer.reply, files);
 });
 function updateDraft() {
   if (!view?.composer || view.dm || elements.message.readOnly) return;
   const decision = decisions.composer();
-  const reply = activeReply(view.composer);
+  const reply = view.composer.reply;
   if (decision) decisions.edit(elements.message.value);
   else view.composer.edit(elements.message.value, reply);
   fitMessage();
@@ -3519,7 +3496,7 @@ function updateDraft() {
 }
 elements.message.addEventListener('compositionstart', () => {
   if (!view?.composer || view.dm || elements.message.readOnly) return;
-  composition = { composer: view.composer, anchor: decisions.composer()?.key ?? activeReply(view.composer)?.messageId };
+  composition = { composer: view.composer, anchor: decisions.composer()?.key ?? view.composer.reply?.messageId };
   renderComposer();
 });
 elements.message.addEventListener('compositionend', () => {
