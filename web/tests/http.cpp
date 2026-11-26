@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
@@ -253,7 +254,7 @@ void messageReceipts(const std::filesystem::path& path) {
         requester.post("/api/messages", revoked, 403);
         requester.post("/api/messages", message, 403);
         check(Conversations(store).conversation("release").size() == 2 && Conversations(store).conversation("triage").size() == 1 &&
-                  store.tasks().empty(),
+                  Tasks(store).tasks().empty(),
               "denied or replayed messages duplicated conversation entries or started work");
         access.setMember(owner, "release", "requester", true);
     }
@@ -274,7 +275,7 @@ void messageReceipts(const std::filesystem::path& path) {
         check(requester.post("/api/messages", changed, 409).at("error") == "message_conflict",
               "changing the text behind a receipt did not conflict");
         check(Conversations(store).conversation("release").size() == 2 && Conversations(store).conversation("triage").size() == 1 &&
-                  store.tasks().empty(),
+                  Tasks(store).tasks().empty(),
               "replaying persisted receipts duplicated conversation entries or started work");
     }
 }
@@ -303,7 +304,7 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
     expectedRequests.insert(earlierRequests.begin(), earlierRequests.end());
     for (int i = 0; i < 43; ++i) {
         const auto text = "Paged request " + std::to_string(i);
-        const auto id = cli.submit({"release", text, "local-env", "release"});
+        const auto id = Tasks(cli).submit({"release", text, "local-env", "release"});
         expectedRequests.emplace(id, text);
     }
 
@@ -356,12 +357,14 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     Id failed = 0, historical = 0;
     for (int i = 0; i < 8; ++i) {
         const auto id = std::to_string(i);
-        const auto task = cli.submit({"triage", "Session " + id, "linked env", "separate-" + id});
+        const auto task = Tasks(cli).submit({"triage", "Session " + id, "linked env", "separate-" + id});
         expectedTasks.insert(task);
         if (i == 0) failed = task;
         if (i == 1) historical = task;
     }
-    const auto allRunsStarted = [&] { return std::ranges::all_of(expectedTasks, [&](Id id) { return cli.task(id).runs.size() == 1; }); };
+    const auto allRunsStarted = [&] {
+        return std::ranges::all_of(expectedTasks, [&](Id id) { return Tasks(cli).task(id).runs.size() == 1; });
+    };
     for (int attempt = 0; attempt < 20 && !allRunsStarted(); ++attempt) runtime.tick();
     check(allRunsStarted(), "session fixtures did not each start one Run");
 
@@ -430,7 +433,7 @@ void failedCompletion(const std::filesystem::path& path) {
                                          .report = "The health check failed",
                                          .resultRunId = "failed-result",
                                          .itemId = "failed-report"};
-    store.submit({"release", "Verify staging", "local-env", "release"});
+    Tasks(store).submit({"release", "Verify staging", "local-env", "release"});
     tick(runtime, 8);
 
     const auto server = startWeb(store, 0, callbacks());
@@ -459,7 +462,7 @@ std::vector<PeerBot> fixturePeers(std::string_view sender) {
 }
 
 void seedPeerHistory(Store& store, Browser& browser, Runtime& runtime, const FixedT3& t3) {
-    store.submit({"release", "判定基準の確認", "local-env", "release"});
+    Tasks(store).submit({"release", "判定基準の確認", "local-env", "release"});
     Json waiting;
     for (unsigned attempt = 0; attempt < 8; ++attempt) {
         runtime.tick();
@@ -484,7 +487,7 @@ void peerHistory(const std::filesystem::path& path) {
     Browser browser(*server);
     seedPeerHistory(store, browser, runtime, t3);
 
-    for (int i = 0; i < 2001; ++i) store.submit({"release", "Newer request " + std::to_string(i), "local-env", "release"});
+    for (int i = 0; i < 2001; ++i) Tasks(store).submit({"release", "Newer request " + std::to_string(i), "local-env", "release"});
     const auto newest = browser.get("/api/view?bot=release");
     auto cursor = newest.at("olderBefore").get<Id>();
     check(cursor > 0, "missing older peer history cursor");
@@ -571,7 +574,7 @@ void peerConversation(const std::filesystem::path& path) {
             "/api/peer-messages",
             {{"botId", "release"}, {"peerId", "triage"}, {"clientMessageId", "direct-send"}, {"text", "Send directly to the peer"}}, 404);
         runtime.tick();
-        check(store.tasks().empty() && t3.launches.empty(), "opening a DM or posting to the old route started work");
+        check(Tasks(store).tasks().empty() && t3.launches.empty(), "opening a DM or posting to the old route started work");
         Browser::checked(browser.client.Get("/api/peer-conversation?bot=triage&peer=settings"), 403);
 
         seedPeerHistory(store, browser, runtime, t3);
@@ -632,7 +635,7 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     options.peers = fixturePeers;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
     for (int i = 0; i < 36; ++i) {
-        store.submit({"release", "Check release criteria", "local-env", "release"});
+        Tasks(store).submit({"release", "Check release criteria", "local-env", "release"});
         tick(runtime, 8);
     }
 
@@ -727,9 +730,9 @@ void conversationRequestApproval(const std::filesystem::path& path) {
                                        {"projectId", "ignored"},
                                        {"trigger", {{"triggerKind", "ignored"}}}},
                                       201);
-    check(receipt.at("status") == "received" && store.tasks().empty(), "HTTP intake did not wait for the conversation turn");
+    check(receipt.at("status") == "received" && Tasks(store).tasks().empty(), "HTTP intake did not wait for the conversation turn");
     tick(runtime, 4);
-    const auto tasks = store.tasks("release");
+    const auto tasks = Tasks(store).tasks("release");
     check(tasks.size() == 1 && tasks.front().task.sourceMessageId == receipt.at("messageId").get<Id>(),
           "the Task did not retain its conversation message");
     const auto& task = tasks.front().task;
@@ -775,11 +778,11 @@ void exercise(const std::filesystem::path& path) {
     const auto port = server->port();
     Browser browser(*server);
     boundary(browser);
-    check(cli.tasks().empty() && Conversations(cli).conversation("release").empty(),
+    check(Tasks(cli).tasks().empty() && Conversations(cli).conversation("release").empty(),
           "rejected HTTP requests still submitted messages or work");
-    const auto release = cli.submit(web.intake("release", "下書きの掲載範囲を確認する"));
-    const auto triage = cli.submit(web.intake("triage", "昨日届いた不具合を確認する"));
-    const auto settings = cli.submit(web.intake("settings", "接続設定を確認する"));
+    const auto release = Tasks(cli).submit(web.intake("release", "下書きの掲載範囲を確認する"));
+    const auto triage = Tasks(cli).submit(web.intake("triage", "昨日届いた不具合を確認する"));
+    const auto settings = Tasks(cli).submit(web.intake("settings", "接続設定を確認する"));
     tick(*runtime, 3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
     t3.observations["thread-release"].question = {"scope-question", {{.id = "scope"}}};
@@ -814,14 +817,14 @@ void exercise(const std::filesystem::path& path) {
     std::map<Id, std::string> earlierRequests;
     for (int i = 0; i < 45; ++i) {
         const auto text = "Earlier request " + std::to_string(i);
-        earlierRequests.emplace(cli.submit({"release", text, "local-env", "release"}), text);
+        earlierRequests.emplace(Tasks(cli).submit({"release", text, "local-env", "release"}), text);
     }
     const auto beforeAnswer = browser.get("/api/view?bot=release");
     check(std::none_of(beforeAnswer["events"].begin(), beforeAnswer["events"].end(),
                        [&](const Json& row) { return row["kind"] == "waiting" && row["data"]["id"] == waitId; }),
           "question fixture did not cross a history page boundary");
 
-    const auto next = cli.submit(web.intake("release", "次の版の変更点を調べる"));
+    const auto next = Tasks(cli).submit(web.intake("release", "次の版の変更点を調べる"));
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
@@ -836,7 +839,7 @@ void exercise(const std::filesystem::path& path) {
                   {"targetGeneration", visibleWait.at("generation")}};
     browser.post("/api/operations", reply, 404);
     reply["botId"] = "release";
-    cli.operate(localOwner, TaskTarget::from(cli.task(release).task, waitId), "answer", {{"text", "利用者向けのみ"}});
+    Tasks(cli).operate(localOwner, TaskTarget::from(Tasks(cli).task(release).task, waitId), "answer", {{"text", "利用者向けのみ"}});
     const auto answered = browser.get("/api/view?bot=release");
     check(std::any_of(answered["events"].begin(), answered["events"].end(),
                       [&](const Json& row) {
@@ -848,7 +851,7 @@ void exercise(const std::filesystem::path& path) {
     tick(*runtime, 2);
     check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-release" && t3.replies[0].target.runId == "run-release-1" &&
               t3.replies[0].questionId == "scope-question" && t3.replies[0].answers["scope"] == "利用者向けのみ" &&
-              cli.task(next).task.state == TaskState::queued,
+              Tasks(cli).task(next).task.state == TaskState::queued,
           "stale reply affected the active Run or another task");
     check(browser.get("/api/view?bot=release")["waits"].empty(), "resolved wait stayed selectable");
     const auto resumed = browser.get("/api/bots");
@@ -880,7 +883,7 @@ void exercise(const std::filesystem::path& path) {
                                       {"targetGeneration", settingsWait.at("generation")},
                                       {"session", {{"runtimeMode", "invalid-client-setting"}}}});
     tick(*runtime, 2);
-    check(cli.task(settings).task.state == TaskState::running && t3.launches["settings"] == 1,
+    check(Tasks(cli).task(settings).task.state == TaskState::running && t3.launches["settings"] == 1,
           "Web reconciliation did not start the Session with the corrected Bot settings");
     const auto page = reopened.get("/api/view?bot=release");
     check(hasEvent(page["events"], "report", "report", "T3 finished while the browser was closed") &&
@@ -902,7 +905,7 @@ void exercise(const std::filesystem::path& path) {
                    {"targetRevision", external.at("currentRevision")},
                    {"targetGeneration", external.at("generation")}},
                   409);
-    check(cli.task(triage).task.state == TaskState::running, "stale cancellation affected a resumed Run");
+    check(Tasks(cli).task(triage).task.state == TaskState::running, "stale cancellation affected a resumed Run");
 
     auto& triageQuestion = t3.observations["thread-triage"];
     triageQuestion.kind = Observation::Kind::Question;
@@ -1073,8 +1076,8 @@ void notificationEvents(const std::filesystem::path& path) {
         reply("triage", "private-reply");
         reply("release", "new-reply-two");
         runtime.runConversations();
-        store.submit({"release", "Choose a publish date", "local-env", "publication"});
-        store.submit(web.intake("release", "Verify staging"));
+        Tasks(store).submit({"release", "Choose a publish date", "local-env", "publication"});
+        Tasks(store).submit(web.intake("release", "Verify staging"));
         t3.observations["thread-release"] = {.kind = Observation::Kind::Finished,
                                              .status = "failed",
                                              .report = "Health check failed",
@@ -1254,7 +1257,7 @@ void watchedBotView(const std::filesystem::path& path) {
     };
     store.policy().setMember(localOwner, "release", "reader", true);
     const auto intake = web.intake("release", "Check staging");
-    store.submit(intake);
+    Tasks(store).submit(intake);
     FixedModel model;
     FixedT3 t3;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
@@ -1374,13 +1377,13 @@ void eventStream(const std::filesystem::path& path) {
             }
             check(change == Json{{"list", true}, {"bot", "release"}}, "unexpected SSE invalidation scope or payload");
             if (changes == 0) {
-                releaseTask = cli.submit(web.intake("release", "CLI write"));
+                releaseTask = Tasks(cli).submit(web.intake("release", "CLI write"));
             } else if (changes == 1) {
                 tick(runtime, 3);
             } else {
                 check(browser.get("/api/view?bot=release").at("presence") == "working",
                       "a state-only Runtime change did not reach the view");
-                cli.submit(web.intake("triage", "Other Bot"));
+                Tasks(cli).submit(web.intake("triage", "Other Bot"));
             }
             ++changes;
             return true;
@@ -1421,7 +1424,7 @@ void conversationPermissions(const std::filesystem::path& path) {
         return std::nullopt;
     };
 
-    const auto taskId = store.submit(web.intake("release", "Draft release notes"));
+    const auto taskId = Tasks(store).submit(web.intake("release", "Draft release notes"));
     struct ConversationModel : FixedModel {
         ModelTurn decide(const ModelInput& input) override {
             if (input.event.at("kind") == "conversation_turn")
@@ -1511,7 +1514,7 @@ void retryEventProjection(const std::filesystem::path& path) {
 void retryHistoryInvalidation(const std::filesystem::path& path) {
     Store store(path);
     auto web = callbacks();
-    const auto task = store.submit(web.intake("release", "Release notes"));
+    const auto task = Tasks(store).submit(web.intake("release", "Release notes"));
     const auto intake = web.intake("release", "Follow up");
     const auto message = Conversations(store).receive(Person{"owner", true}, intake, "old", "Follow up").at("messageId").get<Id>();
     for (int i = 0; i < 40; ++i) Conversations(store).receive(Person{"owner", true}, intake, "new-" + std::to_string(i), "Newer message");
@@ -1579,7 +1582,7 @@ void retryOneBotProjection(const std::filesystem::path& path) {
     const auto web = callbacks();
     const auto intake = web.intake("release", "Follow up");
     const auto message = Conversations(writer).receive(localOwner, intake, "old", "Follow up").at("messageId").get<Id>();
-    const auto task = writer.submit(web.intake("release", "Latest release request"));
+    const auto task = Tasks(writer).submit(web.intake("release", "Latest release request"));
     const auto latest = Conversations(store).conversation("release", 0, 1);
     std::atomic<bool> releaseAvailable = true;
     std::atomic<bool> releaseFailed = false;
@@ -1615,7 +1618,7 @@ void retryOneBotProjection(const std::filesystem::path& path) {
     const auto write = "INSERT INTO journal(task_id,time,kind,data,message_id,instruction_step) VALUES" + event("instruction_accepted") +
                        "," + event("instruction_delivered");
     check(sqlite3_exec(db.get(), write.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK, "could not update historical message");
-    writer.submit(web.intake("triage", "Healthy Bot request"));
+    Tasks(writer).submit(web.intake("triage", "Healthy Bot request"));
     expectBot(triage, "triage");
     check(feed.next(release).value().empty() && releaseFailed.load(), "release did not remain pending during the failed projection");
     releaseAvailable = true;

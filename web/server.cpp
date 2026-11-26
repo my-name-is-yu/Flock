@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/web.hpp"
@@ -348,7 +349,7 @@ public:
                         const auto sessionsAfter =
                             req.has_param("sessionsAfter") ? std::optional{queryId(req, "sessionsAfter", true)} : std::nullopt;
                         const auto changes = Conversations(store_).conversationChangesSince(changesAfter, id);
-                        const auto [sessionThrough, sessionTasks] = store_.sessionChangesSince(id, sessionsAfter);
+                        const auto [sessionThrough, sessionTasks] = Tasks(store_).sessionChangesSince(id, sessionsAfter);
                         auto view = readBotView(actor, id, *bot, sessionsAfter ? &sessionTasks : nullptr);
                         view["bot"]["id"] = id;
                         view["limits"] = {{"messageBytes", limits::messages::maxBodyBytes},
@@ -806,10 +807,11 @@ private:
             const auto id = bodyId(body, "taskId");
             const auto wait = bodyId(body, "waitId");
             auto data = operationData(body, operation);
-            const auto task = store_.task(id);
+            const auto task = Tasks(store_).task(id);
             if (task.task.botId != bot) return error(res, 404, "task_not_found");
-            if (operation == "reconcile") data = store_.reconciliationData(id, wait, std::move(data), callbacks_.intake);
-            store_.operate(actor, {bot, id, wait, bodyId(body, "targetRevision", 0), bodyId(body, "targetGeneration", 0)}, operation, data);
+            if (operation == "reconcile") data = Tasks(store_).reconciliationData(id, wait, std::move(data), callbacks_.intake);
+            Tasks(store_).operate(actor, {bot, id, wait, bodyId(body, "targetRevision", 0), bodyId(body, "targetGeneration", 0)}, operation,
+                                  data);
             json(res, 200, {{"accepted", true}});
         } catch (const InputError& e) {
             error(res, 400, e.what());

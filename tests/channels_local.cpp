@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/channels.hpp"
 #include "flock/board_inbox.hpp"
@@ -540,8 +541,8 @@ void taskUpdates(const std::filesystem::path& database) {
     model.decideNext = std::move(taskModel);
     const auto receipt = store.receiveChannel(channel, "fixture-auth", original, intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
-    const Id taskId = store.activeTasks("release").at(0).task.id;
-    check(store.task(taskId).task.activeRun.has_value(), "Channel task did not start a Session");
+    const Id taskId = Tasks(store).activeTasks("release").at(0).task.id;
+    check(Tasks(store).task(taskId).task.activeRun.has_value(), "Channel task did not start a Session");
     t3.observeRun = [](const RunRef&) {
         Observation observed;
         observed.kind = Observation::Kind::Question;
@@ -577,19 +578,19 @@ void taskUpdates(const std::filesystem::path& database) {
     model.decideNext = [&](const ModelInput& input) -> Decision {
         check(input.task.at("tasks").empty() && input.history.empty(), "Another thread received private task context");
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return {"cancel_task", {{"taskId", taskId}, {"generation", store.task(taskId).task.generation}}, {}};
+        if (steps.empty()) return {"cancel_task", {{"taskId", taskId}, {"generation", Tasks(store).task(taskId).task.generation}}, {}};
         check(steps.at(0).at("result").at("ok") == false, "Another thread could address a private task by ID");
         return reply("No task in this thread.");
     };
     store.receiveChannel(channel, "fixture-auth", event("other-thread", "ask", "What is the release target?"), intake);
     runtime.runConversations();
-    check(store.task(taskId).task.state == TaskState::waiting, "Another thread cancelled a private task");
+    check(Tasks(store).task(taskId).task.state == TaskState::waiting, "Another thread cancelled a private task");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
         if (input.event.at("kind") == "result")
             return {"complete", {{"report", "Private release completed."}}, "The Session confirmed the release"};
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return answerQuestion(taskJson(store.task(taskId)), "Preview");
+        if (steps.empty()) return answerQuestion(taskJson(Tasks(store).task(taskId)), "Preview");
         check(steps.at(0).at("result").at("ok") == true, "Originating thread could not answer its question");
         return reply("Answer received.");
     };
@@ -599,7 +600,7 @@ void taskUpdates(const std::filesystem::path& database) {
     check(Inbox(store).decisionHistory(root).at(0).at("decidedBy") == owner.id, "Channel decision lost the verified sender");
     t3.observeRun = [](const RunRef&) { return finished(); };
     for (int i = 0; i < 5; ++i) runtime.tick();
-    check(store.task(taskId).task.state == TaskState::completed && transport->effects.size() == 8 &&
+    check(Tasks(store).task(taskId).task.state == TaskState::completed && transport->effects.size() == 8 &&
               transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
               transport->effects.back().at("payload").at("text") == "Private release completed.",
           "Task completion was not delivered to the originating thread");
@@ -775,14 +776,15 @@ void taskQuestionChoices(const std::filesystem::path& database) {
                                  return route;
                              });
         for (int i = 0; i < 8; ++i) runtime.tick();
-        const auto task = taskJson(store.task(store.activeTasks("release").at(0).task.id));
+        const auto task = taskJson(Tasks(store).task(Tasks(store).activeTasks("release").at(0).task.id));
         check(task.at("state") == "waiting" && transport->effects.back().at("payload").at("suggestions") == Json::array({"Yes", "No"}),
               "The task question was not posted");
         return std::pair{task, transport->effects.back().at("externalMessageId")};
     };
     const auto [first, firstPost] = start("first");
     const auto [second, secondPost] = start("second");
-    check(first.at("id") != second.at("id") && firstPost != secondPost && store.task(first.at("id")).task.state == TaskState::waiting,
+    check(first.at("id") != second.at("id") && firstPost != secondPost &&
+              Tasks(store).task(first.at("id")).task.state == TaskState::waiting,
           "Both questions must be open at the same time");
     auto answer = event("choice-thread", "answer-first", "Yes");
     answer["replyToExternalMessageId"] = firstPost;
@@ -791,7 +793,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     rejects([&] { store.receiveChannel(channel, "fixture-auth", wrongThread, intake); });
 
     const auto recordedChoice = [&](const Json& task, const Json& receipt) {
-        return std::ranges::any_of(store.history(task.at("id"), 0, 200), [&](const Json& event) {
+        return std::ranges::any_of(Tasks(store).history(task.at("id"), 0, 200), [&](const Json& event) {
             const auto& data = event.at("data");
             return event.at("kind") == "user_answer" && data.at("text") == "Yes" && data.at("messageId") == receipt.at("messageId") &&
                    data.at("waitId") == task.at("wait").at("id");
@@ -804,7 +806,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     };
     const auto receipt = store.receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
-    check(recordedChoice(first, receipt) && taskJson(store.task(second.at("id"))).at("wait") == second.at("wait"),
+    check(recordedChoice(first, receipt) && taskJson(Tasks(store).task(second.at("id"))).at("wait") == second.at("wait"),
           "Only the selected question should receive the exact choice");
     check(store.receiveChannel(channel, "fixture-auth", answer, intake) == receipt, "Choice replay changed the receipt");
     answer["replyToExternalMessageId"] = secondPost;
@@ -828,7 +830,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     };
     const auto followed = store.receiveChannel(channel, "fixture-auth", followup, intake);
     runtime.runConversations();
-    check(recordedChoice(second, followed) && taskJson(store.task(second.at("id"))).at("wait").is_null(),
+    check(recordedChoice(second, followed) && taskJson(Tasks(store).task(second.at("id"))).at("wait").is_null(),
           "Reply to a Bot clarification could not answer its original question");
 }
 
@@ -844,9 +846,9 @@ void local(const std::filesystem::path& database, const std::string& path) {
     const auto session = [&](auto bot) {
         auto route = intake(bot, "Prepare");
         route.projectId += std::to_string(++project);
-        const auto task = store.submit(route);
+        const auto task = Tasks(store).submit(route);
         for (int i = 0; i < 3; ++i) runtime.tick();
-        auto run = store.task(task).task.activeRun;
+        auto run = Tasks(store).task(task).task.activeRun;
         check(run.has_value(), "Fixture Session did not start");
         return std::move(run->ref);
     };
@@ -887,7 +889,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         return Decision{"follow_up", {{"instruction", "Continue in this Session"}}, "The work needs one more Run"};
     };
     for (int i = 0; i < 5; ++i) runtime.tick();
-    for (const auto& row : store.activeTasks("release")) {
+    for (const auto& row : Tasks(store).activeTasks("release")) {
         const auto& active = row.task.activeRun;
         if (active && active->ref.threadId == originalRun.threadId) a = active->ref;
     }

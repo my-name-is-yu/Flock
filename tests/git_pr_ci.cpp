@@ -1,4 +1,5 @@
 #include "fake_git.hpp"
+#include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
@@ -194,15 +195,15 @@ void runner() {
     Id task, other;
     {
         Store store(path);
-        task = store.submit(intake());
+        task = Tasks(store).submit(intake());
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(store.task(task).task.state == TaskState::completed && host->createCalls == 1,
-              "Session-to-PR flow did not complete: " + store.history(task).dump());
-        other = store.submit(intake("other", "other-project"));
+        check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1,
+              "Session-to-PR flow did not complete: " + Tasks(store).history(task).dump());
+        other = Tasks(store).submit(intake("other", "other-project"));
         check(script.results.at("session-pr").at("prNumber") == 1, "task did not receive the PR number");
         check(historyCount(store, task, "git_mutation") == 2, "PR operation history must include intent and result");
-        check(recordedMutationReason(store.history(task), "git_open_pr"), "PR creation lost its rationale in task history");
+        check(recordedMutationReason(Tasks(store).history(task), "git_open_pr"), "PR creation lost its rationale in task history");
         check(historyCount(store, task, "report") == 1, "Session result missing");
         check(Inbox(store).inbox(localOwner, "owner").at(0).at("prTitle") == "Pull request awaiting review", "PR awaiting review missing");
         check(GitEvents(store).receiveGitWebhook(
@@ -212,7 +213,7 @@ void runner() {
     }
     {
         Store store(path);
-        const auto otherHistory = store.history(other);
+        const auto otherHistory = Tasks(store).history(other);
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
         check(!GitEvents(store).receiveGitWebhook(
                   {hostName, "ci-before-restart", "org/other", "ci", "completed", {2}, sha, "changed duplicate", 81}),
@@ -224,10 +225,10 @@ void runner() {
         runtime.runConversations();
         check(script.notifications == 1 && host->logCalls == 1 && historyCount(store, task, "git_webhook") == 1,
               "CI event did not wake exactly the persistent PR owner");
-        check(store.history(other) == otherHistory &&
+        check(Tasks(store).history(other) == otherHistory &&
                   Conversations(store).conversation("other").dump().find("CI failed") == std::string::npos,
               "unrelated task was woken");
-        check(store.history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
+        check(Tasks(store).history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
               "CI report is missing from the owning task");
         check(GitEvents(store).receiveGitWebhook({hostName, "review", repoName, "review", "submitted", {1}, sha, "Approved", 0}),
               "review rejected");
@@ -246,7 +247,7 @@ void runner() {
               "Git inbox decision did not update and record");
         check(script.notifications == 3 && historyCount(store, task, "git_webhook") == 3, "webhooks were delivered more than once");
 
-        const auto sibling = store.submit(intake());
+        const auto sibling = Tasks(store).submit(intake());
         auto args = openArgs("sibling-change");
         args["taskId"] = sibling;
         check(invoke(store, runtime, script, "watch-sibling", "git_open_pr", args).at("prNumber") == 2,
@@ -293,7 +294,7 @@ void webhookHeadPeriods() {
     Script script;
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto first = store.submit(intake());
+    const auto first = Tasks(store).submit(intake());
     auto args = openArgs();
     args["taskId"] = first;
     check(invoke(store, runtime, script, "watch-first", "git_open_pr", args).at("prNumber") == 1, "could not create first watch");
@@ -310,7 +311,7 @@ void webhookHeadPeriods() {
     check(GitEvents(store).receiveGitWebhook({hostName, "first-sync", repoName, "pull_request", "synchronize", {1}, newSha, "New head", 0}),
           "could not enqueue synchronization");
 
-    const auto second = store.submit(intake());
+    const auto second = Tasks(store).submit(intake());
     args = openArgs("other-change");
     args["taskId"] = second;
     check(invoke(store, runtime, script, "watch-second", "git_open_pr", args).at("prNumber") == 2, "could not create second watch");
@@ -338,10 +339,10 @@ void pausedGitNotifications() {
     Id task;
     {
         Store store(path);
-        task = store.submit(intake());
+        task = Tasks(store).submit(intake());
         Runtime runtime(store, script, sessions, {}, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(store.task(task).task.state == TaskState::completed && host->createCalls == 1,
+        check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1,
               "Git notification fixture did not finish its watched request");
         store.setBotPaused(localOwner, "owner", true);
         check(GitEvents(store).receiveGitWebhook({hostName, "paused-delivery", repoName, "comment", "created", {1}, sha, "Paused", 0}),
@@ -373,9 +374,9 @@ void reviewAfterTaskProgress() {
     Script script;
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto task = store.submit(intake());
-    for (int i = 0; i < 4 && store.task(task).task.currentRevision.value_or(0) == 0; ++i) runtime.tick();
-    check(store.task(task).task.currentRevision.value_or(0) > 0, "task has no initial revision");
+    const auto task = Tasks(store).submit(intake());
+    for (int i = 0; i < 4 && Tasks(store).task(task).task.currentRevision.value_or(0) == 0; ++i) runtime.tick();
+    check(Tasks(store).task(task).task.currentRevision.value_or(0) > 0, "task has no initial revision");
 
     auto args = openArgs();
     args["taskId"] = task;
@@ -411,7 +412,7 @@ void webhookDeliveryResumesAfterAnIdlePoll() {
     script.openAfterSession = true;
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto task = store.submit(intake());
+    const auto task = Tasks(store).submit(intake());
     host->inspect = [&](const GitContext&, const GitOpenPr&) {
         check(GitEvents(store).receiveGitWebhook({hostName, "early-ci", repoName, "ci", "completed", {}, sha, "Early head", 0}),
               "Could not receive a webhook while the PR was opening");
@@ -440,9 +441,9 @@ void reconciliationAfterTaskRevision() {
     Script script;
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto task = store.submit(intake());
-    for (int i = 0; i < 4 && store.task(task).task.currentRevision.value_or(0) == 0; ++i) runtime.tick();
-    const auto before = taskJson(store.task(task));
+    const auto task = Tasks(store).submit(intake());
+    for (int i = 0; i < 4 && Tasks(store).task(task).task.currentRevision.value_or(0) == 0; ++i) runtime.tick();
+    const auto before = taskJson(Tasks(store).task(task));
     check(before.value("currentRevision", Id{0}) > 0, "task has no initial revision");
 
     auto args = openArgs();
@@ -463,13 +464,14 @@ void reconciliationAfterTaskRevision() {
                                  {"revisionId", before.at("currentRevision")},
                                  {"instruction", "Update the success criteria"},
                                  {"doneWhen", "Verify the new completion criteria"}});
-    check(changed.at("ok") == true && store.task(task).task.replanning, "fixture did not revise the active task");
+    check(changed.at("ok") == true && Tasks(store).task(task).task.replanning, "fixture did not revise the active task");
     check(invoke(store, runtime, script, "retry-after-replan", "git_open_pr", args).at("status") == "ambiguous",
           "fixture did not keep the PR creation unresolved");
     const auto latest = Inbox(store).inbox(localOwner, "owner").at(0);
     check(latest.at("itemId") == initial.at("itemId") && latest.at("targetRevision") != initial.at("targetRevision") &&
-              latest.at("targetRevision") == store.task(task).task.currentRevision.value() &&
-              latest.at("targetGeneration") == store.task(task).task.generation && latest.at("candidates") == initial.at("candidates"),
+              latest.at("targetRevision") == Tasks(store).task(task).task.currentRevision.value() &&
+              latest.at("targetGeneration") == Tasks(store).task(task).task.generation &&
+              latest.at("candidates") == initial.at("candidates"),
           "Reconciliation lost its current target or verified candidates");
     try {
         Inbox(store).decideInbox(localOwner, target(initial), "reject_pr");
@@ -495,7 +497,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
     InboxTarget initial{};
     {
         Store store(path);
-        task = store.submit(intake());
+        task = Tasks(store).submit(intake());
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
         host->inspect = [&](const GitContext& context, const GitOpenPr& request) {
             operationId = request.operationId;
@@ -588,8 +590,8 @@ void accessAndActions() {
     auto host = std::make_shared<FakeHost>();
     Script script;
     Sessions sessions;
-    const auto task = store.submit(intake());
-    const auto other = store.submit(intake("other"));
+    const auto task = Tasks(store).submit(intake());
+    const auto other = Tasks(store).submit(intake("other"));
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     const std::vector<std::pair<std::string, Json>> commands{
         {"git_repo_info", Json::object()},
@@ -709,7 +711,7 @@ void accessAndActions() {
     check(retry.at("data").at("id") == 101 && host->comments == 1 && host->edits == 2, "comment edit retry duplicated a comment");
     check(historyCount(store, task, "git_mutation") == 18 && historyCount(store, other, "git_mutation") == 0,
           "Git mutations were not recorded on the owning task");
-    check(recordedMutationReason(store.history(task, 0, 200), "git_update_pr"), "PR update lost its rationale in task history");
+    check(recordedMutationReason(Tasks(store).history(task, 0, 200), "git_update_pr"), "PR update lost its rationale in task history");
 
     const auto review = invoke(store, runtime, script, "review-existing-pr", "git_request_review",
                                argsFor({{"prNumber", 20}, {"reviewers", {"alice"}}}, repoName));
@@ -728,7 +730,7 @@ void newAttempts() {
     Script script;
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto originalTask = store.submit(intake());
+    const auto originalTask = Tasks(store).submit(intake());
     auto args = openArgs();
     args["taskId"] = originalTask;
     host->create = FakeHost::Create::rejected;
@@ -749,7 +751,7 @@ void newAttempts() {
           "A fresh comment request could not retry a definitive rejection");
 
     host->prs.front().state = FakeHost::State::merged;
-    args["taskId"] = store.submit(intake());
+    args["taskId"] = Tasks(store).submit(intake());
     const auto next = invoke(store, runtime, script, "replacement-pr", "git_open_pr", args);
     check(next.at("prNumber") == 2 && host->createCalls == 3, "Branch pair was locked after the previous task's PR merged");
 }
@@ -760,7 +762,7 @@ void taskMutationAttempts() {
     auto host = std::make_shared<FakeHost>();
     Script script;
     Sessions sessions;
-    const auto task = store.submit(intake());
+    const auto task = Tasks(store).submit(intake());
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     const std::vector<std::string> states{"closed", "open", "closed"};
     script.onTaskResult = [&](const ModelInput& input) -> Decision {
@@ -780,8 +782,8 @@ void taskMutationAttempts() {
                 "git_update_pr", {{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", states.at(previous.size() - 1)}}, {}};
         return {"git_manage_issue", {{"host", hostName}, {"repo", repoName}, {"action", "create"}, {"title", "Follow-up"}}, {}};
     };
-    for (int i = 0; i < 14 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    check(store.task(task).task.state == TaskState::completed && host->prStateUpdates == states &&
+    for (int i = 0; i < 14 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::completed && host->prStateUpdates == states &&
               host->prs.at(0).state == FakeHost::State::closed,
           "separate decisions on one event did not all update the PR");
 }
@@ -815,7 +817,7 @@ void taskMutationRestart(bool protectTitleOnRestart) {
     Id task;
     {
         Store store(path);
-        task = store.submit(intake());
+        task = Tasks(store).submit(intake());
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
         auto args = openArgs();
         args["taskId"] = task;
@@ -851,10 +853,10 @@ void taskMutationRestart(bool protectTitleOnRestart) {
     Store store(path);
     if (protectTitleOnRestart) GitEvents(store).protectGitCredential(title);
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 5 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    for (int i = 0; i < 5 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
     std::ifstream log(effects);
     const std::string actions((std::istreambuf_iterator<char>(log)), {});
-    check(store.task(task).task.state == TaskState::completed && calls == 1 && actions == "closed\n",
+    check(Tasks(store).task(task).task.state == TaskState::completed && calls == 1 && actions == "closed\n",
           "restart repeated inference or dispatched the saved Git mutation twice");
 }
 
@@ -870,7 +872,7 @@ void taskReadRecovery() {
     {
         Store store(path);
         GitEvents(store).protectGitCredential(secret);
-        task = store.submit(intake());
+        task = Tasks(store).submit(intake());
         script.onTaskResult = [&](const ModelInput&) -> Decision {
             return {
                 "git_read_ci_logs", {{"host", "GITHUB.COM"}, {"repo", "ORG/FLOCK"}, {"jobId", 81 + host->logCalls}, {"maxBytes", 32}}, {}};
@@ -914,8 +916,8 @@ void taskReadRecovery() {
         return {"git_read_result", {{"host", hostName}, {"readId", saved}}, {}};
     };
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 8 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    check(store.task(task).task.state == TaskState::completed && phase == 3 && host->logCalls == 5,
+    for (int i = 0; i < 8 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::completed && phase == 3 && host->logCalls == 5,
           "recovery did not use saved snapshots through both access checks");
 }
 
@@ -936,7 +938,7 @@ void approvedTaskReadProjects() {
     store.policy().changeRule(localOwner, RuleKind::allow, Action::environment_launch, intake().environmentId, true);
     store.policy().changeRule(localOwner, RuleKind::ask, Action::repository_read, GitRepository{hostName, repoName}.resource(), true);
     Runtime runtime(store, script, sessions, [](auto) { return std::string{}; }, options(host));
-    const auto task = store.submit(intake(), &localOwner);
+    const auto task = Tasks(store).submit(intake(), &localOwner);
     for (int i = 0; i < 8 && Inbox(store).inbox(localOwner).empty(); ++i) runtime.tick();
     const auto items = Inbox(store).inbox(localOwner);
     check(items.size() == 1 && host->hostCalls == 0, "Git read reached the host before approval");
@@ -945,8 +947,8 @@ void approvedTaskReadProjects() {
                              {card.at("botId"), InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
                               card.at("targetRevision"), card.at("targetGeneration")},
                              "allow_once");
-    for (int i = 0; i < 8 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    check(phase == 2 && host->hostCalls == 1 && store.task(task).task.state == TaskState::completed,
+    for (int i = 0; i < 8 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    check(phase == 2 && host->hostCalls == 1 && Tasks(store).task(task).task.state == TaskState::completed,
           "Approved Git read did not settle through the task");
 }
 
@@ -968,9 +970,9 @@ void discoveryReplayRevocation() {
         return {"complete", {{"report", "Checked discovery authorization"}}, {}};
     };
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto task = store.submit(intake());
-    for (int i = 0; i < 10 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    check(phase == 2 && store.task(task).task.state == TaskState::completed, "Discovery replay was not exercised");
+    const auto task = Tasks(store).submit(intake());
+    for (int i = 0; i < 10 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
+    check(phase == 2 && Tasks(store).task(task).task.state == TaskState::completed, "Discovery replay was not exercised");
 }
 
 void boundedTaskReadAndForeignReference(bool comments) {
@@ -987,7 +989,7 @@ void boundedTaskReadAndForeignReference(bool comments) {
     host->result = {{"items", std::move(page)}, {"nextPage", 2}};
     Script script;
     Sessions sessions;
-    const auto first = store.submit(intake());
+    const auto first = Tasks(store).submit(intake());
     Id saved = 0;
     script.onTaskResult = [&](const ModelInput& input) -> Decision {
         const bool owner = input.task.at("id") == first;
@@ -1019,11 +1021,11 @@ void boundedTaskReadAndForeignReference(bool comments) {
         return {"complete", {{"report", "Checked the Git read"}}, {}};
     };
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 10 && store.task(first).task.state != TaskState::completed; ++i) runtime.tick();
-    check(store.task(first).task.state == TaskState::completed, "bounded read did not reach the task");
-    const auto other = store.submit(intake("owner", "other-project"));
-    for (int i = 0; i < 10 && store.task(other).task.state != TaskState::completed; ++i) runtime.tick();
-    check(store.task(other).task.state == TaskState::completed && host->hostCalls == 1,
+    for (int i = 0; i < 10 && Tasks(store).task(first).task.state != TaskState::completed; ++i) runtime.tick();
+    check(Tasks(store).task(first).task.state == TaskState::completed, "bounded read did not reach the task");
+    const auto other = Tasks(store).submit(intake("owner", "other-project"));
+    for (int i = 0; i < 10 && Tasks(store).task(other).task.state != TaskState::completed; ++i) runtime.tick();
+    check(Tasks(store).task(other).task.state == TaskState::completed && host->hostCalls == 1,
           "task-scoped Git lookup reached the wrong repository read");
 }
 
@@ -1041,7 +1043,7 @@ void redaction() {
     auto policy = store.policy();
     const auto input = policy.requestSecret("other", {"example"});
     policy.submitSecret(localOwner, "other", input, secret);
-    const auto task = store.submit(intake());
+    const auto task = Tasks(store).submit(intake());
     host->result["description"] = credential + " " + secret;
     host->result[credential] = secret;
     const auto repo = Json{{"host", hostName}, {"repo", repoName}};
@@ -1061,7 +1063,7 @@ void redaction() {
               {hostName, "secret-event", repoName, "review", "submitted", {1}, sha, credential + " " + secret, 0}),
           "Webhook with redactable content was rejected");
     runtime.runConversations();
-    for (const auto& content : {store.history(task).dump(), Inbox(store).inbox(localOwner, "owner").dump()})
+    for (const auto& content : {Tasks(store).history(task).dump(), Inbox(store).inbox(localOwner, "owner").dump()})
         check(content.find(secret) == content.npos && content.find(credential) == content.npos, "Webhook output exposed secrets");
     for (const auto& file : {path.string(), path.string() + "-wal"}) {
         std::ifstream database(file, std::ios::binary);
@@ -1077,9 +1079,9 @@ void notificationCannotControlASession() {
     Script script;
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto task = store.submit(intake());
-    for (int i = 0; i < 8 && store.task(task).task.state != TaskState::running; ++i) runtime.tick();
-    check(store.task(task).task.state == TaskState::running, "Session did not start");
+    const auto task = Tasks(store).submit(intake());
+    for (int i = 0; i < 8 && Tasks(store).task(task).task.state != TaskState::running; ++i) runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::running, "Session did not start");
     auto args = openArgs();
     args["taskId"] = task;
     check(invoke(store, runtime, script, "create-watch", "git_open_pr", args).at("ok") == true, "Could not create watch");
@@ -1090,7 +1092,7 @@ void notificationCannotControlASession() {
         if (steps.empty()) {
             check(std::ranges::find(input.tools, "message_session") == input.tools.end(), "Session write was offered in a notification");
             return Decision{"message_session",
-                            {{"taskId", task}, {"generation", store.task(task).task.generation}, {"text", "Act on the webhook"}},
+                            {{"taskId", task}, {"generation", Tasks(store).task(task).task.generation}, {"text", "Act on the webhook"}},
                             {}};
         }
         result = steps.at(0).at("result");
@@ -1112,7 +1114,7 @@ void notificationBudgetAndRevocation() {
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     auto limited = intake();
     limited.config["modelCallLimit"] = 1;
-    const auto task = store.submit(limited);
+    const auto task = Tasks(store).submit(limited);
     auto args = openArgs();
     args["taskId"] = task;
     check(invoke(store, runtime, script, "create-watch", "git_open_pr", args).at("ok") == true, "Could not create watch");
@@ -1125,7 +1127,7 @@ void notificationBudgetAndRevocation() {
     check(approval != inbox.end(), "The notification did not pause for model budget");
     Inbox(store).decideInbox(localOwner, target(*approval), "approve");
     runtime.runConversations();
-    const auto history = store.history(task);
+    const auto history = Tasks(store).history(task);
     const auto event = std::find_if(history.begin(), history.end(), [](const Json& row) { return row.at("kind") == "git_webhook"; });
     check(event != history.end() && event->at("data").at("jobId") == 81 && event->at("data").at("headSha") == sha &&
               event->at("data").at("prNumber") == 1,

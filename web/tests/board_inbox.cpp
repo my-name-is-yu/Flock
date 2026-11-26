@@ -1,4 +1,5 @@
 #include "http_fixture.hpp"
+#include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
@@ -23,8 +24,8 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     auto policy = store.policy();
     policy.setMember(owner, "release", "reviewer", true);
     policy.setMember(owner, "release", "reader", true);
-    const auto release = store.submit({"release", "Draft notes", "local-env", "release"});
-    store.submit({"triage", "Private request", "linked env", "triage"});
+    const auto release = Tasks(store).submit({"release", "Draft notes", "local-env", "release"});
+    Tasks(store).submit({"triage", "Private request", "linked env", "triage"});
     FixedModel model;
     FixedT3 t3;
     Runtime runtime(store, model, t3, {});
@@ -32,8 +33,8 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     t3.observations["thread-release"].kind = Observation::Kind::Question;
     t3.observations["thread-release"].question = {"scope-question", {{.id = "scope"}}};
     tick(runtime, 2);
-    const auto before = taskJson(store.task(release));
-    const auto history = store.history(release);
+    const auto before = taskJson(Tasks(store).task(release));
+    const auto history = Tasks(store).history(release);
     for (int i = 0; i < 40; ++i)
         Conversations(store).receive(owner, {"release", "unused", "local-env", "release"}, "new-" + std::to_string(i), "Later message");
     auto cb = callbacks();
@@ -54,7 +55,7 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     check(inbox.size() == 1 && inbox.at(0).at("itemKind") == "user_question" && inbox.at(0).at("botName") == "Release" &&
               inbox.at(0).at("choices").size() == 2 && inbox.at(0).at("prompt") == "利用者向けの変更だけを載せますか？" &&
               browser.get("/api/inbox?bot=release").at("items") == inbox && browser.get("/api/inbox?bot=triage").at("items").empty() &&
-              taskJson(store.task(release)) == before && store.history(release) == history &&
+              taskJson(Tasks(store).task(release)) == before && Tasks(store).history(release) == history &&
               browser.get("/api/inbox/history").at("decisions").empty(),
           "inbox GET failed to preserve the question or changed storage");
     auto answer = inbox.at(0);
@@ -83,8 +84,8 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
           "view-only reader could not load the older question with its surrounding history");
     Browser::checked(browser.client.Get("/api/conversation?bot=triage" + cursor), 403);
     policy.setMember(owner, "release", "reader", false);
-    check(browser.post("/api/inbox/decide", answer, 403).at("error") == "access_denied" && taskJson(store.task(release)) == before &&
-              store.history(release) == history,
+    check(browser.post("/api/inbox/decide", answer, 403).at("error") == "access_denied" && taskJson(Tasks(store).task(release)) == before &&
+              Tasks(store).history(release) == history,
           "denied Inbox decision advanced the request");
     browser.client.set_default_headers({{"Authorization", "Bearer reviewer"}});
     browser.post("/api/inbox/decide", answer);

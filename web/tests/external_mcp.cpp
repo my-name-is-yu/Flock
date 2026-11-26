@@ -1,5 +1,6 @@
 #include "../views.hpp"
 #include "http_fixture.hpp"
+#include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/external_mcp.hpp"
 #include "flock/t3_connection.hpp"
@@ -190,7 +191,7 @@ void pausedBotRefusesExternalMessages() {
     expectPaused(submitTool, ask);
     expectPaused(answerTool,
                  {{"taskId", receipt.at("taskId")}, {"waitId", 1}, {"targetRevision", 0}, {"targetGeneration", 0}, {"text", "Use main"}});
-    check(client.success(statusTool, {{"taskId", receipt.at("taskId")}}).at("status") == "cancelled" && store.tasks().size() == 1,
+    check(client.success(statusTool, {{"taskId", receipt.at("taskId")}}).at("status") == "cancelled" && Tasks(store).tasks().size() == 1,
           "Pause did not close the old request or refused requests created work");
 
     const auto other = client.success(submitTool, {{"bot", "triage"}, {"text", "Check triage"}, {"requestId", "other-bot"}});
@@ -224,10 +225,11 @@ void roundTrip() {
         auto tooLong = ask;
         tooLong["text"] = ask.at("text").get<std::string>() + "a";
         const auto tooLongError = first.request("tools/call", {{"name", submitTool}, {"arguments", tooLong}}).at("error");
-        check(tooLongError.at("code") == -32602 && tooLongError.at("message") == "text: Maximum 8192 UTF-8 bytes." && store.tasks().empty(),
+        check(tooLongError.at("code") == -32602 && tooLongError.at("message") == "text: Maximum 8192 UTF-8 bytes." &&
+                  Tasks(store).tasks().empty(),
               "The submission byte budget was not enforced or reported");
         first.submitWithoutReceipt(ask);
-        const auto tasks = store.tasks();
+        const auto tasks = Tasks(store).tasks();
         check(tasks.size() == 1 && tasks.front().task.request == ask.at("text").get<std::string>(),
               "The lost receipt did not leave exactly one Task");
         taskId = tasks.front().task.id;
@@ -250,7 +252,7 @@ void roundTrip() {
     changed["bot"] = "settings";
     changed["requestId"] = "not-allowed-1";
     client.denied(submitTool, changed, "A connection could submit to a Bot outside its allowlist");
-    check(store.tasks().size() == 1, "Retries or denied requests enqueued another Task");
+    check(Tasks(store).tasks().size() == 1, "Retries or denied requests enqueued another Task");
 
     const Json task{{"taskId", taskId}};
     const auto queued = client.success(statusTool, task);
@@ -310,10 +312,10 @@ void roundTrip() {
           "The final report or safe Session link was lost");
     second.denied(statusTool, task, "A different connection read the final result");
     client.denied(answerTool, answer, "The ended question accepted another answer");
-    check(t3.replies.size() == 1 && store.tasks().size() == 1, "One exchange produced duplicate work or answers");
+    check(t3.replies.size() == 1 && Tasks(store).tasks().size() == 1, "One exchange produced duplicate work or answers");
 
     const auto independent = second.success(submitTool, ask);
-    check(independent.at("taskId") != taskId && store.tasks().size() == 2,
+    check(independent.at("taskId") != taskId && Tasks(store).tasks().size() == 2,
           "A request ID on a different connection did not create an independent exchange");
     client.denied(statusTool, {{"taskId", independent.at("taskId")}}, "The first connection read the other exchange");
     ExternalMcp(store).disconnect(caller.connectionId);
@@ -434,11 +436,11 @@ void replannedTaskDropsPriorRun() {
     check(mcp.success(statusTool, task).at("sessionLink") == releaseLink, "The initial Run was not active");
     Conversations(store).receive(localOwner, cb.intake("release", ""), "revise-scope", "Include internal changes too");
     runtime.runConversations();
-    check(store.task(model.taskId).task.replanning && mcp.success(statusTool, task).at("sessionLink").is_null(),
+    check(Tasks(store).task(model.taskId).task.replanning && mcp.success(statusTool, task).at("sessionLink").is_null(),
           "The old Run was still linked during replanning");
     t3.observations["thread-release"] = {.kind = Observation::Kind::Finished, .status = "stopped", .report = "Stopped"};
     tick(runtime, 2);
-    const auto current = store.task(model.taskId).task;
+    const auto current = Tasks(store).task(model.taskId).task;
     check(!current.replanning && current.lastRun.value().assignment.revisionId != current.currentRevision &&
               mcp.success(statusTool, task).at("sessionLink").is_null(),
           "A settled Run for the old revision was linked");

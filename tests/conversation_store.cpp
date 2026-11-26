@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
@@ -100,7 +101,7 @@ struct Fixture {
 Id task(Store& store, std::string name, std::string bot = "alpha", std::string project = "project") {
     auto intake = Fixture::bot(std::move(bot), std::move(project));
     intake.request = std::move(name);
-    return store.submit(intake);
+    return Tasks(store).submit(intake);
 }
 
 Json reply(Store& store, Id message, std::string_view bot = "alpha") {
@@ -178,13 +179,13 @@ struct RuntimeFixture {
               RuntimeOptions{.clock = [this] { return now; }, .storageContention = std::move(contention)}) {}
 
     void reach(Store& store, Id id, std::string_view state) {
-        for (int i = 0; i < 16 && taskStateName(store.task(id).task.state) != state; ++i) runtime.tick();
-        check(taskStateName(store.task(id).task.state) == state, "The work did not reach the required fixture state");
+        for (int i = 0; i < 16 && taskStateName(Tasks(store).task(id).task.state) != state; ++i) runtime.tick();
+        check(taskStateName(Tasks(store).task(id).task.state) == state, "The work did not reach the required fixture state");
     }
 
     void finish(Store& store, Id id, std::string result) {
         reach(store, id, "running");
-        const auto run = store.task(id).task.activeRun.value().ref.runId;
+        const auto run = Tasks(store).task(id).task.activeRun.value().ref.runId;
         t3.observations[run] = {.kind = Observation::Kind::Finished,
                                 .status = "completed",
                                 .report = std::move(result),
@@ -222,7 +223,7 @@ void retryAcrossConnections() {
     if (first) std::rethrow_exception(first);
     if (second) std::rethrow_exception(second);
     check(a && a == b, "Concurrent delivery returned different receipts");
-    check(left.tasks("alpha").empty(), "Receipt intake executed work before its turn");
+    check(Tasks(left).tasks("alpha").empty(), "Receipt intake executed work before its turn");
     Store restarted(fixture.database());
     RuntimeFixture execution(restarted);
     unsigned calls = 0;
@@ -233,7 +234,7 @@ void retryAcrossConnections() {
         return say("I queued your request.");
     };
     execution.runtime.runConversations();
-    check(restarted.tasks("alpha").size() == 1 && reply(restarted, a)["actions"].size() == 1,
+    check(Tasks(restarted).tasks("alpha").size() == 1 && reply(restarted, a)["actions"].size() == 1,
           "Delivery did not queue exactly the requested work");
     bool rejected = false;
     try {
@@ -251,7 +252,7 @@ void retryAcrossConnections() {
     check(rejected, "Changed message reply target did not conflict");
     check(receive(restarted, "retry", "Write a release note") == a, "Receipt was lost on restart");
     execution.runtime.runConversations();
-    check(calls == 2 && restarted.tasks("alpha").size() == 1, "The retry ran an applied message again");
+    check(calls == 2 && Tasks(restarted).tasks("alpha").size() == 1, "The retry ran an applied message again");
 }
 
 void dueAutomationWakesAfterIdle(bool externalWrite, bool duringTick) {
@@ -293,14 +294,14 @@ void dueAutomationWakesAfterIdle(bool externalWrite, bool duringTick) {
     if (!externalWrite) createReminder(now.load());
     runtime.tickConcurrent();
     runtime.tickConcurrent();
-    check(store.tasks("beta").empty(), "A reminder ran before it was due");
+    check(Tasks(store).tasks("beta").empty(), "A reminder ran before it was due");
 
     if (duringTick)
         dueReminder = DueReminder::AfterApprovalClockRead;
     else
         makeDue();
     runtime.tickConcurrent();
-    check(store.tasks("beta").size() == 1, "An idle check missed a newly due reminder");
+    check(Tasks(store).tasks("beta").size() == 1, "An idle check missed a newly due reminder");
 }
 
 void failedAutomationDoesNotInvalidateOtherMaintenance() {
@@ -344,7 +345,7 @@ void savedDecisionIsAppliedWithoutAnotherModelCall() {
         return say("Queued.");
     };
     execution.runtime.runConversations();
-    check(calls == 1 && store.tasks("alpha").size() == 1 && reply(store, message)["text"] == "Queued.",
+    check(calls == 1 && Tasks(store).tasks("alpha").size() == 1 && reply(store, message)["text"] == "Queued.",
           "A saved decision was decided again or applied twice");
 }
 
@@ -355,7 +356,7 @@ void missingToolCannotBeAddedAfterInferenceStarts() {
     store.setRootPeople({localOwner.id});
     const auto id = task(store, "Prepare a local Session");
     execution.reach(store, id, "running");
-    const auto run = store.task(id).task.activeRun.value().ref;
+    const auto run = Tasks(store).task(id).task.activeRun.value().ref;
     const Decision request{"request_local_machine_connection",
                            {{"threadId", run.threadId},
                             {"runId", run.runId},
@@ -402,7 +403,7 @@ void protectedArgumentKeyCannotReachTaskIntake() {
     };
     const auto message = receive(store, "protected-key", "Prepare release notes.");
     execution.runtime.runConversations();
-    check(store.tasks("alpha").empty() && observed.at(0).at("result").at("ok") == false &&
+    check(Tasks(store).tasks("alpha").empty() && observed.at(0).at("result").at("ok") == false &&
               observed.dump().find(marker) == std::string::npos &&
               reply(store, message).at("text") == "The blocked content was [redacted]" &&
               fixture.count("SELECT count(*) FROM conversation_steps WHERE instr(decision,'" + marker + "') > 0") == 0,
@@ -523,7 +524,7 @@ void transientFailureResumesAfterTheLastFinishedStep() {
         later = receive(store, "later", "How should we announce it?");
         const auto other = receive(store, "beta", "Hello beta", 0, Fixture::bot("beta"));
         for (int i = 0; i < 24; ++i) execution.runtime.runConversations();
-        check(store.tasks("alpha").size() == 1 && reply(store, message).is_null() && reply(store, later).is_null() &&
+        check(Tasks(store).tasks("alpha").size() == 1 && reply(store, message).is_null() && reply(store, later).is_null() &&
                   reply(store, other, "beta")["text"] == "Hello." && calls[0] == 2 && calls[1] == 1 &&
                   Conversations(store).pausedConversations("alpha").empty(),
               "A fixed-clock outage spent the budget or displaced a Bot's oldest turn");
@@ -550,7 +551,7 @@ void transientFailureResumesAfterTheLastFinishedStep() {
     check(calls[1] == 2, "Restart reset the consecutive failure count");
     ++execution.now;
     execution.runtime.runConversations();
-    check(calls[0] == 3 && calls[1] == 3 && restarted.tasks("alpha").size() == 1 && reply(restarted, message)["text"] == "Queued." &&
+    check(calls[0] == 3 && calls[1] == 3 && Tasks(restarted).tasks("alpha").size() == 1 && reply(restarted, message)["text"] == "Queued." &&
               reply(restarted, later)["text"] == "In the changelog.",
           "Restart repeated a finished step or lost a turn");
     check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 4,
@@ -649,7 +650,7 @@ void repairSurvivesRestart(bool alreadyClaimed) {
             throw ModelError("Unexpected batch", false, {{"output_tokens", 42}}, ModelErrorCode::invalid_tool_count);
         };
         execution.runtime.runConversations();
-        check(execution.model.turns.size() == 2 && reply(store, message).is_null() && store.tasks("alpha").size() == 1 &&
+        check(execution.model.turns.size() == 2 && reply(store, message).is_null() && Tasks(store).tasks("alpha").size() == 1 &&
                   execution.t3.launches == 0,
               "The rejected response dispatched an action or finished the turn");
     }
@@ -675,7 +676,7 @@ void repairSurvivesRestart(bool alreadyClaimed) {
         return say("The task is queued.");
     };
     execution.runtime.runConversations();
-    check(execution.model.turns.size() == (alreadyClaimed ? 0 : 1) && reopened.tasks("alpha").size() == 1 &&
+    check(execution.model.turns.size() == (alreadyClaimed ? 0 : 1) && Tasks(reopened).tasks("alpha").size() == 1 &&
               reply(reopened, message).at("route") == (alreadyClaimed ? "error" : "reply") &&
               fixture.count("SELECT count(*) FROM model_attempts") == 3,
           "Restart duplicated an operation or charged another repair attempt");
@@ -726,7 +727,7 @@ void shutdownLeavesAnUnsentRunReadyForRestart() {
         allow.set_value();
         check(ready, "The task worker did not reach preflight");
     }
-    const auto pending = store.task(id).task;
+    const auto pending = Tasks(store).task(id).task;
     check(pending.state == TaskState::sending && !pending.activeRun, "A blocked worker launched a Run after shutdown");
     RuntimeFixture execution(store);
     execution.reach(store, id, "running");
@@ -769,7 +770,8 @@ void modelFailureReportsWhatWasAlreadyDone() {
     const auto response = reply(store, message);
     check(response["route"] == "error" && response["status"] == "working" &&
               response["text"].get<std::string>().find("Already done for this message") != std::string::npos &&
-              response["text"].get<std::string>().find("Write a release note") != std::string::npos && store.tasks("alpha").size() == 1,
+              response["text"].get<std::string>().find("Write a release note") != std::string::npos &&
+              Tasks(store).tasks("alpha").size() == 1,
           "The error reply hid the work the turn had already started");
 }
 
@@ -783,7 +785,7 @@ void notesFailureEndsTheTurnWithoutWork() {
     execution.runtime.runConversations();
     const auto response = reply(store, message);
     check(response["route"] == "error" && response["text"].get<std::string>().find("SOUL.md is unreadable") != std::string::npos &&
-              store.tasks("alpha").empty(),
+              Tasks(store).tasks("alpha").empty(),
           "A notes failure started work or hid the cause");
 }
 
@@ -793,7 +795,7 @@ void toolErrorsReturnToTheModel() {
     RuntimeFixture execution(store);
     const auto mine = task(writer, "Prepare the release");
     const auto foreign = task(writer, "Beta work", "beta");
-    const auto before = taskJson(store.task(mine));
+    const auto before = taskJson(Tasks(store).task(mine));
     const std::vector<Decision> steps{
         {"start_task", {{"request", "Run it"}, {"environment", "mars"}}, "Unknown environment"},
         {"change_task",
@@ -817,8 +819,8 @@ void toolErrorsReturnToTheModel() {
           "Another Bot's task was distinguishable from a missing one");
     check(results[4]["result"]["error"] == "stale" && results[4]["result"]["current"]["generation"] == before.at("generation"),
           "A stale call did not return the current version");
-    check(taskJson(store.task(mine)) == before && taskJson(store.task(foreign))["pendingInstructions"].is_null() &&
-              store.tasks("alpha").size() == 1,
+    check(taskJson(Tasks(store).task(mine)) == before && taskJson(Tasks(store).task(foreign))["pendingInstructions"].is_null() &&
+              Tasks(store).tasks("alpha").size() == 1,
           "A failed call changed a task");
     const auto response = reply(store, message);
     check(response["route"] == "reply" && response["suggestions"] == Json::array({"1.4", "1.5"}) && response["status"] == "done",
@@ -837,7 +839,7 @@ void boundedContextAndOlderTasks() {
     const auto foreign = task(writer, "Beta hidden project fixture", "beta");
     execution.finish(store, foreign, "Beta-only result fixture");
     for (int i = 0; i < 20; ++i) task(writer, "Outstanding plan " + std::to_string(i));
-    const auto before = taskJson(store.tasks("alpha", 0, 200));
+    const auto before = taskJson(Tasks(store).tasks("alpha", 0, 200));
     const auto launches = execution.t3.launches;
 
     Json found, read;
@@ -860,11 +862,12 @@ void boundedContextAndOlderTasks() {
     const auto message = receive(writer, "named", "「古い計測計画」を要約して");
     execution.runtime.runConversations();
     check(found["tasks"].size() == 1 && found["tasks"][0]["taskId"] == old &&
-              found["tasks"][0]["generation"] == store.task(old).task.generation && found["tasks"][0].contains("revisionId") &&
+              found["tasks"][0]["generation"] == Tasks(store).task(old).task.generation && found["tasks"][0].contains("revisionId") &&
               read["text"] == "Compare paired measurements using the same workload on both builds." && read["end"] == true &&
               read["currentRevision"] == true && original.at("id") == read["messageId"],
           "An older task outside the list could not be found and read");
-    check(reply(store, message)["actions"].empty() && taskJson(store.tasks("alpha", 0, 200)) == before && execution.t3.launches == launches,
+    check(reply(store, message)["actions"].empty() && taskJson(Tasks(store).tasks("alpha", 0, 200)) == before &&
+              execution.t3.launches == launches,
           "Reading an older result changed work");
 }
 
@@ -986,10 +989,10 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
         RuntimeFixture execution(store);
         execution.model.conversation = script;
         execution.runtime.runConversations();
-        taskId = store.tasks("alpha").at(0).task.id;
+        taskId = Tasks(store).tasks("alpha").at(0).task.id;
         execution.reach(store, taskId, "waiting");
     }
-    const auto task = store.task(taskId);
+    const auto task = Tasks(store).task(taskId);
     const auto taskTarget = TaskTarget::from(task.task, task.wait.value().id);
     const auto pause = Conversations(store).pausedConversations("alpha").at(0).at("messageId").get<Id>();
     const InboxTarget turnTarget{"alpha", InboxKind::conversation_model_budget, message, pause, 0, 0, pause};
@@ -997,11 +1000,11 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
           "The fixture did not exhaust the shared and independent allowances");
     const auto beforeApproval = Conversations(store).conversationChangesSince(std::nullopt, "alpha").through;
     if (approveTask)
-        store.operate(localOwner, taskTarget, "approve");
+        Tasks(store).operate(localOwner, taskTarget, "approve");
     else
         Inbox(store).decideInbox(localOwner, turnTarget, "approve");
     const auto changes = Conversations(store).conversationChangesSince(beforeApproval, "alpha");
-    check(Conversations(store).pausedConversations("alpha").empty() && taskJson(store.task(taskId)).at("wait").is_null() &&
+    check(Conversations(store).pausedConversations("alpha").empty() && taskJson(Tasks(store).task(taskId)).at("wait").is_null() &&
               Conversations(store).pausedConversations("beta").size() == 1 &&
               changes.messages.at("alpha") == std::vector<Id>{message, pause},
           "Renewal did not clear both shared pauses, invalidate the conversation, or preserve the independent pause");
@@ -1010,7 +1013,7 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
         if (approveTask)
             Inbox(store).decideInbox(localOwner, turnTarget, "approve");
         else
-            store.operate(localOwner, taskTarget, "approve");
+            Tasks(store).operate(localOwner, taskTarget, "approve");
     } catch (const Conflict&) {
         rejected = true;
     }
@@ -1043,7 +1046,7 @@ void notesFailureReleasesUnusedApproval() {
     };
     const auto message = receive(store, "approval-notes", "Write a release note", 0, limited);
     execution.runtime.runConversations();
-    const auto tasks = taskJson(store.tasks("alpha"));
+    const auto tasks = taskJson(Tasks(store).tasks("alpha"));
     const auto pauses = Conversations(store).pausedConversations("alpha");
     check(tasks.size() == 1 && pauses.size() == 1, "The turn did not start a task and pause for approval");
     const Id pause = pauses.at(0).at("messageId");
@@ -1093,10 +1096,10 @@ void conversationPagesCombineTaskAndMessageHistory() {
     RuntimeFixture execution(store);
     execution.model.conversation = [](const ModelInput&) { return say("Noted."); };
 
-    const auto older = store.history(task(store, "Older task")).at(0).at("id").get<Id>();
+    const auto older = Tasks(store).history(task(store, "Older task")).at(0).at("id").get<Id>();
     const auto message = receive(store, "message", "Hello alpha");
     task(store, "Another Bot's task", "beta");
-    const auto newer = store.history(task(store, "Newer task")).at(0).at("id").get<Id>();
+    const auto newer = Tasks(store).history(task(store, "Newer task")).at(0).at("id").get<Id>();
     const auto cursor = Conversations(store).conversationChangesSince(std::nullopt, "alpha").through;
     execution.runtime.runConversations();
 

@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
 #include "flock/conversations.hpp"
@@ -157,7 +158,7 @@ void reopenDirectTask(const std::filesystem::path& path) {
         store.policy().setOwner(requester, "release");
         store.policy().setMode(localOwner, "supervised");
         Memory(store).memory(requester, "release", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the old signing process."}});
-        task = store.submit({"release", "Build the release", "env", "project", {{"shareMemoryWithSessions", true}}}, &requester);
+        task = Tasks(store).submit({"release", "Build the release", "env", "project", {{"shareMemoryWithSessions", true}}}, &requester);
     }
     Store reopened(path);
     FixtureModel model;
@@ -361,14 +362,14 @@ void scheduled(const std::filesystem::path& path) {
     const auto pump = [&] {
         for (int i = 0; i < 6; ++i) runtime.tick();
     };
-    const auto anonymous = store.submit({"release", "No person originated this task", "env", "anonymous-project"});
+    const auto anonymous = Tasks(store).submit({"release", "No person originated this task", "env", "anonymous-project"});
     pump();
     check(adapter.sends == 0 &&
               std::ranges::none_of(Inbox(store).inbox(requester),
                                    [](const auto& item) { return item.at("itemKind") == "policy_approval"; }) &&
               model.outcome.dump().find("denied by policy") != std::string::npos,
           "unanswerable task received a card or was silently denied");
-    store.operate(requester, TaskTarget::from(store.task(anonymous).task, 0), "cancel");
+    Tasks(store).operate(requester, TaskTarget::from(Tasks(store).task(anonymous).task, 0), "cancel");
     pump();
 
     const auto schedule = [&] {
@@ -378,15 +379,15 @@ void scheduled(const std::filesystem::path& path) {
         ++now;
         pump();
     };
-    const auto staleTask = store.submit({"release", "Cancel a pending launch", "env", "stale-project"}, &requester);
+    const auto staleTask = Tasks(store).submit({"release", "Cancel a pending launch", "env", "stale-project"}, &requester);
     pump();
     const auto staleItem = Inbox(store).inbox(requester).at(0);
     check(staleItem.at("taskId") == staleTask && staleItem.at("prompt").dump().find("Build the release") != std::string::npos,
           "pending launch card did not bind the task and its prepared instruction");
     auto stale = target(staleItem);
-    check(taskJson(store.task(staleTask)).at("wait").at("reason") == "policy_approval", "task never entered its durable wait");
+    check(taskJson(Tasks(store).task(staleTask)).at("wait").at("reason") == "policy_approval", "task never entered its durable wait");
     Inbox(store).decideInbox(requester, stale, "allow_once");
-    store.operate(requester, TaskTarget::from(store.task(staleTask).task, 0), "cancel");
+    Tasks(store).operate(requester, TaskTarget::from(Tasks(store).task(staleTask).task, 0), "cancel");
     pump();
     check(adapter.sends == 0, "an approved action ran after the task was cancelled");
     rejected([&] { Inbox(store).decideInbox(requester, stale, "allow_once"); });
@@ -411,7 +412,7 @@ void scheduled(const std::filesystem::path& path) {
     Inbox(store).decideInbox(localOwner, target(expired), "allow_next_time");
     pump();
     check(adapter.sends == 0 && model.outcome.dump().find("expired") != std::string::npos, "expired action ran or the Bot was never told");
-    store.operate(requester, TaskTarget::from(store.task(item.at("taskId")).task, 0), "cancel");
+    Tasks(store).operate(requester, TaskTarget::from(Tasks(store).task(item.at("taskId")).task, 0), "cancel");
     pump();
     schedule();
     check(adapter.sends == 1 && Inbox(store).inbox(requester).empty(), "next-time rule did not admit only future work");
@@ -492,8 +493,8 @@ void stopRequesterDecidesCurrentStopApproval(const std::filesystem::path& path) 
     policy.setMode(localOwner, "supervised");
     const Person stopRequester{"stop-requester"};
     policy.setMember(localOwner, "release", stopRequester.id, true);
-    const auto taskId = store.submit({"release", "Stop the assigned Run", "env", "project"}, &stopRequester);
-    const auto task = taskJson(store.task(taskId));
+    const auto taskId = Tasks(store).submit({"release", "Stop the assigned Run", "env", "project"}, &stopRequester);
+    const auto task = taskJson(Tasks(store).task(taskId));
     const auto revision = task.value("currentRevision", Id{0});
     const auto generation = task.value("generation", Id{0});
     sqlite3* raw = nullptr;
@@ -570,7 +571,7 @@ void secrets(const std::filesystem::path& path) {
     const auto request = policy.requestSecret("release", secret);
     constexpr auto value = "SECRET_FIXTURE_VALUE";
     policy.submitSecret(requester, "release", request, value);
-    auto task = store.submit({"release", "Use the token", "env", "project"}, &requester);
+    auto task = Tasks(store).submit({"release", "Use the token", "env", "project"}, &requester);
     unsigned uses = 0;
     const auto adapter = [&](std::string_view token) {
         check(token == value, "protected value did not reach the adapter");

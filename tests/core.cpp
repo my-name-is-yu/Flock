@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/policy.hpp"
 #include "flock/command.hpp"
 #include "flock/decision.hpp"
@@ -147,8 +148,8 @@ int main() {
             Store store(db);
             checkSchemaRefusals(db);
             Runtime runtime(store, model, t3, notes);
-            id = store.submit({"release", "Check main", "env", "proj"});
-            tickUntil(runtime, [&] { return store.task(id).task.state == TaskState::running; }, "delegate did not start");
+            id = Tasks(store).submit({"release", "Check main", "env", "proj"});
+            tickUntil(runtime, [&] { return Tasks(store).task(id).task.state == TaskState::running; }, "delegate did not start");
             const auto callsBeforeIdle = model.calls;
             const auto pollsBeforeIdle = t3.polls;
             for (int i = 0; i < 3; ++i) runtime.tick();
@@ -156,7 +157,7 @@ int main() {
             t3.current.kind = Observation::Kind::Question;
             t3.current.question = {"q1", {{.id = "branch"}}};
             tickUntil(
-                runtime, [&] { return t3.replies == 1 && store.task(id).task.state == TaskState::running; },
+                runtime, [&] { return t3.replies == 1 && Tasks(store).task(id).task.state == TaskState::running; },
                 "did not answer and return to the same Run");
         }
         {
@@ -165,12 +166,12 @@ int main() {
             t3.current.kind = Observation::Kind::Finished;
             t3.current.status = "completed";
             t3.current.report = "main confirmed";
-            tickUntil(runtime, [&] { return store.task(id).task.state == TaskState::completed; }, "restart did not complete");
-            const auto task = taskJson(store.task(id));
+            tickUntil(runtime, [&] { return Tasks(store).task(id).task.state == TaskState::completed; }, "restart did not complete");
+            const auto task = taskJson(Tasks(store).task(id));
             check(task["runs"].size() == 1 && task["runs"][0]["threadId"] == "thread-1" && task["runs"][0]["runId"] == "run-1" &&
                       task["additionalUsed"] == 0 && t3.launches == 1 && t3.replies == 1,
                   "restart duplicated the Run or consumed additional work");
-            const auto history = store.history(id);
+            const auto history = Tasks(store).history(id);
             const auto isCompletion = [](const Json& entry) { return entry["kind"] == "completed"; };
             const auto completion = std::find_if(history.begin(), history.end(), isCompletion);
             check(std::count_if(history.begin(), history.end(), isCompletion) == 1 && (*completion)["data"]["text"] == "main confirmed" &&

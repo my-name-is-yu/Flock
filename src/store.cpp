@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "git_storage.hpp"
 #include "flock/bot_memory.hpp"
@@ -177,6 +178,10 @@ Inbox::Inbox(Store& store) : inbox_(store.p_->inboxStorage), git_(store.p_->gitS
 
 GitEvents::GitEvents(Store& store) : git_(store.p_->gitStorage), secrets_(store.p_->secretStorage) {}
 
+Tasks::Tasks(Store& store)
+    : database_(Database::of(store)), outbox_(store.p_->outboxStorage), operations_(store.p_->taskOperations),
+      records_(store.p_->taskRecords), waits_(store.p_->waitStorage) {}
+
 const std::filesystem::path& Store::path() const {
     return p_->path;
 }
@@ -285,10 +290,10 @@ std::optional<Store::BotViewStamp> Store::botViewStamp() const {
     return BotViewStamp{changeStamp(), p_->secretStorage.gitCredentialCount()};
 }
 
-Id Store::submit(const Intake& item, const Person* requester) {
-    std::lock_guard lock(p_->mutex);
-    Transaction transaction(p_->db);
-    const auto id = p_->taskOperations.submitRequest(item, requester);
+Id Tasks::submit(const Intake& item, const Person* requester) {
+    std::lock_guard lock(database_.mutex);
+    Transaction transaction(database_.db);
+    const auto id = operations_.submitRequest(item, requester);
     transaction.commit();
     return id;
 }
@@ -343,15 +348,15 @@ Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSo
     return id;
 }
 
-Json Store::reconciliationData(Id id, Id waitId, Json target, const IntakeResolver& intake) const {
+Json Tasks::reconciliationData(Id id, Id waitId, Json target, const IntakeResolver& intake) const {
     TaskData task;
     {
-        std::lock_guard lock(p_->mutex);
-        Transaction transaction(p_->db, Transaction::Mode::read);
-        const auto wait = p_->waitStorage.currentWait(id);
+        std::lock_guard lock(database_.mutex);
+        Transaction transaction(database_.db, Transaction::Mode::read);
+        const auto wait = waits_.currentWait(id);
         if (!wait || wait->id != waitId || wait->reason() != WaitReason::settings) return target;
-        task = p_->taskRecords.load(id);
-        const auto pending = p_->outboxStorage.outbox(task);
+        task = records_.load(id);
+        const auto pending = outbox_.outbox(task);
         if (pending && (pending->phase != OutboxPhase::ready || pending->command.tool == CommandTool::start_in_session)) return target;
         transaction.commit();
     }
@@ -375,10 +380,10 @@ TaskTarget TaskTarget::from(const TaskData& task, Id waitId) {
     return {task.botId, task.id, waitId, task.currentRevision.value_or(0), task.generation};
 }
 
-void Store::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& data) {
-    std::lock_guard lock(p_->mutex);
-    Transaction transaction(p_->db);
-    p_->taskOperations.operate(actor, target, operation, data);
+void Tasks::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& data) {
+    std::lock_guard lock(database_.mutex);
+    Transaction transaction(database_.db);
+    operations_.operate(actor, target, operation, data);
     transaction.commit();
 }
 
@@ -514,9 +519,9 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
     if (kind) inboxStorage.recordInboxDecision(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
 }
 
-bool Store::hasTask(Id id) const {
-    std::lock_guard lock(p_->mutex);
-    return p_->query("SELECT 1 FROM tasks WHERE id=?", {id}).next();
+bool Tasks::hasTask(Id id) const {
+    std::lock_guard lock(database_.mutex);
+    return database_.query("SELECT 1 FROM tasks WHERE id=?", {id}).next();
 }
 
 namespace {
@@ -524,16 +529,16 @@ Json journalRow(const Statement& row) {
     return {{"id", row.number(0)}, {"taskId", row.number(1)}, {"time", row.number(2)}, {"kind", row.string(3)}, {"data", row.json(4)}};
 }
 }
-Json Store::history(Id taskId, Id after, unsigned limit) const {
-    std::lock_guard lock(p_->mutex);
-    auto rows = p_->query(R"SQL(
+Json Tasks::history(Id taskId, Id after, unsigned limit) const {
+    std::lock_guard lock(database_.mutex);
+    auto rows = database_.query(R"SQL(
 SELECT j.id,j.task_id,j.time,j.kind,
   CASE WHEN input.message_id IS NULL THEN j.data
        ELSE json_patch(j.data,json_object('status',input.status)) END
 FROM journal j LEFT JOIN conversation_input_status input ON input.message_id=j.id
 WHERE j.task_id=? AND j.id>? ORDER BY j.id LIMIT ?
 )SQL",
-                          {taskId, after, std::clamp(limit, 1u, 200u)});
+                                {taskId, after, std::clamp(limit, 1u, 200u)});
     Json result = Json::array();
     while (rows.next()) result.push_back(journalRow(rows));
     return result;

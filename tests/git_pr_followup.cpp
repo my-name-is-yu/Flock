@@ -1,5 +1,6 @@
 #include "fake_git.hpp"
 #include "model.hpp"
+#include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
@@ -146,9 +147,9 @@ struct Fixture {
             task = model.createdTask;
             check(task > 0, "The initial Session ask did not create a task");
         } else
-            task = store.submit(request, person ? &testRequester : nullptr);
+            task = Tasks(store).submit(request, person ? &testRequester : nullptr);
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(store.task(task).task.state == TaskState::completed && host->createCalls == 1, "Could not open fixture PR");
+        check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1, "Could not open fixture PR");
     }
 
     void ask(std::string_view requestId, std::string_view text) {
@@ -168,9 +169,9 @@ struct Fixture {
 void keepsWorkInOriginatingSession() {
     Fixture f;
     f.model.openPullRequest = false;
-    const auto other = f.store.submit(intake("owner", "other-project"), &testRequester);
+    const auto other = Tasks(f.store).submit(intake("owner", "other-project"), &testRequester);
     for (int i = 0; i < 8; ++i) f.runtime.tick();
-    check(f.store.task(other).task.state == TaskState::completed, "Unrelated Session did not run");
+    check(Tasks(f.store).task(other).task.state == TaskState::completed, "Unrelated Session did not run");
     const auto firstFailure = failure("failed-job");
     f.notify(firstFailure);
     const auto& sends = f.sessions.sessionSends;
@@ -192,7 +193,7 @@ void keepsWorkInOriginatingSession() {
               includes(sends.back().instruction, "/pull/1#discussion_r301"),
           "Review location and feedback were not quoted as evidence");
     f.notify(review("another-review"));
-    check(sends.size() == 2 && !f.model.canFix && includes(f.store.history(f.task).dump(), "How should I proceed?"),
+    check(sends.size() == 2 && !f.model.canFix && includes(Tasks(f.store).history(f.task).dump(), "How should I proceed?"),
           "The cap did not ask for human input");
     Conversations(f.store).receive(testRequester, intake(), "resume-fixes", "Please continue fixing the PR.");
     f.notify(failure("next-failure"));
@@ -244,7 +245,7 @@ void skipsSupersededChecks() {
     f.host->result["headSha"] = newHead;
     f.notify({hostName, "synchronized", repoName, "pull_request", "synchronize", {1}, newHead, "New change"});
     f.notify(failure("previous-head"));
-    check(f.sessions.sessionSends.empty() && !f.model.canFix && includes(f.store.history(f.task).dump(), "previous-head"),
+    check(f.sessions.sessionSends.empty() && !f.model.canFix && includes(Tasks(f.store).history(f.task).dump(), "previous-head"),
           "A superseded failing check was dispatched or dropped");
     auto current = failure("current-head");
     current.headSha = newHead;
@@ -312,14 +313,14 @@ void waitsForSupervisedApproval() {
     check(f.sessions.sessionSends.empty() && card != inbox.end() && card->at("canDecide") == true && card->at("action") == "t3.send" &&
               card->at("target") == Json::array({"sandbox", "thread-project"}).dump(),
           "Supervised mode did not ask the original requester for a Session send: " + inbox.dump() +
-              "; latest history: " + f.store.history(f.task, 0, 10).dump());
+              "; latest history: " + Tasks(f.store).history(f.task, 0, 10).dump());
     const auto preview = Json::parse(card->at("prompt").get<std::string>());
     check(card->at("displayTarget") == "https://github.com/org/flock/pull/1" &&
               preview == Json{{"diagnosis", "The migration test needs attention."}, {"pullRequest", card->at("displayTarget")}},
           "Approval did not show the PR and diagnosis");
     Inbox(f.store).decideInbox(testRequester, target(*card), "allow_once");
     f.runtime.runConversations();
-    check(f.sessions.sessionSends.size() == 1 && includes(f.store.history(f.task).dump(), "I asked the original Session"),
+    check(f.sessions.sessionSends.size() == 1 && includes(Tasks(f.store).history(f.task).dump(), "I asked the original Session"),
           "Approved follow-up was not sent and reported");
 }
 void rejectsStaleSupervisedApproval(bool disconnect) {
@@ -354,7 +355,7 @@ void testGitPrFollowup() {
     Fixture disabled(true, false);
     disabled.notify(failure("disabled"));
     check(!disabled.model.canFix && disabled.sessions.sessionSends.empty() &&
-              includes(disabled.store.history(disabled.task).dump(), "Git notification received"),
+              includes(Tasks(disabled.store).history(disabled.task).dump(), "Git notification received"),
           "Disabled setting did not keep report-only behavior");
     Fixture noRequester(false);
     noRequester.notify(review("no-requester"));

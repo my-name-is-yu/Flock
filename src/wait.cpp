@@ -1,3 +1,6 @@
+#include "flock/tasks.hpp"
+#include "task_operations.hpp"
+#include "task_records.hpp"
 #include "wait_storage.hpp"
 #include "run_ref_storage.hpp"
 #include "model_calls.hpp"
@@ -284,7 +287,7 @@ Wait decodeWaitingEntry(Id entry, const Json& data) {
     });
 }
 
-Wait Store::waitingEvent(const Json& event) {
+Wait Tasks::waitingEvent(const Json& event) {
     return decodeWaitingEntry(event.at("id"), event.at("data"));
 }
 

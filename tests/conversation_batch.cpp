@@ -1,3 +1,4 @@
+#include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
 #include "flock/board_inbox.hpp"
@@ -322,8 +323,8 @@ void followUpNeeded(const Decision& action, std::string_view guidance) {
 
 void gatewayOnlyCancelDoesNotCancelBatchSibling() {
     Fixture f;
-    const auto task = f.store->submit({"alpha", "Keep this task running", "env", "project"});
-    const auto generation = f.store->task(task).task.generation;
+    const auto task = Tasks(*f.store).submit({"alpha", "Keep this task running", "env", "project"});
+    const auto generation = Tasks(*f.store).task(task).task.generation;
     f.receive({call("cancel_task", {{"taskId", task}, {"generation", generation}, {"gatewayEnvironmentId", "env"}}), search});
     f.runtime->runConversations();
     f.checkFinished(2);
@@ -331,7 +332,7 @@ void gatewayOnlyCancelDoesNotCancelBatchSibling() {
     const auto first = results[0].value("result", results[0]);
     const auto second = results[1].value("result", results[1]);
     check((first.value("ok", true) == false || first.contains("error")) && second.value("ok", false) == true &&
-              f.store->task(task).task.state == TaskState::queued && f.t3.searches == 1,
+              Tasks(*f.store).task(task).task.state == TaskState::queued && f.t3.searches == 1,
           ("a gateway-only batch cancel changed the task or suppressed its sibling: " + results.dump()).c_str());
 }
 
@@ -461,8 +462,8 @@ constexpr auto sharedDoc = "fixture/playbook";
 void conversationReadParity() {
     Fixture f;
     const Intake intake{"alpha", "Fixture task", "env", "project"};
-    const auto task = f.store->submit(intake, &localOwner);
-    f.store->operate(localOwner, TaskTarget::from(f.store->task(task).task, 0), "cancel");
+    const auto task = Tasks(*f.store).submit(intake, &localOwner);
+    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(task).task, 0), "cancel");
     const auto result = std::stoll(f.query("SELECT id FROM journal WHERE kind='cancelled' AND task_id=" + std::to_string(task)));
     f.receive(
         {call("start_workflow", {{"request", "Collect the release notes"}, {"stages", {{{"stageId", "collect"}, {"role", "collect"}}}}})});

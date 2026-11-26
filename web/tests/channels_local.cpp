@@ -1,4 +1,5 @@
 #include "http_fixture.hpp"
+#include "flock/tasks.hpp"
 #include "flock/channels.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
@@ -156,7 +157,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     event["externalMessageId"] = "prepare-local";
     store.receiveChannel(ChannelKind::slack, "Bearer fixture-channel", event, cb.intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
-    const auto active = store.activeTasks("release").at(0).task.activeRun;
+    const auto active = Tasks(store).activeTasks("release").at(0).task.activeRun;
     check(active.has_value(), "Fixture Session did not start");
     const auto localFile = std::filesystem::canonical(database.parent_path()) / "session-local.txt";
     std::ofstream(localFile) << "Approved only for this Session";

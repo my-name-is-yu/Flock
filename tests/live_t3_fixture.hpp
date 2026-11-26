@@ -1,5 +1,6 @@
 #pragma once
 
+#include "flock/tasks.hpp"
 #include "flock/decision.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
@@ -145,19 +146,19 @@ inline Id submit(Store& store, std::string_view environmentId, std::string_view 
     }
     if (scenario == "question" || scenario == "ambiguous-question") config["session"]["interactionMode"] = "plan";
     if (const auto* mode = std::getenv("FLOCK_ACCEPTANCE_RUNTIME_MODE")) config["session"]["runtimeMode"] = mode;
-    return store.submit({"acceptance", std::string(scenario), std::string(environmentId), std::string(projectId), config});
+    return Tasks(store).submit({"acceptance", std::string(scenario), std::string(environmentId), std::string(projectId), config});
 }
 
 inline int pump(Store& store, T3& t3, Id id, std::string_view targetState) {
     using namespace std::chrono_literals;
     TestModel model;
     RuntimeOptions options;
-    if (store.task(id).task.request == "measurement-read-resume") options.sessionRead = "on_demand";
+    if (Tasks(store).task(id).task.request == "measurement-read-resume") options.sessionRead = "on_demand";
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string("Validate the acceptance fixture"); }, options);
     std::string previous;
     const auto end = std::chrono::steady_clock::now() + 5min;
     do {
-        const auto task = taskJson(store.task(id));
+        const auto task = taskJson(Tasks(store).task(id));
         const auto state = task.at("state").get<std::string>();
         if (previous != state) {
             std::cout << state << " ";
@@ -168,7 +169,7 @@ inline int pump(Store& store, T3& t3, Id id, std::string_view targetState) {
         }
         if (state == targetState) return 0;
         if (targetState == "read-saved") {
-            const auto history = store.history(id);
+            const auto history = Tasks(store).history(id);
             if (std::any_of(history.begin(), history.end(), [](const Json& item) { return item["kind"] == "session_read"; })) return 0;
         }
         if ((state == "waiting" && task.at("wait").value("reason", "") != "t3_input") || state == "completed" || state == "cancelled")
