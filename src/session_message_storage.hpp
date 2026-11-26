@@ -58,7 +58,15 @@ public:
     CallOutcome runSessionEffect(const conversation::Message&, int step, const Decision&, std::string_view key, bool offered, T3&,
                                  std::stop_token);
 private:
+    struct SessionSend;
     std::map<Id, SessionSendReceipt> sessionSendReceipts;
+    void saveSessionSendStep(const SessionSend&, Json result);
+    void addressSessionSend(SessionSend&);
+    std::optional<CallOutcome> prepareSessionSend(SessionSend&);
+    void probeSessionSendTarget(SessionSend&);
+    std::optional<CallOutcome> approveSessionSend(SessionSend&);
+    std::optional<CallOutcome> startSessionSend(const SessionSend&);
+    void deliverSessionSend(SessionSend&);
     void persistSessionSendReceipt(Id message, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
     void saveSessionSendResult(std::string_view bot, Id message, int step, Json result);
     bool recordSessionSendRun(Id, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});

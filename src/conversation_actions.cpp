@@ -471,292 +471,339 @@ WHERE rowid=? AND interrupt_at IS NOT NULL AND environment=? AND gateway_environ
     }
 }
 
-CallOutcome SessionMessageStorage::sendSessionMessage(const conversation::Message& message, int step, const Decision& decision,
-                                                      std::string_view key, const ConversationCallContext& ctx) {
-    using enum CallOutcome;
-    const auto id = message.id;
-    const bool fixesPullRequest = decision.tool == "fix_pull_request";
-    const auto save = [&](Json result) {
-        conversationTools.saveTurnResults(id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
-    };
+struct SessionMessageStorage::SessionSend {
+    SessionSend(const conversation::Message& message, int step, const Decision& decision, std::string_view key,
+                const ConversationCallContext& ctx)
+        : message(message), step(step), decision(decision), key(key), ctx(ctx) {}
+
+    const conversation::Message& message;
+    int step;
+    const Decision& decision;
+    std::string_view key;
+    const ConversationCallContext& ctx;
     Command command;
-    command.tool = CommandTool::message_session;
-    command.actionId = "flock-turn-" + actionId();
-    command.ownerBotId = message.bot;
-    const bool savedTaskTarget = decision.tool == "send_to_task";
+    SessionTarget target;
+    Resource resource{Action::t3_send, {}};
+    std::optional<GitStorage::GitPrFollowup> followup;
     Id savedTaskId = 0, savedGeneration = 0;
     std::string savedActionId;
     bool includesSavedContent = false;
-    std::optional<GitStorage::GitPrFollowup> followup;
-    SessionTarget target;
-    Resource resource{Action::t3_send, {}};
-    constexpr auto stopped = "This Bot's participation in the Session has stopped";
-    {
-        std::lock_guard lock(database.mutex);
-        Transaction transaction(database.db);
-        if (!conversationTurns.authorizeTurn(message)) {
-            transaction.commit();
-            return stop;
-        }
-        auto row = database.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step});
-        if (!row.next()) return stop;
-        if (!row.string(0).empty()) {
-            if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end()) {
-                persistSessionSendReceipt(id, receipt->second);
-            } else if (field(row.json(0), "sendState") == "prepared") {
-                save({{"ok", false}, {"delivery", "not_accepted"}, {"error", "The T3 Session message was not sent."}});
-            } else {
-                saveSessionSendResult(message.bot, id, step,
-                                      {{"ok", false},
-                                       {"delivery", "unknown"},
-                                       {"error", "Flock restarted while sending this. Check the Session before sending again."}});
-            }
-            transaction.commit();
-            sessionSendReceipts.erase(id);
-            return advance;
-        }
-        try {
-            std::string expectedCommit;
-            Json source = nullptr;
-            if (fixesPullRequest) {
-                followup = gitStorage.gitPrFollowup(message, ctx.intake);
-                if (!followup || followup->status != GitStorage::GitPrFollowup::Status::available)
-                    throw ToolError("Automatic follow-up is unavailable for this pull request");
-                command.environmentId = followup->session.environmentId;
-                command.gatewayEnvironmentId = followup->session.gatewayEnvironmentId;
-                command.target.threadId = followup->session.threadId;
-                command.target.gatewayEnvironmentId = followup->session.gatewayEnvironmentId;
-                command.instruction = gitStorage.gitPrFollowupInstruction(message, *followup, decision);
-            } else if (savedTaskTarget) {
-                const auto task = conversationTurns.ownTask(conversation_storage::identifier(decision.args, "taskId", true), message);
-                if (conversation_storage::identifier(decision.args, "generation", true, 0) != task.generation)
-                    throw ToolError("stale", {{"taskId", task.id}, {"current", conversationTurns.taskState(task, message)}});
-                if (terminal(task) || task.state == TaskState::cancelling)
-                    throw ToolError("The task is " + std::string(taskStateName(task.state)), {{"taskId", task.id}});
-                const auto& selected = selectSavedDestination(task, decision.args, true);
-                if (const auto sourceId = conversation_storage::identifier(decision.args, "sourceResultMessageId", false); sourceId) {
-                    source = conversationTurns.resultReference(sourceId, message);
-                    if (source.at("taskId") != task.id || source.at("revisionId") != task.currentRevision.value_or(0))
-                        throw ToolError("sourceResultMessageId must be a result of this task's current revision");
-                }
-                command.environmentId = selected.environmentId;
-                command.gatewayEnvironmentId = selected.ref.gatewayEnvironmentId;
-                command.target.threadId = selected.ref.threadId;
-                command.target.gatewayEnvironmentId = selected.ref.gatewayEnvironmentId;
-                if (command.environmentId.empty() || command.target.threadId.empty())
-                    throw ToolError("The destination Session is unavailable");
-                savedTaskId = task.id;
-                savedGeneration = task.generation;
-                savedActionId = selected.actionId;
-                expectedCommit = task.requestedCommit.value_or("");
-                command.instruction = conversation_storage::text(decision.args, "instruction", limits::messages::maxBodyBytes, true);
-            } else {
-                command.environmentId = conversation_storage::text(decision.args, "environmentId", 256, true);
-                command.target.threadId = conversation_storage::text(decision.args, "threadId", 256, true);
-                command.instruction = conversation_storage::text(decision.args, "text", limits::messages::maxBodyBytes, true);
-            }
-            const auto name = message.routing.at("config").value("botDisplayName", message.bot);
-            command.instruction = name + ": " + command.instruction;
-            includesSavedContent = !source.is_null() || !expectedCommit.empty();
-            if (!source.is_null())
-                command.instruction +=
-                    "\n\n(reference only):\n" + bounded(field(source, "text"), limits::session_prompt::maxQuoteTextBytes);
-            if (!expectedCommit.empty()) command.instruction = commit_check::instructions(std::move(command.instruction), expectedCommit);
-            command.instruction = secretStorage.redactor(message.bot).text(command.instruction);
-            if (decision.tool == "message_session" &&
-                (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
-                throw ToolError("Use the Session identifiers");
-            target = {command.environmentId, command.target.threadId, command.gatewayEnvironmentId};
-            resource = {Action::t3_send, Resource::sessionRead(target.environmentId, target.threadId).target};
-            if (sessionParticipationStorage.sessionParticipationStopped(message.bot, target, id)) throw ToolError(stopped);
-            if (permissions.forbidden(message.bot, resource.action, resource.target))
-                throw ToolError(std::string(approvalError(ApprovalGate::denied)));
-            if (!fixesPullRequest && !savedTaskTarget && !sessionReadStorage.connectedSessionAccess(message, target))
-                throw ToolError("This Session is unavailable through your T3 connection");
-        } catch (const ToolError& failure) {
-            save(toolFailure(failure.what()));
-            transaction.commit();
-            return advance;
-        }
-        transaction.commit();
-    }
-    const auto availableFollowup = [&]() -> std::optional<GitStorage::GitPrFollowup> {
+    std::string title, error;
+
+    bool fixesPullRequest() const { return decision.tool == "fix_pull_request"; }
+    bool savedTaskTarget() const { return decision.tool == "send_to_task"; }
+    bool namesSession() const { return !fixesPullRequest() && !savedTaskTarget(); }
+    std::optional<GitStorage::GitPrFollowup> availableFollowup(GitStorage& gitStorage) const {
         auto current = gitStorage.gitPrFollowup(message, ctx.intake);
         if (!current || current->operation != followup->operation || current->session != target ||
             current->status != GitStorage::GitPrFollowup::Status::available)
             return std::nullopt;
         return current;
-    };
-    std::string error;
-    std::string title;
+    }
+};
+
+namespace {
+constexpr auto participationStopped = "This Bot's participation in the Session has stopped";
+constexpr auto sessionUnavailable = "This Session is unavailable through your T3 connection";
+constexpr auto followupUnavailable = "Automatic follow-up is unavailable for this pull request";
+constexpr auto destinationUnavailable = "The destination Session is unavailable";
+
+void requireSendable(const ConversationStorage& turns, const TaskData& task, Id generation, const conversation::Message& message) {
+    if (generation != task.generation) throw ToolError("stale", {{"taskId", task.id}, {"current", turns.taskState(task, message)}});
+    if (terminal(task) || task.state == TaskState::cancelling)
+        throw ToolError("The task is " + std::string(taskStateName(task.state)), {{"taskId", task.id}});
+}
+}
+
+void SessionMessageStorage::saveSessionSendStep(const SessionSend& send, Json result) {
+    conversationTools.saveTurnResults(send.message.id, send.step,
+                                      Json::array({secretStorage.redactor(send.message.bot).record(std::move(result))}));
+}
+
+void SessionMessageStorage::addressSessionSend(SessionSend& send) {
+    const auto& message = send.message;
+    const auto& decision = send.decision;
+    auto& command = send.command;
+    std::string expectedCommit;
+    Json source = nullptr;
+    if (send.fixesPullRequest()) {
+        send.followup = gitStorage.gitPrFollowup(message, send.ctx.intake);
+        if (!send.followup || send.followup->status != GitStorage::GitPrFollowup::Status::available) throw ToolError(followupUnavailable);
+        command.environmentId = send.followup->session.environmentId;
+        command.gatewayEnvironmentId = send.followup->session.gatewayEnvironmentId;
+        command.target.threadId = send.followup->session.threadId;
+        command.target.gatewayEnvironmentId = send.followup->session.gatewayEnvironmentId;
+        command.instruction = gitStorage.gitPrFollowupInstruction(message, *send.followup, decision);
+    } else if (send.savedTaskTarget()) {
+        const auto task = conversationTurns.ownTask(conversation_storage::identifier(decision.args, "taskId", true), message);
+        requireSendable(conversationTurns, task, conversation_storage::identifier(decision.args, "generation", true, 0), message);
+        const auto& selected = selectSavedDestination(task, decision.args, true);
+        if (const auto sourceId = conversation_storage::identifier(decision.args, "sourceResultMessageId", false); sourceId) {
+            source = conversationTurns.resultReference(sourceId, message);
+            if (source.at("taskId") != task.id || source.at("revisionId") != task.currentRevision.value_or(0))
+                throw ToolError("sourceResultMessageId must be a result of this task's current revision");
+        }
+        command.environmentId = selected.environmentId;
+        command.gatewayEnvironmentId = selected.ref.gatewayEnvironmentId;
+        command.target.threadId = selected.ref.threadId;
+        command.target.gatewayEnvironmentId = selected.ref.gatewayEnvironmentId;
+        if (command.environmentId.empty() || command.target.threadId.empty()) throw ToolError(destinationUnavailable);
+        send.savedTaskId = task.id;
+        send.savedGeneration = task.generation;
+        send.savedActionId = selected.actionId;
+        expectedCommit = task.requestedCommit.value_or("");
+        command.instruction = conversation_storage::text(decision.args, "instruction", limits::messages::maxBodyBytes, true);
+    } else {
+        command.environmentId = conversation_storage::text(decision.args, "environmentId", 256, true);
+        command.target.threadId = conversation_storage::text(decision.args, "threadId", 256, true);
+        command.instruction = conversation_storage::text(decision.args, "text", limits::messages::maxBodyBytes, true);
+    }
+    const auto name = message.routing.at("config").value("botDisplayName", message.bot);
+    command.instruction = name + ": " + command.instruction;
+    send.includesSavedContent = !source.is_null() || !expectedCommit.empty();
+    if (!source.is_null())
+        command.instruction += "\n\n(reference only):\n" + bounded(field(source, "text"), limits::session_prompt::maxQuoteTextBytes);
+    if (!expectedCommit.empty()) command.instruction = commit_check::instructions(std::move(command.instruction), expectedCommit);
+    command.instruction = secretStorage.redactor(message.bot).text(command.instruction);
+    if (decision.tool == "message_session" &&
+        (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
+        throw ToolError("Use the Session identifiers");
+    send.target = {command.environmentId, command.target.threadId, command.gatewayEnvironmentId};
+    send.resource = {Action::t3_send, Resource::sessionRead(send.target.environmentId, send.target.threadId).target};
+    if (sessionParticipationStorage.sessionParticipationStopped(message.bot, send.target, message.id))
+        throw ToolError(participationStopped);
+    if (permissions.forbidden(message.bot, send.resource.action, send.resource.target))
+        throw ToolError(std::string(approvalError(ApprovalGate::denied)));
+    if (send.namesSession() && !sessionReadStorage.connectedSessionAccess(message, send.target)) throw ToolError(sessionUnavailable);
+}
+
+std::optional<CallOutcome> SessionMessageStorage::prepareSessionSend(SessionSend& send) {
+    using enum CallOutcome;
+    const auto& message = send.message;
+    const auto id = message.id;
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
+    if (!conversationTurns.authorizeTurn(message)) {
+        transaction.commit();
+        return stop;
+    }
+    auto row = database.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, send.step});
+    if (!row.next()) return stop;
+    if (!row.string(0).empty()) {
+        if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end()) {
+            persistSessionSendReceipt(id, receipt->second);
+        } else if (field(row.json(0), "sendState") == "prepared") {
+            saveSessionSendStep(send, {{"ok", false}, {"delivery", "not_accepted"}, {"error", "The T3 Session message was not sent."}});
+        } else {
+            saveSessionSendResult(message.bot, id, send.step,
+                                  {{"ok", false},
+                                   {"delivery", "unknown"},
+                                   {"error", "Flock restarted while sending this. Check the Session before sending again."}});
+        }
+        transaction.commit();
+        sessionSendReceipts.erase(id);
+        return advance;
+    }
     try {
-        command.authGeneration =
-            ctx.t3.authGeneration(target.gatewayEnvironmentId.empty() ? target.environmentId : target.gatewayEnvironmentId, command.config);
-        if (!fixesPullRequest && !savedTaskTarget) {
-            if (const auto metadata = ctx.t3.sessionMetadata(target, false))
-                title = metadata->title;
+        addressSessionSend(send);
+    } catch (const ToolError& failure) {
+        saveSessionSendStep(send, toolFailure(failure.what()));
+        transaction.commit();
+        return advance;
+    }
+    transaction.commit();
+    return std::nullopt;
+}
+
+void SessionMessageStorage::probeSessionSendTarget(SessionSend& send) {
+    const auto& target = send.target;
+    try {
+        send.command.authGeneration = send.ctx.t3.authGeneration(
+            target.gatewayEnvironmentId.empty() ? target.environmentId : target.gatewayEnvironmentId, send.command.config);
+        if (send.namesSession()) {
+            if (const auto metadata = send.ctx.t3.sessionMetadata(target, false))
+                send.title = metadata->title;
             else
-                error = "This Session is unavailable through your T3 connection";
+                send.error = sessionUnavailable;
         }
     } catch (const std::exception&) {
-        error = "Could not verify access to this T3 Session";
+        send.error = "Could not verify access to this T3 Session";
     }
-    if (error.empty() && followup && (!ctx.gitHost || !gitStorage.gitPrReadyForFollowup(*ctx.gitHost, message)))
-        error = "Could not verify that the follow-up still applies to this pull request";
-    const SessionDispatchFileLock dispatch(path, SessionDispatchFileLock::Mode::shared);
-    {
-        std::lock_guard lock(database.mutex);
-        Transaction transaction(database.db);
-        if (ctx.shutdown.stop_requested()) return stop;
-        if (!conversationTurns.authorizeTurn(message)) {
-            transaction.commit();
-            return stop;
-        }
-        if (sessionParticipationStorage.sessionParticipationStopped(message.bot, target, id)) {
-            save(toolFailure(stopped));
-            transaction.commit();
-            return advance;
-        }
-        if (!error.empty() || (!fixesPullRequest && !savedTaskTarget && !sessionReadStorage.connectedSessionAccess(message, target))) {
-            save(toolFailure(error.empty() ? "This Session is unavailable through your T3 connection" : error));
-            transaction.commit();
-            return advance;
-        }
-        auto origin = policyApprovals.policyOrigin(message);
-        auto approvalOperation = std::string(key);
-        Json policyPayload{decision.tool, decision.args, command.authGeneration};
-        if (fixesPullRequest) {
-            const auto current = availableFollowup();
-            if (!current) {
-                save(toolFailure("Automatic follow-up is unavailable for this pull request"));
-                transaction.commit();
-                return advance;
+    if (send.error.empty() && send.followup && (!send.ctx.gitHost || !gitStorage.gitPrReadyForFollowup(*send.ctx.gitHost, send.message)))
+        send.error = "Could not verify that the follow-up still applies to this pull request";
+}
+
+std::optional<CallOutcome> SessionMessageStorage::approveSessionSend(SessionSend& send) {
+    using enum CallOutcome;
+    const auto& message = send.message;
+    const auto& decision = send.decision;
+    const auto& target = send.target;
+    const auto id = message.id;
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
+    if (send.ctx.shutdown.stop_requested()) return stop;
+    if (!conversationTurns.authorizeTurn(message)) {
+        transaction.commit();
+        return stop;
+    }
+    const auto fail = [&](std::string_view reason) {
+        saveSessionSendStep(send, toolFailure(reason));
+        transaction.commit();
+        return advance;
+    };
+    if (sessionParticipationStorage.sessionParticipationStopped(message.bot, target, id)) return fail(participationStopped);
+    if (!send.error.empty()) return fail(send.error);
+    if (send.namesSession() && !sessionReadStorage.connectedSessionAccess(message, target)) return fail(sessionUnavailable);
+    auto origin = policyApprovals.policyOrigin(message);
+    auto approvalOperation = std::string(send.key);
+    Json policyPayload{decision.tool, decision.args, send.command.authGeneration};
+    if (send.fixesPullRequest()) {
+        const auto current = send.availableFollowup(gitStorage);
+        if (!current) return fail(followupUnavailable);
+        origin = current->origin;
+        policyPayload = {{"pullRequest", current->target.at("url")},
+                         {"diagnosis", decision.args.at("diagnosis")},
+                         {"arguments", Json::array({send.command.instruction, send.command.authGeneration, target.gatewayEnvironmentId})}};
+    } else if (send.savedTaskTarget()) {
+        try {
+            const auto task = conversationTurns.ownTask(send.savedTaskId, message);
+            requireSendable(conversationTurns, task, send.savedGeneration, message);
+            const auto& selected = selectSavedDestination(task, decision.args, true);
+            if (selected.actionId != send.savedActionId || selected.environmentId != target.environmentId ||
+                selected.ref.threadId != target.threadId || selected.ref.runId.empty())
+                throw ToolError(destinationUnavailable);
+            const auto action = outboxStorage.outbox(task, selected.actionId);
+            if (!action || !action->destinationAction || action->phase != OutboxPhase::accepted || action->stop ||
+                action->command.environmentId != selected.environmentId || action->command.projectId != selected.assignment.projectId ||
+                action->command.gatewayEnvironmentId != selected.ref.gatewayEnvironmentId)
+                throw ToolError(destinationUnavailable);
+            if (!database
+                     .query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
+                            {selected.actionId, send.savedTaskId, selected.environmentId, selected.ref.threadId, selected.ref.runId})
+                     .next())
+                throw ToolError(destinationUnavailable);
+            origin.task = send.savedTaskId;
+            origin.generation = send.savedGeneration;
+            origin.revision = task.currentRevision.value_or(0);
+            policyPayload.push_back(selected.actionId);
+            if (send.includesSavedContent) {
+                approvalOperation += "/rendered-session-message";
+                policyPayload.push_back(send.command.instruction);
             }
-            origin = current->origin;
-            policyPayload = {{"pullRequest", current->target.at("url")},
-                             {"diagnosis", decision.args.at("diagnosis")},
-                             {"arguments", Json::array({command.instruction, command.authGeneration, target.gatewayEnvironmentId})}};
-        } else if (savedTaskTarget) {
-            try {
-                const auto task = conversationTurns.ownTask(savedTaskId, message);
-                if (task.generation != savedGeneration)
-                    throw ToolError("stale", {{"taskId", savedTaskId}, {"current", conversationTurns.taskState(task, message)}});
-                if (terminal(task) || task.state == TaskState::cancelling)
-                    throw ToolError("The task is " + std::string(taskStateName(task.state)), {{"taskId", savedTaskId}});
-                const auto& selected = selectSavedDestination(task, decision.args, true);
-                if (selected.actionId != savedActionId || selected.environmentId != target.environmentId ||
-                    selected.ref.threadId != target.threadId || selected.ref.runId.empty())
-                    throw ToolError("The destination Session is unavailable");
-                const auto action = outboxStorage.outbox(task, selected.actionId);
-                if (!action || !action->destinationAction || action->phase != OutboxPhase::accepted || action->stop ||
-                    action->command.environmentId != selected.environmentId || action->command.projectId != selected.assignment.projectId ||
-                    action->command.gatewayEnvironmentId != selected.ref.gatewayEnvironmentId)
-                    throw ToolError("The destination Session is unavailable");
-                if (!database
-                         .query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
-                                {selected.actionId, savedTaskId, selected.environmentId, selected.ref.threadId, selected.ref.runId})
-                         .next())
-                    throw ToolError("The destination Session is unavailable");
-                origin.task = savedTaskId;
-                origin.generation = savedGeneration;
-                origin.revision = task.currentRevision.value_or(0);
-                policyPayload.push_back(selected.actionId);
-                if (includesSavedContent) {
-                    approvalOperation += "/rendered-session-message";
-                    policyPayload.push_back(command.instruction);
-                }
-            } catch (const ToolError& failure) {
-                save(toolFailure(failure.what()));
-                transaction.commit();
-                return advance;
-            }
+        } catch (const ToolError& failure) {
+            return fail(failure.what());
         }
-        const auto gate = policyApprovals.approveAction(origin, resource, approvalOperation, policyPayload, policyApprovals.now());
-        if (gate != ApprovalGate::allow) {
-            if (gate != ApprovalGate::waiting) save(toolFailure(approvalError(gate)));
-            transaction.commit();
-            return gate == ApprovalGate::waiting ? waiting : advance;
-        }
-        Json effect{{"kind", "message_session"}, {"sendState", "prepared"}};
-        if (savedTaskTarget) {
-            effect["taskId"] = savedTaskId;
-            effect["actionId"] = savedActionId;
-        }
-        database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
-                      "AND result IS NULL AND effect IS NULL",
-                      {effect, id, step});
-        if (!sqlite3_changes(database.db)) return stop;
-        const auto read = Resource::sessionRead(target.environmentId, target.threadId);
-        if (!message.channelScope.empty() || !permissions.allows(message.bot, read)) title.clear();
-        title = bounded(redactT3Tokens(secretStorage.redactor(message.bot).text(title)), 512);
-        database.exec(R"SQL(
+    }
+    const auto gate = policyApprovals.approveAction(origin, send.resource, approvalOperation, policyPayload, policyApprovals.now());
+    if (gate != ApprovalGate::allow) {
+        if (gate != ApprovalGate::waiting) saveSessionSendStep(send, toolFailure(approvalError(gate)));
+        transaction.commit();
+        return gate == ApprovalGate::waiting ? waiting : advance;
+    }
+    Json effect{{"kind", "message_session"}, {"sendState", "prepared"}};
+    if (send.savedTaskTarget()) {
+        effect["taskId"] = send.savedTaskId;
+        effect["actionId"] = send.savedActionId;
+    }
+    database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
+                  "AND result IS NULL AND effect IS NULL",
+                  {effect, id, send.step});
+    if (!sqlite3_changes(database.db)) return stop;
+    const auto read = Resource::sessionRead(target.environmentId, target.threadId);
+    if (!message.channelScope.empty() || !permissions.allows(message.bot, read)) send.title.clear();
+    send.title = bounded(redactT3Tokens(secretStorage.redactor(message.bot).text(send.title)), 512);
+    database.exec(R"SQL(
 INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state)
 SELECT ?,?,?,person_id,'active' FROM t3_connector WHERE singleton=1
 ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
 )SQL",
-                      {message.bot, target.environmentId, target.threadId});
-        transaction.commit();
-    }
+                  {message.bot, target.environmentId, target.threadId});
+    transaction.commit();
+    return std::nullopt;
+}
 
-    {
-        std::lock_guard lock(database.mutex);
-        Transaction transaction(database.db);
-        if (ctx.shutdown.stop_requested()) return stop;
-        if (!conversationTurns.authorizeTurn(message)) {
+std::optional<CallOutcome> SessionMessageStorage::startSessionSend(const SessionSend& send) {
+    using enum CallOutcome;
+    const auto& message = send.message;
+    const auto& target = send.target;
+    const auto id = message.id;
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
+    if (send.ctx.shutdown.stop_requested()) return stop;
+    if (!conversationTurns.authorizeTurn(message)) {
+        transaction.commit();
+        return stop;
+    }
+    auto row = database.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, send.step});
+    if (!row.next()) {
+        transaction.commit();
+        return stop;
+    }
+    auto effect = row.json(0);
+    if (effect.value("sendState", std::string{}) != "prepared") {
+        transaction.commit();
+        return stop;
+    }
+    if (send.fixesPullRequest()) {
+        const auto current = send.availableFollowup(gitStorage);
+        if (!current) {
+            saveSessionSendStep(send, toolFailure(followupUnavailable));
             transaction.commit();
-            return stop;
+            return advance;
         }
-        auto row = database.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step});
-        if (!row.next()) {
-            transaction.commit();
-            return stop;
-        }
-        auto effect = row.json(0);
-        if (effect.value("sendState", std::string{}) != "prepared") {
-            transaction.commit();
-            return stop;
-        }
-        if (fixesPullRequest) {
-            const auto current = availableFollowup();
-            if (!current) {
-                save(toolFailure("Automatic follow-up is unavailable for this pull request"));
-                transaction.commit();
-                return advance;
-            }
-            gitStorage.recordGitPrFollowup(message, *current);
-        }
-        effect["sendState"] = "sending";
-        effect["requestId"] = command.actionId;
-        database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL", {effect, id, step});
-        database.exec(
-            R"SQL(
+        gitStorage.recordGitPrFollowup(message, *current);
+    }
+    effect["sendState"] = "sending";
+    effect["requestId"] = send.command.actionId;
+    database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL", {effect, id, send.step});
+    database.exec(
+        R"SQL(
 INSERT INTO session_message_sends(action,message_id,environment,thread,gateway_environment,instruction,step)
 VALUES(?,?,?,?,?,?,?)
 )SQL",
-            {command.actionId, id, target.environmentId, target.threadId, target.gatewayEnvironmentId, command.instruction, step});
-        transaction.commit();
-    }
+        {send.command.actionId, id, target.environmentId, target.threadId, target.gatewayEnvironmentId, send.command.instruction,
+         send.step});
+    transaction.commit();
+    return std::nullopt;
+}
 
+void SessionMessageStorage::deliverSessionSend(SessionSend& send) {
+    const auto& message = send.message;
     Delivery receipt;
     try {
-        receipt = permissions.forbidden(message.bot, resource.action, resource.target)
+        receipt = permissions.forbidden(message.bot, send.resource.action, send.resource.target)
                       ? Delivery{Delivery::Kind::NotAccepted, {}, std::string(approvalError(ApprovalGate::denied)), true}
-                      : ctx.t3.send(command);
+                      : send.ctx.t3.send(send.command);
     } catch (const std::exception&) {
         receipt.detail = "Could not confirm delivery to T3";
     }
     std::lock_guard lock(database.mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
-    const auto checkpoint =
-        sessionSendReceipts
-            .insert_or_assign(id, SessionSendReceipt{message.bot, target, std::move(title), sessionSendOutcome(target, std::move(receipt)),
-                                                     step, savedTaskId, savedActionId, command.actionId, !fixesPullRequest})
-            .first;
+    const auto checkpoint = sessionSendReceipts
+                                .insert_or_assign(message.id, SessionSendReceipt{message.bot, send.target, std::move(send.title),
+                                                                                 sessionSendOutcome(send.target, std::move(receipt)),
+                                                                                 send.step, send.savedTaskId, send.savedActionId,
+                                                                                 send.command.actionId, !send.fixesPullRequest()})
+                                .first;
     Transaction transaction(database.db);
-    persistSessionSendReceipt(id, checkpoint->second);
+    persistSessionSendReceipt(message.id, checkpoint->second);
     transaction.commit();
     sessionSendReceipts.erase(checkpoint);
-    return advance;
+}
+
+CallOutcome SessionMessageStorage::sendSessionMessage(const conversation::Message& message, int step, const Decision& decision,
+                                                      std::string_view key, const ConversationCallContext& ctx) {
+    SessionSend send(message, step, decision, key, ctx);
+    send.command.tool = CommandTool::message_session;
+    send.command.actionId = "flock-turn-" + actionId();
+    send.command.ownerBotId = message.bot;
+    if (const auto settled = prepareSessionSend(send)) return *settled;
+    probeSessionSendTarget(send);
+    const SessionDispatchFileLock dispatch(path, SessionDispatchFileLock::Mode::shared);
+    if (const auto settled = approveSessionSend(send)) return *settled;
+    if (const auto settled = startSessionSend(send)) return *settled;
+    deliverSessionSend(send);
+    return CallOutcome::advance;
 }
 
 CallOutcome SessionMessageStorage::cancelDestinationRun(const conversation::Message& message, int step, const Decision& decision,
