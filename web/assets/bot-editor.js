@@ -67,12 +67,6 @@ function readFileAsBase64(file) {
   });
 }
 
-function colorNameFor(hex) {
-  const normalized = String(hex ?? '').toLowerCase();
-  const match = AVATAR_COLORS.find(([, value]) => value.toLowerCase() === normalized);
-  return match ? match[0] : normalized.toUpperCase();
-}
-
 const EASE_OUT_EXPO = 'cubic-bezier(0.23, 1, 0.32, 1)';
 const EASE_SPRING = 'cubic-bezier(0.22, 1, 0.36, 1)';
 const reducedMotionQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
@@ -157,7 +151,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
         </div>
 
         <div class="studio-colors-field" id="studio-color-field">
-          <div class="studio-label"><span id="studio-color-label">Color</span><span id="studio-color-name"></span></div>
+          <div class="studio-label"><span id="studio-color-label">Color</span></div>
           <div id="studio-colors" class="studio-palette" role="group" aria-labelledby="studio-color-label"></div>
         </div>
 
@@ -190,7 +184,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     removeUpload: el('studio-remove-upload'),
     uploadError: el('studio-upload-error'),
     colorField: el('studio-color-field'),
-    colorName: el('studio-color-name'),
     colors: el('studio-colors'),
     submitError: el('studio-submit-error'),
     cancel: el('studio-cancel'),
@@ -377,17 +370,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     });
   }
 
-  function animateColorName() {
-    runAnimation(
-      els.colorName,
-      [
-        { opacity: 0.35, transform: 'translateY(2px)' },
-        { opacity: 1, transform: 'none' },
-      ],
-      { duration: 160, easing: EASE_OUT_EXPO },
-    );
-  }
-
   function saveLabel() {
     if (saving) return mode === 'edit' ? 'Saving…' : 'Creating…';
     return mode === 'edit' ? 'Save' : 'Create';
@@ -517,7 +499,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       const selected = swatch.dataset.color.toLowerCase() === activeHex;
       swatch.setAttribute('aria-pressed', String(selected));
     }
-    els.colorName.textContent = colorNameFor(state.color);
     els.colorField.hidden = state.kind === 'upload';
     els.uploadPanel.hidden = state.kind !== 'upload';
     els.shuffle.disabled = state.kind === 'upload';
@@ -745,13 +726,11 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   els.colors.addEventListener('click', (event) => {
     const swatch = event.target.closest('button[data-color]');
     if (!swatch) return;
-    const changed = state.color.toLowerCase() !== swatch.dataset.color.toLowerCase();
     state.color = swatch.dataset.color;
     state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
     popHeroAvatar();
-    if (changed) animateColorName();
   });
   els.colors.addEventListener('keydown', (event) => arrowNavigate(els.colors, 'button[data-color]', event));
 
@@ -769,7 +748,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     renderAppearance();
     animateShuffleIcon();
     popHeroAvatar();
-    animateColorName();
   });
 
   els.photo.addEventListener('change', (event) => {
