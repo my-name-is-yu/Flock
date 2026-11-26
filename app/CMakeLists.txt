@@ -57,6 +57,12 @@ if(BUILD_TESTING)
   add_test(NAME flock_cli_invalid_port
     COMMAND "${CMAKE_COMMAND}" "-DFLOCK=$<TARGET_FILE:flock>" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_port.cmake")
   if(FLOCK_NODE_EXECUTABLE)
+    if(FLOCK_CHROME_EXECUTABLE)
+      add_test(NAME flock_app_suggested_tasks_browser
+        COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/suggested-tasks.mjs"
+                "$<TARGET_FILE:flock>" "${FLOCK_CHROME_EXECUTABLE}")
+      set_tests_properties(flock_app_suggested_tasks_browser PROPERTIES TIMEOUT 30)
+    endif()
     add_test(NAME flock_app_bot_deletion
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-deletion.mjs"
               "$<TARGET_FILE:flock>" "${Python3_EXECUTABLE}")

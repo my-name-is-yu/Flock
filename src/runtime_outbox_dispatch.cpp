@@ -499,6 +499,9 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
                             {"environmentId", cmd.environmentId}};
         if (cmd.sessionOrigin) payload["delegatedFrom"] = sessionOriginJson(*cmd.sessionOrigin);
         const auto assess = [&](const TaskData& current, bool claim) {
+            if (cmd.tool == CommandTool::delegate)
+                return policyApprovals.approveTaskLaunch(current, {cmd.environmentId, cmd.projectId, cmd.gatewayEnvironmentId}, operation,
+                                                         payload, clock(), claim);
             const auto origin = policyApprovals.taskPolicyOrigin(current);
             if (usesExistingSession) {
                 const Resource launch{Action::environment_launch, cmd.environmentId, true};
@@ -566,8 +569,8 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
                 policyGate = assess(current, true);
                 if (policyGate != ApprovalGate::allow) return false;
             }
-            if (usesExistingSession && current.sourceMessageId) {
-                const auto source = conversationTurns.loadTurnMessage(*current.sourceMessageId);
+            if (const auto message = current.requestMessageId(); usesExistingSession && message) {
+                const auto source = conversationTurns.loadTurnMessage(*message);
                 const SessionTarget target{cmd.environmentId, cmd.target.threadId,
                                            cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId};
                 auto participant = database.query(R"SQL(

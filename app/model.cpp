@@ -4,6 +4,7 @@
 #include "flock/git_host.hpp"
 #include "flock/json.hpp"
 #include "flock/limits.hpp"
+#include "flock/suggested_tasks.hpp"
 #include "flock/session_read.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
@@ -25,6 +26,23 @@ constexpr std::size_t maxRequest = 8 * 1024 * 1024;
 
 Json textParameter(std::string description) {
     return {{"type", "string"}, {"description", std::move(description)}};
+}
+
+Json suggestedTaskSchema() {
+    return {
+        {"type", "array"},
+        {"minItems", 1},
+        {"maxItems", maxSuggestedTasks},
+        {"items",
+         {{"type", "object"},
+          {"properties",
+           {{"request", textParameter("Concrete work to start, including its target.")},
+            {"doneWhen", textParameter("Acceptance criteria for the follow-up.")},
+            {"environment", textParameter("One destination from task.environments. Omit to use the default.")},
+            {"environments", {{"type", "array"}, {"minItems", 1}, {"items", textParameter("A destination name from task.environments.")}}},
+            {"reason", textParameter("One sentence explaining why the work is worth doing.")}}},
+          {"required", {"request", "reason"}},
+          {"additionalProperties", false}}}};
 }
 
 Json toolSchema(const std::string& name, const ModelInput& input) {
@@ -56,6 +74,8 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
     } else if (name == "complete") {
         description = "Close the task when the available evidence satisfies every saved acceptance criterion.";
         text("report", "Summarize the verified outcome for the user.");
+        fields["suggestedTasks"] = suggestedTaskSchema();
+        fields["suggestedTasks"]["description"] = "Concrete optional follow-up work beyond this task's scope.";
         if (input.task.contains("userInstructions")) {
             fields["acknowledgedInstructions"] = {
                 {"type", "array"},
@@ -119,6 +139,10 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         description = "Continue an open task in a new Session with its existing criteria and provenance.";
         integer("taskId", "Owned task to continue.", true);
         text("instruction", "Additional handoff context.", false);
+    } else if (name == "suggest_tasks") {
+        description = "Offer concrete follow-up tasks beyond what the person requested. The person can edit, start, or dismiss them.";
+        fields["items"] = suggestedTaskSchema();
+        required.emplace_back("items");
     } else if (name == "start_task") {
         description =
             "Start a new task for work the user asked for in one T3 Session or on one or more T3 environments, including reachable linked environments listed in task.environments.";
@@ -532,6 +556,10 @@ Tasks do the work: start_task creates one, send_to_task records an instruction f
 safe point, change_task changes its intent, criteria, or environment, answer_task_question answers a task's
 open user_question, and cancel_task stops the whole task. Use record_task_blocker to record what
 blocks an active task and withdraw_task_question when an open question no longer needs an answer.
+Start work the person explicitly asks for with start_task or start_workflow in this turn. When suggest_tasks
+is available, use it for separate work you discover or work beyond what they asked you to split. Give each
+item a specific target and a concrete reason. Honor a follow-up preference the person has explicitly saved,
+within current permissions. Keep reply suggestions for short conversational responses.
 Use one start_task with environments for work that targets one or more T3 environments. Choose
 destinations from task.environments and ask only when a destination or project is ambiguous. For linked
 targets, use the listed destination name that includes its gateway; if linked targets are unavailable,
@@ -621,7 +649,10 @@ user's language and refer to work by description, never by task, message, revisi
         "If that read fails, wait for new information before retrying it again. "
         "If a settled Session can remedy missing evidence or work, use follow_up. Use delegate for first work, "
         "which starts in the selected Session when task.usesSelectedSession is true, or for a fresh Session when needed. "
-        "Complete only when available evidence proves all saved criteria. Ask the user when a "
+        "Complete only when available evidence proves all saved criteria. Include suggestedTasks in that same "
+        "completion for concrete optional work discovered beyond the saved scope. Use the current destination "
+        "unless a different available destination is needed. Respect any saved follow-up preference within current "
+        "permissions. Ask the user when a "
         "decision or fact cannot be resolved from the available context or through Session work. Answer a "
         "Session question with the exact current requestId and field IDs when the needed facts are available. "
         "A question for the user refers to work by its description and never cites task, run, or revision IDs.";

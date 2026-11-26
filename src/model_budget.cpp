@@ -115,7 +115,7 @@ SELECT )SQL" + taskProjection() +
     auto ancestor = database.query(sql.c_str(), {taskId});
     if (!ancestor.next()) throw Conflict("The originating task is missing");
     const auto root = taskRecords.readTask(ancestor);
-    if (root.sourceMessageId) return messageModelBudget(*root.sourceMessageId);
+    if (const auto message = root.requestMessageId()) return messageModelBudget(*message);
     return {"task/" + std::to_string(root.id), initialModelCallLimit(root.config)};
 }
 
@@ -246,6 +246,17 @@ ModelCall ModelCalls::checkModelCall(std::string_view bot, Decision call, const 
         if (call.args.is_object()) {
             for (auto& [key, value] : call.args.items())
                 if (value.is_string() && redactsProse(call.tool, key)) value = scrub.text(value.get_ref<const std::string&>());
+        }
+        if (call.tool == "complete") {
+            const auto suggestions = call.args.find("suggestedTasks");
+            if (suggestions != call.args.end() && scrub.containsProtected("suggestedTasks"))
+                call.args.erase(suggestions);
+            else if (suggestions != call.args.end() && suggestions->is_array())
+                suggestions->erase(std::remove_if(suggestions->begin(), suggestions->end(),
+                                                  [&](const Json& item) { return scrub.containsProtected(item); }),
+                                   suggestions->end());
+            else if (suggestions != call.args.end() && scrub.containsProtected(*suggestions))
+                call.args.erase(suggestions);
         }
         if (modelArgumentsContainProtected(scrub, call.tool, call.args))
             rejection = "Tool arguments contain protected material. Use a secret reference where supported.";

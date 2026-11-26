@@ -274,6 +274,36 @@ TaskRoute TaskRouting::taskRoute(std::string_view bot, const Json& routing, std:
     return *discovered;
 }
 
+Json TaskRouting::destinationsForModel(std::string_view bot, const Json& routing, const LinkedTaskDestinations& linked) {
+    const auto scrub = permissions.secretRedactor(bot);
+    Json environments = Json::array();
+    const auto initial = taskEnvironment(bot, routing);
+    if (!initial.empty()) environments.push_back({{"name", initial}, {"environmentId", initial}, {"default", true}});
+    if (field(routing, "environmentId").empty())
+        for (const auto& environment : registeredT3Environments(bot))
+            if (environment != initial) environments.push_back({{"name", environment}, {"environmentId", environment}});
+    const auto& config = routing.at("config");
+    if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object()) {
+        for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) {
+            const auto id = taskEnvironment(bot, routing, alias.key());
+            if (!id.empty()) {
+                auto choice = Json{{"name", alias.key()}, {"environmentId", id}};
+                const auto gateway = conversationGatewayEnvironmentId(alias.value());
+                if (!gateway.empty()) choice["gatewayEnvironmentId"] = gateway;
+                environments.push_back(std::move(choice));
+            }
+        }
+    }
+    for (const auto& linkedChoice : linked.choices) {
+        environments.push_back({{"name", scrub.text(linkedChoice.name)},
+                                {"environmentId", linkedChoice.route.environmentId},
+                                {"projectId", linkedChoice.route.projectId},
+                                {"gatewayEnvironmentId", linkedChoice.route.gatewayEnvironmentId},
+                                {"linked", true}});
+    }
+    return environments;
+}
+
 StartDestinations TaskRouting::startDestinations(const conversation::Message& message, const Json& args, bool resume,
                                                  const WorkSession* selectedSession, const LinkedTaskDestinations& linked) {
     using conversation_storage::text;

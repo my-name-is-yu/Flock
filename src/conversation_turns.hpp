@@ -39,6 +39,7 @@ class SessionMessageStorage;
 class SessionParticipationStorage;
 class SessionReadStorage;
 class TaskOperations;
+class SuggestionStorage;
 class TaskRecords;
 class TaskRouting;
 class WaitStorage;
@@ -80,16 +81,18 @@ public:
                         LocalMachineStorage& localMachineStorage, MemoryStorage& memoryStorage, ModelCalls& modelCalls,
                         PeerStorage& peerStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
                         SessionMessageStorage& sessionMessageStorage, SessionParticipationStorage& sessionParticipationStorage,
-                        SessionReadStorage& sessionReadStorage, TaskOperations& taskOperations, TaskRecords& taskRecords,
-                        TaskRouting& taskRouting, WaitStorage& waitStorage, WebIdentityState& webIdentity, WorkflowStorage& workflowStorage)
+                        SessionReadStorage& sessionReadStorage, SuggestionStorage& suggestionsStorage, TaskOperations& taskOperations,
+                        TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage, WebIdentityState& webIdentity,
+                        WorkflowStorage& workflowStorage)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
           botAccess(botAccess), botSettingsStorage(botSettingsStorage), channelStorage(channelStorage),
           conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
           permissions(permissions), journalStorage(journalStorage), localMachineStorage(localMachineStorage), memoryStorage(memoryStorage),
           modelCalls(modelCalls), peerStorage(peerStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
           sessionMessageStorage(sessionMessageStorage), sessionParticipationStorage(sessionParticipationStorage),
-          sessionReadStorage(sessionReadStorage), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
-          waitStorage(waitStorage), webIdentity(webIdentity), workflowStorage(workflowStorage) {}
+          sessionReadStorage(sessionReadStorage), suggestionsStorage(suggestionsStorage), taskOperations(taskOperations),
+          taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), webIdentity(webIdentity),
+          workflowStorage(workflowStorage) {}
 
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
                  conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&, const Json& attachments);
@@ -153,6 +156,7 @@ private:
     SessionMessageStorage& sessionMessageStorage;
     SessionParticipationStorage& sessionParticipationStorage;
     SessionReadStorage& sessionReadStorage;
+    SuggestionStorage& suggestionsStorage;
     TaskOperations& taskOperations;
     TaskRecords& taskRecords;
     TaskRouting& taskRouting;

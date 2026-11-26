@@ -14,6 +14,7 @@ class ConversationContextStorage;
 class Database;
 class MemoryStorage;
 class ModelCalls;
+class SuggestionStorage;
 
 class Conversations {
 public:
@@ -38,5 +39,6 @@ private:
     const MemoryStorage& memory_;
     const ModelCalls& modelCalls_;
     const ChannelStorage& channels_;
+    const SuggestionStorage& suggestions_;
 };
 }

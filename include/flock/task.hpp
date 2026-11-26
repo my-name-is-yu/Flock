@@ -132,6 +132,7 @@ struct TaskData {
     std::optional<TaskPeerOutcome> peerOutcome{};
     nlohmann::json config = nlohmann::json::object();
 
+    std::optional<std::int64_t> requestMessageId() const { return requester ? std::nullopt : sourceMessageId; }
     bool hasDestinations() const { return !std::holds_alternative<std::monostate>(destinations); }
     std::span<const RunTarget> runTargets() const {
         if (const auto* targets = std::get_if<RunTargets>(&destinations)) return *targets;

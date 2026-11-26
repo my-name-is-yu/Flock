@@ -17,6 +17,8 @@
 #include "journal_storage.hpp"
 #include "git_storage.hpp"
 #include "conversation_tools.hpp"
+#include "suggested_task_routing.hpp"
+#include "suggested_tasks_storage.hpp"
 #include "conversation_turns.hpp"
 #include "channel_storage.hpp"
 #include "bot_settings_storage.hpp"
@@ -139,7 +141,8 @@ const std::vector<std::string> webTools{"start_workflow",       "workflow_status
                                         "update_bot_settings",  "request_bot_change",     "read_memory",
                                         "propose_memory_edit",  "apply_memory_edit",      "revert_memory_edit",
                                         "memory_history",       "create_schedule",        "list_schedules",
-                                        "remove_schedule",      "create_reminder",        "create_trigger"};
+                                        "remove_schedule",      "create_reminder",        "create_trigger",
+                                        "suggest_tasks"};
 
 std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
@@ -527,32 +530,6 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
         if (message.question) replyTo["taskQuestionMessageId"] = message.question->messageId;
     }
 
-    Json environments = Json::array();
-    const auto initial = taskRouting.taskEnvironment(message.bot, message.routing);
-    if (!initial.empty()) environments.push_back({{"name", initial}, {"environmentId", initial}, {"default", true}});
-    if (field(message.routing, "environmentId").empty())
-        for (const auto& environment : taskRouting.registeredT3Environments(message.bot))
-            if (environment != initial) environments.push_back({{"name", environment}, {"environmentId", environment}});
-    const auto& config = message.routing.at("config");
-    if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object()) {
-        for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) {
-            const auto id = taskRouting.taskEnvironment(message.bot, message.routing, alias.key());
-            if (!id.empty()) {
-                auto choice = Json{{"name", alias.key()}, {"environmentId", id}};
-                const auto gateway = conversationGatewayEnvironmentId(alias.value());
-                if (!gateway.empty()) choice["gatewayEnvironmentId"] = gateway;
-                environments.push_back(std::move(choice));
-            }
-        }
-    }
-    for (const auto& linkedChoice : linked.choices) {
-        environments.push_back({{"name", scrub.text(linkedChoice.name)},
-                                {"environmentId", linkedChoice.route.environmentId},
-                                {"projectId", linkedChoice.route.projectId},
-                                {"gatewayEnvironmentId", linkedChoice.route.gatewayEnvironmentId},
-                                {"linked", true}});
-    }
-
     const auto channel = channelStorage.channelContext(message.id, message.bot, &images);
     auto turn = conversationSteps(message, step, images);
     const auto expandedBytes = ConversationContextStorage::boundExpandedContext(turn);
@@ -566,7 +543,7 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
     if (web) event["attachments"] = attachments.attachmentViews(message.id);
     Json task{{"tasks", std::move(tasks)},
               {"moreTasks", moreTasks},
-              {"environments", std::move(environments)},
+              {"environments", taskRouting.destinationsForModel(message.bot, message.routing, linked)},
               {"localMachines", std::move(machines)}};
     if (!linked.unavailable.empty()) task["linkedEnvironmentIssues"] = linked.unavailable;
     if (web) {
@@ -610,6 +587,8 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
     if (auto result = localMachineStorage.localMachineTool(bot, message.channelScope, decision); !result.is_null()) return result;
     if (std::ranges::find(webTools, tool) != webTools.end()) {
         if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
+        if (tool == "suggest_tasks")
+            return {{"ok", true}, {"count", suggestTasks(suggestionsStorage, taskRouting, message, args.at("items"), linked)}};
         if (tool == "continue_fresh_session") {
             auto task = ownTask(identifier(args, "taskId", true), message);
             if (task.hasDestinations()) throw ToolError("Use a new request to run more work across T3 environments");
@@ -662,19 +641,12 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         const auto request = text(args, "request", maxBodyBytes, true);
         const auto doneWhen = text(args, "doneWhen", limits::session_prompt::maxDecisionTextBytes, false);
         const bool resume = args.value("resume", false);
-        auto [destination, targets, commit] = taskRouting.startDestinations(message, args, resume, selectedSession, linked);
+        const auto destinations = taskRouting.startDestinations(message, args, resume, selectedSession, linked);
         const auto result = source(nullptr);
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
-        const auto id = taskOperations.startConversationTask(routing, bot, request, destination, message.id, sourceRef(result), resume,
-                                                             selectedSession);
-        if (!doneWhen.empty() || !targets.empty()) {
-            auto task = taskRecords.load(id);
-            if (!doneWhen.empty()) task.criteriaProposal = TaskCriteriaProposal{doneWhen, message.id};
-            if (!targets.empty()) task.destinations = std::move(targets);
-            if (!commit.empty()) task.requestedCommit = std::move(commit);
-            taskRecords.save(task);
-        }
+        const auto id = taskOperations.startConversationTask(routing, bot, request, destinations, message.id, doneWhen, sourceRef(result),
+                                                             resume, selectedSession);
         Json receipt{{"ok", true}, {"effect", "started"}, {"taskId", id}};
         if (selectedSession) receipt["existingSession"] = true;
         return receipt;
@@ -881,6 +853,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                        .suggestions = suggestions.is_array() && !suggestions.empty() ? scrub.payload(suggestions) : Json(),
                                        .artifacts = artifacts.empty() ? Json() : std::move(artifacts)};
     const auto replyId = journalStorage.journalConversationReply(linked, message.bot, entry);
+    suggestionsStorage.reanchor(message.bot, message.id, replyId);
     if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot))
         channelStorage.queueChannelReply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
     database.exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});

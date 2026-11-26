@@ -1,0 +1,62 @@
+.suggested-tasks-card {
+  width: min(100% - var(--avatar-col), 36rem);
+  margin-block: .4rem .6rem;
+  margin-inline-start: var(--avatar-col);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--canvas);
+}
+.suggested-tasks-card:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.task-suggestion-heading {
+  padding: .75rem 1rem .6rem;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 650;
+}
+.task-suggestion-list { margin: 0; padding: 0; list-style: none; }
+.task-suggestion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: .45rem .8rem;
+  padding: .7rem 1rem;
+  border-top: 1px solid var(--hairline);
+}
+.task-suggestion-details {
+  display: grid;
+  gap: .18rem;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.task-suggestion-details p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-suggestion-title { color: var(--text); font-size: var(--text-md); font-weight: 600; }
+.task-suggestion-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .2rem; }
+.task-suggestion-actions .text-button { color: var(--text-2); font-weight: 500; }
+.task-suggestion-actions .text-button:hover { color: var(--text); background: var(--hover); text-decoration: none; }
+.task-suggestion-status { color: var(--text-2); font-size: var(--text-sm); }
+.task-suggestion-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: .65rem 1rem;
+  border-top: 1px solid var(--hairline);
+}
+.task-suggestion-feedback:not(:empty) { padding: .55rem 1rem .7rem; color: var(--danger); font-size: var(--text-sm); }
+.task-suggestion-form { display: grid; grid-column: 1 / -1; gap: .45rem; }
+.task-suggestion-request {
+  width: 100%;
+  min-height: 4rem;
+  max-height: 14rem;
+  resize: vertical;
+  padding: .5rem .65rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--field);
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+@container conversation-layout (max-width: 700px) {
+  .suggested-tasks-card { --avatar-col: 0px; }
+}
+@container conversation-layout (max-width: 480px) {
+  .task-suggestion { grid-template-columns: minmax(0, 1fr); }
+}

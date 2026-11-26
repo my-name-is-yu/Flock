@@ -64,6 +64,10 @@
 #include <sys/stat.h>
 
 using namespace flockv0;
+namespace flockv0::http_test {
+void suggestedTaskEndpoints(const std::filesystem::path&);
+}
+
 namespace {
 constexpr auto privateValue = "private-token-value";
 constexpr auto comparisonRequest = "3案を比較して";
@@ -1856,6 +1860,7 @@ int main(int argc, char** argv) {
         inspectors(directory.path / "inspectors.db");
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
+        http_test::suggestedTaskEndpoints(directory.path / "suggested-tasks.sqlite");
         parallelVerificationInView(directory.path / "parallel-verification.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite",

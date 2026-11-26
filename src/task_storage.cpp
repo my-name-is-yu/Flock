@@ -83,13 +83,13 @@ RunEvidence::Availability decodeReportAvailability(const Json& data, const Recor
     return *availability;
 }
 
-namespace {
 RunTarget decodeRunTarget(const Json& data, const RecordDecoder& row) {
     return {row.get<std::string>(data, "name"),
             {row.get<std::string>(data, "environmentId"), row.get<std::string>(data, "projectId"),
              row.optional<std::string>(data, "gatewayEnvironmentId").value_or("")}};
 }
 
+namespace {
 DestinationRun decodeDestinationRun(const Json& data, const RecordDecoder& row) {
     auto [name, route] = decodeRunTarget(data, row);
     DestinationRun run{
@@ -846,7 +846,13 @@ Id TaskRecords::addRevision(TaskData& task, std::string_view intent, std::string
     if (!conversation_storage::hasText(intent) || !conversation_storage::hasText(doneWhen))
         throw Conflict("Task revision needs intent and completion criteria");
     if (source) {
-        auto row = database.query("SELECT 1 FROM messages WHERE id=? AND bot_id=?", {source, task.botId});
+        auto row = database.query(R"SQL(
+SELECT 1 FROM messages WHERE id=?1 AND bot_id=?2
+UNION ALL
+SELECT 1 FROM suggested_tasks WHERE source_message_id=?1 AND bot_id=?2 AND task_id=?3
+LIMIT 1
+)SQL",
+                                  {source, task.botId, task.id});
         if (!row.next()) throw Conflict("Task revision must come from this Bot's conversation");
     }
     database.exec(R"SQL(

@@ -991,12 +991,15 @@ void rememberSourceResult(TaskData& task, const OutboxSource& source) {
 }
 }
 
-Id TaskOperations::startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute& destination,
-                                         Id messageId, const std::optional<OutboxSource>& reference, bool resume,
-                                         const WorkSession* selectedSession) {
+Id TaskOperations::startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
+                                         const StartDestinations& destinations, Id messageId, std::string_view doneWhen,
+                                         const std::optional<OutboxSource>& reference, bool resume, const WorkSession* selectedSession,
+                                         const Person* requester) {
     if (selectedSession) secretStorage.redactor(bot).requirePublic(selectedSession->target.threadId);
-    const auto id = submit({std::string(bot), std::string(request), destination.environmentId, destination.projectId, routing.at("config")},
-                           messageId, reference ? &*reference : nullptr);
+    const auto& destination = destinations.primary;
+    const auto id =
+        submit({std::string(bot), std::string(request), destination.environmentId, destination.projectId, routing.at("config")}, messageId,
+               reference ? &*reference : nullptr, TaskSource::request, {}, requester ? std::optional{requester->id} : std::nullopt);
     auto task = taskRecords.load(id);
     if (!destination.gatewayEnvironmentId.empty() && destination.gatewayEnvironmentId != destination.environmentId)
         task.gatewayEnvironmentId = destination.gatewayEnvironmentId;
@@ -1054,6 +1057,9 @@ WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.
             task.pendingInstructions.push_back(std::move(item));
         }
     }
+    if (!doneWhen.empty()) task.criteriaProposal = TaskCriteriaProposal{secretStorage.redactor(bot).text(std::string(doneWhen)), messageId};
+    if (!destinations.targets.empty()) task.destinations = destinations.targets;
+    if (!destinations.commit.empty()) task.requestedCommit = destinations.commit;
     taskRecords.save(task);
     return id;
 }

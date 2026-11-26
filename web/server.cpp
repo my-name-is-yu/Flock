@@ -13,6 +13,7 @@
 #include "flock/task_target.hpp"
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
+#include "flock/suggested_tasks.hpp"
 #include "flock/web.hpp"
 #include "change_feed.hpp"
 #include "embedded_assets.hpp"
@@ -393,6 +394,8 @@ public:
         server_.Post("/api/bots/pause", [this](const Request& req, Response& res) { setBotPaused(req, res); });
         server_.Post("/api/messages", [this](const Request& req, Response& res) { mutate(req, res, Mutation::Message); });
         server_.Post("/api/operations", [this](const Request& req, Response& res) { mutate(req, res, Mutation::Operation); });
+        for (const auto path : {"/api/suggested-tasks/start", "/api/suggested-tasks/dismiss"})
+            server_.Post(path, [this](const Request& req, Response& res) { mutateSuggestions(req, res); });
 
         const auto bound = port ? (server_.bind_to_port(loopback, static_cast<int>(port)) ? static_cast<int>(port) : -1)
                                 : server_.bind_to_any_port(loopback);
@@ -784,6 +787,42 @@ private:
         const auto history =
             Policy{store_}.redactSecrets(bot, web::peerConversation(store_, bot, peer, before, anchor, verifiedViewer(callbacks_, actor)));
         json(res, 200, Policy{store_}.redactSecrets(peer, history));
+    }
+
+    void mutateSuggestions(const Request& req, Response& res) {
+        if (req.body.size() > web::maxStandardPayload) return error(res, 413, "payload_too_large");
+        const auto body = Json::parse(req.body, nullptr, false);
+        if (!body.is_object()) return error(res, 400, "invalid_json");
+        try {
+            const auto bot = requiredText(body, "botId", 1024);
+            const auto actor = web::person(callbacks_, req);
+            if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) return error(res, 403, "access_denied");
+            if (!botById(bots(), bot)) return error(res, 404, "bot_not_found");
+            SuggestedTasks suggestions(store_);
+            Json receipt{{"ok", true}};
+            if (req.path == "/api/suggested-tasks/dismiss")
+                suggestions.dismiss(actor, bot, bodyId(body, "id"));
+            else {
+                const auto items = body.find("items");
+                if (items == body.end() || !items->is_array() || items->empty() || items->size() > maxSuggestedTasks)
+                    return error(res, 400, "invalid_suggestions");
+                std::vector<SuggestedTaskStart> starts;
+                for (const auto& item : *items)
+                    starts.push_back({bodyId(item, "id"),
+                                      item.contains("request") ? requiredText(item, "request", limits::messages::maxBodyBytes) : ""});
+                receipt = suggestions.start(actor, bot, bodyId(body, "sourceMessageId"), starts, callbacks_.intake);
+            }
+            changes_.rescan();
+            json(res, 200, receipt);
+        } catch (const InputError& e) {
+            error(res, 400, e.what());
+        } catch (const DecisionDenied&) {
+            error(res, 403, "access_denied");
+        } catch (const BotPaused& e) {
+            json(res, 409, {{"error", "bot_paused"}, {"message", e.what()}});
+        } catch (const Conflict&) {
+            error(res, 409, "suggestion_conflict");
+        }
     }
 
     void mutate(const Request& req, Response& res, Mutation mutation) {

@@ -93,7 +93,7 @@ struct Runtime::Impl {
                    options.intake, options.requireT3Connection, workers.stopToken()),
           decisions(storage.database, storage.conversationTurns, storage.gitStorage, storage.journalStorage, storage.peerStorage,
                     storage.secretStorage, storage.taskEvents, storage.taskRecords, storage.waitStorage, updates, reports, history,
-                    peerExchanges, dispatch, options.sessionRead, options.gitHost.get()),
+                    peerExchanges, dispatch, options.sessionRead, options.gitHost.get(), storage.suggestions, storage.taskRouting, t3),
           taskTurn(storage.database, storage.gitStorage, storage.modelCalls, storage.peerStorage, storage.secretStorage, storage.taskEvents,
                    storage.taskRecords, storage.taskRouting, storage.waitStorage, storage.memoryStorage, model, soul, options.clock,
                    options.gitHost.get(), options.sessionRead, workers.stopToken(), updates, reports, history, peerExchanges, runs, prompts,

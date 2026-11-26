@@ -19,6 +19,10 @@ class PeerStorage;
 class SecretStorage;
 class TaskEvents;
 class TaskRecords;
+class SuggestionStorage;
+class TaskRouting;
+class T3;
+struct LinkedTaskDestinations;
 class WaitStorage;
 
 class runtime::TaskDecisions {
@@ -26,7 +30,8 @@ public:
     TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage, JournalStorage& journalStorage,
                   PeerStorage& peerStorage, SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,
                   WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
-                  PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead, GitHost* gitHost);
+                  PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead, GitHost* gitHost,
+                  SuggestionStorage&, TaskRouting&, T3&);
 
     bool canComplete(const TaskData& task, const Json& event) const;
     void rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision, std::string_view message,
@@ -36,7 +41,7 @@ public:
     bool resumeGitApproval(const TaskData& task);
 private:
     void acceptReplyOrCompletion(const TaskData& snapshot, const Json& event, const TaskDecision& decision);
-    void complete(TaskData& current, const Json& event, const TaskDecision& decision);
+    void complete(TaskData& current, const Json& event, const TaskDecision& decision, const LinkedTaskDestinations&);
     CompletionProvenance completionProvenance(const TaskData& task, const Json& event);
 
     Database& database;
@@ -55,5 +60,8 @@ private:
     OutboxDispatch& dispatch;
     const std::string& sessionRead;
     GitHost* gitHost;
+    SuggestionStorage& suggestions;
+    TaskRouting& routing;
+    T3& t3;
 };
 }

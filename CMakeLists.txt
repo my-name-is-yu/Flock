@@ -70,7 +70,7 @@ function(flock_fetch_cmark)
 endfunction()
 flock_fetch_cmark()
 
-add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/journal.cpp src/task_storage.cpp src/task_context.cpp src/task_interaction.cpp src/wait.cpp src/outbox.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
+add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/journal.cpp src/task_storage.cpp src/task_context.cpp src/task_interaction.cpp src/wait.cpp src/outbox.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp src/suggested_tasks.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/runtime_maintenance.cpp src/runtime_task_scheduler.cpp src/runtime_lifecycle.cpp
@@ -92,7 +92,8 @@ add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp src/git_followup.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
-target_sources(flock_core PRIVATE src/journal_conversation.cpp src/journal_peer.cpp src/journal_task.cpp src/peer_storage.cpp)
+target_sources(flock_core PRIVATE src/journal_conversation.cpp src/journal_peer.cpp src/journal_task.cpp src/peer_storage.cpp
+                                  src/suggested_tasks_storage.cpp)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
 else()

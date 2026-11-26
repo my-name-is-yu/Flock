@@ -12,6 +12,7 @@
 #include "flock/board_inbox.hpp"
 #include "database.hpp"
 #include "policy_approvals.hpp"
+#include "suggested_tasks_storage.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
@@ -98,7 +99,7 @@ PolicyOrigin PolicyApprovals::taskPolicyOrigin(const TaskData& task) {
     for (const auto& instruction : task.pendingInstructions) source = std::max(source, instruction.messageId);
     PolicyOrigin origin{task.botId, {}, {}, source, 0, id, task.currentRevision.value_or(0), task.generation, !source};
     if (!source) origin.scope = "task/" + std::to_string(id);
-    if (source) {
+    if (source && (source != task.sourceMessageId || task.requestMessageId())) {
         const auto message = conversationTurns.loadTurnMessage(source);
         const auto fromMessage = policyOrigin(message);
         origin.scope = fromMessage.scope;
@@ -107,6 +108,7 @@ PolicyOrigin PolicyApprovals::taskPolicyOrigin(const TaskData& task) {
         if (message.bot != origin.bot && !origin.requester.empty()) origin.scope = "task/" + std::to_string(id);
     } else if (const auto& requester = task.requester; requester && !requester->empty()) {
         origin.requester = *requester;
+        origin.scope = "task/" + std::to_string(id);
         origin.background = false;
     } else if (task.trigger) {
         auto owner = database.query("SELECT person FROM bot_owners WHERE bot=?", {origin.bot});
@@ -208,6 +210,21 @@ WHERE a.status IN ('pending','approved')
 
 void PolicyApprovals::consumePolicyApproval(std::string_view operation) {
     database.exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'", {operation});
+}
+
+ApprovalGate PolicyApprovals::approveTaskLaunch(const TaskData& task, const TaskRoute& route, std::string_view operation,
+                                                const Json& payload, Seconds now, bool claim) {
+    const Resource resource{Action::environment_launch, route.environmentId};
+    if (task.requester && !task.lastRun && !task.newSessionRequired && suggestions.coversLaunch(task.id, route)) {
+        auto actor = Person{*task.requester, *task.requester == localOwner.id};
+        if (webIdentity.resolve && permissions.requiresIdentity()) {
+            const auto role = webIdentity.resolve(actor.id);
+            actor = role ? Person{actor.id, *role} : Person{};
+        }
+        if (!permissions.allows(actor, Action::bot_decide, task.botId)) return ApprovalGate::denied;
+        if (!permissions.forbidden(task.botId, resource.action, resource.target)) return ApprovalGate::allow;
+    }
+    return approveAction(taskPolicyOrigin(task), resource, operation, payload, now, claim);
 }
 
 ApprovalGate PolicyApprovals::approveAction(const PolicyOrigin& origin, const Resource& resource, std::string_view operation,

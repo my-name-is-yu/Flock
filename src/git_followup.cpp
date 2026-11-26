@@ -77,8 +77,8 @@ LIMIT 2
 
     std::string requester;
     std::string requesterBot = message.bot;
-    if (task.sourceMessageId) {
-        const auto source = conversationTurns.loadTurnMessage(*task.sourceMessageId);
+    if (const auto messageId = task.requestMessageId()) {
+        const auto source = conversationTurns.loadTurnMessage(*messageId);
         requesterBot = source.bot;
         if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
             const auto actor = conversationTurns.turnActor(source);

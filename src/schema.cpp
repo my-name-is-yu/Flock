@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 16;
+constexpr Id schemaVersion = 17;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -156,6 +156,18 @@ CREATE TABLE conversation_turns(
   pause_id INTEGER UNIQUE REFERENCES journal(id), reserved_attempt INTEGER,
   reply_id INTEGER UNIQUE REFERENCES journal(id));
 CREATE INDEX conversation_turns_running ON conversation_turns(message_id) WHERE status='running';
+CREATE TABLE suggested_tasks(
+  id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, source_message_id INTEGER NOT NULL REFERENCES journal(id),
+  source_task_id INTEGER REFERENCES tasks(id), request TEXT NOT NULL, request_key TEXT NOT NULL,
+  done_when TEXT NOT NULL, reason TEXT NOT NULL, destination_label TEXT NOT NULL,
+  destinations TEXT NOT NULL CHECK(json_type(destinations)='object'),
+  destination_key TEXT NOT NULL CHECK(json_type(destination_key)='array'),
+  status TEXT NOT NULL CHECK(status IN ('suggested','started','dismissed')),
+  task_id INTEGER UNIQUE REFERENCES tasks(id),
+  CHECK((status='started')=(task_id IS NOT NULL)));
+CREATE INDEX suggested_tasks_card ON suggested_tasks(bot_id,source_message_id,id);
+CREATE INDEX suggested_tasks_dismissed ON suggested_tasks(bot_id,request_key COLLATE NOCASE,destination_key)
+  WHERE status='dismissed';
 CREATE VIEW conversation_input_status AS
 SELECT t.message_id,
   CASE t.status WHEN 'paused' THEN 'needs_you'
@@ -185,7 +197,7 @@ CREATE TABLE session_message_waits(
 CREATE TABLE task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   number INTEGER NOT NULL, intent TEXT NOT NULL, done_when TEXT NOT NULL,
-  source_message_id INTEGER REFERENCES messages(id),
+  source_message_id INTEGER REFERENCES journal(id),
   UNIQUE(task_id,number));
 CREATE INDEX session_message_interrupts_due ON session_message_waits(interrupt_at) WHERE interrupt_at IS NOT NULL;
 CREATE INDEX session_message_missing_targets ON session_message_waits(task_id,action_id) WHERE session_missing=1;

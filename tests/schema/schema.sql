@@ -127,6 +127,7 @@ VALUES
     ('index', 'sqlite_autoindex_session_queue_cancellations_1', 'session_queue_cancellations', NULL),
     ('index', 'sqlite_autoindex_session_read_refs_1', 'session_read_refs', NULL),
     ('index', 'sqlite_autoindex_session_read_refs_2', 'session_read_refs', NULL),
+    ('index', 'sqlite_autoindex_suggested_tasks_1', 'suggested_tasks', NULL),
     ('index', 'sqlite_autoindex_t3_connected_environments_1', 't3_connected_environments', NULL),
     ('index', 'sqlite_autoindex_t3_events_1', 't3_events', NULL),
     ('index', 'sqlite_autoindex_task_revisions_1', 'task_revisions', NULL),
@@ -134,6 +135,9 @@ VALUES
     ('index', 'sqlite_autoindex_workflow_dependencies_1', 'workflow_dependencies', NULL),
     ('index', 'sqlite_autoindex_workflow_stages_1', 'workflow_stages', NULL),
     ('index', 'sqlite_autoindex_workflow_stages_2', 'workflow_stages', NULL),
+    ('index', 'suggested_tasks_card', 'suggested_tasks', 'CREATE INDEX suggested_tasks_card ON suggested_tasks(bot_id,source_message_id,id)'),
+    ('index', 'suggested_tasks_dismissed', 'suggested_tasks', 'CREATE INDEX suggested_tasks_dismissed ON suggested_tasks(bot_id,request_key COLLATE NOCASE,destination_key)
+  WHERE status=''dismissed'''),
     ('index', 'tasks_bot', 'tasks', 'CREATE INDEX tasks_bot ON tasks(bot_id,id DESC)'),
     ('index', 'tasks_route', 'tasks', 'CREATE INDEX tasks_route ON tasks(environment_id,project_id,id)
   WHERE state NOT IN (''completed'',''cancelled'')'),
@@ -416,6 +420,15 @@ VALUES
   environment TEXT NOT NULL, thread TEXT NOT NULL, payload TEXT NOT NULL,
   UNIQUE(bot,kind,environment,thread,payload))'),
     ('table', 'sqlite_sequence', 'sqlite_sequence', 'CREATE TABLE sqlite_sequence(name,seq)'),
+    ('table', 'suggested_tasks', 'suggested_tasks', 'CREATE TABLE suggested_tasks(
+  id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, source_message_id INTEGER NOT NULL REFERENCES journal(id),
+  source_task_id INTEGER REFERENCES tasks(id), request TEXT NOT NULL, request_key TEXT NOT NULL,
+  done_when TEXT NOT NULL, reason TEXT NOT NULL, destination_label TEXT NOT NULL,
+  destinations TEXT NOT NULL CHECK(json_type(destinations)=''object''),
+  destination_key TEXT NOT NULL CHECK(json_type(destination_key)=''array''),
+  status TEXT NOT NULL CHECK(status IN (''suggested'',''started'',''dismissed'')),
+  task_id INTEGER UNIQUE REFERENCES tasks(id),
+  CHECK((status=''started'')=(task_id IS NOT NULL)))'),
     ('table', 't3_connected_environments', 't3_connected_environments', 'CREATE TABLE t3_connected_environments(environment_id TEXT PRIMARY KEY)'),
     ('table', 't3_connector', 't3_connector', 'CREATE TABLE t3_connector(
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
@@ -426,7 +439,7 @@ VALUES
     ('table', 'task_revisions', 'task_revisions', 'CREATE TABLE task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   number INTEGER NOT NULL, intent TEXT NOT NULL, done_when TEXT NOT NULL,
-  source_message_id INTEGER REFERENCES messages(id),
+  source_message_id INTEGER REFERENCES journal(id),
   UNIQUE(task_id,number))'),
     ('table', 'task_run_destinations', 'task_run_destinations', 'CREATE TABLE task_run_destinations(
   task_id INTEGER NOT NULL REFERENCES tasks(id), position INTEGER NOT NULL,

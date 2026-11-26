@@ -22,6 +22,7 @@ TaskState decodeTaskState(Id id, std::string_view);
 TaskData decodeTaskPayload(TaskData, std::string_view data);
 Json encodeTaskPayload(const TaskData&);
 Json encodeTask(const TaskData&);
+RunTarget decodeRunTarget(const Json&, const RecordDecoder&);
 Json runTargetJson(const RunTarget&);
 Json runTargetsJson(std::span<const RunTarget>);
 Json destinationRunSummaryJson(const DestinationRun&);

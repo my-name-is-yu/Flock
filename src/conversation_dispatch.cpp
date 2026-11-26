@@ -303,7 +303,8 @@ CallOutcome ConversationStorage::executeLocalConversationCall(const Message& mes
             result = toolFailure("The selected T3 Session could not be verified. Search for it again.");
         }
     }
-    if ((decision.tool == "start_task" || decision.tool == "change_task") && !selectedSession && result.is_null())
+    if ((decision.tool == "start_task" || decision.tool == "change_task" || decision.tool == "suggest_tasks") && !selectedSession &&
+        result.is_null())
         linked = taskRouting.discoverLinkedTaskDestinations(ctx.t3, message.bot);
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);

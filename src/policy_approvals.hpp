@@ -21,6 +21,8 @@ struct InboxTarget;
 struct Person;
 struct Resource;
 struct TaskData;
+struct TaskRoute;
+class SuggestionStorage;
 struct WebIdentityState;
 
 namespace conversation {
@@ -34,10 +36,11 @@ class PolicyApprovals {
 public:
     PolicyApprovals(Database& database, const SecretStorage& secretStorage, const WebIdentityState& webIdentity, TaskRecords& taskRecords,
                     WaitStorage& waitStorage, Policy& permissions, ConversationStorage& conversationTurns,
-                    BotLifecycleStorage& botLifecycle, ChannelStorage& channelStorage, InboxStorage& inboxStorage)
+                    BotLifecycleStorage& botLifecycle, ChannelStorage& channelStorage, InboxStorage& inboxStorage,
+                    const SuggestionStorage& suggestions)
         : database(database), secretStorage(secretStorage), webIdentity(webIdentity), taskRecords(taskRecords), waitStorage(waitStorage),
           permissions(permissions), conversationTurns(conversationTurns), botLifecycle(botLifecycle), channelStorage(channelStorage),
-          inboxStorage(inboxStorage) {}
+          inboxStorage(inboxStorage), suggestions(suggestions) {}
 
     Seconds now() const { return clock(); }
     void setClock(const std::function<Seconds()>& value) { clock = value; }
@@ -45,6 +48,8 @@ public:
     PolicyOrigin taskPolicyOrigin(const TaskData&);
     ApprovalGate approveAction(const PolicyOrigin&, const Resource&, std::string_view operation, const Json& payload, Seconds now,
                                bool claim = true, ApprovalWait = ApprovalWait::pause);
+    ApprovalGate approveTaskLaunch(const TaskData&, const TaskRoute&, std::string_view operation, const Json& payload, Seconds now,
+                                   bool claim);
     void consumePolicyApproval(std::string_view operation);
     void settlePolicyApprovals(std::optional<Seconds> now = {});
     void decidePolicyApproval(const Person&, const InboxTarget&, std::string_view);
@@ -64,6 +69,7 @@ private:
     BotLifecycleStorage& botLifecycle;
     ChannelStorage& channelStorage;
     InboxStorage& inboxStorage;
+    const SuggestionStorage& suggestions;
     std::function<Seconds()> clock = unixTime;
 };
 }

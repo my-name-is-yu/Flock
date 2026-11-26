@@ -34,6 +34,7 @@
 #include "task_events.hpp"
 #include "task_records.hpp"
 #include "task_routing.hpp"
+#include "suggested_task_routing.hpp"
 #include "wait_storage.hpp"
 
 #include <algorithm>
@@ -156,6 +157,10 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
     if (!task.runTargets().empty()) {
         summary["runTargets"] = runTargetsJson(task.runTargets());
         if (task.requestedCommit) summary["requestedCommit"] = *task.requestedCommit;
+    }
+    if (std::ranges::find(tools, "complete") != tools.end()) {
+        std::lock_guard lock(database.mutex);
+        summary["environments"] = taskRouting.destinationsForModel(task.botId, suggestionRouting(task));
     }
     if (task.sourceMessageId) summary["sourceMessageId"] = *task.sourceMessageId;
     if (task.selectedSession && !task.newSessionRequired) summary["usesSelectedSession"] = true;

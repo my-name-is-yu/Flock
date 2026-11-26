@@ -61,6 +61,7 @@ public:
     ProjectCatalog readProjectCatalog(T3&, std::string_view bot, std::string_view environment, bool requireConnection);
     bool applyProjectCatalog(TaskData& task, ProjectCatalog catalog);
     std::set<std::string> registeredT3Environments(std::string_view bot);
+    Json destinationsForModel(std::string_view bot, const Json& routing, const LinkedTaskDestinations& linked = {});
     std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {});
     TaskRoute taskRoute(std::string_view bot, const Json& routing, std::string_view name, const TaskData* movingTask = nullptr,
                         const LinkedTaskDestinations* linked = nullptr);

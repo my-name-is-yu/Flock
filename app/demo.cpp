@@ -28,10 +28,25 @@ class DemoModel final : public Model {
                 const auto tool = last.value("tool", "");
                 std::string text = !ok                              ? "The demo could not apply that request."
                                    : tool == "answer_task_question" ? "I passed your answer to the task."
+                                   : tool == "suggest_tasks"        ? "I found a few follow-ups you can start when you’re ready."
                                    : tool == "read_result"          ? "The demo result records successful completion of simulated work. "
                                                                       "It contains no implementation details."
                                                                     : "I queued your request.";
                 return {{{"reply", {{"text", text}}, {}}}};
+            }
+            if (in.event.value("text", "") == "Suggest follow-up tasks" && std::ranges::find(in.tools, "suggest_tasks") != in.tools.end()) {
+                return {{{"suggest_tasks",
+                          {{"items", Json::array({{{"request", "Guard empty invoices in Billing"},
+                                                   {"reason", "Billing reads the first line item before checking that one exists."}},
+                                                  {{"request", "Fix the retry test in Payments"},
+                                                   {"reason", "The test waits on a timer and sometimes runs before the retry."}},
+                                                  {{"request", "Remove the old checkout fixture"},
+                                                   {"reason", "Checkout now uses the shared fixture in every test."}},
+                                                  {{"request", "Add a regression test for duplicate refunds"},
+                                                   {"reason", "The webhook can deliver a refund event twice."}},
+                                                  {{"request", "Check the export path for the same null check"},
+                                                   {"reason", "Invoice exports use the same line-item parser as Billing."}}})}},
+                          {}}}};
             }
             const auto& reply = in.event.at("replyTo");
             if (reply.is_object() && reply.value("kind", "") == "task_question" && reply.value("current", false)) {

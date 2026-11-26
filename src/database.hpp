@@ -36,6 +36,7 @@ enum class JournalKind {
     conversation_message,
     conversation_reply,
     conversation_budget_approved,
+    suggested_tasks_changed,
     completed,
     cancel_requested,
     cancelled,

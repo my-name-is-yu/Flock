@@ -18,6 +18,7 @@ import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQues
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 import { mountConversationFind } from '/conversation-find.mjs';
 import { createRecurringRequests } from '/recurring-requests.js';
+import { createSuggestedTasksCard, updateSuggestedTasksCard } from '/suggested-tasks.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -2154,8 +2155,10 @@ function conversationRows(data, events, keep, source) {
     const request = ['request', 'conversation_message'].includes(event.kind);
     const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
+    const { suggestedTasks, ...messageData } = event.data;
+    const message = suggestedTasks ? { ...event, data: messageData } : event;
     const row = keep(`event-${report?.id ?? event.id}`,
-      [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
+      [message, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
         place.groupStart, place.taskStart, place.afterQuestion, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         waitDecision && decisions.busy(waitDecision),
@@ -2164,11 +2167,12 @@ function conversationRows(data, events, keep, source) {
         request ? timeline.parallelTasks.get(event.taskId) : null,
         event.kind === 'memory_remembered' && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
-      () => eventCard(event, timeline, place, report));
+      () => eventCard(message, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
     row.classList.toggle('group-continues', !place.groupEnd);
     row.classList.toggle('conversation-source-target', event.id === source?.id);
     rows.push(row);
+    if (suggestedTasks?.length) rows.push(suggestedTasksRow(keep, event.id, suggestedTasks, timeline.canDecide));
     for (const item of approvals) {
       if (!anchoredToWait.has(item.itemId) && item.conversationEventId === event.id)
         rows.push(keep(`policy-${item.itemId}`, [item, decisions.busy(item)], () => decisions.inlinePolicyCard(item)));
@@ -2201,6 +2205,27 @@ function conversationRows(data, events, keep, source) {
     rows.push(row);
   }
   return rows;
+}
+
+function suggestedTasksRow(keep, sourceMessageId, items, canAct) {
+  const card = keep(`suggested-tasks-${sourceMessageId}`, canAct, () => {
+    const context = view;
+    const mutate = async (path, body) => {
+      try {
+        await api(`suggested-tasks/${path}`, { botId: context.id, ...body });
+      } finally {
+        await context.refresh();
+      }
+    };
+    return createSuggestedTasksCard({
+      canAct,
+      start: selected => mutate('start', { sourceMessageId, items: selected }),
+      dismiss: id => mutate('dismiss', { id }),
+      openTask: id => void showConversationMessage(context, id, { preferLoaded: true }),
+    });
+  });
+  updateSuggestedTasksCard(card, items);
+  return card;
 }
 
 function setNotice(context, text, isError = false) {

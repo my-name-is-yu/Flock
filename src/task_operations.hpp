@@ -23,6 +23,7 @@ class SecretStorage;
 class TaskEvents;
 class TaskRecords;
 class TaskRouting;
+struct StartDestinations;
 class WaitStorage;
 struct Person;
 struct Intake;
@@ -48,8 +49,9 @@ public:
 
     void recordTaskBlocker(TaskData&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(TaskData&, Id waitId);
-    Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute&, Id messageId,
-                             const std::optional<OutboxSource>& source, bool resume, const WorkSession* selectedSession = nullptr);
+    Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const StartDestinations&, Id messageId,
+                             std::string_view doneWhen, const std::optional<OutboxSource>& source, bool resume,
+                             const WorkSession* selectedSession = nullptr, const Person* requester = nullptr);
     bool acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, std::optional<OutboxSource> source,
                            const TaskChange* change);
     Id submitRequest(const Intake&, const Person* requester);

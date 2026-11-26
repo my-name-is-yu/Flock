@@ -37,6 +37,7 @@
 #include "task_events.hpp"
 #include "journal_storage.hpp"
 #include "store_access.hpp"
+#include "suggested_task_routing.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
 #include "journal_peer.hpp"
@@ -205,7 +206,7 @@ Json ConversationIntake::receive(const Person& actor, const Intake& routing, std
 Conversations::Conversations(Store& store)
     : database_(Database::of(store)), context_(StoreAccess::get(store).conversationContextStorage),
       memory_(StoreAccess::get(store).memoryStorage), modelCalls_(StoreAccess::get(store).modelCalls),
-      channels_(StoreAccess::get(store).channelStorage) {}
+      channels_(StoreAccess::get(store).channelStorage), suggestions_(StoreAccess::get(store).suggestions) {}
 
 Memory::Memory(Store& store) : database_(Database::of(store)), memory_(StoreAccess::get(store).memoryStorage) {}
 
@@ -265,6 +266,10 @@ WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
 UNION
 SELECT j.conversation_bot_id,j.wait_message_id FROM journal j
 WHERE j.id>?1 AND j.id<=?2 AND j.kind='conversation_budget_approved'
+  AND (?3='' OR j.conversation_bot_id=?3)
+UNION
+SELECT j.conversation_bot_id,j.message_id FROM journal j
+WHERE j.id>?1 AND j.id<=?2 AND j.kind='suggested_tasks_changed'
   AND (?3='' OR j.conversation_bot_id=?3)
 ORDER BY 1,2
 )SQL",
@@ -399,9 +404,10 @@ Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSo
     if (sourceKind == TaskSource::request) {
         Json entry = {{"text", request},
                       {"messageId", sourceMessageId},
-                      {"source", sourceMessageId ? "conversation"
-                                 : task.trigger  ? "automation"
-                                                 : "manual"}};
+                      {"source", sourceMessageId && task.requester.has_value() ? "suggestion"
+                                 : sourceMessageId                             ? "conversation"
+                                 : task.trigger                                ? "automation"
+                                                                               : "manual"}};
         if (task.trigger) entry["trigger"] = taskTriggerJson(*task.trigger);
         database.writeJournal(id, "request", entry);
     }
@@ -610,7 +616,7 @@ WITH visible AS NOT MATERIALIZED (
   WHERE id<=?2
     AND (?3=0 OR kind IN ('conversation_reply','report','completed','pr_review_requested')
          OR (kind='waiting' AND wait_reason IN ('user_question','model_failure')))
-    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','conversation_budget_approved','session_participation_stop'))
+    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','conversation_budget_approved','session_participation_stop','suggested_tasks_changed'))
       OR (conversation_bot_id IS NULL
         AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')
@@ -651,7 +657,9 @@ SELECT page.id,page.task_id,page.time,page.kind,
                 AND d.task_id=i.task_id AND d.step=i.step
               )) FROM instructions i WHERE i.kind!='instruction_delivered'
             ) THEN 'true' ELSE 'false' END))) END,
-  channel.message_id IS NOT NULL,w.id,w.reason,w.data
+  channel.message_id IS NOT NULL,w.id,w.reason,w.data,
+  EXISTS(SELECT 1 FROM suggested_tasks s WHERE s.bot_id=?1 AND s.source_message_id=page.id)
+    AND page.kind IN ('conversation_reply','completed')
 FROM page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN conversation_input_status input ON input.message_id=m.id
 LEFT JOIN waits w ON page.kind='user_answer'
@@ -665,6 +673,7 @@ ORDER BY page.id DESC)SQL",
         if (event.at("kind") == "memory_remembered") memory_.projectMemoryNotice(bot, event.at("data"));
         if (rows.number(5)) event["data"].update(channels_.channelContext(rows.number(0), bot, nullptr, viewer));
         if (rows.number(6)) event["data"]["question"] = decodeWaitRow(rows, 6).text;
+        if (rows.number(9)) event["data"]["suggestedTasks"] = suggestedTaskRows(suggestions_.forCard(bot, rows.number(0)));
         result.push_back(std::move(event));
     }
     std::reverse(result.begin(), result.end());

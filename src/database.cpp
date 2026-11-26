@@ -35,6 +35,7 @@ constexpr std::array kinds{
     std::pair{JournalKind::conversation_message, std::string_view{"conversation_message"}},
     std::pair{JournalKind::conversation_reply, std::string_view{"conversation_reply"}},
     std::pair{JournalKind::conversation_budget_approved, std::string_view{"conversation_budget_approved"}},
+    std::pair{JournalKind::suggested_tasks_changed, std::string_view{"suggested_tasks_changed"}},
     std::pair{JournalKind::completed, std::string_view{"completed"}},
     std::pair{JournalKind::cancel_requested, std::string_view{"cancel_requested"}},
     std::pair{JournalKind::cancelled, std::string_view{"cancelled"}},

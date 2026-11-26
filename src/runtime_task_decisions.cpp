@@ -15,6 +15,9 @@
 #include "flock/task_interaction.hpp"
 #include "flock/outbox_instruction.hpp"
 #include "conversation_turns.hpp"
+#include "conversation_storage.hpp"
+#include "suggested_task_routing.hpp"
+#include "task_routing.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "git_storage.hpp"
@@ -50,11 +53,12 @@ runtime::TaskDecisions::TaskDecisions(Database& database, ConversationStorage& c
                                       JournalStorage& journalStorage, PeerStorage& peerStorage, SecretStorage& secretStorage,
                                       TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage, TaskUpdates& updates,
                                       RunReports& reports, SessionHistory& history, PeerExchanges& peerExchanges, OutboxDispatch& dispatch,
-                                      const std::string& sessionRead, GitHost* gitHost)
+                                      const std::string& sessionRead, GitHost* gitHost, SuggestionStorage& suggestions,
+                                      TaskRouting& routing, T3& t3)
     : database(database), conversationTurns(conversationTurns), gitStorage(gitStorage), journalStorage(journalStorage),
       peerStorage(peerStorage), secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords), waitStorage(waitStorage),
       updates(updates), reports(reports), history(history), peerExchanges(peerExchanges), dispatch(dispatch), sessionRead(sessionRead),
-      gitHost(gitHost) {}
+      gitHost(gitHost), suggestions(suggestions), routing(routing), t3(t3) {}
 
 bool runtime::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
     if (task.replanning) return false;
@@ -87,6 +91,13 @@ void runtime::TaskDecisions::rejectDecision(const TaskData& task, const Json& ev
 }
 
 void runtime::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, const Json& event, const TaskDecision& decision) {
+    LinkedTaskDestinations linked;
+    if (decision.tool == "complete") {
+        const auto items = decision.args.find("suggestedTasks");
+        if (items != decision.args.end() && items->is_array() &&
+            std::ranges::any_of(*items, [](const Json& item) { return item.contains("environment") || item.contains("environments"); }))
+            linked = routing.discoverLinkedTaskDestinations(t3, snapshot.botId);
+    }
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);
     const auto id = snapshot.id;
@@ -98,12 +109,13 @@ void runtime::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, c
         if (peerExchanges.replyPeer(current, event, decision, actionId())) updates.saveTask(current);
     } else {
         if (peerStorage.peerExchange(id) || !canComplete(current, event)) return;
-        complete(current, event, decision);
+        complete(current, event, decision, linked);
     }
     transaction.commit();
 }
 
-void runtime::TaskDecisions::complete(TaskData& current, const Json& event, const TaskDecision& decision) {
+void runtime::TaskDecisions::complete(TaskData& current, const Json& event, const TaskDecision& decision,
+                                      const LinkedTaskDestinations& linked) {
     const auto& pending = current.pendingInstructions;
     auto ids = Json::array();
     for (const auto& item : pending) ids.push_back({{"messageId", item.messageId}, {"step", item.step}});
@@ -117,10 +129,14 @@ void runtime::TaskDecisions::complete(TaskData& current, const Json& event, cons
     current.pendingInstructions.clear();
     current.newSessionRequired = false;
     current.state = TaskState::completed;
-    journalStorage.journal(current.id,
-                           CompletionEntry{field(decision.args, "report"), current.currentRevision,
-                                           TaskCompletion{decision.reason, current.doneWhen, completionProvenance(current, event)}});
+    const auto completionId = journalStorage.journal(
+        current.id, CompletionEntry{field(decision.args, "report"), current.currentRevision,
+                                    TaskCompletion{decision.reason, current.doneWhen, completionProvenance(current, event)}});
     updates.saveTask(current);
+    if (const auto items = decision.args.find("suggestedTasks"); items != decision.args.end()) {
+        const conversation::Message source{.id = completionId, .bot = current.botId, .routing = suggestionRouting(current)};
+        suggestTasks(suggestions, routing, source, *items, linked, &current);
+    }
 }
 
 void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision,
@@ -161,7 +177,7 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         {"delegate", {"instruction", "doneWhen"}},
         {"answer_session_question", {"requestId", "answers"}},
         {"follow_up", {"instruction"}},
-        {"complete", {"report", "acknowledgedInstructions"}},
+        {"complete", {"report", "acknowledgedInstructions", "suggestedTasks"}},
         {"ask_user", {"question", "choices"}},
         {"session_read", {"threadId", "runId", "itemId", "cursor", "view", "offset"}},
         {"send_bot_message", {"botId", "kind", "text", "doneWhen", "forwardUserMessage"}},

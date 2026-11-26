@@ -22,6 +22,7 @@
 #include "session_message_storage.hpp"
 #include "session_participation_storage.hpp"
 #include "session_read_storage.hpp"
+#include "suggested_tasks_storage.hpp"
 #include "task_events.hpp"
 #include "task_operations.hpp"
 #include "task_records.hpp"
@@ -66,6 +67,7 @@ struct Store::Impl {
                                           sessionMessageStorage,
                                           sessionParticipationStorage,
                                           sessionReadStorage,
+                                          suggestions,
                                           taskOperations,
                                           taskRecords,
                                           taskRouting,
@@ -101,6 +103,7 @@ struct Store::Impl {
     WaitStorage waitStorage{database, journalStorage, outboxStorage, peerStorage, modelCalls};
     TaskRecords taskRecords{database, journalStorage, outboxStorage, waitStorage};
     SecretStorage secretStorage{database, path.parent_path()};
+    SuggestionStorage suggestions{database, secretStorage};
     MemoryStorage memoryStorage;
     BotLifecycleStorage botLifecycle{database};
     AutomationStorage automationStorage;
@@ -124,8 +127,8 @@ struct Store::Impl {
                           sessionParticipationStorage};
     ChannelStorage channelStorage{database, path, permissions, webIdentity, journalStorage, conversationTurns, policyApprovals};
     LocalMachineStorage localMachineStorage{database, permissions, webIdentity, taskRecords};
-    PolicyApprovals policyApprovals{database,    secretStorage,     webIdentity,  taskRecords,    waitStorage,
-                                    permissions, conversationTurns, botLifecycle, channelStorage, inboxStorage};
+    PolicyApprovals policyApprovals{database,          secretStorage, webIdentity,    taskRecords,  waitStorage, permissions,
+                                    conversationTurns, botLifecycle,  channelStorage, inboxStorage, suggestions};
     SessionParticipationStorage sessionParticipationStorage{database,
                                                             path,
                                                             secretStorage,

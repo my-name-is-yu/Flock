@@ -242,6 +242,8 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
                 if (suggestion.is_string()) details["suggestions"].push_back(suggestion);
         }
     }
+    if (const auto suggestions = data.find("suggestedTasks"); suggestions != data.end() && suggestions->is_array())
+        details["suggestedTasks"] = *suggestions;
     view["data"] = std::move(details);
     return view;
 }

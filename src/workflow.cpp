@@ -371,7 +371,8 @@ void WorkflowStorage::materializeWorkflowStages() {
             AND d.workflow_id=? AND d.stage_id=?)SQL",
                        {id, stage});
         const TaskRoute route{field(routing, "environmentId"), field(routing, "projectId")};
-        const auto taskId = operations_.startConversationTask(routing, bot, request, route, ready.number(4), std::nullopt, false);
+        const auto taskId = operations_.startConversationTask(routing, bot, request, StartDestinations{.primary = route}, ready.number(4),
+                                                              {}, std::nullopt, false);
         auto task = taskRecords_.load(taskId);
         task.workflow = TaskWorkflow{id, stage, input};
         task.sourceResultRefs = std::move(sources);
