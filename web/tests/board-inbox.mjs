@@ -116,10 +116,10 @@ async function exercise(mountBoardInbox) {
     'The layer did not open inside the conversation with an accessible title and usable composer');
   check(item.textContent.includes(prompt) && !item.textContent.includes(docs.prompt) && !item.querySelector('img,a') &&
     previous.disabled && !next.disabled, 'The first card displayed another Bot, unsafe markup, or invalid navigation');
-  check(choices().querySelector('legend').textContent === prompt && sendChoice().disabled && !selected(),
-    'The structured question did not start with a labeled, unselected radio group');
   check(panel.querySelector('.board-inbox-submeta')?.textContent.includes('Question for you'),
     'The panel named the question differently from the sidebar');
+  check(choices().querySelector('legend').textContent === prompt && sendChoice().disabled && !selected(),
+    'The structured question did not start with a labeled, unselected radio group');
 
   await browse(button('Show in conversation'));
   check(layer.hidden && !conversation.inert && sources.length === 1 && sources[0][0] === 'release' && sources[0][1] === 18,
