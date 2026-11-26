@@ -1,3 +1,7 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task.hpp"
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
 #include "fixtures.hpp"
 #include "../bots.hpp"
 #include "flock/tasks.hpp"
@@ -97,9 +101,9 @@ void parallelDestinations() {
     model.action = {"start_task",
                     {{"request", "Verify the release"}, {"environments", {"mini", "local"}}, {"commit", std::string(40, 'A')}},
                     "Use the requested destinations."};
-    Conversations(store).receive(localOwner, intake, "parallel-verification", "Verify the release on both Macs");
+    ConversationIntake(store).receive(localOwner, intake, "parallel-verification", "Verify the release on both Macs");
     runtime.runConversations();
-    const auto tasks = Tasks(store).tasks();
+    const auto tasks = TaskList(store).tasks();
     check(tasks.size() == 1 && t3.commands.empty(), "one conversation request must save exactly one task before dispatch");
     const auto& task = tasks.front().task;
     const Json expected = Json::array({{{"name", "mini"}, {"environmentId", "mini-env"}, {"projectId", "mini-project"}},
@@ -108,12 +112,12 @@ void parallelDestinations() {
           "the task must pin the selected canonical routes and normalized SHA");
 
     model.action.args["environments"] = {"local", "env-canonical"};
-    Conversations(store).receive(localOwner, intake, "duplicate-environment", "Verify again on both Macs");
+    ConversationIntake(store).receive(localOwner, intake, "duplicate-environment", "Verify again on both Macs");
     runtime.runConversations();
-    check(Tasks(store).tasks().size() == 1, "two aliases for one environment must not create a parallel task");
+    check(TaskList(store).tasks().size() == 1, "two aliases for one environment must not create a parallel task");
 
     model.action.args = {{"request", "Verify on the Mini"}, {"environment", "mini"}, {"commit", std::string(40, 'a')}};
-    Conversations(store).receive(localOwner, intake, "single-verification", "Verify on the Mini");
+    ConversationIntake(store).receive(localOwner, intake, "single-verification", "Verify on the Mini");
     runtime.runConversations();
     const auto singleNamed = Tasks(store).task(model.receipt.at("taskId"));
     check(model.receipt.value("ok", false) && singleNamed.task.projectId == "mini-project" &&
@@ -121,14 +125,14 @@ void parallelDestinations() {
               singleNamed.task.runTargets().front().route.environmentId == "mini-env",
           "a single named destination must retain optional verification and its saved route");
     model.action.args = {{"request", "Verify on the Mini"}, {"environments", Json::array({"mini"})}};
-    Conversations(store).receive(localOwner, intake, "single-array", "Verify on the Mini");
+    ConversationIntake(store).receive(localOwner, intake, "single-array", "Verify on the Mini");
     runtime.runConversations();
     const auto singleArray = Tasks(store).task(model.receipt.at("taskId"));
     check(singleArray.task.runTargets().size() == 1 && taskJson(singleArray).at("runTargets") == taskJson(singleNamed).at("runTargets"),
           "a one-item environments list must route like a named single destination");
     model.action.args = {
         {"request", "Resume the cancelled task"}, {"resume", true}, {"sourceResultMessageId", 1}, {"commit", std::string(40, 'a')}};
-    Conversations(store).receive(localOwner, intake, "resume-with-commit", "Verify the saved work again");
+    ConversationIntake(store).receive(localOwner, intake, "resume-with-commit", "Verify the saved work again");
     runtime.runConversations();
     check(!model.receipt.value("ok", true) && model.receipt.dump().find("Commit verification is not supported") != std::string::npos,
           "resume must explicitly reject optional commit verification when its saved destination cannot be verified");
@@ -138,7 +142,7 @@ void parallelDestinations() {
     for (const auto& target : task.runTargets()) {
         follower.environmentId = target.route.environmentId;
         follower.projectId = target.route.projectId;
-        const auto queued = Tasks(store).task(Tasks(store).submit(follower));
+        const auto queued = Tasks(store).task(TaskIntake(store).submit(follower));
         check(queued.blockedBy && queued.blockedBy->id == task.id,
               "a saved destination must reserve its project before dispatch creates an outbox action");
     }
@@ -152,17 +156,17 @@ void genericDestinationCounts() {
     Store store(temp.path / "state.db");
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     model.action = {"start_task", {{"request", "Run on the Mini"}, {"environments", {"mini"}}}, "Use the one selected destination."};
-    Conversations(store).receive(localOwner, intake, "single-route-work", "Run this on the Mini");
+    ConversationIntake(store).receive(localOwner, intake, "single-route-work", "Run this on the Mini");
     runtime.runConversations();
-    auto tasks = Tasks(store).tasks();
+    auto tasks = TaskList(store).tasks();
     check(tasks.size() == 1, "one destination must create one conversation task");
     const auto& single = tasks.front().task;
     check(single.runTargets().size() == 1 && !single.requestedCommit, "ordinary one-destination work must not require commit verification");
 
     model.action.args = {{"request", "Run on all three"}, {"environments", {"mini", "local", "cloud"}}};
-    Conversations(store).receive(localOwner, intake, "three-route-work", "Run this on all three destinations");
+    ConversationIntake(store).receive(localOwner, intake, "three-route-work", "Run this on all three destinations");
     runtime.runConversations();
-    tasks = Tasks(store).tasks();
+    tasks = TaskList(store).tasks();
     check(tasks.size() == 2, "three destinations must remain one additional conversation task");
     const auto& multi = tasks.front().task;
     check(multi.runTargets().size() == 3 && !multi.requestedCommit,
@@ -196,7 +200,7 @@ void manyConfiguredDestinations() {
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     model.action = {
         "start_task", {{"request", "Verify on every destination"}, {"environments", selected}}, "Use all selected destinations."};
-    Conversations(store).receive(localOwner, intake, "seventeen-destinations", "Verify on all 17 destinations");
+    ConversationIntake(store).receive(localOwner, intake, "seventeen-destinations", "Verify on all 17 destinations");
     runtime.runConversations();
     bool allOptionsOffered = model.offeredEnvironments.size() >= 17;
     for (const auto& alias : selected) {
@@ -205,7 +209,7 @@ void manyConfiguredDestinations() {
         allOptionsOffered &= offered;
     }
     check(allOptionsOffered, "all 17 configured destinations must be offered as choices to one request");
-    const auto tasks = Tasks(store).tasks();
+    const auto tasks = TaskList(store).tasks();
     check(tasks.size() == 1, "one request across 17 destinations must create one task");
     check(taskJson(tasks.front()).at("runTargets") == expected && t3.commands.empty(),
           "one request must save all 17 selected destinations without dropping or dispatching any early");
@@ -217,7 +221,7 @@ void destinationWithoutSessionIsUnavailable() {
     intake.request = "Verify the release";
     const auto database = temp.path / "state.db";
     Store store(database);
-    const auto id = Tasks(store).submit(intake);
+    const auto id = TaskIntake(store).submit(intake);
     const auto generation = Tasks(store).task(id).task.generation;
     sqlite3* raw = nullptr;
     const auto opened = sqlite3_open(database.c_str(), &raw);
@@ -239,7 +243,7 @@ VALUES(?,0,'mini','mini-env','mini-project','saved-action','running','{}')
     model.action = {"send_to_task",
                     {{"taskId", id}, {"generation", generation}, {"instruction", "Continue the Mini work"}},
                     "Continue this destination only."};
-    Conversations(store).receive(localOwner, intake, "destination-follow-up", "Continue the Mini work");
+    ConversationIntake(store).receive(localOwner, intake, "destination-follow-up", "Continue the Mini work");
     runtime.runConversations();
     check(!model.receipt.value("ok", true) && model.receipt.dump().find("destination Session is unavailable") != std::string::npos,
           "a destination without a saved T3 Thread must be rejected as unavailable");
@@ -265,7 +269,7 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
     RoutingModel model;
     RoutingT3 t3;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
-    const auto id = Tasks(store).submit(intake);
+    const auto id = TaskIntake(store).submit(intake);
     const auto task = Tasks(store).task(id).task;
     model.action = {"change_task",
                     {{"taskId", id},
@@ -274,7 +278,7 @@ void moveWithProject(std::string_view alias, std::string_view project, bool same
                      {"instruction", "Move verification to the Mini"},
                      {"environment", alias}},
                     "Use the requested Mini destination."};
-    Conversations(store).receive(localOwner, intake, "move-to-mini", "Move verification to the Mini");
+    ConversationIntake(store).receive(localOwner, intake, "move-to-mini", "Move verification to the Mini");
     runtime.runConversations();
     check(model.receipt.value("ok", false), "change_task rejected the named destination");
     for (int i = 0; i < 12 && t3.commands.empty(); ++i) runtime.tick();
@@ -289,7 +293,7 @@ void modelFailureGivesGuidance(ModelErrorCode code, std::string_view guidance) {
     RoutingT3 t3;
     Store store(temp.path / "state.db");
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
-    Conversations(store).receive(localOwner, intake, "rejected-model-request", "Check the release");
+    ConversationIntake(store).receive(localOwner, intake, "rejected-model-request", "Check the release");
     runtime.runConversations();
     const auto events = Conversations(store).conversation("release");
     const auto reply = std::ranges::find_if(events, [](const Json& event) { return event.value("kind", "") == "conversation_reply"; });

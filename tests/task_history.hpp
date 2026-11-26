@@ -1,6 +1,6 @@
 #pragma once
 
-#include "flock/tasks.hpp"
+#include "flock/task_history.hpp"
 #include "flock/json.hpp"
 #include "flock/store.hpp"
 #include "flock/types.hpp"
@@ -15,7 +15,7 @@ inline Json lastTaskEvent(Store& store, Id task, std::string_view kind) {
     Id after = 0;
     Json result = nullptr;
     while (true) {
-        const auto page = Tasks(store).history(task, after, pageSize);
+        const auto page = TaskHistory(store).history(task, after, pageSize);
         for (const auto& entry : page) {
             if (entry.at("kind") == kind) result = entry;
         }

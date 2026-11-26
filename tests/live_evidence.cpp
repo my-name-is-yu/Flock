@@ -1,3 +1,4 @@
+#include "flock/task_history.hpp"
 #include "flock/tasks.hpp"
 #include "flock/t3_mcp.hpp"
 #include "live_setup.hpp"
@@ -68,7 +69,7 @@ bool containsMeasurement(std::string_view text, std::string_view marker) {
 Recording load(Store& store, T3& t3, Id id, std::string_view commit, bool matches) {
     const auto task = taskJson(Tasks(store).task(id));
     Json report;
-    for (const auto& item : Tasks(store).history(id)) {
+    for (const auto& item : TaskHistory(store).history(id)) {
         if (item["kind"] == "report") report = item["data"];
     }
     if (task.at("state") != "completed" || report.is_null() || report.at("status") != "completed" ||

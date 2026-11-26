@@ -1,3 +1,7 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_control.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_list.hpp"
 #include "bots.hpp"
 #include "flock/decision_errors.hpp"
 #include "demo.hpp"
@@ -11,7 +15,6 @@
 #include "t3_setup.hpp"
 #include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
-#include "flock/conversations.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/external_mcp.hpp"
@@ -466,11 +469,11 @@ void operate(const std::filesystem::path& home, const Bots& bots, const std::str
     args.end();
 
     if (operation == "reconcile") {
-        details =
-            Tasks(store).reconciliationData(task, target.waitId, std::move(details),
-                                            [&](std::string_view id, std::string_view request) { return bots.get(id).intake(request); });
+        details = TaskControl(store).reconciliationData(
+            task, target.waitId, std::move(details),
+            [&](std::string_view id, std::string_view request) { return bots.get(id).intake(request); });
     }
-    Tasks(store).operate(localOwner, target, operation, details);
+    TaskControl(store).operate(localOwner, target, operation, details);
     print(taskJson(Tasks(store).task(task)));
 }
 
@@ -494,9 +497,9 @@ void taskCommand(const std::filesystem::path& home, const std::string& command, 
     auto store = openStore(home);
     if (command == "history") {
         if (!Tasks(store).hasTask(task)) throw Conflict("Task does not exist");
-        print(Tasks(store).history(task, cursor, limit));
+        print(TaskHistory(store).history(task, cursor, limit));
     } else
-        print(taskJson(Tasks(store).tasks(bot, cursor, limit)));
+        print(taskJson(TaskList(store).tasks(bot, cursor, limit)));
 }
 
 void rulesCommand(const std::filesystem::path& home, Arguments& args) {
@@ -565,7 +568,7 @@ int runCli(Arguments& args) {
             intake.request = message;
         }
         auto store = openStore(home);
-        print(Conversations(store).receive(localOwner, intake, actionId(), message));
+        print(ConversationIntake(store).receive(localOwner, intake, actionId(), message));
     } else if (command == "status") {
         const auto id = number(args, "task ID");
         args.end();

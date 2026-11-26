@@ -1,8 +1,6 @@
 #include "flock/local_machines.hpp"
 #include "web_identity_state.hpp"
 #include "task_records.hpp"
-#include "secret_storage.hpp"
-#include "json_fields.hpp"
 #include "flock/policy.hpp"
 #include "flock/channels.hpp"
 #include "database.hpp"
@@ -200,7 +198,7 @@ WHERE bot_id=? AND task_id=? AND environment_id=? AND thread_id=? AND machine_id
 )SQL",
                                      {bot, task, environment, thread, machineId});
     const auto rules = localRules(args);
-    secretStorage.redactor(bot).requirePublic({thread, run, machineId, owner, rules});
+    permissions.secretRedactor(bot).requirePublic({thread, run, machineId, owner, rules});
     Id id;
     std::string status = "pending";
     if (connection.next()) {
@@ -251,7 +249,7 @@ AND t.environment_id=r.environment_id
     const auto bot = connection.string(0);
     const auto rules = connection.json(1);
     if (std::ranges::find(rules, rule) == rules.end()) throw ChannelAccessDenied("The operation is outside the approved local rules");
-    auto output = secretStorage.redactor(bot).payload(machine->second->run(operation, path));
+    auto output = permissions.secretRedactor(bot).payload(machine->second->run(operation, path));
     tx.commit();
     return output;
 }
@@ -266,13 +264,13 @@ FROM local_machine_connections ORDER BY id DESC
     while (rows.next()) {
         const auto bot = rows.string(1);
         if (rows.string(5) != actor.id || !permissions.allows(actor, Action::bot_decide, bot)) continue;
-        result.push_back(secretStorage.redactor(bot).record({{"id", rows.number(0)},
-                                                             {"botId", bot},
-                                                             {"threadId", rows.string(2)},
-                                                             {"runId", rows.string(3)},
-                                                             {"machineId", rows.string(4)},
-                                                             {"rules", rows.json(6)},
-                                                             {"status", rows.string(7)}}));
+        result.push_back(permissions.secretRedactor(bot).record({{"id", rows.number(0)},
+                                                                 {"botId", bot},
+                                                                 {"threadId", rows.string(2)},
+                                                                 {"runId", rows.string(3)},
+                                                                 {"machineId", rows.string(4)},
+                                                                 {"rules", rows.json(6)},
+                                                                 {"status", rows.string(7)}}));
     }
     return result;
 }

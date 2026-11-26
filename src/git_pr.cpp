@@ -6,7 +6,6 @@
 #include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
-#include "json_fields.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "run_ref_storage.hpp"
@@ -14,7 +13,6 @@
 #include "bot_lifecycle_storage.hpp"
 #include "inbox_storage.hpp"
 #include "secret_storage.hpp"
-#include "journal_storage.hpp"
 #include "task_records.hpp"
 
 #include <algorithm>
@@ -117,8 +115,8 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
                            runJson(context.run), intent});
             auto pending = prResult(request.operationId, "pending");
             pending["reason"] = reason;
-            journalStorage.journal(context.taskId, "git_mutation",
-                                   secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, pending)));
+            database.writeJournal(context.taskId, "git_mutation",
+                                  secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, pending)));
         } else {
             if (operation.number(1) != context.taskId || operation.string(2) != context.botId)
                 throw Conflict("This PR target belongs to another task");
@@ -196,7 +194,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
         auto entry = gitJournal(context, "git_open_pr", base, result);
         entry["run"] = run;
         entry["recovered"] = state == "created" && !create;
-        journalStorage.journal(context.taskId, "git_mutation", scrub.record(std::move(entry)));
+        database.writeJournal(context.taskId, "git_mutation", scrub.record(std::move(entry)));
     }
     transaction.commit();
     return scrub.record(result, SecretRedactor::Fields::external);
@@ -246,7 +244,7 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
     database.exec("UPDATE git_pr_operations SET status=?,pr_number=?,url=? WHERE operation_id=?",
                   {status, link ? Json(number) : Json(nullptr), link ? Json(url) : Json(nullptr), operation});
     database.exec("UPDATE pr_review_items SET status=? WHERE id=?", {link ? "linked" : "rejected", item.itemId});
-    journalStorage.journal(
+    database.writeJournal(
         item.taskId, "git_mutation",
         secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, prResult(operation, status, number, url))));
 }

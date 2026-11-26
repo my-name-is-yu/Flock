@@ -34,10 +34,8 @@
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
 #include "journal_storage.hpp"
-#include "json_fields.hpp"
 #include "policy_approvals.hpp"
 #include "run_ref_storage.hpp"
-#include "secret_storage.hpp"
 #include "session_participation_storage.hpp"
 #include "session_read_storage.hpp"
 #include "task_events.hpp"
@@ -108,8 +106,8 @@ void Runtime::Components::OutboxDispatch::stop(TaskData task) {
             updates.refundUnsentWork(current, *action);
             current.actionId.clear();
             waitStorage.clearWait(current, "superseded_instruction");
-            journalStorage.journal(current.id, "delivery_superseded",
-                                   {{"actionId", action->command.actionId}, {"revisionId", revisionJson(current.currentRevision)}});
+            database.writeJournal(current.id, "delivery_superseded",
+                                  {{"actionId", action->command.actionId}, {"revisionId", revisionJson(current.currentRevision)}});
             return true;
         });
         return;
@@ -178,7 +176,7 @@ bool Runtime::Components::OutboxDispatch::assignedRunMatches(const TaskData& tas
 
 Runtime::Components::OutboxDispatch::DeliveryOutcome
 Runtime::Components::OutboxDispatch::classifyDelivery(const TaskData& task, const Outbox& action, Delivery& outcome, bool reply) {
-    const auto scrub = secretStorage.redactor(task.botId);
+    const auto scrub = policy.secretRedactor(task.botId);
     if (scrub.payload(runJson(outcome.run)) != runJson(outcome.run))
         outcome = {Delivery::Kind::Unknown, {}, "T3 returned a protected Run identifier"};
     outcome.detail = scrub.text(outcome.detail);
@@ -203,11 +201,11 @@ AssignedRun Runtime::Components::OutboxDispatch::recordRunAssignment(const TaskD
     }
     auto sources = Json::array();
     for (const auto& source : action.sourceResultRefs) sources.push_back(sourceJson(source));
-    journalStorage.journal(task.id, "run_started",
-                           {{"run", destination ? destinationRunJson(*destination) : assignedRunJson(run)},
-                            {"actionId", cmd.actionId},
-                            {"revisionId", revisionJson(action.revisionId)},
-                            {"sourceResultRefs", std::move(sources)}});
+    database.writeJournal(task.id, "run_started",
+                          {{"run", destination ? destinationRunJson(*destination) : assignedRunJson(run)},
+                           {"actionId", cmd.actionId},
+                           {"revisionId", revisionJson(action.revisionId)},
+                           {"sourceResultRefs", std::move(sources)}});
     return run;
 }
 
@@ -279,8 +277,8 @@ void Runtime::Components::OutboxDispatch::applyDelivery(Id id, const Outbox& act
             if (gateway != action.command.environmentId) outcome.run.gatewayEnvironmentId = std::move(gateway);
         }
         if (!outcome.launchWarning.empty()) {
-            task.launchWarning = secretStorage.redactor(task.botId).text(outcome.launchWarning);
-            journalStorage.journal(id, "session_lineage_unavailable", {{"actionId", key}, {"text", *task.launchWarning}});
+            task.launchWarning = policy.secretRedactor(task.botId).text(outcome.launchWarning);
+            database.writeJournal(id, "session_lineage_unavailable", {{"actionId", key}, {"text", *task.launchWarning}});
         }
         const bool cancelling = task.state == TaskState::cancelling;
         const bool reply = action.command.tool == CommandTool::answer_session_question;
@@ -329,8 +327,8 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 }
             }
             if (reply)
-                journalStorage.journal(id, "session_answered",
-                                       {{"requestId", action.command.questionId}, {"actionId", action.command.actionId}});
+                database.writeJournal(id, "session_answered",
+                                      {{"requestId", action.command.questionId}, {"actionId", action.command.actionId}});
             task.actionId.clear();
             if (!cancelling) task.state = TaskState::running;
             return true;
@@ -345,7 +343,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         if (delivery == DeliveryOutcome::Unknown && !outcome.run.threadId.empty() && action.phase == OutboxPhase::ready && !reply &&
             !cancelling) {
             rememberRunCandidate(action, outcome.run);
-            journalStorage.journal(id, "run_id_pending", {{"actionId", action.command.actionId}, {"thread", runJson(outcome.run)}});
+            database.writeJournal(id, "run_id_pending", {{"actionId", action.command.actionId}, {"thread", runJson(outcome.run)}});
             return true;
         }
         const auto reason = outcome.kind == Delivery::Kind::Auth       ? SimpleWaitReason::auth
@@ -364,7 +362,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         if (cancelling) {
             if (task.cancellationDetail == detail && delivery == DeliveryOutcome::Unknown) return false;
             task.cancellationDetail = detail;
-            journalStorage.journal(id, "cancelling", {{"detail", detail}, {"actionId", action.command.actionId}});
+            database.writeJournal(id, "cancelling", {{"detail", detail}, {"actionId", action.command.actionId}});
         } else {
             const auto wait = waitStorage.currentWait(id);
             if (!wait || wait->reason() != waitReason(reason) || wait->text != detail)
@@ -445,7 +443,7 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
             current.feedback = approvalError(gate);
             if (current.state == TaskState::deciding)
                 taskEvents.event(current, "policy/" + cmd.actionId, {{"kind", "policy_outcome"}, {"text", approvalError(gate)}});
-            journalStorage.journal(id, "policy_action_closed", {{"actionId", cmd.actionId}, {"text", approvalError(gate)}});
+            database.writeJournal(id, "policy_action_closed", {{"actionId", cmd.actionId}, {"text", approvalError(gate)}});
             return true;
         });
     };
@@ -478,7 +476,7 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
             }
         }
         if (sendsWork) {
-            const auto scrub = secretStorage.redactor(cmd.ownerBotId);
+            const auto scrub = policy.secretRedactor(cmd.ownerBotId);
             if (task.workflow && scrub.text(task.workflow->inputArtifactVersion) != task.workflow->inputArtifactVersion)
                 return applyDelivery(
                     id, action, {Delivery::Kind::Settings, {}, "The pinned workflow artifact version contains a protected value", true});
@@ -661,7 +659,7 @@ void Runtime::Components::OutboxDispatch::queueAction(TaskData& task, const std:
     SessionPrompts::WorkPrompt prompt;
     if (tool == CommandTool::follow_up) {
         prompt = prompts.workPrompt(task, event, id.size());
-        const auto scrub = secretStorage.redactor(task.botId);
+        const auto scrub = policy.secretRedactor(task.botId);
         redactInstructions(prompt.pending, scrub);
         instruction += prompt.instruction;
         instruction = scrub.text(instruction);
@@ -692,7 +690,7 @@ void Runtime::Components::OutboxDispatch::queueAction(TaskData& task, const std:
             action.commit = OutboxCommit{*task.requestedCommit, true};
             instruction = commit_check::instructions(instruction, action.commit->expected);
         }
-        action.instructionBase = secretStorage.redactor(task.botId).text(instruction);
+        action.instructionBase = policy.secretRedactor(task.botId).text(instruction);
     } else
         cmd.instruction = std::move(instruction);
     outboxStorage.insertOutbox(taskId, action);

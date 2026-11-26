@@ -47,7 +47,6 @@
 #include "flock/task.hpp"
 #include "flock/wait.hpp"
 #include "flock/outbox_instruction.hpp"
-#include "json_fields.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "flock/board_inbox.hpp"

@@ -4,7 +4,6 @@
 #include "bot_lifecycle_storage.hpp"
 #include "database.hpp"
 #include "inbox_storage.hpp"
-#include "journal_storage.hpp"
 #include "policy_approvals.hpp"
 #include "secret_storage.hpp"
 #include "task_records.hpp"
@@ -148,10 +147,10 @@ Resource Resource::sessionRead(std::string_view environment, std::string_view th
     return {Action::session_read, Json::array({environment, thread}).dump()};
 }
 
-Policy::Policy(Database& database, const BotLifecycleStorage& botLifecycle, const TaskRecords& taskRecords, JournalStorage& journalStorage,
-               SecretStorage& secretStorage, InboxStorage& inboxStorage, PolicyApprovals& policyApprovals)
-    : database_(database), botLifecycle_(botLifecycle), taskRecords_(taskRecords), journalStorage_(journalStorage),
-      secretStorage_(secretStorage), inboxStorage_(inboxStorage), policyApprovals_(policyApprovals) {}
+Policy::Policy(Database& database, const BotLifecycleStorage& botLifecycle, const TaskRecords& taskRecords, SecretStorage& secretStorage,
+               InboxStorage& inboxStorage, PolicyApprovals& policyApprovals)
+    : database_(database), botLifecycle_(botLifecycle), taskRecords_(taskRecords), secretStorage_(secretStorage),
+      inboxStorage_(inboxStorage), policyApprovals_(policyApprovals) {}
 
 SecretRedactor Policy::secretRedactor(std::string_view bot) const {
     return secretStorage_.redactor(bot);
@@ -418,7 +417,7 @@ void Policy::executeSessionResource(std::string_view environment, const RunRef& 
         throw Conflict("Resource execution failed");
     }
     std::lock_guard lock(database_.mutex);
-    journalStorage_.journal(
+    database_.writeJournal(
         task, "resource_used",
         {{"target", resource.target}, {"action", actionName(resource.action)}, {"threadId", run.threadId}, {"runId", run.runId}});
 }

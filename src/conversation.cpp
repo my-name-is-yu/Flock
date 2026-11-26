@@ -1,7 +1,7 @@
+#include "flock/web_conversation_intake.hpp"
 #include "local_machine_storage.hpp"
 #include "flock/decision_errors.hpp"
 #include "web_identity_state.hpp"
-#include "flock/conversations.hpp"
 #include "database.hpp"
 #include "flock/policy.hpp"
 #include "secret_storage.hpp"
@@ -21,9 +21,7 @@
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/session_ref.hpp"
-#include "json_fields.hpp"
 #include "flock/secrets.hpp"
-#include "flock/board_inbox.hpp"
 #include "channel_storage.hpp"
 
 #include <functional>
@@ -74,23 +72,16 @@ std::optional<Json> ConversationStorage::messageReceipt(const Person& actor, std
     return receiptRow(row, secretStorage.redactor(bot).text(std::string(text)), replyTo);
 }
 
-std::optional<Json> Conversations::receipt(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text,
-                                           Id replyTo, const Json& attachments) const {
+std::optional<Json> WebConversationIntake::receipt(const Person& actor, std::string_view bot, std::string_view clientId,
+                                                   std::string_view text, Id replyTo, const Json& attachments) const {
     std::lock_guard lock(database_.mutex);
     if (reservedMessageId(clientId)) throw Conflict("This client message ID is reserved");
     if (!permissions_.allows(actor, Action::bot_talk, bot)) throw DecisionDenied{};
     return turns_.messageReceipt(actor, bot, clientId, text, replyTo, attachments);
 }
 
-Json Conversations::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
-                            const Json& attachments) {
-    return turns_.receive(
-        actor, routing.botId, clientId, text, replyTo, conversation::PrincipalSource::trusted, nullptr, [&] { return routing; },
-        attachments);
-}
-
-Json Conversations::receiveWeb(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
-                               const Json& attachments) {
+Json WebConversationIntake::receiveWeb(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text,
+                                       Id replyTo, const Json& attachments) {
     return turns_.receive(
         actor, routing.botId, clientId, text, replyTo, conversation::PrincipalSource::web, nullptr, [&] { return routing; }, attachments);
 }

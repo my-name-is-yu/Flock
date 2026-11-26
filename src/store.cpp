@@ -1,3 +1,11 @@
+#include "flock/tasks.hpp"
+#include "flock/task_list.hpp"
+#include "flock/conversation_intake.hpp"
+#include "flock/web_conversation_intake.hpp"
+#include "conversation_storage.hpp"
+#include "flock/task_control.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
 #include "flock/notifications.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/policy.hpp"
@@ -6,7 +14,6 @@
 #include "flock/local_machines.hpp"
 #include "flock/identity.hpp"
 #include "flock/workflows.hpp"
-#include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "git_storage.hpp"
 #include "flock/bot_memory.hpp"
@@ -172,10 +179,35 @@ void GitEvents::protectGitCredential(std::string value) {
 Database& Database::of(Store& store) {
     return store.p_->database;
 }
+Tasks::Tasks(Store& store) : database_(Database::of(store)), records_(store.p_->taskRecords) {}
+
+TaskList::TaskList(Store& store) : database_(Database::of(store)), records_(store.p_->taskRecords), waits_(store.p_->waitStorage) {}
+
+bool Tasks::hasTask(Id id) const {
+    std::lock_guard lock(database_.mutex);
+    return database_.query("SELECT 1 FROM tasks WHERE id=?", {id}).next();
+}
+
+TaskView Tasks::task(Id id) const {
+    std::lock_guard lock(database_.mutex);
+    return records_.taskDetails(id, true);
+}
+
+ConversationIntake::ConversationIntake(Store& store) : turns_(store.p_->conversationTurns) {}
+
+WebConversationIntake::WebConversationIntake(Store& store)
+    : database_(Database::of(store)), turns_(store.p_->conversationTurns), permissions_(store.p_->permissions) {}
+
+Json ConversationIntake::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                                 const Json& attachments) {
+    return turns_.receive(
+        actor, routing.botId, clientId, text, replyTo, conversation::PrincipalSource::trusted, nullptr, [&] { return routing; },
+        attachments);
+}
+
 Conversations::Conversations(Store& store)
-    : database_(Database::of(store)), turns_(store.p_->conversationTurns), context_(store.p_->conversationContextStorage),
-      memory_(store.p_->memoryStorage), modelCalls_(store.p_->modelCalls), channels_(store.p_->channelStorage),
-      permissions_(store.p_->permissions) {}
+    : database_(Database::of(store)), context_(store.p_->conversationContextStorage), memory_(store.p_->memoryStorage),
+      modelCalls_(store.p_->modelCalls), channels_(store.p_->channelStorage) {}
 
 Memory::Memory(Store& store) : database_(Database::of(store)), memory_(store.p_->memoryStorage) {}
 
@@ -187,9 +219,13 @@ Inbox::Inbox(Store& store) : inbox_(store.p_->inboxStorage), git_(store.p_->gitS
 
 GitEvents::GitEvents(Store& store) : git_(store.p_->gitStorage), secrets_(store.p_->secretStorage) {}
 
-Tasks::Tasks(Store& store)
+TaskIntake::TaskIntake(Store& store) : database_(Database::of(store)), operations_(store.p_->taskOperations) {}
+
+TaskControl::TaskControl(Store& store)
     : database_(Database::of(store)), outbox_(store.p_->outboxStorage), operations_(store.p_->taskOperations),
       records_(store.p_->taskRecords), waits_(store.p_->waitStorage) {}
+
+TaskHistory::TaskHistory(Store& store) : database_(Database::of(store)), records_(store.p_->taskRecords) {}
 
 Channels::Channels(Store& store) : channels_(store.p_->channelStorage) {}
 
@@ -314,7 +350,7 @@ std::optional<Notifications::BotViewStamp> Notifications::botViewStamp() const {
     return BotViewStamp{database_.changeStamp(), secrets_.gitCredentialCount()};
 }
 
-Id Tasks::submit(const Intake& item, const Person* requester) {
+Id TaskIntake::submit(const Intake& item, const Person* requester) {
     std::lock_guard lock(database_.mutex);
     Transaction transaction(database_.db);
     const auto id = operations_.submitRequest(item, requester);
@@ -367,12 +403,12 @@ Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSo
                                  : task.trigger  ? "automation"
                                                  : "manual"}};
         if (task.trigger) entry["trigger"] = taskTriggerJson(*task.trigger);
-        journalStorage.journal(id, "request", entry);
+        database.writeJournal(id, "request", entry);
     }
     return id;
 }
 
-Json Tasks::reconciliationData(Id id, Id waitId, Json target, const IntakeResolver& intake) const {
+Json TaskControl::reconciliationData(Id id, Id waitId, Json target, const IntakeResolver& intake) const {
     TaskData task;
     {
         std::lock_guard lock(database_.mutex);
@@ -404,7 +440,7 @@ TaskTarget TaskTarget::from(const TaskData& task, Id waitId) {
     return {task.botId, task.id, waitId, task.currentRevision.value_or(0), task.generation};
 }
 
-void Tasks::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& data) {
+void TaskControl::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& data) {
     std::lock_guard lock(database_.mutex);
     Transaction transaction(database_.db);
     operations_.operate(actor, target, operation, data);
@@ -458,7 +494,7 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
             task.projectId = project;
             taskRouting.rememberT3Project(bot, environment, project);
             next = TaskState::queued;
-            journalStorage.journal(id, "project_selected", encodeUserAnswer(entry));
+            database.writeJournal(id, "project_selected", encodeUserAnswer(entry));
         } else {
             auto updated = taskEvents.currentEvent(task);
             updated["userAnswer"] = answer;
@@ -470,12 +506,12 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
         }
     } else if (operation == "approve" && reason == WaitReason::budget) {
         task.allowance.remaining += WaitStorage::initialWorkAllowance;
-        journalStorage.journal(id, "budget_granted", {{"waitId", waitId}, {"remaining", task.allowance.remaining}});
+        database.writeJournal(id, "budget_granted", {{"waitId", waitId}, {"remaining", task.allowance.remaining}});
     } else if (operation == "approve" && reason == WaitReason::model_budget) {
         const Id eventId = task.eventId;
         const auto attempt = modelCalls.approveModelBudget(actor, modelCalls.taskModelBudget(id), "task_decision", 0, id, eventId);
         database.exec("UPDATE events SET reserved_attempt=? WHERE id=? AND task_id=?", {attempt, eventId, id});
-        journalStorage.journal(id, "model_budget_granted", {{"waitId", waitId}, {"attemptId", attempt}});
+        database.writeJournal(id, "model_budget_granted", {{"waitId", waitId}, {"attemptId", attempt}});
     } else if (operation == "retry" && (reason == WaitReason::model_failure || taskRouting.isUndispatchedNotesWait(task))) {
         if (reason == WaitReason::bot_notes_unavailable) next = TaskState::queued;
         if (const auto* failure = std::get_if<ModelFailureWait>(&wait->details);
@@ -483,7 +519,7 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
             automationStorage.refreshPlannerModel(bot, task.config);
         database.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task.eventId});
         task.feedback.reset();
-        journalStorage.journal(id, "model_retry", {{"waitId", waitId}});
+        database.writeJournal(id, "model_retry", {{"waitId", waitId}});
     } else if (operation == "extend" && reason == WaitReason::deadline) {
         if (!data.contains("deadline") || !data["deadline"].is_number_integer() || data["deadline"].get<Seconds>() <= unixTime())
             throw Conflict("The new deadline must be in the future");
@@ -496,7 +532,7 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
             task.deadline = deadline;
         }
         next = TaskState::running;
-        journalStorage.journal(id, "deadline_extended", {{"deadline", deadline}, {"waitId", waitId}});
+        database.writeJournal(id, "deadline_extended", {{"deadline", deadline}, {"waitId", waitId}});
     } else if (operation == "reconcile" &&
                (reason == WaitReason::unknown_delivery || reason == WaitReason::auth || reason == WaitReason::settings)) {
         if (data.contains("session")) {
@@ -532,7 +568,7 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
             outboxStorage.saveOutbox(*action);
             next = TaskState::sending;
         }
-        journalStorage.journal(id, "reconcile_requested", {{"waitId", waitId}});
+        database.writeJournal(id, "reconcile_requested", {{"waitId", waitId}});
     } else {
         throw Conflict("Operation is unavailable for this waiting item");
     }
@@ -543,17 +579,12 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
     if (kind) inboxStorage.recordInboxDecision(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
 }
 
-bool Tasks::hasTask(Id id) const {
-    std::lock_guard lock(database_.mutex);
-    return database_.query("SELECT 1 FROM tasks WHERE id=?", {id}).next();
-}
-
 namespace {
 Json journalRow(const Statement& row) {
     return {{"id", row.number(0)}, {"taskId", row.number(1)}, {"time", row.number(2)}, {"kind", row.string(3)}, {"data", row.json(4)}};
 }
 }
-Json Tasks::history(Id taskId, Id after, unsigned limit) const {
+Json TaskHistory::history(Id taskId, Id after, unsigned limit) const {
     std::lock_guard lock(database_.mutex);
     auto rows = database_.query(R"SQL(
 SELECT j.id,j.task_id,j.time,j.kind,

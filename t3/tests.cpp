@@ -1,7 +1,9 @@
+#include "flock/task.hpp"
+#include "flock/task_history.hpp"
+#include "flock/web_conversation_intake.hpp"
 #include "internal.hpp"
 #include "flock/identity.hpp"
 #include "flock/tasks.hpp"
-#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/command.hpp"
 #include "flock/decision.hpp"
@@ -200,14 +202,14 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
           "The approved Session-origin task sent the wrong launch");
     const auto task = Tasks(store).task(taskId).task;
     const auto& thread = task.activeRun.value().ref.threadId;
-    check(task.launchWarning && std::ranges::any_of(Tasks(store).history(taskId),
+    check(task.launchWarning && std::ranges::any_of(TaskHistory(store).history(taskId),
                                                     [](const Json& entry) { return entry.at("kind") == "session_lineage_unavailable"; }),
           "A launch fallback was not recorded on the task and in its journal");
 
     Policy{store}.setMode(localOwner, "full");
     const auto call = [&](const char* clientId, std::string tool, const Json& args) {
         model.next = {std::move(tool), args, "Check a Session from the origin turn"};
-        Conversations(store).receiveWeb(member, intake, clientId, "Follow up on this work.", message);
+        WebConversationIntake(store).receiveWeb(member, intake, clientId, "Follow up on this work.", message);
         runtime.runConversations();
         check(model.origin == origin, "An explicit reply lost the original Session context");
         return model.result;

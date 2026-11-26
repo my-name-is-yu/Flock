@@ -1,10 +1,12 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_control.hpp"
+#include "flock/task_intake.hpp"
 #include "flock/identity.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
-#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
 #include "flock/bot_change.hpp"
@@ -133,7 +135,7 @@ void reopen(const std::filesystem::path& path) {
         Store store(path);
         Policy{store}.setOwner(requester, "release");
         Policy{store}.changeNeverRule(localOwner, Action::repository_read, "github.com/example/private", true);
-        oldMessage = Conversations(store).receive(requester, intake, "existing", "Existing turn").at("messageId");
+        oldMessage = ConversationIntake(store).receive(requester, intake, "existing", "Existing turn").at("messageId");
     }
     Store reopened(path);
     Policy policy{reopened};
@@ -162,7 +164,8 @@ void reopenDirectTask(const std::filesystem::path& path) {
         Policy{store}.setOwner(requester, "release");
         Policy{store}.setMode(localOwner, "supervised");
         Memory(store).memory(requester, "release", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the old signing process."}});
-        task = Tasks(store).submit({"release", "Build the release", "env", "project", {{"shareMemoryWithSessions", true}}}, &requester);
+        task =
+            TaskIntake(store).submit({"release", "Build the release", "env", "project", {{"shareMemoryWithSessions", true}}}, &requester);
     }
     Store reopened(path);
     FixtureModel model;
@@ -200,7 +203,7 @@ void turns(const std::filesystem::path& path) {
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; }, options);
     int sequence = 0;
     auto send = [&](std::string_view text, const Person& actor = requester) {
-        const auto receipt = Conversations(store).receive(actor, intake, std::to_string(++sequence), text);
+        const auto receipt = ConversationIntake(store).receive(actor, intake, std::to_string(++sequence), text);
         runtime.runConversations();
         return receipt.at("messageId").get<Id>();
     };
@@ -325,7 +328,7 @@ void downstreamApproval(const std::filesystem::path& path) {
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; });
     const auto approve = [&](std::string_view id, Decision action) {
         model.action = std::move(action);
-        Conversations(store).receive(localOwner, intake, id, "Use this tool");
+        ConversationIntake(store).receive(localOwner, intake, id, "Use this tool");
         runtime.runConversations();
         const auto items = Inbox(store).inbox(localOwner);
         check(items.size() == 1 && items.at(0).at("status") == "pending", "Tool did not await its one-shot approval");
@@ -342,7 +345,7 @@ void downstreamApproval(const std::filesystem::path& path) {
 
     const Decision privateEdit{"apply_memory_edit", {{"baseVersion", 0}, {"content", "Use Markdown"}}, "Edit"};
     model.action = privateEdit;
-    Conversations(store).receive(member, intake, "member-edit", "Remember to use Markdown");
+    ConversationIntake(store).receive(member, intake, "member-edit", "Remember to use Markdown");
     runtime.runConversations();
     check(Inbox(store).inbox(localOwner).empty(), "An ineligible private memory edit requested approval");
     check(model.outcome.at(0).at("result") == Json{{"ok", false}, {"error", "Memory access denied"}},
@@ -366,14 +369,14 @@ void scheduled(const std::filesystem::path& path) {
     const auto pump = [&] {
         for (int i = 0; i < 6; ++i) runtime.tick();
     };
-    const auto anonymous = Tasks(store).submit({"release", "No person originated this task", "env", "anonymous-project"});
+    const auto anonymous = TaskIntake(store).submit({"release", "No person originated this task", "env", "anonymous-project"});
     pump();
     check(adapter.sends == 0 &&
               std::ranges::none_of(Inbox(store).inbox(requester),
                                    [](const auto& item) { return item.at("itemKind") == "policy_approval"; }) &&
               model.outcome.dump().find("denied by policy") != std::string::npos,
           "unanswerable task received a card or was silently denied");
-    Tasks(store).operate(requester, TaskTarget::from(Tasks(store).task(anonymous).task, 0), "cancel");
+    TaskControl(store).operate(requester, TaskTarget::from(Tasks(store).task(anonymous).task, 0), "cancel");
     pump();
 
     const auto schedule = [&] {
@@ -383,7 +386,7 @@ void scheduled(const std::filesystem::path& path) {
         ++now;
         pump();
     };
-    const auto staleTask = Tasks(store).submit({"release", "Cancel a pending launch", "env", "stale-project"}, &requester);
+    const auto staleTask = TaskIntake(store).submit({"release", "Cancel a pending launch", "env", "stale-project"}, &requester);
     pump();
     const auto staleItem = Inbox(store).inbox(requester).at(0);
     check(staleItem.at("taskId") == staleTask && staleItem.at("prompt").dump().find("Build the release") != std::string::npos,
@@ -391,7 +394,7 @@ void scheduled(const std::filesystem::path& path) {
     auto stale = target(staleItem);
     check(taskJson(Tasks(store).task(staleTask)).at("wait").at("reason") == "policy_approval", "task never entered its durable wait");
     Inbox(store).decideInbox(requester, stale, "allow_once");
-    Tasks(store).operate(requester, TaskTarget::from(Tasks(store).task(staleTask).task, 0), "cancel");
+    TaskControl(store).operate(requester, TaskTarget::from(Tasks(store).task(staleTask).task, 0), "cancel");
     pump();
     check(adapter.sends == 0, "an approved action ran after the task was cancelled");
     rejected([&] { Inbox(store).decideInbox(requester, stale, "allow_once"); });
@@ -416,7 +419,7 @@ void scheduled(const std::filesystem::path& path) {
     Inbox(store).decideInbox(localOwner, target(expired), "allow_next_time");
     pump();
     check(adapter.sends == 0 && model.outcome.dump().find("expired") != std::string::npos, "expired action ran or the Bot was never told");
-    Tasks(store).operate(requester, TaskTarget::from(Tasks(store).task(item.at("taskId")).task, 0), "cancel");
+    TaskControl(store).operate(requester, TaskTarget::from(Tasks(store).task(item.at("taskId")).task, 0), "cancel");
     pump();
     schedule();
     check(adapter.sends == 1 && Inbox(store).inbox(requester).empty(), "next-time rule did not admit only future work");
@@ -497,7 +500,7 @@ void stopRequesterDecidesCurrentStopApproval(const std::filesystem::path& path) 
     policy.setMode(localOwner, "supervised");
     const Person stopRequester{"stop-requester"};
     policy.setMember(localOwner, "release", stopRequester.id, true);
-    const auto taskId = Tasks(store).submit({"release", "Stop the assigned Run", "env", "project"}, &stopRequester);
+    const auto taskId = TaskIntake(store).submit({"release", "Stop the assigned Run", "env", "project"}, &stopRequester);
     const auto task = taskJson(Tasks(store).task(taskId));
     const auto revision = task.value("currentRevision", Id{0});
     const auto generation = task.value("generation", Id{0});
@@ -575,7 +578,7 @@ void secrets(const std::filesystem::path& path) {
     const auto request = policy.requestSecret("release", secret);
     constexpr auto value = "SECRET_FIXTURE_VALUE";
     policy.submitSecret(requester, "release", request, value);
-    auto task = Tasks(store).submit({"release", "Use the token", "env", "project"}, &requester);
+    auto task = TaskIntake(store).submit({"release", "Use the token", "env", "project"}, &requester);
     unsigned uses = 0;
     const auto adapter = [&](std::string_view token) {
         check(token == value, "protected value did not reach the adapter");

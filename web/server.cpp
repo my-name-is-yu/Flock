@@ -1,3 +1,7 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_control.hpp"
+#include "flock/task_history.hpp"
+#include "flock/web_conversation_intake.hpp"
 #include "flock/identity.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/decision_errors.hpp"
@@ -356,7 +360,7 @@ public:
                         const auto sessionsAfter =
                             req.has_param("sessionsAfter") ? std::optional{queryId(req, "sessionsAfter", true)} : std::nullopt;
                         const auto changes = Conversations(store_).conversationChangesSince(changesAfter, id);
-                        const auto [sessionThrough, sessionTasks] = Tasks(store_).sessionChangesSince(id, sessionsAfter);
+                        const auto [sessionThrough, sessionTasks] = TaskHistory(store_).sessionChangesSince(id, sessionsAfter);
                         auto view = readBotView(actor, id, *bot, sessionsAfter ? &sessionTasks : nullptr);
                         view["bot"]["id"] = id;
                         view["limits"] = {{"messageBytes", limits::messages::maxBodyBytes},
@@ -794,7 +798,7 @@ private:
                 const auto clientMessageId = requiredText(body, "clientMessageId", 256);
                 const auto replyTo = body.contains("replyToMessageId") ? bodyId(body, "replyToMessageId") : Id{};
                 const auto attachments = body.value("attachments", Json::array());
-                const auto previous = Conversations(store_).receipt(actor, bot, clientMessageId, request, replyTo, attachments);
+                const auto previous = WebConversationIntake(store_).receipt(actor, bot, clientMessageId, request, replyTo, attachments);
                 if (previous) return json(res, 201, *previous);
                 const bool identityRequired = web::hasWebIdentities(callbacks_);
                 if (identityRequired && !callbacks_.resolveIdentity) return error(res, 503, "message_identity_unavailable");
@@ -806,9 +810,10 @@ private:
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                const auto receipt = identityRequired
-                                         ? Conversations(store_).receiveWeb(actor, intake, clientMessageId, request, replyTo, attachments)
-                                         : Conversations(store_).receive(actor, intake, clientMessageId, request, replyTo, attachments);
+                const auto receipt =
+                    identityRequired
+                        ? WebConversationIntake(store_).receiveWeb(actor, intake, clientMessageId, request, replyTo, attachments)
+                        : ConversationIntake(store_).receive(actor, intake, clientMessageId, request, replyTo, attachments);
                 return json(res, 201, receipt);
             }
             const auto operation = requiredText(body, "operation", 32);
@@ -817,9 +822,9 @@ private:
             auto data = operationData(body, operation);
             const auto task = Tasks(store_).task(id);
             if (task.task.botId != bot) return error(res, 404, "task_not_found");
-            if (operation == "reconcile") data = Tasks(store_).reconciliationData(id, wait, std::move(data), callbacks_.intake);
-            Tasks(store_).operate(actor, {bot, id, wait, bodyId(body, "targetRevision", 0), bodyId(body, "targetGeneration", 0)}, operation,
-                                  data);
+            if (operation == "reconcile") data = TaskControl(store_).reconciliationData(id, wait, std::move(data), callbacks_.intake);
+            TaskControl(store_).operate(actor, {bot, id, wait, bodyId(body, "targetRevision", 0), bodyId(body, "targetGeneration", 0)},
+                                        operation, data);
             json(res, 200, {{"accepted", true}});
         } catch (const InputError& e) {
             error(res, 400, e.what());

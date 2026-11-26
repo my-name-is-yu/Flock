@@ -26,7 +26,6 @@ class Database;
 class JournalStorage;
 class Policy;
 class PolicyApprovals;
-class SecretStorage;
 class SessionParticipationStorage;
 class SessionReadStorage;
 class TaskEvents;
@@ -42,14 +41,14 @@ class Runtime::Components::OutboxDispatch {
 public:
     OutboxDispatch(Database& database, BotLifecycleStorage& botLifecycle, BotSettingsStorage& botSettingsStorage,
                    ConversationStorage& conversationTurns, JournalStorage& journalStorage, const std::filesystem::path& path,
-                   PolicyApprovals& policyApprovals, SecretStorage& secretStorage, SessionParticipationStorage& sessionParticipationStorage,
+                   PolicyApprovals& policyApprovals, SessionParticipationStorage& sessionParticipationStorage,
                    SessionReadStorage& sessionReadStorage, TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting,
                    TaskRunReports& taskRunReports, WaitStorage& waitStorage, OutboxStorage& outboxStorage, MemoryStorage& memoryStorage,
                    T3& t3, const Policy& policy, TaskUpdates& updates, TaskQuestions& questions, RunReports& reports, RunObserver& runs,
                    SessionPrompts& prompts, const std::function<Seconds()>& clock, const IntakeResolver& intake, bool requireT3Connection,
                    std::stop_token shutdown)
         : database(database), botLifecycle(botLifecycle), botSettingsStorage(botSettingsStorage), conversationTurns(conversationTurns),
-          journalStorage(journalStorage), path(path), policyApprovals(policyApprovals), secretStorage(secretStorage),
+          journalStorage(journalStorage), path(path), policyApprovals(policyApprovals),
           sessionParticipationStorage(sessionParticipationStorage), sessionReadStorage(sessionReadStorage), taskEvents(taskEvents),
           taskRecords(taskRecords), taskRouting(taskRouting), taskRunReports(taskRunReports), waitStorage(waitStorage),
           outboxStorage(outboxStorage), memoryStorage(memoryStorage), t3(t3), policy(policy), updates(updates), questions(questions),
@@ -88,7 +87,6 @@ private:
     JournalStorage& journalStorage;
     const std::filesystem::path& path;
     PolicyApprovals& policyApprovals;
-    SecretStorage& secretStorage;
     SessionParticipationStorage& sessionParticipationStorage;
     SessionReadStorage& sessionReadStorage;
     TaskEvents& taskEvents;

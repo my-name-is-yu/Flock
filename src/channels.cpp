@@ -1,9 +1,7 @@
 #include "conversation_turns.hpp"
 #include "session_dispatch_lock.hpp"
 #include "web_identity_state.hpp"
-#include "secret_storage.hpp"
 #include "journal_storage.hpp"
-#include "json_fields.hpp"
 #include "flock/policy.hpp"
 #include "flock/channels.hpp"
 #include "database.hpp"
@@ -257,7 +255,7 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
 void ChannelStorage::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
     if (!permitsChannel(bot, message.origin, message.senderId, message.personId, message.attachments.empty() ? "use" : "read"))
         throw ChannelAccessDenied("Channel access is no longer authorized");
-    const auto scrub = secretStorage.redactor(bot);
+    const auto scrub = permissions.secretRedactor(bot);
     scrub.requirePublic({message.origin.json(), message.senderId, message.personId});
     if (replay) {
         auto saved = database.query("SELECT 1 FROM channel_messages WHERE message_id=? AND sender_id=? AND person_id=?",
@@ -420,7 +418,7 @@ void ChannelStorage::queueChannelTaskUpdate(Id task, Id entry, std::string_view 
     if (text.empty()) return;
     auto source = database.query("SELECT message_id,t.bot_id FROM channel_tasks c JOIN tasks t ON t.id=c.task_id WHERE t.id=?", {task});
     if (!source.next()) return;
-    const auto scrub = secretStorage.redactor(source.string(1));
+    const auto scrub = permissions.secretRedactor(source.string(1));
     queueChannelReply(source.number(0), entry, scrub.text(bounded(text, 8000)), scrub.payload(Json(suggestions)));
 }
 
@@ -534,16 +532,16 @@ AND d.state IN ('pending','unknown') AND json_extract(d.payload,'$.externalMessa
         if (bytes.empty()) bytes = decodeAttachment(field(args, "contentBase64"), std::min(caps.maxAttachmentBytes, attachmentLimit));
         if (!matchesMime(field(payload, "mimeType"), bytes)) throw Conflict("Attachment content does not match its MIME type");
         if (!payload.contains("attachmentId")) {
-            secretStorage.redactor(bot).requirePublic(bytes);
+            permissions.secretRedactor(bot).requirePublic(bytes);
             payload["contentBase64"] = encodeAttachment(bytes);
         }
     } else if (tool == "publish_artifact") {
         const auto title = required(args, "title", 255);
         html = required(args, "html", artifactLimit);
-        secretStorage.redactor(bot).requirePublic({title, html});
+        permissions.secretRedactor(bot).requirePublic({title, html});
         payload = {{"title", title}, {"url", artifactOrigin + "/api/artifacts/" + key}};
     }
-    secretStorage.redactor(bot).requirePublic(payload);
+    permissions.secretRedactor(bot).requirePublic(payload);
     database.exec("INSERT INTO channel_deliveries(id,source_id,operation,payload) VALUES(?,?,?,?)", {key, message, tool, payload});
     Json result{{"ok", true}, {"delivery", "queued"}, {"deliveryId", key}};
     if (tool == "publish_artifact") {
@@ -723,7 +721,7 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
         std::lock_guard lock(database.mutex);
         auto& external = outcome.externalMessageId;
         if (external.size() > 128 || external.find('\0') != external.npos || !conversation_storage::hasText(external) ||
-            secretStorage.redactor(bot).text(external) != external)
+            permissions.secretRedactor(bot).text(external) != external)
             external.clear();
         const auto next = outcome.state == ChannelDelivery::State::accepted  ? "accepted"
                           : outcome.state == ChannelDelivery::State::notSent ? "pending"

@@ -15,7 +15,6 @@ namespace flockv0 {
 class BotLifecycleStorage;
 class Database;
 class InboxStorage;
-class JournalStorage;
 class PolicyApprovals;
 class SecretStorage;
 class Store;
@@ -114,14 +113,13 @@ public:
     void useSecret(Id task, const SecretRef&, std::string_view destination, std::string_view operation, bool upstreamPermitted,
                    const std::function<void(std::string_view)>& adapter) const;
 private:
-    Policy(Database&, const BotLifecycleStorage&, const TaskRecords&, JournalStorage&, SecretStorage&, InboxStorage&, PolicyApprovals&);
+    Policy(Database&, const BotLifecycleStorage&, const TaskRecords&, SecretStorage&, InboxStorage&, PolicyApprovals&);
     void writeRule(const Person&, RuleKind, Action, std::string_view target, bool add, bool fromCard);
     void fulfillSecret(const Person&, std::string_view bot, Id request, std::string_view value);
     void audit(const Person&, std::string_view bot, std::string_view action, const Json& details);
     Database& database_;
     const BotLifecycleStorage& botLifecycle_;
     const TaskRecords& taskRecords_;
-    JournalStorage& journalStorage_;
     SecretStorage& secretStorage_;
     InboxStorage& inboxStorage_;
     PolicyApprovals& policyApprovals_;

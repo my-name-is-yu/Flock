@@ -14,7 +14,6 @@ class Policy;
 class ConversationStorage;
 
 class Database;
-class JournalStorage;
 class SecretStorage;
 class TaskRecords;
 class WaitStorage;
@@ -34,11 +33,11 @@ class InboxStorage;
 class PolicyApprovals {
 public:
     PolicyApprovals(Database& database, const SecretStorage& secretStorage, const WebIdentityState& webIdentity, TaskRecords& taskRecords,
-                    WaitStorage& waitStorage, JournalStorage& journalStorage, Policy& permissions, ConversationStorage& conversationTurns,
+                    WaitStorage& waitStorage, Policy& permissions, ConversationStorage& conversationTurns,
                     BotLifecycleStorage& botLifecycle, ChannelStorage& channelStorage, InboxStorage& inboxStorage)
         : database(database), secretStorage(secretStorage), webIdentity(webIdentity), taskRecords(taskRecords), waitStorage(waitStorage),
-          journalStorage(journalStorage), permissions(permissions), conversationTurns(conversationTurns), botLifecycle(botLifecycle),
-          channelStorage(channelStorage), inboxStorage(inboxStorage) {}
+          permissions(permissions), conversationTurns(conversationTurns), botLifecycle(botLifecycle), channelStorage(channelStorage),
+          inboxStorage(inboxStorage) {}
 
     Seconds now() const { return clock(); }
     void setClock(const std::function<Seconds()>& value) { clock = value; }
@@ -60,7 +59,6 @@ private:
     const WebIdentityState& webIdentity;
     TaskRecords& taskRecords;
     WaitStorage& waitStorage;
-    JournalStorage& journalStorage;
     Policy& permissions;
     ConversationStorage& conversationTurns;
     BotLifecycleStorage& botLifecycle;

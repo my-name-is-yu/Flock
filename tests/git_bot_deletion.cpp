@@ -1,8 +1,10 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
 #include "fake_git.hpp"
 #include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/git_events.hpp"
-#include "flock/conversations.hpp"
 #include "flock/decision.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
@@ -40,7 +42,7 @@ public:
             std::lock_guard lock(mutex);
             tools.emplace(message, Script{std::move(tool), std::move(beforeTool), nullptr});
         }
-        Conversations(store).receive(localOwner, intake(std::string(bot)), message, message);
+        ConversationIntake(store).receive(localOwner, intake(std::string(bot)), message, message);
     }
 
     Json result(std::string_view message) {
@@ -145,7 +147,7 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
     {
         Store store(path);
         Runtime runtime(store, model, sessions, soul, options(host));
-        retired = Tasks(store).submit(intake());
+        retired = TaskIntake(store).submit(intake());
         for (int i = 0; i < 8 && Tasks(store).task(retired).task.state != TaskState::completed; ++i) runtime.tick();
         check(Tasks(store).task(retired).task.state == TaskState::completed && host->createCalls == 1,
               "The original PR task did not finish");
@@ -161,12 +163,12 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         check(blockedByReview && !store.botDeleted("owner"), "A pending Git review did not block Bot deletion");
         Inbox(store).decideInbox(localOwner, target(pending.at(0)), "approve");
 
-        sibling = Tasks(store).submit(intake("sibling", "sibling-project"));
+        sibling = TaskIntake(store).submit(intake("sibling", "sibling-project"));
         auto siblingArgs = openArgs("sibling-change");
         siblingArgs["taskId"] = sibling;
         check(model.runTool(store, runtime, "sibling", "watch-sibling", {"git_open_pr", siblingArgs, {}}).at("prNumber") == 2,
               "The sibling did not start watching another PR at the same commit");
-        replacement = Tasks(store).submit(intake("replacement", "replacement-project"));
+        replacement = TaskIntake(store).submit(intake("replacement", "replacement-project"));
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(Tasks(store).task(sibling).task.state == TaskState::completed &&
                   Tasks(store).task(replacement).task.state == TaskState::completed,
@@ -287,7 +289,7 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         check(historyCount(store, retired, "git_webhook") == 0 && historyCount(store, sibling, "git_webhook") == 0,
               "Handoff delivered an old event to the retired task or changed a shared commit's attribution");
         check(webhookWasUndelivered(path, "shared-head-during-handoff"), "Handoff backdated a head change past ambiguous CI activity");
-        const auto history = Tasks(store).history(replacement, 0, 200).dump();
+        const auto history = TaskHistory(store).history(replacement, 0, 200).dump();
         check((history.find("\"ci-before-delayed-sync\"") != std::string::npos) == observedDelayedHead,
               "Delayed synchronization failed to recover matching CI or crossed a conflicting head observation");
         const auto expectedNotifications = (requestsReview ? 6 : 4) + (observedDelayedHead ? 1 : 0);

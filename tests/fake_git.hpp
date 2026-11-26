@@ -1,5 +1,5 @@
 #pragma once
-#include "flock/tasks.hpp"
+#include "flock/task_history.hpp"
 #include "flock/git_host.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/command.hpp"
@@ -208,7 +208,7 @@ inline InboxTarget target(const Json& row) {
 }
 
 inline unsigned historyCount(Store& store, Id task, std::string_view kind) {
-    const auto records = Tasks(store).history(task, 0, 200);
+    const auto records = TaskHistory(store).history(task, 0, 200);
     return std::ranges::count_if(records, [&](const Json& row) { return row.at("kind") == kind; });
 }
 }

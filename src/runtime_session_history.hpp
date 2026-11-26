@@ -14,16 +14,14 @@
 
 namespace flockv0 {
 class Database;
-class JournalStorage;
 class Policy;
-class SecretStorage;
 
 class Runtime::Components::SessionHistory {
 public:
     enum class PrefillResult { NotNeeded, Persisted, UnavailableWithSettledReport };
     static constexpr std::size_t maxEvidenceReads = 3;
 
-    SessionHistory(Database&, JournalStorage&, SecretStorage&, T3&, const Policy&, TaskUpdates&, const std::string& mode);
+    SessionHistory(Database&, T3&, const Policy&, TaskUpdates&, const std::string& mode);
     static std::size_t readOffset(const Json& args);
     SessionExcerptEntry readExcerpt(std::string_view bot, const ReadRequest& req);
     bool readEvidence(const TaskData&, const Json& event, const Json& args, const Json& usage = Json::object());
@@ -32,8 +30,6 @@ public:
     PrefillResult prefillHistory(const TaskData&, const Json& event);
 private:
     Database& database;
-    JournalStorage& journalStorage;
-    SecretStorage& secretStorage;
     T3& t3;
     const Policy& policy;
     TaskUpdates& updates;

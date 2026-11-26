@@ -1,3 +1,5 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/web_conversation_intake.hpp"
 #include "flock/identity.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
@@ -68,7 +70,7 @@ struct SearchConversation {
         const Intake intake{std::move(bot), "Investigate staging", "env-1", "project", Json::object()};
         model.result = nullptr;
         model.next = {std::move(tool), std::move(args), "Inspect the requested investigation"};
-        Conversations(store).receive(localOwner, intake, std::to_string(++sequence), "Check the investigation.");
+        ConversationIntake(store).receive(localOwner, intake, std::to_string(++sequence), "Check the investigation.");
         runtime.runConversations();
         return model.result;
     }
@@ -241,7 +243,7 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     T3Connections(*store).connect("env-1", localOwner.id, 3210);
     const Intake intake{"release", "Inspect staging", "env-1", "project", {{"botDisplayName", "Ernest"}}};
     const auto receive = [&](std::string_view id) {
-        return Conversations(*store).receiveWeb(localOwner, intake, id, "Send the follow-up.");
+        return WebConversationIntake(*store).receiveWeb(localOwner, intake, id, "Send the follow-up.");
     };
     model.next = {"flock_session_search", Json::object(), "Find the Session"};
     receive("find");

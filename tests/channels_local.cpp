@@ -1,3 +1,7 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
 #include "flock/identity.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/local_machines.hpp"
@@ -547,7 +551,7 @@ void taskUpdates(const std::filesystem::path& database) {
     model.decideNext = std::move(taskModel);
     const auto receipt = Channels(store).receiveChannel(channel, "fixture-auth", original, intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
-    const Id taskId = Tasks(store).activeTasks("release").at(0).task.id;
+    const Id taskId = TaskList(store).activeTasks("release").at(0).task.id;
     check(Tasks(store).task(taskId).task.activeRun.has_value(), "Channel task did not start a Session");
     t3.observeRun = [](const RunRef&) {
         Observation observed;
@@ -629,7 +633,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
 
     model.decideNext = [](const ModelInput&) { return reply("Recorded in Web"); };
     const auto original =
-        Conversations(store).receive(owner, intake("release", ""), "web-original", "Original Web evidence").at("messageId");
+        ConversationIntake(store).receive(owner, intake("release", ""), "web-original", "Original Web evidence").at("messageId");
     runtime.runConversations();
 
     Json compaction, workflow;
@@ -643,7 +647,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
         workflow = steps.at(1).at("result").at("workflowId");
         return reply("Started in Web");
     };
-    Conversations(store).receive(owner, intake("release", ""), "web-workflow", "Summarize and start a workflow");
+    ConversationIntake(store).receive(owner, intake("release", ""), "web-workflow", "Summarize and start a workflow");
     runtime.runConversations();
     check(compaction.is_number() && workflow.is_number(), "Web workflow or compaction tool failed");
 
@@ -652,7 +656,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
         webContext = input.history.at(0).at("compactionId") == compaction && input.task.at("workflows").at(0).at("workflowId") == workflow;
         return reply("Loaded in Web");
     };
-    Conversations(store).receive(owner, intake("release", ""), "web-context", "Check the workflow");
+    ConversationIntake(store).receive(owner, intake("release", ""), "web-context", "Check the workflow");
     runtime.runConversations();
     check(webContext, "Web turn lost the workflow or compacted summary");
 
@@ -743,7 +747,7 @@ void sessionEvidence(const std::filesystem::path& database) {
           "Channel text approved a protected decision");
 
     t3.listBackground = true;
-    Conversations(store).receive(owner, intake("release", ""), "web-search", "Search for a missing investigation");
+    ConversationIntake(store).receive(owner, intake("release", ""), "web-search", "Search for a missing investigation");
     runtime.runConversations();
     scanCursor = result.at("nextCursor");
     check(result.at("sessions").empty() && scanCursor.is_string(), "Web search did not produce an empty continuation");
@@ -782,7 +786,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
                                            return route;
                                        });
         for (int i = 0; i < 8; ++i) runtime.tick();
-        const auto task = taskJson(Tasks(store).task(Tasks(store).activeTasks("release").at(0).task.id));
+        const auto task = taskJson(Tasks(store).task(TaskList(store).activeTasks("release").at(0).task.id));
         check(task.at("state") == "waiting" && transport->effects.back().at("payload").at("suggestions") == Json::array({"Yes", "No"}),
               "The task question was not posted");
         return std::pair{task, transport->effects.back().at("externalMessageId")};
@@ -799,7 +803,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     rejects([&] { Channels(store).receiveChannel(channel, "fixture-auth", wrongThread, intake); });
 
     const auto recordedChoice = [&](const Json& task, const Json& receipt) {
-        return std::ranges::any_of(Tasks(store).history(task.at("id"), 0, 200), [&](const Json& event) {
+        return std::ranges::any_of(TaskHistory(store).history(task.at("id"), 0, 200), [&](const Json& event) {
             const auto& data = event.at("data");
             return event.at("kind") == "user_answer" && data.at("text") == "Yes" && data.at("messageId") == receipt.at("messageId") &&
                    data.at("waitId") == task.at("wait").at("id");
@@ -852,7 +856,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     const auto session = [&](auto bot) {
         auto route = intake(bot, "Prepare");
         route.projectId += std::to_string(++project);
-        const auto task = Tasks(store).submit(route);
+        const auto task = TaskIntake(store).submit(route);
         for (int i = 0; i < 3; ++i) runtime.tick();
         auto run = Tasks(store).task(task).task.activeRun;
         check(run.has_value(), "Fixture Session did not start");
@@ -880,7 +884,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
             observed = true;
             return reply("Chat is available");
         };
-        Conversations(store).receive(localOwner, intake(bot, ""), std::to_string(++count), "Local connection");
+        ConversationIntake(store).receive(localOwner, intake(bot, ""), std::to_string(++count), "Local connection");
         runtime.runConversations();
         check(observed, "Local tool result was not delivered");
     };
@@ -895,7 +899,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         return Decision{"follow_up", {{"instruction", "Continue in this Session"}}, "The work needs one more Run"};
     };
     for (int i = 0; i < 5; ++i) runtime.tick();
-    for (const auto& row : Tasks(store).activeTasks("release")) {
+    for (const auto& row : TaskList(store).activeTasks("release")) {
         const auto& active = row.task.activeRun;
         if (active && active->ref.threadId == originalRun.threadId) a = active->ref;
     }
@@ -927,7 +931,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId", "env"}, {"runTimeoutSeconds", 1800}}});
         return reply("Chat is available");
     };
-    Conversations(store).receive(localOwner, intake("release", ""), std::to_string(++count), "List reusable environments");
+    ConversationIntake(store).receive(localOwner, intake("release", ""), std::to_string(++count), "List reusable environments");
     runtime.runConversations();
     check(unchanged, "Local connections added a reusable environment");
     check(Conversations(store).conversation("release").back()["data"]["text"] == "Chat is available", "Chat disabled after local decline");

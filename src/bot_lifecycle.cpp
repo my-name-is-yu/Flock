@@ -10,7 +10,6 @@
 #include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
-#include "flock/board_inbox.hpp"
 #include "flock/policy.hpp"
 #include "policy_approvals.hpp"
 #include "channel_storage.hpp"

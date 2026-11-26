@@ -1,3 +1,5 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/board_inbox.hpp"
@@ -109,8 +111,8 @@ void runningSessions(const std::filesystem::path& path) {
         return {};
     };
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; }, options);
-    Tasks(store).submit({"Ernest", "read repository", "env", "project"});
-    Tasks(store).submit({"Ernest", "ask reviewer", "env", "other-project"});
+    TaskIntake(store).submit({"Ernest", "read repository", "env", "project"});
+    TaskIntake(store).submit({"Ernest", "ask reviewer", "env", "other-project"});
     for (int i = 0; i < 30 && adapter.running.size() < 2; ++i) runtime.tick();
     check(adapter.running.size() == 2, "peer and sender did not launch under distinct owners");
     std::vector<std::string> completed;
@@ -179,7 +181,7 @@ void freshLaunch(const std::filesystem::path& path) {
     RunningAdapter adapter;
     WorkModel model;
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; });
-    auto task = Tasks(store).submit({"Fresh", "read repository", "env", "project"});
+    auto task = TaskIntake(store).submit({"Fresh", "read repository", "env", "project"});
     Policy{store}.changeNeverRule(owner, Action::environment_launch, "env", true);
     for (int i = 0; i < 6; ++i) runtime.tick();
     check(adapter.running.empty() && taskJson(Tasks(store).task(task)).at("wait").at("reason") == "settings",
@@ -249,7 +251,7 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool p
         runtime.runConversations();
     };
     model.next = {"request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "NewBot"}, {"name", "New Bot"}}, {}};
-    Conversations(store).receive(creator, Intake{"Ernest", "", "env", "project"}, "create", "Create a Bot");
+    ConversationIntake(store).receive(creator, Intake{"Ernest", "", "env", "project"}, "create", "Create a Bot");
     run(store);
     check(model.result.is_null() && attempts == 1, "Uncertain creation saved a terminal tool result");
     check(!Policy{store}.allows(creator, Action::bot_settings, "NewBot"), "Interrupted creation finalized ownership prematurely");
@@ -273,7 +275,7 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool p
         appliedKey.clear();
         failing = false;
         model.next = {"request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "NewBot"}, {"name", "New Bot"}}, {}};
-        Conversations(restarted).receive(creator, Intake{"Ernest", "", "env", "project"}, "recreate", "Create a Bot again");
+        ConversationIntake(restarted).receive(creator, Intake{"Ernest", "", "env", "project"}, "recreate", "Create a Bot again");
         run(restarted);
     }
     check(!publishedKey.empty() && model.result.at("turn").back().at("result").at("status") == "applied",
@@ -287,7 +289,7 @@ void exercise(const std::filesystem::path& dir) {
     Store store(path);
     Policy policy{store};
     Intake ernest{"Ernest", "read", "env", "project"}, reviewer{"Reviewer", "review", "env", "project"};
-    auto child = Tasks(store).submit(ernest), peerChild = Tasks(store).submit(reviewer);
+    auto child = TaskIntake(store).submit(ernest), peerChild = TaskIntake(store).submit(reviewer);
     ToolModel model;
     Adapter t3;
     std::vector<BotChange> applied;
@@ -297,7 +299,7 @@ void exercise(const std::filesystem::path& dir) {
     unsigned message = 0;
     auto turn = [&](std::string name, Json args = Json::object(), std::string text = "acknowledged") {
         model.next = {std::move(name), std::move(args), ""};
-        Conversations(store).receive(localOwner, ernest, std::to_string(++message), text);
+        ConversationIntake(store).receive(localOwner, ernest, std::to_string(++message), text);
         runtime.runConversations();
         return model.result.dump();
     };
@@ -386,7 +388,7 @@ void exercise(const std::filesystem::path& dir) {
     std::filesystem::remove(dir / "secrets");
     std::filesystem::rename(dir / "original-vault", dir / "secrets");
     model.next = {"list_secrets", Json::object(), "list"};
-    Conversations(store).receive(localOwner, reviewer, "peer-names", "show names", 0);
+    ConversationIntake(store).receive(localOwner, reviewer, "peer-names", "show names", 0);
     runtime.runConversations();
     check(model.result.at("turn").at(0).at("result").at("names") == Json::array({"repo-token"}), "shared secret names unavailable");
     check(policy.redactSecrets("Reviewer", Json(credential)) == "[redacted]" &&

@@ -12,7 +12,6 @@
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/wait.hpp"
-#include "json_fields.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "wait_storage.hpp"
@@ -278,7 +277,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?)
     if (target.taskId) {
         auto entry = key(target);
         entry.update(Json{{"decidedBy", actor.id}, {"decidedAt", now}, {"decision", decision}});
-        journalStorage.journal(target.taskId, "inbox_decision", entry);
+        database.writeJournal(target.taskId, "inbox_decision", entry);
     }
 }
 

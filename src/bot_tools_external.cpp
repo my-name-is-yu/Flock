@@ -1,4 +1,3 @@
-#include "json_fields.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/secrets.hpp"
 #include "flock/policy.hpp"

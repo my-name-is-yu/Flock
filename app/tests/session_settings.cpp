@@ -1,3 +1,5 @@
+#include "flock/task_control.hpp"
+#include "flock/task_intake.hpp"
 #include "fixtures.hpp"
 #include "../../t3/internal.hpp"
 #include "../bots.hpp"
@@ -83,7 +85,7 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
         Store store(database);
         auto saved = config;
         saved["session"] = legacy;
-        id = Tasks(store).submit({"release", "Verify the fixture", "env-1", "project", saved});
+        id = TaskIntake(store).submit({"release", "Verify the fixture", "env-1", "project", saved});
     }
     Store store(database);
     auto adapter = makeT3Mcp(credentials);
@@ -98,13 +100,13 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
     const Id waitId = waiting.wait.value().id;
     const auto target = TaskTarget::from(waiting.task, waitId);
     for (const auto& session : malformed) {
-        rejects<Conflict>([&] { Tasks(store).operate(owner, target, "reconcile", {{"session", session}}); },
+        rejects<Conflict>([&] { TaskControl(store).operate(owner, target, "reconcile", {{"session", session}}); },
                           "settings correction accepted " + session.dump());
     }
     check(taskJson(Tasks(store).task(id)).at("wait") == taskJson(waiting).at("wait"), "invalid corrections cleared the settings wait");
 
     createBot(folder / "release", config, "", "");
-    Tasks(store).operate(owner, target, "reconcile", Tasks(store).reconciliationData(id, waitId, Json::object(), intake));
+    TaskControl(store).operate(owner, target, "reconcile", TaskControl(store).reconciliationData(id, waitId, Json::object(), intake));
     for (int i = 0; i < 2; ++i) runtime.tick();
     const auto resumed = Tasks(store).task(id);
     check(resumed.task.state == TaskState::running, "corrected task state was " + std::string(taskStateName(resumed.task.state)));

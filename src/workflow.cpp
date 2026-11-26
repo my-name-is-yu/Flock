@@ -6,7 +6,6 @@
 
 #include "conversation_storage.hpp"
 #include "database.hpp"
-#include "json_fields.hpp"
 #include "journal.hpp"
 #include "journal_storage.hpp"
 #include "journal_task.hpp"
@@ -316,7 +315,7 @@ void WorkflowStorage::advanceWorkflows(Seconds now) {
     while (overdue.next()) {
         const auto task = overdue.number(0);
         database_.exec("UPDATE workflow_stages SET alerted=1 WHERE task_id=?", {task});
-        journalStorage_.journal(task, "workflow_deadline_exceeded", {{"needsAttention", true}, {"observedAt", now}});
+        database_.writeJournal(task, "workflow_deadline_exceeded", {{"needsAttention", true}, {"observedAt", now}});
     }
     materializeWorkflowStages();
     tx.commit();

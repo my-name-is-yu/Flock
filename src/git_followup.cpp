@@ -9,7 +9,6 @@
 #include "flock/json.hpp"
 #include "flock/decision.hpp"
 #include "flock/session_ref.hpp"
-#include "json_fields.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "flock/policy.hpp"

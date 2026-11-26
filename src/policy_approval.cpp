@@ -6,8 +6,6 @@
 #include "wait_storage.hpp"
 #include "task_records.hpp"
 #include "secret_storage.hpp"
-#include "json_fields.hpp"
-#include "journal_storage.hpp"
 #include "flock/secrets.hpp"
 #include "flock/policy.hpp"
 #include "flock/board_inbox.hpp"
@@ -203,7 +201,7 @@ WHERE a.status IN ('pending','approved')
         releasePolicyTurn(change.turn);
         releasePolicyTask(change.id, change.status);
         permissions.audit(Person{}, {}, "approval_closed", {{"itemId", change.id}, {"status", change.status}});
-        if (change.task) journalStorage.journal(change.task, "policy_approval", {{"itemId", change.id}, {"status", change.status}});
+        if (change.task) database.writeJournal(change.task, "policy_approval", {{"itemId", change.id}, {"status", change.status}});
     }
 }
 
@@ -218,7 +216,7 @@ ApprovalGate PolicyApprovals::approveAction(const PolicyOrigin& origin, const Re
     const auto deny = [&](std::string_view reason) {
         auto details = secretStorage.sharedRedactor().record({{"action", action}, {"target", resource.target}, {"reason", reason}});
         policy.audit(Person{}, origin.bot, "action_denied", details);
-        if (origin.task) journalStorage.journal(origin.task, "policy_denied", details);
+        if (origin.task) database.writeJournal(origin.task, "policy_denied", details);
         return ApprovalGate::denied;
     };
     if (botLifecycle.botPaused(origin.bot)) return ApprovalGate::stale;
@@ -300,7 +298,7 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
                               {waitId, resume, task.generation, task.generation, card});
             }
         }
-        journalStorage.journal(origin.task, "policy_approval", {{"itemId", card}, {"status", "pending"}});
+        database.writeJournal(origin.task, "policy_approval", {{"itemId", card}, {"status", "pending"}});
     }
     policy.audit(Person{}, origin.bot, "approval_requested", {{"itemId", card}, {"action", action}, {"target", resource.target}});
     if (origin.anchor) channelStorage.channelApprovalNotice(origin.anchor);

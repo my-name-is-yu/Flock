@@ -1,5 +1,8 @@
-#include "flock/tasks.hpp"
 #include "flock/secret_ref.hpp"
+#include "flock/conversation_intake.hpp"
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
+#include "flock/web_conversation_intake.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
@@ -242,7 +245,7 @@ struct Fixture {
     Json batch(std::vector<Decision> calls, Id budget = 20, std::string bot = "alpha") {
         model.next = std::move(calls);
         model.seen = nullptr;
-        lastMessage = Conversations(*store)
+        lastMessage = ConversationIntake(*store)
                           .receive(owner, intake(std::move(bot), budget), std::to_string(++seq), "Check the fixture")
                           .at("messageId");
         runtime->runConversations();
@@ -319,7 +322,7 @@ void workspaceFiles(Fixture& f) {
     write(history, historyMarker);
     auto privateIntake = f.intake("beta");
     privateIntake.request = dbMarker;
-    Tasks(*f.store).submit(privateIntake);
+    TaskIntake(*f.store).submit(privateIntake);
     for (int i = 0; i < 12 && !f.t3.launched; ++i) f.runtime->tick();
     check(f.t3.launched, "Private T3 fixture did not start");
     const auto sessionScope = Resource::sessionRead("test-environment", "private-thread");
@@ -451,7 +454,7 @@ void externalTools(Fixture& f) {
                      {{"name", secretMarker}, {"mimeType", "audio/mpeg"}, {"dataBase64", "SUQzdmF1bHQtb25seS1tYXJrZXI="}}});
     f.model.next = {call("reply", {{"text", "Message received."}})};
     const auto message =
-        Conversations(*f.store).receive(owner, f.intake(), "media", "Please inspect these photos and audio", 0, media).at("messageId");
+        ConversationIntake(*f.store).receive(owner, f.intake(), "media", "Please inspect these photos and audio", 0, media).at("messageId");
     f.block(Action::attachment_inspect, "alpha");
     f.runtime->runConversations();
     const auto image = call("inspect_attachment", {{"messageId", message}, {"attachmentId", "1"}});
@@ -472,7 +475,7 @@ void externalTools(Fixture& f) {
     check(corrupt.at("ok") == false && f.model.content.size() == 1, "A corrupt image reached the model or interrupted the turn");
     const auto opaque = f.run(call("inspect_attachment", {{"messageId", message}, {"attachmentId", "4"}}));
     check(opaque.at("ok") == true && opaque.at("data").at("name") == "[redacted]", "Attachment inspection exposed a shared secret value");
-    check(Conversations(*f.store).receipt(owner, "alpha", "media", "Please inspect these photos and audio", 0, media).has_value(),
+    check(WebConversationIntake(*f.store).receipt(owner, "alpha", "media", "Please inspect these photos and audio", 0, media).has_value(),
           "Attachment receipt was not idempotent");
     const auto jpeg =
         Json::array({{{"name", "pixel.jpg"},
@@ -482,7 +485,8 @@ void externalTools(Fixture& f) {
                                      "AAAAAAAAAAAAAAD/2gAIAQEAAD8AP//Z"}},
                      {{"name", "corrupt.jpg"}, {"mimeType", "image/jpeg"}, {"dataBase64", "/9j/4AAQSkZJRgABAQAAAQABAAA="}}});
     f.model.next = {call("reply", {{"text", "Message received."}})};
-    const auto pictures = Conversations(*f.store).receive(owner, f.intake(), "jpeg", "Please inspect these JPEGs", 0, jpeg).at("messageId");
+    const auto pictures =
+        ConversationIntake(*f.store).receive(owner, f.intake(), "jpeg", "Please inspect these JPEGs", 0, jpeg).at("messageId");
     f.runtime->runConversations();
     const auto jpegViews = f.batch({call("inspect_attachment", {{"messageId", pictures}, {"attachmentId", "1"}}),
                                     call("inspect_attachment", {{"messageId", pictures}, {"attachmentId", "2"}})});
@@ -516,7 +520,7 @@ void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
     const auto read = call("workspace_read_file", {{"path", "allowed.txt"}});
     const auto start = call("start_task", {{"request", "Run a task"}, {"doneWhen", "Done"}});
     const auto path = f.home / "workspaces" / "alpha" / "unapproved.txt";
-    const auto taskCount = Tasks(*f.store).tasks("alpha").size();
+    const auto taskCount = TaskList(*f.store).tasks("alpha").size();
     f.model.followStep = [&](const Json& steps) {
         if (steps.size() == 1) return std::vector{write, read};
         if (steps.size() == 3) return std::vector{start};
@@ -525,7 +529,7 @@ void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
     const auto steps = f.batch({fetch});
     f.model.followStep = {};
     check(steps.size() == 4 && steps[1].at("result").at("ok") == false && steps[2].at("result").at("ok") == true &&
-              steps[3].at("result").at("ok") == false && !fs::exists(path) && Tasks(*f.store).tasks("alpha").size() == taskCount,
+              steps[3].at("result").at("ok") == false && !fs::exists(path) && TaskList(*f.store).tasks("alpha").size() == taskCount,
           "A web evidence turn reached a privileged action or lost an independent read");
     check(f.run(write).at("ok") == true && fs::is_regular_file(path), "A new user message could not request an action");
 }

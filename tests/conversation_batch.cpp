@@ -1,3 +1,6 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_control.hpp"
+#include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/automations.hpp"
@@ -170,7 +173,7 @@ struct Fixture {
         model.first = {std::move(calls)};
         model.followUps.clear();
         model.turns.clear();
-        message = Conversations(*store)
+        message = ConversationIntake(*store)
                       .receive(localOwner, {"alpha", "", "env", "project", {{"modelCallLimit", limit}}}, std::to_string(++sequence),
                                "Check the fixture")
                       .at("messageId");
@@ -325,7 +328,7 @@ void followUpNeeded(const Decision& action, std::string_view guidance) {
 
 void gatewayOnlyCancelDoesNotCancelBatchSibling() {
     Fixture f;
-    const auto task = Tasks(*f.store).submit({"alpha", "Keep this task running", "env", "project"});
+    const auto task = TaskIntake(*f.store).submit({"alpha", "Keep this task running", "env", "project"});
     const auto generation = Tasks(*f.store).task(task).task.generation;
     f.receive({call("cancel_task", {{"taskId", task}, {"generation", generation}, {"gatewayEnvironmentId", "env"}}), search});
     f.runtime->runConversations();
@@ -464,8 +467,8 @@ constexpr auto sharedDoc = "fixture/playbook";
 void conversationReadParity() {
     Fixture f;
     const Intake intake{"alpha", "Fixture task", "env", "project"};
-    const auto task = Tasks(*f.store).submit(intake, &localOwner);
-    Tasks(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(task).task, 0), "cancel");
+    const auto task = TaskIntake(*f.store).submit(intake, &localOwner);
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(task).task, 0), "cancel");
     const auto result = std::stoll(f.query("SELECT id FROM journal WHERE kind='cancelled' AND task_id=" + std::to_string(task)));
     f.receive(
         {call("start_workflow", {{"request", "Collect the release notes"}, {"stages", {{{"stageId", "collect"}, {"role", "collect"}}}}})});

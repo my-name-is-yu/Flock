@@ -1,3 +1,5 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/conversations.hpp"
@@ -224,8 +226,8 @@ struct Fixture {
     Json call(std::string tool, Json args, std::string bot = "alpha") {
         model.result = nullptr;
         model.next = {std::move(tool), std::move(args), "Inspect the requested investigation"};
-        Conversations(*store).receive(localOwner, intake(std::move(bot)), std::to_string(++sequence),
-                                      "Where did yesterday’s staging investigation fail?");
+        ConversationIntake(*store).receive(localOwner, intake(std::move(bot)), std::to_string(++sequence),
+                                           "Where did yesterday’s staging investigation fail?");
         runtime->runConversations();
         check(!model.result.is_null(), "conversation did not dispatch tool");
         return model.result;
@@ -343,7 +345,7 @@ void acceptance() {
     check(fetchLog() == log && request("list", {{"cursor", cursor}, {"limit", 2}}) == secondPage && f.call(search, nextSearch) == next,
           "restart lost scoped references or read access");
 
-    const auto task = Tasks(*f.store).submit(f.intake("beta"));
+    const auto task = TaskIntake(*f.store).submit(f.intake("beta"));
     for (int i = 0; i < 8 && Tasks(*f.store).task(task).task.state != TaskState::running; ++i) f.runtime->tick();
     const auto running = taskJson(Tasks(*f.store).task(task));
     check(running.at("state") == "running" && f.t3.writes.size() == 1, "foreign task did not start");
@@ -354,7 +356,7 @@ void acceptance() {
     auto outside = f.intake("outside");
     outside.projectId = "elsewhere";
     f.model.next = {search, {{"query", "Foreign"}}, "Check configured project"};
-    Conversations(*f.store).receive(localOwner, outside, "outside-project", "Search my project");
+    ConversationIntake(*f.store).receive(localOwner, outside, "outside-project", "Search my project");
     f.runtime->runConversations();
     check(f.model.result.at("sessions").empty(), "Search included a recorded run from a different project");
     f.t3.denied["foreign-thread"] = true;
@@ -399,7 +401,7 @@ void acceptance() {
 void catalogResultsAreDeduplicatedAcrossRecordedBatches() {
     Fixture f;
     f.t3.overlappingCatalog = true;
-    Tasks(*f.store).submit(f.intake("alpha"));
+    TaskIntake(*f.store).submit(f.intake("alpha"));
     {
         sqlite3* raw = nullptr;
         check(sqlite3_open(f.store->path().c_str(), &raw) == SQLITE_OK, "could not open fixture database");
@@ -494,7 +496,7 @@ void approvedCallSurvivesReadPreflightContention() {
     f.model.next = {"flock_session_search", {{"query", "regression"}}, "Find the report"};
     auto intake = f.intake("alpha");
     intake.config["modelCallLimit"] = 1;
-    const auto receipt = Conversations(*f.store).receive(localOwner, intake, "preflight-busy", "Look for the failure");
+    const auto receipt = ConversationIntake(*f.store).receive(localOwner, intake, "preflight-busy", "Look for the failure");
     f.runtime->runConversations();
     const auto paused = Conversations(*f.store).pausedConversations("alpha");
     check(paused.size() == 1 && f.model.result.is_null(), "turn did not pause after reading evidence");
@@ -561,7 +563,7 @@ void redactionAndResumedHistory() {
         f.model.result = nullptr;
         auto intake = f.intake("alpha");
         intake.config["modelCallLimit"] = 1;
-        const auto receipt = Conversations(*f.store).receive(localOwner, intake, std::to_string(++f.sequence), "Look for the failure");
+        const auto receipt = ConversationIntake(*f.store).receive(localOwner, intake, std::to_string(++f.sequence), "Look for the failure");
         f.runtime->runConversations();
         const auto paused = Conversations(*f.store).pausedConversations("alpha");
         check(paused.size() == 1 && f.model.result.is_null(), "turn did not pause after reading evidence");

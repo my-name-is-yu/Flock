@@ -1,3 +1,5 @@
+#include "flock/task_control.hpp"
+#include "flock/task_history.hpp"
 #include "flock/tasks.hpp"
 #include "flock/person.hpp"
 #include "flock/t3_mcp.hpp"
@@ -102,7 +104,7 @@ int runSmoke() {
     Store store(scratch.path / "state.db");
     const auto id = submit(store, environmentId, projectId, "smoke");
     if (const auto status = pump(store, *t3, id, "completed"); status != 0) return status;
-    for (const auto& item : Tasks(store).history(id)) {
+    for (const auto& item : TaskHistory(store).history(id)) {
         if (item.at("kind") != "completed") continue;
         const auto& report = item.at("data").at("text");
         if (report != smokeReport) throw Conflict("T3 smoke expected " + Json(smokeReport).dump() + ", got " + report.dump());
@@ -191,11 +193,12 @@ int main(int argc, char** argv) {
         } else if (operation == "show" && argc == 4) {
             Store store(argv[2]);
             const auto id = std::stoll(argv[3]);
-            std::cout << Json{{"task", taskJson(Tasks(store).task(id))}, {"history", Tasks(store).history(id, 0, 200)}}.dump(2) << '\n';
+            std::cout << Json{{"task", taskJson(Tasks(store).task(id))}, {"history", TaskHistory(store).history(id, 0, 200)}}.dump(2)
+                      << '\n';
         } else if (operation == "operate" && (argc == 6 || argc == 7)) {
             Store store(argv[2]);
-            Tasks(store).operate(localOwner, TaskTarget::from(Tasks(store).task(std::stoll(argv[3])).task, std::stoll(argv[4])), argv[5],
-                                 argc == 7 ? Json::parse(argv[6]) : Json::object());
+            TaskControl(store).operate(localOwner, TaskTarget::from(Tasks(store).task(std::stoll(argv[3])).task, std::stoll(argv[4])),
+                                       argv[5], argc == 7 ? Json::parse(argv[6]) : Json::object());
         } else if (operation == "inspect" && argc == 5) {
             Store store(argv[2]);
             auto t3 = makeT3Mcp(argv[3]);
