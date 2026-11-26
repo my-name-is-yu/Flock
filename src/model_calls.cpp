@@ -2,6 +2,7 @@
 #include "database.hpp"
 #include "secret_storage.hpp"
 #include "model_calls.hpp"
+#include "memory_learnings.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "conversation_storage.hpp"
 #include "flock/limits.hpp"
@@ -54,7 +55,8 @@ bool validDecisionReason(std::string_view reason) {
 bool modelArgumentsContainProtected(const SecretRedactor& scrub, std::string_view tool, const Json& args) {
     if (!args.is_object()) return scrub.containsProtected(args);
     for (const auto& [key, value] : args.items()) {
-        const bool protocolKey = redactsProse(tool, key) || (tool == "reply" && key == "suggestions");
+        const bool protocolKey =
+            redactsProse(tool, key) || (tool == "reply" && key == "suggestions") || (tool == "complete" && key == "learnings");
         if ((!protocolKey && scrub.containsProtected(key)) || scrub.containsProtected(value)) return true;
     }
     return false;
@@ -134,6 +136,16 @@ ModelCall ModelCalls::checkModelCall(std::string_view bot, Decision call, const 
     } else {
         const auto scrub = modelCallRedactor(bot, call.tool, call.args, gitNotification);
         if (call.args.is_object()) {
+            if (call.tool == "complete") {
+                const auto learnings = call.args.find("learnings");
+                if (learnings != call.args.end()) {
+                    auto safe = safeTaskLearnings(*learnings, scrub);
+                    if (safe.empty())
+                        call.args.erase(learnings);
+                    else
+                        *learnings = std::move(safe);
+                }
+            }
             for (auto& [key, value] : call.args.items())
                 if (value.is_string() && redactsProse(call.tool, key)) value = scrub.text(value.get_ref<const std::string&>());
         }
@@ -168,6 +180,7 @@ CheckedModelTurn ModelCalls::callModel(std::string_view bot, Model& model, const
         safe.config = scrub.record(input.config, SecretRedactor::Fields::external);
         safe.notes = {scrub.text(input.notes.soul), scrub.text(input.notes.memory)};
         safe.feedback = scrub.text(input.feedback);
+        if (scrub.containsProtectedText(safe.learningRunId)) safe.learningRunId.clear();
         if (conversation) conversation_storage::projectToolHistory(safe.event.at("turn"), revision);
         {
             std::lock_guard lock(database.mutex);

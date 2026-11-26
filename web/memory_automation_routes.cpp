@@ -92,7 +92,10 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             if (req.has_param("docId")) args["docId"] = req.get_param_value("docId");
             for (auto key : {"before", "proposalsBefore", "revisionId", "proposalId"})
                 if (req.has_param(key)) args[key] = queryId(req, key);
-            reply(res, 200, Memory(store).memory(actor, bot, req.path.ends_with("/history") ? "memory_history" : "read_memory", args));
+            const bool history = req.path.ends_with("/history");
+            auto result = Memory(store).memory(actor, bot, history ? "memory_history" : "read_memory", args);
+            if (history) projectMemoryHistoryLinks(result);
+            reply(res, 200, result);
         });
     });
     server.Post(R"(/api/memory/(propose|apply|revert|reject))", [&](const Request& req, Response& res) {

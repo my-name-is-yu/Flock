@@ -35,6 +35,7 @@ enum class JournalKind {
     git_pr_followup_requested,
     conversation_message,
     conversation_reply,
+    memory_learned,
     completed,
     cancel_requested,
     cancelled,

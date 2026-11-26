@@ -295,6 +295,7 @@
 .memory-notice .text-button { color: var(--text); font-size: inherit; }
 .memory-notice .text-button[aria-disabled="true"] { color: var(--text-3); }
 .memory-notice-status { display: block; }
+.memory-notice-removed { margin: .2rem 0 0; }
 .session-event { overflow-wrap: anywhere; }
 .session-event .text-button { font-size: inherit; }
 .session-invitation-note { margin: .25rem 0 0; }

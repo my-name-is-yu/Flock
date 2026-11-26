@@ -33,6 +33,7 @@ struct ModelInput {
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
     bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
+    std::string learningRunId{};
 };
 class Model {
 public:

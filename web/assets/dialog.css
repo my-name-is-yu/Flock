@@ -150,6 +150,14 @@
 .settings-card-feedback { color: var(--text-2); font-size: var(--text-xs); }
 .settings-card-feedback.error { color: var(--danger); }
 .settings-card-feedback:empty { position: absolute; }
+.memory-history { gap: .6rem; overflow-wrap: anywhere; }
+.memory-history-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.memory-history-list li { padding-block: .65rem; }
+.memory-history-list li + li { border-top: 1px solid var(--hairline); }
+.memory-history-list p { margin: .25rem 0 0; }
+.memory-history-meta, .memory-history-source { color: var(--text-3); font-size: var(--text-xs); }
+.memory-history .text-button, .memory-history .link { color: var(--text); font-size: inherit; }
+.memory-history-more { justify-self: start; }
 .settings-rows { padding: 0; }
 .settings-workspace { gap: .35rem; }
 .settings-workspace.needs-setup { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 45%, transparent); }

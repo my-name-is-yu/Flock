@@ -813,6 +813,18 @@ void responseContract() {
     const auto valid = responseDecision(Json::array({{{"type", "reasoning"}}, call}), completeRequest).calls.at(0);
     check(valid.tool == "complete" && valid.reason == "Evidence provided" && valid.args == Json{{"report", "Done"}},
           "Responses call did not map to core decision");
+    const auto learnings = Json::array({{{"text", "./scripts/verify.sh runs the full check."}, {"runId", "verified-run"}}});
+    const auto learningCall = modelCall("complete", {{"reason", "Evidence provided"}, {"report", "Done"}, {"learnings", learnings}});
+    rejects<ModelError>([&] { responseDecision(learningCall, completeRequest); }, "An ineligible task was offered learnings");
+    input.learningRunId = "verified-run";
+    const auto learningRequest = responseRequest(input);
+    const auto& completion = toolParameters(learningRequest, "complete");
+    const auto& learningSchema = completion.at("properties").at("learnings");
+    check(completion.at("required") == Json::array({"reason", "report"}) && learningSchema.at("maxItems") == 3 &&
+              learningSchema.at("items").at("properties").at("text").at("maxLength") == 300 &&
+              learningSchema.at("items").at("properties").at("runId").at("enum") == Json::array({"verified-run"}) &&
+              responseDecision(learningCall, learningRequest).calls.at(0).args.at("learnings") == learnings,
+          "Completion did not round-trip optional learnings scoped to the verified Run");
     rejects<ModelError>([&] { responseDecision(modelCall("complete", {{"report", "Done"}}), completeRequest); },
                         "Completion without a reason was accepted");
     rejects<ModelError>([&] { responseDecision(modelCall("complete", {{"report", "Done"}, {"reason", " \t"}}), completeRequest); },

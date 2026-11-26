@@ -2389,13 +2389,19 @@ void consultationRestoresOwnEvidence() {
             };
         f.allowBeta();
         f.restart();
-        const auto source = f.submit("Verify with a Session and consult");
+        constexpr auto request = "Verify with a Session and consult";
         f.model.script = [&](const ModelInput& input) -> Decision {
+            if (input.event["kind"] == "conversation_turn") return converse(input, "start_task", 0, Json::object());
             if (input.event["kind"] == "intake") return work();
-            if (input.event["kind"] == "result") return botRequest("beta", "consult", "Confirm policy");
+            if (input.event["kind"] == "result") {
+                check(input.learningRunId == "run-1-result", "the owner's Session report did not qualify as a learning source");
+                return botRequest("beta", "consult", "Confirm policy");
+            }
             if (input.event["kind"] == "bot_request") return botReply("result", "Policy confirmed");
             check(input.event["kind"] == "bot_result" && input.event["sessionResult"]["resultRunId"] == "run-1-result",
                   "the consultation result omitted the source Bot's settled report");
+            check(input.learningRunId.empty() && hasTool(input, "complete"),
+                  "peer completion exposed a learning source or lost completion");
             check(hasTool(input, "session_read") == (f.read == "on_demand") && !hasTool(input, "read_bot_evidence"),
                   "the source Bot's history ignored its selected read mode");
             if (f.read == "on_demand" && input.evidence.empty())
@@ -2404,11 +2410,15 @@ void consultationRestoresOwnEvidence() {
                   "own Session evidence did not match its selected mode");
             return complete();
         };
+        ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "verify-and-consult", request);
+        f.runtime->runConversations();
+        const auto source = TaskList(*f.store).tasks("alpha").front().task.id;
         f.reach(source, "running");
         f.t3.finish("run-1");
         f.reach(source, "completed");
         const auto expected = f.read == "off" ? 0 : f.read == "prefill" ? 2 : 1;
-        check(f.t3.reads == expected && f.t3.launches == 1, "the consultation changed read or Run counts");
+        check(f.t3.reads == expected && f.t3.launches == 1 && f.logs(source, "model_failure") == 0,
+              "the consultation changed read or Run counts or failed a decision");
     }
 }
 

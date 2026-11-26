@@ -1,6 +1,7 @@
 #include "flock/bot_memory.hpp"
 #include "flock/bot_id.hpp"
 #include "conversation_turns.hpp"
+#include "memory_learnings.hpp"
 #include "memory_storage.hpp"
 #include "flock/outbox.hpp"
 
@@ -17,6 +18,7 @@
 #include "flock/person.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
+#include "flock/task.hpp"
 #include "json_fields.hpp"
 
 #include <algorithm>
@@ -75,13 +77,39 @@ void checkVersion(Id expected, Id current) {
 }
 
 Json revisionView(const Statement& row) {
-    return {{"id", row.number(0)},
-            {"version", row.number(1)},
-            {"baseVersion", row.number(2)},
-            {"author", row.string(3)},
-            {"diffSummary", row.string(4)},
-            {"createdAt", row.number(5)},
-            {"revertedFrom", row.number(6) ? Json(row.number(6)) : Json(nullptr)}};
+    Json revision{{"id", row.number(0)},
+                  {"version", row.number(1)},
+                  {"baseVersion", row.number(2)},
+                  {"author", row.string(3)},
+                  {"diffSummary", row.string(4)},
+                  {"createdAt", row.number(5)},
+                  {"revertedFrom", row.number(6) ? Json(row.number(6)) : Json(nullptr)}};
+    if (!row.null(7)) revision["source"] = row.json(7);
+    if (!row.null(8) && !row.null(9)) {
+        const auto notice = row.json(8);
+        revision["learning"] = {{"taskTitle", notice.at("taskTitle")},
+                                {"requestEventId", notice.at("requestEventId")},
+                                {"reportEventId", notice.at("reportEventId")},
+                                {"added", notice.at("added")},
+                                {"removed", notice.at("removed")},
+                                {"run", row.json(9)}};
+    }
+    return revision;
+}
+
+Json writeMemoryRevision(Database& database, std::string_view key, const MemoryDocument& before, std::string_view updated,
+                         std::string_view author, Seconds now, Id reverted = 0, const Json& source = nullptr) {
+    const auto summary = diffSummary(before.content, updated);
+    database.exec("UPDATE memory_documents SET content=?,version=version+1,updated_at=? WHERE doc_key=? AND version=?",
+                  {updated, now, key, before.version});
+    if (!sqlite3_changes(database.db)) throw Conflict("Memory version conflict");
+    database.exec(R"SQL(
+INSERT INTO memory_revisions(doc_key,version,base_version,author,diff_summary,previous_content,new_content,reverted_from,created_at,source)
+VALUES(?,?,?,?,?,?,?,?,?,?)
+)SQL",
+                  {key, before.version + 1, before.version, author, summary, before.content, updated,
+                   reverted ? Json(reverted) : Json(nullptr), now, source});
+    return {{"docKey", key}, {"revisionId", database.last()}, {"version", before.version + 1}, {"diffSummary", summary}};
 }
 
 std::string roleHash(std::string_view text) {
@@ -245,21 +273,33 @@ Json MemoryStorage::memory(std::string_view bot, const Person& actor, std::strin
     scrub.requirePublic({key, author});
     auto doc = findMemory(database_.db, key);
     if (!doc && !shared) doc = MemoryDocument{seedPrivateMemory(key, bot, scrub, now), 0, now};
-    const auto [content, version, updatedAt] = doc.value_or(MemoryDocument{});
+    const auto empty = MemoryDocument{};
+    const auto& current = doc ? *doc : empty;
+    const auto& [content, version, updatedAt] = current;
 
     if (operation == "read_memory")
         return scrub.record({{"docKey", key}, {"content", content}, {"version", version}, {"updatedAt", updatedAt}});
     if (operation == "memory_history") {
-        if (args.contains("revisionId")) {
-            auto row = database_.query(R"SQL(
-SELECT id,version,base_version,author,diff_summary,created_at,reverted_from,previous_content,new_content
-FROM memory_revisions WHERE doc_key=? AND id=?
+        const auto revision = args.contains("revisionId") ? requiredInteger(args, "revisionId") : 0;
+        const auto before = !revision && args.contains("before") ? requiredInteger(args, "before") : 0;
+        auto revisions = database_.query(R"SQL(
+SELECT r.id,r.version,r.base_version,r.author,r.diff_summary,r.created_at,r.reverted_from,r.source,
+       learned.data,json_extract(completed.data,'$.source'),
+       CASE WHEN ?2<>0 THEN r.previous_content END,CASE WHEN ?2<>0 THEN r.new_content END
+FROM memory_revisions r
+LEFT JOIN journal learned ON learned.task_id=json_extract(r.source,'$.taskId') AND learned.kind='memory_learned'
+  AND json_extract(learned.data,'$.revisionId')=r.id
+LEFT JOIN journal completed ON completed.id=json_extract(learned.data,'$.completionEventId')
+  AND completed.task_id=learned.task_id AND completed.kind='completed'
+WHERE r.doc_key=?1 AND (?2=0 OR r.id=?2) AND (?3=0 OR r.id<?3)
+ORDER BY r.id DESC LIMIT 21
 )SQL",
-                                       {key, requiredInteger(args, "revisionId")});
-            if (!row.next()) throw Conflict("Memory revision not found");
-            auto detail = revisionView(row);
-            detail["previousContent"] = row.string(7);
-            detail["newContent"] = row.string(8);
+                                         {key, revision, before});
+        if (revision) {
+            if (!revisions.next()) throw Conflict("Memory revision not found");
+            auto detail = revisionView(revisions);
+            detail["previousContent"] = revisions.string(10);
+            detail["newContent"] = revisions.string(11);
             return scrub.record(std::move(detail));
         }
         const Id proposal = args.contains("proposalId") ? requiredInteger(args, "proposalId") : 0;
@@ -286,12 +326,6 @@ FROM memory_proposals WHERE doc_key=? AND (?=0 OR id=?) AND (?=0 OR id<?) ORDER 
             edits.push_back(std::move(row));
         }
         if (proposal) throw Conflict("Memory proposal not found");
-        const auto before = args.contains("before") ? requiredInteger(args, "before") : 0;
-        auto revisions = database_.query(R"SQL(
-SELECT id,version,base_version,author,diff_summary,created_at,reverted_from
-FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 21
-)SQL",
-                                         {key, before, before});
         Json history = Json::array();
         Id next = 0;
         while (revisions.next()) {
@@ -345,9 +379,9 @@ FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 2
     if (updated.size() > limits::memory::maxDocumentBytes)
         throw Conflict("Redacted memory content exceeds " + std::to_string(limits::memory::maxDocumentBytes) + " bytes");
     if (remembering && updated == content) return {{"version", version}, {"unchanged", true}};
-    const auto summary = diffSummary(content, updated);
     if (!doc) createMemory(key, {}, id, {}, now);
     if (operation == "propose_memory_edit") {
+        const auto summary = diffSummary(content, updated);
         const auto rationale = field(args, "rationale");
         if (rationale.empty() || rationale.size() > 1000) throw Conflict("Enter a rationale up to 1,000 bytes");
         database_.exec(R"SQL(
@@ -359,18 +393,10 @@ VALUES(?,?,?,?,?,'pending',?,?)
             {"docKey", key}, {"proposalId", database_.last()}, {"baseVersion", version}, {"diffSummary", summary}, {"status", "pending"}};
     }
 
-    database_.exec("UPDATE memory_documents SET content=?,version=version+1,updated_at=? WHERE doc_key=? AND version=?",
-                   {updated, now, key, expected});
-    if (!sqlite3_changes(database_.db)) throw Conflict("Memory version conflict");
-    database_.exec(R"SQL(
-INSERT INTO memory_revisions(doc_key,version,base_version,author,diff_summary,previous_content,new_content,reverted_from,created_at)
-VALUES(?,?,?,?,?,?,?,?,?)
-)SQL",
-                   {key, version + 1, version, author, summary, content, updated, reverted ? Json(reverted) : Json(nullptr), now});
-    const auto revision = database_.last();
+    auto result = writeMemoryRevision(database_, key, current, updated, author, now, reverted);
     if (operation == "apply_memory_edit" && proposal)
         database_.exec("UPDATE memory_proposals SET status='applied',decided_by=?,decided_at=? WHERE id=?", {author, now, proposal});
-    return {{"docKey", key}, {"revisionId", revision}, {"version", version + 1}, {"diffSummary", summary}};
+    return result;
 }
 
 bool MemoryStorage::canReviewPreference(const conversation::Message& message) {
@@ -378,6 +404,36 @@ bool MemoryStorage::canReviewPreference(const conversation::Message& message) {
     return (message.principalSource == trusted || message.principalSource == web) && !message.routing.contains("sessionWake") &&
            !message.routing.contains("sessionInvitation") &&
            permissions.allows(conversationTurns.turnActor(message), Action::bot_settings, message.bot);
+}
+
+bool MemoryStorage::canLearnFrom(const TaskData& task) {
+    if (task.trigger || !task.sourceMessageId) return false;
+    const auto message = conversationTurns.loadTurnMessage(*task.sourceMessageId);
+    return message.bot == task.botId && canReviewPreference(message) &&
+           permissions.allows(task.botId, Action::private_memory_write, task.botId);
+}
+
+void MemoryStorage::learnFromWork(const TaskData& task, Id completion, Id report, std::string_view runId, const Json& args, Seconds now) {
+    const auto scrub = secretStorage_.redactor(task.botId);
+    const auto key = privateKey(task.botId);
+    const auto author = "bot:" + task.botId;
+    if (scrub.containsProtectedText(key) || scrub.containsProtectedText(author)) return;
+    auto doc = findMemory(database_.db, key);
+    if (!doc) doc = MemoryDocument{seedPrivateMemory(key, task.botId, scrub, now), 0, now};
+    if (scrub.containsProtectedText(doc->content)) return;
+    auto learned = mergeTaskLearnings(doc->content, args, runId, scrub);
+    if (learned.added.empty() || scrub.containsProtectedText(learned.content)) return;
+    const Json source{{"taskId", task.id}, {"runId", runId}};
+    auto notice = writeMemoryRevision(database_, key, *doc, learned.content, author, now, 0, source);
+    notice.erase("docKey");
+    notice.update(source);
+    notice["taskTitle"] = bounded(scrub.text(std::string_view(task.request).substr(0, task.request.find('\n'))), 300);
+    notice["requestEventId"] = task.sourceMessageId.value();
+    notice["completionEventId"] = completion;
+    notice["reportEventId"] = report;
+    notice["added"] = std::move(learned.added);
+    notice["removed"] = std::move(learned.removed);
+    database_.writeJournal(task.id, JournalKind::memory_learned, notice, {}, task.botId);
 }
 
 bool MemoryStorage::preferenceReviewPending(Id id, int step) const {

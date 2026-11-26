@@ -13,6 +13,7 @@
 #include "flock/web.hpp"
 
 #include "bots.hpp"
+#include "demo.hpp"
 #include "model.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/command.hpp"
@@ -1635,6 +1636,65 @@ void queuedWebAuthority(const std::filesystem::path& path) {
     }
 }
 
+void learningNoticeEndpoints(const std::filesystem::path& path) {
+    Store store(path, {.memorySeed = [](auto) { return "Initial convention"; }});
+    const auto model = app::makeDemoModel();
+    const auto t3 = app::makeDemoT3();
+    Runtime runtime(store, *model, *t3, [](std::string_view) { return std::string{}; });
+    auto server = startWeb(store, 0, callbacks());
+    Browser browser(*server);
+    const std::string conversation = "/api/conversation?bot=release";
+    const auto anchor = [&](const Json& id) {
+        return browser.get(conversation + "&before=" + std::to_string(id.get<Id>() + 1)).at("events").back();
+    };
+    const auto learn = [&](std::string_view clientId) {
+        const auto request = browser.post(
+            "/api/messages", {{"botId", "release"}, {"clientMessageId", clientId}, {"text", "Show me how to verify this project"}}, 201);
+        tick(runtime, 8);
+        const auto events = browser.get(conversation).at("events");
+        const auto recent = events | std::views::reverse;
+        const auto notice = std::ranges::find_if(recent, [](const Json& event) { return event.at("kind") == "memory_learned"; });
+        check(notice != recent.end() && notice->at("data").at("canUndo"), "Conversation did not offer Undo on the learned revision");
+        const auto requestId = notice->at("data").at("requestEventId");
+        const auto requestAnchor = anchor(requestId);
+        check(requestId == request.at("messageId") && requestAnchor.at("id") == requestId &&
+                  requestAnchor.at("kind") == "conversation_message",
+              "The Learned notice did not target the person's message");
+        return *notice;
+    };
+    const auto saved = learn("learning");
+    const auto& data = saved.at("data");
+    const auto completion = conversationCompletion(browser.get("/api/view?bot=release"), saved.at("taskId"));
+    auto session = completion.at("data").at("run");
+    session.erase("itemId");
+    const auto history = browser.get("/api/memory/history?bot=release").at("revisions");
+    const auto records = TaskHistory(store).history(saved.at("taskId"));
+    const auto report = std::ranges::find_if(records, [](const Json& event) { return event.at("kind") == "report"; });
+    check(report != records.end() && history.size() == 1 && history.front().at("id") == data.at("revisionId") &&
+              history.front().at("source") == Json{{"taskId", saved.at("taskId")}, {"runId", session.at("runId")}} &&
+              history.front().at("learning") == Json{{"added", data.at("added")},
+                                                     {"removed", Json::array()},
+                                                     {"run", session},
+                                                     {"taskTitle", "Show me how to verify this project"},
+                                                     {"requestEventId", data.at("requestEventId")},
+                                                     {"reportEventId", report->at("id")}},
+          "Memory history did not link the exact learned text to its task and Session");
+    const auto reportAnchor = anchor(history.front().at("learning").at("reportEventId"));
+    check(reportAnchor.at("kind") == "report" && reportAnchor.at("id") == report->at("id"),
+          "Memory history did not target the exact Session report");
+
+    const auto undo = [&](const Json& revision, int expected) {
+        browser.post("/api/memory/revert",
+                     {{"botId", "release"}, {"baseVersion", revision.at("version")}, {"revisionId", revision.at("revisionId")}}, expected);
+    };
+    undo(data, 200);
+    check(browser.get("/api/memory?bot=release").at("content") == "Initial convention", "Undo did not restore the prior memory exactly");
+    const auto newer = learn("learning-again").at("data");
+    browser.post("/api/memory/apply", {{"botId", "release"}, {"baseVersion", newer.at("version")}, {"content", "A later edit"}});
+    undo(newer, 409);
+    check(browser.get("/api/memory?bot=release").at("content") == "A later edit", "Stale Undo reverted a later edit");
+}
+
 void memoryAutomationEndpoints(const std::filesystem::path& path) {
     Store store(path, {.memorySeed = [](auto) { return "Initial convention"; }});
     auto cb = callbacks();
@@ -1765,6 +1825,7 @@ int main(int argc, char** argv) {
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");
         botRoleSavesRequireCompleteOriginal(directory.path / "role-edit");
         queuedWebAuthority(directory.path / "queued-web-authority.sqlite");
+        learningNoticeEndpoints(directory.path / "learning.sqlite");
         memoryAutomationEndpoints(directory.path / "automation.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {

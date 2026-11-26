@@ -21,6 +21,7 @@ struct BotNotes;
 struct ModelInput;
 struct Person;
 struct SessionContext;
+struct TaskData;
 namespace conversation {
 struct Message;
 }
@@ -41,6 +42,8 @@ public:
     std::optional<ModelInput> preferenceReviewInput(const conversation::Message&, std::vector<std::string>, std::string feedback,
                                                     Seconds now);
     Json rememberPreference(const conversation::Message&, int step, const Json&, Seconds now);
+    bool canLearnFrom(const TaskData&);
+    void learnFromWork(const TaskData&, Id completion, Id report, std::string_view runId, const Json&, Seconds now);
     void projectMemoryNotice(std::string_view bot, Json& data) const;
 private:
     void createMemory(std::string_view key, std::string_view bot, std::string_view id, std::string_view content, Seconds now);

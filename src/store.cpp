@@ -630,7 +630,8 @@ ORDER BY page.id DESC)SQL",
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
-        if (event.at("kind") == "memory_remembered") memory_.projectMemoryNotice(bot, event.at("data"));
+        if (event.at("kind") == "memory_remembered" || event.at("kind") == "memory_learned")
+            memory_.projectMemoryNotice(bot, event.at("data"));
         if (rows.number(5)) event["data"].update(channels_.channelContext(rows.number(0), bot, nullptr, viewer));
         if (rows.number(6)) event["data"]["question"] = decodeWaitRow(rows, 6).text;
         result.push_back(std::move(event));

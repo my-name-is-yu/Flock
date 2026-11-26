@@ -19,6 +19,7 @@
 #include "flock/secrets.hpp"
 #include "git_storage.hpp"
 #include "journal_storage.hpp"
+#include "memory_storage.hpp"
 #include "peer_storage.hpp"
 #include "run_ref_storage.hpp"
 #include "secret_storage.hpp"
@@ -47,14 +48,15 @@ std::string gitInvocation(const TaskDecision& decision) {
 }
 
 runtime::TaskDecisions::TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage,
-                                      JournalStorage& journalStorage, PeerStorage& peerStorage, SecretStorage& secretStorage,
-                                      TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage, TaskUpdates& updates,
-                                      RunReports& reports, SessionHistory& history, PeerExchanges& peerExchanges, OutboxDispatch& dispatch,
-                                      const std::string& sessionRead, GitHost* gitHost)
+                                      JournalStorage& journalStorage, MemoryStorage& memoryStorage, PeerStorage& peerStorage,
+                                      SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,
+                                      WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
+                                      PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead,
+                                      GitHost* gitHost)
     : database(database), conversationTurns(conversationTurns), gitStorage(gitStorage), journalStorage(journalStorage),
-      peerStorage(peerStorage), secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords), waitStorage(waitStorage),
-      updates(updates), reports(reports), history(history), peerExchanges(peerExchanges), dispatch(dispatch), sessionRead(sessionRead),
-      gitHost(gitHost) {}
+      memoryStorage(memoryStorage), peerStorage(peerStorage), secretStorage(secretStorage), taskEvents(taskEvents),
+      taskRecords(taskRecords), waitStorage(waitStorage), updates(updates), reports(reports), history(history),
+      peerExchanges(peerExchanges), dispatch(dispatch), sessionRead(sessionRead), gitHost(gitHost) {}
 
 bool runtime::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
     if (task.replanning) return false;
@@ -65,6 +67,19 @@ bool runtime::TaskDecisions::canComplete(const TaskData& task, const Json& event
     if (!peer) return false;
     if (task.newSessionRequired) return peer->environment == task.environmentId && event.at("status") == "completed";
     return task.currentRevision.has_value() || (peer->kind == "consult" && event.at("status") == "completed");
+}
+
+std::optional<runtime::TaskDecisions::LearningSource> runtime::TaskDecisions::learningSource(const TaskData& task, const Json& event) {
+    if (!RunReports::hasSettledRun(task) || task.newSessionRequired || !memoryStorage.canLearnFrom(task)) return {};
+    const auto source = completionProvenance(task, event);
+    const auto* run = std::get_if<OutboxSourceRun>(&source);
+    if (!run || run->runId.empty()) return {};
+    const auto report = reports.settledSessionReport(task);
+    if (!report || !report->data.matches(*task.lastRun) || report->data.revisionId != task.currentRevision ||
+        report->data.resultRunId != run->runId || report->data.evidence.availability != RunEvidence::Availability::Available ||
+        !present(report->data.evidence.report))
+        return {};
+    return LearningSource{report->id, run->runId};
 }
 
 void runtime::TaskDecisions::rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision, std::string_view message,
@@ -112,14 +127,18 @@ void runtime::TaskDecisions::complete(TaskData& current, const Json& event, cons
         decision.args.value("acknowledgedInstructions", Json::array()) != ids)
         throw Conflict("Completion must acknowledge each pending instruction by messageId and step, oldest first");
     if (conversationTurns.conversationPending(current.botId)) return;
+    auto source = completionProvenance(current, event);
+    const auto learnings = decision.args.find("learnings");
+    const auto learning = learnings == decision.args.end() ? std::nullopt : learningSource(current, event);
     updates.consumeEvent(current);
     updates.recordDecision(current, event, decision, actionId());
     current.pendingInstructions.clear();
     current.newSessionRequired = false;
     current.state = TaskState::completed;
-    journalStorage.journal(current.id,
-                           CompletionEntry{field(decision.args, "report"), current.currentRevision,
-                                           TaskCompletion{decision.reason, current.doneWhen, completionProvenance(current, event)}});
+    const auto completion =
+        journalStorage.journal(current.id, CompletionEntry{field(decision.args, "report"), current.currentRevision,
+                                                           TaskCompletion{decision.reason, current.doneWhen, std::move(source)}});
+    if (learning) memoryStorage.learnFromWork(current, completion, learning->reportId, learning->runId, *learnings, unixTime());
     updates.saveTask(current);
 }
 
@@ -161,7 +180,7 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         {"delegate", {"instruction", "doneWhen"}},
         {"answer_session_question", {"requestId", "answers"}},
         {"follow_up", {"instruction"}},
-        {"complete", {"report", "acknowledgedInstructions"}},
+        {"complete", {"report", "acknowledgedInstructions", "learnings"}},
         {"ask_user", {"question", "choices"}},
         {"session_read", {"threadId", "runId", "itemId", "cursor", "view", "offset"}},
         {"send_bot_message", {"botId", "kind", "text", "doneWhen", "forwardUserMessage"}},
