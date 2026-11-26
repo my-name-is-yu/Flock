@@ -1,5 +1,7 @@
 #include "settings_routes.hpp"
 #include "views.hpp"
+#include "flock/automations.hpp"
+#include "flock/bot_memory.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
@@ -67,7 +69,7 @@ Json unscheduledRequests(Store& store, std::string_view bot, const Json& profile
     const auto configured = profile.find("cron");
     if (configured == profile.end() || !configured->is_array() || configured->empty()) return requests;
 
-    const auto active = store.activeConfiguredSchedules(bot);
+    const auto active = Automations(store).activeConfiguredSchedules(bot);
     for (const auto& entry : *configured) {
         if (!entry.is_object()) continue;
         const auto request = field(entry, "request");
@@ -91,7 +93,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             if (req.has_param("docId")) args["docId"] = req.get_param_value("docId");
             for (auto key : {"before", "proposalsBefore", "revisionId", "proposalId"})
                 if (req.has_param(key)) args[key] = queryId(req, key);
-            reply(res, 200, store.memory(actor, bot, req.path.ends_with("/history") ? "memory_history" : "read_memory", args));
+            reply(res, 200, Memory(store).memory(actor, bot, req.path.ends_with("/history") ? "memory_history" : "read_memory", args));
         });
     });
     server.Post(R"(/api/memory/(propose|apply|revert|reject))", [&](const Request& req, Response& res) {
@@ -100,7 +102,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             const auto actor = person(callbacks, req);
             const auto bot = args.at("botId").get<std::string>();
             requireBot(store, callbacks, actor, bot, Action::bot_settings);
-            reply(res, 200, store.memory(actor, bot, req.matches[1].str() + "_memory_edit", args));
+            reply(res, 200, Memory(store).memory(actor, bot, req.matches[1].str() + "_memory_edit", args));
         });
     });
     server.Get("/api/schedules", [&](const Request& req, Response& res) {
@@ -110,7 +112,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             const auto profile = requireBot(store, callbacks, actor, bot, Action::bot_view);
             const auto before = req.has_param("before") ? queryId(req, "before") : 0;
             const bool activeOnly = req.get_param_value("active") == "1";
-            auto page = store.automations(actor, bot, before, activeOnly);
+            auto page = Automations(store).automations(actor, bot, before, activeOnly);
             if (activeOnly && !before) {
                 const auto policy = store.policy();
                 page["canManage"] = policy.allows(actor, Action::bot_settings, bot) && policy.allows(actor, Action::bot_decide, bot);
@@ -128,7 +130,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             requireBot(store, callbacks, actor, bot, Action::bot_settings);
             auto routing = callbacks.intake(bot, args.at("request").get<std::string>());
             if (routing.botId != bot) throw Conflict("Bot route changed");
-            reply(res, 201, store.createAutomation(actor, routing, args, callbacks.clock()));
+            reply(res, 201, Automations(store).createAutomation(actor, routing, args, callbacks.clock()));
         });
     });
     server.Delete("/api/schedules", [&](const Request& req, Response& res) {
@@ -136,14 +138,15 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             const auto actor = person(callbacks, req);
             const auto bot = req.get_param_value("bot");
             requireBot(store, callbacks, actor, bot, Action::bot_settings);
-            reply(res, 200, store.cancelAutomation(actor, bot, queryId(req, "id")));
+            reply(res, 200, Automations(store).cancelAutomation(actor, bot, queryId(req, "id")));
         });
     });
     server.Post(R"(/api/webhooks/([A-Za-z0-9][A-Za-z0-9_.-]*))", [&](const Request& req, Response& res) {
         handle(req, res, [&] {
             const auto args = body(req);
-            auto result = store.receiveWebhook(person(callbacks, req), req.matches[1].str(), args.at("externalEventId").get<std::string>(),
-                                               args.at("event"), callbacks.clock());
+            auto result =
+                Automations(store).receiveWebhook(person(callbacks, req), req.matches[1].str(),
+                                                  args.at("externalEventId").get<std::string>(), args.at("event"), callbacks.clock());
             if (result.contains("skippedBots") && result.at("tasks").empty()) {
                 result["error"] = "bot_paused";
                 return reply(res, 409, result);

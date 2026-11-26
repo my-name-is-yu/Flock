@@ -1,3 +1,5 @@
+#include "flock/automations.hpp"
+#include "flock/bot_memory.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/workspace_tools.hpp"
 #include "flock/decision.hpp"
@@ -215,10 +217,10 @@ struct Fixture {
         return Json::parse(query("SELECT " + std::string(column) + " FROM conversation_steps" + whereStep(step)));
     }
     void decideApproval(bool allow) {
-        const auto items = store->inbox(localOwner);
+        const auto items = Inbox(*store).inbox(localOwner);
         check(items.size() == 1 && items[0].at("itemKind") == "policy_approval", "Expected one approval card");
-        store->decideInbox(localOwner, {"alpha", InboxKind::policy_approval, items[0].at("itemId"), items[0].at("waitId"), 0, 0, 0},
-                           allow ? "allow_once" : "deny");
+        Inbox(*store).decideInbox(localOwner, {"alpha", InboxKind::policy_approval, items[0].at("itemId"), items[0].at("waitId"), 0, 0, 0},
+                                  allow ? "allow_once" : "deny");
     }
     void requireApproval(const Resource& resource) {
         auto policy = store->policy();
@@ -286,7 +288,7 @@ void checkStoreResponsiveDuringProviderCall(Fixture& f, std::function<void()>& p
     };
     auto batch = std::async(std::launch::async, [&] { f.runtime->runConversations(); });
     const bool reachedProvider = entered.get_future().wait_for(3s) == std::future_status::ready;
-    auto inbox = std::async(std::launch::async, [&] { return f.store->inbox(localOwner); });
+    auto inbox = std::async(std::launch::async, [&] { return Inbox(*f.store).inbox(localOwner); });
     const bool servedInbox = inbox.wait_for(3s) == std::future_status::ready;
     release.set_value();
     inbox.get();
@@ -467,14 +469,15 @@ void conversationReadParity() {
     f.runtime->runConversations();
     f.checkFinished(2);
     const auto workflow = f.results().at(0).at("workflowId");
-    f.store->createAutomation(localOwner, intake,
-                              {{"kind", "schedule"}, {"cron", "0 9 * * 1"}, {"timezone", "Etc/UTC"}, {"request", "Weekly progress"}},
-                              unixTime());
+    Automations(*f.store).createAutomation(
+        localOwner, intake, {{"kind", "schedule"}, {"cron", "0 9 * * 1"}, {"timezone", "Etc/UTC"}, {"request", "Weekly progress"}},
+        unixTime());
     auto policy = f.store->policy();
     const auto secret = policy.requestSecret("alpha", {"fixture-token"});
     policy.submitSecret(localOwner, "alpha", secret, "fixture-protected-value");
-    f.store->memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Private notes"}});
-    f.store->memory(localOwner, "alpha", "apply_memory_edit", {{"docId", sharedDoc}, {"baseVersion", 0}, {"content", "Shared playbook"}});
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Private notes"}});
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit",
+                            {{"docId", sharedDoc}, {"baseVersion", 0}, {"content", "Shared playbook"}});
     for (const auto& read : {call("find_tasks", {{"taskId", task}}), call("read_result", {{"messageId", result}}),
                              call("workflow_status", {{"workflowId", workflow}}), call("list_schedules"), call("list_secrets"),
                              call("list_connections"), call("read_memory"), call("memory_history"),
@@ -507,8 +510,8 @@ void gatedRead(std::string_view tool, bool batch, bool allow, bool restart) {
     const bool events = tool == "flock_session_events";
     const auto read = events ? sessionEvents(f) : call(std::string(tool), {{"docId", sharedDoc}});
     if (!events)
-        f.store->memory(localOwner, "alpha", "apply_memory_edit",
-                        {{"docId", sharedDoc}, {"baseVersion", 0}, {"content", "Shared playbook"}});
+        Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit",
+                                {{"docId", sharedDoc}, {"baseVersion", 0}, {"content", "Shared playbook"}});
     f.requireApproval(events ? Resource::sessionRead("env", "fixture-thread") : Resource{Action::shared_memory_read, sharedDoc});
     f.receive(batch ? std::vector{search, read} : std::vector{read});
     f.runtime->runConversations();
@@ -614,7 +617,7 @@ Measurement measure(const std::vector<Decision>& reads, bool batch, int limit, F
     f.runtime->runConversations();
     if (f.status() == "paused") {
         const Id pause = Conversations(*f.store).pausedConversations("alpha").at(0).at("messageId");
-        f.store->decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, f.message, pause, 0, 0, pause}, "approve");
+        Inbox(*f.store).decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, f.message, pause, 0, 0, pause}, "approve");
         f.runtime->runConversations();
     }
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);

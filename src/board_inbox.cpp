@@ -1,3 +1,4 @@
+#include "git_storage.hpp"
 #include "inbox_storage.hpp"
 #include "storage.hpp"
 #include "journal_peer.hpp"
@@ -400,15 +401,15 @@ void InboxStorage::insertPrReview(const TaskData& task, std::string_view url, st
         journalStorage.journal(task.id, PrReviewRequestedEntry{database.last(), savedTitle, savedPrompt, std::string(url)});
 }
 
-Json Store::inbox(const Person& actor, std::string_view bot) const {
-    return p_->inboxStorage.inbox(actor, bot);
+Json Inbox::inbox(const Person& actor, std::string_view bot) const {
+    return inbox_.inbox(actor, bot);
 }
 
-Json Store::decisionHistory(const Person& actor, std::string_view bot) const {
-    return p_->inboxStorage.decisionHistory(actor, bot);
+Json Inbox::decisionHistory(const Person& actor, std::string_view bot) const {
+    return inbox_.decisionHistory(actor, bot);
 }
 
-void Store::decideInbox(const Person& actor, const InboxTarget& item, std::string_view decision, const Json& data) {
-    p_->inboxStorage.decideInbox(p_->gitStorage, actor, item, decision, data);
+void Inbox::decideInbox(const Person& actor, const InboxTarget& item, std::string_view decision, const Json& data) {
+    inbox_.decideInbox(git_, actor, item, decision, data);
 }
 }

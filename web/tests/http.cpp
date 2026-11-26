@@ -1,3 +1,5 @@
+#include "flock/automations.hpp"
+#include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/t3_connection.hpp"
 #include "http_fixture.hpp"
@@ -1167,24 +1169,25 @@ void recurringRequestStatus(const std::filesystem::path& path) {
     cron.push_back({{"id", "edited"}, {"schedule", "0 7 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Check staging"}});
     web.bots = [cards] { return cards; };
     Store store(path);
-    const auto errors = store.syncSchedules("release",
-                                            {
-                                                {"daily", "0 9 * * *", "Asia/Tokyo", web.intake("release", "前日の変更を確認する")},
-                                                {"invalid", "0 9 * * Mon", "Asia/Tokyo", web.intake("release", "Invalid weekday")},
-                                                {"edited", "0 8 * * *", "Etc/UTC", web.intake("release", "Check staging")},
-                                            },
-                                            now);
+    const auto errors =
+        Automations(store).syncSchedules("release",
+                                         {
+                                             {"daily", "0 9 * * *", "Asia/Tokyo", web.intake("release", "前日の変更を確認する")},
+                                             {"invalid", "0 9 * * Mon", "Asia/Tokyo", web.intake("release", "Invalid weekday")},
+                                             {"edited", "0 8 * * *", "Etc/UTC", web.intake("release", "Check staging")},
+                                         },
+                                         now);
     check(errors.size() == 1 && errors.front().id == "invalid", "fixture accepted an unsupported weekday");
     for (int i = 0; i < 40; ++i) {
-        const auto reminder = store.createAutomation(owner, web.intake("release", "Check staging"),
-                                                     {
-                                                         {"kind", "reminder"},
-                                                         {"timezone", "Etc/UTC"},
-                                                         {"fireAt", now + 60},
-                                                         {"request", "Check staging"},
-                                                     },
-                                                     now);
-        if (i >= 20) store.cancelAutomation(owner, "release", reminder.at("id").get<Id>());
+        const auto reminder = Automations(store).createAutomation(owner, web.intake("release", "Check staging"),
+                                                                  {
+                                                                      {"kind", "reminder"},
+                                                                      {"timezone", "Etc/UTC"},
+                                                                      {"fireAt", now + 60},
+                                                                      {"request", "Check staging"},
+                                                                  },
+                                                                  now);
+        if (i >= 20) Automations(store).cancelAutomation(owner, "release", reminder.at("id").get<Id>());
     }
 
     const auto server = startWeb(store, 0, web);
@@ -1201,7 +1204,10 @@ void recurringRequestStatus(const std::filesystem::path& path) {
     check(older.size() == 2 && older.at(1).at("configId") == "daily" && second.at("before") == 0,
           "newer entries hid an active configured request");
 
-    Store(path).cancelAutomation(owner, "release", older.at(1).at("id").get<Id>());
+    {
+        Store cancellation(path);
+        Automations(cancellation).cancelAutomation(owner, "release", older.at(1).at("id").get<Id>());
+    }
     check(browser.get(pathForActive).at("unscheduledRequests") == Json::array({"前日の変更を確認する", "Invalid weekday", "Check staging"}),
           "canceled configured request still appeared scheduled");
 }
@@ -1211,8 +1217,8 @@ void pausedWebhookStatus(const std::filesystem::path& path) {
     auto web = callbacks();
     const auto now = web.clock();
     const auto trigger = [&](std::string_view bot, std::string_view source) {
-        store.createAutomation(localOwner, web.intake(bot, "Check deployment"),
-                               {{"kind", "trigger"}, {"source", source}, {"request", "Check deployment"}}, now);
+        Automations(store).createAutomation(localOwner, web.intake(bot, "Check deployment"),
+                                            {{"kind", "trigger"}, {"source", source}, {"request", "Check deployment"}}, now);
     };
     trigger("release", "release-only");
     trigger("release", "shared");
@@ -1285,7 +1291,7 @@ void watchedBotView(const std::filesystem::path& path) {
             return true;
         }
 
-        store.protectGitCredential("A&Bcache-test");
+        GitEvents(store).protectGitCredential("A&Bcache-test");
         const auto events = reader.get(viewPath).at("events");
         const auto scrubbed = std::ranges::find_if(events, [&](const Json& event) { return event.at("id") == link; });
         check(scrubbed != events.end() && scrubbed->at("data").at("textHtml").get<std::string>().find("href=") == std::string::npos,

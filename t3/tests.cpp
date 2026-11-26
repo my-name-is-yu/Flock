@@ -183,14 +183,14 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     Json approval;
     for (int i = 0; i < 6 && approval.is_null(); ++i) {
         runtime.tick();
-        for (const auto& item : store.inbox(member))
+        for (const auto& item : Inbox(store).inbox(member))
             if (item.at("status") == "pending") approval = item;
     }
     check(!approval.is_null() && launches().size() == before, "The linked launch bypassed Supervised approval");
-    store.decideInbox(member,
-                      {approval.at("botId"), InboxKind::policy_approval, approval.at("itemId"), approval.at("waitId"),
-                       approval.at("taskId"), approval.at("targetRevision"), approval.at("targetGeneration")},
-                      "allow_once");
+    Inbox(store).decideInbox(member,
+                             {approval.at("botId"), InboxKind::policy_approval, approval.at("itemId"), approval.at("waitId"),
+                              approval.at("taskId"), approval.at("targetRevision"), approval.at("targetGeneration")},
+                             "allow_once");
     for (int i = 0; i < 6 && launches().size() == before; ++i) runtime.tick();
     const auto attempts = launches();
     check(attempts.size() == before + 2 && attempts.at(before).at("delegatedFrom") == origin &&

@@ -1,5 +1,6 @@
 #include "fixtures.hpp"
 #include "../bots.hpp"
+#include "flock/automations.hpp"
 #include "flock/json.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/person.hpp"
@@ -70,10 +71,10 @@ void cronIntakeAndRestart() {
     {
         Store store(db);
         bots.syncSchedules(store, utc(2026, 3, 8, 6, 0), report);
-        store.fireDueAutomations(utc(2026, 3, 8, 9, 0));
+        Automations(store).fireDueAutomations(utc(2026, 3, 8, 9, 0));
         check(store.tasks().empty(), "nonexistent spring local time was submitted");
-        store.fireDueAutomations(utc(2026, 11, 1, 5, 30));
-        store.fireDueAutomations(utc(2026, 11, 1, 6, 30));
+        Automations(store).fireDueAutomations(utc(2026, 11, 1, 5, 30));
+        Automations(store).fireDueAutomations(utc(2026, 11, 1, 6, 30));
         const auto tasks = store.tasks();
         check(tasks.size() == 2, "both fall-back instants should submit exactly once");
         check(std::get<TimedTaskTrigger>(tasks[0].task.trigger.value().details).targetTime == utc(2026, 11, 1, 6, 30) &&
@@ -84,9 +85,9 @@ void cronIntakeAndRestart() {
     {
         Store store(db);
         bots.syncSchedules(store, utc(2026, 11, 1, 6, 30), report);
-        store.fireDueAutomations(utc(2026, 11, 1, 6, 30));
+        Automations(store).fireDueAutomations(utc(2026, 11, 1, 6, 30));
         check(store.tasks().size() == 2, "duplicate scheduled UTC instant registered after restart");
-        store.fireDueAutomations(utc(2027, 11, 1, 5, 35));
+        Automations(store).fireDueAutomations(utc(2027, 11, 1, 5, 35));
         check(store.tasks().size() == 4, "configured schedules did not retain their due time across restart");
     }
 }
@@ -117,7 +118,7 @@ void invalidSessionSettingsPreserveDueTimes() {
     write(folder / "config.json", config.dump());
     Store store(database);
     bots.syncSchedules(store, due + 3600, report);
-    store.fireDueAutomations(due + 3600);
+    Automations(store).fireDueAutomations(due + 3600);
     check(store.tasks("release").size() == 1 &&
               std::get<TimedTaskTrigger>(store.tasks("release").at(0).task.trigger.value().details).targetTime == due,
           "invalid Session settings erased the original scheduled occurrence");
@@ -139,7 +140,7 @@ void configuredScheduleLifecycle() {
     const auto sync = [&](Seconds now) {
         bots.syncSchedules(store, now, [&](std::string_view, std::string_view error) { errors.emplace_back(error); });
     };
-    const auto schedule = [&] { return store.automations(owner, "release").at("automations").front(); };
+    const auto schedule = [&] { return Automations(store).automations(owner, "release").at("automations").front(); };
     const auto start = utc(2026, 1, 1, 12, 0);
     const auto next = utc(2026, 1, 2, 0, 0);
     sync(start);
@@ -147,14 +148,14 @@ void configuredScheduleLifecycle() {
     config["projectId"] = "";
     write(folder / "config.json", config.dump());
     sync(next);
-    store.fireDueAutomations(next);
+    Automations(store).fireDueAutomations(next);
     check(errors.size() == 1 && schedule().at("status") == "inactive" && store.tasks().empty(),
           "invalid configuration left its previously stored route active");
 
     config["projectId"] = "repaired-project";
     write(folder / "config.json", config.dump());
     sync(next);
-    store.fireDueAutomations(next);
+    Automations(store).fireDueAutomations(next);
     check(store.tasks("release").size() == 1 && store.tasks("release").at(0).task.projectId == "repaired-project",
           "repaired config did not restore the schedule's identity and route");
 
@@ -165,23 +166,23 @@ void configuredScheduleLifecycle() {
     config["cron"] = Json::array({entry});
     write(folder / "config.json", config.dump());
     sync(next);
-    store.fireDueAutomations(next);
+    Automations(store).fireDueAutomations(next);
     check(schedule().at("id") == id && schedule().at("status") == "active" && store.tasks().size() == 1,
           "reintroduced configuration duplicated a firing or lost its schedule ID");
-    store.cancelAutomation(owner, "release", id);
+    Automations(store).cancelAutomation(owner, "release", id);
     sync(next);
     check(schedule().at("status") == "canceled", "sync reactivated an explicit cancellation");
 
     for (const auto* removedBot : {"release", "other"}) {
         const auto routing = bots.get(removedBot).intake("");
-        store.createAutomation(owner, routing,
-                               {{"kind", "reminder"}, {"timezone", "Asia/Tokyo"}, {"fireAt", next + 1}, {"request", "Check again"}}, next);
-        store.createAutomation(owner, routing, {{"kind", "trigger"}, {"source", "deploy"}, {"request", "Deploy check"}}, next);
+        Automations(store).createAutomation(
+            owner, routing, {{"kind", "reminder"}, {"timezone", "Asia/Tokyo"}, {"fireAt", next + 1}, {"request", "Check again"}}, next);
+        Automations(store).createAutomation(owner, routing, {{"kind", "trigger"}, {"source", "deploy"}, {"request", "Deploy check"}}, next);
         std::filesystem::remove_all(home / removedBot);
     }
     sync(next);
-    store.fireDueAutomations(next + 1);
-    rejects<AccessDenied>([&] { store.receiveWebhook(owner, "deploy", "event-1", Json::object(), next + 1); },
+    Automations(store).fireDueAutomations(next + 1);
+    rejects<AccessDenied>([&] { Automations(store).receiveWebhook(owner, "deploy", "event-1", Json::object(), next + 1); },
                           "webhook was delivered for a removed Bot");
     check(store.tasks().size() == 1, "automation for a removed Bot queued work");
 }
@@ -205,10 +206,10 @@ void runSettingsChangesResyncConfiguredSchedules() {
     const Person owner{"fixture", true};
     std::vector<std::string> errors;
     const auto report = [&](std::string_view, std::string_view error) { errors.emplace_back(error); };
-    const auto schedules = [&] { return store.automations(owner, "release").at("automations"); };
+    const auto schedules = [&] { return Automations(store).automations(owner, "release").at("automations"); };
     bots.syncSchedules(store, start, report);
     for (const auto& schedule : schedules()) {
-        if (schedule.at("configId") == "canceled") store.cancelAutomation(owner, "release", schedule.at("id"));
+        if (schedule.at("configId") == "canceled") Automations(store).cancelAutomation(owner, "release", schedule.at("id"));
     }
 
     rejects<Conflict>(
@@ -246,7 +247,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
     check(allowance.at("modelCallLimit") == 7 && allowance.at("model") == "next-model" && allowance.at("reasoningEffort") == "ultra" &&
               allowance.at("projectId") == "new-project",
           "saving the allowance changed the model, effort or destination");
-    store.fireDueAutomations(due + 1);
+    Automations(store).fireDueAutomations(due + 1);
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && tasks.at(0).task.environmentId == "new-environment" && tasks.at(0).task.projectId == "new-project" &&
               std::get<TimedTaskTrigger>(tasks.at(0).task.trigger.value().details).targetTime == due,
@@ -263,7 +264,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
               !stored.contains("reasoningEffort") && cleared.at("environmentId") == "new-environment" &&
               cleared.at("projectId") == "new-project" && errors.size() == 1,
           "clearing the model left configuration behind or changed the destination");
-    store.fireDueAutomations(due + 86400);
+    Automations(store).fireDueAutomations(due + 86400);
     check(store.tasks("release").size() == 1, "a configured schedule fired after its model was cleared");
     rejects<BotProfileError>([&] { bots.updateRunSettings(store, "release", {{"reasoningEffort", "low"}}, due + 86400, report); },
                              "a Bot saved an effort without a model");
@@ -272,7 +273,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
     const auto unplaced = bots.updateRunSettings(store, "release", {{"projectId", ""}}, due + 86400, report);
     check(!unplaced.contains("projectId") && unplaced.at("environmentId") == "new-environment" && errors.size() == 2,
           "clearing the project changed the environment or silently kept configured schedules active");
-    store.fireDueAutomations(due + 2 * 86400);
+    Automations(store).fireDueAutomations(due + 2 * 86400);
     check(store.tasks("release").size() == 1, "a configured schedule fired after its destination was cleared");
 }
 
@@ -294,13 +295,13 @@ void automationFiringsUseCurrentPlannerSettings() {
     saved.config["modelProvider"] = "saved-provider";
     saved.config["reasoningEffort"] = "high";
     saved.config["runTimeoutSeconds"] = 135;
-    const auto schedule = store.createAutomation(
+    const auto schedule = Automations(store).createAutomation(
         owner, saved, {{"kind", "schedule"}, {"cron", "0 0 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Daily check"}}, firstDue - 60);
-    const auto trigger = store.createAutomation(
+    const auto trigger = Automations(store).createAutomation(
         owner, saved, {{"kind", "trigger"}, {"source", "deploy"}, {"eventFilter", {{"branch", "main"}}}, {"request", "Deploy check"}},
         firstDue - 60);
 
-    store.fireDueAutomations(firstDue);
+    Automations(store).fireDueAutomations(firstDue);
     const auto previousTask = store.tasks("release").at(0).task.id;
     const auto report = [](std::string_view, std::string_view error) { throw std::runtime_error(std::string(error)); };
     bots.updateRunSettings(store, "release",
@@ -311,12 +312,12 @@ void automationFiringsUseCurrentPlannerSettings() {
                             {"modelCallLimit", 7}},
                            firstDue, report);
 
-    store.fireDueAutomations(nextDue);
+    Automations(store).fireDueAutomations(nextDue);
     const auto recurring = store.tasks("release").at(0).task;
     check(recurring.trigger.value().id == schedule.at("id").get<Id>() &&
               std::get<TimedTaskTrigger>(recurring.trigger.value().details).targetTime == nextDue,
           "model change lost the next scheduled occurrence");
-    const auto webhook = store.receiveWebhook(owner, "deploy", "event-1", {{"branch", "main"}}, nextDue);
+    const auto webhook = Automations(store).receiveWebhook(owner, "deploy", "event-1", {{"branch", "main"}}, nextDue);
     check(webhook.at("tasks").size() == 1 && webhook.at("tasks").at(0).at("triggerId") == trigger.at("id"),
           "model change lost the matched webhook firing");
 
@@ -340,18 +341,18 @@ void automationFiringsUseCurrentPlannerSettings() {
 
     const auto defaultDue = utc(2026, 1, 4, 0, 0);
     bots.updateRunSettings(store, "release", {{"reasoningEffort", ""}}, nextDue, report);
-    store.fireDueAutomations(defaultDue);
+    Automations(store).fireDueAutomations(defaultDue);
     currentConfig.erase("reasoningEffort");
     checkTask(store.tasks("release").at(0).task.id, currentConfig);
 
     write(folder / "config.json", botConfig("current-model").dump());
-    const auto reset = store.receiveWebhook(owner, "deploy", "event-2", {{"branch", "main"}}, defaultDue);
+    const auto reset = Automations(store).receiveWebhook(owner, "deploy", "event-2", {{"branch", "main"}}, defaultDue);
     currentConfig.erase("modelCallLimit");
     checkTask(reset.at("tasks").at(0).at("taskId").get<Id>(), currentConfig);
 
     const auto fallbackDue = utc(2026, 1, 5, 0, 0);
     write(folder / "config.json", "invalid");
-    store.fireDueAutomations(fallbackDue);
+    Automations(store).fireDueAutomations(fallbackDue);
     const auto fallback = store.tasks("release").at(0).task;
     check(std::get<TimedTaskTrigger>(fallback.trigger.value().details).targetTime == fallbackDue,
           "unreadable Bot settings prevented the saved automation from firing");
@@ -372,17 +373,17 @@ void unreadableProfileKeepsAutomationDelivery() {
     auto release = bots.get("release").intake("");
     release.config["modelProvider"] = "saved-provider";
     for (const auto& bot : {release, bots.get("triage").intake("")}) {
-        store.createAutomation(owner, bot, schedule, due - 60);
-        store.createAutomation(owner, bot, trigger, due - 60);
+        Automations(store).createAutomation(owner, bot, schedule, due - 60);
+        Automations(store).createAutomation(owner, bot, trigger, due - 60);
     }
     write(home / "triage" / "config.json", botConfig("triage-current").dump());
     std::filesystem::rename(home / "release", home / "release.saved");
     std::filesystem::create_symlink("release", home / "release");
 
-    store.fireDueAutomations(due);
-    store.fireDueAutomations(due);
-    const auto delivered = store.receiveWebhook(owner, "deploy", "event-1", {{"branch", "main"}}, due);
-    const auto repeated = store.receiveWebhook(owner, "deploy", "event-1", {{"branch", "main"}}, due);
+    Automations(store).fireDueAutomations(due);
+    Automations(store).fireDueAutomations(due);
+    const auto delivered = Automations(store).receiveWebhook(owner, "deploy", "event-1", {{"branch", "main"}}, due);
+    const auto repeated = Automations(store).receiveWebhook(owner, "deploy", "event-1", {{"branch", "main"}}, due);
     check(delivered.at("tasks").size() == 2 && repeated.at("duplicate") == true && repeated.at("tasks") == delivered.at("tasks"),
           "both Bots must receive one copy of the webhook");
     for (const auto id : {"release", "triage"}) {
@@ -426,7 +427,7 @@ BEGIN SELECT RAISE(ABORT,'schedule write rejected'); END;
 
     rejects<std::runtime_error>([&] { bots.updateRunSettings(store, "release", {{"projectId", "next-project"}}, due, report); },
                                 "workspace save succeeded after the schedule write failed");
-    store.fireDueAutomations(due);
+    Automations(store).fireDueAutomations(due);
     const auto tasks = store.tasks("release");
     const auto& project = config.at("projectId").get_ref<const std::string&>();
     check(tasks.size() == 1 && tasks.front().task.projectId == project && bots.get("release").projectId == project,
@@ -465,11 +466,11 @@ void invalidEntriesPreserveDueSchedule() {
     check(errors.size() == 3 && errors[0].starts_with("cron schedule report:") && errors[1] == "cron schedule review: Invalid request" &&
               errors[2].starts_with("cron entry 4:"),
           "Invalid cron entries were not reported individually");
-    const auto schedules = store.automations({"fixture", true}, "release").at("automations");
+    const auto schedules = Automations(store).automations({"fixture", true}, "release").at("automations");
     check(schedules.at(0).at("status") == "inactive" && schedules.at(1).at("status") == "inactive" &&
               schedules.at(2).at("status") == "active" && schedules.at(2).at("nextRunAt") == firstDue,
           "Invalid cron edits disturbed the valid sibling's saved run time");
-    store.fireDueAutomations(now);
+    Automations(store).fireDueAutomations(now);
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && tasks.at(0).task.request == "Daily check" &&
               std::get<TimedTaskTrigger>(tasks.at(0).task.trigger.value().details).coveredFrom == firstDue &&
@@ -506,11 +507,11 @@ void malformedDuplicatesDeactivateSchedules() {
     check(errors ==
               std::vector<std::string>{"cron entry 1: Duplicate configured schedule ID", "cron entry 3: Duplicate configured schedule ID"},
           "A malformed duplicate did not invalidate both entries");
-    const auto schedules = store.automations({"fixture", true}, "release").at("automations");
+    const auto schedules = Automations(store).automations({"fixture", true}, "release").at("automations");
     check(schedules.size() == 2 && schedules.at(1).at("configId") == "daily" && schedules.at(1).at("status") == "inactive" &&
               schedules.at(1).at("nextRunAt").is_null(),
           "A malformed duplicate left the previously configured schedule active");
-    store.fireDueAutomations(due);
+    Automations(store).fireDueAutomations(due);
     const auto tasks = store.tasks("release");
     check(tasks.size() == 1 && tasks.at(0).task.request == "Weekly check", "The unrelated schedule did not fire on restart");
 }

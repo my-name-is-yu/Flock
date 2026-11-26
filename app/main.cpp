@@ -8,6 +8,7 @@
 #include "settings_system.hpp"
 #include "t3_connection_setup.hpp"
 #include "t3_setup.hpp"
+#include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/bot_change.hpp"
@@ -286,7 +287,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (savedPort && !web) std::cerr << "Warning: T3 skills cannot reach Flock in headless mode. Start 'flock run' with Web enabled.\n";
     if (const auto token = connections.githubToken(); !token.empty()) {
         options.gitHost = makeGitHubHost(token);
-        store.protectGitCredential(token);
+        GitEvents(store).protectGitCredential(token);
     }
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;

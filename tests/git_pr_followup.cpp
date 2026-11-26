@@ -1,5 +1,7 @@
 #include "fake_git.hpp"
 #include "model.hpp"
+#include "flock/board_inbox.hpp"
+#include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/participation.hpp"
 #include "flock/decision.hpp"
@@ -158,7 +160,7 @@ struct Fixture {
     }
 
     void notify(const GitWebhook& event) {
-        check(store.receiveGitWebhook(event), "Could not receive fixture notification");
+        check(GitEvents(store).receiveGitWebhook(event), "Could not receive fixture notification");
         runtime.runConversations();
     }
 };
@@ -177,7 +179,7 @@ void keepsWorkInOriginatingSession() {
               includes(sends.front().instruction, "\"headBranch\":\"change\"") &&
               includes(sends.front().instruction, "linker: missing symbol"),
           "CI fix did not target the original PR Session and branch");
-    check(!f.store.receiveGitWebhook(firstFailure), "Duplicate Git delivery was accepted");
+    check(!GitEvents(f.store).receiveGitWebhook(firstFailure), "Duplicate Git delivery was accepted");
     f.runtime.runConversations();
     check(sends.size() == 1, "Duplicate Git delivery asked the Session twice");
     auto inlineReview = review("review");
@@ -305,7 +307,7 @@ void waitsForSupervisedApproval() {
     Fixture f;
     f.store.policy().setMode(localOwner, "supervised");
     f.notify(review("supervised-review"));
-    const auto inbox = f.store.inbox(testRequester, "owner");
+    const auto inbox = Inbox(f.store).inbox(testRequester, "owner");
     const auto card = std::ranges::find_if(inbox, [](const auto& row) { return row.at("itemKind") == "policy_approval"; });
     check(f.sessions.sessionSends.empty() && card != inbox.end() && card->at("canDecide") == true && card->at("action") == "t3.send" &&
               card->at("target") == Json::array({"sandbox", "thread-project"}).dump(),
@@ -315,7 +317,7 @@ void waitsForSupervisedApproval() {
     check(card->at("displayTarget") == "https://github.com/org/flock/pull/1" &&
               preview == Json{{"diagnosis", "The migration test needs attention."}, {"pullRequest", card->at("displayTarget")}},
           "Approval did not show the PR and diagnosis");
-    f.store.decideInbox(testRequester, target(*card), "allow_once");
+    Inbox(f.store).decideInbox(testRequester, target(*card), "allow_once");
     f.runtime.runConversations();
     check(f.sessions.sessionSends.size() == 1 && includes(f.store.history(f.task).dump(), "I asked the original Session"),
           "Approved follow-up was not sent and reported");
@@ -324,14 +326,14 @@ void rejectsStaleSupervisedApproval(bool disconnect) {
     Fixture f;
     f.store.policy().setMode(localOwner, "supervised");
     f.notify(failure("waiting"));
-    const auto inbox = f.store.inbox(testRequester, "owner");
+    const auto inbox = Inbox(f.store).inbox(testRequester, "owner");
     const auto card = std::ranges::find_if(inbox, [](const auto& row) { return row.at("itemKind") == "policy_approval"; });
     check(card != inbox.end(), "No approval was requested before the target changed");
     if (disconnect)
         T3Connections(f.store).disconnect("sandbox");
     else
         f.host->result["headSha"] = std::string(40, 'b');
-    f.store.decideInbox(testRequester, target(*card), "allow_once");
+    Inbox(f.store).decideInbox(testRequester, target(*card), "allow_once");
     f.runtime.runConversations();
     check(f.sessions.sessionSends.empty() && historyCount(f.store, f.task, "git_pr_followup_requested") == 0,
           "A stale approval sent work or consumed the automatic follow-up quota");

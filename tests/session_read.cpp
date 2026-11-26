@@ -497,8 +497,8 @@ void approvedCallSurvivesReadPreflightContention() {
     const auto paused = Conversations(*f.store).pausedConversations("alpha");
     check(paused.size() == 1 && f.model.result.is_null(), "turn did not pause after reading evidence");
     const Id pauseId = paused.front().at("messageId");
-    f.store->decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId},
-                         "approve");
+    Inbox(*f.store).decideInbox(
+        localOwner, {"alpha", InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId}, "approve");
     sqlite3* raw = nullptr;
     check(sqlite3_open(f.store->path().c_str(), &raw) == SQLITE_OK, "could not open the second writer");
     const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> writer(raw, sqlite3_close);
@@ -566,8 +566,8 @@ void redactionAndResumedHistory() {
         revoke();
         f.restart();
         const Id pauseId = paused.front().at("messageId");
-        f.store->decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId},
-                             "approve");
+        Inbox(*f.store).decideInbox(
+            localOwner, {"alpha", InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId}, "approve");
         f.runtime->runConversations();
         check(f.model.result.dump() == missing.dump(), "reopened turn exposed inaccessible cached evidence");
     };

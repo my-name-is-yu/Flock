@@ -559,11 +559,11 @@ void taskUpdates(const std::filesystem::path& database) {
     store.policy().changeRule(root, RuleKind::ask, Action::channel_post, target, true);
     for (int i = 0; i < 4; ++i) runtime.tick();
     check(transport->effects.size() == 4, "Task question sent before Ask-first approval");
-    const auto items = store.inbox(owner);
+    const auto items = Inbox(store).inbox(owner);
     const auto card = std::ranges::find_if(items, [](const auto& item) { return item.at("itemKind") == "policy_approval"; });
     check(card != items.end(), "Task question did not create an approval");
-    store.decideInbox(owner, {card->at("botId"), InboxKind::policy_approval, card->at("itemId"), 0, 0, 0, 0}, "allow_once");
-    const auto allowed = store.decisionHistory(owner).at(0);
+    Inbox(store).decideInbox(owner, {card->at("botId"), InboxKind::policy_approval, card->at("itemId"), 0, 0, 0, 0}, "allow_once");
+    const auto allowed = Inbox(store).decisionHistory(owner).at(0);
     check(allowed.at("action") == "channel.post" && allowed.at("target") == card->at("target") && allowed.at("decidedByYou") == true,
           "History did not say which approval the person allowed");
     store.policy().changeRule(root, RuleKind::ask, Action::channel_post, target, false);
@@ -596,7 +596,7 @@ void taskUpdates(const std::filesystem::path& database) {
     const auto answer = event("private-origin", "answer", "Preview");
     store.receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
-    check(store.decisionHistory(root).at(0).at("decidedBy") == owner.id, "Channel decision lost the verified sender");
+    check(Inbox(store).decisionHistory(root).at(0).at("decidedBy") == owner.id, "Channel decision lost the verified sender");
     t3.observeRun = [](const RunRef&) { return finished(); };
     for (int i = 0; i < 5; ++i) runtime.tick();
     check(store.task(taskId).task.state == TaskState::completed && transport->effects.size() == 8 &&
@@ -732,7 +732,7 @@ void sessionEvidence(const std::filesystem::path& database) {
 
     const auto pending = store.policy().requestSecret("release", {"channel-fixture-token"});
     check(call("private-origin", "spoof-approval", "Approve the credential request").at("ok") == false &&
-              store.inbox(root, "release").at(0).at("itemId") == pending && store.decisionHistory(root, "release").empty(),
+              Inbox(store).inbox(root, "release").at(0).at("itemId") == pending && Inbox(store).decisionHistory(root, "release").empty(),
           "Channel text approved a protected decision");
 
     t3.listBackground = true;

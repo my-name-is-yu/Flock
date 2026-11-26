@@ -1,5 +1,6 @@
 #pragma once
 
+#include "flock/store_options.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
@@ -55,15 +56,6 @@ struct TaskTarget {
 // Separate CLI and Web connections may use the same database.
 class Store {
 public:
-    using MemorySeed = std::function<std::string(std::string_view)>;
-    struct PlannerModel {
-        std::string model, provider;
-        std::optional<std::string> reasoningEffort;
-        std::optional<Id> modelCallLimit = std::nullopt;
-    };
-    using AutomationModelResolver = std::function<std::optional<PlannerModel>(std::string_view botId)>;
-    using CommitConfiguredSchedules = std::function<void(const std::vector<ConfiguredSchedule>&, const std::function<void()>&)>;
-    using EditConfiguredSchedules = std::function<void(const CommitConfiguredSchedules&)>;
     explicit Store(std::filesystem::path database, MemorySeed = {}, AutomationModelResolver = {});
     ~Store();
     Store(const Store&) = delete;
@@ -74,21 +66,6 @@ public:
     void deleteBot(const Person&, std::string_view bot);
     bool botPaused(std::string_view bot) const;
     void setBotPaused(const Person&, std::string_view bot, bool paused, const std::function<Seconds()>& clock = unixTime);
-    Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
-    Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
-    Json automations(const Person&, std::string_view bot, Id before = 0, bool activeOnly = false) const;
-    Json activeConfiguredSchedules(std::string_view bot) const;
-    Json cancelAutomation(const Person&, std::string_view bot, Id id);
-    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
-    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(std::string_view bot, Seconds now, const EditConfiguredSchedules&);
-    void pruneAutomations(const std::vector<std::string>& configuredBots);
-    void fireDueAutomations(Seconds now);
-    Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId, const Json& event, Seconds now);
-    Json inbox(const Person&, std::string_view bot = {}) const;
-    Json decisionHistory(const Person&, std::string_view bot = {}) const;
-    void decideInbox(const Person&, const InboxTarget&, std::string_view decision, const Json& data = Json::object());
-    bool receiveGitWebhook(const GitWebhook&);
-    void protectGitCredential(std::string value);
     Id submit(const Intake&, const Person* requester = nullptr);
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
@@ -154,6 +131,10 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> p_;
+    friend class Memory;
+    friend class Automations;
+    friend class Inbox;
+    friend class GitEvents;
     friend class Conversations;
     friend class Runtime;
     friend class Policy;

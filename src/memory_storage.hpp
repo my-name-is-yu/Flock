@@ -1,5 +1,6 @@
 #pragma once
 
+#include "flock/store_options.hpp"
 #include "flock/json.hpp"
 #include "flock/store.hpp"
 #include "flock/types.hpp"
@@ -28,7 +29,7 @@ struct Message;
 
 class MemoryStorage {
 public:
-    MemoryStorage(Database&, const SecretStorage&, Policy&, ConversationStorage&, Store::MemorySeed);
+    MemoryStorage(Database&, const SecretStorage&, Policy&, ConversationStorage&, MemorySeed);
 
     BotNotes loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>& soul, Seconds now);
     std::optional<SessionMemory> sessionMemory(const Command&, Seconds now);
@@ -47,6 +48,6 @@ private:
     const SecretStorage& secretStorage_;
     Policy& permissions;
     ConversationStorage& conversationTurns;
-    const Store::MemorySeed seed_;
+    const MemorySeed seed_;
 };
 }

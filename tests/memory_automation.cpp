@@ -1,3 +1,5 @@
+#include "flock/automations.hpp"
+#include "flock/bot_memory.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/memory_automation.hpp"
@@ -150,9 +152,9 @@ void memoryFlow(const std::filesystem::path& db) {
     const auto followup = turn(alpha, "Which staging environment is standard?", {});
     check(bot.inputs.at(followup).notes.memory == "Prefer CSV.\nUse staging-eu.\n", "BotNotes did not load edited memory");
 
-    store.memory(owner, "alpha", "revert_memory_edit", {{"baseVersion", 1}, {"revisionId", first.at("id")}});
-    const auto restored = store.memory(owner, "alpha", "read_memory", Json::object());
-    const auto revisions = store.memory(owner, "alpha", "memory_history", Json::object()).at("revisions");
+    Memory(store).memory(owner, "alpha", "revert_memory_edit", {{"baseVersion", 1}, {"revisionId", first.at("id")}});
+    const auto restored = Memory(store).memory(owner, "alpha", "read_memory", Json::object());
+    const auto revisions = Memory(store).memory(owner, "alpha", "memory_history", Json::object()).at("revisions");
     check(restored.at("content") == "Prefer CSV.\n" && restored.at("version") == 2 && revisions.size() == 2 &&
               revisions.at(0).at("revertedFrom") == first.at("id") && revisions.at(0).at("author") == "person:owner",
           "Revert did not preserve the original revision and restore content");
@@ -161,7 +163,7 @@ void memoryFlow(const std::filesystem::path& db) {
     policy.setMember(localOwner, "alpha", member.id, true);
     bool sharedDenied = false;
     try {
-        store.memory(member, "alpha", "read_memory", {{"docId", path}});
+        Memory(store).memory(member, "alpha", "read_memory", {{"docId", path}});
     } catch (const AccessDenied&) {
         sharedDenied = true;
     }
@@ -220,7 +222,8 @@ void memoryFlow(const std::filesystem::path& db) {
     const auto personEdit = [&](Store& connection, const Person& person, const Intake& target, std::string_view content) {
         start.arrive_and_wait();
         try {
-            connection.memory(person, target.botId, "apply_memory_edit", {{"docId", path}, {"baseVersion", 1}, {"content", content}});
+            Memory(connection)
+                .memory(person, target.botId, "apply_memory_edit", {{"docId", path}, {"baseVersion", 1}, {"content", content}});
             return true;
         } catch (const Conflict& error) {
             check(std::string_view(error.what()).starts_with("Memory version conflict"), "Wrong concurrent edit failure");
@@ -232,7 +235,7 @@ void memoryFlow(const std::filesystem::path& db) {
     auto secondEdit = std::async(std::launch::async, [&] { return personEdit(right, editor, beta, "Beta version"); });
     const auto alphaWon = firstEdit.get(), betaWon = secondEdit.get();
     check(alphaWon != betaWon, "Concurrent edits did not have exactly one winner");
-    const auto final = store.memory(owner, "alpha", "read_memory", {{"docId", path}});
+    const auto final = Memory(store).memory(owner, "alpha", "read_memory", {{"docId", path}});
     check(final.at("version") == 2 && final.at("content") == (alphaWon ? "Alpha version" : "Beta version"),
           "A concurrent shared edit silently overwrote the winner");
     const auto stale =
@@ -253,7 +256,7 @@ void memoryFlow(const std::filesystem::path& db) {
                              });
     check(bot.inputs.at(redact + 1).event.dump().find("fixture-protected-token") == std::string::npos,
           "Shared-memory decision leaked a protected value in the conversation trace");
-    const auto sharedContent = store.memory(owner, "beta", "read_memory", {{"docId", path}});
+    const auto sharedContent = Memory(store).memory(owner, "beta", "read_memory", {{"docId", path}});
     check(sharedContent.at("content") == "Example: [redacted]", "Shared text exposed another Bot's protected value");
 
     auto limited = beta;
@@ -263,8 +266,8 @@ void memoryFlow(const std::filesystem::path& db) {
     runtime.runConversations();
     const Id pauseId = Conversations(store).pausedConversations(beta.botId).at(0).at("messageId");
     policy.changeNeverRule(owner, Action::shared_memory_read, path, true);
-    store.decideInbox(owner, {beta.botId, InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId},
-                      "approve");
+    Inbox(store).decideInbox(owner, {beta.botId, InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId},
+                             "approve");
     runtime.runConversations();
     check(bot.choices.empty() && lastResult(bot.inputs.back()).at("ok") == false &&
               bot.inputs.back().event.dump().find("Example: [redacted]") == std::string::npos,
@@ -292,7 +295,7 @@ void proactiveMemory(const std::filesystem::path& db) {
             if (event.at("kind") == "memory_remembered") result.push_back(event.at("data"));
         return result;
     };
-    const auto memory = [&] { return store.memory(owner, alpha.botId, "read_memory", Json::object()); };
+    const auto memory = [&] { return Memory(store).memory(owner, alpha.botId, "read_memory", Json::object()); };
 
     send("preferred", preference, remember(0, preferred, "Keep release notes under one page.", preference));
     auto saved = notices();
@@ -318,15 +321,15 @@ void proactiveMemory(const std::filesystem::path& db) {
     policy.setMode(owner, "supervised");
     policy.changeRule(owner, RuleKind::ask, Action::private_memory_write, alpha.botId, true);
     send("correction", correction, remember(1, corrected, "Use Markdown for release notes.", correction));
-    const auto pending = store.inbox(localOwner);
+    const auto pending = Inbox(store).inbox(localOwner);
     check(pending.size() == 1 && pending.front().at("status") == "pending" &&
               pending.front().at("prompt") == "\"Use Markdown for release notes.\"" && notices().size() == 1 && memory().at("version") == 1,
           "A private memory correction bypassed approval");
     const auto& item = pending.front();
-    store.decideInbox(localOwner,
-                      {alpha.botId, InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), item.at("taskId"),
-                       item.at("targetRevision"), item.at("targetGeneration")},
-                      "allow_once");
+    Inbox(store).decideInbox(localOwner,
+                             {alpha.botId, InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), item.at("taskId"),
+                              item.at("targetRevision"), item.at("targetGeneration")},
+                             "allow_once");
     runtime.runConversations();
     saved = notices();
     check(model.choices.empty() && saved.size() == 2 && saved.back().at("text") == "Use Markdown for release notes." &&
@@ -334,16 +337,16 @@ void proactiveMemory(const std::filesystem::path& db) {
           "The approved correction did not replace the old preference");
     rejectsWithConflict(
         [&] {
-            store.memory(owner, alpha.botId, "revert_memory_edit",
-                         {{"baseVersion", saved.front().at("version")}, {"revisionId", firstRevision}});
+            Memory(store).memory(owner, alpha.botId, "revert_memory_edit",
+                                 {{"baseVersion", saved.front().at("version")}, {"revisionId", firstRevision}});
         },
         "Memory version conflict: expected 1, current 2");
 
     const auto revision = saved.back().at("revisionId");
-    store.memory(owner, alpha.botId, "revert_memory_edit", {{"baseVersion", saved.back().at("version")}, {"revisionId", revision}});
+    Memory(store).memory(owner, alpha.botId, "revert_memory_edit", {{"baseVersion", saved.back().at("version")}, {"revisionId", revision}});
     const auto reverted = notices();
     Store reopened(db);
-    const auto history = reopened.memory(owner, alpha.botId, "memory_history", Json::object()).at("revisions");
+    const auto history = Memory(reopened).memory(owner, alpha.botId, "memory_history", Json::object()).at("revisions");
     check(memory().at("content") == preferred && reverted.size() == 2 && reverted.back().at("undone") == true &&
               !reverted.back().value("canUndo", false) && history.size() == 3 && history.front().at("revertedFrom") == revision,
           "Undo did not persist the restored memory and identify the reverted edit");
@@ -379,15 +382,15 @@ void memoryRedactionLimit(const std::filesystem::path& db) {
 
     const std::string suffix(8192 - 10, 'x');
     const Json tooLong{{"baseVersion", 0}, {"content", "z9q7" + suffix + "tail"}};
-    rejectsWithConflict([&] { store.memory(owner, alpha.botId, "apply_memory_edit", tooLong); },
+    rejectsWithConflict([&] { Memory(store).memory(owner, alpha.botId, "apply_memory_edit", tooLong); },
                         "Redacted memory content exceeds 8192 bytes");
-    const auto current = store.memory(owner, alpha.botId, "read_memory", Json::object());
-    const auto history = store.memory(owner, alpha.botId, "memory_history", Json::object());
+    const auto current = Memory(store).memory(owner, alpha.botId, "read_memory", Json::object());
+    const auto history = Memory(store).memory(owner, alpha.botId, "memory_history", Json::object());
     check(current.at("version") == 0 && current.at("content") == "Original" && history.at("revisions").empty(),
           "An oversized redacted edit changed the memory document or its history");
 
-    store.memory(owner, alpha.botId, "apply_memory_edit", {{"baseVersion", 0}, {"content", "z9q7" + suffix}});
-    const auto saved = store.memory(owner, alpha.botId, "read_memory", Json::object());
+    Memory(store).memory(owner, alpha.botId, "apply_memory_edit", {{"baseVersion", 0}, {"content", "z9q7" + suffix}});
+    const auto saved = Memory(store).memory(owner, alpha.botId, "read_memory", Json::object());
     check(saved.at("version") == 1 && saved.at("content") == "[redacted]" + suffix,
           "An edit at exactly 8,192 redacted bytes was not stored intact");
 }
@@ -404,20 +407,20 @@ void configuredRequestLimit(const std::filesystem::path& db) {
     auto target = alpha;
     target.request = "Daily check";
     ConfiguredSchedule schedule{"daily", "0 0 * * *", "Etc/UTC", target};
-    const auto stored = [&] { return store.automations(owner, alpha.botId).at("automations").front(); };
-    check(store.syncSchedules(alpha.botId, {schedule}, start).empty(), "Initial schedule import failed");
+    const auto stored = [&] { return Automations(store).automations(owner, alpha.botId).at("automations").front(); };
+    check(Automations(store).syncSchedules(alpha.botId, {schedule}, start).empty(), "Initial schedule import failed");
 
     schedule.routing.request = std::string(16'000, 'x');
-    check(store.syncSchedules(alpha.botId, {schedule}, due + 60).empty() && stored().at("nextRunAt") == due &&
+    check(Automations(store).syncSchedules(alpha.botId, {schedule}, due + 60).empty() && stored().at("nextRunAt") == due &&
               stored().at("request") == schedule.routing.request,
           "A 16,000-byte request lost its original timing");
 
     schedule.routing.request += 'y';
-    const auto errors = store.syncSchedules(alpha.botId, {schedule}, due + 60);
+    const auto errors = Automations(store).syncSchedules(alpha.botId, {schedule}, due + 60);
     check(errors.size() == 1 && errors.front().id == schedule.id && errors.front().message == "Invalid request" &&
               stored().at("status") == "inactive" && stored().at("request").get<std::string>().size() == 16'000,
           "An oversized update with unchanged timing was accepted");
-    store.fireDueAutomations(due + 60);
+    Automations(store).fireDueAutomations(due + 60);
     check(store.tasks().empty(), "A schedule with a rejected request fired");
 }
 
@@ -429,8 +432,8 @@ void downtime(const std::filesystem::path& db) {
     const Json weekly{{"kind", "schedule"}, {"cron", "0 9 * * 1"}, {"timezone", "Asia/Tokyo"}, {"request", "Weekly summary"}};
     {
         Store store(db);
-        summaryId = store.createAutomation(owner, alpha, weekly, now).at("id");
-        reminderId = store
+        summaryId = Automations(store).createAutomation(owner, alpha, weekly, now).at("id");
+        reminderId = Automations(store)
                          .createAutomation(owner, beta,
                                            {{"kind", "reminder"},
                                             {"timezone", "Asia/Tokyo"},
@@ -439,9 +442,9 @@ void downtime(const std::filesystem::path& db) {
                                             {"request", "Check staging now"}},
                                            now)
                          .at("id");
-        canceledId = store.createAutomation(owner, beta, weekly, now).at("id");
-        store.cancelAutomation(owner, beta.botId, canceledId);
-        store.fireDueAutomations(now);
+        canceledId = Automations(store).createAutomation(owner, beta, weekly, now).at("id");
+        Automations(store).cancelAutomation(owner, beta.botId, canceledId);
+        Automations(store).fireDueAutomations(now);
         check(store.tasks().empty(), "Automation fired before its target time");
     }
     now = utc(2026, 1, 20, 4);
@@ -468,11 +471,11 @@ void downtime(const std::filesystem::path& db) {
         check(reminder.id == reminderId && reminderDetails.kind == TimedTriggerKind::reminder && reminderDetails.targetTime == fireAt &&
                   reminderDetails.occurrenceCount == 1,
               "Missed reminder lost its provenance");
-        const auto botSchedules = store.automations(owner, "beta").at("automations");
+        const auto botSchedules = Automations(store).automations(owner, "beta").at("automations");
         check(botSchedules.at(0).at("id") == canceledId && botSchedules.at(0).at("status") == "canceled" &&
                   botSchedules.at(1).at("status") == "delivered",
               "Reminder or canceled schedule status incorrect");
-        check(store.automations(owner, "alpha").at("automations").at(0).at("nextRunAt") == next,
+        check(Automations(store).automations(owner, "alpha").at("automations").at(0).at("nextRunAt") == next,
               "Next weekly summary does not use its configured timezone");
     }
     {
@@ -499,7 +502,7 @@ void pausedSchedules(const std::filesystem::path& db) {
     configured.request = "Configured check";
     const ConfiguredSchedule schedule{"configured", "* * * * *", "Etc/UTC", configured};
     const auto reminder = [&](Store& store, const Intake& target, Seconds fireAt) {
-        return store
+        return Automations(store)
             .createAutomation(owner, target, {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", fireAt}, {"request", "Reminder"}},
                               now)
             .at("id");
@@ -507,8 +510,8 @@ void pausedSchedules(const std::filesystem::path& db) {
     Id duringDowntime, afterResume;
     {
         Store store(db);
-        store.createAutomation(owner, alpha, recurring, now);
-        check(store.syncSchedules(alpha.botId, {schedule}, now + 1).empty(), "Could not import configured schedule");
+        Automations(store).createAutomation(owner, alpha, recurring, now);
+        check(Automations(store).syncSchedules(alpha.botId, {schedule}, now + 1).empty(), "Could not import configured schedule");
         reminder(store, alpha, first + 15);
         duringDowntime = reminder(store, alpha, first + 75);
         afterResume = reminder(store, alpha, next + 15);
@@ -518,19 +521,19 @@ void pausedSchedules(const std::filesystem::path& db) {
     {
         Store restarted(db);
         check(restarted.botPaused(alpha.botId), "Bot pause was lost on restart");
-        restarted.fireDueAutomations(first + 15);
+        Automations(restarted).fireDueAutomations(first + 15);
         check(restarted.tasks(alpha.botId).empty() && restarted.tasks(beta.botId).size() == 1,
               "A paused schedule fired or a different Bot's reminder was skipped");
     }
     {
         Store restarted(db);
         restarted.setBotPaused(owner, alpha.botId, false, [&] { return resumedAt; });
-        restarted.fireDueAutomations(resumedAt);
+        Automations(restarted).fireDueAutomations(resumedAt);
         check(restarted.tasks(alpha.botId).empty(), "Resume replayed missed occurrences");
-        const auto schedules = restarted.automations(owner, alpha.botId).at("automations");
+        const auto schedules = Automations(restarted).automations(owner, alpha.botId).at("automations");
         const auto missed = std::ranges::find_if(schedules, [&](const Json& item) { return item.at("id") == duringDowntime; });
         check(missed != schedules.end() && missed->at("status") == "canceled", "A reminder due during paused downtime was left pending");
-        restarted.fireDueAutomations(next);
+        Automations(restarted).fireDueAutomations(next);
         const auto tasks = taskJson(restarted.tasks(alpha.botId));
         check(tasks.size() == 2 && std::ranges::all_of(tasks,
                                                        [&](const Json& task) {
@@ -538,7 +541,7 @@ void pausedSchedules(const std::filesystem::path& db) {
                                                            return trigger.at("targetTime") == next && trigger.at("occurrenceCount") == 1;
                                                        }),
               "First recurring requests after resume included paused occurrences");
-        restarted.fireDueAutomations(next + 15);
+        Automations(restarted).fireDueAutomations(next + 15);
         check(restarted.tasks(alpha.botId).size() == 3 && restarted.tasks(alpha.botId).front().task.trigger.value().id == afterResume,
               "A reminder due after resume did not fire");
     }
@@ -548,9 +551,9 @@ void isolatedFirings(const std::filesystem::path& db) {
     Store store(db);
     const auto now = utc(2026, 3, 1, 1) + 30 * 60;
     const Json rare{{"kind", "schedule"}, {"cron", "30 2 */31,25-31 3 0"}, {"timezone", "Europe/Berlin"}, {"request", "Sparse check"}};
-    const auto schedule = store.createAutomation(owner, alpha, rare, utc(2025, 12, 1)).at("id");
+    const auto schedule = Automations(store).createAutomation(owner, alpha, rare, utc(2025, 12, 1)).at("id");
     const auto reminder = [&](const Intake& target) {
-        return store
+        return Automations(store)
             .createAutomation(owner, target,
                               {{"kind", "reminder"}, {"fireAt", now}, {"timezone", "Etc/UTC"}, {"request", "Check the deployment"}},
                               now - 1)
@@ -561,21 +564,22 @@ void isolatedFirings(const std::filesystem::path& db) {
     auto policy = store.policy();
     const auto secret = policy.requestSecret("broken", {"deployment-token"});
     policy.submitSecret(owner, "broken", secret, "protected-destination");
-    store.fireDueAutomations(now);
-    const auto alphaSchedule = store.automations(owner, "alpha").at("automations").at(0);
+    Automations(store).fireDueAutomations(now);
+    const auto alphaSchedule = Automations(store).automations(owner, "alpha").at("automations").at(0);
     check(alphaSchedule.at("nextRunAt") == utc(2037, 3, 1, 1) + 30 * 60 && store.tasks("alpha").at(0).task.trigger.value().id == schedule,
           "A long gap after a valid occurrence prevented delivery");
-    const auto failed = store.automations(owner, "broken").at("automations").at(0);
+    const auto failed = Automations(store).automations(owner, "broken").at("automations").at(0);
     check(failed.at("id") == invalid && failed.at("status") == "failed" && failed.at("nextRunAt").is_null() &&
               store.tasks("broken").empty() && store.tasks("beta").at(0).task.trigger.value().id == regular,
           "A rejected firing blocked or contaminated the rest of the batch");
 
     const auto end = lastAutomationTime;
-    store.createAutomation(
+    Automations(store).createAutomation(
         owner, alpha, {{"kind", "schedule"}, {"cron", "* * * * *"}, {"timezone", "Etc/UTC"}, {"request", "Final occurrence"}}, end - 60);
-    store.cancelAutomation(owner, "alpha", schedule.get<Id>());
-    store.fireDueAutomations(end);
-    check(store.tasks("alpha").size() == 2 && store.automations(owner, "alpha").at("automations").at(0).at("status") == "delivered",
+    Automations(store).cancelAutomation(owner, "alpha", schedule.get<Id>());
+    Automations(store).fireDueAutomations(end);
+    check(store.tasks("alpha").size() == 2 &&
+              Automations(store).automations(owner, "alpha").at("automations").at(0).at("status") == "delivered",
           "The final supported occurrence was dropped");
 }
 
@@ -606,9 +610,9 @@ void automationConversation(const std::filesystem::path& db) {
     Conversations(store).receive(localOwner, alpha, "remove", "Cancel the weekly progress schedule");
     runtime.runConversations();
     check(lastResult(bot.inputs.back()).at("status") == "canceled", "Conversation scheduler could not cancel");
-    const auto delivery = store.receiveWebhook(owner, "deploy", "deployment-1", {{"status", "finished"}}, options.clock());
+    const auto delivery = Automations(store).receiveWebhook(owner, "deploy", "deployment-1", {{"status", "finished"}}, options.clock());
     Store restarted(db);
-    const auto replay = restarted.receiveWebhook(owner, "deploy", "deployment-1", {{"status", "finished"}}, options.clock());
+    const auto replay = Automations(restarted).receiveWebhook(owner, "deploy", "deployment-1", {{"status", "finished"}}, options.clock());
     check(replay.at("duplicate") == true && replay.at("tasks") == delivery.at("tasks") && restarted.tasks().size() == 1,
           "Webhook duplicate across connections was enqueued");
     const auto trigger = restarted.tasks().at(0).task.trigger.value();
@@ -629,9 +633,9 @@ void webhookPolicy(const std::filesystem::path& db) {
         policy.setMember(owner, "alpha", sender.id, true);
         policy.setMember(owner, "beta", other.id, true);
         policy.submitSecret(owner, "beta", policy.requestSecret("beta", {"webhook-secret"}), "fixture-webhook-token");
-        store.createAutomation(owner, alpha, trigger, now);
-        store.createAutomation(owner, beta, trigger, now);
-        const auto received = store.receiveWebhook(sender, "deploy", "evt-1", event, now);
+        Automations(store).createAutomation(owner, alpha, trigger, now);
+        Automations(store).createAutomation(owner, beta, trigger, now);
+        const auto received = Automations(store).receiveWebhook(sender, "deploy", "evt-1", event, now);
         alphaReceipt = received.at("tasks");
         check(received.at("duplicate") == false && alphaReceipt.size() == 1 && alphaReceipt.at(0).at("botId") == "alpha" &&
                   store.tasks("beta").empty(),
@@ -640,11 +644,11 @@ void webhookPolicy(const std::filesystem::path& db) {
               "Webhook fanout copied a protected value into a task");
     }
     Store restarted(db);
-    const auto otherDelivery = restarted.receiveWebhook(other, "deploy", "evt-1", event, now);
+    const auto otherDelivery = Automations(restarted).receiveWebhook(other, "deploy", "evt-1", event, now);
     check(otherDelivery.at("duplicate") == false && otherDelivery.at("tasks").size() == 1 &&
               otherDelivery.at("tasks").at(0).at("botId") == "beta",
           "A delivery to another Bot consumed this Bot's authorized event");
-    const auto replay = restarted.receiveWebhook(sender, "deploy", "evt-1", event, now);
+    const auto replay = Automations(restarted).receiveWebhook(sender, "deploy", "evt-1", event, now);
     check(replay.at("duplicate") == true && replay.at("tasks") == alphaReceipt && restarted.tasks().size() == 2,
           "Webhook replay leaked unrelated receipts or queued duplicate work");
 }
@@ -654,15 +658,15 @@ void pausedWebhookFanout(const std::filesystem::path& db) {
     const Person sender{"alpha-ingress"};
     const Json trigger{{"kind", "trigger"}, {"source", "deploy"}, {"request", "Check deployment"}};
     const auto deliver = [&](Store& store, const Person& actor, std::string_view eventId) {
-        return store.receiveWebhook(actor, "deploy", eventId, Json::object(), now);
+        return Automations(store).receiveWebhook(actor, "deploy", eventId, Json::object(), now);
     };
     const Json paused = Json::array({alpha.botId});
     Json activeReceipts;
     {
         Store store(db);
         store.policy().setMember(owner, alpha.botId, sender.id, true);
-        store.createAutomation(owner, alpha, trigger, now);
-        store.createAutomation(owner, beta, trigger, now);
+        Automations(store).createAutomation(owner, alpha, trigger, now);
+        Automations(store).createAutomation(owner, beta, trigger, now);
         store.setBotPaused(owner, alpha.botId, true);
 
         const auto shared = deliver(store, owner, "shared");
@@ -694,7 +698,7 @@ void webhookMatchesRawPublicFields(const std::filesystem::path& db) {
     const auto now = utc(2026, 1, 1);
     const std::string secret = "fixture-status-token";
     const auto trigger = [&](const std::string& expected) {
-        return store
+        return Automations(store)
             .createAutomation(
                 owner, alpha,
                 {{"kind", "trigger"}, {"source", "deploy"}, {"request", "Check deployment"}, {"eventFilter", {{"status", expected}}}}, now)
@@ -706,10 +710,10 @@ void webhookMatchesRawPublicFields(const std::filesystem::path& db) {
     const auto request = policy.requestSecret(alpha.botId, {"status-token"});
     policy.submitSecret(owner, alpha.botId, request, secret);
 
-    const auto hidden = store.receiveWebhook(owner, "deploy", "hidden", {{"status", secret}}, now);
+    const auto hidden = Automations(store).receiveWebhook(owner, "deploy", "hidden", {{"status", secret}}, now);
     check(hidden.at("tasks").empty() && store.tasks().empty(), "A protected event field matched a trigger");
     const Json event{{"status", "[redacted]"}, {"details", {{"token", secret}}}};
-    const auto visible = store.receiveWebhook(owner, "deploy", "visible", event, now);
+    const auto visible = Automations(store).receiveWebhook(owner, "deploy", "visible", event, now);
     check(visible.at("tasks").size() == 1 && visible.at("tasks").at(0).at("triggerId") == marker,
           "A literal [redacted] event field did not match its trigger");
     const auto task = taskJson(store.tasks(alpha.botId).at(0));
@@ -724,23 +728,24 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
     const std::string source = "fixture-webhook-source", token = "fixture-request-token";
     constexpr auto payloadText = "I prefer HTML for future release notes.";
     const auto id =
-        store
+        Automations(store)
             .createAutomation(owner, alpha,
                               {{"kind", "trigger"}, {"source", source}, {"request", "Check " + token}, {"eventFilter", {{token, "ready"}}}},
                               now)
             .at("id");
-    const auto publicId =
-        store.createAutomation(owner, alpha, {{"kind", "trigger"}, {"source", source}, {"request", "Check " + token}}, now).at("id");
+    const auto publicId = Automations(store)
+                              .createAutomation(owner, alpha, {{"kind", "trigger"}, {"source", source}, {"request", "Check " + token}}, now)
+                              .at("id");
     auto policy = store.policy();
     policy.submitSecret(owner, beta.botId, policy.requestSecret(beta.botId, {"source-token"}), source);
     policy.submitSecret(owner, beta.botId, policy.requestSecret(beta.botId, {"request-token"}), token);
 
-    const auto list = store.automations(owner, alpha.botId).at("automations");
+    const auto list = Automations(store).automations(owner, alpha.botId).at("automations");
     check(list.at(1).at("id") == id && list.at(1).at("source") == "[redacted]" && list.at(1).at("request") == "Check [redacted]" &&
               list.at(1).at("eventFilter").contains("[redacted]"),
           "Trigger listing exposed saved webhook metadata that became protected");
 
-    const auto delivery = store.receiveWebhook(owner, source, "evt-1", {{token, "ready"}, {"text", payloadText}}, now);
+    const auto delivery = Automations(store).receiveWebhook(owner, source, "evt-1", {{token, "ready"}, {"text", payloadText}}, now);
     const auto receipts = delivery.at("tasks");
     check(receipts.size() == 1 && receipts.at(0).at("triggerId") == publicId,
           "A newly protected filter matched or a redacted trigger failed to deliver");
@@ -770,10 +775,10 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
     check(input.task.at("trigger").at("event").at("text") == payloadText &&
               std::ranges::find(input.tools, "review_preference") == input.tools.end() &&
               std::ranges::find(input.tools, "remember_preference") == input.tools.end() &&
-              store.memory(owner, alpha.botId, "memory_history", Json::object()).at("revisions").empty(),
+              Memory(store).memory(owner, alpha.botId, "memory_history", Json::object()).at("revisions").empty(),
           "A webhook payload can be used as a preference source");
 
-    const auto replay = store.receiveWebhook(owner, source, "evt-1", Json::object(), now);
+    const auto replay = Automations(store).receiveWebhook(owner, source, "evt-1", Json::object(), now);
     check(replay.at("duplicate") == true && replay.at("tasks") == receipts, "Redacted webhook metadata changed delivery deduplication");
 }
 
@@ -784,14 +789,16 @@ void webhookEventIdsStayPrivate(const std::filesystem::path& db) {
     auto policy = store.policy();
     policy.setMember(owner, alpha.botId, sender.id, true);
     const Json trigger{{"kind", "trigger"}, {"source", "deploy"}, {"request", "Check deployment"}};
-    store.createAutomation(owner, alpha, trigger, now);
-    store.createAutomation(owner, beta, trigger, now);
+    Automations(store).createAutomation(owner, alpha, trigger, now);
+    Automations(store).createAutomation(owner, beta, trigger, now);
     const auto own = policy.requestSecret(alpha.botId, {"alpha-token"});
     const auto other = policy.requestSecret(beta.botId, {"beta-token"});
     policy.submitSecret(owner, alpha.botId, own, "fixture-alpha-secret");
     policy.submitSecret(owner, beta.botId, other, "fixture-beta-secret");
 
-    const auto deliver = [&](std::string_view eventId) { return store.receiveWebhook(sender, "deploy", eventId, Json::object(), now); };
+    const auto deliver = [&](std::string_view eventId) {
+        return Automations(store).receiveWebhook(sender, "deploy", eventId, Json::object(), now);
+    };
     const std::string_view firstId = "fixture-external-id-1", secondId = "fixture-external-id-2";
     const auto first = deliver(firstId), second = deliver(secondId), replay = deliver(firstId);
     check(first.at("duplicate") == false && second.at("duplicate") == false && replay.at("duplicate") == true &&

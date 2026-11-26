@@ -1,4 +1,6 @@
 #pragma once
+#include "flock/json.hpp"
+#include <nlohmann/json.hpp>
 #include "flock/types.hpp"
 
 #include <optional>
@@ -39,4 +41,22 @@ struct DecisionUnavailable : Conflict {
 struct DecisionDenied : Conflict {
     DecisionDenied() : Conflict("You do not have permission to decide this request.") {}
 };
+
+class Store;
+class InboxStorage;
+class GitStorage;
+struct Person;
+
+class Inbox {
+public:
+    explicit Inbox(Store&);
+
+    Json inbox(const Person&, std::string_view bot = {}) const;
+    Json decisionHistory(const Person&, std::string_view bot = {}) const;
+    void decideInbox(const Person&, const InboxTarget&, std::string_view decision, const Json& data = Json::object());
+private:
+    InboxStorage& inbox_;
+    GitStorage& git_;
+};
+
 }

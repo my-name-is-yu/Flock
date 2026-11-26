@@ -253,8 +253,8 @@ struct Fixture {
     }
     void approvePaused(const Json& pause) {
         const Id wait = pause.at("messageId");
-        store->decideInbox(owner, {"alpha", InboxKind::conversation_model_budget, pause.at("replyToMessageId"), wait, 0, 0, wait},
-                           "approve");
+        Inbox(*store).decideInbox(owner, {"alpha", InboxKind::conversation_model_budget, pause.at("replyToMessageId"), wait, 0, 0, wait},
+                                  "approve");
     }
     void approve() {
         const auto paused = Conversations(*store).pausedConversations("alpha");
@@ -688,17 +688,18 @@ void mcpToolOutcomes(Fixture& f) {
 
     const auto approveMcp = [&](std::string_view name) {
         check(f.batch({invoke(name)}).is_null(), "An MCP tool that required approval ran before approval");
-        const auto items = f.store->inbox(owner);
+        const auto items = Inbox(*f.store).inbox(owner);
         check(items.size() == 1 && items.at(0).at("itemKind") == "policy_approval", "MCP tool did not create an approval");
         const auto& item = items.at(0);
-        f.store->decideInbox(owner, {"alpha", InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), 0, 0, 0}, "allow_once");
+        Inbox(*f.store).decideInbox(owner, {"alpha", InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), 0, 0, 0},
+                                    "allow_once");
         f.runtime->runConversations();
         return f.model.seen.at(0).at("result");
     };
     f.store->policy().changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", true);
     check(approveMcp("extension").at("ok") == true, "Ask first did not take precedence over a read-only hint");
     f.store->policy().changeNeverRule(owner, Action::mcp_invoke, "one", true);
-    check(f.run(invoke("extension")).at("ok") == false && f.store->inbox(owner).empty(),
+    check(f.run(invoke("extension")).at("ok") == false && Inbox(*f.store).inbox(owner).empty(),
           "Never did not take precedence over a read-only hint and Ask first");
     f.store->policy().changeNeverRule(owner, Action::mcp_invoke, "one", false);
     f.store->policy().changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", false);

@@ -1,3 +1,6 @@
+#include "flock/automations.hpp"
+#include "flock/bot_memory.hpp"
+#include "flock/store_options.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
@@ -322,12 +325,12 @@ struct Fixture {
     Script model;
     SimulatedT3 t3;
     std::function<void()> beforeNotes;
-    Store::MemorySeed memorySeed;
+    MemorySeed memorySeed;
     bool shareMemoryWithSessions = false;
     Seconds now = unixTime();
     bool requireT3Connection = false;
 
-    explicit Fixture(Store::MemorySeed seed = {}) : memorySeed(std::move(seed)) {
+    explicit Fixture(MemorySeed seed = {}) : memorySeed(std::move(seed)) {
         char path[] = "/tmp/flock-conversation-runtime-XXXXXX";
         const auto* created = mkdtemp(path);
         if (!created) throw std::runtime_error("cannot create a test directory");
@@ -767,7 +770,7 @@ void exactOfferedAnswersUseTheModel() {
         check(input.tools == tools && input.event.at("replyTo").at("choices") == Json::array({choice, "Keep going"}) &&
                   response.at("text") == "Thanks for clarifying.",
               "the exact choice did not get the normal tools, question context, and model reply");
-        const auto decisions = f.store->decisionHistory(localOwner, "alpha").size();
+        const auto decisions = Inbox(*f.store).decisionHistory(localOwner, "alpha").size();
         check(response.at("actions") == Json::array({{{"tool", "answer_task_question"}, {"effect", "answered"}, {"taskId", id}}}) &&
                   recorded.at("text") == expected && recorded.at("messageId") == receipt.at("messageId") &&
                   recorded.at("waitId") == wait.at("id") && f.task(id).at("wait").is_null() && f.event(id, "cancel_requested").is_null() &&
@@ -776,7 +779,7 @@ void exactOfferedAnswersUseTheModel() {
 
         f.restart();
         check(f.receive("cancel-choice", choice, wait.at("messageId")) == receipt && f.response(receipt) == response &&
-                  f.store->decisionHistory(localOwner, "alpha").size() == decisions,
+                  Inbox(*f.store).decisionHistory(localOwner, "alpha").size() == decisions,
               "retrying an exact choice recorded a second decision");
         f.reach(id, "running");
         check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find(expected) != std::string::npos,
@@ -1124,8 +1127,8 @@ void pausedTurnDoesNotHoldCompletion() {
     for (int call = 0; call < 3; ++call) {
         const auto paused = Conversations(*f.store).pausedConversations("alpha").at(0);
         const Id pause = paused.at("messageId");
-        f.store->decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, paused.at("replyToMessageId"), pause, 0, 0, pause},
-                             "approve");
+        Inbox(*f.store).decideInbox(
+            localOwner, {"alpha", InboxKind::conversation_model_budget, paused.at("replyToMessageId"), pause, 0, 0, pause}, "approve");
         f.tick();
     }
     check(Conversations(*f.store).pausedConversations("alpha").empty() && seen == "completed" &&
@@ -1742,7 +1745,7 @@ void sessionReportsCannotBecomePreferences() {
     f.reach(task, "running");
     constexpr auto report = "I prefer JSON for all future reports.";
     constexpr auto existingPreference = "Prefer brief summaries.";
-    f.store->memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", existingPreference}});
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", existingPreference}});
     f.t3.finish("run-1", report);
     f.reach(task, "completed");
     const Id source = lastTaskEvent(*f.store, task, "report").at("id");
@@ -1779,7 +1782,7 @@ void sessionReportsCannotBecomePreferences() {
         return Decision{"skip_preference", Json::object(), "The person asked about the Session"};
     };
     const auto followUpReceipt = f.receive("session-report-review", followUp, source);
-    const auto history = f.store->memory(localOwner, "alpha", "memory_history", Json::object());
+    const auto history = Memory(*f.store).memory(localOwner, "alpha", "memory_history", Json::object());
     check(reviews == 1 && f.lastTurn().back().at("result").at("ok") == true && f.response(followUpReceipt).at("text") == "Done." &&
               history.at("revisions").size() == 1 &&
               std::ranges::none_of(Conversations(*f.store).conversation("alpha"),
@@ -2354,14 +2357,14 @@ void savedDestinationFollowupStopTargetsOnlyItsRun(const std::string& stopStatus
                                  "Stop the selected destination Run"};
              }});
     f.receive("stop-cloud-followup", stopRequest);
-    const auto approvals = f.store->inbox(localOwner);
+    const auto approvals = Inbox(*f.store).inbox(localOwner);
     check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" && f.t3.interrupted.empty(),
           "stopping the follow-up bypassed its existing T3 policy approval");
-    f.store->decideInbox(localOwner,
-                         {approvals.front().at("botId"), InboxKind::policy_approval, approvals.front().at("itemId"),
-                          approvals.front().at("waitId"), approvals.front().at("taskId"), approvals.front().at("targetRevision"),
-                          approvals.front().at("targetGeneration")},
-                         "allow_once");
+    Inbox(*f.store).decideInbox(localOwner,
+                                {approvals.front().at("botId"), InboxKind::policy_approval, approvals.front().at("itemId"),
+                                 approvals.front().at("waitId"), approvals.front().at("taskId"), approvals.front().at("targetRevision"),
+                                 approvals.front().at("targetGeneration")},
+                                "allow_once");
     f.runtime->runConversations();
     f.tick();
     check(f.t3.interrupted.size() == 1 && f.t3.interrupted.front().first == "cloud" &&
@@ -2612,14 +2615,14 @@ void lateSavedDestinationReceiptKeepsTaskAndSlot() {
                                  "Stop the accepted linked follow-up"};
              }});
     f.receive("stop-late-linked-followup", stopRequest);
-    const auto approvals = f.store->inbox(localOwner);
+    const auto approvals = Inbox(*f.store).inbox(localOwner);
     check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" && f.t3.interrupted.empty(),
           "the late follow-up stop bypassed the saved T3 policy");
-    f.store->decideInbox(localOwner,
-                         {approvals.front().at("botId"), InboxKind::policy_approval, approvals.front().at("itemId"),
-                          approvals.front().at("waitId"), approvals.front().at("taskId"), approvals.front().at("targetRevision"),
-                          approvals.front().at("targetGeneration")},
-                         "allow_once");
+    Inbox(*f.store).decideInbox(localOwner,
+                                {approvals.front().at("botId"), InboxKind::policy_approval, approvals.front().at("itemId"),
+                                 approvals.front().at("waitId"), approvals.front().at("taskId"), approvals.front().at("targetRevision"),
+                                 approvals.front().at("targetGeneration")},
+                                "allow_once");
     f.runtime->runConversations();
     f.advanceConcurrentlyUntil([&] { return f.t3.interruptedOnlyVia("cloud", followupRun.runId, "desktop"); },
                                "the approved stop did not interrupt the live follow-up through its linked gateway");
@@ -2761,7 +2764,7 @@ void destinationFollowupValidatesAndRedactsSourceReport() {
     constexpr auto followupText = "Continue using the valid report";
     f.script(followupText, {sendDestinationWithSource(task, reportId, "other", "other-project", followupText)});
     f.receive("valid-source-report", followupText);
-    auto approvals = f.store->inbox(localOwner);
+    auto approvals = Inbox(*f.store).inbox(localOwner);
     check(approvals.size() == 1 && approvals.front().at("itemKind") == "policy_approval" &&
               approvals.front().at("prompt").get<std::string>().find("stable result") != std::string::npos &&
               approvals.front().at("prompt").get<std::string>().find(secret) == std::string::npos &&
@@ -2780,14 +2783,14 @@ void destinationFollowupValidatesAndRedactsSourceReport() {
           "could not simulate the previously approved operation");
     f.restart();
     f.runtime->runConversations();
-    approvals = f.store->inbox(localOwner);
+    approvals = Inbox(*f.store).inbox(localOwner);
     check(f.t3.sent.size() == sentBefore && approvals.size() == 1 && approvals.front().at("itemId") != firstCard,
           "newly rendered report context reused a previously approved send");
-    f.store->decideInbox(localOwner,
-                         {approvals.front().at("botId"), InboxKind::policy_approval, approvals.front().at("itemId"),
-                          approvals.front().at("waitId"), approvals.front().at("taskId"), approvals.front().at("targetRevision"),
-                          approvals.front().at("targetGeneration")},
-                         "allow_once");
+    Inbox(*f.store).decideInbox(localOwner,
+                                {approvals.front().at("botId"), InboxKind::policy_approval, approvals.front().at("itemId"),
+                                 approvals.front().at("waitId"), approvals.front().at("taskId"), approvals.front().at("targetRevision"),
+                                 approvals.front().at("targetGeneration")},
+                                "allow_once");
     f.runtime->runConversations();
     const auto& sent = f.t3.sent.back();
     check(f.t3.sent.size() == sentBefore + 1 && sent.tool == CommandTool::message_session &&
@@ -2842,16 +2845,16 @@ void ordinarySessionApprovalKeepsItsPayload() {
     const Json args{{"environmentId", "desktop"}, {"threadId", "session-approved"}, {"text", "Share the result"}};
     f.script("Send the result", {[&](const ModelInput&) { return Decision{"message_session", args, "Send the approved message"}; }});
     f.receive("approved-session-message", "Send the result");
-    const auto approvals = f.store->inbox(localOwner);
+    const auto approvals = Inbox(*f.store).inbox(localOwner);
     check(approvals.size() == 1 && f.t3.sent.empty() &&
               Json::parse(approvals.front().at("prompt").get<std::string>()) == Json::array({"message_session", args, f.t3.login}),
           "the ordinary send approval changed its original payload");
     f.restart();
     const auto& card = approvals.front();
-    f.store->decideInbox(localOwner,
-                         {card.at("botId"), InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
-                          card.at("targetRevision"), card.at("targetGeneration")},
-                         "allow_once");
+    Inbox(*f.store).decideInbox(localOwner,
+                                {card.at("botId"), InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
+                                 card.at("targetRevision"), card.at("targetGeneration")},
+                                "allow_once");
     f.runtime->runConversations();
     check(f.t3.sent.size() == 1 && f.t3.sent.front().tool == CommandTool::message_session,
           "the ordinary send approval did not survive restart");
@@ -3241,25 +3244,25 @@ void recoveredStopApprovalBelongsToTheStopRequester() {
     Conversations(*f.store).receive(stopRequester, route, "requester-bound-stop", stopText);
     f.runtime->runConversations();
     f.t3.deliveryVisible = true;
-    auto stopCards = f.store->inbox(stopRequester, "alpha");
+    auto stopCards = Inbox(*f.store).inbox(stopRequester, "alpha");
     for (int attempt = 0; attempt < 4 && stopCards.empty(); ++attempt) {
         const auto retryAt = destinationRunFor(f.task(taskId), "cloud").value("retryAt", f.now);
         if (retryAt > f.now) f.now = retryAt;
         f.tick();
-        stopCards = f.store->inbox(stopRequester, "alpha");
+        stopCards = Inbox(*f.store).inbox(stopRequester, "alpha");
     }
-    const auto taskOwnerCards = f.store->inbox(taskRequester, "alpha");
+    const auto taskOwnerCards = Inbox(*f.store).inbox(taskRequester, "alpha");
     if (!(stopCards.size() == 1 && stopCards.front().at("canDecide") == true && stopCards.front().at("canSaveRule") == false &&
           (taskOwnerCards.empty() || taskOwnerCards.front().at("canDecide") == false) && f.t3.interrupted.empty()))
         throw std::runtime_error(
             "recovered-stop approval was not assigned to the actor who requested the stop: stopCards=" + stopCards.dump() +
             " taskOwnerCards=" + taskOwnerCards.dump() + " task=" + persistedTaskDiagnostics(f, taskId).dump());
     try {
-        f.store->decideInbox(stopRequester,
-                             {stopCards.front().at("botId"), InboxKind::policy_approval, stopCards.front().at("itemId"),
-                              stopCards.front().at("waitId"), stopCards.front().at("taskId"), stopCards.front().at("targetRevision"),
-                              stopCards.front().at("targetGeneration")},
-                             "allow_once");
+        Inbox(*f.store).decideInbox(stopRequester,
+                                    {stopCards.front().at("botId"), InboxKind::policy_approval, stopCards.front().at("itemId"),
+                                     stopCards.front().at("waitId"), stopCards.front().at("taskId"), stopCards.front().at("targetRevision"),
+                                     stopCards.front().at("targetGeneration")},
+                                    "allow_once");
     } catch (const std::exception& error) {
         throw std::runtime_error(std::string(error.what()) + " actor=" + stopRequester.id +
                                  " botDecision=" + std::to_string(f.store->policy().allows(stopRequester, Action::bot_decide, "alpha")) +
@@ -3310,27 +3313,28 @@ void recoveredDestinationStopHonorsPolicy() {
         f.tick();
         f.now += 5;
         f.tick();
-        auto cards = f.store->inbox(localOwner);
+        auto cards = Inbox(*f.store).inbox(localOwner);
         check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" && f.t3.interrupted.empty(),
               "the recovered Run stop bypassed its required approval or failed to create a card");
-        f.store->decideInbox(localOwner,
-                             {cards.front().at("botId"), InboxKind::policy_approval, cards.front().at("itemId"), cards.front().at("waitId"),
-                              cards.front().at("taskId"), cards.front().at("targetRevision"), cards.front().at("targetGeneration")},
-                             "deny");
+        Inbox(*f.store).decideInbox(localOwner,
+                                    {cards.front().at("botId"), InboxKind::policy_approval, cards.front().at("itemId"),
+                                     cards.front().at("waitId"), cards.front().at("taskId"), cards.front().at("targetRevision"),
+                                     cards.front().at("targetGeneration")},
+                                    "deny");
         f.now += 5;
         f.tick();
         const auto denied = destinationResult(f.task(id), "cloud");
         check(f.t3.interrupted.empty() && denied.value("status", "") == "running",
               "denying a recovered stop still interrupted the Run or left it awaiting the denied approval");
         stopDestinationByName(f, id, "retry-recovered-stop", "Request a fresh approval to stop the uncertain Run");
-        auto retryCards = f.store->inbox(localOwner);
+        auto retryCards = Inbox(*f.store).inbox(localOwner);
         check(retryCards.size() == 1 && retryCards.front().at("status") == "pending" && f.t3.interrupted.empty(),
               "a denied recovered stop could not request a fresh approval");
-        f.store->decideInbox(localOwner,
-                             {retryCards.front().at("botId"), InboxKind::policy_approval, retryCards.front().at("itemId"),
-                              retryCards.front().at("waitId"), retryCards.front().at("taskId"), retryCards.front().at("targetRevision"),
-                              retryCards.front().at("targetGeneration")},
-                             "allow_once");
+        Inbox(*f.store).decideInbox(localOwner,
+                                    {retryCards.front().at("botId"), InboxKind::policy_approval, retryCards.front().at("itemId"),
+                                     retryCards.front().at("waitId"), retryCards.front().at("taskId"),
+                                     retryCards.front().at("targetRevision"), retryCards.front().at("targetGeneration")},
+                                    "allow_once");
         f.runtime->runConversations();
         f.now += 5;
         f.tick();
@@ -3381,15 +3385,15 @@ void startedRunOutboxApprovalIsStale() {
     Fixture f;
     f.store->policy().setMode(localOwner, "supervised");
     oneLinkedDestinationTask(f, "stale-outbox-approval", "Wait for linked launch approval");
-    f.advanceUntil([&] { return !f.store->inbox(localOwner).empty(); }, "the linked launch did not request approval");
-    const auto cards = f.store->inbox(localOwner);
+    f.advanceUntil([&] { return !Inbox(*f.store).inbox(localOwner).empty(); }, "the linked launch did not request approval");
+    const auto cards = Inbox(*f.store).inbox(localOwner);
     check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" && f.t3.sent.empty(),
           "the linked launch did not remain gated on its approval");
     const auto operation = latestApprovalOperation(f);
     constexpr std::string_view outboxPrefix = "run-outbox/";
     check(operation.starts_with(outboxPrefix), "the pending launch did not use an outbox approval");
     setOutboxPhase(f, operation.substr(outboxPrefix.size()), "started");
-    const auto remaining = f.store->inbox(localOwner);
+    const auto remaining = Inbox(*f.store).inbox(localOwner);
     check(latestApprovalStatus(f) == "stale" && remaining.empty() && f.t3.sent.empty(),
           "a launch approval remained live after its outbox had started");
 }
@@ -3435,8 +3439,8 @@ void queuedDestinationStopsReleaseSlots() {
         Fixture f;
         f.store->policy().setMode(localOwner, "supervised");
         const auto destination = oneLinkedDestinationTask(f, "approval-stop", "Wait for linked launch approval");
-        f.advanceUntil([&] { return !f.store->inbox(localOwner).empty(); }, "the linked launch did not request approval");
-        const auto cards = f.store->inbox(localOwner);
+        f.advanceUntil([&] { return !Inbox(*f.store).inbox(localOwner).empty(); }, "the linked launch did not request approval");
+        const auto cards = Inbox(*f.store).inbox(localOwner);
         check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" && f.t3.sent.empty(),
               "the destination launch did not hold its slot for approval");
         const auto follower = oneLinkedDestinationTask(f, "after-approval-stop", "Run after approval cancellation");
@@ -3444,7 +3448,7 @@ void queuedDestinationStopsReleaseSlots() {
         f.tick();
         f.tick();
         check(f.t3.sent.empty() && destinationResult(f.task(destination), "cloud").at("status") == "cancelled" &&
-                  latestApprovalStatus(f) == "stale" && f.store->inbox(localOwner).empty(),
+                  latestApprovalStatus(f) == "stale" && Inbox(*f.store).inbox(localOwner).empty(),
               "cancelling a pending launch did not settle its approval locally");
         f.store->policy().setMode(localOwner, "full");
         f.advanceUntil([&] { return f.t3.sent.size() == 1; }, "the follower did not acquire the slot after pending-approval cancellation");
@@ -3880,7 +3884,7 @@ void authoritativeHandoffFitsBeforeMemory() {
     const std::string protectedValue = "fixture-private-key";
     std::string memory = "Use fixture credentials: " + protectedValue + "\n";
     while (memory.size() + std::string_view("界").size() <= 8192) memory += "界";
-    f.store->memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", memory}});
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", memory}});
     auto policy = f.store->policy();
     policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"fixture-key"}), protectedValue);
     const auto id = f.store->submit(f.routing());
@@ -4109,9 +4113,9 @@ void existingSessionStartsNormalWork() {
 void sessionMemoryFollowsTheAcceptedVersion() {
     Fixture f([](std::string_view bot) { return bot == "alpha" ? "Use baseline A." : "Beta's private convention."; });
     f.shareMemoryWithSessions = true;
-    f.store->memory(localOwner, "beta", "read_memory", Json::object());
-    f.store->memory(localOwner, "alpha", "apply_memory_edit",
-                    {{"docId", "team/notes.md"}, {"baseVersion", 0}, {"content", "Shared playbook."}});
+    Memory(*f.store).memory(localOwner, "beta", "read_memory", Json::object());
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit",
+                            {{"docId", "team/notes.md"}, {"baseVersion", 0}, {"content", "Shared playbook."}});
     f.t3.deferNextRunId = true;
     f.t3.deliveryVisible = false;
     auto routing = f.routing();
@@ -4144,12 +4148,12 @@ void sessionMemoryFollowsTheAcceptedVersion() {
     const auto unchanged = follow(1);
     check(unchanged.find("Notes from") == unchanged.npos, "unchanged seed memory was repeated");
 
-    f.store->memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use baseline B."}});
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use baseline B."}});
     const auto updated = follow(2);
     check(updated.find("Notes from Release's memory:\nUse baseline B.") != updated.npos && updated.find("Use baseline A.") == updated.npos,
           "the follow-up missed the updated memory");
 
-    f.store->memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 1}, {"content", ""}});
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 1}, {"content", ""}});
     const auto cleared = follow(3);
     check(cleared.find("Notes from") == cleared.npos, "empty memory added a section to the follow-up");
 }
@@ -4159,7 +4163,7 @@ void existingAutomationUsesLiveMemorySharing() {
     Fixture f([note](std::string_view) { return std::string(note); });
     auto saved = f.routing();
     saved.config.erase("shareMemoryWithSessions");
-    const auto schedule = f.store->createAutomation(
+    const auto schedule = Automations(*f.store).createAutomation(
         localOwner, saved, {{"kind", "schedule"}, {"cron", "* * * * *"}, {"timezone", "Etc/UTC"}, {"request", "Check the release"}}, f.now);
     f.shareMemoryWithSessions = true;
     RuntimeOptions options{[&] { return f.now; }};
@@ -4168,7 +4172,7 @@ void existingAutomationUsesLiveMemorySharing() {
     f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, Runtime::SoulLoader{}, options);
 
     f.now = schedule.at("nextRunAt");
-    f.store->fireDueAutomations(f.now);
+    Automations(*f.store).fireDueAutomations(f.now);
     const auto id = f.store->tasks("alpha").at(0).task.id;
     check(!f.task(id).at("config").contains("shareMemoryWithSessions"),
           "The schedule fixture did not preserve the settings saved before opt-in");

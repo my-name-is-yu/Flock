@@ -1,3 +1,4 @@
+#include "flock/automations.hpp"
 #include "task_operations.hpp"
 #include "automation_storage.hpp"
 #include "bot_lifecycle_storage.hpp"
@@ -5,6 +6,7 @@
 #include "database.hpp"
 #include "secret_storage.hpp"
 #include "storage.hpp"
+#include "flock/store_options.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/memory_automation.hpp"
@@ -121,7 +123,7 @@ bool matchesEvent(const Json& filter, const Json& event, const SecretRedactor& s
     return true;
 }
 
-void applyPlannerModel(Json& config, const Store::PlannerModel& planner) {
+void applyPlannerModel(Json& config, const PlannerModel& planner) {
     config["model"] = planner.model;
     config["modelProvider"] = planner.provider;
     if (planner.reasoningEffort)
@@ -132,15 +134,15 @@ void applyPlannerModel(Json& config, const Store::PlannerModel& planner) {
 }
 
 AutomationStorage::AutomationStorage(Database& database, const SecretStorage& secretStorage, const BotLifecycleStorage& lifecycle,
-                                     const Policy& permissions, Store::AutomationModelResolver model, TaskOperations& taskOperations)
+                                     const Policy& permissions, AutomationModelResolver model, TaskOperations& taskOperations)
     : database_(database), secretStorage_(secretStorage), lifecycle_(lifecycle), permissions_(permissions), model_(std::move(model)),
       taskOperations(taskOperations) {}
 
-Json Store::createAutomation(const Person& actor, const Intake& target, const Json& args, Seconds now) {
-    std::lock_guard lock(p_->mutex);
-    Transaction tx(p_->db);
-    if (!policy().allows(actor, Action::bot_decide, target.botId)) throw AccessDenied("Automation access denied");
-    auto result = p_->automationStorage.createAutomation(target, args, "person:" + actor.id, now);
+Json Automations::createAutomation(const Person& actor, const Intake& target, const Json& args, Seconds now) {
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
+    if (!policy_.allows(actor, Action::bot_decide, target.botId)) throw AccessDenied("Automation access denied");
+    auto result = automation_.createAutomation(target, args, "person:" + actor.id, now);
     tx.commit();
     return result;
 }
@@ -161,11 +163,11 @@ VALUES(?,?,?,?,'active',?,?,?)
     return {{"id", database_.last()}, {"status", "active"}, {"nextRunAt", item.next ? Json(*item.next) : Json(nullptr)}};
 }
 
-Json Store::automations(const Person& actor, std::string_view bot, Id before, bool activeOnly) const {
-    std::lock_guard lock(p_->mutex);
-    Transaction tx(p_->db, Transaction::Mode::read);
-    if (!p_->permissions.allows(actor, Action::bot_view, bot)) throw AccessDenied("Automation access denied");
-    auto result = p_->automationStorage.automations(bot, before, activeOnly);
+Json Automations::automations(const Person& actor, std::string_view bot, Id before, bool activeOnly) const {
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db, Transaction::Mode::read);
+    if (!policy_.allows(actor, Action::bot_view, bot)) throw AccessDenied("Automation access denied");
+    auto result = automation_.automations(bot, before, activeOnly);
     tx.commit();
     return result;
 }
@@ -200,23 +202,23 @@ FROM automations WHERE bot_id=? AND (?=0 OR id<?)
     return {{"automations", std::move(items)}, {"before", next}};
 }
 
-Json Store::activeConfiguredSchedules(std::string_view bot) const {
-    std::lock_guard lock(p_->mutex);
-    auto rows = p_->query(R"SQL(
+Json Automations::activeConfiguredSchedules(std::string_view bot) const {
+    std::lock_guard lock(database_.mutex);
+    auto rows = database_.query(R"SQL(
 SELECT config_id,definition FROM automations
 WHERE bot_id=? AND config_id IS NOT NULL AND status='active'
 )SQL",
-                          {bot});
+                                {bot});
     auto schedules = Json::object();
     while (rows.next()) schedules[rows.string(0)] = rows.json(1);
     return schedules;
 }
 
-Json Store::cancelAutomation(const Person& actor, std::string_view bot, Id id) {
-    std::lock_guard lock(p_->mutex);
-    Transaction tx(p_->db);
-    if (!policy().allows(actor, Action::bot_decide, bot)) throw AccessDenied("Automation access denied");
-    auto result = p_->automationStorage.cancelAutomation(bot, id);
+Json Automations::cancelAutomation(const Person& actor, std::string_view bot, Id id) {
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
+    if (!policy_.allows(actor, Action::bot_decide, bot)) throw AccessDenied("Automation access denied");
+    auto result = automation_.cancelAutomation(bot, id);
     tx.commit();
     return result;
 }
@@ -229,17 +231,18 @@ Json AutomationStorage::cancelAutomation(std::string_view bot, Id id) {
     return {{"id", id}, {"status", "canceled"}};
 }
 
-std::vector<ScheduleImportError> Store::syncSchedules(std::string_view bot, const std::vector<ConfiguredSchedule>& schedules, Seconds now) {
+std::vector<ScheduleImportError> Automations::syncSchedules(std::string_view bot, const std::vector<ConfiguredSchedule>& schedules,
+                                                            Seconds now) {
     return syncSchedules(bot, now, [&](const auto& commit) { commit(schedules, [] {}); });
 }
 
-std::vector<ScheduleImportError> Store::syncSchedules(std::string_view bot, Seconds now, const EditConfiguredSchedules& edit) {
+std::vector<ScheduleImportError> Automations::syncSchedules(std::string_view bot, Seconds now, const EditConfiguredSchedules& edit) {
     if (now < 0 || now > lastAutomationTime) throw Conflict("Clock is outside the supported range");
-    std::lock_guard lock(p_->mutex);
-    Transaction tx(p_->db);
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
     std::vector<ScheduleImportError> errors;
     edit([&](const auto& schedules, const auto& publish) {
-        errors = p_->automationStorage.stageConfiguredSchedules(bot, schedules, now);
+        errors = automation_.stageConfiguredSchedules(bot, schedules, now);
         publish();
         tx.commit();
     });
@@ -310,16 +313,16 @@ VALUES(?,'schedule',?,?,'active',?,'config',?,?)
     }
 }
 
-void Store::pruneAutomations(const std::vector<std::string>& configuredBots) {
-    std::lock_guard lock(p_->mutex);
-    Transaction tx(p_->db);
-    auto absent = p_->query(R"SQL(
+void Automations::pruneAutomations(const std::vector<std::string>& configuredBots) {
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
+    auto absent = database_.query(R"SQL(
 SELECT json_group_array(DISTINCT bot_id) FROM automations
 WHERE status IN ('active','failed') AND bot_id NOT IN (SELECT value FROM json_each(?))
 )SQL",
-                            {Json(configuredBots).dump()});
+                                  {Json(configuredBots).dump()});
     absent.next();
-    p_->automationStorage.retireAutomations(absent.json(0));
+    automation_.retireAutomations(absent.json(0));
     tx.commit();
 }
 
@@ -358,8 +361,8 @@ Json AutomationStorage::automationTool(std::string_view bot, const Person& actor
     return createAutomation(intake(bot, field(args, "request"), routing), definition, "bot:" + std::string(bot), now);
 }
 
-void Store::fireDueAutomations(Seconds now) {
-    p_->automationStorage.fireDueAutomations(now);
+void Automations::fireDueAutomations(Seconds now) {
+    automation_.fireDueAutomations(now);
 }
 
 void AutomationStorage::fireDueAutomations(Seconds now) {
@@ -451,26 +454,26 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
     }
 }
 
-Json Store::receiveWebhook(const Person& actor, std::string_view source, std::string_view eventId, const Json& event, Seconds now) {
+Json Automations::receiveWebhook(const Person& actor, std::string_view source, std::string_view eventId, const Json& event, Seconds now) {
     if (!validBotId(source) || !validExternalId(eventId) || !event.is_object() || event.dump().size() > 16000)
         throw Conflict("Invalid webhook event");
     const auto key = "webhook:" + std::string(source) + ":" + std::string(eventId);
-    std::lock_guard lock(p_->mutex);
-    Transaction tx(p_->db);
-    const auto permits = [&](std::string_view bot) { return policy().allows(actor, Action::bot_decide, bot); };
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
+    const auto permits = [&](std::string_view bot) { return policy_.allows(actor, Action::bot_decide, bot); };
     std::map<std::string, Json> previous;
-    auto existing = p_->query("SELECT bot_id,receipts FROM automation_firings WHERE dedupe_key=?", {key});
+    auto existing = database_.query("SELECT bot_id,receipts FROM automation_firings WHERE dedupe_key=?", {key});
     while (existing.next()) {
         const auto bot = existing.string(0);
         if (permits(bot)) previous.emplace(bot, existing.json(1));
     }
 
-    auto rows = p_->query(R"SQL(
+    auto rows = database_.query(R"SQL(
 SELECT id,bot_id,definition,routing FROM automations WHERE status='active' AND kind='trigger'
 AND json_extract(definition,'$.source')=? ORDER BY id
 )SQL",
-                          {source});
-    const auto scrub = p_->secretStorage.sharedRedactor();
+                                {source});
+    const auto scrub = secrets_.sharedRedactor();
     std::optional<Json> payload;
     std::map<std::string, Json> received;
     while (rows.next()) {
@@ -479,19 +482,19 @@ AND json_extract(definition,'$.source')=? ORDER BY id
         auto& receipts = received.try_emplace(bot, Json::array()).first->second;
         const auto def = rows.json(2);
         if (receipts.is_null() || !matchesEvent(def.at("eventFilter"), event, scrub)) continue;
-        if (p_->botLifecycle.botPaused(bot)) {
+        if (lifecycle_.botPaused(bot)) {
             receipts = nullptr;
             continue;
         }
-        const auto routing = p_->automationStorage.automationRoute(bot, rows.json(3));
+        const auto routing = automation_.automationRoute(bot, rows.json(3));
         const Json destination = {bot, routing};
         if (scrub.record(destination, SecretRedactor::Fields::external) != destination) continue;
         const auto request = bounded(scrub.text(field(def, "request")), maxRequestBytes);
         if (request.find_first_not_of(" \r\n\t") == request.npos) continue;
         if (!payload) payload = scrub.payload(event);
         const auto id = rows.number(0);
-        const auto task = p_->taskOperations.submit(intake(bot, request, routing), 0, nullptr, TaskSource::request,
-                                                    TaskTrigger{id, now, WebhookTaskTrigger{scrub.text(source), *payload}});
+        const auto task = tasks_.submit(intake(bot, request, routing), 0, nullptr, TaskSource::request,
+                                        TaskTrigger{id, now, WebhookTaskTrigger{scrub.text(source), *payload}});
         receipts.push_back({{"taskId", task}, {"botId", bot}, {"triggerId", id}});
     }
     if (previous.empty() && received.empty()) throw AccessDenied("Webhook source unavailable");
@@ -505,7 +508,7 @@ AND json_extract(definition,'$.source')=? ORDER BY id
             tasks.insert(tasks.end(), receipts.begin(), receipts.end());
     };
     for (const auto& [bot, receipts] : received) {
-        p_->exec("INSERT INTO automation_firings VALUES(?,?,?,?)", {key, bot, now, receipts.dump()});
+        database_.exec("INSERT INTO automation_firings VALUES(?,?,?,?)", {key, bot, now, receipts.dump()});
         append(bot, receipts);
     }
     for (const auto& [bot, receipts] : previous) append(bot, receipts);

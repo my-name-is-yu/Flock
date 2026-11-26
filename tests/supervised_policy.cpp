@@ -1,3 +1,5 @@
+#include "flock/automations.hpp"
+#include "flock/bot_memory.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
@@ -141,9 +143,9 @@ void reopen(const std::filesystem::path& path) {
     options.applyBotChange = [&](const BotChange&) { ++applied; };
     Runtime runtime(reopened, model, adapter, [](auto) { return std::string{}; }, options);
     runtime.runConversations();
-    const auto items = reopened.inbox(requester);
+    const auto items = Inbox(reopened).inbox(requester);
     check(items.size() == 1 && items.at(0).at("conversationEventId") == oldMessage, "Reopening lost the existing turn or its approval");
-    reopened.decideInbox(requester, target(items.at(0)), "allow_once");
+    Inbox(reopened).decideInbox(requester, target(items.at(0)), "allow_once");
     runtime.runConversations();
     check(applied == 1, "Reopened turn could not consume approval");
 }
@@ -154,7 +156,7 @@ void reopenDirectTask(const std::filesystem::path& path) {
         Store store(path);
         store.policy().setOwner(requester, "release");
         store.policy().setMode(localOwner, "supervised");
-        store.memory(requester, "release", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the old signing process."}});
+        Memory(store).memory(requester, "release", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the old signing process."}});
         task = store.submit({"release", "Build the release", "env", "project", {{"shareMemoryWithSessions", true}}}, &requester);
     }
     Store reopened(path);
@@ -162,12 +164,13 @@ void reopenDirectTask(const std::filesystem::path& path) {
     Adapter adapter;
     Runtime runtime(reopened, model, adapter, [](auto) { return std::string{}; });
     for (int i = 0; i < 6; ++i) runtime.tick();
-    const auto items = reopened.inbox(requester);
+    const auto items = Inbox(reopened).inbox(requester);
     check(items.size() == 1 && items.at(0).at("taskId") == task && items.at(0).at("expiresAt") == 0 && adapter.sends == 0,
           "A saved direct request lost its approval for the original requester");
     check(items.dump().find("Use the old signing process.") == std::string::npos, "The approval displayed the Bot's private memory");
-    reopened.memory(requester, "release", "apply_memory_edit", {{"baseVersion", 1}, {"content", "Use the current signing process."}});
-    reopened.decideInbox(requester, target(items.at(0)), "allow_once");
+    Memory(reopened).memory(requester, "release", "apply_memory_edit",
+                            {{"baseVersion", 1}, {"content", "Use the current signing process."}});
+    Inbox(reopened).decideInbox(requester, target(items.at(0)), "allow_once");
     for (int i = 0; i < 6; ++i) runtime.tick();
     check(adapter.sends == 1, "The saved direct request did not launch after approval");
     check(adapter.instruction.find("Use the current signing process.") != std::string::npos &&
@@ -201,7 +204,7 @@ void turns(const std::filesystem::path& path) {
             "request_bot_change", {{"operation", "rename_bot"}, {"targetBotId", "target"}, {"name", "Release candidate"}}, "Rename"};
     };
     auto card = [&] {
-        const auto items = store.inbox(requester);
+        const auto items = Inbox(store).inbox(requester);
         check(items.size() == 1, "expected one card at message " + std::to_string(sequence) + ": " + items.dump());
         return items.at(0);
     };
@@ -213,19 +216,19 @@ void turns(const std::filesystem::path& path) {
           "approval was detached, lacked its preview, or ran early");
     check(item.at("canDecide") == true && item.at("canSaveRule") == false,
           "the requester needs decision controls without global rule access");
-    const auto otherView = store.inbox(member).at(0);
+    const auto otherView = Inbox(store).inbox(member).at(0);
     check(otherView.at("canDecide") == false && otherView.at("canSaveRule") == false,
           "member received another person's decision or rule controls");
-    rejected<DecisionDenied>([&] { store.decideInbox(member, target(item), "always_allow"); });
-    rejected<DecisionDenied>([&] { store.decideInbox(requester, target(item), "always_allow"); });
-    check(card() == item && policy.rules().empty() && store.decisionHistory(requester).empty(),
+    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(member, target(item), "always_allow"); });
+    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(requester, target(item), "always_allow"); });
+    check(card() == item && policy.rules().empty() && Inbox(store).decisionHistory(requester).empty(),
           "a rejected global rule affected the pending approval");
-    rejected([&] { store.decideInbox(Person{}, target(item), "allow_once"); });
+    rejected([&] { Inbox(store).decideInbox(Person{}, target(item), "allow_once"); });
     now += 3601;
     check(card().at("status") == "pending", "a person's approval expired");
     auto answer = [&] {
         try {
-            store.decideInbox(requester, target(item), "allow_once");
+            Inbox(store).decideInbox(requester, target(item), "allow_once");
             return 1;
         } catch (const Conflict&) {
             return 0;
@@ -241,9 +244,9 @@ void turns(const std::filesystem::path& path) {
     model.retry = true;
     send("Rename again");
     item = card();
-    store.decideInbox(requester, target(item), "deny");
+    Inbox(store).decideInbox(requester, target(item), "deny");
     runtime.runConversations();
-    check(actions == 1 && store.inbox(requester).empty(), "denied operation retried within the same request");
+    check(actions == 1 && Inbox(store).inbox(requester).empty(), "denied operation retried within the same request");
     model.retry = false;
 
     constexpr int rulesPerKind = 32;
@@ -265,28 +268,28 @@ void turns(const std::filesystem::path& path) {
             return std::nullopt;
         },
         true);
-    check(store.inbox(delegatedAdmin).at(0).at("canSaveRule") == true, "an administrator could not save a global rule");
+    check(Inbox(store).inbox(delegatedAdmin).at(0).at("canSaveRule") == true, "an administrator could not save a global rule");
     isAdmin = false;
-    check(store.inbox(delegatedAdmin).empty(), "a demoted administrator retained access to the approval");
-    rejected<DecisionDenied>([&] { store.decideInbox(delegatedAdmin, target(item), "always_allow"); });
+    check(Inbox(store).inbox(delegatedAdmin).empty(), "a demoted administrator retained access to the approval");
+    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(delegatedAdmin, target(item), "always_allow"); });
     check(card() == item && policy.rules() == existingRules, "a stale administrator changed the rule or card");
     // Older host configuration can assign separate credentials with distinct
     // roles to one person. Interactive authority comes from the credential.
     store.setWebIdentityResolver([](std::string_view) -> std::optional<bool> { return false; });
-    check(store.inbox(delegatedAdmin).at(0).at("canSaveRule") == true,
+    check(Inbox(store).inbox(delegatedAdmin).at(0).at("canSaveRule") == true,
           "the queued role replaced the host administrator's interactive authority");
-    store.decideInbox(delegatedAdmin, target(item), "always_allow");
+    Inbox(store).decideInbox(delegatedAdmin, target(item), "always_allow");
     runtime.runConversations();
     check(actions == 2 && policy.rules().size() == existingRules.size() + 1, "Always allow did not run and add one rule");
     send("Use the saved rule");
-    check(actions == 3 && store.inbox(requester).empty(), "saved exact rule did not allow the next action");
+    check(actions == 3 && Inbox(store).inbox(requester).empty(), "saved exact rule did not allow the next action");
     policy.changeRule(localOwner, RuleKind::allow, Action::bot_rename, "target", false);
     check(policy.rules() == existingRules, "Saving a rule from a card changed an existing rule");
 
     send("Pending change before Never");
     item = card();
     policy.changeRule(localOwner, RuleKind::never, Action::bot_rename, "tar*", true);
-    store.decideInbox(requester, target(item), "allow_once");
+    Inbox(store).decideInbox(requester, target(item), "allow_once");
     runtime.runConversations();
     check(actions == 3, "Never added after card creation lost to approval");
     policy.changeRule(localOwner, RuleKind::never, Action::bot_rename, "tar*", false);
@@ -294,7 +297,7 @@ void turns(const std::filesystem::path& path) {
     send("Pending change before mode switch");
     item = card();
     policy.setMode(localOwner, "full");
-    rejected([&] { store.decideInbox(requester, target(item), "allow_once"); });
+    rejected([&] { Inbox(store).decideInbox(requester, target(item), "allow_once"); });
     runtime.runConversations();
     check(actions == 3, "switching modes ran a stale action");
     policy.setMode(localOwner, "supervised");
@@ -319,28 +322,28 @@ void downstreamApproval(const std::filesystem::path& path) {
         model.action = std::move(action);
         Conversations(store).receive(localOwner, intake, id, "Use this tool");
         runtime.runConversations();
-        const auto items = store.inbox(localOwner);
+        const auto items = Inbox(store).inbox(localOwner);
         check(items.size() == 1 && items.at(0).at("status") == "pending", "Tool did not await its one-shot approval");
-        store.decideInbox(localOwner, target(items.at(0)), "allow_once");
+        Inbox(store).decideInbox(localOwner, target(items.at(0)), "allow_once");
         runtime.runConversations();
-        check(model.outcome.at(0).at("result").at("ok") == true && store.inbox(localOwner).empty(),
+        check(model.outcome.at(0).at("result").at("ok") == true && Inbox(store).inbox(localOwner).empty(),
               "Downstream authorization rejected a one-shot grant");
     };
     approve("reminder",
             {"create_reminder", {{"fireAt", unixTime() + 600}, {"timezone", "Etc/UTC"}, {"request", "Check release"}}, "Schedule"});
     approve("playbook", {"apply_memory_edit", {{"docId", "shared-playbook"}, {"baseVersion", 0}, {"content", "Verify staging"}}, "Edit"});
-    check(store.memory(localOwner, "release", "read_memory", {{"docId", "shared-playbook"}}).at("content") == "Verify staging",
+    check(Memory(store).memory(localOwner, "release", "read_memory", {{"docId", "shared-playbook"}}).at("content") == "Verify staging",
           "Approved shared memory edit did not persist");
 
     const Decision privateEdit{"apply_memory_edit", {{"baseVersion", 0}, {"content", "Use Markdown"}}, "Edit"};
     model.action = privateEdit;
     Conversations(store).receive(member, intake, "member-edit", "Remember to use Markdown");
     runtime.runConversations();
-    check(store.inbox(localOwner).empty(), "An ineligible private memory edit requested approval");
+    check(Inbox(store).inbox(localOwner).empty(), "An ineligible private memory edit requested approval");
     check(model.outcome.at(0).at("result") == Json{{"ok", false}, {"error", "Memory access denied"}},
           "The shared member's private memory edit was not denied");
     approve("private-edit", privateEdit);
-    check(store.memory(localOwner, "release", "read_memory", Json::object()).at("content") == "Use Markdown",
+    check(Memory(store).memory(localOwner, "release", "read_memory", Json::object()).at("content") == "Use Markdown",
           "Approved private memory edit did not persist");
 }
 
@@ -361,14 +364,15 @@ void scheduled(const std::filesystem::path& path) {
     const auto anonymous = store.submit({"release", "No person originated this task", "env", "anonymous-project"});
     pump();
     check(adapter.sends == 0 &&
-              std::ranges::none_of(store.inbox(requester), [](const auto& item) { return item.at("itemKind") == "policy_approval"; }) &&
+              std::ranges::none_of(Inbox(store).inbox(requester),
+                                   [](const auto& item) { return item.at("itemKind") == "policy_approval"; }) &&
               model.outcome.dump().find("denied by policy") != std::string::npos,
           "unanswerable task received a card or was silently denied");
     store.operate(requester, TaskTarget::from(store.task(anonymous).task, 0), "cancel");
     pump();
 
     const auto schedule = [&] {
-        store.createAutomation(
+        Automations(store).createAutomation(
             requester, intake,
             {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", now + 1}, {"request", "Build the scheduled release"}}, now);
         ++now;
@@ -376,41 +380,41 @@ void scheduled(const std::filesystem::path& path) {
     };
     const auto staleTask = store.submit({"release", "Cancel a pending launch", "env", "stale-project"}, &requester);
     pump();
-    const auto staleItem = store.inbox(requester).at(0);
+    const auto staleItem = Inbox(store).inbox(requester).at(0);
     check(staleItem.at("taskId") == staleTask && staleItem.at("prompt").dump().find("Build the release") != std::string::npos,
           "pending launch card did not bind the task and its prepared instruction");
     auto stale = target(staleItem);
     check(taskJson(store.task(staleTask)).at("wait").at("reason") == "policy_approval", "task never entered its durable wait");
-    store.decideInbox(requester, stale, "allow_once");
+    Inbox(store).decideInbox(requester, stale, "allow_once");
     store.operate(requester, TaskTarget::from(store.task(staleTask).task, 0), "cancel");
     pump();
     check(adapter.sends == 0, "an approved action ran after the task was cancelled");
-    rejected([&] { store.decideInbox(requester, stale, "allow_once"); });
+    rejected([&] { Inbox(store).decideInbox(requester, stale, "allow_once"); });
 
     schedule();
-    auto items = store.inbox(requester);
+    auto items = Inbox(store).inbox(requester);
     check(items.size() == 1 && items.at(0).at("expiresAt") == now + 1800, "background approval has the wrong recipient or expiry");
     const auto item = items.at(0);
     now += 1799;
-    check(store.inbox(requester).at(0).at("status") == "pending", "approval expired early");
+    check(Inbox(store).inbox(requester).at(0).at("status") == "pending", "approval expired early");
     ++now;
-    rejected([&] { store.decideInbox(requester, target(item), "allow_once"); });
-    const auto expired = store.inbox(requester).at(0);
+    rejected([&] { Inbox(store).decideInbox(requester, target(item), "allow_once"); });
+    const auto expired = Inbox(store).inbox(requester).at(0);
     check(expired.at("status") == "expired" && expired.at("canDecide") == false && expired.at("canSaveRule") == false,
           "the expired approval showed actions to the requester");
-    rejected<DecisionDenied>([&] { store.decideInbox(requester, target(expired), "allow_next_time"); });
-    check(store.inbox(requester).at(0) == expired && policy.rules().empty(),
+    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(requester, target(expired), "allow_next_time"); });
+    check(Inbox(store).inbox(requester).at(0) == expired && policy.rules().empty(),
           "the requester changed an expired approval or its global rule");
-    const auto adminView = store.inbox(localOwner).at(0);
+    const auto adminView = Inbox(store).inbox(localOwner).at(0);
     check(adminView.at("canDecide") == true && adminView.at("canSaveRule") == true,
           "the administrator could not act on the expired approval");
-    store.decideInbox(localOwner, target(expired), "allow_next_time");
+    Inbox(store).decideInbox(localOwner, target(expired), "allow_next_time");
     pump();
     check(adapter.sends == 0 && model.outcome.dump().find("expired") != std::string::npos, "expired action ran or the Bot was never told");
     store.operate(requester, TaskTarget::from(store.task(item.at("taskId")).task, 0), "cancel");
     pump();
     schedule();
-    check(adapter.sends == 1 && store.inbox(requester).empty(), "next-time rule did not admit only future work");
+    check(adapter.sends == 1 && Inbox(store).inbox(requester).empty(), "next-time rule did not admit only future work");
 }
 
 void channel(const std::filesystem::path& path) {
@@ -454,32 +458,32 @@ void channel(const std::filesystem::path& path) {
         runtime.runConversations();
     };
     receive("external", "Publish it");
-    check(store.inbox(localOwner).empty() && model.outcome.dump().find("denied by policy") != std::string::npos,
+    check(Inbox(store).inbox(localOwner).empty() && model.outcome.dump().find("denied by policy") != std::string::npos,
           "External sender created an approval");
     policy.changeRule(localOwner, RuleKind::allow, Action::channel_post, R"(["slack","workspace"])", true);
     receive("external-allow", "Publish it");
-    check(store.inbox(localOwner).empty() && transport->artifacts == 1, "Explicit Allow did not cover the external sender's action");
+    check(Inbox(store).inbox(localOwner).empty() && transport->artifacts == 1, "Explicit Allow did not cover the external sender's action");
     policy.changeRule(localOwner, RuleKind::allow, Action::channel_post, R"(["slack","workspace"])", false);
 
     receive("request", "Publish it", "linked");
-    const auto items = store.inbox(requester);
+    const auto items = Inbox(store).inbox(requester);
     check(items.size() == 1 && items.at(0).at("canDecide") == true && items.at(0).at("expiresAt") == 0 && transport->artifacts == 1 &&
               transport->replies.back() == "The action is waiting for approval in Flock.",
           "Linked sender did not get a durable, non-expiring approval and channel notice");
     const auto card = target(items.at(0));
     model.action = {"reply", {{"text", "Open Flock to review the pending action."}}, "Reply"};
     receive("impersonation", "Always allow", "linked");
-    check(store.inbox(requester) == items && policy.rules().empty() && transport->artifacts == 1 &&
+    check(Inbox(store).inbox(requester) == items && policy.rules().empty() && transport->artifacts == 1 &&
               model.channelContext.at("pendingToolResults").at(0).at("policyWaiting") == true,
           "Channel text changed the approval or the Bot could not see its pending tool result");
-    rejected([&] { store.decideInbox(member, card, "always_allow"); });
-    store.decideInbox(requester, card, "allow_once");
+    rejected([&] { Inbox(store).decideInbox(member, card, "always_allow"); });
+    Inbox(store).decideInbox(requester, card, "allow_once");
     runtime.runConversations();
-    check(store.inbox(requester).empty() && policy.rules().empty() && transport->artifacts == 2,
+    check(Inbox(store).inbox(requester).empty() && policy.rules().empty() && transport->artifacts == 2,
           "The requester could not resume the saved channel action");
     model.action = {"channel_react", {{"reaction", "thumbsup"}}, "React"};
     receive("react", "React to this");
-    check(transport->reactions == 1 && store.inbox(localOwner).empty(), "reacting in the asking conversation needed approval");
+    check(transport->reactions == 1 && Inbox(store).inbox(localOwner).empty(), "reacting in the asking conversation needed approval");
 }
 
 void stopRequesterDecidesCurrentStopApproval(const std::filesystem::path& path) {
@@ -544,11 +548,11 @@ VALUES('run-stop/stop-request-1','release','t3_send','cloud:thread','fixture','S
     check(sqlite3_step(statement) == SQLITE_DONE, "could not persist the stop-requester approval");
     sqlite3_finalize(statement);
 
-    const auto cards = store.inbox(stopRequester, "release");
+    const auto cards = Inbox(store).inbox(stopRequester, "release");
     check(cards.size() == 1 && cards.at(0).at("canDecide") == true && cards.at(0).at("canSaveRule") == false &&
               cards.at(0).at("taskId") == taskId,
           "the stop requester did not receive the current one-shot approval");
-    store.decideInbox(stopRequester, target(cards.at(0)), "allow_once");
+    Inbox(store).decideInbox(stopRequester, target(cards.at(0)), "allow_once");
     check(sqlite3_prepare_v2(db.get(), "SELECT status FROM policy_approvals WHERE operation='run-stop/stop-request-1'", -1, &statement,
                              nullptr) == SQLITE_OK &&
               sqlite3_step(statement) == SQLITE_ROW &&
@@ -573,14 +577,14 @@ void secrets(const std::filesystem::path& path) {
         ++uses;
     };
     rejected([&] { policy.useSecret(task, secret, "connector.example", "first", true, adapter); });
-    auto items = store.inbox(requester);
+    auto items = Inbox(store).inbox(requester);
     check(items.size() == 1 && items.dump().find(value) == std::string::npos && uses == 0, "protected value reached the card");
-    store.decideInbox(requester, target(items.at(0)), "allow_once");
+    Inbox(store).decideInbox(requester, target(items.at(0)), "allow_once");
     policy.useSecret(task, secret, "connector.example", "first", true, adapter);
     rejected([&] { policy.useSecret(task, secret, "connector.example", "first", true, adapter); });
     policy.useSecret(task, secret, "connector.example", "next", true, adapter);
     rejected([&] { policy.useSecret(task, secret, "other.example", "third", true, adapter); });
-    check(uses == 2 && store.inbox(requester).size() == 1, "secret destination did not gate subsequent use");
+    check(uses == 2 && Inbox(store).inbox(requester).size() == 1, "secret destination did not gate subsequent use");
 }
 }
 

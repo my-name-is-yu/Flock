@@ -1,3 +1,4 @@
+#include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/web.hpp"
 #include "change_feed.hpp"
@@ -243,7 +244,7 @@ public:
             store_.policy().requireWebIdentity();
             store_.setWebIdentityResolver(callbacks_.resolveIdentity);
         }
-        store_.protectGitCredential(callbacks_.githubWebhookSecret);
+        GitEvents(store_).protectGitCredential(callbacks_.githubWebhookSecret);
         server_.new_task_queue = [] { return new httplib::ThreadPool(4, 8, 32); };
         server_.set_address_family(AF_INET)
             .set_payload_max_length(std::max(web::maxUploadPayload, maxMessagePayloadBytes))
@@ -634,7 +635,7 @@ private:
     }
 
     Json snapshot(const Person& person, const ChangeFeed::BotList&) const {
-        return {{"bots", botList(person)}, {"inbox", store_.inbox(person, {})}};
+        return {{"bots", botList(person)}, {"inbox", Inbox(store_).inbox(person, {})}};
     }
 
     Json notificationPage(const Person& person, std::optional<Id> after, const std::map<std::string, Id>& scope) const {
@@ -648,7 +649,7 @@ private:
         auto page = store_.notificationEventsSince(person, configured, after, scope);
         for (const auto& [bot, cursor] : page.scope) names.at(bot) = web::field(redactBot(bot, {{"name", names.at(bot)}}), "name");
         auto inbox = Json::array();
-        for (const auto& item : store_.inbox(person, {})) {
+        for (const auto& item : Inbox(store_).inbox(person, {})) {
             const auto id = web::field(item, "botId");
             if (!page.scope.contains(id) || !item.value("canDecide", false) || web::field(item, "status") == "expired") continue;
             const auto kind = web::field(item, "itemKind");
