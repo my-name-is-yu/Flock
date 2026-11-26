@@ -1,3 +1,4 @@
+#include "flock/t3_connection.hpp"
 #include "flock/bot_memory.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/conversation_intake.hpp"
@@ -184,6 +185,7 @@ struct FakeWeb : WebTools {
 
 struct FakeMcp : McpTools {
     std::atomic<int> discoveries{0}, calls{0}, reads{0};
+    std::vector<std::string> serverNames() const override { return {"fixture", "private"}; }
     bool hasServer(std::string_view server) const override { return server == "fixture" || server == "private"; }
     Json discover(std::string_view, std::string_view, McpCollection collection, std::string_view cursor) override {
         ++discoveries;
@@ -782,6 +784,16 @@ void mcpLoopback(Fixture& f, std::string_view url) {
                                             {"failed-init", {{"url", std::string(url) + "/failed-init"}}}}}}
                                          .dump());
     f.tools->mcp = app::loadBotTools(f.home)->mcp;
+    T3Connections(*f.store).connect("connected", owner.id, 48123);
+    T3Connections(*f.store).connect("blocked", owner.id, 48123);
+    f.block(Action::environment_inspect, "blocked");
+    f.block(Action::mcp_discover, "failed-init");
+    const auto listed = f.run(call("list_connections"));
+    check(listed.at("ok") == true && listed.at("mcpServers") == Json::array({"one", "two"}) &&
+              listed.at("environments") == Json::array({{{"environmentId", "connected"}}}) && !listed.contains("services") &&
+              listed.dump().find(url) == std::string::npos,
+          "list_connections did not report the usable installation connections");
+    f.block(Action::mcp_discover, "failed-init", false);
     mcpSessionPagination(*f.tools->mcp);
     mcpToolOutcomes(f);
 }

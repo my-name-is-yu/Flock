@@ -1,4 +1,5 @@
 #include "task_routing.hpp"
+#include "connector_credentials.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 #include "task_storage.hpp"
@@ -21,88 +22,22 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-std::string conversationEnvironmentId(const Json& alias) {
-    return alias.is_string() ? alias.get<std::string>() : field(alias, "environmentId");
-}
-std::string conversationGatewayEnvironmentId(const Json& alias) {
-    return field(alias, "gatewayEnvironmentId");
-}
-
 namespace {
-std::string namedT3Project(const Json& config, std::string_view environment, std::string_view name) {
-    const auto aliases = config.find("conversationEnvironments");
-    if (aliases == config.end() || !aliases->is_object()) return {};
-    const auto alias = aliases->find(name);
-    if (alias == aliases->end() || conversationEnvironmentId(*alias) != environment) return {};
-    return field(*alias, "projectId");
-}
-}
+constexpr std::size_t maxEnvironmentSelectorBytes = 256;
 
-std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name) {
-    const auto& config = routing.at("config");
-    if (auto project = namedT3Project(config, environment, name); !project.empty()) return project;
-    if (environment == field(routing, "environmentId"))
-        if (auto project = field(routing, "projectId"); !project.empty()) return project;
-    const auto aliases = config.find("conversationEnvironments");
-    if (aliases == config.end() || !aliases->is_object()) return {};
-    std::string selected;
-    for (const auto& alias : *aliases) {
-        if (conversationEnvironmentId(alias) != environment) continue;
-        auto project = field(alias, "projectId");
-        if (project.empty()) continue;
-        if (!selected.empty() && selected != project) return {};
-        selected = std::move(project);
-    }
-    return selected;
-}
+std::string linkedSelector(std::string_view label, std::string_view title, const TaskRoute& route) {
+    constexpr std::string_view separator = " — ";
+    const auto key = Json::array({route.environmentId, route.projectId, route.gatewayEnvironmentId}).dump();
+    const auto selector = " [" + connector_credentials::digest(key).substr(0, 24) + "]";
+    const auto identity = " (" + route.environmentId + " via " + route.gatewayEnvironmentId + ")";
+    const auto project = " (" + route.projectId + ")";
+    const auto remaining = maxEnvironmentSelectorBytes - selector.size();
+    const auto fixedBytes = identity.size() + separator.size() + project.size();
+    if (fixedBytes > remaining) return bounded(title, remaining) + selector;
 
-namespace {
-std::string resolveAlias(const Json& config, std::string_view name) {
-    const auto aliases = config.find("conversationEnvironments");
-    if (aliases == config.end() || !aliases->is_object()) return {};
-    const auto canonical = std::ranges::any_of(*aliases, [&](const Json& value) { return conversationEnvironmentId(value) == name; });
-    auto id = std::string(name);
-    if (!canonical) {
-        const auto alias = aliases->find(name);
-        if (alias == aliases->end()) return {};
-        id = conversationEnvironmentId(*alias);
-    }
-    constexpr auto valid = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:.";
-    if (id.size() > 1024 || id.find_first_not_of(valid) != std::string::npos) return {};
-    return id;
-}
-
-std::optional<TaskRoute> configuredTaskRoute(const Json& config, std::string_view name) {
-    const auto environment = resolveAlias(config, name);
-    if (environment.empty()) return std::nullopt;
-    const auto aliases = config.find("conversationEnvironments");
-    if (aliases == config.end() || !aliases->is_object()) return TaskRoute{environment, {}, {}};
-
-    const std::string canonicalId(name);
-    bool canonical = false;
-    std::string canonicalGateway;
-    std::string canonicalProject;
-    for (const auto& alias : *aliases) {
-        if (conversationEnvironmentId(alias) != name) continue;
-        auto gateway = conversationGatewayEnvironmentId(alias);
-        if (gateway.empty()) gateway = canonicalId;
-        if (canonical && gateway != canonicalGateway) return TaskRoute{};
-        canonical = true;
-        canonicalGateway = std::move(gateway);
-        auto project = field(alias, "projectId");
-        if (!project.empty()) {
-            if (!canonicalProject.empty() && project != canonicalProject) return TaskRoute{};
-            canonicalProject = std::move(project);
-        }
-    }
-    if (canonical) {
-        if (canonicalGateway == canonicalId) canonicalGateway.clear();
-        return TaskRoute{canonicalId, std::move(canonicalProject), std::move(canonicalGateway)};
-    }
-    const auto selected = aliases->find(name);
-    if (selected != aliases->end())
-        return TaskRoute{conversationEnvironmentId(*selected), field(*selected, "projectId"), conversationGatewayEnvironmentId(*selected)};
-    return TaskRoute{environment, {}, {}};
+    const auto shortTitle = bounded(title, remaining - fixedBytes);
+    auto name = bounded(label, remaining - fixedBytes - shortTitle.size()) + identity;
+    return name.append(separator).append(shortTitle).append(project).append(selector);
 }
 
 std::string verifiedCommit(std::string commit) {
@@ -159,7 +94,6 @@ TaskDestinations TaskRouting::discoverTaskDestinations(T3& t3, const conversatio
     TaskDestinations result;
     const auto scrub = permissions.secretRedactor(bot);
     std::set<std::tuple<std::string, std::string, std::string>> seenRoutes;
-    std::set<std::string> seenNames;
     for (const auto& gateway : gateways) {
         T3EnvironmentLinks links;
         try {
@@ -198,18 +132,11 @@ TaskDestinations TaskRouting::discoverTaskDestinations(T3& t3, const conversatio
                     continue;
                 }
                 for (const auto& project : projects) {
-                    if (project.id.empty() || project.title.empty() || !seenRoutes.emplace(target, project.id, gateway).second) continue;
+                    if (project.id.empty() || !seenRoutes.emplace(target, project.id, gateway).second) continue;
                     scrub.requirePublic({target, project.id, gateway});
-                    const auto identity = " (" + target + " via " + gateway + ")";
-                    const auto projectLabel = " — " + scrub.text(project.title) + " (" + project.id + ")";
-                    if (identity.size() + projectLabel.size() >= 256) {
-                        result.unavailable.push_back("A linked destination identity is too long to select safely.");
-                        continue;
-                    }
-                    const auto label = bounded(scrub.text(link.label), 256 - identity.size() - projectLabel.size());
-                    const auto name = label + identity + projectLabel;
-                    if (!seenNames.insert(name).second) continue;
-                    result.linked.push_back({name, {target, project.id, gateway}});
+                    TaskRoute route{target, project.id, gateway};
+                    auto name = linkedSelector(scrub.text(link.label), scrub.text(project.title), route);
+                    result.linked.push_back({std::move(name), std::move(route)});
                 }
             } catch (const std::exception&) {
                 result.unavailable.push_back(scrub.text("Flock could not list projects for linked target " + link.label +
@@ -228,28 +155,24 @@ TaskDestinations TaskRouting::discoverTaskDestinations(T3& t3, const conversatio
             auto key = catalogKey(route);
             routes.try_emplace(std::move(key), std::move(route));
         };
-        const auto offer = [&](std::string_view name) {
-            auto route = taskRoute(bot, routing, name);
-            if (route.environmentId.empty()) return;
-            result.configured.push_back({std::string(name), route});
-            add(std::move(route));
-        };
-        offer({});
-        if (field(routing, "environmentId").empty()) {
-            const auto initial = result.configured.empty() ? std::string{} : result.configured.front().route.environmentId;
-            for (const auto& gateway : gateways)
-                if (gateway != initial) offer(gateway);
+        const auto defaultRoute = taskRoute(bot, routing, {});
+        if (!defaultRoute.environmentId.empty()) {
+            result.direct.push_back({{}, defaultRoute});
+            add(defaultRoute);
         }
-        const auto& config = routing.at("config");
-        if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object())
-            for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) offer(alias.key());
+        for (const auto& gateway : gateways) {
+            if (gateway == defaultRoute.environmentId) continue;
+            TaskRoute route{gateway, {}, gateway};
+            result.direct.push_back({gateway, route});
+            add(std::move(route));
+        }
         if (change) {
             const auto id = change->find("taskId");
             if (id != change->end() && id->is_number_integer()) {
                 auto row = database.query("SELECT environment_id,project_id,data FROM tasks WHERE id=? AND bot_id=?", {*id, bot});
                 if (row.next()) {
                     const auto data = row.json(2);
-                    TaskData task{.environmentId = row.string(0), .projectId = row.string(1), .config = data.at("config")};
+                    TaskData task{.environmentId = row.string(0), .projectId = row.string(1)};
                     if (data.contains("gatewayEnvironmentId")) task.gatewayEnvironmentId = field(data, "gatewayEnvironmentId");
                     const auto name = field(*change, "environment");
                     if (name.empty())
@@ -282,61 +205,33 @@ TaskRoute TaskRouting::taskRoute(std::string_view bot, const Json& routing, std:
                                  const TaskDestinations* linked) {
     using conversation_storage::ToolError;
     const auto configured = field(routing, "environmentId");
-    const auto resolved = [&](TaskRoute route) {
-        if (route.environmentId.empty()) return route;
-        if (route.projectId.empty() && movingTask) {
-            route.projectId = namedT3Project(routing.at("config"), route.environmentId, name);
-            if (route.projectId.empty()) {
-                if (route.environmentId == movingTask->environmentId)
-                    route.projectId = movingTask->projectId;
-                else if (route.environmentId == configured)
-                    route.projectId = field(routing, "projectId");
-            }
-        } else if (route.projectId.empty())
-            route.projectId = configuredT3Project(routing, route.environmentId, name);
-        if (route.gatewayEnvironmentId.empty()) route.gatewayEnvironmentId = route.environmentId;
-        return route;
-    };
-    const auto connected = [&](const TaskRoute& route) {
-        return route.gatewayEnvironmentId == route.environmentId || registeredT3Environments(bot).contains(route.gatewayEnvironmentId);
+    const auto directRoute = [&](std::string environment) {
+        auto project = environment == configured ? field(routing, "projectId") : std::string{};
+        return TaskRoute{environment, std::move(project), environment};
     };
     if (name.empty())
-        return resolved(
-            {defaultT3Environment(bot, configured, field(routing.value("sessionOrigin", Json::object()), "environmentId")), {}, {}});
+        return directRoute(defaultT3Environment(bot, configured, field(routing.value("sessionOrigin", Json::object()), "environmentId")));
     if (movingTask && name == movingTask->environmentId) {
-        const auto route = resolved({std::string(name), {}, movingTask->gatewayEnvironmentId.value_or("")});
-        return connected(route) ? route : TaskRoute{};
+        const auto gateway = movingTask->gatewayEnvironmentId.value_or(movingTask->environmentId);
+        if (gateway != name && !registeredT3Environments(bot).contains(gateway)) return {};
+        return {movingTask->environmentId, movingTask->projectId, gateway};
     }
-    // The Bot's default ID is the direct route offered by change_task.
-    if (movingTask && name == configured) return resolved({std::string(name), {}, {}});
-    std::optional<TaskRoute> route;
-    if (name == configured)
-        route = TaskRoute{std::string(name), {}, {}};
-    else {
-        if (movingTask && movingTask->projectId != field(routing, "projectId")) route = configuredTaskRoute(movingTask->config, name);
-        if (!route) route = configuredTaskRoute(routing.at("config"), name);
-        if (!route && configured.empty() && registeredT3Environments(bot).contains(std::string(name)))
-            route = TaskRoute{std::string(name), {}, {}};
-    }
-    if (route && route->environmentId.empty()) {
-        if (linked) throw ToolError("This T3 environment has conflicting configured routes. Choose a specific destination name.");
-        return {};
-    }
-    if (route) *route = resolved(std::move(*route));
+    const auto connected = registeredT3Environments(bot);
+    if (name == configured || connected.contains(std::string(name))) return directRoute(std::string(name));
+    if (!linked) return {};
+
     const TaskRoute* discovered = nullptr;
-    if (linked) {
-        for (const auto& choice : linked->linked) {
-            if (choice.name != name && choice.route.environmentId != name) continue;
-            if (discovered) throw ToolError("This T3 environment has more than one linked route. Choose a specific destination name.");
+    for (const auto& choice : linked->linked) {
+        if (choice.name == name) {
             discovered = &choice.route;
+            break;
         }
+        if (choice.route.environmentId != name) continue;
+        if (discovered) throw ToolError("This T3 environment has more than one linked route. Choose a specific destination name.");
+        discovered = &choice.route;
     }
-    if (!discovered) return route && connected(*route) ? *route : TaskRoute{};
-    if (route && (route->environmentId != discovered->environmentId || route->projectId != discovered->projectId ||
-                  route->gatewayEnvironmentId != discovered->gatewayEnvironmentId))
-        throw ToolError(
-            "This destination name resolves to both a configured route and a linked T3 gateway. Choose an unambiguous destination.");
-    if (!registeredT3Environments(bot).contains(discovered->gatewayEnvironmentId))
+    if (!discovered) return {};
+    if (!connected.contains(discovered->gatewayEnvironmentId))
         throw ToolError("The selected T3 gateway is no longer connected. Flock will not switch gateways.");
     auto& policy = permissions;
     if (!policy.allows(bot, Action::environment_inspect, discovered->environmentId) ||
@@ -351,7 +246,7 @@ StartDestinations TaskRouting::startDestinations(const conversation::Message& me
     using conversation_storage::ToolError;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
-    const auto environment = text(args, "environment", 256, false);
+    const auto environment = text(args, "environment", maxEnvironmentSelectorBytes, false);
     const auto sessionRef = text(args, "sessionRef", 128, false);
     const auto project = text(args, "projectId", 1024, args.contains("projectId"));
     StartDestinations destinations;
@@ -377,7 +272,7 @@ StartDestinations TaskRouting::startDestinations(const conversation::Message& me
             const auto selection = choice.is_object() ? choice : Json{{"environment", choice}};
             if (selection.size() != (selection.contains("projectId") ? 2 : 1))
                 throw ToolError("Use environment and projectId to select a destination.");
-            const auto name = text(selection, "environment", 256, true);
+            const auto name = text(selection, "environment", maxEnvironmentSelectorBytes, true);
             const auto selectedProject = text(selection, "projectId", 1024, selection.contains("projectId"));
             auto route = routeForName(name);
             if (route.environmentId.empty())
@@ -426,7 +321,7 @@ TaskChange TaskRouting::taskChange(const conversation::Message& message, const J
     using conversation_storage::ToolError;
     using limits::session_prompt::maxDecisionTextBytes;
     TaskChange change{text(args, "intent", maxDecisionTextBytes, false), text(args, "doneWhen", maxDecisionTextBytes, false), {}};
-    const auto environment = text(args, "environment", 256, false);
+    const auto environment = text(args, "environment", maxEnvironmentSelectorBytes, false);
     const auto project = text(args, "projectId", 1024, args.contains("projectId"));
     if (change.intent.empty() && change.doneWhen.empty() && environment.empty() && project.empty())
         throw ToolError("change_task needs intent, doneWhen, environment, or projectId; use send_to_task for other instructions");

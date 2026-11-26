@@ -1,3 +1,4 @@
+#include "flock/t3_connection.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
@@ -930,6 +931,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     LocalMachines(store).decideLocalConnection(owner, LocalMachines(store).localConnections(owner).at(0).at("id"), false);
     rejects([&] { operation(b, "read_file", path); });
     check(policyRules.rules() == environments, "Local approval created reusable policy rules");
+    T3Connections(store).connect("env", owner.id, 48123);
     bool unchanged = false;
     model.decideNext = [&](const ModelInput& input) {
         const auto& steps = input.event.at("turn");

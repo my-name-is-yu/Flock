@@ -1,5 +1,7 @@
+#include "flock/t3_connection.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
+#include "flock/web_conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
 #include "flock/task_list.hpp"
@@ -175,9 +177,9 @@ struct FixedModel : Model {
             for (const auto& environment : input.task.at("environments")) choices.push_back(environment.at("name"));
             return reply("どちらの実行先で準備しますか？", choices);
         }
-        if (text == "backup") {
+        if (text == "backup-env") {
             if (steps.empty())
-                return {"start_task", {{"request", "Prepare the notes"}, {"environment", "backup"}}, "Use the chosen destination"};
+                return {"start_task", {{"request", "Prepare the notes"}, {"environment", "backup-env"}}, "Use the chosen destination"};
             return reply("backup で準備を始めました。");
         }
         const auto& anchor = event.at("replyTo");
@@ -204,8 +206,9 @@ struct FixedT3 : T3 {
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
     std::vector<T3Project> projects(std::string_view environment) override {
-        check(environment == "backup-env", "project discovery queried the wrong environment");
-        return {{"backup-release", "Backup release", "release"}};
+        if (environment == "backup-env") return {{"backup-release", "Backup release", "release"}};
+        if (environment == "mini-env") return {{"mini-project", "Mini project", {}}};
+        return {{"release", "Local release", {}}};
     }
     Delivery send(const Command& command) override {
         if (command.tool == CommandTool::delegate) {
@@ -486,14 +489,8 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     FixedModel model;
     FixedT3 t3;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
-    auto config = callbacks();
-    const auto configuredIntake = config.intake;
-    config.intake = [configuredIntake](std::string_view bot, std::string_view request) {
-        auto intake = configuredIntake(bot, request);
-        intake.config["conversationEnvironments"]["backup"] = "backup-env";
-        return intake;
-    };
-    const auto server = startWeb(store, 0, std::move(config));
+    T3Connections(store).connect("backup-env", localOwner.id, 48123);
+    const auto server = startWeb(store, 0, callbacks());
     Browser browser(*server);
     const auto send = [&](std::string_view key, std::string_view message, Id replyTo) {
         Json input = {{"botId", "release"}, {"clientMessageId", key}, {"text", message}};
@@ -504,9 +501,10 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     runtime.runConversations();
     const auto page = browser.get("/api/view?bot=release");
     const auto asked = conversationReply(page, question.at("messageId"));
-    check(asked.at("suggestions") == Json::array({"local-env", "backup"}) && page.at("waits").empty() && TaskList(store).tasks().empty(),
+    check(asked.at("suggestions") == Json::array({"local-env", "backup-env"}) && page.at("waits").empty() &&
+              TaskList(store).tasks().empty(),
           "the Bot's question was not an ordinary message with its suggested replies");
-    const auto receipt = send("choose-backup", "backup", asked.at("messageId"));
+    const auto receipt = send("choose-backup", "backup-env", asked.at("messageId"));
     tick(runtime, 4);
     const auto resolved = browser.get("/api/view?bot=release");
     const auto tasks = TaskList(store).tasks("release");
@@ -529,7 +527,7 @@ void parallelVerificationInView(const std::filesystem::path& path) {
                 return {{{"start_task",
                           {{"request", "Verify the release"},
                            {"doneWhen", "Run the checks"},
-                           {"environments", {"local-env", "mini"}},
+                           {"environments", {"local-env", "mini-env"}},
                            {"commit", commit}},
                           "Use the two requested environments"}}};
             return {{{"reply", {{"text", "I saved the request."}}, "Acknowledge the request"}}};
@@ -556,14 +554,8 @@ void parallelVerificationInView(const std::filesystem::path& path) {
     Store store(path);
     Seconds now = unixTime();
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, RuntimeOptions{[&] { return now; }});
-    auto config = callbacks();
-    const auto configuredIntake = config.intake;
-    config.intake = [configuredIntake](std::string_view bot, std::string_view request) {
-        auto intake = configuredIntake(bot, request);
-        intake.config["conversationEnvironments"]["mini"] = {{"environmentId", "mini-env"}, {"projectId", "mini-project"}};
-        return intake;
-    };
-    auto server = startWeb(store, 0, std::move(config));
+    T3Connections(store).connect("mini-env", localOwner.id, 48123);
+    auto server = startWeb(store, 0, callbacks());
     Browser browser(*server);
     const auto receipt = browser.post(
         "/api/messages", {{"botId", "release"}, {"clientMessageId", "verify-both"}, {"text", "Verify the release on both machines."}}, 201);
@@ -605,7 +597,7 @@ void parallelVerificationInView(const std::filesystem::path& path) {
         ++reports;
         const auto& result = event.at("data");
         const auto& run = result.at("run");
-        const bool mini = result.at("destination") == "mini";
+        const bool mini = result.at("destination") == "mini-env";
         check(result.at("status") == (mini ? "failed" : "completed") && result.at("commit") == commit &&
                   run.at("link") ==
                       std::string("https://app.t3.codes/threads/") + (mini ? "mini-env/" : "local-env/") + "verification-thread",
@@ -1187,9 +1179,9 @@ Json chatGPTConversationTool(const Json& task, const Json& event) {
     }
     if (text == blockers || text == consultation || text == notes) return chatGPTToolCall("start_task", {{"request", text}});
     if (text == checksums) {
-        check(std::ranges::any_of(task.at("environments"), [](const Json& env) { return env.at("name") == "backup"; }),
+        check(std::ranges::any_of(task.at("environments"), [](const Json& env) { return env.at("name") == "backup-env"; }),
               "the backup destination was missing from the production request");
-        return chatGPTToolCall("start_task", {{"request", text}, {"environment", "backup"}});
+        return chatGPTToolCall("start_task", {{"request", text}, {"environment", "backup-env"}});
     }
     if (text == whyBlocked || text == renewal) {
         const auto& tasks = task.at("tasks");
@@ -1302,10 +1294,13 @@ void chatGPTConversation(const std::filesystem::path& home) {
         config.update(Json{{"modelProvider", "chatgpt"}, {"model", "fixture-model"}, {"environmentId", "local-env"}, {"projectId", id}});
         std::ofstream(directory / "config.json") << config.dump();
     };
-    writeBot("release", {{"name", "Release"}, {"allowedBots", {"verifier"}}, {"conversationEnvironments", {{"backup", "backup-env"}}}});
+    writeBot("release", {{"name", "Release"}});
     writeBot("verifier", {{"name", "Verifier"}});
     const app::Bots bots(home / "bots");
     Store store(home / "conversation.sqlite", {.memorySeed = [&](std::string_view bot) { return bots.initialMemory(bot); }});
+    BotAccess(store).setOwner(localOwner, "release");
+    BotAccess(store).setOwner(localOwner, "verifier");
+    T3Connections(store).connect("backup-env", localOwner.id, 48123);
     std::exception_ptr fixtureError;
     app::ChatGPTModel model(credentials, [&](const app::chatgpt::HttpRequest& request) {
         try {
@@ -1317,7 +1312,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     });
     FixedT3 t3;
     RuntimeOptions options;
-    options.peers = [&](std::string_view bot) { return bots.peers(bot); };
+    options.peers = [&](std::string_view bot) { return bots.peers(store, bot); };
     Runtime runtime(store, model, t3, [&](std::string_view bot) { return bots.soul(bot); }, options);
     const auto advance = [&](int steps) {
         tick(runtime, steps);
@@ -1423,6 +1418,14 @@ void chatGPTConversation(const std::filesystem::path& home) {
               Tasks(store).task(firstTask.task.id).runs == firstTask.runs &&
               Tasks(store).task(secondTask.task.id).runs == secondTask.runs && t3.interruptions == 0,
           "ambiguous stop changed a Run or created work");
+
+    writeBot("release", {{"name", "Release"}, {"conversationEnvironments", Json::object()}});
+    const auto rejected =
+        browser.post("/api/messages", {{"botId", "release"}, {"clientMessageId", "removed-setting"}, {"text", "Try the invalid Bot"}}, 400);
+    check(rejected.at("error") == "removed_bot_setting" &&
+              rejected.at("message").get<std::string>().find("conversationEnvironments") != std::string::npos &&
+              !WebConversationIntake(store).receipt(localOwner, "release", "removed-setting", "Try the invalid Bot", 0, Json::array()),
+          "Web intake accepted a removed Bot setting or omitted its name from the error");
 }
 
 void botRolePreviewRedactsBeforeBounding(const std::filesystem::path& path) {

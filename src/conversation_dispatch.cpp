@@ -128,7 +128,7 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
     if (tool == botSetupTool) return executeBotSetup(message, step, decision, key, ctx);
     if (tool == "request_bot_change") return executeConversationBotChange(message, step, decision, key, ctx);
 
-    if (!isGitTool(tool)) return executeLocalConversationCall(message, step, decision, key, ctx);
+    if (!isGitTool(tool)) return executeLocalConversationCall(message, step, decision, key, ctx, settings);
 
     {
         std::lock_guard lock(database.mutex);
@@ -335,7 +335,8 @@ std::optional<Resource> ConversationStorage::conversationCallResource(const Mess
 }
 
 CallOutcome ConversationStorage::executeLocalConversationCall(const Message& message, int step, const Decision& decision,
-                                                              std::string_view key, const ConversationCallContext& ctx) {
+                                                              std::string_view key, const ConversationCallContext& ctx,
+                                                              const BotTools& settings) {
     using enum CallOutcome;
     Json result;
     std::optional<WorkSession> selectedSession;
@@ -367,7 +368,7 @@ CallOutcome ConversationStorage::executeLocalConversationCall(const Message& mes
     }
     if (ctx.shutdown.stop_requested()) return stop;
     auto completed = applyLocalConversationCall(message, step, decision, key, ctx.clock(), ApprovalWait::pause,
-                                                selectedSession ? &*selectedSession : nullptr, linked);
+                                                selectedSession ? &*selectedSession : nullptr, linked, settings);
     if (completed) saveConversationCallResult(message, step, std::move(*completed));
     transaction.commit();
     return completed ? advance : waiting;
@@ -375,7 +376,8 @@ CallOutcome ConversationStorage::executeLocalConversationCall(const Message& mes
 
 std::optional<Json> ConversationStorage::applyLocalConversationCall(const Message& message, int step, const Decision& decision,
                                                                     std::string_view key, Seconds now, ApprovalWait waitMode,
-                                                                    const WorkSession* selectedSession, const TaskDestinations& linked) {
+                                                                    const WorkSession* selectedSession, const TaskDestinations& linked,
+                                                                    const BotTools& settings) {
     if (const auto resource = conversationCallResource(message, decision)) {
         using enum Action;
         const bool writesMemory = resource->action == private_memory_write || resource->action == shared_memory_write;
@@ -391,7 +393,7 @@ std::optional<Json> ConversationStorage::applyLocalConversationCall(const Messag
     }
     database.exec("SAVEPOINT turn_tool");
     try {
-        auto result = applyTurnTool(message, step, decision, now, selectedSession, linked);
+        auto result = applyTurnTool(message, step, decision, now, selectedSession, linked, settings);
         database.exec("RELEASE turn_tool");
         return result;
     } catch (const StorageError&) {

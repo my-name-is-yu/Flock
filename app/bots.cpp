@@ -29,7 +29,6 @@
 #include <map>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -263,6 +262,9 @@ namespace {
 Json parseBotConfig(std::string_view text) {
     auto config = Json::parse(text, nullptr, false);
     if (!config.is_object()) throw Conflict("Invalid Bot config.json");
+    for (const auto key : {"allowedBots", "conversationEnvironments", "services", "mcpServers"})
+        if (config.contains(key))
+            throw BotProfileError("removed_bot_setting", std::string("Bot config.json contains removed setting ") + key + ".");
     return config;
 }
 
@@ -296,37 +298,8 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
         auto level = validatedBotRunSetting("reasoningEffort", *effort);
         if (level != "") bot.settings["reasoningEffort"] = std::move(level);
     }
-    for (const auto key : {"services", "mcpServers"}) {
-        if (!config.contains(key)) continue;
-        if (!config[key].is_array()) throw Conflict("Connection names must be an array");
-        for (const auto& name : config[key])
-            if (!name.is_string() || !validPlainId(name.get_ref<const std::string&>())) throw Conflict("Invalid connection name");
-        bot.settings[key] = config[key];
-    }
     if (const auto fix = config.find("fixPullRequests"); fix != config.end())
         bot.settings["fixPullRequests"] = validatedBotFixPullRequests(*fix);
-    if (config.contains("conversationEnvironments")) {
-        const auto& destinations = config["conversationEnvironments"];
-        if (!destinations.is_object()) throw Conflict("conversationEnvironments must map names to T3 destinations");
-        auto& saved = bot.settings["conversationEnvironments"] = Json::object();
-        for (auto alias = destinations.begin(); alias != destinations.end(); ++alias) {
-            const auto environment =
-                alias->is_object() ? validatedString(*alias, "environmentId") : validatedString(destinations, alias.key().c_str());
-            if (alias.key().empty() || alias.key().size() > 80 || !validPlainId(environment))
-                throw Conflict("Use short conversation environment names and canonical T3 environment IDs");
-            if (alias->is_object()) {
-                const auto project = validatedString(*alias, "projectId");
-                const bool hasGateway = alias->contains("gatewayEnvironmentId");
-                const auto gateway = hasGateway ? validatedString(*alias, "gatewayEnvironmentId") : std::string{};
-                if (alias->size() != (hasGateway ? 3u : 2u) || !validPlainId(project) || (hasGateway && !validPlainId(gateway)))
-                    throw Conflict("T3 destination objects require canonical environmentId, projectId, and optional gatewayEnvironmentId");
-                saved[alias.key()] = {{"environmentId", environment}, {"projectId", project}};
-                if (hasGateway) saved[alias.key()]["gatewayEnvironmentId"] = gateway;
-            } else {
-                saved[alias.key()] = environment;
-            }
-        }
-    }
     if (config.contains("session")) {
         try {
             bot.settings["session"] = normalizeSessionSettings(config["session"]);
@@ -336,16 +309,6 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
             // Preserve the cron due time. This snapshot must stop at Session launch validation.
             bot.settings["session"] = nullptr;
         }
-    }
-    const auto allowedBots = config.value("allowedBots", Json::array());
-    if (!allowedBots.is_array()) throw Conflict("allowedBots must be an array of Bot IDs");
-    std::set<std::string> allowedIds;
-    for (const auto& item : allowedBots) {
-        if (!item.is_string()) throw Conflict("allowedBots must contain only Bot IDs");
-        const auto& peerId = item.get_ref<const std::string&>();
-        if (!validBotId(peerId) || peerId == id || !allowedIds.insert(peerId).second)
-            throw Conflict("allowedBots must contain valid, unique IDs of other Bots");
-        bot.allowedBots.push_back(peerId);
     }
     if (const auto role = config.find("role"); role != config.end() && role->is_string())
         bot.role = bounded(role->get_ref<const std::string&>(), 80);
@@ -436,11 +399,9 @@ std::string Bots::initialMemory(std::string_view id) const {
     return readOptionalNotes(id, "MEMORY.md", limits::memory::maxDocumentBytes);
 }
 
-std::vector<PeerBot> Bots::peers(std::string_view id) const {
-    const auto sender = tryGet(id);
-    if (!sender) return {};
+std::vector<PeerBot> Bots::peers(Store& store, std::string_view id) const {
     std::vector<PeerBot> result;
-    for (const auto& peerId : sender->allowedBots) {
+    for (const auto& peerId : BotAccess(store).peerIds(id)) {
         if (const auto peer = tryGet(peerId)) result.push_back({peer->name, peer->intake(""), peer->role});
     }
     return result;

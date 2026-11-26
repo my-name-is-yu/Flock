@@ -1837,7 +1837,8 @@ void peerClarificationAfterRun() {
 void revisionWaitsForPeerClarification(bool direct = false) {
     Fixture f;
     f.allowBeta();
-    const Intake routing{"alpha", "Release check", "e", "p", {{"conversationEnvironments", {{"cloud", "cloud"}}}}};
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
+    const Intake routing{"alpha", "Release check", "e", "p"};
     const auto root = TaskIntake(*f.store).submit(routing);
     bool answeredPeer = false;
     f.model.script = [&](const ModelInput& input) -> Decision {
@@ -1900,7 +1901,8 @@ void peerCompletionAfterEnvironmentMove() {
     for (const auto [kind, environment] : {std::pair{"work", "cloud"}, {"consult", "cloud"}, {"work", "e"}}) {
         Fixture f;
         f.allowBeta();
-        const Intake routing{"alpha", "Release check", "e", "p", {{"conversationEnvironments", {{"cloud", "cloud"}}}}};
+        T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
+        const Intake routing{"alpha", "Release check", "e", "p"};
         const auto sender = TaskIntake(*f.store).submit(routing);
         f.model.script = [&](const ModelInput& input) -> Decision {
             const auto& event = input.event;
@@ -2083,8 +2085,8 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
 
     const std::string revisionText =
         "Revise Verify the release completion criteria to " + std::string(revisedCriteria) + (moves ? " and move it to cloud" : "");
-    const Intake betaRouting{
-        "beta", revisionText, "e", "beta-project", {{"model", "beta-model"}, {"conversationEnvironments", {{"cloud", "cloud"}}}}};
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
+    const Intake betaRouting{"beta", revisionText, "e", "beta-project", {{"model", "beta-model"}}};
     ConversationIntake(*f.store).receive(localOwner, betaRouting, "recipient-question-revision", revisionText);
     f.runtime->runConversations();
     for (int step = 0; step < 3; ++step) f.runtime->tick();
@@ -2139,14 +2141,14 @@ void checkWorkRecipientMove(bool sharesSenderQueue) {
     f.t3.projectsByEnvironment["e"] = {{project, "Destination project", {}}};
     executeSql(f.directory / "state.db", sharesSenderQueue ? "INSERT INTO bot_t3_projects VALUES('beta','e','p')"
                                                            : "INSERT INTO bot_t3_projects VALUES('beta','e','beta-project')");
-    const Intake betaRouting{
-        "beta", "Verify the release", "cloud", "cloud-beta-project", {{"conversationEnvironments", {{"desktop", "e"}}}}};
+    T3Connections(*f.store).connect("e", localOwner.id, 48123);
+    const Intake betaRouting{"beta", "Verify the release", "cloud", "cloud-beta-project"};
     f.peers["alpha"] = {{"Verifier", betaRouting}};
     const auto sender = f.submit("Release check");
     Id recipient = 0, unrelated = 0;
     f.model.script = [&](const ModelInput& input) -> Decision {
         const auto& kind = input.event.at("kind");
-        if (kind == "conversation_turn") return converse(input, "change_task", recipient, {{"environment", "desktop"}});
+        if (kind == "conversation_turn") return converse(input, "change_task", recipient, {{"environment", "e"}});
         if (input.task["id"] == sender) {
             if (kind == "intake") return botRequest("beta", "work", "Verify the release");
             check(kind == "bot_result" && input.event["references"][0]["environmentId"] == "e",
@@ -2718,13 +2720,14 @@ void peerProjectCycle() {
 }
 
 struct PeerMoveCycleFixture : Fixture {
-    const Intake verifier{
-        "beta", "", "cloud", "p", {{"conversationEnvironments", {{"desktop", "e"}, {"remote", "remote"}, {"backup", "backup"}}}}};
+    const Intake verifier{"beta", "", "cloud", "p"};
     const Intake pinnedRemote{"beta", "", "remote", "remote-project", verifier.config};
     Intake specialist{"alpha", "", "e", "p", verifier.config};
     Id desktopSender = 0, cloudRecipient = 0, remoteSender = 0;
 
     PeerMoveCycleFixture() {
+        T3Connections connections(*store);
+        for (auto environment : {"e", "remote", "backup"}) connections.connect(environment, localOwner.id, 48123);
         executeSql(directory / "state.db",
                    "INSERT INTO bot_t3_projects VALUES "
                    "('beta','remote','remote-project'),('beta','e','p'),('alpha','e','p'),('beta','backup','backup-project')");
@@ -2786,7 +2789,7 @@ void cyclicPeerMoveIsRejected() {
               f.logs(f.cloudRecipient, "instruction_accepted") == 0 && f.task(queued).at("blockedBy").at("id") == f.desktopSender,
           "the rejected move changed the run, criteria, or exchange after restart");
 
-    check(f.move(f.cloudRecipient, f.verifier, "desktop").at("effect") == "replanning",
+    check(f.move(f.cloudRecipient, f.verifier, "e").at("effect") == "replanning",
           "the recipient could not move into the sender's own queue");
     f.restart();
     f.t3.finish(originalRun.at("runId"));
@@ -2831,7 +2834,7 @@ void replacingAStalePeerProjectReservationRechecksCycles() {
     check(unresolved.at("environmentId") == "remote" && unresolved.at("projectId") == "" && !unresolved.contains("pendingDestination") &&
               unresolved.at("wait").at("text").get<std::string>().find("project queues") != std::string::npos && f.t3.launches == 1,
           "late project discovery admitted a peer route with a waiting cycle");
-    check(f.move(f.cloudRecipient, f.verifier, "desktop").at("effect") == "replanning",
+    check(f.move(f.cloudRecipient, f.verifier, "e").at("effect") == "replanning",
           "the task could not be moved away from an unavailable project");
     f.reach(f.cloudRecipient, "running");
     check(f.t3.launches == 2 && f.t3.seen.back().environmentId == "e" && f.t3.seen.back().projectId == "p",
@@ -2886,7 +2889,7 @@ void pendingPeerMovePreventsAnotherMove() {
     f.startRemoteSender("backup");
     f.reach(f.remoteSender, "peer_waiting");
     const auto backupRecipient = TaskList(*f.store).tasks("alpha").front().task.id;
-    check(f.move(backupRecipient, f.specialist, "desktop").at("effect") == "replanning",
+    check(f.move(backupRecipient, f.specialist, "e").at("effect") == "replanning",
           "the first move could not reserve the desktop destination");
     check(f.move(f.remoteSender, f.verifier, "backup").at("effect") == "replanning",
           "the sender could not request a move for after its exchange");
@@ -2904,8 +2907,7 @@ void cancelledPeerMoveFreesItsPendingDestination() {
     check(f.move(f.cloudRecipient, f.verifier, "remote").at("effect") == "replanning",
           "the first move could not reserve the remote destination");
     TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(f.cloudRecipient).task, 0), "cancel");
-    check(f.task(f.cloudRecipient).at("state") == "cancelling" &&
-              f.move(backupRecipient, f.specialist, "desktop").at("effect") == "replanning",
+    check(f.task(f.cloudRecipient).at("state") == "cancelling" && f.move(backupRecipient, f.specialist, "e").at("effect") == "replanning",
           "a cancelling recipient retained its abandoned destination");
 }
 

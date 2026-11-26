@@ -414,6 +414,11 @@ class ConfiguredMcp final : public McpTools {
 public:
     explicit ConfiguredMcp(std::map<std::string, Server, std::less<>> servers) : servers_(std::move(servers)) {}
     bool hasServer(std::string_view server) const override { return servers_.contains(server); }
+    std::vector<std::string> serverNames() const override {
+        std::vector<std::string> names;
+        for (const auto& [name, server] : servers_) names.push_back(name);
+        return names;
+    }
     bool readOnlyHint(std::string_view server, std::string_view tool) override {
         std::lock_guard lock(mutex_);
         const auto catalog = readOnlyTools_.find(server);
@@ -516,6 +521,7 @@ std::shared_ptr<const BotTools> loadBotTools(const std::filesystem::path& home, 
     const auto searchKey = config.value("searchKey", "");
     if (!searchKey.empty() && !safeHeaderValue(searchKey)) throw Conflict("Invalid web search credential");
     result->web = std::make_shared<PublicWeb>(searchKey);
+    result->webSearchConfigured = !searchKey.empty();
     const auto skills = config.value("skills", Json::object());
     if (!skills.is_object() || skills.size() > 128) throw Conflict("Invalid skills configuration");
     for (const auto& [id, value] : skills.items()) {

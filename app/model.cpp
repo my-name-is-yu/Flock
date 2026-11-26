@@ -333,7 +333,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         description = "Ask the user to supply a new named secret through protected input.";
         text("name", "Secret reference name");
     } else if (name == "list_connections") {
-        description = "List configured service, MCP server and environment names.";
+        description = "List installation T3 connections, MCP servers, skills, and web search availability.";
     } else if (name == "check_environment_readiness") {
         description = "Check launch policy, project configuration and T3 OAuth.";
         text("environmentId", "Environment ID. Defaults to the configured environment.", false);

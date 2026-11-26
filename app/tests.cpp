@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
 #include "flock/secret_requests.hpp"
@@ -507,12 +508,13 @@ void notesAcrossConversationAndWork() {
           "replying after note repair must let the Bot retry the original request");
 }
 
-void directionalPeerConfiguration() {
+void peersUseBotOwnership() {
     Sandbox temp;
     const Bots bots(temp.path);
-    auto release = botConfig();
-    release["allowedBots"] = Json::array({"verifier", "missing"});
-    createBot(temp.path / "release", release, "Own releases", "Release-only memory");
+    Store store(temp.path / "state.db");
+    BotAccess access(store);
+    createBot(temp.path / "release", botConfig(), "Own releases", "Release-only memory");
+    access.setOwner(localOwner, "release");
     auto verifier = botConfig("verification-model");
     verifier["name"] = "Verifier";
     verifier["environmentId"] = "verification-environment";
@@ -520,29 +522,56 @@ void directionalPeerConfiguration() {
     verifier["session"]["runtimeMode"] = "approval-required";
     createBot(temp.path / "verifier", verifier, "Verify changes", "Verifier-only memory");
 
-    const auto peers = bots.peers("release");
+    access.setOwner(localOwner, "verifier");
+    access.setOwner(localOwner, "missing");
+    createBot(temp.path / "external", botConfig(), "", "");
+    access.setOwner({"another-owner"}, "external");
+    access.setMember(localOwner, "external", localOwner.id, true);
+    createBot(temp.path / "unowned", botConfig(), "", "");
+
+    const auto peers = bots.peers(store, "release");
     check(peers.size() == 1 && peers[0].name == "Verifier" && peers[0].intake.botId == "verifier",
-          "allowed peers must resolve to configured destinations");
+          "only available Bots of the same owner are peers");
     const auto& intake = peers[0].intake;
     check(intake.environmentId == "verification-environment" && intake.projectId == "verification-project" &&
               intake.config["model"] == "verification-model" && intake.config["session"]["runtimeMode"] == "approval-required",
           "receiver must use its own route and settings");
-    check(bots.peers("verifier").empty(), "peer configuration must be directional and default to empty");
+    const auto reverse = bots.peers(store, "verifier");
+    check(reverse.size() == 1 && reverse.front().intake.botId == "release" && bots.peers(store, "unowned").empty(),
+          "same-owner peer discovery must work in both directions and require recorded ownership");
 
     verifier.erase("environmentId");
     verifier.erase("projectId");
     write(temp.path / "verifier" / "config.json", verifier.dump());
-    const auto automatic = bots.peers("release");
+    const auto automatic = bots.peers(store, "release");
     check(automatic.size() == 1 && automatic[0].intake.botId == "verifier" && automatic[0].intake.environmentId.empty() &&
               automatic[0].intake.projectId.empty(),
           "an allowed peer disappeared when using automatic routing");
 
-    release["allowedBots"] = Json::array();
-    write(temp.path / "release" / "config.json", release.dump());
-    check(bots.peers("release").empty(), "resolver must observe peer configuration changes");
-    release["allowedBots"] = Json::array({"../verifier"});
-    write(temp.path / "release" / "config.json", release.dump());
-    rejects<Conflict>([&] { bots.get("release"); }, "invalid peer ID accepted");
+    BotLifecycle lifecycle(store);
+    lifecycle.setBotPaused(localOwner, "verifier", true);
+    check(bots.peers(store, "release").empty(), "paused Bots must be excluded from peers");
+    lifecycle.setBotPaused(localOwner, "verifier", false);
+    check(bots.peers(store, "release").size() == 1, "resumed Bots must reappear as peers");
+    lifecycle.deleteBot(localOwner, "verifier");
+    check(bots.peers(store, "release").empty(), "deleted Bots must be excluded even if their files remain");
+}
+
+void removedBotConfigKeysAreRejected() {
+    Sandbox temp;
+    const Bots bots(temp.path);
+    for (const auto key : {"allowedBots", "conversationEnvironments", "services", "mcpServers"}) {
+        auto config = botConfig();
+        config[key] = nullptr;
+        createBot(temp.path / "release", config, "", "");
+        try {
+            bots.get("release");
+        } catch (const Conflict& error) {
+            check(std::string_view(error.what()).find(key) != std::string_view::npos, "removed setting was missing from the error");
+            continue;
+        }
+        throw std::runtime_error(std::string("was accepted as a Bot setting: ") + key);
+    }
 }
 
 void responseContract() {
@@ -1319,7 +1348,8 @@ int main() {
         pinnedConversationDestinations();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();
-        directionalPeerConfiguration();
+        peersUseBotOwnership();
+        removedBotConfigKeysAreRejected();
         responseContract();
         oversizedRequestStopsBeforeAccessingCredentials();
         missingChatGPTSignInIsTyped();

@@ -11,9 +11,9 @@
 #include "flock/t3_command.hpp"
 #include "flock/decision.hpp"
 #include "flock/command.hpp"
+#include "flock/workspace_tools.hpp"
 #include "database.hpp"
 
-#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -29,31 +29,25 @@ std::string argument(const Json& args, const char* key) {
     return value;
 }
 
-std::set<std::string> environments(const Json& routing) {
-    std::set<std::string> ids;
-    if (auto primary = field(routing, "environmentId"); !primary.empty()) ids.insert(std::move(primary));
-    for (const auto& alias : routing.at("config").value("conversationEnvironments", Json::object()))
-        if (auto id = conversationEnvironmentId(alias); !id.empty()) ids.insert(std::move(id));
-    return ids;
-}
 }
 
 Json BotSettingsStorage::readiness(std::string_view bot, const Json& routing, const Json& args, T3& t3) {
     Policy policy = permissions;
     const auto& config = routing.at("config");
     const auto name = args.contains("environmentId") ? argument(args, "environmentId") : std::string{};
-    std::string id;
+    TaskRoute route;
     {
         std::lock_guard lock(database.mutex);
-        id = taskRouting.taskEnvironment(bot, routing, name);
+        route = taskRouting.taskRoute(bot, routing, name);
     }
     auto failure = [&](std::string reason) -> Json { return {{"ready", false}, {"reason", reason}, {"settingsLink", "/settings"}}; };
+    const auto& id = route.environmentId;
     if (id.empty()) return failure("Choose a connected T3 environment");
     if (policy.forbidden(bot, Action::environment_launch, id)) return failure("Environment launch denied by installation policy");
     Command command;
     command.ownerBotId = bot;
     command.environmentId = id;
-    command.projectId = configuredT3Project(routing, id, name);
+    command.projectId = std::move(route.projectId);
     command.config = config;
     command.actionId = actionId();
     command.tool = CommandTool::delegate;
@@ -73,11 +67,10 @@ Json BotSettingsStorage::readiness(std::string_view bot, const Json& routing, co
     return {{"ready", true}};
 }
 
-Json BotSettingsStorage::botSettingsTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision& decision) {
+Json BotSettingsStorage::botSettingsTool(std::string_view bot, Id sourceMessage, const BotTools& settings, const Decision& decision) {
     Policy policy = permissions;
     const auto& tool = decision.tool;
     const auto& args = decision.args;
-    const auto& config = routing.at("config");
     if (tool == "list_secrets") {
         auto rows = database.query("SELECT name FROM protected_inputs WHERE status='fulfilled' ORDER BY name");
         auto names = Json::array();
@@ -97,11 +90,15 @@ Json BotSettingsStorage::botSettingsTool(std::string_view bot, Id sourceMessage,
     }
     if (tool == "list_connections") {
         Json result{{"environments", Json::array()},
-                    {"services", config.value("services", Json::array())},
-                    {"mcpServers", config.value("mcpServers", Json::array())}};
-        auto ids = environments(routing);
-        if (field(routing, "environmentId").empty()) ids.merge(taskRouting.registeredT3Environments(bot));
-        for (const auto& id : ids) result["environments"].push_back({{"environmentId", id}});
+                    {"mcpServers", Json::array()},
+                    {"skills", Json::array()},
+                    {"webSearchConfigured", settings.webSearchConfigured}};
+        for (const auto& id : taskRouting.registeredT3Environments(bot)) result["environments"].push_back({{"environmentId", id}});
+        if (settings.mcp)
+            for (const auto& name : settings.mcp->serverNames())
+                if (!policy.forbidden(bot, Action::mcp_discover, name)) result["mcpServers"].push_back(name);
+        for (const auto& [name, path] : settings.skills)
+            if (policy.allows(bot, Action::skill_read, name)) result["skills"].push_back(name);
         return result;
     }
     return nullptr;

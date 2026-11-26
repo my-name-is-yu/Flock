@@ -61,10 +61,10 @@ std::vector<PeerBot> runtime::PeerExchanges::peersFor(std::string_view bot) cons
 }
 
 PeerBot runtime::PeerExchanges::allowedPeer(std::string_view sender, std::string_view botId) const {
-    if (botId.empty() || sender == botId) throw Conflict("Choose an allowed peer Bot");
+    if (botId.empty() || sender == botId) throw Conflict("Choose another Bot");
     const auto peers = peersFor(sender);
     const auto peer = std::find_if(peers.begin(), peers.end(), [&](const PeerBot& p) { return p.intake.botId == botId; });
-    if (peer == peers.end()) throw Conflict("The destination Bot is unavailable or not allowed");
+    if (peer == peers.end()) throw Conflict("The destination Bot is unavailable for this exchange");
     return *peer;
 }
 
@@ -139,7 +139,7 @@ void runtime::PeerExchanges::sendPeer(TaskData& sender, const Json& event, const
         if (sender.activeRun || !sender.actionId.empty())
             throw Conflict("Let the assigned Run settle before requesting another Bot's work");
         peer.intake.environmentId = taskRouting.defaultT3Environment(peer.intake.botId, peer.intake.environmentId, sender.environmentId);
-        if (peer.intake.environmentId.empty()) throw Conflict("Choose a T3 environment for the destination Bot in its configuration");
+        if (peer.intake.environmentId.empty()) throw Conflict("Choose a T3 environment for the destination Bot in Bot settings");
         if (!peer.intake.projectId.empty() &&
             peerStorage.peerWorkRouteWouldCycle(sender.id, peer.intake.environmentId, peer.intake.projectId))
             throw Conflict("This work request would make two project queues wait for one another");

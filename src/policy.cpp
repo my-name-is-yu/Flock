@@ -344,6 +344,23 @@ void BotAccess::setOwner(const Person& creator, std::string_view bot) {
     database.exec("INSERT INTO bot_owners VALUES(?,?)", {bot, creator.id});
 }
 
+std::vector<std::string> BotAccess::peerIds(std::string_view bot) const {
+    auto& storage = StoreAccess::get(store_);
+    auto& database = storage.database;
+    std::lock_guard lock(database.mutex);
+    auto rows = database.query(R"SQL(
+SELECT peer.bot FROM bot_owners sender JOIN bot_owners peer ON peer.person=sender.person
+WHERE sender.bot=? AND peer.bot<>sender.bot ORDER BY peer.bot
+)SQL",
+                               {bot});
+    std::vector<std::string> peers;
+    while (rows.next()) {
+        auto id = rows.string(0);
+        if (!storage.botLifecycle.botDeleted(id) && !storage.botLifecycle.botPaused(id)) peers.push_back(std::move(id));
+    }
+    return peers;
+}
+
 void BotAccess::setMember(const Person& actor, std::string_view bot, std::string_view person, bool add) {
     auto& storage = StoreAccess::get(store_);
     auto& database = storage.database;

@@ -115,6 +115,7 @@ struct FakeT3 : T3 {
 struct FakeMcp : McpTools {
     std::atomic_int calls = 0, reads = 0;
     std::function<void()> onHasServer, onReadOnlyHint, onRead;
+    std::vector<std::string> serverNames() const override { return {"fixture"}; }
     bool hasServer(std::string_view server) const override {
         if (onHasServer) onHasServer();
         return server == "fixture";

@@ -233,8 +233,9 @@ private:
         std::lock_guard lock(store_.database.mutex);
         Transaction transaction(store_.database.db);
         if (authorize()) {
-            auto result = store_.conversationTurns.applyLocalConversationCall(message_, step_, calls_[slot], callKey(slot), ctx_.clock(),
-                                                                              ApprovalWait::defer, nullptr, TaskDestinations{});
+            auto result =
+                store_.conversationTurns.applyLocalConversationCall(message_, step_, calls_[slot], callKey(slot), ctx_.clock(),
+                                                                    ApprovalWait::defer, nullptr, TaskDestinations{}, tools_.settings);
             if (result)
                 saveSlot(slot, store_.secretStorage.redactor(message_.bot).record(std::move(*result)));
             else

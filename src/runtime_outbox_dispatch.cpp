@@ -664,14 +664,9 @@ bool runtime::OutboxDispatch::refreshSessionSettings(TaskData& task, const Outbo
         const auto current = intake(task.botId, task.request);
         const auto& environment = task.environmentId;
         const auto& project = task.projectId;
-        const auto destinations = current.config.value("conversationEnvironments", Json::object());
-        const bool namedRoute = std::ranges::any_of(destinations, [&](const Json& alias) {
-            return conversationEnvironmentId(alias) == environment &&
-                   (environment != current.environmentId || field(alias, "projectId") == project);
-        });
         const bool sameRoute = environment == current.environmentId ? (current.projectId.empty() || project == current.projectId)
                                                                     : current.environmentId.empty();
-        if (!sameRoute && !namedRoute) return true;
+        if (!sameRoute) return true;
         session = normalizeSessionSettings(current.config.value("session", Json::object()));
     } catch (const std::exception&) {
         return true;

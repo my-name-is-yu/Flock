@@ -1,3 +1,4 @@
+#include "flock/t3_connection.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
@@ -123,8 +124,9 @@ struct Scene {
     Json config;
     Scene(Mixed& mixed, const std::string& slug, Judge textJudge)
         : store(directory.path / "state.db"), model(mixed), runtime(store, model, t3, [](std::string_view) { return std::string{}; }),
-          judge(std::move(textJudge)),
-          config({{"modelProvider", "chatgpt"}, {"model", slug}, {"conversationEnvironments", {{"cloud Mac", "cloud"}}}}) {}
+          judge(std::move(textJudge)), config({{"modelProvider", "chatgpt"}, {"model", slug}}) {
+        T3Connections(store).connect("cloud", localOwner.id, 48123);
+    }
 
     Intake intake(std::string request = {}, std::string project = "project") const {
         return {"release", std::move(request), "desktop", std::move(project), config};
@@ -477,7 +479,7 @@ void selfTest() {
     const auto queue = [&](std::string_view text) { return action("send_to_task", benchmark, {{"instruction", text}}); };
 
     auto cloud = start("Run the existing test suite");
-    cloud.args["environment"] = "cloud Mac";
+    cloud.args["environment"] = "cloud";
     test("new request", {cloud, done});
     test("new request", {start("Run the existing test suite"), done}, {}, "did not use the cloud Mac");
     test("a reply", {action("answer_task_question", "Prepare the release label", {{"text", "Cancel this task"}}), done});
@@ -495,7 +497,7 @@ void selfTest() {
     changedIntent.args["intent"] = "Measure memory usage instead.";
     test("new criteria", {changedIntent, done}, {}, "retaining the original intent");
     auto movedBenchmark = criteria;
-    movedBenchmark.args["environment"] = "cloud Mac";
+    movedBenchmark.args["environment"] = "cloud";
     test("new criteria", {movedBenchmark, done}, {}, "altered pendingDestination");
     constexpr auto omitColumn = "Do not include startup_p95_ms in the final report.";
     auto conflicting = criteria;

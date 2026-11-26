@@ -63,6 +63,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -376,11 +377,7 @@ struct Fixture {
     }
     Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop",
                    std::string project = "project") {
-        return {std::move(bot),
-                std::move(request),
-                std::move(environment),
-                std::move(project),
-                {{"conversationEnvironments", {{"クラウドMac", "cloud"}, {"ローカルMac", "desktop"}}}}};
+        return {std::move(bot), std::move(request), std::move(environment), std::move(project)};
     }
     Json enqueue(std::string_view key, std::string_view text, Id replyTo = 0) {
         Store httpWriter(dir / "state.db");
@@ -956,11 +953,12 @@ void queuedTurnsSeeEarlierReplies() {
 
 void destinationClarificationContinuesFromConversationHistory() {
     Fixture f;
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     constexpr auto request = "Run the release audit";
     f.script(request, {say("Which environment should I use?")});
     const auto first = f.receive("destination-request", request);
     const auto clarification = f.response(first);
-    f.script("Use the cloud Mac", {start({{"request", request}, {"environment", "クラウドMac"}})});
+    f.script("Use the cloud Mac", {start({{"request", request}, {"environment", "cloud"}})});
     f.receive("destination-choice", "Use the cloud Mac", clarification["messageId"].get<Id>());
     const auto& input = f.model.turnInputs.back();
     const auto hasHistoryEntry = [&](std::string_view role, std::string_view text) {
@@ -1225,6 +1223,7 @@ void cancelledReportCanBeReferencedWithoutRestarting() {
 
 void resumeRestoresCancelledTaskDirections() {
     Fixture f;
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     const auto old = TaskIntake(*f.store).submit(f.routing("Measure the reference dataset"));
     f.script("Use a pinned regression fixture", {send(old)});
     f.receive("past-direction", "Use a pinned regression fixture");
@@ -1246,10 +1245,10 @@ void resumeRestoresCancelledTaskDirections() {
     const auto running = TaskIntake(*f.store).submit(f.routing("Another task", "alpha", "desktop", "other"));
     f.reach(running, "running");
     constexpr auto request = "この作業をクラウドMacで再開して";
-    f.script(request, {start({{"request", "Resume the measurement"},
-                              {"sourceResultMessageId", cancellation},
-                              {"resume", true},
-                              {"environment", "クラウドMac"}})});
+    f.script(
+        request,
+        {start(
+            {{"request", "Resume the measurement"}, {"sourceResultMessageId", cancellation}, {"resume", true}, {"environment", "cloud"}})});
     f.script("Resume the other one", {start({{"request", "Resume"}, {"resume", true}})});
     f.receive("resume-wrong-source", "Resume the other one");
     check(f.lastTurn()[0]["result"]["ok"] == false && TaskList(*f.store).tasks("alpha").size() == 2,
@@ -1273,13 +1272,13 @@ void resumeRestoresCancelledTaskDirections() {
     constexpr auto trace = "attach the raw trace";
     constexpr auto revisionRequest = "Move this run to ローカルMac, measure the release dataset, "
                                      "report median throughput, and attach the raw trace";
-    f.script(revisionRequest, {change(next, {{"intent", goal}, {"doneWhen", criteria}, {"environment", "ローカルMac"}})});
+    f.script(revisionRequest, {change(next, {{"intent", goal}, {"doneWhen", criteria}, {"environment", "desktop"}})});
     f.receive("revise-resumed", revisionRequest);
     check(f.task(next)["pendingDestination"]["environmentId"] == "desktop" && f.task(next)["intent"] == goal &&
               f.task(next)["doneWhen"] == criteria,
           "the combined move and work revision was not accepted");
     constexpr auto abandonedMove = "Use ローカルMac for the next run";
-    f.script(abandonedMove, {change(next, {{"environment", "ローカルMac"}})});
+    f.script(abandonedMove, {change(next, {{"environment", "desktop"}})});
     f.receive("old-destination", abandonedMove);
     constexpr auto correctedCriteria = "Report p95 latency";
     constexpr auto correction = "Change the completion criteria to report p95 latency";
@@ -1293,7 +1292,7 @@ void resumeRestoresCancelledTaskDirections() {
         if (row["kind"] == "cancelled") anchor = row["id"];
     const auto secondRequest = std::string("Resume the measurement on クラウドMac and keep the flamegraph ") + std::string(9000, 'r');
     f.script(secondRequest,
-             {start({{"request", secondRequest}, {"sourceResultMessageId", anchor}, {"resume", true}, {"environment", "クラウドMac"}})});
+             {start({{"request", secondRequest}, {"sourceResultMessageId", anchor}, {"resume", true}, {"environment", "cloud"}})});
     f.receive("resume-again", secondRequest, anchor);
     const auto last = TaskList(*f.store).tasks("alpha").front().task.id;
     check(last != next && f.task(last)["sourceTaskId"] == next, "the second resume did not create fresh work");
@@ -1316,7 +1315,7 @@ void resumeRestoresCancelledTaskDirections() {
           "the follow-up omitted or replayed directions");
 
     constexpr auto move = "Continue the measurement on ローカルMac";
-    f.script(move, {change(last, {{"environment", "ローカルMac"}})});
+    f.script(move, {change(last, {{"environment", "desktop"}})});
     f.receive("move-resumed", move);
     f.t3.finish(f.task(last)["activeRun"]["runId"].get<std::string>(), "Cloud work settled");
     f.advanceUntil([&] { return f.t3.sent.back().environmentId == "desktop"; }, "the resumed task did not move");
@@ -1336,7 +1335,7 @@ void liveMoveAndCriteriaCorrectionKeepCurrentContract() {
     constexpr auto trace = "attach the raw trace";
     constexpr auto mixed = "Move this run to ローカルMac, measure the release dataset, report median throughput, "
                            "and attach the raw trace";
-    f.script(mixed, {change(id, {{"intent", goal}, {"doneWhen", originalCriteria}, {"environment", "ローカルMac"}})});
+    f.script(mixed, {change(id, {{"intent", goal}, {"doneWhen", originalCriteria}, {"environment", "desktop"}})});
     f.receive("live-move-and-contract", mixed);
     constexpr auto correction = "Change the completion criteria to report p95 latency";
     f.script(correction, {change(id, {{"doneWhen", correctedCriteria}})});
@@ -1367,10 +1366,11 @@ void liveMoveAndCriteriaCorrectionKeepCurrentContract() {
 
 void environmentOnlyMoveKeepsWorkAcrossResume() {
     Fixture f;
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     const std::string goal = "Measure " + std::string(4992, 'g');
     const std::string criteria = "Complete " + std::string(3991, 'c');
     constexpr auto create = "Start a large checksum measurement";
-    f.script(create, {start({{"request", goal}, {"doneWhen", criteria}, {"environment", "クラウドMac"}})});
+    f.script(create, {start({{"request", goal}, {"doneWhen", criteria}, {"environment", "cloud"}})});
     f.receive("large-contract", create);
     const auto original = TaskList(*f.store).tasks("alpha").front().task.id;
     f.reach(original, "running");
@@ -1378,7 +1378,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
     constexpr auto checksum = "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
     constexpr auto trace = "trace:latency-samples-42";
     const auto direction = std::string("Move this run to ローカルMac and include checksum ") + checksum + " and attach trace " + trace;
-    f.script(direction, {change(original, {{"environment", "ローカルMac"}})});
+    f.script(direction, {change(original, {{"environment", "desktop"}})});
     f.receive("move-with-checksum", direction);
     check(f.task(original)["pendingDestination"]["environmentId"] == "desktop", "the fixture did not create an environment-only move");
 
@@ -1395,8 +1395,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
 
     const auto cancellation = lastTaskEvent(*f.store, original, "report").at("id");
     constexpr auto request = "Resume checksum validation on クラウドMac";
-    f.script(request,
-             {start({{"request", request}, {"sourceResultMessageId", cancellation}, {"resume", true}, {"environment", "クラウドMac"}})});
+    f.script(request, {start({{"request", request}, {"sourceResultMessageId", cancellation}, {"resume", true}, {"environment", "cloud"}})});
     f.receive("resume-checksum", request, cancellation.get<Id>());
     const auto resumed = TaskList(*f.store).tasks("alpha").front().task.id;
     f.reach(resumed, "running");
@@ -1423,13 +1422,14 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
 
 void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
     Fixture f;
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     const auto original = TaskIntake(*f.store).submit(f.routing("Measure the checksum target", "alpha", "cloud"));
     f.reach(original, "running");
 
     constexpr auto checksum = "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
     constexpr auto direction = "Move this run to ローカルMac and include checksum "
                                "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
-    f.script(direction, {change(original, {{"environment", "ローカルMac"}})});
+    f.script(direction, {change(original, {{"environment", "desktop"}})});
     f.receive("cancel-before-move-delivery", direction);
     check(f.task(original)["pendingDestination"]["environmentId"] == "desktop", "the fixture did not create an environment-only move");
     const auto activeRun = f.task(original)["activeRun"]["runId"].get<std::string>();
@@ -1443,8 +1443,7 @@ void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
         if (row["kind"] == "cancelled") cancellation = row["id"];
     check(cancellation > 0, "the cancelled task had no resume anchor");
     constexpr auto request = "Resume the checksum work on クラウドMac";
-    f.script(request,
-             {start({{"request", request}, {"sourceResultMessageId", cancellation}, {"resume", true}, {"environment", "クラウドMac"}})});
+    f.script(request, {start({{"request", request}, {"sourceResultMessageId", cancellation}, {"resume", true}, {"environment", "cloud"}})});
     f.receive("resume-before-delivery", request, cancellation);
     const auto resumed = TaskList(*f.store).tasks("alpha").front().task.id;
     f.reach(resumed, "running");
@@ -2175,9 +2174,10 @@ void pendingTurnDoesNotBlockIndependentProject() {
 void oneMessageStartsTasksInSeparateProjects() {
     using namespace std::chrono_literals;
     Fixture f;
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     const auto text = std::string("ローカルMacで利用件数を集計して。\nクラウドMacでメモリを計測して");
     f.script(text, {start({{"request", "ローカルMacで利用件数を集計して"}, {"environment", "desktop"}}),
-                    start({{"request", "クラウドMacでメモリを計測して"}, {"environment", "クラウドMac"}})});
+                    start({{"request", "クラウドMacでメモリを計測して"}, {"environment", "cloud"}})});
     f.receive("compound-task", text);
     const auto tasks = taskJson(TaskList(*f.store).tasks("alpha"));
     check(tasks.size() == 2 && tasks[1]["environmentId"] == "desktop" && tasks[0]["environmentId"] == "cloud",
@@ -2244,30 +2244,36 @@ void rememberCloudProject(Fixture& f) {
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
 }
 
+Step moveToLinkedCloudProject(Id task) {
+    return [task](const ModelInput& input) {
+        const auto& choices = input.task.at("environments");
+        const auto destination = std::ranges::find_if(
+            choices, [](const Json& choice) { return choice.value("linked", false) && choice.value("projectId", "") == "cloud-project"; });
+        check(destination != choices.end(), "the linked project was not discovered");
+        return change(task, {{"environment", destination->at("name")}})(input);
+    };
+}
+
 void canonicalMoveKeepsProjectAndGateway() {
     Fixture f;
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}, {"other-project", "Other fixture", {}}};
-    const Json aliases = {
-        {"cloud", "staging"},
-        {"cloud-target", {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}}}};
     auto initial = f.routing("Start this work", "alpha", "desktop", "project");
-    initial.config["conversationEnvironments"] = aliases;
     const auto moving = TaskIntake(*f.store).submit(initial);
     f.reach(moving, "running");
     check(f.task(moving).at("projectId") == "project", "the task did not start in its conversation's default project");
 
-    constexpr auto withoutAlias = "Start additional work on the cloud project";
-    f.script(withoutAlias, {start({{"environment", "cloud"}, {"projectId", "cloud-project"}})});
-    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "desktop", "project"}, "unlisted-linked-project", withoutAlias);
+    constexpr auto beforeDiscovery = "Start additional work on the cloud project";
+    f.script(beforeDiscovery, {start({{"environment", "cloud"}, {"projectId", "cloud-project"}})});
+    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "desktop", "project"}, "unlisted-linked-project", beforeDiscovery);
     f.runtime->runConversations();
     check(f.lastTurn().at(0).at("result").at("ok") == false && TaskList(*f.store).tasks("alpha").size() == 1,
           "a project ID provided an undiscovered gateway route");
 
+    f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable});
     const auto text = "Move this work to cloud";
-    f.script(text, {change(moving, {{"environment", "cloud"}})});
+    f.script(text, {moveToLinkedCloudProject(moving)});
     auto intake = f.routing(text, "alpha", "desktop", "project");
-    intake.config["conversationEnvironments"] = aliases;
     ConversationIntake(*f.store).receive(localOwner, intake, "canonical-move", text);
     f.runtime->runConversations();
     check(f.task(moving)["pendingDestination"] ==
@@ -2288,19 +2294,15 @@ void nonDefaultProjectMoveKeepsCanonicalGateway() {
     Fixture f;
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}, {"other-project", "Other fixture", {}}};
-    const Json aliases = {
-        {"cloud", "staging"},
-        {"cloud-target", {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}}}};
+    f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable});
     auto initial = f.routing("Start this work", "alpha", "desktop", "task-project");
-    initial.config["conversationEnvironments"] = aliases;
     const auto moving = TaskIntake(*f.store).submit(initial);
     f.reach(moving, "running");
     check(f.task(moving).at("projectId") == "task-project", "the task did not start in its non-default project");
 
     const auto text = "Move this work to cloud";
-    f.script(text, {change(moving, {{"environment", "cloud"}})});
+    f.script(text, {moveToLinkedCloudProject(moving)});
     auto intake = f.routing(text, "alpha", "desktop", "conversation-project");
-    intake.config["conversationEnvironments"] = aliases;
     ConversationIntake(*f.store).receive(localOwner, intake, "non-default-canonical-move", text);
     f.runtime->runConversations();
     check(f.task(moving)["pendingDestination"] ==
@@ -2318,12 +2320,10 @@ void sameEnvironmentMoveKeepsGateway() {
     Fixture f;
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
-    const Json aliases = {
-        {"cloud-target", {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}}}};
+    f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable});
     auto initial = f.routing("Start this work");
-    initial.config["conversationEnvironments"] = aliases;
     const auto request = "Start linked cloud work";
-    f.script(request, {start({{"request", request}, {"environment", "cloud-target"}})});
+    f.script(request, {start({{"request", request}, {"environment", "cloud"}})});
     ConversationIntake(*f.store).receive(localOwner, initial, "same-environment-start", request);
     f.runtime->runConversations();
     const auto moving = TaskList(*f.store).tasks("alpha").front().task.id;
@@ -2334,7 +2334,6 @@ void sameEnvironmentMoveKeepsGateway() {
     const auto text = "Edit the linked cloud work";
     f.script(text, {change(moving, {{"environment", "cloud"}})});
     auto intake = f.routing(text, "alpha", "desktop", "project");
-    intake.config["conversationEnvironments"] = aliases;
     ConversationIntake(*f.store).receive(localOwner, intake, "same-environment-change", text);
     f.runtime->runConversations();
     f.t3.finish("run-1", "Old linked destination settled");
@@ -2350,17 +2349,36 @@ void productionGatewayOnlyLaunch() {
     f.restart();
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     auto route = f.routing("Start linked cloud work");
-    route.config["conversationEnvironments"]["cloud-target"] = {
-        {"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}};
-    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
+    f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable});
+    std::string longTitle;
+    for (int i = 0; i < 120; ++i) longTitle += "雲";
+    const auto longId = std::string(256, 'p');
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", longTitle + " release", {}},
+                                           {"other-project", longTitle + " docs", {}},
+                                           {longId + "-a", longTitle, {}},
+                                           {longId + "-b", longTitle, {}}};
     constexpr auto request = "Start linked cloud work";
-    f.script(request, {start({{"environment", "cloud-target"}})});
+    f.script(request, {[&](const ModelInput& input) {
+                 Json choices = Json::array();
+                 for (const auto& choice : input.task.at("environments"))
+                     if (choice.value("linked", false)) choices.push_back(choice);
+                 check(choices.size() == 4, "discovery omitted a project with a long title or ID");
+                 std::set<std::string> selectors;
+                 for (const auto& choice : choices) {
+                     const auto& name = choice.at("name").get_ref<const std::string&>();
+                     check(name.size() <= 256 && Json::accept(choice.dump()) && selectors.insert(name).second,
+                           "the project did not have a distinct, bounded UTF-8 selector");
+                 }
+                 const auto chosen = choices[3].at("name");
+                 std::ranges::reverse(f.t3.projectsByEnvironment.at("cloud"));
+                 return start({{"environment", chosen}})(input);
+             }});
     ConversationIntake(*f.store).receive(localOwner, route, "gateway-only-launch", request);
     f.runtime->runConversations();
     const auto id = TaskList(*f.store).tasks("alpha").front().task.id;
     f.reach(id, "running");
     const auto& command = f.t3.sent.back();
-    check(f.t3.sent.size() == 1 && command.environmentId == "cloud" && command.projectId == "cloud-project" &&
+    check(f.t3.sent.size() == 1 && command.environmentId == "cloud" && command.projectId == longId + "-b" &&
               command.gatewayEnvironmentId == "desktop",
           "production connection validation rejected the connected gateway or used the unregistered target");
 }
@@ -2415,50 +2433,40 @@ void discoveredLinkedNameMoveKeepsRoute() {
           "a linked route replaced the Bot's direct default");
 }
 
-void conflictingDiscoveryDoesNotMoveTask() {
-    const std::vector<Json> aliases{
-        {{"cloud-target", {{"environmentId", "cloud"}, {"projectId", "configured-project"}, {"gatewayEnvironmentId", "desktop"}}}},
-        {{"cloud-target", {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "disconnected"}}}},
-        {{"cloud-target", {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}}},
-         {"alternate-target", {{"environmentId", "cloud"}, {"projectId", "configured-project"}, {"gatewayEnvironmentId", "desktop"}}}},
-    };
-    for (const auto& configured : aliases) {
-        Fixture f;
-        T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
-        f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud via desktop", T3EnvironmentLink::Status::reachable});
-        f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
-        auto intake = f.routing("Start on desktop");
-        intake.config["conversationEnvironments"] = configured;
-        const auto id = TaskIntake(*f.store).submit(intake);
-        f.reach(id, "running");
-        const auto original = f.task(id);
-        constexpr auto request = "Move the existing work to cloud";
-        f.script(request, {change(id, {{"environment", "cloud"}}), start({{"environment", "cloud"}})});
-        ConversationIntake(*f.store).receive(localOwner, intake, "conflicting-discovery", request);
-        f.runtime->runConversations();
-        const auto steps = f.lastTurn();
-        check(steps.size() == 2 && !steps[0].at("result").at("ok").get<bool>() && !steps[1].at("result").at("ok").get<bool>(),
-              "a canonical route used discovery despite conflicting configured routing");
-        const auto unchanged = f.task(id);
-        check(!unchanged.contains("pendingDestination") && unchanged.at("generation") == original.at("generation") &&
-                  unchanged.at("activeRun") == original.at("activeRun") && TaskList(*f.store).tasks("alpha").size() == 1,
-              "a rejected destination changed persisted task routing");
-        f.t3.finish("run-1", "Desktop work settled");
-        f.reach(id, "completed");
-        check(f.t3.sent.size() == 1, "a conflicting linked destination received work");
-    }
+void ambiguousLinkedProjectsDoNotMoveTask() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
+    f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable});
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}, {"other-project", "Other fixture", {}}};
+    auto intake = f.routing("Start on desktop");
+    const auto id = TaskIntake(*f.store).submit(intake);
+    f.reach(id, "running");
+    const auto original = f.task(id);
+    constexpr auto request = "Move the existing work to cloud";
+    f.script(request, {change(id, {{"environment", "cloud"}}), start({{"environment", "cloud"}})});
+    ConversationIntake(*f.store).receive(localOwner, intake, "ambiguous-linked-projects", request);
+    f.runtime->runConversations();
+    const auto steps = f.lastTurn();
+    check(steps.size() == 2 && !steps[0].at("result").at("ok").get<bool>() && !steps[1].at("result").at("ok").get<bool>(),
+          "an ambiguous environment ID selected a linked project");
+    const auto unchanged = f.task(id);
+    check(!unchanged.contains("pendingDestination") && unchanged.at("generation") == original.at("generation") &&
+              unchanged.at("activeRun") == original.at("activeRun") && TaskList(*f.store).tasks("alpha").size() == 1,
+          "a rejected destination changed persisted task routing");
+    f.t3.finish("run-1", "Desktop work settled");
+    f.reach(id, "completed");
+    check(f.t3.sent.size() == 1, "an ambiguous linked destination received work");
 }
 
 Id twoLinkedDestinationTask(Fixture& f) {
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     auto route = f.routing("Start work on both linked targets");
-    route.config["conversationEnvironments"] = {
-        {"cloud-target", {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}}},
-        {"other-target", {{"environmentId", "other"}, {"projectId", "other-project"}, {"gatewayEnvironmentId", "desktop"}}}};
+    f.t3.linksByGateway["desktop"].links = {{{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable},
+                                            {{"other", "desktop"}, "Other", T3EnvironmentLink::Status::reachable}};
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
     f.t3.projectsByEnvironment["other"] = {{"other-project", "Other fixture", {}}};
     constexpr auto request = "Start work on both linked targets";
-    f.script(request, {start({{"environments", {"cloud-target", "other-target"}}})});
+    f.script(request, {start({{"environments", {"cloud", "other"}}})});
     ConversationIntake(*f.store).receive(localOwner, route, "two-linked-targets", request);
     f.runtime->runConversations();
     const auto id = TaskList(*f.store).tasks("alpha").front().task.id;
@@ -2647,10 +2655,9 @@ void savedDestinationFollowupStopTargetsOnlyItsRun(const std::string& stopStatus
 Id oneLinkedDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     auto route = f.routing(std::string(request));
-    route.config["conversationEnvironments"]["cloud-target"] = {
-        {"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}};
+    f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable});
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
-    f.script(request, {start({{"environments", {"cloud-target"}}})});
+    f.script(request, {start({{"environments", {"cloud"}}})});
     ConversationIntake(*f.store).receive(localOwner, route, key, request);
     f.runtime->runConversations();
     return f.lastTurn().front().at("result").at("taskId").get<Id>();
@@ -2927,12 +2934,11 @@ void lateSavedDestinationReceiptKeepsTaskAndSlot() {
 Id otherAndCloudDestinationTask(Fixture& f, std::string_view key, std::string_view request) {
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     auto route = f.routing(std::string(request));
-    route.config["conversationEnvironments"] = {
-        {"cloud-target", {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}}},
-        {"other-target", {{"environmentId", "other"}, {"projectId", "other-project"}, {"gatewayEnvironmentId", "desktop"}}}};
+    f.t3.linksByGateway["desktop"].links = {{{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable},
+                                            {{"other", "desktop"}, "Other", T3EnvironmentLink::Status::reachable}};
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
     f.t3.projectsByEnvironment["other"] = {{"other-project", "Other fixture", {}}};
-    f.script(request, {start({{"environments", {"other-target", "cloud-target"}}})});
+    f.script(request, {start({{"environments", {"other", "cloud"}}})});
     ConversationIntake(*f.store).receive(localOwner, route, key, request);
     f.runtime->runConversations();
     return f.lastTurn().front().at("result").at("taskId").get<Id>();
@@ -3130,10 +3136,9 @@ void pinnedDestinationFollowupKeepsVerificationContract() {
     constexpr auto request = "Start pinned linked work";
     constexpr auto commit = "0123456789abcdef0123456789abcdef01234567";
     auto route = f.routing(request);
-    route.config["conversationEnvironments"]["cloud-target"] = {
-        {"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}};
+    f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable});
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
-    f.script(request, {start({{"environments", {"cloud-target"}}, {"commit", commit}})});
+    f.script(request, {start({{"environments", {"cloud"}}, {"commit", commit}})});
     ConversationIntake(*f.store).receive(localOwner, route, "pinned-followup-parent", request);
     f.runtime->runConversations();
     const auto taskId = f.lastTurn().front().at("result").at("taskId").get<Id>();
@@ -3468,9 +3473,9 @@ void recoveredStopApprovalBelongsToTheStopRequester() {
     f.t3.deliveryVisible = false;
     constexpr auto startText = "Start work whose Run receipt is delayed";
     auto route = f.routing(startText);
-    route.config["conversationEnvironments"]["cloud-target"] = {
-        {"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}};
-    f.script(startText, {start({{"environments", {"cloud-target"}}})});
+    f.t3.linksByGateway["desktop"].links.push_back({{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable});
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
+    f.script(startText, {start({{"environments", {"cloud"}}})});
     ConversationIntake(*f.store).receive(taskRequester, route, "requester-bound-stop-task", startText);
     f.runtime->runConversations();
     const auto taskId = f.lastTurn().front().at("result").at("taskId").get<Id>();
@@ -3715,6 +3720,7 @@ void queuedDestinationStopsReleaseSlots() {
 
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     rememberCloudProject(f);
     const auto occupied = TaskIntake(*f.store).submit(f.routing("Cloud work", "beta", "cloud", "cloud-project"));
     const auto moving = TaskIntake(*f.store).submit(f.routing());
@@ -3722,7 +3728,7 @@ void cloudDestinationWaitsForItsProject() {
     f.receive("format-before-launch", "Include the table as CSV");
     f.reach(occupied, "running");
     f.reach(moving, "running");
-    f.script("Run the measurement on the cloud Mac", {change(moving, {{"environment", "クラウドMac"}})});
+    f.script("Run the measurement on the cloud Mac", {change(moving, {{"environment", "cloud"}})});
     f.receive("where", "Run the measurement on the cloud Mac");
     const auto following = TaskIntake(*f.store).submit(f.routing("Cloud follower", "beta", "cloud", "cloud-project"));
     const auto desktopFollowing = TaskIntake(*f.store).submit(f.routing("Desktop follower", "beta"));
@@ -3767,6 +3773,7 @@ void cloudDestinationWaitsForItsProject() {
 
 void queuedMoveWaitsForTheNewerDestinationOwner() {
     Fixture f;
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     rememberCloudProject(f);
     const auto local = TaskIntake(*f.store).submit(f.routing("Existing local work", "beta"));
     const auto moving = TaskIntake(*f.store).submit(f.routing("Transfer this task"));
@@ -3844,9 +3851,10 @@ void moveChoosesTheDestinationProjectAfterSettlement() {
 
 void latestTargetPrecedesABatchedBacklog() {
     Fixture f;
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     const auto id = TaskIntake(*f.store).submit(f.routing());
     f.reach(id, "running");
-    f.script("計測はクラウドMacで", {change(id, {{"environment", "クラウドMac"}})});
+    f.script("計測はクラウドMacで", {change(id, {{"environment", "cloud"}})});
     f.receive("old-location", "計測はクラウドMacで");
     std::vector<std::string> notes;
     for (int i = 0; i < 5; ++i) {
@@ -3854,7 +3862,7 @@ void latestTargetPrecedesABatchedBacklog() {
         f.script(notes.back(), {send(id)});
         f.receive("notes-" + std::to_string(i), notes.back());
     }
-    f.script("計測はローカルMacで", {change(id, {{"environment", "ローカルMac"}})});
+    f.script("計測はローカルMacで", {change(id, {{"environment", "desktop"}})});
     f.receive("new-location", "計測はローカルMacで");
     f.t3.finish("run-1", "Settled before the next destination");
     f.advanceUntil([&] { return f.t3.sent.size() > 1; }, "the backlog did not reach T3");
@@ -4074,6 +4082,7 @@ void newSessionsReceivePersistedTaskDecisions() {
 
 void revisedSessionDoesNotReplaySupersededDecisions() {
     Fixture f;
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
     const auto id = TaskIntake(*f.store).submit(f.routing("Measure the retired dataset"));
     constexpr auto oldDirection = "Use the retired runner";
     f.script(oldDirection, {send(id)});
@@ -4085,9 +4094,9 @@ void revisedSessionDoesNotReplaySupersededDecisions() {
     TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait.at("id")), "answer",
                                   {{"text", oldAnswer}});
     f.reach(id, "running");
-    f.script("Use the replacement suite", {change(id, {{"intent", "Measure the replacement dataset"},
-                                                       {"doneWhen", "Report median throughput"},
-                                                       {"environment", "クラウドMac"}})});
+    f.script(
+        "Use the replacement suite",
+        {change(id, {{"intent", "Measure the replacement dataset"}, {"doneWhen", "Report median throughput"}, {"environment", "cloud"}})});
     f.receive("replace-contract", "Use the replacement suite");
     f.restart();
     f.t3.finish("run-1", "The prior Run settled");
@@ -4249,35 +4258,6 @@ void interruptNoOpsDoNotAcknowledgeARequest() {
     }
 }
 
-void environmentsResolveByNameOrId() {
-    Fixture f;
-    auto routing = f.routing();
-    auto& aliases = routing.config["conversationEnvironments"];
-    aliases["cloud"] = "staging";
-    aliases["クラウドMac"] = {{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}};
-    T3Connections connector(*f.store);
-    connector.connect("desktop", localOwner.id, 48123);
-    for (int i = 0; i < 15; ++i) aliases["alias" + std::to_string(i)] = "executor-" + std::to_string(i);
-    aliases["z-final"] = "executor-final";
-    constexpr auto text = "Run the benchmark on cloud, the archive on z-final, and the audit on mars";
-    f.model.beforeTurn = [&](const ModelInput& input) {
-        if (!input.event["turn"].empty()) return;
-        const auto& environments = input.task.at("environments");
-        check(std::ranges::any_of(environments,
-                                  [](const Json& item) { return item["name"] == "z-final" && item["environmentId"] == "executor-final"; }),
-              "the environment list truncated the last alias");
-    };
-    f.script(text, {start({{"request", "Benchmark"}, {"environment", "cloud"}}),
-                    start({{"request", "Archive"}, {"environment", "z-final"}}), start({{"request", "Audit"}, {"environment", "mars"}})});
-    const auto message = ConversationIntake(*f.store).receive(localOwner, routing, "environments", text);
-    f.runtime->runConversations();
-    const auto tasks = taskJson(TaskList(*f.store).tasks("alpha"));
-    const auto cloudTask = tasks.size() > 1 ? f.task(tasks[1]["id"]) : Json::object();
-    check(tasks.size() == 2 && cloudTask["environmentId"] == "cloud" && cloudTask["projectId"] == "cloud-project" &&
-              cloudTask.value("gatewayEnvironmentId", "") == "desktop" && f.task(tasks[0]["id"])["environmentId"] == "executor-final" &&
-              f.lastTurn()[2]["result"]["ok"] == false && f.response(message)["actions"].size() == 2,
-          "a canonical ID was shadowed by an alias, an alias was missed, or an unknown environment was accepted");
-}
 void existingSessionStartsNormalWork() {
     Fixture f([](std::string_view) { return "Prefer integration tests."; });
     f.role = "Report verification commands.";
@@ -4736,7 +4716,7 @@ int main(int argc, char** argv) {
         gatewayOnlyCancelDoesNotCancelTask();
         productionGatewayOnlyLaunch();
         discoveredLinkedNameMoveKeepsRoute();
-        conflictingDiscoveryDoesNotMoveTask();
+        ambiguousLinkedProjectsDoNotMoveTask();
         destinationFollowupValidatesAndRedactsSourceReport();
         savedDestinationFollowupsRemainTaskWork();
         savedDestinationFollowupStopTargetsOnlyItsRun();
@@ -4762,7 +4742,6 @@ int main(int argc, char** argv) {
         queuedCriteriaAreUsedForFirstDelegation();
         startCriteriaAreUsedForFirstDelegation();
         conversationCanReadAndChangeTheFullCurrentContract();
-        environmentsResolveByNameOrId();
         newSessionsReceivePersistedTaskDecisions();
         revisedSessionDoesNotReplaySupersededDecisions();
         standingContextFitsAlongsideTheAuthoritativeHandoff();
