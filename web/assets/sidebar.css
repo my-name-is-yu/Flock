@@ -34,7 +34,7 @@
     border-inline-end-width: 0;
     transition: opacity .2s ease-out, transform .26s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s linear .26s;
   }
-  .workspace.sidebar-collapsed > .sidebar-resizer { pointer-events: none; }
+  .workspace.sidebar-collapsed > .sidebar-resizer { pointer-events: none; visibility: hidden; }
 }
 .sidebar-head { height: var(--header-height); padding: 0 var(--space-3) 0 1.35rem; display: flex; align-items: center; gap: var(--space-2); flex: none; }
 .sidebar-title { font-size: var(--text-md); font-weight: 600; letter-spacing: -.01em; }
@@ -123,21 +123,21 @@
 .bot-row:hover .row-menu, .pin-tile:hover .row-menu, .bot-row:focus-within .row-menu, .pin-tile:focus-within .row-menu,
 .row-menu[aria-expanded="true"] { opacity: 1; }
 @media (hover: none) { .row-menu { opacity: 1; } }
+@media (hover: none), (pointer: coarse) {
+  .pin-tile .row-menu { width: 1.75rem; height: 1.75rem; }
+}
 
 .menu-popover {
-  position: absolute; z-index: 4; top: calc(100% - .2rem); right: .35rem; min-width: 11rem;
+  position: fixed; z-index: 30; top: 0; left: 0; right: auto; min-width: 11rem;
   display: grid; padding: .3rem; border-radius: 12px; background: var(--overlay);
   box-shadow: var(--shadow-lg), 0 0 0 1px var(--hairline);
-  transform-origin: top right;
+  transform-origin: var(--menu-origin, top right);
   animation: menu-pop .14s cubic-bezier(.2, .9, .25, 1);
 }
 @keyframes menu-pop {
   from { opacity: 0; transform: scale(.94) translateY(-3px); }
   to { opacity: 1; transform: none; }
 }
-.pin-tile .menu-popover { left: 50%; right: auto; translate: -50% 0; transform-origin: top center; }
-.pin-tile:first-child .menu-popover { left: 0; translate: none; transform-origin: top left; }
-.pin-tile:nth-child(3n) .menu-popover { left: auto; right: 0; translate: none; transform-origin: top right; }
 .menu-popover button {
   display: flex; align-items: center; gap: .6rem; padding: .45rem .55rem; border: 0; border-radius: var(--radius-sm);
   background: transparent; color: var(--text); font-size: var(--text-sm); text-align: left; white-space: nowrap;
