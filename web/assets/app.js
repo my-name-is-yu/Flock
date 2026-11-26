@@ -2862,7 +2862,8 @@ function waitContent(context, task, deadlineDraft) {
   request.append(node('p', 'wait-request-text', task.request));
   if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
   const reason = node('div', 'wait-reason');
-  reason.append(node('p', 'wait-text', waitText(wait)));
+  if (!['budget', 'model_budget'].includes(wait.reason) || (wait.text && wait.text !== waitLabels[wait.reason][1]))
+    reason.append(node('p', 'wait-text', waitText(wait)));
   if (wait.reason === 'deadline' && task.deadline)
     reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
   const content = [request, reason];
