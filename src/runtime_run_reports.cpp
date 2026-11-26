@@ -1,4 +1,5 @@
 #include "runtime_run_reports.hpp"
+#include "workflow_storage.hpp"
 #include "runtime_session_history.hpp"
 #include "runtime_task_state.hpp"
 #include "runtime_task_updates.hpp"
@@ -21,9 +22,9 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::RunReports::RunReports(Store::Impl& db, T3& t3, const Policy& policy, TaskUpdates& updates, SessionHistory& history,
-                                            const std::function<Seconds()>& clock)
-    : db(db), t3(t3), policy(policy), updates(updates), history(history), clock(clock) {}
+Runtime::Components::RunReports::RunReports(Store::Impl& db, WorkflowStorage& workflowStorage, T3& t3, const Policy& policy,
+                                            TaskUpdates& updates, SessionHistory& history, const std::function<Seconds()>& clock)
+    : db(db), workflowStorage(workflowStorage), t3(t3), policy(policy), updates(updates), history(history), clock(clock) {}
 
 void Runtime::Components::RunReports::writeRunReport(TaskData& task, const SettledRunReport& report) {
     const auto entry = runReportEntry(report);
@@ -34,7 +35,7 @@ void Runtime::Components::RunReports::writeRunReport(TaskData& task, const Settl
     const auto reportId = db.journalStorage.journal(task.id, entry);
     if (task.workflow) {
         task.pendingStageReport = reportId;
-        db.settleStageReport(task);
+        workflowStorage.settleStageReport(task);
     }
 }
 

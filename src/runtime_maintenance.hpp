@@ -14,12 +14,13 @@
 
 namespace flockv0 {
 class AutomationStorage;
+class WorkflowStorage;
 
 class Runtime::Components::Maintenance {
     using ErrorReporter = std::function<void(std::string_view)>;
 public:
-    Maintenance(Store::Impl&, AutomationStorage&, const std::function<Seconds()>& clock, const ErrorReporter& automationError,
-                const ErrorReporter& storageContention);
+    Maintenance(Store::Impl&, AutomationStorage&, WorkflowStorage&, const std::function<Seconds()>& clock,
+                const ErrorReporter& automationError, const ErrorReporter& storageContention);
 
     Seconds settleApprovals();
     std::optional<Seconds> fireDueAutomations();
@@ -47,6 +48,7 @@ private:
 
     Store::Impl& db;
     AutomationStorage& automationStorage;
+    WorkflowStorage& workflowStorage;
     const std::function<Seconds()>& clock;
     const ErrorReporter& automationError;
     const ErrorReporter& storageContention;

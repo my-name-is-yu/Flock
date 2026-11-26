@@ -1,10 +1,22 @@
+#include "workflow_storage.hpp"
+#include "task_operations.hpp"
+#include "task_routing.hpp"
+
 #include "conversation_storage.hpp"
+#include "database.hpp"
+#include "json_fields.hpp"
 #include "journal.hpp"
+#include "journal_storage.hpp"
 #include "journal_task.hpp"
 #include "outbox_storage.hpp"
+#include "secret_storage.hpp"
+#include "storage.hpp"
+#include "task_events.hpp"
+#include "task_records.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"
+#include "flock/secrets.hpp"
 #include "flock/json.hpp"
 #include "flock/t3.hpp"
 #include "flock/task.hpp"
@@ -93,10 +105,16 @@ bool closed(std::string_view status) {
 }
 }
 
-Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const {
-    auto owner = query("SELECT stop_requested,request FROM workflows WHERE id=? AND bot_id=?", {id, bot});
+WorkflowStorage::WorkflowStorage(Database& database, TaskRecords& taskRecords, TaskEvents& taskEvents, JournalStorage& journalStorage,
+                                 const SecretStorage& secretStorage, Store::Impl& remaining, TaskOperations& operations,
+                                 TaskRouting& routing)
+    : database_(database), taskRecords_(taskRecords), taskEvents_(taskEvents), journalStorage_(journalStorage),
+      secretStorage_(secretStorage), remaining_(remaining), operations_(operations), routing_(routing) {}
+
+Json WorkflowStorage::workflowStatus(Id id, std::string_view bot, Seconds now) const {
+    auto owner = database_.query("SELECT stop_requested,request FROM workflows WHERE id=? AND bot_id=?", {id, bot});
     if (!owner.next()) throw Conflict("Unknown workflow");
-    const auto scrub = secretStorage.redactor(bot);
+    const auto scrub = secretStorage_.redactor(bot);
     const bool stopping = owner.number(0);
     Json result = {{"ok", true},
                    {"workflowId", id},
@@ -115,11 +133,11 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
         LEFT JOIN outdated_workflow_stages old USING(workflow_id,stage_id)
         LEFT JOIN workflow_verdicts v ON v.report_id=s.result_id
         WHERE s.workflow_id=? ORDER BY s.rowid)SQL";
-    auto rows = query(sql.c_str(), {id});
+    auto rows = database_.query(sql.c_str(), {id});
     while (rows.next()) {
         const auto spec = rows.json(0);
         const auto taskId = rows.number(2);
-        const auto task = taskId ? std::optional{taskRecords.readTask(rows, 14)} : std::nullopt;
+        const auto task = taskId ? std::optional{taskRecords_.readTask(rows, 14)} : std::nullopt;
         const auto taskState = task ? std::optional{task->state} : std::nullopt;
         auto status = rows.string(1);
         if (taskState == TaskState::cancelled)
@@ -160,11 +178,11 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
         if (!verdict.empty() && !outdated && (status == "completed" || status == "failed")) stage["currentVerdict"] = verdict;
         result["stages"].push_back(stage);
     }
-    auto evidence = query(R"SQL(SELECT e.stage_id,j.task_id,e.version,e.verdict,j.id,j.data FROM (
+    auto evidence = database_.query(R"SQL(SELECT e.stage_id,j.task_id,e.version,e.verdict,j.id,j.data FROM (
         SELECT stage_id,version,report_id,NULL AS verdict FROM workflow_artifacts WHERE workflow_id=?
         UNION ALL SELECT stage_id,version,report_id,verdict FROM workflow_verdicts WHERE workflow_id=?) e
         JOIN journal j ON j.id=e.report_id ORDER BY j.id)SQL",
-                          {id, id});
+                                    {id, id});
     while (evidence.next()) {
         const auto report = decodeRunReport(evidence.number(4), evidence.json(5));
         Json item = {{"stageId", evidence.string(0)},   {"taskId", evidence.number(1)},       {"artifactVersion", evidence.string(2)},
@@ -190,33 +208,36 @@ Json Store::workflows(std::string_view bot, Id before, unsigned limit) const {
     Json result = Json::array();
     auto rows = p_->query("SELECT id FROM workflows WHERE bot_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?",
                           {bot, before, before, std::min(limit, 50u)});
-    while (rows.next()) result.push_back(p_->workflowStatus(rows.number(0), bot, unixTime()));
+    while (rows.next()) result.push_back(p_->workflowStorage.workflowStatus(rows.number(0), bot, unixTime()));
     tx.commit();
     return result;
 }
 
-Id Store::Impl::startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing) {
-    const auto environment = taskRouting.taskEnvironment(bot, routing);
+Id WorkflowStorage::startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing) {
+    const auto environment = routing_.taskEnvironment(bot, routing);
     if (environment.empty()) throw Conflict("Choose a connected T3 environment for this workflow");
     auto destination = routing;
     destination["environmentId"] = environment;
-    const auto scrub = secretStorage.redactor(bot);
+    const auto scrub = secretStorage_.redactor(bot);
     scrub.requirePublic({bot, destination});
     const auto safe = scrub.record(args, SecretRedactor::Fields::external);
     const auto stages = stageDefinitions(safe);
-    exec("INSERT INTO workflows(bot_id,routing,request,message_id) VALUES(?,?,?,?)", {bot, destination, safe.at("request"), message});
-    const auto id = last();
+    database_.exec("INSERT INTO workflows(bot_id,routing,request,message_id) VALUES(?,?,?,?)",
+                   {bot, destination, safe.at("request"), message});
+    const auto id = database_.last();
     for (auto stage : stages) {
         stage.erase("dependsOn");
-        exec("INSERT INTO workflow_stages(workflow_id,stage_id,spec) VALUES(?,?,?)", {id, stage.at("stageId"), stage});
+        database_.exec("INSERT INTO workflow_stages(workflow_id,stage_id,spec) VALUES(?,?,?)", {id, stage.at("stageId"), stage});
     }
     for (const auto& stage : stages)
         for (const auto& parent : stage.at("dependsOn"))
-            exec("INSERT INTO workflow_dependencies(workflow_id,stage_id,parent_id) VALUES(?,?,?)", {id, stage.at("stageId"), parent});
+            database_.exec("INSERT INTO workflow_dependencies(workflow_id,stage_id,parent_id) VALUES(?,?,?)",
+                           {id, stage.at("stageId"), parent});
     return id;
 }
 
-Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::string_view bot, Id message, int step, const Json& routing) {
+Json WorkflowStorage::workflowTool(std::string_view tool, const Json& args, std::string_view bot, Id message, int step,
+                                   const Json& routing) {
     if (tool == "start_workflow") {
         const auto id = startWorkflow(message, args, bot, routing);
         auto status = workflowStatus(id, bot, unixTime());
@@ -225,27 +246,28 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
     }
     const Id id = conversation_storage::identifier(args, "workflowId", true);
     if (tool == "workflow_status") return workflowStatus(id, bot, unixTime());
-    auto owner = query("SELECT stop_requested FROM workflows WHERE id=? AND bot_id=?", {id, bot});
+    auto owner = database_.query("SELECT stop_requested FROM workflows WHERE id=? AND bot_id=?", {id, bot});
     if (!owner.next()) throw Conflict("Unknown workflow");
     const bool stopping = owner.number(0);
 
     const bool whole = tool == "stop_workflow";
     const auto target = whole ? std::string{} : conversation_storage::text(args, "stageId", 80, true);
     if (whole || tool == "stop_workflow_stage") {
-        if (whole) exec("UPDATE workflows SET stop_requested=1 WHERE id=?", {id});
-        auto children = query("SELECT task_id FROM workflow_stages WHERE workflow_id=? AND (?='' OR stage_id=?)", {id, target, target});
+        if (whole) database_.exec("UPDATE workflows SET stop_requested=1 WHERE id=?", {id});
+        auto children =
+            database_.query("SELECT task_id FROM workflow_stages WHERE workflow_id=? AND (?='' OR stage_id=?)", {id, target, target});
         if (!children.next()) throw Conflict("Unknown stage");
         bool awaiting = false;
         do {
             if (const Id taskId = children.number(0)) {
-                auto task = taskRecords.load(taskId);
-                if (!terminal(task) && task.state != TaskState::cancelling) taskOperations.requestCancellation(task);
+                auto task = taskRecords_.load(taskId);
+                if (!terminal(task) && task.state != TaskState::cancelling) operations_.requestCancellation(task);
                 awaiting |= !terminal(task);
             }
         } while (children.next());
-        exec("UPDATE workflow_stages SET status='stopped' WHERE workflow_id=? AND (?='' OR stage_id=?)"
-             " AND task_id IS NULL AND status='pending'",
-             {id, target, target});
+        database_.exec("UPDATE workflow_stages SET status='stopped' WHERE workflow_id=? AND (?='' OR stage_id=?)"
+                       " AND task_id IS NULL AND status='pending'",
+                       {id, target, target});
         auto status = workflowStatus(id, bot, unixTime());
         status["effect"] = awaiting ? "cancelling" : "cancelled";
         if (!whole) status["stageId"] = target;
@@ -253,29 +275,30 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
     }
 
     if (stopping) throw Conflict("Workflow is stopping");
-    const auto instruction = secretStorage.redactor(bot).text(conversation_storage::text(args, "instruction", 8000, true));
-    auto stage = query("SELECT s.task_id,s.status,EXISTS(SELECT 1 FROM workflow_dependencies d WHERE d.workflow_id=s.workflow_id"
-                       " AND d.stage_id=s.stage_id) FROM workflow_stages s WHERE s.workflow_id=? AND s.stage_id=?",
-                       {id, target});
+    const auto instruction = secretStorage_.redactor(bot).text(conversation_storage::text(args, "instruction", 8000, true));
+    auto stage = database_.query("SELECT s.task_id,s.status,EXISTS(SELECT 1 FROM workflow_dependencies d WHERE d.workflow_id=s.workflow_id"
+                                 " AND d.stage_id=s.stage_id) FROM workflow_stages s WHERE s.workflow_id=? AND s.stage_id=?",
+                                 {id, target});
     if (!stage.next()) throw Conflict("Unknown stage");
     const Id taskId = stage.number(0);
-    auto task = taskId ? std::optional{taskRecords.load(taskId)} : std::nullopt;
+    auto task = taskId ? std::optional{taskRecords_.load(taskId)} : std::nullopt;
     if (stage.string(1) == "stopped" || (task && (task->state == TaskState::cancelled || task->state == TaskState::cancelling)))
         throw Conflict("Stage is stopping");
     if (stage.number(2) && (stage.string(1) == "failed" || (task && terminal(*task)))) {
         Json next = {{"text", instruction}, {"messageId", message}, {"step", step}};
         if (task) next["priorRevisionId"] = task->currentRevision.value();
-        exec("UPDATE workflow_stages SET task_id=NULL,status='pending',deadline=0,alerted=0,input='',output='',"
-             "result_id=NULL,confirmed_at=0,confirmed_state='',unreachable=0,"
-             "instruction=json_patch(coalesce(instruction,'{}'),?) WHERE workflow_id=? AND stage_id=?",
-             {next, id, target});
+        database_.exec("UPDATE workflow_stages SET task_id=NULL,status='pending',deadline=0,alerted=0,input='',output='',"
+                       "result_id=NULL,confirmed_at=0,confirmed_state='',unreachable=0,"
+                       "instruction=json_patch(coalesce(instruction,'{}'),?) WHERE workflow_id=? AND stage_id=?",
+                       {next, id, target});
     } else {
         if (!task) throw Conflict("Stage has no assigned task yet");
         if (terminal(*task)) {
             task->state = TaskState::queued;
-            exec("UPDATE workflow_stages SET status='pending',deadline=0,alerted=0 WHERE workflow_id=? AND stage_id=?", {id, target});
+            database_.exec("UPDATE workflow_stages SET status='pending',deadline=0,alerted=0 WHERE workflow_id=? AND stage_id=?",
+                           {id, target});
         }
-        taskOperations.acceptInstruction(*task, message, step, instruction, std::nullopt, nullptr);
+        operations_.acceptInstruction(*task, message, step, instruction, std::nullopt, nullptr);
     }
     auto status = workflowStatus(id, bot, unixTime());
     status["effect"] = "accepted";
@@ -283,23 +306,23 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
     return status;
 }
 
-void Store::Impl::advanceWorkflows(Seconds now) {
-    std::lock_guard lock(mutex);
-    Transaction tx(db);
-    auto overdue = query("SELECT s.task_id FROM workflow_stages s JOIN tasks t ON t.id=s.task_id "
-                         "WHERE s.deadline BETWEEN 1 AND ? AND s.alerted=0 AND t.state NOT IN ('completed','cancelled')",
-                         {now});
+void WorkflowStorage::advanceWorkflows(Seconds now) {
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
+    auto overdue = database_.query("SELECT s.task_id FROM workflow_stages s JOIN tasks t ON t.id=s.task_id "
+                                   "WHERE s.deadline BETWEEN 1 AND ? AND s.alerted=0 AND t.state NOT IN ('completed','cancelled')",
+                                   {now});
     while (overdue.next()) {
         const auto task = overdue.number(0);
-        exec("UPDATE workflow_stages SET alerted=1 WHERE task_id=?", {task});
-        journalStorage.journal(task, "workflow_deadline_exceeded", {{"needsAttention", true}, {"observedAt", now}});
+        database_.exec("UPDATE workflow_stages SET alerted=1 WHERE task_id=?", {task});
+        journalStorage_.journal(task, "workflow_deadline_exceeded", {{"needsAttention", true}, {"observedAt", now}});
     }
     materializeWorkflowStages();
     tx.commit();
 }
 
-void Store::Impl::materializeWorkflowStages() {
-    auto ready = query(R"SQL(WITH ready AS MATERIALIZED (
+void WorkflowStorage::materializeWorkflowStages() {
+    auto ready = database_.query(R"SQL(WITH ready AS MATERIALIZED (
         SELECT s.workflow_id,s.spec,w.bot_id,w.routing,w.message_id,s.instruction,
                r.id,r.intent,r.done_when,
                coalesce(r.source_message_id,w.message_id)
@@ -315,16 +338,16 @@ void Store::Impl::materializeWorkflowStages() {
         const auto spec = ready.json(1);
         const auto stage = spec.at("stageId").get<std::string>();
         const auto bot = ready.string(2);
-        const auto scrub = secretStorage.redactor(bot);
+        const auto scrub = secretStorage_.redactor(bot);
         const auto routing = ready.json(3);
         const auto request = scrub.text(field(spec, "request"));
         std::vector<OutboxSource> sources;
         std::string input;
         const auto inputFrom = field(spec, "inputFrom");
-        auto parents = query(R"SQL(SELECT p.stage_id,p.output,p.result_id,p.task_id,j.data
+        auto parents = database_.query(R"SQL(SELECT p.stage_id,p.output,p.result_id,p.task_id,j.data
             FROM workflow_dependencies d JOIN workflow_stages p ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
             JOIN journal j ON j.id=p.result_id WHERE d.workflow_id=? AND d.stage_id=? ORDER BY d.rowid)SQL",
-                             {id, stage});
+                                       {id, stage});
         while (parents.next()) {
             const auto report = decodeRunReport(parents.number(2), parents.json(4));
             if (parents.string(0) == inputFrom) input = parents.string(1);
@@ -341,36 +364,36 @@ void Store::Impl::materializeWorkflowStages() {
         const auto role = field(spec, "role");
         if (!conversation_storage::hasText(request) || scrub.text(input) != input || (role == "verify" && !immutableVersion(input)) ||
             scrub.text(bot) != bot || scrub.record(routing, SecretRedactor::Fields::external) != routing) {
-            exec("UPDATE workflow_stages SET status='failed' WHERE workflow_id=? AND stage_id=?", {id, spec.at("stageId")});
+            database_.exec("UPDATE workflow_stages SET status='failed' WHERE workflow_id=? AND stage_id=?", {id, spec.at("stageId")});
             continue;
         }
-        exec(R"SQL(UPDATE workflow_dependencies AS d SET report_id=p.result_id,artifact_version=p.output
+        database_.exec(R"SQL(UPDATE workflow_dependencies AS d SET report_id=p.result_id,artifact_version=p.output
             FROM workflow_stages p WHERE p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
             AND d.workflow_id=? AND d.stage_id=?)SQL",
-             {id, stage});
+                       {id, stage});
         const TaskRoute route{field(routing, "environmentId"), field(routing, "projectId")};
-        const auto taskId = taskOperations.startConversationTask(routing, bot, request, route, ready.number(4), std::nullopt, false);
-        auto task = taskRecords.load(taskId);
+        const auto taskId = operations_.startConversationTask(routing, bot, request, route, ready.number(4), std::nullopt, false);
+        auto task = taskRecords_.load(taskId);
         task.workflow = TaskWorkflow{id, stage, input};
         task.sourceResultRefs = std::move(sources);
         const bool hasPriorRevision = ready.number(6) != 0;
-        taskRecords.addRevision(task, hasPriorRevision ? scrub.text(ready.string(7)) : request,
-                                hasPriorRevision ? scrub.text(ready.string(8)) : request, ready.number(9));
+        taskRecords_.addRevision(task, hasPriorRevision ? scrub.text(ready.string(7)) : request,
+                                 hasPriorRevision ? scrub.text(ready.string(8)) : request, ready.number(9));
         if (!ready.string(5).empty()) {
             const auto next = ready.json(5);
-            taskOperations.acceptInstruction(task, next.at("messageId"), next.at("step"), scrub.text(field(next, "text")), std::nullopt,
-                                             nullptr);
+            operations_.acceptInstruction(task, next.at("messageId"), next.at("step"), scrub.text(field(next, "text")), std::nullopt,
+                                          nullptr);
         } else
-            taskRecords.save(task);
-        exec("UPDATE workflow_stages SET task_id=?,input=?,instruction=NULL WHERE workflow_id=? AND stage_id=?",
-             {taskId, input, id, spec.at("stageId")});
+            taskRecords_.save(task);
+        database_.exec("UPDATE workflow_stages SET task_id=?,input=?,instruction=NULL WHERE workflow_id=? AND stage_id=?",
+                       {taskId, input, id, spec.at("stageId")});
     }
 }
 
-void Store::Impl::appendStageRequirements(std::string& instruction, const TaskData& task) const {
-    auto stage = query("SELECT s.spec,s.input,w.request FROM workflow_stages s"
-                       " JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?",
-                       {task.id});
+void WorkflowStorage::appendStageRequirements(std::string& instruction, const TaskData& task) const {
+    auto stage = database_.query("SELECT s.spec,s.input,w.request FROM workflow_stages s"
+                                 " JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?",
+                                 {task.id});
     if (!stage.next()) throw Conflict("Missing workflow stage assignment");
     const auto spec = stage.json(0);
     const auto role = field(spec, "role"), pin = stage.string(1);
@@ -382,26 +405,26 @@ void Store::Impl::appendStageRequirements(std::string& instruction, const TaskDa
         instruction += "\n\nReturn only JSON with the immutable artifactVersion (full lowercase commit SHA or SHA-256 digest).";
 }
 
-void Store::Impl::stageObservation(const TaskData& task, const Observation& observed, Seconds now) {
+void WorkflowStorage::stageObservation(const TaskData& task, const Observation& observed, Seconds now) {
     const bool unreachable = observed.kind == Observation::Kind::Unavailable;
     const auto state = observed.kind == Observation::Kind::Finished   ? observed.status
                        : observed.kind == Observation::Kind::Settling ? "settling"
                                                                       : "running";
-    exec("UPDATE workflow_stages SET unreachable=?,confirmed_state=CASE WHEN ? THEN confirmed_state ELSE ? END,"
-         "confirmed_at=CASE WHEN ? THEN confirmed_at ELSE ? END WHERE task_id=?",
-         {int(unreachable), int(unreachable), state, int(unreachable), now, task.id});
+    database_.exec("UPDATE workflow_stages SET unreachable=?,confirmed_state=CASE WHEN ? THEN confirmed_state ELSE ? END,"
+                   "confirmed_at=CASE WHEN ? THEN confirmed_at ELSE ? END WHERE task_id=?",
+                   {int(unreachable), int(unreachable), state, int(unreachable), now, task.id});
 }
 
-bool Store::Impl::settleStageReport(TaskData& task) {
-    if (task.state != TaskState::cancelling && conversationPending(task.botId)) return false;
+bool WorkflowStorage::settleStageReport(TaskData& task) {
+    if (task.state != TaskState::cancelling && remaining_.conversationPending(task.botId)) return false;
     const Id reportId = task.pendingStageReport.value();
     task.pendingStageReport.reset();
     const auto& workflow = task.workflow.value();
     const auto id = workflow.id;
     const auto& stage = workflow.stageId;
-    auto row = query("SELECT s.spec,s.input,j.data FROM workflow_stages s JOIN journal j ON j.id=? AND j.task_id=s.task_id"
-                     " WHERE workflow_id=? AND stage_id=? AND s.task_id=?",
-                     {reportId, id, stage, task.id});
+    auto row = database_.query("SELECT s.spec,s.input,j.data FROM workflow_stages s JOIN journal j ON j.id=? AND j.task_id=s.task_id"
+                               " WHERE workflow_id=? AND stage_id=? AND s.task_id=?",
+                               {reportId, id, stage, task.id});
     if (!row.next()) throw Conflict("Missing workflow stage assignment");
     const auto role = field(row.json(0), "role");
     const auto pin = row.string(1);
@@ -417,29 +440,30 @@ bool Store::Impl::settleStageReport(TaskData& task) {
         const auto verdict = field(result, "verdict");
         ok = ok && version == pin && (verdict == "pass" || verdict == "fail");
         if (ok)
-            exec("INSERT INTO workflow_verdicts(workflow_id,stage_id,report_id,version,verdict) VALUES(?,?,?,?,?)",
-                 {id, stage, reportId, pin, verdict});
+            database_.exec("INSERT INTO workflow_verdicts(workflow_id,stage_id,report_id,version,verdict) VALUES(?,?,?,?,?)",
+                           {id, stage, reportId, pin, verdict});
         ok = ok && verdict == "pass";
         if (ok) output = pin;
     } else if (role == "implement" || !version.empty()) {
         ok = ok && immutableVersion(version);
         if (ok) {
             output = version;
-            exec("INSERT INTO workflow_artifacts(workflow_id,stage_id,report_id,version) VALUES(?,?,?,?)", {id, stage, reportId, version});
+            database_.exec("INSERT INTO workflow_artifacts(workflow_id,stage_id,report_id,version) VALUES(?,?,?,?)",
+                           {id, stage, reportId, version});
         }
     } else if (ok)
         output = pin;
     if (task.state == TaskState::cancelling || task.replanning || !task.pendingInstructions.empty()) return true;
-    exec("UPDATE workflow_stages SET status=?,output=?,result_id=? WHERE workflow_id=? AND stage_id=?",
-         {ok ? "completed" : "failed", output, reportId, id, stage});
-    taskEvents.consumeEvent(task);
+    database_.exec("UPDATE workflow_stages SET status=?,output=?,result_id=? WHERE workflow_id=? AND stage_id=?",
+                   {ok ? "completed" : "failed", output, reportId, id, stage});
+    taskEvents_.consumeEvent(task);
     task.state = TaskState::completed;
     const auto& text = reportUnavailable ? evidence.detail : evidence.report;
     std::optional<WorkflowCompletionOutcome> outcome;
     if (status == "completed" || status == "cancelled")
         outcome = ok ? WorkflowCompletionOutcome::completed : WorkflowCompletionOutcome::failed;
-    journalStorage.journal(task.id, CompletionEntry{ok ? text : "Workflow stage failed: " + text, task.currentRevision.value(),
-                                                    WorkflowCompletion{reportSourceRun(report), outcome}});
+    journalStorage_.journal(task.id, CompletionEntry{ok ? text : "Workflow stage failed: " + text, task.currentRevision.value(),
+                                                     WorkflowCompletion{reportSourceRun(report), outcome}});
     return true;
 }
 }

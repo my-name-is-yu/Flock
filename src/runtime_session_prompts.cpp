@@ -1,4 +1,5 @@
 #include "runtime_session_prompts.hpp"
+#include "workflow_storage.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
 #include "journal_task.hpp"
@@ -180,7 +181,7 @@ Runtime::Components::SessionPrompts::WorkPrompt Runtime::Components::SessionProm
     }
     if (task.workflow) {
         for (const auto& source : task.sourceResultRefs) quoteSource(source);
-        db.appendStageRequirements(instruction, task);
+        workflowStorage.appendStageRequirements(instruction, task);
     }
     quotes.remaining += recentReportBudget;
     if (moved) {

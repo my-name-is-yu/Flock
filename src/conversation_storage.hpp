@@ -35,7 +35,6 @@ struct Message {
 }
 
 namespace flockv0::conversation_storage {
-std::size_t boundExpandedContext(Json& turn);
 void projectToolHistory(Json& turn, const Json& redactionRevision);
 inline bool japanese(std::string_view text) {
     return std::ranges::any_of(text, [](unsigned char byte) { return byte == 0xe3 || (byte >= 0xe4 && byte <= 0xe9); });

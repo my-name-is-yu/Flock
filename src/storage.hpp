@@ -9,6 +9,8 @@
 #include "git_storage.hpp"
 #include "inbox_storage.hpp"
 #include "policy_origin.hpp"
+#include "conversation_context_storage.hpp"
+#include "workflow_storage.hpp"
 #include "json_fields.hpp"
 #include "wait_storage.hpp"
 #include "task_records.hpp"
@@ -154,6 +156,8 @@ struct Store::Impl : Database {
     BotLifecycleStorage botLifecycle{*this};
     AutomationStorage automationStorage;
     AttachmentStorage attachments{*this};
+    ConversationContextStorage conversationContextStorage{*this, secretStorage, attachments};
+    WorkflowStorage workflowStorage{*this, taskRecords, taskEvents, journalStorage, secretStorage, *this, taskOperations, taskRouting};
     class SessionEvidence;
     std::map<ChannelKind, ChannelConnector> channels;
     std::map<std::string, std::shared_ptr<LocalMachine>, std::less<>> localMachines;
@@ -226,17 +230,6 @@ struct Store::Impl : Database {
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
     explicit Impl(std::filesystem::path path, MemorySeed, AutomationModelResolver);
-    Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;
-    Json conversationHistory(const conversation::Message&, const Json& summaries, std::size_t expandedBytes) const;
-    Json contextTool(std::string_view tool, const Json&, const conversation::Message&, int step);
-    Id startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing);
-    Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);
-    Json workflowStatus(Id id, std::string_view bot, Seconds now) const;
-    void advanceWorkflows(Seconds now);
-    void materializeWorkflowStages();
-    void appendStageRequirements(std::string& instruction, const TaskData& task) const;
-    void stageObservation(const TaskData& task, const Observation&, Seconds now);
-    bool settleStageReport(TaskData& task);
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
     Json workspaceTool(const ToolContext&, const Decision&);
     std::optional<Resource> authorizedBotToolScope(std::string_view bot, const Decision&);

@@ -187,6 +187,7 @@ private:
     friend class TaskRunReports;
     friend class InboxStorage;
     friend class GitStorage;
+    friend class WorkflowStorage;
     friend class Runtime;
     friend class Policy;
     friend class T3Connections;

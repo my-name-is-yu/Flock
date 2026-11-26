@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "flock/limits.hpp"
+#include "conversation_context_storage.hpp"
 #include "conversation_storage.hpp"
 #include "journal.hpp"
 #include "journal_task.hpp"
@@ -8,6 +9,7 @@
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "task_storage.hpp"
+#include "workflow_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
@@ -385,7 +387,7 @@ Json Store::Impl::turnInput(const Message& message, int step, Seconds now, Json 
     Json tasks = Json::array();
     std::set<Id> listed;
     const bool web = message.channelScope.empty();
-    const auto summaries = web ? compactions(message.bot, 0, 1, message.id) : Json::array();
+    const auto summaries = web ? conversationContextStorage.compactions(message.bot, 0, 1, message.id) : Json::array();
     const Id boundary = summaries.empty() ? 0 : summaries.front().at("endMessageId").get<Id>();
     const auto latestResult = [&](Id taskId) -> Json {
         auto row = query(R"SQL(
@@ -524,8 +526,8 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
 
     const auto channel = channelContext(message.id, message.bot, &images);
     auto turn = conversationSteps(message, step, images);
-    const auto expandedBytes = conversation_storage::boundExpandedContext(turn);
-    auto history = conversationHistory(message, summaries, expandedBytes);
+    const auto expandedBytes = ConversationContextStorage::boundExpandedContext(turn);
+    auto history = conversationContextStorage.conversationHistory(message, summaries, expandedBytes);
     Json event{{"kind", "conversation_turn"}, {"messageId", message.id},       {"text", message.text},
                {"currentTime", now},          {"replyTo", std::move(replyTo)}, {"turn", std::move(turn)}};
     if (message.routing.contains("sessionOrigin")) event["sessionOrigin"] = message.routing.at("sessionOrigin");
@@ -580,14 +582,24 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     if (std::ranges::find(webTools, tool) != webTools.end()) {
         if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
         if (tool == "continue_fresh_session") {
-            const auto freshTask = ownTask(identifier(args, "taskId", true), message);
-            if (freshTask.hasDestinations()) throw ToolError("Use a new request to run more work across T3 environments");
+            auto task = ownTask(identifier(args, "taskId", true), message);
+            if (task.hasDestinations()) throw ToolError("Use a new request to run more work across T3 environments");
+            if (terminal(task) || task.state == TaskState::cancelling) throw Conflict("Task is closed or stopping");
+            const auto instruction =
+                args.contains("instruction")
+                    ? conversation_storage::text(args, "instruction", limits::session_prompt::maxDecisionTextBytes, true)
+                    : "Continue with the same completion criteria.";
+            task.newSessionRequired = true;
+            task.freshContextRequested = true;
+            task.replanning = true;
+            taskOperations.acceptInstruction(task, message.id, step, instruction, std::nullopt, nullptr);
+            return {{"ok", true}, {"freshContext", true}, {"taskId", task.id}, {"effect", "replanning"}};
         }
-        if (tool == "compact_conversation" || tool == "expand_context" || tool == "continue_fresh_session")
-            return contextTool(tool, args, message, step);
+        if (tool == "compact_conversation" || tool == "expand_context")
+            return conversationContextStorage.contextTool(tool, args, message, step);
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" || tool == "stop_workflow_stage" ||
             tool == "stop_workflow")
-            return workflowTool(tool, args, bot, message.id, step, routing);
+            return workflowStorage.workflowTool(tool, args, bot, message.id, step, routing);
         const auto actor = turnActor(message);
         auto result = botSettingsTool(bot, actor, message.id, routing, decision);
         if (result.is_null()) result = memoryStorage.memory(bot, actor, tool, args, now, true);
