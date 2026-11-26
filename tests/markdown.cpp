@@ -320,6 +320,10 @@ void bareUrls() {
               "<blockquote><p>See the file:<br>\n"
               "<a href=\"https://example.com/?a=1&amp;b=__init__.py\">https://example.com/?a=1&amp;b=__init__.py</a></p></blockquote>",
           "A lazy quoted continuation truncated a bare URL with a character reference");
+    check(markdown::toHtml("https://example.com/**[docs](https://docs.example)**") ==
+              "<p><a href=\"https://example.com/\">https://example.com/</a>"
+              "<strong><a href=\"https://docs.example\">docs</a></strong></p>",
+          "A bare link swallowed a link inside adjacent formatting");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");

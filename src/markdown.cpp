@@ -345,8 +345,12 @@ std::size_t inlineContentEnd(cmark_node* node, int line, int adjustment, std::si
     return lineLength;
 }
 
-bool isUrlFormatting(cmark_node_type type) {
-    return type == CMARK_NODE_EMPH || type == CMARK_NODE_STRONG;
+bool isTextFormatting(cmark_node* node) {
+    const auto type = cmark_node_get_type(node);
+    if (type != CMARK_NODE_EMPH && type != CMARK_NODE_STRONG) return false;
+    for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child))
+        if (cmark_node_get_type(child) != CMARK_NODE_TEXT && !isTextFormatting(child)) return false;
+    return true;
 }
 
 cmark_node* containingParagraph(cmark_node* node) {
@@ -399,11 +403,11 @@ std::optional<FormattedBareUrl> formattedBareUrlAt(cmark_node* node, std::string
         cmark_node* last = node;
         for (auto* next = cmark_node_next(node); next && offset < start + url.size(); next = cmark_node_next(next)) {
             const auto type = cmark_node_get_type(next);
+            const bool formatting = isTextFormatting(next);
             const int nextEnd = cmark_node_get_end_column(next) + adjustment;
             if (cmark_node_get_start_line(next) != line || cmark_node_get_end_line(next) != line ||
                 cmark_node_get_start_column(next) + adjustment != static_cast<int>(offset) + 1 || nextEnd <= static_cast<int>(offset) ||
-                (type != CMARK_NODE_TEXT && !isUrlFormatting(type)) ||
-                (isUrlFormatting(type) && static_cast<std::size_t>(nextEnd) > start + url.size()))
+                (type != CMARK_NODE_TEXT && !formatting) || (formatting && static_cast<std::size_t>(nextEnd) > start + url.size()))
                 break;
             offset = static_cast<std::size_t>(nextEnd);
             last = next;
@@ -432,7 +436,7 @@ std::optional<FormattedBareUrl> formattedBareUrlAt(cmark_node* node, std::string
 
 std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::vector<std::string_view>& lines) {
     auto* adjacent = cmark_node_next(node);
-    if (!adjacent || !isUrlFormatting(cmark_node_get_type(adjacent))) return std::nullopt;
+    if (!adjacent || !isTextFormatting(adjacent)) return std::nullopt;
     auto* paragraph = containingParagraph(node);
     const auto line = physicalSourceLine(node, paragraph);
     if (line < 1 || static_cast<std::size_t>(line) > lines.size()) return std::nullopt;
