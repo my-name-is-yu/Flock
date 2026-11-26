@@ -139,7 +139,7 @@ void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
     waitStorage.clearWait(task, "cancel");
     taskEvents.consumeEvent(task);
     journalStorage.journalCancelRequested(id, stop);
-    if (undispatched && !peer) {
+    if (undispatched && task.actionId.empty() && !peer) {
         task.pendingDestination.reset();
         task.replanning = false;
         task.pendingInstructions.clear();

@@ -552,7 +552,7 @@ int main(int argc, char** argv) {
               "cancelling a started Run must keep its delegated work outstanding");
         fixture({{"selectedDelegated", false}});
         const auto drained = restarted->observe("env-1", selected.config, delivery.run);
-        check(drained.kind == Observation::Kind::Finished && drained.resultRunId == "selected-run",
+        check(drained.kind == Observation::Kind::Finished && drained.resultRunId == "selected-run" && !drained.cancelledBeforeStart,
               "cancellation settles after the assigned Run's delegated work ends");
 
         selected.actionId = "flock-selected-busy";
@@ -584,8 +584,13 @@ int main(int argc, char** argv) {
         }
         const auto cancellation = restarted->observe("env-1", selected.config, delivery.run);
         check(cancellation.kind == Observation::Kind::Finished && cancellation.status == "cancelled" &&
-                  cancellation.resultRunId == "selected-run",
+                  cancellation.resultRunId == "selected-run" && cancellation.cancelledBeforeStart,
               "other active work does not hold cancellation of the assigned Run");
+        fixture({{"selectedBusy", false}});
+        const auto settledQueueCancellation = restarted->observe("env-1", selected.config, delivery.run);
+        check(settledQueueCancellation.kind == Observation::Kind::Finished && settledQueueCancellation.cancelledBeforeStart,
+              "a settled delegated wait must preserve proof of cancellation before starting");
+        fixture({{"selectedBusy", true}});
 
         fixture({{"selectedBadReceipt", true}});
         check(adapter->send(selected).kind == Delivery::Kind::Unknown,

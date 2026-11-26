@@ -1,9 +1,9 @@
 #include "session_dispatch_lock.hpp"
 #include "runtime_outbox_dispatch.hpp"
 
-#include "memory_storage.hpp"
 #include "commit_check.hpp"
 #include "conversation_storage.hpp"
+#include "flock/bot_notes_error.hpp"
 #include "flock/limits.hpp"
 #include "flock/participation.hpp"
 #include "journal.hpp"
@@ -191,7 +191,7 @@ runtime::OutboxDispatch::DeliveryOutcome runtime::OutboxDispatch::classifyDelive
 AssignedRun runtime::OutboxDispatch::recordRunAssignment(const TaskData& task, const Outbox& action, const RunRef& ref,
                                                          DestinationRun* destination) {
     const auto& cmd = action.command;
-    database.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)",
+    database.exec("INSERT OR IGNORE INTO runs(action_id,task_id,environment_id,thread_id,run_id,link) VALUES(?,?,?,?,?,?)",
                   {cmd.actionId, task.id, cmd.environmentId, ref.threadId, ref.runId, ref.link});
     AssignedRun run{ref, cmd.environmentId, {task.botId, cmd.projectId, action.revisionId}};
     if (destination) {
@@ -475,10 +475,9 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
                     id, action, {Delivery::Kind::Settings, {}, "The pinned workflow artifact version contains a protected value", true});
             const auto marker = sessionPrompt(cmd.actionId, {});
             if (cmd.instruction.ends_with(marker)) cmd.instruction.resize(cmd.instruction.size() - marker.size());
-            action.sessionMemory.reset();
-            cmd.instruction = scrub.text(cmd.instruction);
-            action.command.instruction = cmd.instruction;
-            cmd.instruction = sessionPrompt(cmd.actionId, cmd.instruction);
+            action.sessionContext = {};
+            action.command.instruction = scrub.text(cmd.instruction);
+            cmd.instruction = SessionPrompts::dispatchedWorkPrompt(action);
             if (cmd.instruction.size() > limits::session_prompt::maxBytes)
                 return applyDelivery(id, action, {Delivery::Kind::Settings, {}, SessionPrompts::ContextLimit{}.what(), true});
         }
@@ -534,14 +533,6 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
         }
         if (!dispatch) dispatch.emplace(path, SessionDispatchFileLock::Mode::shared);
         if (disconnected()) return connectionUnavailable();
-        const auto sharesMemory = [](const Json& config) { return config.value("shareMemoryWithSessions", Json(false)) == true; };
-        bool includeMemory = false;
-        if (sendsWork) {
-            try {
-                includeMemory = intake ? sharesMemory(intake(cmd.ownerBotId, {}).config) : sharesMemory(cmd.config);
-            } catch (const std::exception&) {
-            }
-        }
         auto policyGate = ApprovalGate::allow;
         const auto startSend = [&](TaskData& current) {
             if (shutdown.stop_requested() || terminal(current) || current.state == TaskState::cancelling ||
@@ -571,19 +562,27 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                                            sessionReadStorage.connectedSessionAccess(source, target)))
                     action.sessionParticipationId = participant.number(0);
             }
-            if (includeMemory) {
-                if (const auto memory = memoryStorage.sessionMemory(cmd, clock())) {
-                    action.sessionMemory = *memory;
-                    cmd.instruction = SessionPrompts::dispatchedWorkPrompt(action);
-                }
-            }
+            if (sendsWork) cmd.instruction = prompts.prepareStandingContext(action, current, clock());
             if (!outboxStorage.startOutbox(action, cmd.authGeneration)) return false;
             journalStorage.journal(current.id, SendStartedEntry{action.command.actionId});
             return true;
         };
-        if (!(destination ? updates.changeTask(id, startSend) : updates.change(task, startSend))) {
-            if (policyGate != ApprovalGate::allow && policyGate != ApprovalGate::waiting) refused(policyGate);
-            return;
+        try {
+            if (!(destination ? updates.changeTask(id, startSend) : updates.change(task, startSend))) {
+                if (policyGate != ApprovalGate::allow && policyGate != ApprovalGate::waiting) refused(policyGate);
+                return;
+            }
+        } catch (const BotNotesUnavailable& error) {
+            if (!destination && updates.change(task, [&](TaskData& current) {
+                    if (current.actionId != cmd.actionId || !taskRouting.automationBeforeDispatch(id)) return false;
+                    waitStorage.wait(current, SimpleWaitReason::bot_notes_unavailable,
+                                     bounded(policy.secretRedactor(current.botId).text(error.what()), 2048));
+                    return true;
+                }))
+                return;
+            return applyDelivery(id, action, {Delivery::Kind::Settings, {}, error.what(), true});
+        } catch (const Conflict& error) {
+            return applyDelivery(id, action, {Delivery::Kind::Settings, {}, error.what(), true});
         }
     } else if (action.phase != OutboxPhase::started)
         return;

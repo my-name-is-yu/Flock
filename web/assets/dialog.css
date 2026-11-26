@@ -175,7 +175,7 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
 }
 .settings-workspace-field select { font-family: var(--font-sans); }
-.settings-workspace-hint { margin: 0; color: var(--text-3); font-size: var(--text-xs); }
+.settings-role-hint, .settings-workspace-hint { margin: 0; color: var(--text-3); font-size: var(--text-xs); }
 .settings-row {
   display: flex; align-items: center; gap: .75rem; width: 100%; min-height: 3.1rem; padding: .7rem 1.1rem;
   border: 0; background: none; text-align: left; font-size: var(--text-md);

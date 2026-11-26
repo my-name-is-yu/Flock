@@ -3,6 +3,7 @@
 #include "runtime_components.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
+#include "flock/soul_loader.hpp"
 #include "flock/task.hpp"
 #include "flock/outbox.hpp"
 #include "flock/outbox_instruction.hpp"
@@ -14,6 +15,7 @@
 
 namespace flockv0 {
 class Database;
+class MemoryStorage;
 class SecretStorage;
 class TaskEvents;
 
@@ -21,8 +23,10 @@ class WorkflowStorage;
 
 class runtime::SessionPrompts {
 public:
-    SessionPrompts(Database& database, SecretStorage& secretStorage, TaskEvents& taskEvents, WorkflowStorage& workflowStorage)
-        : database(database), secretStorage(secretStorage), taskEvents(taskEvents), workflowStorage(workflowStorage) {}
+    SessionPrompts(Database& database, SecretStorage& secretStorage, MemoryStorage& memoryStorage, TaskEvents& taskEvents,
+                   WorkflowStorage& workflowStorage, const SoulLoader& soul)
+        : database(database), secretStorage(secretStorage), memoryStorage(memoryStorage), taskEvents(taskEvents),
+          workflowStorage(workflowStorage), soul(soul) {}
 
     struct WorkPrompt {
         std::string instruction;
@@ -40,6 +44,7 @@ public:
     WorkPrompt workPrompt(const TaskData& task, const Json& event, std::size_t actionIdBytes);
     std::vector<OutboxInstruction> pendingInstructions(const TaskData& task, const Json& event);
     void prepareDelegation(const TaskData& task, Outbox& action);
+    std::string prepareStandingContext(Outbox& action, const TaskData& task, Seconds now);
     static std::string dispatchedWorkPrompt(const Outbox& action);
 private:
     struct SessionContract {
@@ -54,7 +59,9 @@ private:
 
     Database& database;
     SecretStorage& secretStorage;
+    MemoryStorage& memoryStorage;
     TaskEvents& taskEvents;
     WorkflowStorage& workflowStorage;
+    const SoulLoader& soul;
 };
 }

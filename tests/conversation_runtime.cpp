@@ -344,7 +344,7 @@ struct Fixture {
     SimulatedT3 t3;
     std::function<void()> beforeNotes;
     MemorySeed memorySeed;
-    bool shareMemoryWithSessions = false;
+    std::string role;
     Seconds now = unixTime();
     bool requireT3Connection = false;
 
@@ -370,7 +370,7 @@ struct Fixture {
             *store, model, t3,
             [this](auto) {
                 if (beforeNotes) beforeNotes();
-                return std::string{};
+                return role;
             },
             std::move(options));
     }
@@ -380,8 +380,7 @@ struct Fixture {
                 std::move(request),
                 std::move(environment),
                 std::move(project),
-                {{"conversationEnvironments", {{"クラウドMac", "cloud"}, {"ローカルMac", "desktop"}}},
-                 {"shareMemoryWithSessions", shareMemoryWithSessions}}};
+                {{"conversationEnvironments", {{"クラウドMac", "cloud"}, {"ローカルMac", "desktop"}}}}};
     }
     Json enqueue(std::string_view key, std::string_view text, Id replyTo = 0) {
         Store httpWriter(dir / "state.db");
@@ -3721,7 +3720,7 @@ void conversationCanReadAndChangeTheFullCurrentContract() {
 void newSessionsReceivePersistedTaskDecisions() {
     for (const bool explicitFresh : {false, true}) {
         Fixture f([](std::string_view) { return "Use the performance runner"; });
-        f.shareMemoryWithSessions = true;
+        f.role = "Keep the original trace files.";
         const auto intent = "Measure the cold-start fixture, including " + std::string(4800, 'i') + " the cache-disabled case";
         const auto criteria = "Report " + std::string(4500, 'c') + " p99 and raw samples";
         constexpr auto startText = "Measure the cold-start fixture";
@@ -3767,7 +3766,7 @@ void newSessionsReceivePersistedTaskDecisions() {
               "the replacement did not start a separate Session for the same revision");
         for (const std::string_view text :
              {std::string_view(intent), std::string_view(criteria), std::string_view(direction), std::string_view(userAnswer),
-              std::string_view(readyDirection), std::string_view("Use the performance runner")}) {
+              std::string_view(readyDirection), std::string_view(f.role), std::string_view("Use the performance runner")}) {
             const auto at = command.instruction.find(text);
             check(at != command.instruction.npos && at == command.instruction.rfind(text),
                   "the new Session lost, shortened or duplicated a task decision");
@@ -3818,29 +3817,34 @@ void revisedSessionDoesNotReplaySupersededDecisions() {
         check(command.instruction.find(stale) == command.instruction.npos, "a superseded task decision reached the revised Session");
 }
 
-void authoritativeHandoffFitsBeforeMemory() {
+void standingContextFitsAlongsideTheAuthoritativeHandoff() {
     Fixture f;
-    f.shareMemoryWithSessions = true;
     const std::string protectedValue = "fixture-private-key";
+    f.role = "Keep fixture credentials private: " + protectedValue + "\n";
     std::string memory = "Use fixture credentials: " + protectedValue + "\n";
+    while (f.role.size() + std::string_view("界").size() <= 8192) f.role += "界";
     while (memory.size() + std::string_view("界").size() <= 8192) memory += "界";
     Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", memory}});
     SecretRequests secretRequests{*f.store};
     secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"fixture-key"}), protectedValue);
     const auto id = TaskIntake(*f.store).submit(f.routing());
     f.reach(id, "running");
-    const auto checkMemory = [&](const Command& command, std::size_t sectionBudget) {
+    const auto checkMemory = [&](const Command& command, std::string_view work, std::size_t sectionBudget) {
         const auto& prompt = command.instruction;
-        const auto notes = prompt.find("\n\nNotes from alpha's memory:\n");
-        const auto marker = prompt.find(sessionPrompt(command.actionId, {}));
-        check(notes < marker && marker - notes <= sectionBudget && prompt.size() <= limits::session_prompt::maxBytes &&
-                  prompt.find("Use fixture credentials: [redacted]") != prompt.npos && prompt.find(protectedValue) == prompt.npos &&
-                  prompt.find("[Bot memory truncated]") < marker,
+        const auto notes = prompt.find("Notes from alpha's memory:\n");
+        const auto precedence = prompt.find("\n\nThe current request");
+        check(notes < precedence && precedence - notes <= sectionBudget && precedence < prompt.find(work) &&
+                  prompt.size() <= limits::session_prompt::maxBytes && prompt.find("Use fixture credentials: [redacted]") != prompt.npos &&
+                  prompt.find(protectedValue) == prompt.npos && prompt.find("[Bot memory truncated]") < precedence,
               "the Session memory exceeded its budget, lost its truncation notice, or contained a protected value");
         Json(prompt).dump();
         return notes;
     };
-    checkMemory(f.t3.sent.front(), 8192);
+    const auto& first = f.t3.sent.front();
+    const auto notes = checkMemory(first, "Measure and report the fixture", 8192);
+    check(first.instruction.starts_with("Standing rules from alpha's role:\nKeep fixture credentials private: [redacted]") && notes <= 8192,
+          "the Role exceeded its budget or contained a protected value");
+    f.role = "Keep the exact inputs.";
     std::vector<std::string> directions;
     for (int i = 0; i < 9; ++i) {
         const auto key = "large-direction-" + std::to_string(i);
@@ -3857,9 +3861,9 @@ void authoritativeHandoffFitsBeforeMemory() {
     f.t3.finish("run-1", "Previous Run settled");
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "the instructions fit without the full memory section");
     const auto& tight = f.t3.sent.back();
-    const auto notes = checkMemory(tight, 4000);
-    check(tight.instruction.starts_with("Start an independent Session"), "memory displaced the work instruction");
-    for (std::size_t i = 0; i < 8; ++i) check(tight.instruction.find(directions[i]) < notes, "memory displaced an accepted instruction");
+    checkMemory(tight, "Start an independent Session", 4000);
+    for (std::size_t i = 0; i < 8; ++i)
+        check(tight.instruction.find(directions[i]) != tight.instruction.npos, "standing context displaced an accepted instruction");
 
     f.model.onResult = [](const ModelInput&) {
         return Decision{"follow_up", {{"instruction", "Check the baseline again"}}, "Verify the prior report"};
@@ -3869,7 +3873,7 @@ void authoritativeHandoffFitsBeforeMemory() {
     const auto& roomier = f.t3.sent.back();
     check(roomier.target.threadId == "session-2" && roomier.instruction.size() > 8192,
           "a shorter follow-up omitted the longer excerpt of the same memory version");
-    checkMemory(roomier, 8192);
+    checkMemory(roomier, "Check the baseline again", 8192);
 
     f.model.onResult = [](const ModelInput&) {
         return Decision{"delegate", {{"instruction", "Start an independent Session"}}, "Verify independently"};
@@ -3991,10 +3995,12 @@ void environmentsResolveByNameOrId() {
 }
 void existingSessionStartsNormalWork() {
     Fixture f([](std::string_view) { return "Prefer integration tests."; });
-    f.shareMemoryWithSessions = true;
+    f.role = "Report verification commands.";
     T3Connections connector(*f.store);
-    connector.connect("desktop", localOwner.id, 48123);
+    const auto token = connector.connect("desktop", localOwner.id, 48123);
     connector.connect("cloud", localOwner.id, 48123);
+    const auto connection = connector.authenticate(token);
+    check(connection.has_value(), "the fixture could not establish Session participation");
 
     f.script("Create the initial Flock task", {start()});
     f.receive("initial", "Create the initial Flock task");
@@ -4013,8 +4019,15 @@ void existingSessionStartsNormalWork() {
     f.t3.sessions[{"cloud", "native-thread"}] = {
         nativeTitle, "Other Project", "other-project", "running", "2026-11-23T00:00:00Z", "2026-11-23T00:00:00Z", {}, false};
 
-    for (const auto title : {nativeTitle, runTitle}) {
-        const auto request = std::string("Add tests in ") + title;
+    struct Request {
+        std::string_view title, text;
+        bool firstDelivery;
+    };
+    const Request requests[]{{nativeTitle, "Add tests in the native Session", true},
+                             {runTitle, "Add tests in the Bot's Session", false},
+                             {nativeTitle, "Extend tests in the native Session", false}};
+    for (const auto& [title, request, firstDelivery] : requests) {
+        const bool native = title == nativeTitle;
         f.script(request,
                  {[title](const ModelInput&) { return Decision{"flock_session_search", {{"query", title}}, "Find the chosen Session"}; },
                   [request](const ModelInput& input) {
@@ -4024,22 +4037,28 @@ void existingSessionStartsNormalWork() {
                                       {{"request", request}, {"sessionRef", sessions.front().at("sessionRef")}},
                                       "Start work in the chosen Session"};
                   }});
-        ConversationIntake(*f.store).receive(localOwner, f.routing(request, "alpha", "", ""), request, request);
+        if (native) {
+            SessionParticipation(*f.store, f.t3)
+                .ask(*connection, {"alpha", std::string(request), "native-thread", firstDelivery ? "native-first" : "native-next"},
+                     [&](auto, auto) { return f.routing(std::string(request), "alpha", "", ""); });
+        } else {
+            ConversationIntake(*f.store).receive(localOwner, f.routing(std::string(request), "alpha", "", ""), request, request);
+        }
         f.runtime->runConversations();
         const auto taskId = TaskList(*f.store).tasks("alpha").front().task.id;
         f.reach(taskId, "running");
         const auto& sent = f.t3.sent.back();
-        const bool native = title == nativeTitle;
         check(sent.tool == CommandTool::start_in_session && sent.target.runId.empty() &&
                   sent.target.threadId == (native ? "native-thread" : firstThreadId) &&
                   sent.environmentId == (native ? "cloud" : "desktop") && sent.projectId == (native ? "other-project" : "project"),
               "work lost the selected Thread or used the Bot's launch route");
-        check(sent.instruction.find("Prefer integration tests.") != sent.instruction.npos,
-              "work in a Session found by search did not receive the Bot's memory");
+        check((sent.instruction.find("Notes from alpha's memory:\nPrefer integration tests.") != sent.instruction.npos) == firstDelivery &&
+                  (sent.instruction.find("Standing rules from alpha's role:\n" + f.role) != sent.instruction.npos) == firstDelivery,
+              "work in a selected Session received the wrong standing context for its delivery history");
         const auto assigned = f.task(taskId).at("activeRun");
         check(assigned.at("runId") != firstRunId && assigned.at("threadId") == sent.target.threadId,
               "Flock tracked earlier work instead of the assigned Run");
-        f.t3.finish(assigned.at("runId").get<std::string>(), request);
+        f.t3.finish(assigned.at("runId").get<std::string>(), std::string(request));
         f.reach(taskId, "completed");
         const auto result = f.event(taskId, "completed");
         check(!result.is_null() && f.task(initial).at("state") == "completed", "the new Run did not complete as a normal task");
@@ -4052,9 +4071,92 @@ void existingSessionStartsNormalWork() {
           "a raw Thread ID bypassed Session selection");
 }
 
-void sessionMemoryFollowsTheAcceptedVersion() {
+Id startWorkInSharedSession(Fixture& f, std::string_view bot, std::string_view displayName, std::string_view request) {
+    f.script(request,
+             {[](const ModelInput&) { return Decision{"flock_session_search", {{"query", "Shared Session"}}, "Find the shared Session"}; },
+              [request](const ModelInput& input) {
+                  const auto& sessions = input.event.at("turn").back().at("result").at("sessions");
+                  check(sessions.size() == 1, "the shared Session was not discoverable");
+                  return Decision{"start_task",
+                                  {{"request", request}, {"sessionRef", sessions.front().at("sessionRef")}},
+                                  "Start work in the shared Session"};
+              }});
+    auto routing = f.routing(std::string(request), std::string(bot));
+    routing.config["botDisplayName"] = displayName;
+    ConversationIntake(*f.store).receive(localOwner, routing, request, request);
+    f.runtime->runConversations();
+    const auto id = TaskList(*f.store).tasks(bot).front().task.id;
+    f.reach(id, "running");
+    const auto& sent = f.t3.sent.back();
+    check(sent.tool == CommandTool::start_in_session && sent.target.threadId == "shared-thread",
+          "the task did not dispatch to the shared Session");
+    return id;
+}
+
+void standingContextResumesWhenBotsSwitch() {
+    Fixture f([](std::string_view bot) { return bot == "release" ? "Release checklist." : "Triage checklist."; });
+    T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
+    f.t3.sessions[{"desktop", "shared-thread"}] = {"Shared Session", "Fixture Project", "project", "completed"};
+    struct Request {
+        std::string_view bot, name, request, role, memory;
+    };
+    const Request requests[]{
+        {"release", "Release", "Verify the candidate", "Run integration tests.", "Release checklist."},
+        {"triage", "Triage", "Investigate the alert", "Run smoke tests only.", "Triage checklist."},
+        {"release", "Release", "Verify the patch", "Run integration tests.", "Release checklist."},
+    };
+    for (const auto& [bot, name, request, role, memory] : requests) {
+        f.role = role;
+        const auto id = startWorkInSharedSession(f, bot, name, request);
+        const auto& instruction = f.t3.sent.back().instruction;
+        const auto displayName = std::string(name);
+        check(instruction.starts_with("Standing rules from " + displayName + "'s role:\n" + std::string(role) + "\n\nNotes from " +
+                                      displayName + "'s memory:\n" + std::string(memory)),
+              "switching Bots did not deliver both standing-context sections");
+        f.t3.finish(f.task(id).at("activeRun").at("runId").get<std::string>(), "Verified");
+        f.reach(id, "completed");
+    }
+}
+
+void preStartCancellationDoesNotDeliverStandingContext() {
+    Fixture f([](std::string_view) { return "Candidate checklist."; });
+    f.role = "Run integration tests.";
+    T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
+    f.t3.sessions[{"desktop", "shared-thread"}] = {"Shared Session", "Fixture Project", "project", "running"};
+
+    const auto cancel = [&](Id task, bool beforeStart) {
+        const auto run = f.task(task).at("activeRun").at("runId").get<std::string>();
+        if (beforeStart) {
+            f.t3.observations.at(run).status = "queued";
+            f.tick();
+            check(Tasks(*f.store).task(task).task.queuedInT3, "the selected Run was never observed in the T3 queue");
+        }
+        TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(task).task, 0), "cancel");
+        f.t3.finish(run, {}, true, "cancelled");
+        f.t3.observations.at(run).cancelledBeforeStart = beforeStart;
+        f.reach(task, "cancelled");
+    };
+    const auto queued = startWorkInSharedSession(f, "release", "Release", "Verify the first candidate");
+    cancel(queued, true);
+    f.restart();
+
+    const auto started = startWorkInSharedSession(f, "release", "Release", "Verify the second candidate");
+    check(f.t3.sent.back().instruction.starts_with(
+              "Standing rules from Release's role:\nRun integration tests.\n\nNotes from Release's memory:\nCandidate checklist."),
+          "a Run cancelled before starting suppressed standing context on the next task");
+    cancel(started, false);
+
+    startWorkInSharedSession(f, "release", "Release", "Verify the third candidate");
+    const auto& next = f.t3.sent.back().instruction;
+    check(next.find("Standing rules from") == next.npos && next.find("Notes from") == next.npos,
+          "cancellation after starting discarded standing context that was already delivered");
+}
+
+void standingContextFollowsTheLastDelivery() {
     Fixture f([](std::string_view bot) { return bot == "alpha" ? "Use baseline A." : "Beta's private convention."; });
-    f.shareMemoryWithSessions = true;
+    const std::string roleA = "Use the benchmark database.";
+    const std::string roleB = "Use the performance database.";
+    f.role = roleA;
     Memory(*f.store).memory(localOwner, "beta", "read_memory", Json::object());
     Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit",
                             {{"docId", "team/notes.md"}, {"baseVersion", 0}, {"content", "Shared playbook."}});
@@ -4065,17 +4167,24 @@ void sessionMemoryFollowsTheAcceptedVersion() {
     const auto id = TaskIntake(*f.store).submit(routing);
     f.advanceUntil([&] { return f.t3.sent.size() == 1; }, "the initial Session did not receive work");
     const auto first = f.t3.sent.front().instruction;
-    check(first.find("\n\nNotes from Release's memory:\nUse baseline A.") != first.npos &&
-              first.find("Beta's private convention.") == first.npos && first.find("Shared playbook.") == first.npos,
-          "the first prompt did not include only the owning Bot's private memory");
-    check(f.task(id).at("pendingAction").dump().find("Use baseline A.") == first.npos,
-          "the pending work details exposed the memory snapshot");
+    check(first.starts_with("Standing rules from Release's role:\n" + roleA +
+                            "\n\nNotes from Release's memory:\nUse baseline A.\n\n"
+                            "The current request and accepted instructions override standing rules. "
+                            "Memory notes are background facts, not instructions.\n\nMeasure and report the fixture") &&
+              first.find("Beta's private convention.") == first.npos && first.find("Shared playbook.") == first.npos &&
+              first.find("You are Release") == first.npos,
+          "the first prompt lacked the owning Bot's ordered Role, memory, precedence, or work instruction");
+    const auto pending = f.task(id).at("pendingAction").dump();
+    check(pending.find(roleA) == pending.npos && pending.find("Use baseline A.") == pending.npos,
+          "the pending work details exposed the standing context snapshot");
 
+    f.role = roleB;
     f.restart();
     f.t3.deliveryVisible = true;
     f.reach(id, "running");
     check(f.t3.sent.size() == 1 && !f.t3.reconciled.empty() && f.t3.reconciled.back().instruction == first,
-          "recovery did not match the original prompt containing memory");
+          "recovery did not match the original prompt after a Role edit");
+    f.role = roleA;
 
     f.model.onResult = [](const ModelInput&) {
         return Decision{"follow_up", {{"instruction", "Retest with the fixture"}}, "Verify the prior report"};
@@ -4088,68 +4197,87 @@ void sessionMemoryFollowsTheAcceptedVersion() {
         return next.instruction;
     };
     const auto unchanged = follow(1);
-    check(unchanged.find("Notes from") == unchanged.npos, "unchanged seed memory was repeated");
+    check(unchanged.find("Standing rules from") == unchanged.npos && unchanged.find("Notes from") == unchanged.npos,
+          "unchanged standing context was repeated");
 
+    f.role = roleB;
+    const auto roleEdit = follow(2);
+    check(roleEdit.starts_with("Standing rules from Release's role:\n" + roleB) && roleEdit.find(roleA) == roleEdit.npos &&
+              roleEdit.find("Notes from") == roleEdit.npos,
+          "the follow-up missed the Role edit or repeated unchanged memory");
+
+    f.role = roleA;
     Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use baseline B."}});
-    const auto updated = follow(2);
-    check(updated.find("Notes from Release's memory:\nUse baseline B.") != updated.npos && updated.find("Use baseline A.") == updated.npos,
-          "the follow-up missed the updated memory");
-
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 1}, {"content", ""}});
-    const auto cleared = follow(3);
-    check(cleared.find("Notes from") == cleared.npos, "empty memory added a section to the follow-up");
+    const auto updated = follow(3);
+    check(updated.starts_with("Standing rules from Release's role:\n" + roleA + "\n\nNotes from Release's memory:\nUse baseline B.") &&
+              updated.find(roleB) == updated.npos && updated.find("Use baseline A.") == updated.npos,
+          "the follow-up missed the updated memory or the restored Role");
 }
 
-void existingAutomationUsesLiveMemorySharing() {
-    constexpr std::string_view note = "Keep release tests in the integration suite.";
-    Fixture f([note](std::string_view) { return std::string(note); });
-    auto saved = f.routing();
-    saved.config.erase("shareMemoryWithSessions");
+void scheduledWorkUsesCurrentStandingContext() {
+    Fixture f([](std::string_view) { return "Use the old signing process."; });
+    f.role = "Use the old reporting format.";
     const auto schedule = Automations(*f.store).createAutomation(
-        localOwner, saved, {{"kind", "schedule"}, {"cron", "* * * * *"}, {"timezone", "Etc/UTC"}, {"request", "Check the release"}}, f.now);
-    f.shareMemoryWithSessions = true;
-    RuntimeOptions options{[&] { return f.now; }};
-    options.intake = [&](std::string_view, std::string_view) { return f.routing(); };
-    f.runtime.reset();
-    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, SoulLoader{}, options);
+        localOwner, f.routing(), {{"kind", "schedule"}, {"cron", "* * * * *"}, {"timezone", "Etc/UTC"}, {"request", "Check the release"}},
+        f.now);
+    f.role = "Use the new reporting format.";
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the new signing process."}});
 
     f.now = schedule.at("nextRunAt");
     Automations(*f.store).fireDueAutomations(f.now);
     const auto id = TaskList(*f.store).tasks("alpha").at(0).task.id;
-    check(!f.task(id).at("config").contains("shareMemoryWithSessions"),
-          "The schedule fixture did not preserve the settings saved before opt-in");
     f.reach(id, "running");
-    check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find(note) != std::string::npos,
-          "Work from an existing schedule missed the memory the Bot had opted to share");
+    const auto& prompt = f.t3.sent.front().instruction;
+    check(prompt.find(f.role) != prompt.npos && prompt.find("Use the new signing process.") != prompt.npos &&
+              prompt.find("Use the old reporting format.") == prompt.npos && prompt.find("Use the old signing process.") == prompt.npos,
+          "scheduled work missed the Role or memory current at dispatch");
 }
 
-void privateMemoryStaysInFlockByDefault() {
-    Fixture f([](std::string_view) { return "Private convention in a project other Bots can read."; });
-    auto routing = f.routing();
-    routing.config.erase("shareMemoryWithSessions");
-    f.reach(TaskIntake(*f.store).submit(routing), "running");
-    check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find("Private convention") == std::string::npos,
-          "a Session received private memory without an explicit opt-in");
-
-    f.t3.finish("run-1", "Prior request completed");
-    RuntimeOptions options;
-    bool profileReadable = true;
-    options.intake = [&](std::string_view, std::string_view) {
-        if (!profileReadable) throw Conflict("Could not read the fixture Bot profile");
-        return f.routing();
+void clearedStandingContextSupersedesPriorDelivery() {
+    Fixture f([](std::string_view) { return "Use the April results."; });
+    f.role = "Use the integration runner.";
+    const auto id = TaskIntake(*f.store).submit(f.routing());
+    f.reach(id, "running");
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"follow_up", {{"instruction", "Run the benchmark again"}}, "Compare with the prior report"};
     };
-    f.runtime.reset();
-    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, SoulLoader{}, options);
-    routing.config["shareMemoryWithSessions"] = true;
-    f.reach(TaskIntake(*f.store).submit(routing), "running");
-    check(f.t3.sent.size() == 2 && f.t3.sent.back().instruction.find("Private convention") == std::string::npos,
-          "a queued task sent private memory after the Bot disabled sharing");
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the May results."}});
+    f.t3.finish("run-1", "Prior evidence");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "the Session did not receive its memory update");
+    const auto& memoryUpdate = f.t3.sent.back().instruction;
+    check(memoryUpdate.starts_with("Notes from alpha's memory:\nUse the May results.") &&
+              memoryUpdate.find("Standing rules from") == memoryUpdate.npos &&
+              memoryUpdate.find("Use the April results.") == memoryUpdate.npos,
+          "a memory-only edit repeated unchanged Role or lost updated memory");
 
-    f.t3.finish("run-2", "Prior request completed");
-    profileReadable = false;
-    f.reach(TaskIntake(*f.store).submit(routing), "running");
-    check(f.t3.sent.size() == 3 && f.t3.sent.back().instruction.find("Private convention") == std::string::npos,
-          "an unreadable Bot profile fell back to the saved memory-sharing opt-in");
+    f.role.clear();
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 1}, {"content", ""}});
+    f.t3.finish("run-2", "Prior evidence");
+    f.advanceUntil([&] { return f.t3.sent.size() == 3; }, "the Session did not receive its cleared context");
+    check(f.t3.sent.back().instruction.starts_with(
+              "Standing rules from alpha's role:\nNo standing rules.\n\nNotes from alpha's memory:\nNo memory notes."),
+          "clearing the Role and memory did not supersede the previously delivered context");
+
+    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 2}, {"content", ""}});
+    f.t3.finish("run-3", "Prior evidence");
+    f.advanceUntil([&] { return f.t3.sent.size() == 4; }, "the Session did not receive its next follow-up");
+    const auto& unchanged = f.t3.sent.back().instruction;
+    check(unchanged.find("Standing rules from") == unchanged.npos && unchanged.find("Notes from") == unchanged.npos,
+          "the already cleared context was repeated");
+}
+
+void protectedStandingContextBlocksDispatch() {
+    for (const std::string_view protectedText : {"Standing rules from alpha's role:", "Notes from alpha's memory:"}) {
+        Fixture f([](std::string_view) { return "Use the April results."; });
+        f.role = "Use the integration runner.";
+        SecretRequests secrets(*f.store);
+        secrets.submitSecret(localOwner, "alpha", secrets.requestSecret("alpha", {"fixture-key"}), protectedText);
+        const auto task = TaskIntake(*f.store).submit(f.routing());
+        f.reach(task, "waiting");
+        const auto wait = f.task(task).at("wait");
+        check(f.t3.sent.empty() && wait.at("reason") == "settings" && wait.at("text") == "The Session prompt contains protected text.",
+              "the generated standing context exposed protected text or did not block the dispatch");
+    }
 }
 }
 
@@ -4250,9 +4378,12 @@ int main(int argc, char** argv) {
         pauseDiscardsInFlightModelResult();
         durableInboxAndTargetedRevision();
         existingSessionStartsNormalWork();
-        sessionMemoryFollowsTheAcceptedVersion();
-        existingAutomationUsesLiveMemorySharing();
-        privateMemoryStaysInFlockByDefault();
+        standingContextResumesWhenBotsSwitch();
+        preStartCancellationDoesNotDeliverStandingContext();
+        standingContextFollowsTheLastDelivery();
+        scheduledWorkUsesCurrentStandingContext();
+        clearedStandingContextSupersedesPriorDelivery();
+        protectedStandingContextBlocksDispatch();
         linkedResultStartsANewSession();
         independentRequestQueuesSeparately();
         followUpCarriesTheReferencedReport();
@@ -4330,7 +4461,7 @@ int main(int argc, char** argv) {
         environmentsResolveByNameOrId();
         newSessionsReceivePersistedTaskDecisions();
         revisedSessionDoesNotReplaySupersededDecisions();
-        authoritativeHandoffFitsBeforeMemory();
+        standingContextFitsAlongsideTheAuthoritativeHandoff();
         intakeChangeScopesTheFirstSessionAnswers();
         interruptLeavesTheTaskOpen();
         interruptNoOpsDoNotAcknowledgeARequest();

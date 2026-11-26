@@ -172,8 +172,7 @@ void reopenDirectTask(const std::filesystem::path& path) {
         BotAccess{store}.setOwner(requester, "release");
         PolicyRules{store}.setMode(localOwner, "supervised");
         Memory(store).memory(requester, "release", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the old signing process."}});
-        task =
-            TaskIntake(store).submit({"release", "Build the release", "env", "project", {{"shareMemoryWithSessions", true}}}, &requester);
+        task = TaskIntake(store).submit({"release", "Build the release", "env", "project", Json::object()}, &requester);
     }
     Store reopened(path);
     FixtureModel model;

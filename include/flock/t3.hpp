@@ -42,6 +42,7 @@ struct Observation {
     std::string sessionCreatedAt{};
     std::string checkedCommit{};
     bool commitEvidenceUnavailable = false;
+    bool cancelledBeforeStart = false;
 };
 enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun, TargetGone };
 enum class QueueCancelOutcome { Cancelled, AlreadyStarted, NotCancellable, Retry };

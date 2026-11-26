@@ -18,20 +18,23 @@ class Database;
 class SecretRedactor;
 class SecretStorage;
 struct BotNotes;
-struct Command;
 struct ModelInput;
 struct Person;
-struct SessionMemory;
+struct SessionContext;
 namespace conversation {
 struct Message;
 }
+
+struct SessionContextTarget {
+    std::string_view bot, displayName, environmentId, threadId;
+};
 
 class MemoryStorage {
 public:
     MemoryStorage(Database&, const SecretStorage&, Policy&, ConversationStorage&, MemorySeed);
 
     BotNotes loadNotes(std::string_view bot, const SoulLoader& soul, Seconds now);
-    std::optional<SessionMemory> sessionMemory(const Command&, Seconds now);
+    SessionContext sessionContext(const SessionContextTarget&, const SoulLoader&, const SecretRedactor&, std::size_t bytes, Seconds now);
     Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&, Seconds now, bool fromBot = false);
     bool canReviewPreference(const conversation::Message&);
     bool preferenceReviewPending(Id message, int step) const;
