@@ -95,7 +95,6 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
         storage.channelStorage.dropPausedBotDeliveries(bot);
     } else {
         storage.automationStorage.skipDueAutomations(bot, clock());
-        storage.gitStorage.skipPendingGitWebhooks(bot);
         storage.database.exec("DELETE FROM bot_pauses WHERE bot=?", {bot});
     }
 

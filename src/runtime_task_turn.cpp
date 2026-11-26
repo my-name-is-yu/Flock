@@ -80,6 +80,7 @@ std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, cons
     if (!receiving) {
         std::lock_guard lock(database.mutex);
         if (decisions.canComplete(task, event)) tools.push_back("complete");
+        if (!peer && !task.workflow && !task.replanning) tools.push_back("wait_for_event");
     }
     if (canRead && event["evidence"].size() < SessionHistory::maxEvidenceReads) tools.push_back("read_bot_evidence");
     if (canSend && (!task.selectedSession || RunReports::hasSettledRun(task))) tools.push_back("send_bot_message");
@@ -199,6 +200,7 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
     event.erase("evidence");
     event.erase("consumed");
     if (gitHost && event.at("kind") == "result") gitStorage.projectTaskGitReads(*gitHost, task, event);
+    if (event.at("kind") == "external_check") gitStorage.projectExternalCheck(gitHost, task, event);
     TaskInference inference{task.generation, event.at("id"), attempt, task.currentRevision};
     try {
         auto turn = modelCalls.callModel(task.botId, model,
@@ -262,7 +264,7 @@ AND id>coalesce((SELECT max(id) FROM journal WHERE task_id=? AND kind='model_ret
             auto rows = database.query(R"SQL(
 SELECT id,kind,data,json_extract(data,'$.run.threadId'),json_extract(data,'$.resultRunId'),
        json_extract(data,'$.itemId'),coalesce(json_extract(data,'$.environmentId'),json_extract(data,'$.run.environmentId')) FROM journal WHERE task_id=?
-AND kind IN ('decision','report','user_answer','session_answered','bot_message') ORDER BY id DESC LIMIT 6
+AND kind IN ('decision','report','user_answer','session_answered','bot_message','git_webhook') ORDER BY id DESC LIMIT 6
 )SQL",
                                        {task.id});
             std::size_t remaining = 16000;
@@ -307,7 +309,10 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         auto tools = available(task, event, peer, !choices.empty(), canRead);
         if (gitHost && !task.activeRun && event["kind"] == "result")
             tools.insert(tools.end(), gitTools(false).begin(), gitTools(false).end());
-        if (task.pendingInstructions.size() != pending.size()) std::erase(tools, "complete");
+        if (task.pendingInstructions.size() != pending.size()) {
+            std::erase(tools, "complete");
+            std::erase(tools, "wait_for_event");
+        }
         const bool replay = decision.has_value();
         if (!decision) decision = inferDecision(task, event, history, tools, pending, std::move(choices), peer);
         if (!decision || stop.stop_requested()) return;

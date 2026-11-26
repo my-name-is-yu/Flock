@@ -44,6 +44,10 @@ bool slug(std::string_view value) {
     return !value.empty() && value.size() <= 100 && value != "." && value != ".." && value.find_first_not_of(slugChars) == value.npos;
 }
 
+bool fullCommitSha(std::string_view sha) {
+    return (sha.size() == 40 || sha.size() == 64) && sha.find_first_not_of("0123456789abcdefABCDEF") == sha.npos;
+}
+
 std::string lower(std::string_view value) {
     std::string result(value);
     std::ranges::transform(result, result.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -106,11 +110,7 @@ std::string_view validate(const Decision& decision, bool conversation) {
     if (tool == "git_update_pr" && !args.contains("title") && !args.contains("body") && !args.contains("baseRef") &&
         !args.contains("state"))
         throw Conflict("Choose a PR field to update");
-    if (tool == "git_commit_status") {
-        const auto sha = field(args, "sha");
-        if ((sha.size() != 40 && sha.size() != 64) || sha.find_first_not_of("0123456789abcdefABCDEF") != sha.npos)
-            throw Conflict("Expected a full commit SHA");
-    }
+    if (tool == "git_commit_status" && !fullCommitSha(field(args, "sha"))) throw Conflict("Expected a full commit SHA");
     if (tool != "git_manage_issue") return op;
     const auto action = field(args, "action");
     const bool hasNumber = action == "read" || action == "list_comments" || action == "update";
@@ -315,6 +315,64 @@ WHERE r.task_id=? AND r.id=? AND a.task=r.task_id AND a.bot=?
         entry["result"] = {{"ok", false}, {"error", "Saved Git read is unavailable or access was denied"}};
     }
     projection.commit();
+}
+
+void GitStorage::projectExternalCheck(GitHost* host, const TaskData& task, Json& event) {
+    const auto context = taskGitContext(task);
+    const auto mayRead = [&](const GitRepository& repo) {
+        return permissions.allows(task.botId, Action::repository_read, repo.resource());
+    };
+    if (!event.contains("watchedPullRequests")) {
+        std::vector<std::pair<GitRepository, Id>> watches;
+        {
+            std::lock_guard lock(database.mutex);
+            auto rows =
+                database.query("SELECT host,repo,pr_number FROM git_pr_watches WHERE task_id=? ORDER BY host,repo,pr_number", {task.id});
+            while (rows.next()) watches.emplace_back(GitRepository{rows.string(0), rows.string(1)}, rows.number(2));
+        }
+        auto statuses = Json::array();
+        const auto scrub = secretStorage.sharedRedactor();
+        for (const auto& [repo, number] : watches) {
+            auto& entry = statuses.emplace_back(Json{{"host", repo.host},
+                                                     {"repo", repo.repo},
+                                                     {"prNumber", number},
+                                                     {"status", "unavailable"},
+                                                     {"checks", {{"status", "unavailable"}}}});
+            if (!host || host->name() != repo.host) continue;
+            const auto read = [&](const Decision& request) -> Json {
+                if (!mayRead(repo)) return nullptr;
+                try {
+                    if (repositoryAccess(permissions, *host, context, repo, "read"))
+                        return scrub.payload(host->call(context, repo, request), false, gitResultTextLimit);
+                } catch (const StorageError&) {
+                    throw;
+                } catch (const std::exception&) {
+                }
+                return nullptr;
+            };
+            auto pr = read({"git_pr_status", {{"host", repo.host}, {"repo", repo.repo}, {"prNumber", number}}, {}});
+            if (pr.is_null()) continue;
+            const auto sha = field(pr, "headSha");
+            if (fullCommitSha(sha)) {
+                auto checks = read({"git_commit_status", {{"host", repo.host}, {"repo", repo.repo}, {"sha", sha}}, {}});
+                if (!checks.is_null()) entry["checks"] = {{"status", "available"}, {"data", std::move(checks)}};
+            }
+            entry["status"] = "available";
+            entry["data"] = std::move(pr);
+        }
+        {
+            std::lock_guard lock(database.mutex);
+            database.exec("UPDATE events SET data=json_set(data,'$.watchedPullRequests',json(?)) WHERE id=? AND task_id=? AND consumed=0",
+                          {statuses, event.at("id"), task.id});
+        }
+        event["watchedPullRequests"] = std::move(statuses);
+    }
+    for (auto& entry : event.at("watchedPullRequests")) {
+        if (mayRead({field(entry, "host"), field(entry, "repo")})) continue;
+        entry.erase("data");
+        entry["status"] = "unavailable";
+        entry["checks"] = {{"status", "unavailable"}};
+    }
 }
 
 class GitStorage::GitPrMutationClaim {
@@ -543,8 +601,8 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
         const auto url = "https://" + repo.resource() + "/pull/" + std::to_string(pr);
         if (watchPr) {
             const auto sha = field(result.at("data"), "headSha");
-            result["watchAttached"] = watchGitPr(taskId, bot, runJson(context.run), eventCursor,
-                                                 {{repo, repo, {}, {}}, pr, url, {}, sha, false}, GitWatchStart::mutationAdmission);
+            result["watchAttached"] = watchGitPr(taskRecords.load(taskId), runJson(context.run), eventCursor,
+                                                 {{repo, repo, {}, {}}, pr, url, {}, sha, false}) == GitWatchResult::attached;
         }
         if (requestedReview && result.at("watchAttached") == true)
             gitInboxItem(taskRecords.load(taskId), reviewKey, url, "Pull request awaiting review", "Review requested on the Git host.");

@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 19;
+constexpr Id schemaVersion = 20;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -24,7 +24,8 @@ CREATE TABLE tasks(
   action_id TEXT NOT NULL, workflow_id INTEGER, workflow_stage_id TEXT, workflow_artifact_version TEXT, trigger_data TEXT,
   origin_environment_id TEXT, origin_thread_id TEXT, origin_gateway_environment_id TEXT, origin_title TEXT,
   selected_environment_id TEXT, selected_thread_id TEXT, selected_gateway_environment_id TEXT, selected_project_id TEXT,
-  run_outcome TEXT, data TEXT NOT NULL);
+  run_outcome TEXT, external_check_at INTEGER, data TEXT NOT NULL,
+  CHECK(external_check_at IS NULL OR state='external_waiting'));
 CREATE TABLE task_run_destinations(
   task_id INTEGER NOT NULL REFERENCES tasks(id), position INTEGER NOT NULL,
   name TEXT NOT NULL, environment_id TEXT NOT NULL, project_id TEXT NOT NULL,
@@ -34,6 +35,7 @@ CREATE TABLE task_run_destinations(
 CREATE INDEX tasks_route ON tasks(environment_id,project_id,id)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX tasks_bot ON tasks(bot_id,id DESC);
+CREATE INDEX tasks_external_check ON tasks(external_check_at) WHERE external_check_at IS NOT NULL;
 CREATE TABLE journal(
   id INTEGER PRIMARY KEY, task_id INTEGER REFERENCES tasks(id),
   time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, conversation_bot_id TEXT,
@@ -98,7 +100,7 @@ CREATE TABLE peer_exchanges(
   recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
   sender_environment TEXT NOT NULL, sender_revision INTEGER);
 CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
-CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN ('run_started','report');
+CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN ('completed','cancelled','peer_completed');
 CREATE INDEX journal_peer_message ON journal(task_id,exchange_id,id) WHERE kind='bot_message';
 CREATE INDEX journal_peer_evidence ON journal(task_id,exchange_id,peer_message_id,id) WHERE kind='read_bot_evidence';
 CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,git_event_id) WHERE kind='git_pr_followup_requested';
@@ -392,6 +394,7 @@ CREATE TABLE git_pr_watches(
  task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL,
  url TEXT NOT NULL, event_cursor INTEGER NOT NULL,
  PRIMARY KEY(host,repo,pr_number));
+CREATE INDEX git_pr_watches_by_task ON git_pr_watches(task_id);
 CREATE TABLE git_pr_heads(
  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,
  head_sha TEXT NOT NULL, synchronized INTEGER NOT NULL CHECK(synchronized IN (0,1)),
@@ -442,7 +445,7 @@ WITH candidates AS (
   FROM tasks task
   WHERE NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id)
     AND task.project_id<>''
-    AND task.state NOT IN ('completed','cancelled')
+    AND task.state NOT IN ('completed','cancelled','external_waiting')
     AND NOT (task.state='waiting' AND EXISTS (
       SELECT 1 FROM automation_before_dispatch undispatched
       JOIN waits wait ON wait.task_id=undispatched.id AND wait.resolution IS NULL
@@ -499,10 +502,11 @@ CREATE TABLE git_review_receipts(
   reviewer TEXT NOT NULL, after_event INTEGER NOT NULL,
   PRIMARY KEY(inbox_key,reviewer));
 CREATE INDEX git_review_receipts_target ON git_review_receipts(task_id,host,repo,pr_number,reviewer,after_event);
-CREATE TABLE git_pr_watch_origins(
-  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,
-  PRIMARY KEY(host,repo,pr_number),
-  FOREIGN KEY(host,repo,pr_number) REFERENCES git_pr_watches(host,repo,pr_number) ON DELETE CASCADE);
+CREATE TRIGGER stop_terminal_pr_watches AFTER UPDATE OF state ON tasks
+WHEN new.state IN ('completed','cancelled','cancelling') AND old.state<>new.state
+BEGIN
+  DELETE FROM git_pr_watches WHERE task_id=new.id;
+END;
 
 CREATE TABLE deleted_bots(bot TEXT PRIMARY KEY);
 

@@ -646,6 +646,37 @@ void correctInvalidTaskArguments() {
     f.reach(id, "running");
 }
 
+void externalWaitReleasesProjectAndAcceptsInstructions() {
+    Fixture f;
+    const auto task = f.submit("Wait for the release");
+    constexpr auto note = "Waiting for the release announcement";
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event.at("kind") == "conversation_turn") return converse(input, "send_to_task", task, Json::object());
+        if (input.event.at("kind") == "user_instruction") {
+            check(input.task.at("userInstructions").size() == 1, "The model did not receive the update");
+            return work();
+        }
+        if (input.task.at("id") != task) return work();
+        check(hasTool(input, "wait_for_event"), "External waiting was not offered");
+        if (input.event.at("decisionFeedback").empty())
+            return {"wait_for_event", {{"note", "Waiting\nfor release"}, {"checkAgainAfterMinutes", 5}}, {}};
+        return {"wait_for_event", {{"note", note}, {"checkAgainAfterMinutes", 5}}, {}};
+    };
+    f.reach(task, "external_waiting");
+    f.restart();
+    check(f.task(task).at("waitingNote") == note && !Tasks(*f.store).task(task).wait && f.logs(task, "tool_error") == 1,
+          "The one-line note was not persisted independently of a user wait");
+    const auto other = f.submit("Another task in the same project");
+    f.reach(other, "running");
+    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "release-update", "The release was announced");
+    f.runtime->runConversations();
+    check(f.task(task).at("state") == "queued" && !f.task(task).contains("waitingNote"), "New input did not wake the waiting task");
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(other).task, 0), "cancel");
+    f.t3.finish("run-1", "cancelled");
+    f.reach(other, "cancelled");
+    f.reach(task, "running");
+}
+
 void replayQuestionDecision(std::string_view outage = {}) {
     for (const bool stillOpen : {true, false}) {
         Fixture f;
@@ -1157,9 +1188,13 @@ void settledReportCanRecoverAfterRestart() {
         observation.itemId.clear();
         observation.detail = secret;
         f.runtime->tick();
+        const auto history = TaskHistory(*f.store).history(id);
         check(f.task(id)["activeRun"].is_null() && f.task(id)["lastRun"]["runId"] == "run-1" &&
-                  TaskHistory(*f.store).sessionTasks("alpha", 0, 1).at(0).runs.at(0).status == "completed" &&
-                  TaskHistory(*f.store).history(id).dump().find(secret) == std::string::npos,
+                  std::ranges::any_of(history,
+                                      [](const Json& entry) {
+                                          return entry.at("kind") == "run_settled" && entry.at("data").at("status") == "completed";
+                                      }) &&
+                  history.dump().find(secret) == std::string::npos,
               "missing evidence kept the Run active or leaked diagnostics");
         const auto polls = f.t3.polls;
         int attempts = 0;
@@ -2840,7 +2875,8 @@ int main() {
                                                                                    {"invalid decisions", invalidDecisions},
                                                                                    {"correct invalid task arguments",
                                                                                     correctInvalidTaskArguments},
-
+                                                                                   {"external wait releases project and accepts instructions",
+                                                                                    externalWaitReleasesProjectAndAcceptsInstructions},
                                                                                    {"failed preflight", failedPreflightIsUnsent},
                                                                                    {"replay saved question decision",
                                                                                     [] { replayQuestionDecision(); }},

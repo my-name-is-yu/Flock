@@ -8,6 +8,7 @@
 
 #include <string>
 #include <string_view>
+#include <functional>
 #include <optional>
 
 namespace flockv0 {
@@ -28,7 +29,8 @@ public:
     TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage, JournalStorage& journalStorage,
                   MemoryStorage& memoryStorage, PeerStorage& peerStorage, SecretStorage& secretStorage, TaskEvents& taskEvents,
                   TaskRecords& taskRecords, WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
-                  PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead, GitHost* gitHost);
+                  PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead, GitHost* gitHost,
+                  const std::function<Seconds()>& clock);
 
     bool canComplete(const TaskData& task, const Json& event) const;
     struct LearningSource {
@@ -63,5 +65,6 @@ private:
     OutboxDispatch& dispatch;
     const std::string& sessionRead;
     GitHost* gitHost;
+    const std::function<Seconds()>& clock;
 };
 }

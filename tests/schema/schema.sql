@@ -16,6 +16,7 @@ VALUES
     ('index', 'fulfilled_secret', 'protected_inputs', 'CREATE UNIQUE INDEX fulfilled_secret ON protected_inputs(name) WHERE status=''fulfilled'''),
     ('index', 'git_events_repo', 'git_webhook_events', 'CREATE INDEX git_events_repo ON git_webhook_events(host,repo)'),
     ('index', 'git_pr_history', 'git_pr_operations', 'CREATE INDEX git_pr_history ON git_pr_operations(task_id,host,base_repo,base_ref,head_repo,head_ref)'),
+    ('index', 'git_pr_watches_by_task', 'git_pr_watches', 'CREATE INDEX git_pr_watches_by_task ON git_pr_watches(task_id)'),
     ('index', 'git_review_receipts_target', 'git_review_receipts', 'CREATE INDEX git_review_receipts_target ON git_review_receipts(task_id,host,repo,pr_number,reviewer,after_event)'),
     ('index', 'git_task_reads_by_task', 'git_task_reads', 'CREATE INDEX git_task_reads_by_task ON git_task_reads(task_id,id)'),
     ('index', 'inbox_decisions_by_bot', 'inbox_decisions', 'CREATE INDEX inbox_decisions_by_bot ON inbox_decisions(bot_id,id)'),
@@ -34,7 +35,7 @@ VALUES
     ('index', 'journal_report_run', 'journal', 'CREATE INDEX journal_report_run ON journal(task_id,run_environment_id,run_thread_id,run_id,revision_id)
   WHERE kind=''report'''),
     ('index', 'journal_sent_action', 'journal', 'CREATE INDEX journal_sent_action ON journal(task_id,action_id,id) WHERE kind=''send_started'''),
-    ('index', 'journal_session_changes', 'journal', 'CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN (''run_started'',''report'')'),
+    ('index', 'journal_session_changes', 'journal', 'CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN (''completed'',''cancelled'',''peer_completed'')'),
     ('index', 'journal_task', 'journal', 'CREATE INDEX journal_task ON journal(task_id,id)'),
     ('index', 'journal_task_results', 'journal', 'CREATE INDEX journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN (''completed'',''report'',''cancelled'')'),
@@ -91,7 +92,6 @@ VALUES
     ('index', 'sqlite_autoindex_git_mutations_2', 'git_mutations', NULL),
     ('index', 'sqlite_autoindex_git_pr_heads_1', 'git_pr_heads', NULL),
     ('index', 'sqlite_autoindex_git_pr_operations_1', 'git_pr_operations', NULL),
-    ('index', 'sqlite_autoindex_git_pr_watch_origins_1', 'git_pr_watch_origins', NULL),
     ('index', 'sqlite_autoindex_git_pr_watches_1', 'git_pr_watches', NULL),
     ('index', 'sqlite_autoindex_git_review_receipts_1', 'git_review_receipts', NULL),
     ('index', 'sqlite_autoindex_git_task_reads_1', 'git_task_reads', NULL),
@@ -132,6 +132,7 @@ VALUES
     ('index', 'sqlite_autoindex_workflow_stages_1', 'workflow_stages', NULL),
     ('index', 'sqlite_autoindex_workflow_stages_2', 'workflow_stages', NULL),
     ('index', 'tasks_bot', 'tasks', 'CREATE INDEX tasks_bot ON tasks(bot_id,id DESC)'),
+    ('index', 'tasks_external_check', 'tasks', 'CREATE INDEX tasks_external_check ON tasks(external_check_at) WHERE external_check_at IS NOT NULL'),
     ('index', 'tasks_route', 'tasks', 'CREATE INDEX tasks_route ON tasks(environment_id,project_id,id)
   WHERE state NOT IN (''completed'',''cancelled'')'),
     ('index', 'unresolved_git_pr_target', 'git_pr_operations', 'CREATE UNIQUE INDEX unresolved_git_pr_target
@@ -236,10 +237,6 @@ VALUES
  task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL, invocation TEXT NOT NULL,
  event_cursor INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN (''pending'',''created'',''ambiguous'',''failed'',''rejected'')),
  pr_number INTEGER, url TEXT)'),
-    ('table', 'git_pr_watch_origins', 'git_pr_watch_origins', 'CREATE TABLE git_pr_watch_origins(
-  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,
-  PRIMARY KEY(host,repo,pr_number),
-  FOREIGN KEY(host,repo,pr_number) REFERENCES git_pr_watches(host,repo,pr_number) ON DELETE CASCADE)'),
     ('table', 'git_pr_watches', 'git_pr_watches', 'CREATE TABLE git_pr_watches(
  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
  task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL,
@@ -440,7 +437,8 @@ VALUES
   action_id TEXT NOT NULL, workflow_id INTEGER, workflow_stage_id TEXT, workflow_artifact_version TEXT, trigger_data TEXT,
   origin_environment_id TEXT, origin_thread_id TEXT, origin_gateway_environment_id TEXT, origin_title TEXT,
   selected_environment_id TEXT, selected_thread_id TEXT, selected_gateway_environment_id TEXT, selected_project_id TEXT,
-  run_outcome TEXT, data TEXT NOT NULL)'),
+  run_outcome TEXT, external_check_at INTEGER, data TEXT NOT NULL,
+  CHECK(external_check_at IS NULL OR state=''external_waiting''))'),
     ('table', 'waits', 'waits', 'CREATE TABLE waits(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   reason TEXT NOT NULL, data TEXT NOT NULL, resolution TEXT)'),
@@ -466,6 +464,11 @@ VALUES
     ('table', 'workflows', 'workflows', 'CREATE TABLE workflows(
         id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,routing TEXT NOT NULL,request TEXT NOT NULL,
         message_id INTEGER NOT NULL REFERENCES messages,stop_requested INTEGER NOT NULL DEFAULT 0)'),
+    ('trigger', 'stop_terminal_pr_watches', 'tasks', 'CREATE TRIGGER stop_terminal_pr_watches AFTER UPDATE OF state ON tasks
+WHEN new.state IN (''completed'',''cancelled'',''cancelling'') AND old.state<>new.state
+BEGIN
+  DELETE FROM git_pr_watches WHERE task_id=new.id;
+END'),
     ('view', 'automation_before_dispatch', 'automation_before_dispatch', 'CREATE VIEW automation_before_dispatch AS
 SELECT task.id FROM tasks task
 WHERE task.project_id<>'''' AND task.trigger_data IS NOT NULL AND task.active_run IS NULL AND task.last_run IS NULL
@@ -522,7 +525,7 @@ WITH candidates AS (
   FROM tasks task
   WHERE NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id)
     AND task.project_id<>''''
-    AND task.state NOT IN (''completed'',''cancelled'')
+    AND task.state NOT IN (''completed'',''cancelled'',''external_waiting'')
     AND NOT (task.state=''waiting'' AND EXISTS (
       SELECT 1 FROM automation_before_dispatch undispatched
       JOIN waits wait ON wait.task_id=undispatched.id AND wait.resolution IS NULL

@@ -87,7 +87,7 @@ const sessionEndLabels = {
 const stateLabels = {
   ...sessionEndLabels,
   queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for you',
-  confirmation_pending: 'Confirmation pending',
+  confirmation_pending: 'Confirmation pending', external_waiting: 'Waiting',
   cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot', paused: 'Paused',
 };
@@ -1002,6 +1002,64 @@ function workflowInspectors(data, open) {
   }
   return sections;
 }
+function finishedSessionRow(request, session) {
+  const startedAt = Date.parse(session.createdAt);
+  const started = Number.isFinite(startedAt) ? startedLabel(startedAt) : '';
+  const quiet = session.state === 'completed' && !!started;
+  const end = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
+  const status = quiet ? started : [end, started].filter(Boolean).join(' · ');
+  const tone = quiet ? 'quiet' : session.state === 'failed' ? 'failed' : '';
+  const row = sessionRow(request, session, status, tone, startedAt);
+  if (quiet) row.querySelector('.activity-mark').after(node('span', 'sr-only', 'Complete, started '));
+  return row;
+}
+function requestRow(task, sessions, renderRow, renderSession = renderRow) {
+  const taskStatus = { state: task.state };
+  if (sessions.length < 2) return renderRow(task.request, sessions[0] ?? taskStatus);
+  const item = node('div', 'request-task');
+  const links = node('div', 'request-sessions');
+  for (const session of sessions)
+    links.append(renderSession('', { ...session, name: session.name ?? 'T3 Session' }));
+  item.append(renderRow(task.request, taskStatus), links);
+  return item;
+}
+function requestGroups(history, activeTasks, parallelTasks) {
+  const runsByTask = new Map(parallelTasks.map(task => [task.id, task.runs.filter(run => run.threadId)]));
+  const groups = { working: [], waiting: [], done: [] };
+  for (const task of [...activeTasks].sort((a, b) => b.id - a.id)) {
+    const sessions = runsByTask.get(task.id) ?? (task.session ? [{ ...task.session, state: task.state }] : []);
+    if (task.state === 'external_waiting') {
+      const renderWaiting = (request, session) => {
+        const row = sessionRow(request, session, task.waitingNote, 'waiting');
+        row.dataset.tooltip = [task.waitingNote, row.dataset.tooltip].join(' · ');
+        return row;
+      };
+      groups.waiting.push(requestRow(task, sessions, renderWaiting, finishedSessionRow));
+      continue;
+    }
+    groups.working.push(requestRow(task, sessions, (request, session) => sessionRow(request, session,
+      stateLabels[session.state] ?? session.state, session.state === 'confirmation_pending' ? 'waiting' :
+        !Object.hasOwn(sessionEndLabels, session.state) ? 'live' : '',
+      task.createdAt ? task.createdAt * 1000 : undefined)));
+  }
+  const finished = [...history].sort((a, b) => b.id - a.id);
+  for (const task of finished) {
+    const renderDone = (request, session) => finishedSessionRow(request, { ...session, state: task.state });
+    groups.done.push(requestRow(task, task.sessions, renderDone, finishedSessionRow));
+  }
+  const sections = [];
+  for (const [key, label] of [['working', 'Working'], ['waiting', 'Waiting'], ['done', 'Done']]) {
+    const tasks = groups[key];
+    if (!tasks.length) continue;
+    const section = node('section', 'request-group');
+    section.dataset.sessionGroup = key;
+    const heading = node('h3', 'activity-group');
+    heading.append(node('span', null, label), node('span', 'activity-group-count', tasks.length));
+    section.append(heading, ...tasks);
+    sections.push(section);
+  }
+  return sections;
+}
 let activityBotId = null;
 let activitySeen = false;
 let activityReveal = null;
@@ -1035,49 +1093,17 @@ function renderActivity() {
     else if (revealedWaits && rows.length) triggerRowReveal(elements['wait-list']);
     elements['wait-list'].closest('section').hidden = !loading && !rows.length;
   }
-  const groups = [...(view?.loadedSessions.values() ?? [])].filter(task => task.id >= view.sessionsBefore);
-  const active = data?.activeSessions ?? [];
+  const history = [...(view?.loadedSessions.values() ?? [])];
+  const activeTasks = data?.activeTasks ?? [];
+  const parallelTasks = data?.parallelTasks ?? [];
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (changed('sessions', view?.id, loading, groups, active, data?.workflows, data?.compactions, dayFormat.format(Date.now()))) {
+  if (changed('sessions', view?.id, loading, history, activeTasks, parallelTasks,
+    data?.workflows, data?.compactions, dayFormat.format(Date.now()))) {
     const revealedSessions = previousSessionsLoading && !loading;
     previousSessionsLoading = loading;
-    const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
-    const activeKeys = new Set();
-    const live = [];
-    for (const run of active) {
-      const identity = key(run.taskId, run);
-      if (activeKeys.has(identity)) continue;
-      activeKeys.add(identity);
-      live.push(sessionRow(run.request, run, stateLabels[run.state] ?? run.state,
-        ['waiting', 'confirmation_pending'].includes(run.state) ? 'waiting' : 'live',
-        run.createdAt ? run.createdAt * 1000 : undefined));
-    }
-    const ended = [];
-    for (const task of groups.sort((a, b) => b.id - a.id)) {
-      for (const session of task.sessions) {
-        if (activeKeys.has(key(task.id, session))) continue;
-        const startedAt = Date.parse(session.createdAt);
-        const started = Number.isFinite(startedAt) ? startedLabel(startedAt) : '';
-        const quiet = session.state === 'completed' && !!started;
-        const end = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
-        const status = quiet ? started : [end, started].filter(Boolean).join(' · ');
-        const tone = quiet ? 'quiet' : session.state === 'failed' ? 'failed' : '';
-        const row = sessionRow(task.request, session, status, tone, startedAt);
-        if (quiet) row.querySelector('.activity-mark').after(node('span', 'sr-only', 'Complete, started '));
-        ended.push(row);
-      }
-    }
-    const rows = [];
-    const grouped = live.length > 0 && ended.length > 0;
-    for (const [label, items] of [['Active', live], ['Ended', ended]]) {
-      if (!items.length) continue;
-      if (!grouped) { rows.push(...items); continue; }
-      const heading = node('h3', 'activity-group');
-      heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
-      rows.push(heading, ...items);
-    }
+    const rows = requestGroups(history, activeTasks, parallelTasks);
     const list = elements['session-list'];
     const open = new Set(Array.from(list.querySelectorAll('details[open]'), (item) => item.dataset.inspector));
     rows.push(...workflowInspectors(data, open));
@@ -1745,7 +1771,7 @@ function syncTimelineAvatar(row, show, bot) {
   else if (!show && current?.classList.contains('msg-avatar')) current.replaceWith(node('span', 'msg-avatar-space'));
 }
 const workingText = (data) => data.presence === 'working'
-  ? data.activeSessions?.[0]?.request ?? stateLabels.working : stateLabels.thinking;
+  ? data.activeTasks?.find(task => task.state === 'running')?.request ?? stateLabels.working : stateLabels.thinking;
 // The working row stays mounted while the Bot works; only its status changes, sliding the old one out.
 function workingLine(bot) {
   const row = node('div', 'msg bot working group-start');
@@ -1989,7 +2015,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     return;
   }
   if (changed('timeline', view?.id, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued,
-    decisions.pendingKeys(), listLoaded, data?.presence, data?.activeSessions, data?.parallelTasks, data?.sessionTasks,
+    decisions.pendingKeys(), listLoaded, data?.presence, data?.activeTasks, data?.parallelTasks, data?.sessionTasks,
     bots, dayFormat.format(Date.now()),
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');

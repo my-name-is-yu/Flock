@@ -19,7 +19,7 @@
 #include <vector>
 
 namespace flockv0 {
-enum class TaskState { queued, deciding, sending, running, waiting, peer_waiting, cancelling, completed, cancelled };
+enum class TaskState { queued, deciding, sending, running, waiting, peer_waiting, external_waiting, cancelling, completed, cancelled };
 
 std::string_view taskStateName(TaskState);
 
@@ -114,6 +114,8 @@ struct TaskData {
     std::int64_t createdAt = 0;
     std::optional<TaskCriteriaProposal> criteriaProposal{};
     std::optional<std::string> requestedCommit{}, feedback{};
+    std::optional<std::string> waitingNote{};
+    std::optional<std::int64_t> externalCheckAt{};
     std::optional<TaskQuestion> question{};
     std::optional<DecisionCheckpoint> pendingDecision{};
     std::optional<RecordedTaskBlocker> blocker{};

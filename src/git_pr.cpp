@@ -1,6 +1,6 @@
 #include "git_storage.hpp"
-#include "flock/bot_lifecycle.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/bot_lifecycle.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/git_host.hpp"
 #include "flock/types.hpp"
@@ -44,39 +44,32 @@ bool terminalPrOperation(std::string_view status) {
 }
 
 bool GitStorage::gitPrWatchUnavailable(const GitRepository& repo, Id pr, Id task) const {
-    return gitPrMutationsInFlight.contains({repo.host, repo.repo, pr}) || database
-                                                                              .query(R"SQL(
-SELECT 1 FROM git_pr_watches w WHERE (w.host,w.repo,w.pr_number)=(?,?,?) AND w.task_id<>?
-AND NOT EXISTS (SELECT 1 FROM deleted_bots d WHERE d.bot=w.bot_id)
-)SQL",
-                                                                                     {repo.host, repo.repo, pr, task})
-                                                                              .next();
+    return gitPrMutationsInFlight.contains({repo.host, repo.repo, pr}) ||
+           database
+               .query("SELECT 1 FROM git_pr_watches WHERE (host,repo,pr_number)=(?,?,?) AND task_id<>?", {repo.host, repo.repo, pr, task})
+               .next();
 }
 
-bool GitStorage::watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest& pr,
-                            GitWatchStart start) {
+GitStorage::GitWatchResult GitStorage::watchGitPr(const TaskData& task, const Json& run, Id deliveryCursor, const GitPullRequest& pr) {
+    using enum GitWatchResult;
+    if (terminal(task) || task.state == TaskState::cancelling) return taskEnded;
     const auto& repo = pr.target.base;
-    if (gitPrWatchUnavailable(repo, pr.number, task)) return false;
-    auto prior = database.query("SELECT task_id,event_cursor FROM git_pr_watches WHERE (host,repo,pr_number)=(?,?,?)",
-                                {repo.host, repo.repo, pr.number});
-    const bool hasPriorWatch = prior.next();
-    const auto headObservedAt = hasPriorWatch ? latestGitWebhookId() : deliveryCursor;
-    if (hasPriorWatch && prior.number(0) != task) {
-        const auto previousDeliveryCursor = prior.number(1);
-        database.exec("INSERT INTO git_pr_watch_origins VALUES(?,?,?,?) ON CONFLICT DO NOTHING",
-                      {repo.host, repo.repo, pr.number, previousDeliveryCursor});
-        if (start == GitWatchStart::operationIntent) deliveryCursor = headObservedAt;
-        database.exec(R"SQL(
-UPDATE git_pr_watches SET task_id=?,bot_id=?,run=?,url=?,event_cursor=? WHERE (host,repo,pr_number)=(?,?,?)
+    if (gitPrWatchUnavailable(repo, pr.number, task.id)) return unavailable;
+    const auto priorObservation = database
+                                      .query(R"SQL(
+SELECT 1 FROM git_pr_watches WHERE (host,repo,pr_number)=(?1,?2,?3)
+UNION ALL
+SELECT 1 FROM git_pr_heads WHERE (host,repo,pr_number)=(?1,?2,?3) AND event_cursor<=?4
+LIMIT 1
 )SQL",
-                      {task, bot, run, pr.url, deliveryCursor, repo.host, repo.repo, pr.number});
-    } else {
-        database.exec(R"SQL(
+                                             {repo.host, repo.repo, pr.number, deliveryCursor})
+                                      .next();
+    const auto headObservedAt = priorObservation ? latestGitWebhookId() : deliveryCursor;
+    database.exec(R"SQL(
 INSERT INTO git_pr_watches VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,pr_number)
  DO UPDATE SET url=excluded.url
 )SQL",
-                      {repo.host, repo.repo, pr.number, task, bot, run, pr.url, deliveryCursor});
-    }
+                  {repo.host, repo.repo, pr.number, task.id, task.botId, run, pr.url, deliveryCursor});
     if (!pr.headSha.empty()) {
         database.exec(R"SQL(
 INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,event_cursor)
@@ -85,7 +78,7 @@ INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,eve
                       {repo.host, repo.repo, pr.number, headObservedAt, pr.headSha});
     }
     gitWebhooksDrainedAt.reset();
-    return true;
+    return attached;
 }
 
 Json GitStorage::openGitPr(GitHost& host, const GitContext& context, const GitOpenPr& input, std::string_view invocation, bool newIntent,
@@ -158,11 +151,13 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
     std::string url;
     if (matches.size() == 1) {
         const auto& pr = matches.begin()->second;
-        if (watchGitPr(context.taskId, context.botId, run, saved.number(4), pr)) {
+        const auto watch = watchGitPr(task, run, saved.number(4), pr);
+        if (watch != GitWatchResult::unavailable) {
             state = "created";
             number = pr.number;
             url = pr.url;
-            if (pr.awaitingReview) gitInboxItem(task, "awaiting/" + url, url, "Pull request awaiting review", request.title);
+            if (watch == GitWatchResult::attached && pr.awaitingReview)
+                gitInboxItem(task, "awaiting/" + url, url, "Pull request awaiting review", request.title);
         }
     }
     const auto result = prResult(request.operationId, state, number, url);
@@ -229,15 +224,15 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
         if (candidate == candidates.end()) throw Conflict("The PR is not a verified candidate for this operation");
         number = candidate->at("prNumber").get<Id>();
         url = field(*candidate, "url");
-        if (!watchGitPr(item.taskId, item.botId, run, row.number(8),
-                        {{base, head, row.string(4), row.string(5)},
-                         number,
-                         url,
-                         operation,
-                         field(*candidate, "headSha"),
-                         candidate->at("awaitingReview").get<bool>()}))
-            throw Conflict("The PR already belongs to another task");
-        if (candidate->at("awaitingReview") == true)
+        const auto watch = watchGitPr(task, run, row.number(8),
+                                      {{base, head, row.string(4), row.string(5)},
+                                       number,
+                                       url,
+                                       operation,
+                                       field(*candidate, "headSha"),
+                                       candidate->at("awaitingReview").get<bool>()});
+        if (watch == GitWatchResult::unavailable) throw Conflict("The PR already belongs to another task");
+        if (watch == GitWatchResult::attached && candidate->at("awaitingReview") == true)
             gitInboxItem(task, "awaiting/" + url, url, "Pull request awaiting review", "Review the linked pull request.");
     }
     const auto status = link ? "created" : "rejected";

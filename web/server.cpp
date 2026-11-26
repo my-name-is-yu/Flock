@@ -357,7 +357,7 @@ public:
                         const auto sessionsAfter =
                             req.has_param("sessionsAfter") ? std::optional{queryId(req, "sessionsAfter", true)} : std::nullopt;
                         const auto changes = Conversations(store_).conversationChangesSince(changesAfter, id);
-                        const auto [sessionThrough, sessionTasks] = TaskHistory(store_).sessionChangesSince(id, sessionsAfter);
+                        const auto [sessionThrough, sessionTasks] = TaskHistory(store_).finishedTaskChangesSince(id, sessionsAfter);
                         auto view = readBotView(actor, id, *bot, sessionsAfter ? &sessionTasks : nullptr);
                         view["bot"]["id"] = id;
                         view["limits"] = {{"messageBytes", limits::messages::maxBodyBytes},

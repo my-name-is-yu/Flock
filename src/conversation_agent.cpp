@@ -401,14 +401,21 @@ Json ConversationStorage::conversationSteps(const Message& message, int step, st
 Json ConversationStorage::turnInput(const Message& message, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
                                     const LinkedTaskDestinations& linked) {
     if (message.principalSource == PrincipalSource::gitWebhook) {
+        const auto& gitEvent = message.routing.at("gitEvent");
+        const auto task = taskRecords.load(gitEvent.at("taskId").get<Id>());
+        const auto scrub = secretStorage.sharedRedactor();
         auto event = Json{{"kind", "conversation_turn"},
                           {"messageId", message.id},
                           {"text", message.text},
                           {"currentTime", now},
                           {"replyTo", nullptr},
                           {"turn", conversationSteps(message, step, images)},
-                          {"gitEvent", secretStorage.sharedRedactor().record(message.routing.at("gitEvent"))}};
-        return {{"task", Json::object()}, {"event", std::move(event)}, {"history", Json::array()}};
+                          {"gitEvent", scrub.record(gitEvent)}};
+        if (auto pullRequests = gitStorage.watchedPullRequests(message); !pullRequests.empty())
+            event["watchedPullRequests"] = scrub.record(std::move(pullRequests));
+        Json summary{{"request", task.intent}, {"doneWhen", task.doneWhen}};
+        if (auto note = taskRecords.externalWaitingNote(task)) summary["waitingNote"] = std::move(*note);
+        return {{"task", scrub.record(std::move(summary))}, {"event", std::move(event)}, {"history", Json::array()}};
     }
     const auto scrub = secretStorage.redactor(message.bot);
     Json tasks = Json::array();
@@ -585,6 +592,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
+    if (tool == "wait_for_event" || tool == "complete") return gitStorage.applyGitTaskDecision(message, decision);
     if (tool == "review_preference") {
         if (step != 1 || !memoryStorage.canReviewPreference(message)) throw ToolError("Automatic memory is unavailable");
         return {{"ok", true}};
@@ -973,21 +981,16 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         tools.insert(tools.end(), botToolNames().begin(), botToolNames().end());
     }
     if (!message.channelScope.empty()) tools.insert(tools.end(), channelTools.begin(), channelTools.end());
-    bool currentCheck = true;
+    bool shouldVerifyFollowup = false;
     if (gitHost && notification) {
         const auto& event = message.routing.at("gitEvent");
-        if (field(event, "followup") == "failed_check") {
-            bool shouldVerify = false;
-            {
-                std::lock_guard lock(database.mutex);
-                if (gitStorage.canReceiveGitWebhook(message.bot, event)) {
-                    const auto followup = gitStorage.gitPrFollowup(message, intake);
-                    shouldVerify = followup && followup->status == GitStorage::GitPrFollowup::Status::available;
-                }
-            }
-            currentCheck = shouldVerify && gitStorage.currentGitPrCheck(*gitHost, message);
+        std::lock_guard lock(database.mutex);
+        if (gitStorage.canReceiveGitWebhook(message.bot, event)) {
+            const auto followup = gitStorage.gitPrFollowup(message, intake);
+            shouldVerifyFollowup = followup && followup->status == GitStorage::GitPrFollowup::Status::available;
         }
     }
+    const bool currentPr = shouldVerifyFollowup && gitStorage.gitPrReadyForFollowup(*gitHost, message);
     const auto available = [&](int step, bool reviewPreference) {
         if (reviewPreference) {
             std::vector<std::string> reviewTools{"skip_preference"};
@@ -999,10 +1002,16 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         auto machines = Json::array();
         std::string_view followupStatus;
         if (notification) {
+            const auto& event = message.routing.at("gitEvent");
+            const auto task = taskRecords.load(event.at("taskId").get<Id>());
+            if (taskRecords.externalWaitingNote(task)) {
+                offered.push_back("wait_for_event");
+                if (task.pendingInstructions.empty() && gitStorage.gitNotificationCanComplete(message)) offered.push_back("complete");
+            }
             if (const auto followup = gitHost ? gitStorage.gitPrFollowup(message, intake) : std::nullopt) {
                 switch (followup->status) {
                 case GitStorage::GitPrFollowup::Status::available:
-                    if (currentCheck) offered.push_back("fix_pull_request");
+                    if (currentPr) offered.push_back("fix_pull_request");
                     break;
                 case GitStorage::GitPrFollowup::Status::attempted: followupStatus = "already_requested"; break;
                 }

@@ -65,6 +65,7 @@ public:
     bool openAfterSession = false;
     bool checkOriginatingSession = false;
     std::function<void()> onNotification;
+    std::function<void()> beforeTaskWait;
     std::function<Decision(const ModelInput&)> rawNotification;
     std::function<Decision(const ModelInput&)> onTaskResult;
 
@@ -89,6 +90,10 @@ private:
                 results["session-pr"] = steps.at(0).at("result");
                 check(results["session-pr"].value("ok", false), "task PR open failed: " + results["session-pr"].dump());
             }
+            if (openAfterSession) {
+                if (beforeTaskWait) beforeTaskWait();
+                return {"wait_for_event", {{"note", "Waiting for review"}, {"checkAgainAfterMinutes", 5}}, {}};
+            }
             return {"complete", {{"report", "Change prepared and checked"}}, {}};
         }
         const auto& steps = event.at("turn");
@@ -97,12 +102,14 @@ private:
             if (steps.empty()) {
                 ++notifications;
                 if (onNotification) onNotification();
-                check(input.task.empty() && input.history.empty(), "Notification received unrelated task context");
+                check(input.task.contains("request") && input.task.contains("doneWhen") && input.history.empty(),
+                      "Notification did not receive the owning task's context");
                 if (checkOriginatingSession)
                     check(gitEvent.at("run").at("threadId") == "thread-project", "Webhook lost its originating Session");
                 std::vector<std::string> expected{"reply", "read_tool_result", "git_pr_status"};
                 if (gitEvent.at("headSha") != "") expected.push_back("git_commit_status");
                 if (gitEvent.at("jobId") != 0) expected.push_back("git_read_ci_logs");
+                if (input.task.contains("waitingNote")) expected.push_back("wait_for_event");
                 check(input.tools == expected, "Webhook supplied unexpected tools or changed their order");
                 if (gitEvent.at("jobId") == 81)
                     return {
@@ -206,8 +213,8 @@ void runner() {
         task = TaskIntake(store).submit(intake());
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1,
-              "Session-to-PR flow did not complete: " + TaskHistory(store).history(task).dump());
+        check(Tasks(store).task(task).task.state == TaskState::external_waiting && host->createCalls == 1,
+              "Session-to-PR flow did not wait: " + TaskHistory(store).history(task).dump());
         other = TaskIntake(store).submit(intake("other", "other-project"));
         check(script.results.at("session-pr").at("prNumber") == 1, "task did not receive the PR number");
         check(historyCount(store, task, "git_mutation") == 2, "PR operation history must include intent and result");
@@ -350,9 +357,11 @@ void pausedGitNotifications() {
         task = TaskIntake(store).submit(intake());
         Runtime runtime(store, script, sessions, {}, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1,
-              "Git notification fixture did not finish its watched request");
+        check(Tasks(store).task(task).task.state == TaskState::external_waiting && host->createCalls == 1,
+              "Git notification fixture did not start its watch");
         BotLifecycle(store).setBotPaused(localOwner, "owner", true);
+        runtime.tick();
+        check(Tasks(store).task(task).task.state == TaskState::cancelled, "Pausing the Bot did not cancel its waiting task");
         check(GitEvents(store).receiveGitWebhook({hostName, "paused-delivery", repoName, "comment", "created", {1}, sha, "Paused", 0}),
               "Paused delivery was not acknowledged");
         runtime.runConversations();
@@ -370,8 +379,8 @@ void pausedGitNotifications() {
         check(GitEvents(restarted).receiveGitWebhook({hostName, "after-resume", repoName, "ci", "completed", {}, sha, "Active", 0}),
               "New delivery was not acknowledged");
         runtime.runConversations();
-        check(script.notifications == 1 && historyCount(restarted, task, "git_webhook") == 1,
-              "A new SHA-only webhook missed the resumed Bot's watch");
+        check(script.notifications == 0 && historyCount(restarted, task, "git_webhook") == 0,
+              "A webhook woke the cancelled task after its Bot resumed");
     }
 }
 
@@ -426,6 +435,10 @@ void webhookDeliveryResumesAfterAnIdlePoll() {
               "Could not receive a webhook while the PR was opening");
         runtime.runConversations();
         check(historyCount(store, task, "git_webhook") == 0, "An unwatched event was delivered");
+    };
+    script.beforeTaskWait = [&] {
+        runtime.runConversations();
+        check(historyCount(store, task, "git_webhook") == 0, "An early event was delivered before the waiting decision");
     };
     for (int i = 0; i < 8; ++i) runtime.tick();
     check(historyCount(store, task, "git_webhook") == 1, "A new watch did not receive the previously unmatched event");

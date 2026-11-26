@@ -365,17 +365,18 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     const auto viewPath = [](const Json& page) {
         return "/api/view?bot=triage&changesAfter=" + page.at("historyCursor").dump() + "&sessionsAfter=" + page.at("sessionCursor").dump();
     };
-    std::set<Id> expectedTasks = {triage};
+    std::set<Id> expectedActive, expectedDone = {triage};
     Id failed = 0, historical = 0;
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 16; ++i) {
         const auto id = std::to_string(i);
         const auto task = TaskIntake(cli).submit({"triage", "Session " + id, "linked env", "separate-" + id});
-        expectedTasks.insert(task);
+        expectedActive.insert(task);
+        if (i < 8) expectedDone.insert(task);
         if (i == 0) failed = task;
         if (i == 1) historical = task;
     }
     const auto allRunsStarted = [&] {
-        return std::ranges::all_of(expectedTasks, [&](Id id) { return Tasks(cli).task(id).runs.size() == 1; });
+        return std::ranges::all_of(expectedActive, [&](Id id) { return Tasks(cli).task(id).runs.size() == 1; });
     };
     for (int attempt = 0; attempt < 20 && !allRunsStarted(); ++attempt) runtime.tick();
     check(allRunsStarted(), "session fixtures did not each start one Run");
@@ -383,12 +384,11 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     const auto updates = browser.get(viewPath(original));
     check(updates.contains("historyCursor") && updates.contains("changedMessageIds") && updates.contains("sessionCursor"),
           "a view refresh did not return both history cursors");
-    auto expectedAdded = expectedTasks;
-    expectedAdded.erase(triage);
-    for (const auto& task : updates.at("sessionTasks"))
-        check(expectedAdded.erase(task.at("id").get<Id>()) == 1, "refresh returned an unexpected Session task");
-    check(expectedAdded.empty(), "refresh missed new Sessions outside the newest page");
-    check(browser.get(viewPath(updates)).at("sessionTasks").empty(), "refresh returned unchanged Session history");
+    for (const auto& task : updates.at("activeTasks"))
+        check(expectedActive.erase(task.at("id").get<Id>()) == 1 && task.at("session").contains("threadId"),
+              "refresh returned an unexpected active request or lost its Session link");
+    check(expectedActive.empty(), "refresh missed active requests outside the newest page");
+    check(updates.at("sessionTasks").empty(), "active requests entered Done history");
 
     constexpr auto creation = "2026-11-21T00:15:00.000Z";
     t3.observations["thread-separate-0"] = {.kind = Observation::Kind::Finished,
@@ -397,30 +397,36 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
                                             .resultRunId = "distinct-result-run",
                                             .sessionCreatedAt = creation};
     t3.observations["thread-separate-1"] = {.kind = Observation::Kind::Finished, .report = "Historical report without a status"};
-    tick(runtime, 3);
+    for (int i = 2; i < 8; ++i)
+        t3.observations["thread-separate-" + std::to_string(i)] = {
+            .kind = Observation::Kind::Finished, .status = "completed", .report = "Completed Session"};
+    for (int attempt = 0;
+         attempt < 20 && !std::ranges::all_of(expectedDone, [&](Id id) { return terminal(Tasks(cli).task(id).task); }); ++attempt)
+        runtime.tick();
     const auto settled = browser.get(viewPath(updates));
     const auto& settledTasks = settled.at("sessionTasks");
     const std::map<Id, std::string_view> states = {{failed, "failed"}, {historical, "ended"}};
-    check(settled.at("sessionCursor") > updates.at("sessionCursor") && settledTasks.size() == states.size(),
-          "settled Runs did not advance the Session cursor");
+    check(settled.at("sessionCursor") > updates.at("sessionCursor") && settledTasks.size() == expectedDone.size() - 1,
+          "completed requests did not advance the history cursor");
     for (const auto& task : settledTasks) {
         const auto id = task.at("id").get<Id>();
         const auto& session = task.at("sessions").at(0);
-        check(task.at("sessions").size() == 1 && session.at("state") == states.at(id),
+        check(task.at("sessions").size() == 1 && session.at("state") == (states.contains(id) ? states.at(id) : "completed"),
               "a settled Run did not refresh its Session status with the same Session count");
         check(id == failed ? session.at("createdAt") == creation : !session.contains("createdAt"),
               "the Session timestamp must come from T3 and stay absent when unavailable");
     }
 
     auto page = browser.get("/api/view?bot=triage");
-    check(page.at("sessionsBefore").get<Id>() > 0, "session list did not offer older history");
+    check(page.at("sessionTasks").size() == 6 && page.at("activeTasks").size() == 8 && page.at("sessionsBefore").get<Id>() > 0,
+          "active requests consumed spaces in the Done history page");
     std::set<Id> cursors;
     do {
         const auto& tasks = page.at("sessionTasks");
         check(!tasks.empty(), "session page contained no tasks");
         for (const auto& task : tasks) {
             const auto id = task.at("id").get<Id>();
-            check(expectedTasks.erase(id) == 1, "session page returned an unexpected or repeated task");
+            check(expectedDone.erase(id) == 1, "session page returned an unexpected or repeated task");
             check(!task.at("sessions").empty(), "session task contained no links to work");
             if (id == triage || id == failed || id == historical) {
                 const auto expected = id == triage ? "completed" : id == failed ? "failed" : "ended";
@@ -432,7 +438,7 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
         check(cursors.insert(before).second, "session cursor did not advance");
         page = browser.get("/api/sessions?bot=triage&before=" + std::to_string(before));
     } while (true);
-    check(expectedTasks.empty(), "session pagination skipped tasks");
+    check(expectedDone.empty(), "session pagination skipped completed requests");
 }
 
 void failedCompletion(const std::filesystem::path& path) {
@@ -482,6 +488,14 @@ void seedPeerHistory(Store& store, Browser& browser, Runtime& runtime, const Fix
         if (waiting.at("presence") == "peer_waiting") break;
     }
     check(waiting.at("waits").empty() && waiting.at("presence") == "peer_waiting", "waiting on a peer was presented as a user action");
+    const auto recipient = browser.get("/api/view?bot=triage");
+    const auto recipientTask = recipient.at("activeTasks").at(0).at("id").get<Id>();
+    for (unsigned attempt = 0; attempt < 8 && !terminal(Tasks(store).task(recipientTask).task); ++attempt) runtime.tick();
+    const auto refreshed = browser.get("/api/view?bot=triage&sessionsAfter=" + recipient.at("sessionCursor").dump());
+    check(refreshed.at("sessionCursor") > recipient.at("sessionCursor") && refreshed.at("activeTasks").empty() &&
+              refreshed.at("sessionTasks").size() == 1 && refreshed.at("sessionTasks").front().at("id") == recipientTask &&
+              refreshed.at("sessionTasks").front().at("state") == "completed",
+          "the recipient's completed consultation did not move from active work to history on refresh");
     tick(runtime, 8);
     const auto finished = browser.get("/api/view?bot=release");
     check(hasEvent(finished.at("events"), "completed", "text", "判定基準を確認しました") && t3.launches.empty(),
@@ -812,9 +826,8 @@ void exercise(const std::filesystem::path& path) {
     check(releasePage["bot"]["soul"] == "利用者向けのリリースノートをまとめる。" &&
               triagePage["bot"]["soul"] == "報告された問題を整理する。" && !releasePage["bot"].contains("cron"),
           "selected Bots showed incorrect settings");
-    check(releasePage["sessionTasks"][0]["sessions"][0]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
-              triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage" &&
-              triagePage["sessionTasks"][0]["sessions"][0]["link"] == "http://localhost:3773/linked%20env/thread-triage",
+    check(waits[0]["wait"]["run"]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
+              triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "T3 links did not preserve environment and Thread ownership");
     const auto settingsPage = browser.get("/api/view?bot=settings");
     check(settingsPage["waits"][0]["id"] == settings && settingsPage["waits"][0]["wait"]["reason"] == "settings",
@@ -1249,8 +1262,9 @@ void watchedBotView(const std::filesystem::path& path) {
     TaskIntake(store).submit(intake);
     FixedModel model;
     FixedT3 t3;
+    t3.observations["thread-release"] = {.kind = Observation::Kind::Finished, .status = "completed", .report = "Staging checked"};
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
-    tick(runtime, 3);
+    tick(runtime, 5);
     const auto link =
         ConversationIntake(store).receive(localOwner, intake, "link", "[docs](https://example.com/A%26Bcache-test)").at("messageId");
 

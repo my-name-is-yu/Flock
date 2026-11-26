@@ -12,10 +12,12 @@
 #include "task_context_storage.hpp"
 #include "task_interaction_storage.hpp"
 #include "journal.hpp"
+#include "journal_task.hpp"
 #include "record_decode.hpp"
 #include "outbox_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
+#include "flock/decision.hpp"
 #include "flock/task.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/run_report.hpp"
@@ -44,10 +46,15 @@ std::string effectiveDoneWhen(const TaskData& task) {
 
 namespace {
 constexpr std::array states{
-    std::pair{TaskState::queued, std::string_view{"queued"}},         std::pair{TaskState::deciding, std::string_view{"deciding"}},
-    std::pair{TaskState::sending, std::string_view{"sending"}},       std::pair{TaskState::running, std::string_view{"running"}},
-    std::pair{TaskState::waiting, std::string_view{"waiting"}},       std::pair{TaskState::peer_waiting, std::string_view{"peer_waiting"}},
-    std::pair{TaskState::cancelling, std::string_view{"cancelling"}}, std::pair{TaskState::completed, std::string_view{"completed"}},
+    std::pair{TaskState::queued, std::string_view{"queued"}},
+    std::pair{TaskState::deciding, std::string_view{"deciding"}},
+    std::pair{TaskState::sending, std::string_view{"sending"}},
+    std::pair{TaskState::running, std::string_view{"running"}},
+    std::pair{TaskState::waiting, std::string_view{"waiting"}},
+    std::pair{TaskState::peer_waiting, std::string_view{"peer_waiting"}},
+    std::pair{TaskState::external_waiting, std::string_view{"external_waiting"}},
+    std::pair{TaskState::cancelling, std::string_view{"cancelling"}},
+    std::pair{TaskState::completed, std::string_view{"completed"}},
     std::pair{TaskState::cancelled, std::string_view{"cancelled"}},
 };
 
@@ -296,6 +303,7 @@ void decodeTaskFields(TaskData& task, const Json& data, const RecordDecoder& row
         row.fail("criteriaSourceMessageId", "requires proposed completion criteria");
     task.requestedCommit = row.optional<std::string>(data, "requestedCommit");
     task.feedback = row.optional<std::string>(data, "feedback");
+    task.waitingNote = row.optional<std::string>(data, "waitingNote");
     decodeTaskInteraction(task, data, row);
     decodeTaskContext(task, data, row);
 }
@@ -339,6 +347,7 @@ Json encodeTaskPayload(const TaskData& task) {
     }
     if (task.requestedCommit) data["requestedCommit"] = *task.requestedCommit;
     if (task.feedback) data["feedback"] = *task.feedback;
+    if (task.waitingNote) data["waitingNote"] = *task.waitingNote;
     encodeTaskInteraction(data, task);
     encodeTaskContext(data, task);
     return data;
@@ -445,8 +454,8 @@ constexpr std::string_view taskColumns =
     "pending_environment_id,pending_project_id,pending_gateway_environment_id,pending_pinned,"
     "active_run,active_thread_id,active_run_id,last_run,action_id,workflow_id,workflow_stage_id,workflow_artifact_version,trigger_data,"
     "origin_environment_id,origin_thread_id,origin_gateway_environment_id,origin_title,"
-    "selected_environment_id,selected_thread_id,selected_gateway_environment_id,selected_project_id,run_outcome,data";
-constexpr std::string_view taskPlaceholders = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    "selected_environment_id,selected_thread_id,selected_gateway_environment_id,selected_project_id,run_outcome,external_check_at,data";
+constexpr std::string_view taskPlaceholders = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
 Json optionalId(std::optional<Id> value) {
     return value ? Json(*value) : Json(nullptr);
@@ -495,6 +504,7 @@ Json taskBindings(const TaskData& task, Id generation) {
                         selected ? Json(selected->target.gatewayEnvironmentId) : Json(nullptr),
                         selected ? Json(selected->projectId) : Json(nullptr),
                         outcome ? Json(runOutcomeName(*outcome)) : Json(nullptr),
+                        optionalId(task.externalCheckAt),
                         encodeTaskPayload(task)});
 }
 
@@ -575,6 +585,8 @@ TaskData TaskRecords::readTask(const Statement& row, int col) const {
     col += 4;
     const auto outcome = row.null(col) ? std::nullopt : std::optional{row.string(col)};
     ++col;
+    if (!row.null(col)) task.externalCheckAt = row.number(col);
+    ++col;
 
     RunTargets targets;
     RunResults results;
@@ -617,6 +629,16 @@ TaskData TaskRecords::load(Id id) const {
     return readTask(row);
 }
 
+std::optional<std::string> TaskRecords::externalWaitingNote(const TaskData& task) const {
+    if (task.state == TaskState::external_waiting) return task.waitingNote;
+    if (task.state != TaskState::queued && task.state != TaskState::deciding) return std::nullopt;
+    auto event = database.query("SELECT json_extract(data,'$.waitingNote') FROM events "
+                                "WHERE id=? AND task_id=? AND consumed=0 AND json_extract(data,'$.kind')='external_check'",
+                                {task.eventId, task.id});
+    if (event.next()) return event.string(0);
+    return std::nullopt;
+}
+
 Id TaskRecords::insertTask(const TaskData& task) {
     static const auto sql = "INSERT INTO tasks(" + std::string(taskColumns) + ") VALUES" + std::string(taskPlaceholders);
     database.exec(sql.c_str(), taskBindings(task, task.generation));
@@ -624,6 +646,10 @@ Id TaskRecords::insertTask(const TaskData& task) {
 }
 
 void TaskRecords::save(TaskData& task) {
+    if (task.state != TaskState::external_waiting) {
+        task.waitingNote.reset();
+        task.externalCheckAt.reset();
+    }
     const auto generation = task.generation + 1;
     auto values = taskBindings(task, generation);
     values.push_back(task.id);
@@ -644,6 +670,38 @@ INSERT INTO task_run_destinations(task_id,position,name,environment_id,project_i
         throw;
     }
     task.generation = generation;
+}
+
+Id TaskRecords::complete(TaskData& task, const CompletionEntry& entry) {
+    task.pendingInstructions.clear();
+    task.pendingDecision.reset();
+    task.newSessionRequired = false;
+    task.state = TaskState::completed;
+    const auto id = journalStorage.journal(task.id, entry);
+    save(task);
+    return id;
+}
+
+void requireInstructionAcknowledgments(const TaskData& task, const Json& args) {
+    auto ids = Json::array();
+    for (const auto& item : task.pendingInstructions) ids.push_back({{"messageId", item.messageId}, {"step", item.step}});
+    if ((!ids.empty()) != args.contains("acknowledgedInstructions") || args.value("acknowledgedInstructions", Json::array()) != ids)
+        throw Conflict("Acknowledge each pending instruction by messageId and step, oldest first");
+}
+
+void waitForExternalEvent(TaskData& task, const Json& args, Seconds now) {
+    auto note = field(args, "note");
+    if (note.size() > 240 || !conversation_storage::hasText(note) || note.find_first_of("\r\n") != std::string::npos)
+        throw Conflict("Provide a one-line waiting note of up to 240 bytes");
+    const auto delay = args.find("checkAgainAfterMinutes");
+    if (delay == args.end() || !delay->is_number_integer() || *delay < minExternalCheckMinutes || *delay > maxExternalCheckMinutes)
+        throw Conflict("Choose a re-check time between 5 and 1440 minutes");
+    requireInstructionAcknowledgments(task, args);
+    task.pendingInstructions.clear();
+    task.pendingDecision.reset();
+    task.state = TaskState::external_waiting;
+    task.waitingNote = std::move(note);
+    task.externalCheckAt = now + 60 * delay->get<int>();
 }
 
 namespace {
@@ -779,27 +837,26 @@ FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
     return view;
 }
 
-std::vector<TaskView> TaskHistory::sessionTasks(std::string_view bot, Id before, unsigned limit) const {
+std::vector<TaskView> TaskHistory::finishedTasks(std::string_view bot, Id before, unsigned limit) const {
     std::lock_guard lock(database_.mutex);
     auto rows = database_.query("SELECT id FROM tasks WHERE bot_id=? AND (?=0 OR id<?)"
-                                " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
-                                " ORDER BY id DESC LIMIT ?",
+                                " AND state IN ('completed','cancelled') ORDER BY id DESC LIMIT ?",
                                 {bot, before, before, std::clamp(limit, 1u, 200u)});
     std::vector<TaskView> result;
     while (rows.next()) result.push_back(records_.sessionTask(rows.number(0)));
     return result;
 }
 
-std::pair<Id, std::vector<TaskView>> TaskHistory::sessionChangesSince(std::string_view bot, std::optional<Id> after) const {
+std::pair<Id, std::vector<TaskView>> TaskHistory::finishedTaskChangesSince(std::string_view bot, std::optional<Id> after) const {
     std::lock_guard lock(database_.mutex);
-    auto newest = database_.query("SELECT coalesce(max(id),0) FROM journal WHERE kind IN ('run_started','report')");
+    auto newest = database_.query("SELECT coalesce(max(id),0) FROM journal WHERE kind IN ('completed','cancelled','peer_completed')");
     newest.next();
     const auto through = newest.number(0);
     std::vector<TaskView> tasks;
     if (after && *after < through) {
         auto rows = database_.query(R"SQL(
 SELECT DISTINCT j.task_id FROM journal j CROSS JOIN tasks t ON t.id=j.task_id
-WHERE j.kind IN ('run_started','report') AND j.id>? AND j.id<=? AND t.bot_id=?
+WHERE j.kind IN ('completed','cancelled','peer_completed') AND j.id>? AND j.id<=? AND t.bot_id=?
 )SQL",
                                     {*after, through, bot});
         while (rows.next()) tasks.push_back(records_.sessionTask(rows.number(0)));
@@ -830,6 +887,43 @@ Json TaskEvents::currentEvent(const TaskData& task) const {
 
 void TaskEvents::consumeEvent(const TaskData& task) {
     database.exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=? AND consumed=0", {task.eventId, task.id});
+}
+
+void TaskEvents::wakeExternalChecks(TaskRecords& records, Seconds now) {
+    std::lock_guard lock(database.mutex);
+    auto rows = database.query(R"SQL(
+SELECT task.id FROM tasks task
+WHERE task.external_check_at<=?1
+  AND NOT EXISTS (
+    SELECT 1 FROM messages m LEFT JOIN conversation_retries retry ON retry.message_id=m.id
+    WHERE m.id=(
+      SELECT min(turn.message_id) FROM conversation_turns turn JOIN messages head ON head.id=turn.message_id
+      WHERE turn.status='running' AND head.bot_id=task.bot_id
+    )
+      AND json_extract(m.routing,'$.gitEvent.taskId')=task.id AND coalesce(retry.retry_at,0)<=?1
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM policy_approvals a JOIN conversation_turns turn ON turn.message_id=a.turn
+    WHERE a.bot=task.bot_id AND a.task=task.id AND a.generation=task.generation AND a.status IN ('pending','approved')
+      AND turn.status IN ('policy_waiting','running')
+      AND (a.status='approved' OR a.expires_at IS NULL OR a.expires_at>?1)
+  )
+ORDER BY task.external_check_at,task.id LIMIT 20
+)SQL",
+                               {now});
+    std::vector<Id> due;
+    while (rows.next()) due.push_back(rows.number(0));
+    if (due.empty()) return;
+    Transaction transaction(database.db);
+    for (const auto id : due) {
+        auto task = records.load(id);
+        if (!task.externalCheckAt || *task.externalCheckAt > now) continue;
+        event(task, "external-check/" + std::to_string(task.generation),
+              {{"kind", "external_check"}, {"waitingNote", task.waitingNote.value()}});
+        task.state = TaskState::queued;
+        records.save(task);
+    }
+    transaction.commit();
 }
 
 Id TaskRecords::addRevision(TaskData& task, std::string_view intent, std::string_view doneWhen, Id source) {

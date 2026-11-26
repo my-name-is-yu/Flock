@@ -4,6 +4,7 @@
   "include/flock/decision.hpp": 110,
   "include/flock/intake.hpp": 88,
   "include/flock/json.hpp": 159,
+  "include/flock/limits.hpp": 31,
   "include/flock/model.hpp": 50,
   "include/flock/outbox.hpp": 85,
   "include/flock/outbox_instruction.hpp": 88,
