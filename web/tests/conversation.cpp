@@ -1310,7 +1310,7 @@ void botRoleSavesRequireCompleteOriginal(const std::filesystem::path& home) {
     secrets.submitSecret(localOwner, "release", request, privateValue);
     auto cb = callbacks();
     cb.bots = [&] { return bots.cards(); };
-    cb.updateBot = [&](std::string_view bot, const Json& profile, const std::optional<AvatarImage>& image) {
+    cb.updateBot = [&](const Person&, std::string_view bot, const Json& profile, const std::optional<AvatarImage>& image) {
         return bots.updateProfile(bot, profile, image);
     };
     auto server = startWeb(store, 0, cb);
@@ -1366,7 +1366,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
         if (auth == "Bearer fixture-alice") return Person{"alice"};
         return Person{};
     };
-    cb.updateBot = [](std::string_view id, const Json& profile, const std::optional<AvatarImage>&) {
+    cb.updateBot = [](const Person&, std::string_view id, const Json& profile, const std::optional<AvatarImage>&) {
         return Json{{"id", id}, {"name", profile.at("name")}};
     };
     const Person owner{"owner", true};

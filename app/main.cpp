@@ -349,8 +349,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         [&] { return activeBotCards(store, bots.cards()); },
         intake,
         [&](const Person& creator, const Json& profile, const std::optional<AvatarImage>& image) {
-            auto created = BotAccess{store}.createOwnedBot(
-                creator, [&](const auto& publishOwned) { return bots.create(profile, image, publishOwned); });
+            auto created = BotAccess{store}.createOwnedBot(creator, [&](const auto& publishOwned) {
+                return bots.create(profile, image, publishOwned, [&](auto bot, auto environment, auto project) {
+                    BotAccess{store}.rememberProjectAssignment(creator, bot, environment, project);
+                });
+            });
             syncSkills();
             return created;
         },
@@ -365,13 +368,14 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     callbacks.identityRequired = [&access] { return access.enabled(); };
     connections.configureChannels(store, callbacks);
     callbacks.sessionT3 = t3.get();
+    callbacks.demoMode = fixed;
     if (chatgptWeb)
         chatgptWeb->configure(callbacks);
     else {
         callbacks.modelStatus = [] { return Json{{"connected", true}, {"demo", true}}; };
         callbacks.modelCatalog = [] { return Json::array({{{"slug", "demo"}, {"displayName", "Demo"}}}); };
     }
-    callbacks.updateBot = [&, modelCatalog = callbacks.modelCatalog](std::string_view botId, const Json& profile,
+    callbacks.updateBot = [&, modelCatalog = callbacks.modelCatalog](const Person& editor, std::string_view botId, const Json& profile,
                                                                      const std::optional<AvatarImage>& image) {
         auto catalog = Json::array();
         if (!profile.value("reasoningEffort", "").empty()) {
@@ -380,8 +384,9 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             } catch (const ModelError&) {
             }
         }
-        auto updated = botRunSettingCount(profile) ? bots.updateRunSettings(store, botId, profile, options.clock(), reportSchedule, catalog)
-                                                   : bots.updateProfile(botId, profile, image);
+        auto updated = botRunSettingCount(profile)
+                           ? bots.updateRunSettings(store, botId, profile, options.clock(), reportSchedule, catalog, &editor)
+                           : bots.updateProfile(botId, profile, image);
         syncSkills();
         return updated;
     };

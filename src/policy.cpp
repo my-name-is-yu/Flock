@@ -311,6 +311,28 @@ Json BotAccess::createOwnedBot(const Person& creator, const std::function<Json(c
     });
 }
 
+void BotAccess::rememberProjectAssignment(const Person& person, std::string_view bot, std::string_view environment,
+                                          std::string_view project) {
+    auto& storage = StoreAccess::get(store_);
+    auto& database = storage.database;
+    std::lock_guard lock(database.mutex);
+    if (sqlite3_get_autocommit(database.db)) throw Conflict("Project assignment requires a write transaction");
+    storage.secretStorage.redactor(bot).requirePublic({person.id, environment, project});
+    database.exec(R"SQL(
+INSERT INTO recent_project_assignments(person,environment_id,project_id) VALUES(?,?,?)
+ON CONFLICT(person) DO UPDATE SET environment_id=excluded.environment_id,project_id=excluded.project_id
+)SQL",
+                  {person.id, environment, project});
+}
+
+Json BotAccess::recentProjectAssignment(const Person& person) const {
+    auto& database = Database::of(store_);
+    std::lock_guard lock(database.mutex);
+    auto row = database.query("SELECT environment_id,project_id FROM recent_project_assignments WHERE person=?", {person.id});
+    if (!row.next()) return nullptr;
+    return {{"environmentId", row.string(0)}, {"projectId", row.string(1)}};
+}
+
 void BotAccess::setOwner(const Person& creator, std::string_view bot) {
     auto& storage = StoreAccess::get(store_);
     auto& database = storage.database;

@@ -177,6 +177,13 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
         if (!body["role"].is_string() || !validBotRole(body["role"].get_ref<const std::string&>())) throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
+    if (creating && (body.contains("environmentId") || body.contains("projectId"))) {
+        for (const auto* key : {"environmentId", "projectId"}) {
+            if (!body.contains(key)) throw InputError("invalid_workspace");
+            profile[key] = validatedBotRunSetting(key, body.at(key));
+            if (profile.at(key) == "") throw InputError("invalid_workspace");
+        }
+    }
     if (!creating && !body.contains("avatar")) return {std::move(profile), std::nullopt};
     auto avatar = validatedAvatarStyle(body);
     std::optional<AvatarImage> image;
@@ -543,8 +550,8 @@ private:
         try {
             if (update) {
                 const auto botId = requiredText(body, "botId", 1024);
-                if (!Policy{store_}.allows(web::person(callbacks_, req), Action::bot_settings, botId))
-                    return error(res, 403, "access_denied");
+                const auto actor = web::person(callbacks_, req);
+                if (!Policy{store_}.allows(actor, Action::bot_settings, botId)) return error(res, 403, "access_denied");
                 if (findBot(botId).is_null()) return error(res, 404, "bot_not_found");
                 auto parsed = parseBotProfile(body, false);
                 const auto redacted = Policy{store_}.redactSecrets(botId, parsed.profile);
@@ -553,13 +560,24 @@ private:
                     return error(res, 409, "role_changed");
                 if (redacted != parsed.profile)
                     return error(res, 400, parsed.profile.contains("soul") ? "role_contains_secrets" : "invalid_bot_profile");
-                const auto saved = callbacks_.updateBot(botId, parsed.profile, parsed.image);
+                const auto saved = callbacks_.updateBot(actor, botId, parsed.profile, parsed.image);
                 changes_.rescan();
                 return json(res, 200, redactBot(botId, web::botSettings(saved)));
             }
             const auto creator = web::person(callbacks_, req);
             if (!Policy{store_}.allows(creator, Action::bot_create, "")) return error(res, 403, "access_denied");
             auto parsed = parseBotProfile(body, true);
+            if (parsed.profile.contains("projectId")) {
+                const auto environment = web::field(parsed.profile, "environmentId");
+                const auto project = web::field(parsed.profile, "projectId");
+                bool available;
+                try {
+                    available = web::projectAvailable(store_, callbacks_, creator, environment, project);
+                } catch (const std::exception&) {
+                    return error(res, 503, "workspaces_unavailable");
+                }
+                if (!available) throw InputError("invalid_workspace");
+            }
             const auto created = callbacks_.createBot(creator, parsed.profile, parsed.image);
             changes_.rescan();
             return json(res, 201, redactBot(web::field(created, "id"), web::botSettings(created)));
@@ -567,6 +585,8 @@ private:
             error(res, 400, e.what());
         } catch (const BotProfileError& e) {
             error(res, e.code == "role_changed" ? 409 : 400, e.code);
+        } catch (const DecisionDenied&) {
+            error(res, 403, "access_denied");
         } catch (const Conflict&) {
             error(res, 400, "invalid_bot_profile");
         }

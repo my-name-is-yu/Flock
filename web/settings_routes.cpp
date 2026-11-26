@@ -1,5 +1,7 @@
 #include "settings_routes.hpp"
 #include "flock/bot_id.hpp"
+#include "flock/bot_profile.hpp"
+#include "flock/t3.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/json.hpp"
@@ -34,6 +36,18 @@ Person person(const WebCallbacks& callbacks, const httplib::Request& request) {
 }
 
 namespace {
+std::vector<std::string> projectEnvironments(Store& store, const WebCallbacks& callbacks, const Person& actor) {
+    if (callbacks.demoMode) return {"demo"};
+    auto connection = T3Connections(store).settings(actor.id, actor.adminRoot);
+    return connection ? std::move(connection->environments) : std::vector<std::string>{};
+}
+
+std::vector<T3Project> availableProjects(Store& store, const WebCallbacks& callbacks, const Person& actor, std::string_view environment) {
+    const auto environments = projectEnvironments(store, callbacks, actor);
+    if (!callbacks.sessionT3 || std::ranges::find(environments, environment) == environments.end()) return {};
+    return callbacks.sessionT3->projects(environment);
+}
+
 constexpr Action personOnlyActions[] = {Action::bot_view, Action::bot_talk, Action::bot_decide, Action::bot_settings, Action::rules_manage};
 
 void reply(httplib::Response& res, int status, const Json& value) {
@@ -52,6 +66,12 @@ std::optional<T3ConnectRequest> parseT3ConnectRequest(const Json& args) {
     if (value.empty() || value.size() > 4096) return {};
     return T3ConnectRequest{saved ? Source::Saved : Source::Url, std::move(value)};
 }
+}
+
+bool projectAvailable(Store& store, const WebCallbacks& callbacks, const Person& actor, std::string_view environment,
+                      std::string_view project) {
+    const auto projects = availableProjects(store, callbacks, actor, environment);
+    return std::ranges::find(projects, project, &T3Project::id) != projects.end();
 }
 
 void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
@@ -103,6 +123,32 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                {"canDisconnectT3", canDisconnectT3},
                {"t3CleanupPending", t3CleanupPending},
                {"t3", connection ? Json{{"port", connection->port}, {"environments", std::move(environments)}} : Json(nullptr)}});
+    });
+    server.Get("/api/settings/projects", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto actor = person(callbacks, req);
+        const Policy policy(store);
+        if (!policy.allows(actor, Action::bot_create, "")) return reply(res, 403, {{"error", "access_denied"}});
+        if (req.has_param("environmentId")) {
+            const auto environment = req.get_param_value("environmentId");
+            if (req.get_param_value_count("environmentId") != 1 || !validPlainId(environment))
+                return reply(res, 400, {{"error", "invalid_workspace"}});
+            try {
+                auto projects = Json::array();
+                for (const auto& project : availableProjects(store, callbacks, actor, environment)) {
+                    if (validPlainId(project.id)) projects.push_back({{"id", project.id}, {"name", project.title}});
+                }
+                reply(res, 200, policy.redactSecrets({}, {{"projects", std::move(projects)}}));
+            } catch (const std::exception&) {
+                reply(res, 503, {{"error", "workspaces_unavailable"}});
+            }
+        } else {
+            auto environments = Json::array();
+            for (const auto& id : projectEnvironments(store, callbacks, actor))
+                environments.push_back({{"id", id}, {"name", callbacks.demoMode ? "Demo" : id}});
+            reply(res, 200,
+                  policy.redactSecrets(
+                      {}, {{"environments", std::move(environments)}, {"recent", BotAccess(store).recentProjectAssignment(actor)}}));
+        }
     });
     server.Get("/api/settings/models", [&](const httplib::Request& req, httplib::Response& res) {
         const auto bot = req.get_param_value("bot");

@@ -5,6 +5,7 @@ import {
   resolveAvatar,
   showAvatar,
 } from '/avatars.js';
+import { createProjectPicker } from '/project-picker.js';
 
 // A preset only seeds the new Bot's SOUL.md; what the Bot does is up to the user afterwards.
 const PRESETS = [
@@ -155,6 +156,17 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
           <div id="studio-colors" class="studio-palette" role="group" aria-labelledby="studio-color-label"></div>
         </div>
 
+        <fieldset class="studio-workspace" hidden>
+          <legend>Where does it work? <span>Optional</span></legend>
+          <label class="settings-workspace-field">Environment
+            <select name="environmentId"></select>
+          </label>
+          <label class="settings-workspace-field">Project
+            <select name="projectId"></select>
+          </label>
+          <p class="settings-workspace-hint" role="status" hidden></p>
+        </fieldset>
+
         <p class="studio-error" id="studio-submit-error" role="alert" hidden></p>
         <footer class="studio-footer">
           <button type="button" class="dialog-button quiet" id="studio-cancel">Cancel</button>
@@ -189,6 +201,14 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     cancel: el('studio-cancel'),
     save: el('studio-save'),
   };
+  let loadingWorkspace = false;
+  const workspace = createProjectPicker(dialog.querySelector('.studio-workspace'), environmentId => {
+    const path = environmentId ? `settings/projects?${new URLSearchParams({ environmentId })}` : 'settings/projects';
+    return api(path, undefined, { signal: AbortSignal.timeout(6500) });
+  }, loading => {
+    loadingWorkspace = loading;
+    renderSaveButton();
+  });
 
   for (const preset of PRESETS) {
     const btn = document.createElement('button');
@@ -379,10 +399,14 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     onDraft?.({ mode, botId: state.botId, ...previewBot() });
   }
 
-  function renderTextPreview() {
+  function renderSaveButton() {
     const hasValidImage = state.kind !== 'upload' || !!currentPreviewImageUrl();
-    els.save.disabled = saving || !state.name.trim() || !hasValidImage;
+    els.save.disabled = saving || loadingWorkspace || !state.name.trim() || !hasValidImage;
     els.save.textContent = saveLabel();
+  }
+
+  function renderTextPreview() {
+    renderSaveButton();
     emitDraft();
   }
 
@@ -610,6 +634,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
     // Snapshot the request before any await so it always targets the Bot this editor opened.
     const target = { mode, botId: state.botId, role: state.role, look: { ...state } };
+    const destination = workspace.destination();
     try {
       let avatar;
       const { look } = target;
@@ -631,7 +656,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
       const savedBot = target.mode === 'edit'
         ? await api('bots/profile', { botId: target.botId, name: trimmedName, ...(avatar && { avatar }) })
-        : await api('bots', { name: trimmedName, role: target.role, avatar });
+        : await api('bots', { name: trimmedName, role: target.role, avatar, ...destination });
 
       closeReason = 'saved';
       saving = false;
@@ -642,6 +667,8 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
         invalid_name: 'Enter a name between 1 and 32 characters.',
         invalid_image: 'Choose a PNG, JPEG, WebP or GIF up to 5 MB.',
         invalid_avatar: 'Check the selected avatar options and try again.',
+        invalid_workspace: 'Choose an available T3 environment and project.',
+        workspaces_unavailable: 'Couldn’t load the selected project. Check the T3 connection and try again.',
         bot_not_found: 'This Bot no longer exists.',
         bot_management_unavailable: 'Bot editing is unavailable on this server.',
       };
@@ -799,6 +826,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     els.photo.value = '';
     setUploadError('');
     setSubmitError('');
+    workspace.close();
     const reason = closeReason;
     const savedMode = mode;
     closeReason = 'cancel';
@@ -837,6 +865,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     };
     if (!dialog.open) dialog.showModal();
     setStep('start', { animate: false });
+    void workspace.open();
   }
 
   function openEdit(bot, { bots = [], origin = document.activeElement } = {}) {
@@ -867,6 +896,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       originalAvatar: bot.avatar ?? null,
       lookChanged: false,
     };
+    workspace.close();
     if (!dialog.open) dialog.showModal();
     setStep('editor', { animate: false });
   }

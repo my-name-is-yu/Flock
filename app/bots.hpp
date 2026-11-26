@@ -19,6 +19,7 @@
 
 namespace flockv0 {
 class Store;
+struct Person;
 }
 
 namespace flockv0::app {
@@ -32,6 +33,7 @@ struct Bot {
 
 class Bots {
 public:
+    using RememberProject = std::function<void(std::string_view bot, std::string_view environment, std::string_view project)>;
     using ScheduleReporter = std::function<void(std::string_view, std::string_view)>;
 
     explicit Bots(std::filesystem::path directory);
@@ -45,10 +47,11 @@ public:
     Json skillCards() const;
     void apply(const BotChange&);
     bool reconcileCreation(const BotChange&);
-    Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt, const PublishOwnedBot& publishOwned = {});
+    Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt, const PublishOwnedBot& publishOwned = {},
+                const RememberProject& rememberProject = {});
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     Json updateRunSettings(Store&, std::string_view id, const Json& settings, Seconds now, const ScheduleReporter&,
-                           const Json& modelCatalog = Json::array());
+                           const Json& modelCatalog = Json::array(), const Person* editor = nullptr);
     std::optional<AvatarImage> avatarImage(std::string_view id) const;
     void syncSchedules(Store&, Seconds now, const ScheduleReporter&) const;
 private:
