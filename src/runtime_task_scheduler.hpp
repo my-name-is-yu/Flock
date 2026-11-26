@@ -1,7 +1,6 @@
 #pragma once
 
 #include "runtime_components.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 #include "flock/task.hpp"
 
@@ -14,6 +13,10 @@
 #include <vector>
 
 namespace flockv0 {
+class Database;
+class TaskEvents;
+class TaskRouting;
+
 class Runtime::Components::TaskScheduler {
 public:
     struct Work {
@@ -22,8 +25,8 @@ public:
         auto operator<=>(const Work&) const = default;
     };
 
-    TaskScheduler(Store::Impl& db, T3& t3, TaskUpdates& updates, OutboxDispatch& dispatch, bool requireT3Connection,
-                  std::stop_token shutdown);
+    TaskScheduler(Database& database, TaskEvents& taskEvents, TaskRouting& taskRouting, T3& t3, TaskUpdates& updates,
+                  OutboxDispatch& dispatch, bool requireT3Connection, std::stop_token shutdown);
     void activate(TaskData task);
     std::vector<Work> nextBatch(std::size_t slots, const std::function<bool(const Work&)>& isActive);
 private:
@@ -31,7 +34,9 @@ private:
 
     bool selectProject(TaskData& task);
 
-    Store::Impl& db;
+    Database& database;
+    TaskEvents& taskEvents;
+    TaskRouting& taskRouting;
     T3& t3;
     TaskUpdates& updates;
     OutboxDispatch& dispatch;

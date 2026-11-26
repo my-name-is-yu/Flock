@@ -13,6 +13,8 @@
 #include <string_view>
 
 namespace flockv0 {
+struct TaskData;
+std::string effectiveDoneWhen(const TaskData& task);
 class RecordDecoder;
 
 const std::string& taskProjection();

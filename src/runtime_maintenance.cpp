@@ -3,24 +3,23 @@
 #include "automation_storage.hpp"
 #include "workflow_storage.hpp"
 #include "policy_approvals.hpp"
-#include "storage.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
+#include "database.hpp"
 
 #include <functional>
 #include <optional>
 #include <string_view>
 
 namespace flockv0 {
-Runtime::Components::Maintenance::Maintenance(Store::Impl& db, AutomationStorage& automationStorage, WorkflowStorage& workflowStorage,
+Runtime::Components::Maintenance::Maintenance(Database& database, AutomationStorage& automationStorage, WorkflowStorage& workflowStorage,
                                               PolicyApprovals& approvals, const std::function<Seconds()>& clock,
                                               const ErrorReporter& automationError, const ErrorReporter& storageContention)
-    : db(db), automationStorage(automationStorage), workflowStorage(workflowStorage), approvals(approvals), clock(clock),
+    : database(database), automationStorage(automationStorage), workflowStorage(workflowStorage), approvals(approvals), clock(clock),
       automationError(automationError), storageContention(storageContention) {}
 
 Seconds Runtime::Components::Maintenance::settleApprovals() {
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db);
+    std::lock_guard lock(database.mutex);
+    Transaction tx(database.db);
     const auto now = clock();
     approvals.settlePolicyApprovals(now);
     tx.commit();
@@ -50,7 +49,7 @@ Seconds Runtime::Components::Maintenance::advanceWorkflows() {
 void Runtime::Components::Maintenance::scanIfChanged(std::optional<ScanStamp>& completed, std::string_view operation, const auto& work) {
     const auto now = clock();
     std::optional<ScanStamp> beforeScan;
-    deferContendedWork("database change stamp", [&] { beforeScan.emplace(db.changeStamp(), now); });
+    deferContendedWork("database change stamp", [&] { beforeScan.emplace(database.changeStamp(), now); });
     if (beforeScan && beforeScan == completed) return;
     deferContendedWork(operation, [&] {
         const std::optional<Seconds> scannedAt = work();

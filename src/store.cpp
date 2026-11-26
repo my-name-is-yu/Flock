@@ -137,10 +137,6 @@ void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
     }
 }
 
-std::string effectiveDoneWhen(const TaskData& task) {
-    return task.criteriaProposal ? task.criteriaProposal->doneWhen : task.doneWhen;
-}
-
 Store::Store(std::filesystem::path db, MemorySeed seed, AutomationModelResolver automationModel)
     : p_(std::make_unique<Impl>(std::move(db), std::move(seed), std::move(automationModel))) {}
 Store::~Store() = default;

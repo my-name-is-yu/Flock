@@ -3,7 +3,6 @@
 #include "runtime_components.hpp"
 #include "runtime_task_scheduler.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -14,6 +13,10 @@
 #include <string_view>
 
 namespace flockv0 {
+class ConversationStorage;
+class SessionMessageStorage;
+class SessionParticipationStorage;
+
 class ChannelStorage;
 class Database;
 class PolicyApprovals;
@@ -34,8 +37,10 @@ class Runtime::Components::Workers {
 public:
     static constexpr unsigned batchLimit = 4;
 
-    Workers(Store::Impl& db, ChannelStorage& channelStorage, T3& t3, Maintenance& maintenance)
-        : db(db), channelStorage(channelStorage), t3(t3), maintenance(maintenance) {}
+    Workers(ConversationStorage& conversationTurns, SessionMessageStorage& sessionMessageStorage,
+            SessionParticipationStorage& sessionParticipationStorage, ChannelStorage& channelStorage, T3& t3, Maintenance& maintenance)
+        : conversationTurns(conversationTurns), sessionMessageStorage(sessionMessageStorage),
+          sessionParticipationStorage(sessionParticipationStorage), channelStorage(channelStorage), t3(t3), maintenance(maintenance) {}
     Workers(const Workers&) = delete;
     Workers& operator=(const Workers&) = delete;
 
@@ -54,7 +59,9 @@ private:
     template <class Key> void collect(std::map<Key, std::future<void>>& workers, std::string_view operation);
     void collect(std::future<void>& worker, std::string_view operation);
 
-    Store::Impl& db;
+    ConversationStorage& conversationTurns;
+    SessionMessageStorage& sessionMessageStorage;
+    SessionParticipationStorage& sessionParticipationStorage;
     ChannelStorage& channelStorage;
     T3& t3;
     Maintenance& maintenance;

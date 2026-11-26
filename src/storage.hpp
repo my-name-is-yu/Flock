@@ -103,9 +103,6 @@ inline bool hasDestinationSelector(const Json& args) {
     return args.is_object() && (args.contains("destination") || args.contains("environmentId") || args.contains("projectId") ||
                                 args.contains("gatewayEnvironmentId"));
 }
-inline constexpr std::string_view runOutboxOperation = "run-outbox/";
-inline constexpr std::string_view runStopOperation = "run-stop/";
-std::string effectiveDoneWhen(const TaskData& task);
 
 Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
 std::string redactT3Tokens(std::string);

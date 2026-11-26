@@ -1,9 +1,7 @@
 #pragma once
 
 #include "runtime_components.hpp"
-#include "storage.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/runtime.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
@@ -16,11 +14,16 @@
 #include <vector>
 
 namespace flockv0 {
+class Database;
+class SecretStorage;
+class TaskEvents;
+
 class WorkflowStorage;
 
 class Runtime::Components::SessionPrompts {
 public:
-    SessionPrompts(Store::Impl& db, WorkflowStorage& workflowStorage) : db(db), workflowStorage(workflowStorage) {}
+    SessionPrompts(Database& database, SecretStorage& secretStorage, TaskEvents& taskEvents, WorkflowStorage& workflowStorage)
+        : database(database), secretStorage(secretStorage), taskEvents(taskEvents), workflowStorage(workflowStorage) {}
 
     struct WorkPrompt {
         std::string instruction;
@@ -50,7 +53,9 @@ private:
                                                       std::span<const OutboxInstruction> pending, Id answersAfter);
     WorkPrompt workPrompt(const TaskData& task, const Json& event, std::size_t actionIdBytes, const SessionContract* contract);
 
-    Store::Impl& db;
+    Database& database;
+    SecretStorage& secretStorage;
+    TaskEvents& taskEvents;
     WorkflowStorage& workflowStorage;
 };
 }

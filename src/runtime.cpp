@@ -18,6 +18,7 @@
 #include "flock/model.hpp"
 #include "flock/t3.hpp"
 #include "flock/task.hpp"
+#include "storage.hpp"
 
 #include <memory>
 #include <utility>
@@ -31,8 +32,10 @@ RuntimeOptions withDefaultBotTools(RuntimeOptions options) {
 }
 
 struct Runtime::Impl {
-    Store::Impl& db;
     ChannelStorage& channelStorage;
+    ConversationStorage& conversationTurns;
+    GitStorage& gitStorage;
+    WorkflowStorage& workflowStorage;
     Policy policy;
     Model& model;
     T3& t3;
@@ -54,26 +57,36 @@ struct Runtime::Impl {
     Components::DatabaseLock lock;
 
     void runTurn(Id id) {
-        db.conversationTurns.runTurn(id, model, t3, soul, options.clock, *options.botTools, options.gitHost.get(), options.applyBotChange,
-                                     options.reconcileBotCreation, options.intake, options.peers, workers.stopToken());
+        conversationTurns.runTurn(id, model, t3, soul, options.clock, *options.botTools, options.gitHost.get(), options.applyBotChange,
+                                  options.reconcileBotCreation, options.intake, options.peers, workers.stopToken());
     }
 
-    Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
-        : db(*store.p_), channelStorage(db.channelStorage), policy(store.policy()), model(m), t3(adapter), soul(std::move(loader)),
+    Impl(Store::Impl& db, Policy permissions, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
+        : channelStorage(db.channelStorage), conversationTurns(db.conversationTurns), gitStorage(db.gitStorage),
+          workflowStorage(db.workflowStorage), policy(permissions), model(m), t3(adapter), soul(std::move(loader)),
           options(withDefaultBotTools(std::move(opts))), maintenance(db, db.automationStorage, db.workflowStorage, db.policyApprovals,
                                                                      options.clock, options.automationError, options.storageContention),
-          prompts(db, db.workflowStorage), updates(db, db.journalStorage, db.taskEvents, db.taskRecords, db.waitStorage),
-          questions(db, db.waitStorage), history(db, t3, policy, updates, options.sessionRead),
-          reports(db, db.workflowStorage, t3, policy, updates, history, options.clock),
-          peerExchanges(db, policy, updates, reports, history, options.peers), workers(db, channelStorage, t3, maintenance),
-          runs(db, db.outboxStorage, db.workflowStorage, t3, updates, questions, reports, peerExchanges, options.clock,
+          prompts(db, db.secretStorage, db.taskEvents, db.workflowStorage),
+          updates(db, db.journalStorage, db.taskEvents, db.taskRecords, db.waitStorage), questions(db, db.waitStorage),
+          history(db, db.journalStorage, db.secretStorage, t3, policy, updates, options.sessionRead),
+          reports(db, db.journalStorage, db.secretStorage, db.taskEvents, db.workflowStorage, t3, policy, updates, history, options.clock),
+          peerExchanges(db, db.botLifecycle, db.conversationTurns, db.journalStorage, db.peerStorage, db.taskEvents, db.taskOperations,
+                        db.taskRecords, db.taskRouting, db.waitStorage, policy, updates, reports, history, options.peers),
+          workers(db.conversationTurns, db.sessionMessageStorage, db.sessionParticipationStorage, channelStorage, t3, maintenance),
+          runs(db, db.botSettingsStorage, db.journalStorage, db.peerStorage, db.secretStorage, db.taskEvents, db.taskRecords,
+               db.waitStorage, db.outboxStorage, db.workflowStorage, t3, updates, questions, reports, peerExchanges, options.clock,
                workers.stopToken()),
-          dispatch(db, db.outboxStorage, db.memoryStorage, t3, policy, updates, questions, reports, runs, prompts, options.clock,
-                   options.intake, options.requireT3Connection, workers.stopToken()),
-          decisions(db, updates, reports, history, peerExchanges, dispatch, options.sessionRead, options.gitHost.get()),
-          taskTurn(db, db.memoryStorage, model, soul, options.clock, options.gitHost.get(), options.sessionRead, workers.stopToken(),
-                   updates, reports, history, peerExchanges, runs, prompts, decisions),
-          taskScheduler(db, t3, updates, dispatch, options.requireT3Connection, workers.stopToken()),
+          dispatch(db, db.botLifecycle, db.botSettingsStorage, db.conversationTurns, db.journalStorage, db.path, db.policyApprovals,
+                   db.secretStorage, db.sessionParticipationStorage, db.sessionReadStorage, db.taskEvents, db.taskRecords, db.taskRouting,
+                   db.taskRunReports, db.waitStorage, db.outboxStorage, db.memoryStorage, t3, policy, updates, questions, reports, runs,
+                   prompts, options.clock, options.intake, options.requireT3Connection, workers.stopToken()),
+          decisions(db, db.conversationTurns, db.gitStorage, db.journalStorage, db.peerStorage, db.secretStorage, db.taskEvents,
+                    db.taskRecords, db.waitStorage, updates, reports, history, peerExchanges, dispatch, options.sessionRead,
+                    options.gitHost.get()),
+          taskTurn(db, db.gitStorage, db.journalStorage, db.modelCalls, db.peerStorage, db.secretStorage, db.taskEvents, db.taskRecords,
+                   db.taskRouting, db.waitStorage, db.memoryStorage, model, soul, options.clock, options.gitHost.get(), options.sessionRead,
+                   workers.stopToken(), updates, reports, history, peerExchanges, runs, prompts, decisions),
+          taskScheduler(db, db.taskEvents, db.taskRouting, t3, updates, dispatch, options.requireT3Connection, workers.stopToken()),
           lock(db, db.path, db.policyApprovals, options.clock) {}
 
     ~Impl() { workers.drain(taskTurn); }
@@ -90,7 +103,7 @@ struct Runtime::Impl {
         }
         if (!task.runResults().empty()) return;
         if (task.pendingStageReport)
-            updates.change(task, [&](TaskData& current) { return db.workflowStorage.settleStageReport(current); });
+            updates.change(task, [&](TaskData& current) { return workflowStorage.settleStageReport(current); });
         else if (runs.shouldStop(task))
             dispatch.stop(task);
         else if (task.pendingRunReport)
@@ -108,7 +121,7 @@ struct Runtime::Impl {
 };
 
 Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOptions options)
-    : p_(std::make_unique<Impl>(store, model, t3, std::move(soul), std::move(options))) {}
+    : p_(std::make_unique<Impl>(*store.p_, store.policy(), model, t3, std::move(soul), std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::requestStop() {
     p_->workers.requestStop();
@@ -116,12 +129,12 @@ void Runtime::requestStop() {
 void Runtime::runConversations() {
     if (p_->workers.stopToken().stop_requested()) return;
     p_->maintenance.settleApprovals();
-    p_->db.gitStorage.deliverGitWebhooks();
+    p_->gitStorage.deliverGitWebhooks();
     p_->workers.wakeSessions();
     p_->channelStorage.deliverChannels(p_->workers.stopToken());
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick && !p_->workers.stopToken().stop_requested(); ++i) {
-        const auto pending = p_->db.conversationTurns.pendingConversations(1, p_->options.clock());
+        const auto pending = p_->conversationTurns.pendingConversations(1, p_->options.clock());
         if (pending.empty()) break;
         p_->runTurn(pending.front().second);
     }
@@ -132,9 +145,9 @@ void Runtime::tick() {
     p_->maintenance.settleApprovals();
     p_->taskTurn.persistTaskInferences();
     p_->maintenance.fireDueAutomations();
-    p_->db.gitStorage.deliverGitWebhooks();
+    p_->gitStorage.deliverGitWebhooks();
     p_->workers.wakeSessions();
-    for (const auto& [bot, id] : p_->db.conversationTurns.pendingConversations(Components::Workers::batchLimit, p_->options.clock()))
+    for (const auto& [bot, id] : p_->conversationTurns.pendingConversations(Components::Workers::batchLimit, p_->options.clock()))
         p_->runTurn(id);
     p_->maintenance.advanceWorkflows();
     for (const auto& work :
@@ -147,7 +160,7 @@ void Runtime::tickConcurrent() {
     p_->maintenance.settleApprovalsIfChanged();
     p_->workers.collectCompleted();
     p_->maintenance.fireDueAutomationsIfChanged();
-    p_->maintenance.deferContendedWork("Git webhooks", [&] { p_->db.gitStorage.deliverGitWebhooks(); });
+    p_->maintenance.deferContendedWork("Git webhooks", [&] { p_->gitStorage.deliverGitWebhooks(); });
     p_->workers.startChannels();
     p_->workers.stepSessionWake();
     p_->workers.startConversations(p_->options.clock, [impl = p_.get()](Id id) { impl->runTurn(id); });

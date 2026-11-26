@@ -5,11 +5,22 @@
 #include "runtime_task_updates.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/t3_session.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
+#include "bot_lifecycle_storage.hpp"
+#include "conversation_turns.hpp"
+#include "database.hpp"
+#include "flock/policy.hpp"
+#include "journal_storage.hpp"
+#include "json_fields.hpp"
+#include "peer_storage.hpp"
+#include "task_events.hpp"
+#include "task_operations.hpp"
+#include "task_records.hpp"
+#include "task_routing.hpp"
+#include "wait_storage.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -21,21 +32,27 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::PeerExchanges::PeerExchanges(Store::Impl& db, const Policy& policy, TaskUpdates& updates, RunReports& reports,
-                                                  SessionHistory& history, const PeerResolver& resolvePeers)
-    : db(db), policy(policy), updates(updates), reports(reports), history(history), resolvePeers(resolvePeers) {}
+Runtime::Components::PeerExchanges::PeerExchanges(Database& database, BotLifecycleStorage& botLifecycle,
+                                                  ConversationStorage& conversationTurns, JournalStorage& journalStorage,
+                                                  PeerStorage& peerStorage, TaskEvents& taskEvents, TaskOperations& taskOperations,
+                                                  TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
+                                                  const Policy& policy, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
+                                                  const PeerResolver& resolvePeers)
+    : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), journalStorage(journalStorage),
+      peerStorage(peerStorage), taskEvents(taskEvents), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
+      waitStorage(waitStorage), policy(policy), updates(updates), reports(reports), history(history), resolvePeers(resolvePeers) {}
 
 std::optional<Runtime::Components::PeerExchanges::PeerResult> Runtime::Components::PeerExchanges::peerResult(const TaskData& task,
                                                                                                              const Json& event) const {
     if (event.at("kind") != "bot_result") return std::nullopt;
     auto exchange =
-        db.query(R"SQL(
+        database.query(R"SQL(
 SELECT p.recipient_task, p.kind, recipient.environment_id
 FROM peer_exchanges p JOIN tasks recipient ON recipient.id=p.recipient_task
 WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
   AND p.sender_environment=? AND p.sender_revision IS ?
 )SQL",
-                 {event.at("exchangeId"), task.id, event.at("messageId"), task.environmentId, revisionJson(task.currentRevision)});
+                       {event.at("exchangeId"), task.id, event.at("messageId"), task.environmentId, revisionJson(task.currentRevision)});
     if (!exchange.next()) return std::nullopt;
     return PeerResult{exchange.number(0), exchange.string(1), exchange.string(2)};
 }
@@ -72,17 +89,17 @@ void Runtime::Components::PeerExchanges::transitionPeer(const PeerExchange& peer
     const auto kind = closing ? "bot_result" : "bot_" + type;
     const auto phase = closing ? "closed" : type == "question" ? "question" : "working";
     if (type == "request")
-        db.exec("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task,"
-                "sender_environment,sender_revision) VALUES(?,?,?,?,?,?,?,?)",
-                {peer.id, peer.kind, phase, message.messageId, peer.sender, peer.recipient, actor.environmentId,
-                 revisionJson(actor.currentRevision)});
+        database.exec("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task,"
+                      "sender_environment,sender_revision) VALUES(?,?,?,?,?,?,?,?)",
+                      {peer.id, peer.kind, phase, message.messageId, peer.sender, peer.recipient, actor.environmentId,
+                       revisionJson(actor.currentRevision)});
     else
-        db.exec("UPDATE peer_exchanges SET phase=?,last_message=? WHERE id=?", {phase, message.messageId, peer.id});
-    db.peerStorage.peerMessage(peer, message, forwardedSource);
+        database.exec("UPDATE peer_exchanges SET phase=?,last_message=? WHERE id=?", {phase, message.messageId, peer.id});
+    peerStorage.peerMessage(peer, message, forwardedSource);
     updates.consumeEvent(actor);
     if (!closing) actor.state = TaskState::peer_waiting;
     if (terminal(task) || task.state == TaskState::cancelling) return;
-    if (closing) db.waitStorage.clearWait(task, kind);
+    if (closing) waitStorage.clearWait(task, kind);
     updates.consumeEvent(task);
     auto event = encodeBotMessage(message);
     if (event.contains("evidence")) {
@@ -90,7 +107,7 @@ void Runtime::Components::PeerExchanges::transitionPeer(const PeerExchange& peer
         event.erase("evidence");
     }
     event["kind"] = kind;
-    db.taskEvents.event(task, "bot/" + message.messageId, std::move(event));
+    taskEvents.event(task, "bot/" + message.messageId, std::move(event));
     if (task.state != TaskState::queued) task.state = TaskState::deciding;
     updates.saveTask(task);
 }
@@ -98,19 +115,19 @@ void Runtime::Components::PeerExchanges::transitionPeer(const PeerExchange& peer
 std::optional<ForwardedPeerMessage> Runtime::Components::PeerExchanges::forwardableUserMessage(const TaskData& task) const {
     if (!task.sourceMessageId || !task.sourceMessageCoversFullRequest.value_or(false)) return std::nullopt;
     const auto sourceId = *task.sourceMessageId;
-    auto row = db.query(R"SQL(
+    auto row = database.query(R"SQL(
 SELECT m.text,j.time FROM messages m JOIN journal j ON j.id=m.id
 WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
 )SQL",
-                        {sourceId, task.botId});
+                              {sourceId, task.botId});
     if (!row.next()) return std::nullopt;
     return ForwardedPeerMessage{row.string(0), row.number(1)};
 }
 
 void Runtime::Components::PeerExchanges::sendPeer(TaskData& sender, const Json& event, const TaskDecision& decision, PeerBot peer,
                                                   const std::string& action) {
-    if (db.botLifecycle.botPaused(peer.intake.botId)) throw BotPaused{};
-    if (db.peerStorage.peerExchange(sender.id)) throw Conflict("Finish the current Bot exchange first");
+    if (botLifecycle.botPaused(peer.intake.botId)) throw BotPaused{};
+    if (peerStorage.peerExchange(sender.id)) throw Conflict("Finish the current Bot exchange first");
     const auto& args = decision.args;
     const auto note = field(args, "text");
     std::optional<ForwardedPeerMessage> forwarded;
@@ -124,18 +141,18 @@ void Runtime::Components::PeerExchanges::sendPeer(TaskData& sender, const Json& 
     if (work) {
         if (sender.activeRun || !sender.actionId.empty())
             throw Conflict("Let the assigned Run settle before requesting another Bot's work");
-        peer.intake.environmentId = db.taskRouting.defaultT3Environment(peer.intake.botId, peer.intake.environmentId, sender.environmentId);
+        peer.intake.environmentId = taskRouting.defaultT3Environment(peer.intake.botId, peer.intake.environmentId, sender.environmentId);
         if (peer.intake.environmentId.empty()) throw Conflict("Choose a T3 environment for the destination Bot in its configuration");
         if (!peer.intake.projectId.empty() &&
-            db.peerStorage.peerWorkRouteWouldCycle(sender.id, peer.intake.environmentId, peer.intake.projectId))
+            peerStorage.peerWorkRouteWouldCycle(sender.id, peer.intake.environmentId, peer.intake.projectId))
             throw Conflict("This work request would make two project queues wait for one another");
         if (!updates.admitWork(sender, decision, charge)) return;
         updates.establishCriteria(sender, args);
     }
     peer.intake.request = note.empty() && forwarded ? forwarded->text : note;
     const auto source = work ? TaskSource::handoff : TaskSource::consultation;
-    const auto id = db.taskOperations.submit(peer.intake, 0, nullptr, source);
-    auto recipient = db.taskRecords.load(id);
+    const auto id = taskOperations.submit(peer.intake, 0, nullptr, source);
+    auto recipient = taskRecords.load(id);
     const PeerExchange exchange{action, kind, "working", "", sender.id, id};
     auto message = peerMessage(exchange, sender, recipient, "request", note, action);
     message.chargesBudget = charge;
@@ -172,7 +189,7 @@ Json Runtime::Components::PeerExchanges::replyKinds(const TaskData& task, const 
 
 bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& event, const TaskDecision& decision,
                                                    const std::string& action) {
-    const auto peer = db.peerStorage.peerExchange(task.id);
+    const auto peer = peerStorage.peerExchange(task.id);
     if (!peer) throw Conflict("The Bot exchange has closed");
     const auto type = field(decision.args, "kind");
     const auto body = field(decision.args, "text");
@@ -181,11 +198,11 @@ bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& e
         throw Conflict("This reply does not match the open exchange and current task revision");
     const bool answering = type == "answer";
     const auto otherId = answering ? peer->recipient : peer->sender;
-    auto other = db.taskRecords.load(otherId);
-    if (db.botLifecycle.botPaused(other.botId)) throw BotPaused{};
+    auto other = taskRecords.load(otherId);
+    if (botLifecycle.botPaused(other.botId)) throw BotPaused{};
     if (terminal(other) || other.state != TaskState::peer_waiting) throw Conflict("The other Bot is no longer waiting");
     const bool closing = type == "result" || type == "failed";
-    if (closing && db.conversationTurns.conversationPending(task.botId)) return false;
+    if (closing && conversationTurns.conversationPending(task.botId)) return false;
     updates.recordDecision(task, event, decision, action);
     if (closing) {
         const auto outcome = type == "result" ? TaskPeerOutcome::completed : TaskPeerOutcome::failed;
@@ -193,8 +210,8 @@ bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& e
         task.state = TaskState::completed;
         task.peerOutcome = outcome;
         finishPeer(*peer, task, std::move(other), status, body, action);
-        db.journalStorage.journal(task.id, "peer_completed",
-                                  {{"text", body}, {"status", status}, {"reason", decision.reason}, {"doneWhen", task.doneWhen}});
+        journalStorage.journal(task.id, "peer_completed",
+                               {{"text", body}, {"status", status}, {"reason", decision.reason}, {"doneWhen", task.doneWhen}});
     } else {
         transitionPeer(*peer, task, other, peerMessage(*peer, task, other, type, body, action));
     }
@@ -218,9 +235,9 @@ void Runtime::Components::PeerExchanges::readPeerEvidence(const TaskData& task, 
     req.cursor = field(args, "cursor");
     req.offset = SessionHistory::readOffset(args);
     {
-        std::lock_guard lock(db.mutex);
-        auto row = db.query("SELECT 1 FROM peer_exchanges WHERE id=? AND sender_task=? AND last_message=?",
-                            {event["exchangeId"], task.id, messageId});
+        std::lock_guard lock(database.mutex);
+        auto row = database.query("SELECT 1 FROM peer_exchanges WHERE id=? AND sender_task=? AND last_message=?",
+                                  {event["exchangeId"], task.id, messageId});
         if (!row.next()) throw Conflict("The Bot result does not belong to this task");
         req.config = task.config;
     }
@@ -229,7 +246,7 @@ void Runtime::Components::PeerExchanges::readPeerEvidence(const TaskData& task, 
     const PeerEvidenceEntry entry{event.at("exchangeId").get<std::string>(), messageId, history.readExcerpt(task.botId, req)};
     updates.change(task, [&](TaskData& current) {
         history.appendEventEvidence(current, event, encodePeerEvidence(entry));
-        db.journalStorage.journal(current.id, entry, decision.usage);
+        journalStorage.journal(current.id, entry, decision.usage);
         return true;
     });
 }
@@ -260,11 +277,11 @@ std::optional<PeerCompletion> Runtime::Components::PeerExchanges::peerCompletion
                fromPeer);
     };
     for (const auto& record : event.value("references", Json::array())) addEventRef(record, CompletionEvidenceKind::peer_report, true);
-    auto reads = db.query(R"SQL(
+    auto reads = database.query(R"SQL(
 SELECT id,data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
   AND exchange_id=? AND peer_message_id=? ORDER BY id
 )SQL",
-                          {task.id, result.exchangeId, result.messageId});
+                                {task.id, result.exchangeId, result.messageId});
     while (reads.next()) {
         auto record = decodePeerEvidence(reads.number(0), reads.json(1));
         auto& excerpt = record.excerpt;
@@ -282,17 +299,17 @@ SELECT id,data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
 }
 
 bool Runtime::Components::PeerExchanges::forwardedQuestionAnswer(const TaskData& task, const QuestionTarget& target) {
-    std::lock_guard lock(db.mutex);
-    const auto event = db.taskEvents.currentEvent(task);
-    const auto peer = db.peerStorage.peerExchange(task.id);
+    std::lock_guard lock(database.mutex);
+    const auto event = taskEvents.currentEvent(task);
+    const auto peer = peerStorage.peerExchange(task.id);
     if (!peer || peer->recipient != task.id || peer->kind != "work" || peer->phase != "working" || event.is_null() ||
         event["consumed"] == true || field(event, "kind") != "bot_answer" || field(event, "messageType") != "answer" ||
         field(event, "requestKind") != peer->kind || field(event, "exchangeId") != peer->id ||
         field(event, "messageId") != peer->lastMessage || field(event, "toBotId") != task.botId)
         return false;
-    const auto sender = db.taskRecords.load(peer->sender);
+    const auto sender = taskRecords.load(peer->sender);
     if (field(event, "fromBotId") != sender.botId) return false;
-    auto original = db.query("SELECT data FROM events WHERE id=? AND task_id=?", {target.eventId, task.id});
+    auto original = database.query("SELECT data FROM events WHERE id=? AND task_id=?", {target.eventId, task.id});
     if (!original.next()) return false;
     const auto question = original.json(0);
     const auto questionRun = question.value("run", Json::object());

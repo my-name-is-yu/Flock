@@ -37,6 +37,10 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
+std::string effectiveDoneWhen(const TaskData& task) {
+    return task.criteriaProposal ? task.criteriaProposal->doneWhen : task.doneWhen;
+}
+
 namespace {
 constexpr std::array states{
     std::pair{TaskState::queued, std::string_view{"queued"}},         std::pair{TaskState::deciding, std::string_view{"deciding"}},

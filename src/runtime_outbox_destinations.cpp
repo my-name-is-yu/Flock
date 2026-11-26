@@ -1,3 +1,4 @@
+#include "task_run_reports.hpp"
 #include "session_dispatch_lock.hpp"
 #include "runtime_outbox_dispatch.hpp"
 #include "outbox_storage.hpp"
@@ -5,7 +6,6 @@
 #include "runtime_task_state.hpp"
 #include "runtime_task_updates.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
 #include "flock/task.hpp"
@@ -13,6 +13,13 @@
 #include "flock/run_report.hpp"
 #include "flock/wait.hpp"
 #include "flock/outbox.hpp"
+#include "bot_settings_storage.hpp"
+#include "database.hpp"
+#include "flock/policy.hpp"
+#include "policy_approvals.hpp"
+#include "task_records.hpp"
+#include "task_routing.hpp"
+#include "wait_storage.hpp"
 
 #include <cstddef>
 #include <optional>
@@ -30,17 +37,17 @@ bool Runtime::Components::OutboxDispatch::destinationDeadline(TaskData& task, De
     const auto& environment = run.environmentId;
     const bool missing = !run.deadline;
     if (missing) {
-        auto launch = db.query(R"SQL(
+        auto launch = database.query(R"SQL(
 SELECT time FROM journal WHERE task_id=? AND kind='send_started'
 AND action_id=? ORDER BY id LIMIT 1)SQL",
-                               {task.id, action});
+                                     {task.id, action});
         const auto startedAt = launch.next() ? launch.number(0) : now;
-        run.deadline = startedAt + db.botSettingsStorage.environmentTimeout(task.botId, environment, task.config);
+        run.deadline = startedAt + botSettingsStorage.environmentTimeout(task.botId, environment, task.config);
     }
     const auto deadline = *run.deadline;
     if (deadline <= 0 || now < deadline || task.state == TaskState::waiting) return missing;
-    db.waitStorage.wait(task, DeadlineWait{VerificationDeadline{deadline, action}}, run.name + " reached its deadline",
-                        WaitRun{run.ref, environment});
+    waitStorage.wait(task, DeadlineWait{VerificationDeadline{deadline, action}}, run.name + " reached its deadline",
+                     WaitRun{run.ref, environment});
     return true;
 }
 
@@ -49,7 +56,7 @@ void Runtime::Components::OutboxDispatch::stepDestination(const TaskData& task, 
     const auto& key = run.actionId;
     std::optional<Outbox> action;
     {
-        std::lock_guard lock(db.mutex);
+        std::lock_guard lock(database.mutex);
         action = outboxStorage.outbox(task, key);
     }
     if (!action) return;
@@ -90,8 +97,8 @@ void Runtime::Components::OutboxDispatch::stepDestination(const TaskData& task, 
         updates.changeTask(id, [&](TaskData& current) { return destinationDeadline(current, destinationRun(current, key), now); });
     if (now < run.retryAt.value_or(0)) return;
     if (phase == OutboxPhase::ready) {
-        std::lock_guard lock(db.mutex);
-        if (!db.taskRouting.projectRouteReady(id, key)) return;
+        std::lock_guard lock(database.mutex);
+        if (!taskRouting.projectRouteReady(id, key)) return;
     }
     if ((phase == OutboxPhase::ready || phase == OutboxPhase::started) && !stopRequested) return deliver(task, std::move(*action));
     if (phase != OutboxPhase::accepted) return;
@@ -123,11 +130,12 @@ void Runtime::Components::OutboxDispatch::stepDestination(const TaskData& task, 
         bool changed = false;
         if (observed.kind == Kind::Unavailable) {
             const bool sessionMissing =
-                stopping && db.query(R"SQL(
+                stopping && database
+                                .query(R"SQL(
 SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environment=?
   AND gateway_environment=? AND thread=? AND run=? AND session_missing=1 LIMIT 1
 )SQL",
-                                     {id, key, saved.environmentId, saved.ref.gatewayEnvironmentId, ref.threadId, ref.runId})
+                                       {id, key, saved.environmentId, saved.ref.gatewayEnvironmentId, ref.threadId, ref.runId})
                                 .next();
             changed = setDestinationStatus(
                 saved, DestinationRunPhase::confirmation_pending,
@@ -156,12 +164,12 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
     if (!cancelling && action->stop && action->stop->approval) {
         ApprovalGate gate = ApprovalGate::stale;
         {
-            std::lock_guard lock(db.mutex);
-            Transaction tx(db.db);
-            const auto current = db.taskRecords.load(id);
+            std::lock_guard lock(database.mutex);
+            Transaction tx(database.db);
+            const auto current = taskRecords.load(id);
             const auto resource = Resource{Action::t3_send, Resource::sessionRead(cmd.environmentId, ref.threadId).target};
             const auto& approval = *action->stop->approval;
-            auto origin = db.policyApprovals.taskPolicyOrigin(current);
+            auto origin = policyApprovals.taskPolicyOrigin(current);
             origin.scope = approval.scope;
             origin.requester = approval.requester;
             origin.anchor = approval.anchor;
@@ -171,8 +179,8 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
             origin.generation = approval.generation;
             origin.revision = approval.revisionId;
             const auto& operationId = action->stop->operation;
-            gate = db.policyApprovals.approveAction(origin, resource, std::string(runStopOperation) + operationId, stopPolicyJson(approval),
-                                                    now, true, ApprovalWait::defer);
+            gate = policyApprovals.approveAction(origin, resource, std::string(runStopOperation) + operationId, stopPolicyJson(approval),
+                                                 now, true, ApprovalWait::defer);
             if (gate != ApprovalGate::waiting) {
                 auto saved = outboxStorage.outbox(current, key);
                 if (saved && saved->stop && saved->stop->operation == operationId) {
@@ -194,7 +202,7 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
         }
     }
     try {
-        const SessionDispatchFileLock dispatch(db.path, SessionDispatchFileLock::Mode::shared);
+        const SessionDispatchFileLock dispatch(path, SessionDispatchFileLock::Mode::shared);
         t3.interrupt(cmd.environmentId, cmd.config, ref);
     } catch (const std::exception&) {
         destinationStatus(id, key, DestinationRunPhase::confirmation_pending, "T3 did not confirm the stop request.");
