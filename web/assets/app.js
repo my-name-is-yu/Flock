@@ -481,7 +481,6 @@ function positionMenuPopover(botId) {
 function setMenu(botId, focus) {
   menu = botId;
   renderBots();
-  if (botId) positionMenuPopover(botId);
   if (focus === 'first' || focus === 'last') {
     const items = sidebar.querySelectorAll('.menu-popover [role="menuitem"]');
     items[focus === 'first' ? 0 : items.length - 1]?.focus();
@@ -827,6 +826,7 @@ function renderBots() {
       }
     }
   }
+  if (menu) positionMenuPopover(menu);
   if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
