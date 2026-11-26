@@ -937,7 +937,9 @@ function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
   const title = [session.name, request].filter(Boolean).join(' · ');
   const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
-  row.dataset.tooltip = [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · ');
+  const details = [Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean);
+  row.dataset.tooltip = [title, ...details].join(' · ');
+  if (details.length) row.append(node('span', 'sr-only', ` · ${details.join(' · ')}`));
   if (link) {
     row.href = link;
     row.target = '_blank';

@@ -41,6 +41,16 @@ async function exercise() {
   await wait(600);
   check(!open(), 'An open menu still showed its tooltip');
 
+  const summary = document.querySelector('#more summary');
+  pointer('pointerover', summary);
+  await wait(600);
+  check(open(), 'The menu button did not show its tooltip');
+  document.getElementById('more').open = true;
+  await wait(50);
+  check(!open(), 'Opening the menu left its tooltip over it');
+  pointer('pointerout', summary, document.body);
+  await wait(700);
+
   pointer('pointerover', close, null, 'touch');
   await wait(600);
   check(!open(), 'Touch showed a tooltip');
@@ -52,6 +62,7 @@ const index = `<!doctype html><html><head><link rel="stylesheet" href="/style.cs
   <button id="close" aria-label="Close" data-tooltip="Close" data-shortcut="Esc">x</button>
   <button id="copy" aria-label="Copy text" data-tooltip="Copy text">c</button>
   <button id="menu" aria-haspopup="menu" aria-expanded="true" data-tooltip="Menu">m</button>
+  <details id="more"><summary data-tooltip="More actions">…</summary><p>Item</p></details>
   <script type="module">
     import '/tooltip.js';
     try {
