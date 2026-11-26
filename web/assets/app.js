@@ -1699,12 +1699,15 @@ function eventCard(event, context, place, report) {
     }
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
-      const owner = bots.find((item) => item.id === blocker.botId)?.name ?? blocker.botId;
-      // Truncate only the blocking request so "Queued after" and the owner stay readable on narrow screens.
       const note = node('p', 'msg-note msg-queued');
-      note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
-      if (blocker.botId !== context.bot?.id) note.append(node('span', 'msg-queued-owner', `· ${owner}`));
-      note.dataset.tooltip = `Starts when “${blocker.request}” (${owner}) finishes`;
+      if (blocker.request) {
+        // Truncate only the blocking request so "Queued after" stays readable on narrow screens.
+        note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
+        note.dataset.tooltip = `Starts when “${blocker.request}” finishes`;
+      } else {
+        // The server names only this Bot's own requests; another Bot's work in the project stays private.
+        note.append(icon('clock'), node('span', null, 'Waiting for another Bot to finish in this project'));
+      }
       extras.push(note);
     }
   }
@@ -2158,14 +2161,13 @@ function conversationRows(data, events, keep, source) {
     const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
     const request = ['request', 'conversation_message'].includes(event.kind);
     const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
-    const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
         place.groupStart, place.taskStart, place.afterQuestion, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         waitDecision && decisions.busy(waitDecision),
         wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), paused,
-        paused && decisions.busy(pausedDecision(view.id, paused)), blocker, blockedOwner,
+        paused && decisions.busy(pausedDecision(view.id, paused)), blocker,
         request ? timeline.parallelTasks.get(event.taskId) : null,
         event.kind === 'memory_remembered' && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
@@ -2208,8 +2210,8 @@ function conversationRows(data, events, keep, source) {
   return rows;
 }
 
-function setNotice(context, text, isError = false) {
-  notices.set(context.id, { text, isError });
+function setNotice(context, text, isError = false, { quiet = false } = {}) {
+  notices.set(context.id, { text, isError, quiet });
   if (showingComposer(context.id)) renderComposer();
 }
 const composerLimit = (limits, reply, decision) =>
@@ -2405,6 +2407,7 @@ function renderComposer() {
     (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
   elements.notice.classList.toggle('error', !!(notice?.isError || screenshotError));
   elements.notice.classList.toggle('fading', !closedReply && !screenshotError && !!notice?.fading);
+  elements.notice.classList.toggle('sr-only', !closedReply && !screenshotError && !!notice?.quiet);
   scheduleNoticeFade(context, notice);
 }
 
@@ -3268,7 +3271,8 @@ async function submit(event) {
     if (review && view === context && decisions.reviewReply()?.messageId === review.messageId) {
       decisions.close({ focus: false });
     }
-    setNotice(context, 'Message received.');
+    // The bubble shows Received; the notice only tells screen readers.
+    setNotice(context, 'Message received.', false, { quiet: true });
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
