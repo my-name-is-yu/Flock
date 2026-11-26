@@ -203,7 +203,7 @@ const server = createServer(async (request, response) => {
     return;
   }
   try {
-    response.setHeader('Content-Type', pathname === '/' ? 'text/html' : contentTypes[extname(pathname)] ?? 'application/octet-stream');
+    response.setHeader('Content-Type', pathname === '/' ? 'text/html; charset=utf-8' : contentTypes[extname(pathname)] ?? 'application/octet-stream');
     response.end(pathname === '/' ? index : await read(pathname));
   } catch {
     response.writeHead(404).end();

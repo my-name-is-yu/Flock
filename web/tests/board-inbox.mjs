@@ -661,7 +661,7 @@ async function testLive(browserArgs) {
       server.emit('browserResult', searchParams.get('error'));
       return;
     }
-    if (pathname === '/') return response.writeHead(200, { 'Content-Type': 'text/html' }).end(livePage);
+    if (pathname === '/') return response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(livePage);
     try {
       const asset = await read('.' + pathname);
       response.writeHead(200, { 'Content-Type': contentTypes[extname(pathname)] ?? 'application/octet-stream' }).end(asset);

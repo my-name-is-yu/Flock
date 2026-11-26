@@ -16,7 +16,7 @@ export const readAsset = (path) => readFile(new URL(`.${path}`, assets), 'utf8')
 export async function respondWithAsset(response, pathname, pages = {}) {
   try {
     const page = Object.hasOwn(pages, pathname) ? pages[pathname] : null;
-    response.setHeader('Content-Type', page === null ? contentTypes[extname(pathname)] ?? 'application/octet-stream' : 'text/html');
+    response.setHeader('Content-Type', page === null ? contentTypes[extname(pathname)] ?? 'application/octet-stream' : 'text/html; charset=utf-8');
     response.end(page ?? await readFile(new URL(`.${pathname}`, assets)));
   } catch {
     response.writeHead(404).end();
