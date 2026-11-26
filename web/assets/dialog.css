@@ -208,6 +208,7 @@ a.settings-row svg { margin-left: auto; }
 }
 
 .cron-list { padding: 0; }
+.cron-list:empty { display: none; }
 .cron-row { display: grid; gap: .35rem; padding: .95rem 1.1rem; }
 .cron-row + .cron-row { box-shadow: inset 0 1px var(--hairline); }
 .cron-when { display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .6rem; min-width: 0; font-size: var(--text-md); font-weight: 600; }

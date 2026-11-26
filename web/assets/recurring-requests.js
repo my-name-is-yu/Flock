@@ -11,6 +11,17 @@ function node(tag, className, text) {
   return element;
 }
 
+// "Eastern Time" reads better than "America/New_York"; fall back to the ID if the browser can't name it.
+function zoneName(zone) {
+  try {
+    return new Intl.DateTimeFormat('en', { timeZone: zone, timeZoneName: 'longGeneric' })
+      .formatToParts(new Date()).find((part) => part.type === 'timeZoneName')?.value ?? zone;
+  } catch (error) {
+    if (error instanceof RangeError) return zone;
+    throw error;
+  }
+}
+
 function repeatDescription(cron) {
   const match = /^(\d+)\s+(\d+)\s+\*\s+\*\s+(\*|1-5|\d+)$/.exec(cron.trim());
   if (!match) return null;
@@ -49,7 +60,7 @@ function scheduleRow(item, canManage, removeSchedule) {
   const when = node('p', 'cron-when');
   const timing = scheduleWhen(item);
   when.append(node('span', null, timing.text));
-  if (timing.zone && timing.zone !== browserZone) when.append(node('span', 'cron-zone', timing.zone));
+  if (timing.zone && timing.zone !== browserZone) when.append(node('span', 'cron-zone', zoneName(timing.zone)));
   const text = node('div', 'cron-text');
   text.append(when);
   const filter = item.kind === 'trigger' && Object.entries(item.eventFilter ?? {})
@@ -120,7 +131,7 @@ function scheduleForm(addSchedule) {
   const time = node('input');
   Object.assign(time, { type: 'time', value: '09:00', required: true });
   time.setAttribute('aria-label', 'Time');
-  const zone = node('span', 'cron-zone', browserZone);
+  const zone = node('span', 'cron-zone', zoneName(browserZone));
   const add = node('button', 'dialog-button primary', 'Add');
   add.type = 'submit';
   const when = node('div', 'cron-form-when');
@@ -213,11 +224,8 @@ export function createRecurringRequests(bot, api) {
           node('p', 'cron-error', 'This request in the Bot’s configuration isn’t scheduled.'));
         rows.push(row);
       }
-      if (!rows.length) {
-        rows.push(node('p', 'cron-empty', canManage
-          ? 'No scheduled requests. Add one below, or ask the Bot in the conversation.'
-          : 'No scheduled requests.'));
-      }
+      // With the add form right below, an empty list needs no label of its own.
+      if (!rows.length && !canManage) rows.push(node('p', 'cron-empty', 'No recurring requests.'));
       list.replaceChildren(...rows);
       if (focused) {
         const control = [...list.querySelectorAll('[data-schedule-id]')].find((button) => button.dataset.scheduleId === focused);
