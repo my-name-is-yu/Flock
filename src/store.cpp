@@ -36,7 +36,7 @@
 #include "wait_storage.hpp"
 #include "task_events.hpp"
 #include "journal_storage.hpp"
-#include "storage.hpp"
+#include "store_access.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
 #include "journal_peer.hpp"
@@ -172,11 +172,12 @@ void GitEvents::protectGitCredential(std::string value) {
     secrets_.protectGitCredential(std::move(value));
 }
 Database& Database::of(Store& store) {
-    return store.p_->database;
+    return StoreAccess::get(store).database;
 }
-Tasks::Tasks(Store& store) : database_(Database::of(store)), records_(store.p_->taskRecords) {}
+Tasks::Tasks(Store& store) : database_(Database::of(store)), records_(StoreAccess::get(store).taskRecords) {}
 
-TaskList::TaskList(Store& store) : database_(Database::of(store)), records_(store.p_->taskRecords), waits_(store.p_->waitStorage) {}
+TaskList::TaskList(Store& store)
+    : database_(Database::of(store)), records_(StoreAccess::get(store).taskRecords), waits_(StoreAccess::get(store).waitStorage) {}
 
 bool Tasks::hasTask(Id id) const {
     std::lock_guard lock(database_.mutex);
@@ -188,10 +189,11 @@ TaskView Tasks::task(Id id) const {
     return records_.taskDetails(id, true);
 }
 
-ConversationIntake::ConversationIntake(Store& store) : turns_(store.p_->conversationTurns) {}
+ConversationIntake::ConversationIntake(Store& store) : turns_(StoreAccess::get(store).conversationTurns) {}
 
 WebConversationIntake::WebConversationIntake(Store& store)
-    : database_(Database::of(store)), turns_(store.p_->conversationTurns), permissions_(store.p_->permissions) {}
+    : database_(Database::of(store)), turns_(StoreAccess::get(store).conversationTurns), permissions_(StoreAccess::get(store).permissions) {
+}
 
 Json ConversationIntake::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
                                  const Json& attachments) {
@@ -201,39 +203,42 @@ Json ConversationIntake::receive(const Person& actor, const Intake& routing, std
 }
 
 Conversations::Conversations(Store& store)
-    : database_(Database::of(store)), context_(store.p_->conversationContextStorage), memory_(store.p_->memoryStorage),
-      modelCalls_(store.p_->modelCalls), channels_(store.p_->channelStorage) {}
+    : database_(Database::of(store)), context_(StoreAccess::get(store).conversationContextStorage),
+      memory_(StoreAccess::get(store).memoryStorage), modelCalls_(StoreAccess::get(store).modelCalls),
+      channels_(StoreAccess::get(store).channelStorage) {}
 
-Memory::Memory(Store& store) : database_(Database::of(store)), memory_(store.p_->memoryStorage) {}
+Memory::Memory(Store& store) : database_(Database::of(store)), memory_(StoreAccess::get(store).memoryStorage) {}
 
 Automations::Automations(Store& store)
-    : database_(Database::of(store)), automation_(store.p_->automationStorage), lifecycle_(store.p_->botLifecycle),
-      secrets_(store.p_->secretStorage), tasks_(store.p_->taskOperations), policy_(store.p_->permissions) {}
+    : database_(Database::of(store)), automation_(StoreAccess::get(store).automationStorage),
+      lifecycle_(StoreAccess::get(store).botLifecycle), secrets_(StoreAccess::get(store).secretStorage),
+      tasks_(StoreAccess::get(store).taskOperations), policy_(StoreAccess::get(store).permissions) {}
 
-Inbox::Inbox(Store& store) : inbox_(store.p_->inboxStorage), git_(store.p_->gitStorage) {}
+Inbox::Inbox(Store& store) : inbox_(StoreAccess::get(store).inboxStorage), git_(StoreAccess::get(store).gitStorage) {}
 
-GitEvents::GitEvents(Store& store) : git_(store.p_->gitStorage), secrets_(store.p_->secretStorage) {}
+GitEvents::GitEvents(Store& store) : git_(StoreAccess::get(store).gitStorage), secrets_(StoreAccess::get(store).secretStorage) {}
 
-TaskIntake::TaskIntake(Store& store) : database_(Database::of(store)), operations_(store.p_->taskOperations) {}
+TaskIntake::TaskIntake(Store& store) : database_(Database::of(store)), operations_(StoreAccess::get(store).taskOperations) {}
 
 TaskControl::TaskControl(Store& store)
-    : database_(Database::of(store)), outbox_(store.p_->outboxStorage), operations_(store.p_->taskOperations),
-      records_(store.p_->taskRecords), waits_(store.p_->waitStorage) {}
+    : database_(Database::of(store)), outbox_(StoreAccess::get(store).outboxStorage), operations_(StoreAccess::get(store).taskOperations),
+      records_(StoreAccess::get(store).taskRecords), waits_(StoreAccess::get(store).waitStorage) {}
 
-TaskHistory::TaskHistory(Store& store) : database_(Database::of(store)), records_(store.p_->taskRecords) {}
+TaskHistory::TaskHistory(Store& store) : database_(Database::of(store)), records_(StoreAccess::get(store).taskRecords) {}
 
-Channels::Channels(Store& store) : channels_(store.p_->channelStorage) {}
+Channels::Channels(Store& store) : channels_(StoreAccess::get(store).channelStorage) {}
 
-LocalMachines::LocalMachines(Store& store) : machines_(store.p_->localMachineStorage) {}
+LocalMachines::LocalMachines(Store& store) : machines_(StoreAccess::get(store).localMachineStorage) {}
 
 WebIdentity::WebIdentity(Store& store)
-    : database_(Database::of(store)), machines_(store.p_->localMachineStorage), identity_(store.p_->webIdentity) {}
+    : database_(Database::of(store)), machines_(StoreAccess::get(store).localMachineStorage),
+      identity_(StoreAccess::get(store).webIdentity) {}
 
-Workflows::Workflows(Store& store) : database_(Database::of(store)), workflows_(store.p_->workflowStorage) {}
+Workflows::Workflows(Store& store) : database_(Database::of(store)), workflows_(StoreAccess::get(store).workflowStorage) {}
 
 Notifications::Notifications(Store& store)
-    : database_(Database::of(store)), secrets_(store.p_->secretStorage), channels_(store.p_->channelStorage),
-      permissions_(store.p_->permissions) {}
+    : database_(Database::of(store)), secrets_(StoreAccess::get(store).secretStorage), channels_(StoreAccess::get(store).channelStorage),
+      permissions_(StoreAccess::get(store).permissions) {}
 
 PeerConversations::PeerConversations(Store& store) : database_(Database::of(store)) {}
 
