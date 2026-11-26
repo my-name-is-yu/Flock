@@ -179,9 +179,11 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
         copyFields(details, data, {"request"});
     else if (kind == "user_answer")
         copyFields(details, data, {"text", "waitId", "question"});
-    else if (kind == "memory_remembered")
-        copyFields(details, data, {"text", "revisionId", "version", "canUndo", "undone"});
-    else if (kind == "pr_review_requested")
+    else if (kind == "memory_remembered" || kind == "memory_learned") {
+        copyFields(details, data, {"text", "revisionId", "version", "canUndo", "undone", "taskTitle", "requestEventId", "diffSummary"});
+        if (kind == "memory_learned")
+            for (const auto* key : {"added", "removed"}) details[key] = data.at(key);
+    } else if (kind == "pr_review_requested")
         copyFields(details, data, {"itemId", "title", "text", "prUrl"});
     else if (kind == "completed") {
         copyFields(details, data, {"text", "revisionId", "runOutcome", "requestedCommit"});
@@ -440,6 +442,18 @@ Json botSettings(const Json& bot) {
     view["fixPullRequests"] = bot.value("fixPullRequests", true);
     copyFields(view, bot, {"environmentId", "projectId", "model", "reasoningEffort"});
     return view;
+}
+
+void projectMemoryHistoryLinks(Json& result) {
+    const auto project = [](Json& revision) {
+        const auto learning = revision.find("learning");
+        if (learning != revision.end()) learning->at("run") = runView(learning->at("run"), {});
+    };
+    if (const auto revisions = result.find("revisions"); revisions != result.end()) {
+        for (auto& revision : *revisions) project(revision);
+    } else {
+        project(result);
+    }
 }
 
 Json botList(Store& store, const Json& bots) {

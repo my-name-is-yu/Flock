@@ -177,13 +177,8 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
                            {"replyKinds", peerExchanges.replyKinds(task, *peer)},
                            {"phase", peer->phase},
                            {"role", peer->sender == task.id ? "sender" : "recipient"}};
-    const auto evidence = event["evidence"];
-    const bool canReadHistory =
-        std::ranges::find(tools, "session_read") != tools.end() || std::ranges::find(tools, "read_bot_evidence") != tools.end();
-    summary["remainingEvidenceReads"] = canReadHistory ? SessionHistory::maxEvidenceReads - evidence.size() : 0;
-    event.erase("evidence");
-    event.erase("consumed");
     Id attempt = 0;
+    std::string learningRunId;
     {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
@@ -192,15 +187,33 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
         if (current.generation != task.generation || current.eventId != event["id"] || current.currentRevision != task.currentRevision ||
             current.state != TaskState::deciding)
             return std::nullopt;
+        if (std::ranges::find(tools, "complete") != tools.end())
+            if (const auto source = decisions.learningSource(current, event)) learningRunId = source->runId;
         attempt = modelCalls.recordAttempt(modelCalls.taskModelScope(task.id), "task_decision", 0, task.id, event["id"]);
         transaction.commit();
     }
+    auto evidence = std::move(event.at("evidence"));
+    const bool canReadHistory =
+        std::ranges::find(tools, "session_read") != tools.end() || std::ranges::find(tools, "read_bot_evidence") != tools.end();
+    summary["remainingEvidenceReads"] = canReadHistory ? SessionHistory::maxEvidenceReads - evidence.size() : 0;
+    event.erase("evidence");
+    event.erase("consumed");
     if (gitHost && event.at("kind") == "result") gitStorage.projectTaskGitReads(*gitHost, task, event);
     TaskInference inference{task.generation, event.at("id"), attempt, task.currentRevision};
     try {
         auto turn = modelCalls.callModel(task.botId, model,
-                                         {summary, event, history, bot, tools, task.feedback.value_or(""), evidence, task.config,
-                                          needsDoneWhen(task), summary.contains("forwardableUserMessage")});
+                                         {summary,
+                                          event,
+                                          history,
+                                          bot,
+                                          tools,
+                                          task.feedback.value_or(""),
+                                          std::move(evidence),
+                                          task.config,
+                                          needsDoneWhen(task),
+                                          summary.contains("forwardableUserMessage"),
+                                          {},
+                                          std::move(learningRunId)});
         inference.usage = std::move(turn.usage);
         if (turn.calls.size() == 1)
             inference.outcome = std::move(turn.calls.front());

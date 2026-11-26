@@ -114,6 +114,8 @@ const pairedReport = { id: 11, kind: 'report', taskId: 2 };
 const complete = { id: 12, kind: 'completed', taskId: 2 };
 const closed = { id: 13, kind: 'wait_closed' };
 assert.equal(replyArrivalId([pairedReport, complete, closed], 10), 12, 'Only the visible completion in the pair animates');
+assert.equal(replyArrivalId([pairedReport, complete, { id: 13, kind: 'memory_learned' }], 10), 12,
+  'A learning notice leaves the completion arrival in place');
 assert.equal(replyArrivalId([pairedReport, complete, closed], 13), undefined, 'The completion does not replay');
 assert.equal(replyArrivalId([pairedReport, { ...complete, taskId: 3 }], 10), undefined, 'Different requests stay still');
 assert.equal(replyArrivalId([pairedReport, { ...complete, kind: 'report' }], 10), undefined, 'Two reports stay still');

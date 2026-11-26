@@ -10,7 +10,7 @@ import { createBotRoleCard } from '/bot-role.js';
 import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { mountBotPause } from '/bot-pause.js';
-import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
+import { isMemoryNotice, messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pendingKindLabels, pullRequestLink, taskWaitDecision } from '/board-inbox.js';
 import { screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
@@ -19,6 +19,7 @@ import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQues
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 import { mountConversationFind } from '/conversation-find.mjs';
 import { createRecurringRequests } from '/recurring-requests.js';
+import { createMemoryHistory } from '/memory-history.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -1442,16 +1443,8 @@ function verificationLine(run, showLink) {
   return line;
 }
 
-function memoryNotice(event, canUndo, context) {
+function memoryUndo(event, context, status) {
   const { data } = event;
-  const note = node('article', 'system-note memory-notice');
-  note.id = `event-${event.id}`;
-  note.tabIndex = -1;
-  note.append(node('strong', null, data.undone ? 'Memory undone' : 'Remembered'), ' · ', data.text);
-  if (!canUndo) return note;
-
-  const status = node('span', 'memory-notice-status');
-  status.setAttribute('role', 'status');
   const undo = button('Undo', 'text-button', async () => {
     if (undo.getAttribute('aria-disabled') === 'true') return;
     undo.setAttribute('aria-disabled', 'true');
@@ -1476,7 +1469,33 @@ function memoryNotice(event, canUndo, context) {
     }
   });
   undo.dataset.timelineAction = 'undo-memory';
-  note.append(undo, status);
+  return undo;
+}
+
+function memoryNotice(event, canUndo, context) {
+  const { data } = event;
+  const learned = event.kind === 'memory_learned';
+  const note = node('article', 'system-note memory-notice');
+  note.id = `event-${event.id}`;
+  note.tabIndex = -1;
+  const kind = learned ? 'Learned' : 'Remembered';
+  note.append(node('strong', null, data.undone ? 'Memory undone' : kind), ' · ',
+    learned ? data.added.map((fact) => `“${fact}”`).join(' · ') : data.text);
+  if (learned) {
+    const source = button(data.taskTitle || 'Source request', 'text-button', () => {
+      void showConversationMessage(context, data.requestEventId, { preferLoaded: true });
+    });
+    source.dataset.timelineAction = 'show-learning-source';
+    note.append(' · from ', source);
+  }
+  const stale = learned && !data.canUndo && !data.undone;
+  const status = node('span', 'memory-notice-status', stale ? 'Memory has changed.' : '');
+  status.setAttribute('role', 'status');
+  if (canUndo) note.append(' · ', memoryUndo(event, context, status));
+  if (learned && data.removed.length) {
+    note.append(node('p', 'memory-notice-removed', 'Replaced · ' + data.removed.map((fact) => `“${fact}”`).join(' · ')));
+  }
+  if (canUndo || stale) note.append(status);
   return note;
 }
 
@@ -1484,7 +1503,7 @@ function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
-  if (event.kind === 'memory_remembered')
+  if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
@@ -2139,7 +2158,7 @@ function conversationRows(data, events, keep, source) {
         waitDecision && decisions.busy(waitDecision),
         wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), blocker,
         request ? timeline.parallelTasks.get(event.taskId) : null,
-        event.kind === 'memory_remembered' && bot?.canDelete,
+        isMemoryNotice(event) && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
@@ -2394,6 +2413,7 @@ function renderComposer() {
 const detailNav = byId('detail-nav');
 const settingsSections = {
   general: ['General', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
+  memory: ['Memory', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="16" rx="2"/><path d="M9 9h6m-6 4h6m-6 4h3"/></svg>'],
   recurring: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
 };
 const settingsTabs = Object.keys(settingsSections);
@@ -2815,6 +2835,17 @@ function roleCard(bot) {
 }
 function settingsContent(bot, section = 'general') {
   elements['detail-title'].textContent = `${bot.name} settings`;
+  if (section === 'memory') {
+    const context = view;
+    return [createMemoryHistory(
+      (before) => api(botQuery('memory/history', bot.id, before)),
+      (eventId) => {
+        closeDetail();
+        void showConversationMessage(context, eventId, { preferLoaded: true });
+      },
+      (run) => linkToRun(run, 'Open Session')
+    )];
+  }
   if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
   return generalContent(bot);
 }

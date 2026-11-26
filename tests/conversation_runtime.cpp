@@ -11,6 +11,7 @@
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
+#include "flock/external_mcp.hpp"
 #include "flock/store_options.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
@@ -1783,6 +1784,274 @@ void sessionReportsCannotBecomePreferences() {
               std::ranges::none_of(Conversations(*f.store).conversation("alpha"),
                                    [](const Json& event) { return event.at("kind") == "memory_remembered"; }),
           "A preference from a Session report was saved");
+}
+
+Id requestLearningTask(Fixture& f, std::string_view request, const Person& requester = localOwner) {
+    f.script(request, {start()});
+    ConversationIntake(*f.store).receive(requester, f.routing(), request, request);
+    f.runtime->runConversations();
+    return f.lastTurn().front().at("result").at("taskId");
+}
+
+std::string settleLearningTask(Fixture& f, Id task, std::string report) {
+    f.reach(task, "running");
+    const auto runId = f.task(task).at("activeRun").at("runId").get<std::string>();
+    f.t3.finish(runId, std::move(report));
+    f.reach(task, "completed");
+    return runId;
+}
+
+Decision completeWithLearnings(const ModelInput& input, Json learnings) {
+    return {
+        "complete", {{"report", input.event.at("report")}, {"learnings", std::move(learnings)}}, "The Session verified the requested work"};
+}
+
+Json learnedNotices(Fixture& f) {
+    Json notices = Json::array();
+    for (const auto& event : Conversations(*f.store).conversation("alpha"))
+        if (event.at("kind") == "memory_learned") notices.push_back(event);
+    return notices;
+}
+
+void sessionLearningsReachTheNextSessionAndCanBeUndone() {
+    constexpr auto preference = "Prefer release notes to be brief.\n";
+    constexpr auto fact = "./scripts/verify.sh runs the full project check.";
+    constexpr auto otherFact = "The full check requires Chrome and the OpenSSL CLI.";
+    constexpr auto firstRequest = "Find the project's full check";
+    Fixture f([=](auto) { return preference; });
+    const auto first = requestLearningTask(f, firstRequest);
+    f.reach(first, "running");
+    check(f.t3.sent.front().instruction.find(fact) == std::string::npos, "the first Session started with the fact already in memory");
+    int completions = 0;
+    f.model.onResult = [&](const ModelInput& input) {
+        ++completions;
+        check(input.learningRunId == input.event.at("resultRunId").get_ref<const std::string&>() && !input.learningRunId.empty(),
+              "completion did not offer the eligible Run as a learning source");
+        return completeWithLearnings(
+            input, Json::array({{{"text", fact}, {"runId", input.learningRunId}}, {{"text", otherFact}, {"runId", input.learningRunId}}}));
+    };
+    const auto firstRun =
+        settleLearningTask(f, first, "I ran ./scripts/verify.sh. It finished the format check, build and tests using Chrome and openssl.");
+    const auto completion = lastTaskEvent(*f.store, first, "completed");
+    const auto notices = learnedNotices(f);
+    check(completions == 1 && notices.size() == 1 && notices.front().at("id") > completion.at("id"),
+          "learning used a separate decision or did not follow completion");
+    const auto& notice = notices.front().at("data");
+    check(notice.at("taskId") == first && notice.at("runId") == firstRun && notice.at("completionEventId") == completion.at("id") &&
+              notice.at("requestEventId") == f.task(first).at("sourceMessageId") && notice.at("taskTitle") == firstRequest &&
+              notice.at("version") == 1 && notice.at("canUndo") == true && notice.at("added") == Json::array({fact, otherFact}) &&
+              notice.at("removed").empty(),
+          "the learning notice lost its source, facts or Undo");
+    const auto revisions = Memory(*f.store).memory(localOwner, "alpha", "memory_history", Json::object()).at("revisions");
+    const auto revision = notice.at("revisionId");
+    const Json source{{"taskId", first}, {"runId", firstRun}};
+    check(revisions.size() == 1 && revisions.front().at("id") == revision && revisions.front().at("source") == source &&
+              revisions.front().at("author") == "bot:alpha",
+          "one completion did not create exactly one attributed Bot revision");
+    const auto detail = Memory(*f.store).memory(localOwner, "alpha", "memory_history", {{"revisionId", revision}});
+    check(detail.at("source") == source && detail.at("previousContent") == preference &&
+              detail.at("newContent").get<std::string>().find("## Learned from work\n- " + std::string(fact)) != std::string::npos,
+          "the revision detail lost the source or dedicated learnings section");
+    check(Inbox(*f.store).inbox(localOwner).empty(), "automatic learning asked for approval");
+
+    f.restart();
+    const auto second = requestLearningTask(f, "Investigate the next change");
+    f.reach(second, "running");
+    const auto& prompt = f.t3.sent.at(1).instruction;
+    check(f.t3.sent.size() == 2 && f.t3.sent.at(1).tool == CommandTool::delegate &&
+              f.task(first).at("projectId") == f.task(second).at("projectId") &&
+              f.task(second).at("activeRun").at("threadId") != f.task(first).at("runs").front().at("threadId") &&
+              prompt.find("Notes from alpha's memory:") < prompt.find(fact) && prompt.find(fact) != std::string::npos &&
+              prompt.find(otherFact) != std::string::npos,
+          "the next task's first instruction did not carry the learned facts into its new Session");
+    f.model.onResult = [&](const ModelInput& input) {
+        ++completions;
+        return completeWithLearnings(
+            input, Json::array({{{"text", "  ./scripts/verify.sh  runs the FULL project check.  "}, {"runId", input.learningRunId}},
+                                {{"text", "The project linter uses the release configuration."}, {"runId", firstRun}}}));
+    };
+    settleLearningTask(f, second, "I ran the same full check again. The output also mentioned the project linter.");
+    f.tick();
+    Memory currentMemory(*f.store);
+    check(completions == 2 && learnedNotices(f).size() == 1 &&
+              currentMemory.memory(localOwner, "alpha", "read_memory", Json::object()).at("version") == 1,
+          "duplicate or stale evidence changed memory or forced another model decision");
+    currentMemory.memory(localOwner, "alpha", "revert_memory_edit", {{"baseVersion", notice.at("version")}, {"revisionId", revision}});
+    const auto reverted = currentMemory.memory(localOwner, "alpha", "read_memory", Json::object());
+    const auto undone = learnedNotices(f).front().at("data");
+    check(reverted.at("content") == preference && reverted.at("version") == 2 && undone.at("undone") == true &&
+              undone.at("canUndo") == false,
+          "Undo did not restore the exact previous memory document");
+}
+
+void sessionLearningsDropProtectedAndOversizedItems() {
+    constexpr auto secret = "private-fixture-value-48";
+    constexpr auto safeFact = "The build uses a local SQLite database.";
+    Fixture f;
+    SecretRequests secrets(*f.store);
+    secrets.submitSecret(localOwner, "alpha", secrets.requestSecret("alpha", {"fixture-key"}), secret);
+    int completions = 0;
+    const auto oversizedText = "The configured target is " + [] {
+        std::string value;
+        for (int i = 0; i < 100; ++i) value += "界";
+        return value;
+    }();
+    f.model.onResult = [&](const ModelInput& input) {
+        ++completions;
+        return completeWithLearnings(
+            input, Json::array({{{"text", "The credential is " + std::string(secret) + "."}, {"runId", input.learningRunId}},
+                                {{"text", oversizedText}, {"runId", input.learningRunId}},
+                                {{"text", safeFact}, {"runId", input.learningRunId}}}));
+    };
+    const auto task = requestLearningTask(f, "Verify the database build");
+    settleLearningTask(f, task, "The build passed against local SQLite. The sealed configuration contained the key " + std::string(secret));
+    const auto saved = Memory(*f.store).memory(localOwner, "alpha", "read_memory", Json::object()).at("content").get<std::string>();
+    check(completions == 1 && learnedNotices(f).front().at("data").at("added") == Json::array({safeFact}) &&
+              saved.find(safeFact) != saved.npos && saved.find("credential") == saved.npos && saved.find("界") == saved.npos &&
+              TaskHistory(*f.store).history(task).dump().find(secret) == std::string::npos,
+          "an unsafe candidate persisted or caused the valid candidate or completion to be lost");
+
+    f.model.onResult = [](const ModelInput& input) {
+        Json learnings = Json::array();
+        for (const auto* fact :
+             {"The project uses Bash.", "The project uses CMake.", "The project uses Ninja.", "The project uses Chrome."})
+            learnings.push_back({{"text", fact}, {"runId", input.learningRunId}});
+        return completeWithLearnings(input, std::move(learnings));
+    };
+    const auto second = requestLearningTask(f, "Check the installed build tools");
+    settleLearningTask(f, second, "Confirmed Bash, CMake, Ninja and Chrome.");
+    check(learnedNotices(f).size() == 1 && Memory(*f.store).memory(localOwner, "alpha", "read_memory", Json::object()).at("version") == 1,
+          "the runtime accepted an out-of-contract number of learnings");
+}
+
+void fullMemoryConsolidatesOnlySupersededLearnings() {
+    constexpr auto oldFact = "The CMake preset verify-debug runs the project verification checks.";
+    constexpr auto newFact = "The CMake preset verify runs the project checks.";
+    constexpr auto extraFact = "Ninja is present";
+    const std::string otherSections = "## Preferences\n- The source checkout lives at project/.\n";
+    const std::string oldSection = std::string("## Learned from work\n- ") + oldFact + "\n";
+    const auto retained = otherSections + std::string(limits::memory::maxDocumentBytes - oldSection.size() - otherSections.size(), 'x');
+    const auto before = oldSection + retained;
+    Fixture f([&](auto) { return before; });
+    f.model.onResult = [newFact](const ModelInput& input) {
+        return completeWithLearnings(input, Json::array({{{"text", newFact}, {"runId", input.learningRunId}}}));
+    };
+    const auto first = requestLearningTask(f, "Check the new verification preset");
+    settleLearningTask(f, first, "The verify preset ran the project checks.");
+    Memory memory(*f.store);
+    const auto full = memory.memory(localOwner, "alpha", "read_memory", Json::object());
+    check(learnedNotices(f).empty() && full.at("version") == 0 && full.at("content") == before,
+          "a full document lost memory without an identified replacement");
+
+    f.model.onResult = [newFact, oldFact, extraFact](const ModelInput& input) {
+        return completeWithLearnings(input, Json::array({{{"text", extraFact}, {"runId", input.learningRunId}},
+                                                         {{"text", newFact}, {"runId", input.learningRunId}, {"replaces", oldFact}}}));
+    };
+    const auto second = requestLearningTask(f, "Compare the verification presets");
+    settleLearningTask(f, second, "Ninja was installed and the verify-debug preset was removed. The verify preset now runs the checks.");
+    const auto after = std::string("## Learned from work\n- ") + newFact + "\n- " + extraFact + "\n" + retained;
+    const auto notices = learnedNotices(f);
+    const auto revisions = memory.memory(localOwner, "alpha", "memory_history", Json::object()).at("revisions");
+    check(notices.size() == 1 && revisions.size() == 1 && revisions.front().at("version") == 1 &&
+              memory.memory(localOwner, "alpha", "read_memory", Json::object()).at("content") == after,
+          "consolidation changed unrelated memory, truncated the document or wrote multiple revisions");
+    const auto& notice = notices.front().at("data");
+    check(notice.at("added") == Json::array({newFact, extraFact}) && notice.at("removed") == Json::array({oldFact}) &&
+              notice.at("diffSummary") == revisions.front().at("diffSummary") &&
+              !notice.at("diffSummary").get_ref<const std::string&>().empty(),
+          "the learning notice did not describe both sides of the consolidation");
+
+    auto edited = after;
+    edited.back() = 'y';
+    memory.memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 1}, {"content", edited}});
+    bool staleUndo = false;
+    try {
+        memory.memory(localOwner, "alpha", "revert_memory_edit",
+                      {{"baseVersion", notice.at("version")}, {"revisionId", notice.at("revisionId")}});
+    } catch (const Conflict& error) {
+        staleUndo = std::string_view(error.what()).starts_with("Memory version conflict");
+    }
+    check(staleUndo && learnedNotices(f).front().at("data").at("canUndo") == false &&
+              memory.memory(localOwner, "alpha", "read_memory", Json::object()).at("content") == edited,
+          "a stale Undo overwrote or failed to recognize a later memory edit");
+}
+
+void sessionLearningsReplaceCaseOnlyCorrections() {
+    const std::string oldFact = "./scripts/Verify.sh runs the full check.";
+    const std::string corrected = "./scripts/verify.sh runs the full check.";
+    const std::string retained = "The full check requires Chrome.";
+    const std::string heading = "## Learned from work\n- ";
+    const std::string before = heading + oldFact + "\n- " + retained + "\n";
+    Fixture f([&](auto) { return before; });
+    f.model.onResult = [&](const ModelInput& input) {
+        return completeWithLearnings(
+            input, Json::array({{{"text", "The full check requires CHROME."}, {"replaces", oldFact}, {"runId", input.learningRunId}},
+                                {{"text", retained}, {"replaces", retained}, {"runId", input.learningRunId}},
+                                {{"text", corrected}, {"replaces", oldFact}, {"runId", input.learningRunId}}}));
+    };
+    const auto task = requestLearningTask(f, "Check the renamed verification script");
+    settleLearningTask(f, task, "./scripts/verify.sh ran the full check using Chrome.");
+
+    const auto memory = Memory(*f.store).memory(localOwner, "alpha", "read_memory", Json::object());
+    const auto notices = learnedNotices(f);
+    check(memory.at("content") == heading + corrected + "\n- " + retained + "\n" && notices.size() == 1 &&
+              notices.front().at("data").at("added") == Json::array({corrected}) &&
+              notices.front().at("data").at("removed") == Json::array({oldFact}),
+          "case-only correction was dropped or displaced another retained fact");
+}
+
+void sessionLearningsRequireAnAuthorizedHumanRequest() {
+    Fixture f;
+    constexpr auto fact = "The project runs release checks with CMake.";
+    constexpr auto report = "The release checks passed with CMake.";
+    bool expectSource = false;
+    int completions = 0;
+    f.model.onResult = [&](const ModelInput& input) {
+        ++completions;
+        check(expectSource == !input.learningRunId.empty(), "completion offered a learning source without current settings authority");
+        return completeWithLearnings(input, Json::array({{{"text", fact}, {"runId", input.event.at("resultRunId")}}}));
+    };
+    const Person member{"member"};
+    BotAccess(*f.store).setMember(localOwner, "alpha", member.id, true);
+    const auto memberTask = requestLearningTask(f, "Check the member's build", member);
+    settleLearningTask(f, memberTask, report);
+
+    Automations automations(*f.store);
+    automations.createAutomation(localOwner, f.routing(), {{"kind", "trigger"}, {"source", "deploy"}, {"request", "Check the deploy"}},
+                                 f.now);
+    const auto webhook = automations.receiveWebhook(localOwner, "deploy", "example-delivery", {{"status", "success"}}, f.now);
+    settleLearningTask(f, webhook.at("tasks").front().at("taskId"), report);
+    const auto schedule = automations.createAutomation(
+        localOwner, f.routing(), {{"kind", "schedule"}, {"cron", "* * * * *"}, {"timezone", "Etc/UTC"}, {"request", "Check the release"}},
+        f.now);
+    f.now = schedule.at("nextRunAt");
+    automations.fireDueAutomations(f.now);
+    settleLearningTask(f, TaskList(*f.store).tasks("alpha").front().task.id, report);
+    automations.cancelAutomation(localOwner, "alpha", schedule.at("id"));
+
+    ExternalMcp external(*f.store);
+    const auto credential = external.connect(localOwner.id, {"alpha"});
+    const auto connection = external.authenticate(credential.bearerToken);
+    check(connection.has_value(), "the test could not authenticate external MCP");
+    const auto externalTask = external.submit(*connection, "alpha", "external-check", "Check the external build",
+                                              [&](auto bot, auto text) { return f.routing(std::string(text), std::string(bot)); });
+    settleLearningTask(f, externalTask, report);
+
+    constexpr auto request = "Check the web build";
+    const Person webActor{"web-root", true};
+    bool webRoot = true;
+    WebIdentity(*f.store).setWebIdentityResolver(
+        [&](std::string_view person) -> std::optional<bool> { return person == webActor.id ? std::optional(webRoot) : std::nullopt; });
+    f.script(request, {start()});
+    WebConversationIntake(*f.store).receiveWeb(webActor, f.routing(), "web-learning", request);
+    f.runtime->runConversations();
+    const Id webTask = f.lastTurn().front().at("result").at("taskId");
+    expectSource = true;
+    f.model.beforeComplete = [&](const ModelInput&) { webRoot = false; };
+    settleLearningTask(f, webTask, report);
+    const auto memory = Memory(*f.store).memory(localOwner, "alpha", "read_memory", Json::object());
+    check(completions == 5 && learnedNotices(f).empty() && memory.at("version") == 0 && memory.at("content") == "",
+          "a task without current authority created a learning revision or notice");
 }
 
 void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
@@ -4283,6 +4552,15 @@ void protectedStandingContextBlocksDispatch() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "session-learnings") {
+            sessionLearningsReachTheNextSessionAndCanBeUndone();
+            sessionLearningsDropProtectedAndOversizedItems();
+            fullMemoryConsolidatesOnlySupersededLearnings();
+            sessionLearningsReplaceCaseOnlyCorrections();
+            sessionLearningsRequireAnAuthorizedHumanRequest();
+            std::cout << "Session learning acceptance passed with simulated T3\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "non-default-project-move") {
             nonDefaultProjectMoveKeepsCanonicalGateway();
             std::cout << "Non-default-project move acceptance passed with simulated T3\n";
@@ -4419,6 +4697,11 @@ int main(int argc, char** argv) {
         receivedRevisionPrecedesCompletion();
         unfinishedTurnHoldsCompletion();
         sessionReportsCannotBecomePreferences();
+        sessionLearningsReachTheNextSessionAndCanBeUndone();
+        sessionLearningsDropProtectedAndOversizedItems();
+        fullMemoryConsolidatesOnlySupersededLearnings();
+        sessionLearningsReplaceCaseOnlyCorrections();
+        sessionLearningsRequireAnAuthorizedHumanRequest();
         pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall();
         unrelatedUpdatesDoNotDisturbATurn();
         staleTargetIsReportedToTheModel();

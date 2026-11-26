@@ -43,6 +43,8 @@ static_assert(maxExpandedBytes + emptyHistoryBytes < maxBytes);
 
 namespace flockv0::limits::memory {
 inline constexpr std::size_t maxDocumentBytes = 8'192;
+inline constexpr std::size_t maxLearnings = 3;
+inline constexpr std::size_t maxLearningBytes = 300;
 }
 
 namespace flockv0::limits::model {

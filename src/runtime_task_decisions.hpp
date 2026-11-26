@@ -8,6 +8,7 @@
 
 #include <string>
 #include <string_view>
+#include <optional>
 
 namespace flockv0 {
 class ConversationStorage;
@@ -15,6 +16,7 @@ class Database;
 class GitHost;
 class GitStorage;
 class JournalStorage;
+class MemoryStorage;
 class PeerStorage;
 class SecretStorage;
 class TaskEvents;
@@ -24,11 +26,16 @@ class WaitStorage;
 class runtime::TaskDecisions {
 public:
     TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage, JournalStorage& journalStorage,
-                  PeerStorage& peerStorage, SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,
-                  WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
+                  MemoryStorage& memoryStorage, PeerStorage& peerStorage, SecretStorage& secretStorage, TaskEvents& taskEvents,
+                  TaskRecords& taskRecords, WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
                   PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead, GitHost* gitHost);
 
     bool canComplete(const TaskData& task, const Json& event) const;
+    struct LearningSource {
+        Id reportId;
+        std::string runId;
+    };
+    std::optional<LearningSource> learningSource(const TaskData&, const Json& event);
     void rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision, std::string_view message,
                         bool replay = false);
     void accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision, std::string_view approvedInvocation = {});
@@ -43,6 +50,7 @@ private:
     ConversationStorage& conversationTurns;
     GitStorage& gitStorage;
     JournalStorage& journalStorage;
+    MemoryStorage& memoryStorage;
     PeerStorage& peerStorage;
     SecretStorage& secretStorage;
     TaskEvents& taskEvents;

@@ -307,7 +307,7 @@ VALUES
   id INTEGER PRIMARY KEY, doc_key TEXT NOT NULL REFERENCES memory_documents(doc_key),
   version INTEGER NOT NULL, base_version INTEGER NOT NULL, author TEXT NOT NULL,
   diff_summary TEXT NOT NULL, previous_content TEXT NOT NULL, new_content TEXT NOT NULL,
-  reverted_from INTEGER REFERENCES memory_revisions(id), created_at INTEGER NOT NULL,
+  reverted_from INTEGER REFERENCES memory_revisions(id), created_at INTEGER NOT NULL, source TEXT,
   UNIQUE(doc_key,version))'),
     ('table', 'message_attachments', 'message_attachments', 'CREATE TABLE message_attachments(
  message_id INTEGER NOT NULL REFERENCES messages(id), attachment_id TEXT NOT NULL,

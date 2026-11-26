@@ -13,10 +13,15 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace flockv0::app {
 namespace {
+constexpr std::string_view verifyProjectRequest = "Show me how to verify this project";
+constexpr std::string_view verificationReport = "The demo project's full check runs with ./scripts/verify.sh.";
+constexpr std::string_view verificationRunSuffix = "-verify-project";
+
 class DemoModel final : public Model {
     ModelTurn decide(const ModelInput& in) override {
         const auto event = in.event.value("kind", "");
@@ -58,9 +63,12 @@ class DemoModel final : public Model {
                       "The demo report predates the accepted instructions."}}};
         }
         if (event == "result" && std::ranges::find(in.tools, "complete") != in.tools.end()) {
-            return {{{"complete",
-                      {{"report", in.event.value("report", "")}},
-                      "The demo Session reported that it completed the requested work."}}};
+            const auto report = in.event.value("report", "");
+            Json args{{"report", report}};
+            if (!in.learningRunId.empty() && report == verificationReport)
+                args["learnings"] =
+                    Json::array({{{"text", "./scripts/verify.sh runs the demo project's full check."}, {"runId", in.learningRunId}}});
+            return {{{"complete", std::move(args), "The demo Session reported that it completed the requested work."}}};
         }
         if (std::ranges::find(in.tools, "delegate") != in.tools.end()) {
             std::string answer;
@@ -85,22 +93,20 @@ class DemoT3 final : public T3 {
 
     RunRef run(const Command& command) {
         const auto thread = command.tool == CommandTool::follow_up ? command.target.threadId : "demo-thread-" + command.actionId;
-        return {thread, "demo-run-" + command.actionId, ""};
+        auto runId = "demo-run-" + command.actionId;
+        if (command.instruction.find(verifyProjectRequest) != std::string::npos) runId += verificationRunSuffix;
+        return {thread, std::move(runId), ""};
     }
 
-    Delivery send(const Command& command) override { return {Delivery::Kind::Accepted, run(command), ""}; }
+    Delivery send(const Command& command) override { return reconcile(command); }
 
-    Delivery reconcile(const Command& command) override {
-        const auto reference = run(command);
-        // The demo Run is a pure function of the previously persisted action.
-        return {Delivery::Kind::Accepted, reference, ""};
-    }
+    Delivery reconcile(const Command& command) override { return {Delivery::Kind::Accepted, run(command), ""}; }
 
     Observation observe(const std::string&, const Json&, const RunRef& run) override {
         Observation observed;
         observed.kind = Observation::Kind::Finished;
         observed.status = "completed";
-        observed.report = "The demo finished its assigned work.";
+        observed.report = run.runId.ends_with(verificationRunSuffix) ? verificationReport : "The demo finished its assigned work.";
         observed.resultRunId = run.runId;
         return observed;
     }
