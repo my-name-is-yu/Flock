@@ -31,6 +31,12 @@
   border-color: color-mix(in srgb, var(--focus) 45%, var(--hairline));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
 }
+.composer.dragover {
+  border-style: dashed;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--raised));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
 
 .composer-box {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
