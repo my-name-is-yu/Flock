@@ -527,7 +527,7 @@ function showCredential(title, {person, password}, {activate} = {}) {
 
 async function activateAdmin(password) {
   const response = await postSettings('installation/access', {operation: 'activate', person: 'local-owner', password});
-  if (!response.ok) throw new Error('Could not enable shared access. Generate a new password and try again.');
+  if (!response.ok) throw new Error('Could not enable sharing. Generate a new password and try again.');
   location.reload();
   return false;
 }
@@ -539,7 +539,7 @@ async function prepareAccess(event) {
   try {
     const data = await saveInstallation('access', {operation: 'prepare'}, '');
     showCredential('Administrator password', data.credential, {
-      activate: {label: 'Enable shared access', commit: activateAdmin},
+      activate: {label: 'Enable sharing', commit: activateAdmin},
     });
   } catch (error) {
     $('status').textContent = error.message;
@@ -591,12 +591,12 @@ async function activatePassword(person, password) {
 function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
   $('access').replaceChildren();
   if (mode === 'local') {
-    const item = row('access', rowLabel('Private to this computer', 'Enable shared access to create sign-ins for other people.'));
+    const item = row('access', rowLabel('Private to this computer', 'Enable sharing to create sign-ins for other people.'));
     if (pendingUntil) {
       const actions = element('div', '', 'row-actions');
       actionButton(actions, 'Generate new password', prepareAccess);
       actionButton(actions, 'Confirm password',
-        () => confirmCredential('Administrator password', 'local-owner', 'Enable shared access', activateAdmin), true);
+        () => confirmCredential('Administrator password', 'local-owner', 'Enable sharing', activateAdmin), true);
       item.append(actions);
     } else actionButton(item, 'Enable sharing', prepareAccess, true);
     return;
