@@ -360,6 +360,26 @@ https://example.com/__init__?view=full)") ==
 https://example.com/_test_)") == "<p><a href=\"https://example.com/*test*\">https://example.com/*test*</a><br>\n"
                                  "<a href=\"https://example.com/_test_\">https://example.com/_test_</a></p>",
           "Matching text on either side of a hard break changed the link spelling");
+    check(markdown::toHtml("See [https://example.com/docs]. Open https://example.com/docs?q=all&preview; then continue.") ==
+              "<p>See [<a href=\"https://example.com/docs\">https://example.com/docs</a>]. Open "
+              "<a href=\"https://example.com/docs?q=all&amp;preview\">https://example.com/docs?q=all&amp;preview</a>; then continue.</p>",
+          "Sentence punctuation entered a bare link");
+    check(markdown::toHtml("[http://[::1]/docs]") == "<p>[<a href=\"http://[::1]/docs\">http://[::1]/docs</a>]</p>",
+          "Trimming brackets broke an IPv6 destination");
+    check(markdown::toHtml("https://example.com/__init__.py  \nSee details") ==
+              "<p><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a><br>\nSee details</p>",
+          "Spaces before a hard break truncated a formatted bare URL");
+    check(markdown::toHtml("https://example.com/__init__.py?a=1&amp;b=2 then < or >") ==
+              "<p><a href=\"https://example.com/__init__.py?a=1&amp;b=2\">https://example.com/__init__.py?a=1&amp;b=2</a>"
+              " then &lt; or &gt;</p>",
+          "An angle bracket in nearby prose truncated a formatted URL with an entity");
+    check(markdown::toHtml(R"(https://example.com/__init__.py
+[details](
+https://example.org/)
+https://example.com/__main__.py)") == "<p><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a><br>\n"
+                                      "<a href=\"https://example.org/\">details</a><br>\n"
+                                      "<a href=\"https://example.com/__main__.py\">https://example.com/__main__.py</a></p>",
+          "A neighboring multiline Markdown destination truncated a bare URL");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");
