@@ -2780,7 +2780,7 @@ function generalContent(bot) {
   settings.append(node('span', 'settings-row-label', 'Access'));
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
-  const activity = settingsRow('Bot activity', bot.paused ? 'Paused' : 'Active');
+  const activity = settingsRow('Status', bot.paused ? 'Paused' : 'Active');
   if (bot.canDelete) {
     const pause = button(bot.paused ? 'Resume' : 'Pause', 'dialog-button quiet',
       () => botPause.open(bot, () => byId('bot-pause-setting')?.focus({ preventScroll: true })));
