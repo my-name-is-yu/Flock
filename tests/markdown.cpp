@@ -300,6 +300,19 @@ void bareUrls() {
     check(markdown::toHtml("[ref]: https://example.org/reference\nOpen https://example.com/?q=&amp; after") ==
               "<p>Open <a href=\"https://example.com/?q=&amp;\">https://example.com/?q=&amp;</a> after</p>",
           "Reference definitions or entity escaping changed a bare link");
+    check(markdown::toHtml("**https://example.com/__init__.py**です") ==
+              "<p><strong><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a></strong>です</p>",
+          "A bare URL changed its surrounding emphasis");
+    check(markdown::toHtml("https://example.com/__init__.py[docs](https://example.org)") ==
+              "<p><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a>"
+              "<a href=\"https://example.org\">docs</a></p>",
+          "An adjacent Markdown link truncated the bare filename");
+    check(markdown::toHtml("https://example.com/?q=*test*&amp;") ==
+              "<p><a href=\"https://example.com/?q=*test*&amp;\">https://example.com/?q=*test*&amp;</a></p>",
+          "A character reference at the end of a formatted URL changed its destination");
+    check(markdown::toHtml("[ref]: https://example.org/reference\nOpen https://example.com/__init__.py after") ==
+              "<p>Open <a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a> after</p>",
+          "A preceding reference definition truncated the bare filename");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");
