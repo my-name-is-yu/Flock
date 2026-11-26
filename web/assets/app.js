@@ -2857,7 +2857,6 @@ function waitContent(context, task, deadlineDraft) {
   request.append(node('p', 'wait-request-text', task.request));
   if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
   const reason = node('div', 'wait-reason');
-  // The allowance titles already say what happened; their generic sentence would only repeat the title.
   if (wait.text || !['budget', 'model_budget'].includes(wait.reason)) reason.append(node('p', 'wait-text', waitText(wait)));
   if (wait.reason === 'deadline' && task.deadline)
     reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
