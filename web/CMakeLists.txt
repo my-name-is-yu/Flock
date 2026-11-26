@@ -66,9 +66,11 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-workspace.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_tooltip_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/tooltip.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    add_test(NAME flock_web_reply_quote_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/reply-quote.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     set_tests_properties(flock_web_bot_access_dom flock_web_system_settings_dom flock_web_bot_pause_dom flock_web_board_inbox_dom flock_web_board_inbox_live_retry
       flock_web_question_choices_dom flock_web_conversation_find_dom
-      flock_web_recurring_requests_dom flock_web_bot_workspace_dom flock_web_tooltip_dom PROPERTIES TIMEOUT 30)
+      flock_web_recurring_requests_dom flock_web_bot_workspace_dom flock_web_tooltip_dom flock_web_reply_quote_dom PROPERTIES TIMEOUT 30)
   endif()
   add_executable(flock_web_tests tests/http.cpp tests/board_inbox.cpp tests/channels_local.cpp)
   target_include_directories(flock_web_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")

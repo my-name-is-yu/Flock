@@ -450,6 +450,12 @@
 .msg-quote { display: flex; align-items: center; gap: .3rem; }
 .msg-quote span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .msg-quote .glyph svg { width: .8rem; height: .8rem; }
+.msg-quote-link {
+  margin: 0; padding: 0 .2rem 0 0; border: 0; background: none; font: inherit; font-size: var(--text-xs); cursor: pointer;
+  border-radius: var(--radius-sm); transition: color var(--dur-fast) ease;
+}
+.msg-quote-link:hover { color: var(--text-2); }
+.msg-quote-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .msg-queued { display: flex; align-items: center; gap: .3rem; }
 .msg-queued > * { flex: none; }
 .msg-queued .glyph svg { width: .8rem; height: .8rem; }
