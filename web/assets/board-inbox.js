@@ -623,7 +623,7 @@ export function mountBoardInbox({
       if (!sameView()) return;
       const cards = decisions.map(historyCard);
       host.replaceChildren(...cards);
-      message.textContent = decisions.length ? '' : 'Nothing here yet. Questions and approvals you respond to will appear here.';
+      message.textContent = decisions.length ? '' : 'No answered questions or approvals yet.';
       animateHistoryCards(cards);
     } catch {
       if (!sameView()) return;
