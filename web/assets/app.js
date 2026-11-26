@@ -937,7 +937,7 @@ function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
   const title = [session.name, request].filter(Boolean).join(' · ');
   const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
-  row.dataset.tooltip = [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · ');
+  row.setAttribute('aria-description', [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · '));
   if (link) {
     row.href = link;
     row.target = '_blank';
@@ -1002,8 +1002,9 @@ function workflowInspectors(data, open) {
       const link = linkToRun(stage.runRef, 'Open');
       if (link) head.append(link);
       row.append(node('span', 'workflow-stage-mark'), text);
-      row.dataset.tooltip = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
-        .filter(Boolean).join('\n');
+      const versions = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
+        .filter(Boolean).join(' · ');
+      if (versions) row.setAttribute('aria-description', versions);
       list.append(row);
     }
     item.append(list);
@@ -1047,7 +1048,7 @@ function renderActivity() {
         ? [actionLabel(item.action), item.displayTarget ?? item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
       const row = activityRow('button', 'wait-row', title, status, 'waiting');
       row.type = 'button';
-      row.dataset.tooltip = item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title;
+      row.setAttribute('aria-description', item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title);
       row.addEventListener('click', () => {
         openNavigation(false);
         decisions.openItem(item, row);
@@ -1258,7 +1259,7 @@ function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
   const time = node('time', 'msg-time', clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
-  time.dataset.tooltip = [fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
+  time.setAttribute('aria-description', [fullTime.format(timestamp), extra].filter(Boolean).join(' · '));
   return time;
 }
 
@@ -1704,7 +1705,7 @@ function eventCard(event, context, place, report) {
       const note = node('p', 'msg-note msg-queued');
       note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
       if (blocker.botId !== context.bot?.id) note.append(node('span', 'msg-queued-owner', `· ${owner}`));
-      note.dataset.tooltip = `Starts when “${blocker.request}” (${owner}) finishes`;
+      note.setAttribute('aria-description', `Starts when “${blocker.request}” (${owner}) finishes`);
       extras.push(note);
     }
   }
@@ -2710,7 +2711,7 @@ function generalContent(bot) {
 
   function renderNameDisplay() {
     const nameBtn = button(null, 'settings-name-button', beginInlineRename);
-    nameBtn.dataset.tooltip = 'Rename Bot';
+    nameBtn.setAttribute('aria-description', 'Rename Bot');
     nameBtn.append(node('span', 'settings-name', bot.name));
     nameBtn.insertAdjacentHTML('beforeend', pencilIcon);
     nameWrap.replaceChildren(nameBtn);

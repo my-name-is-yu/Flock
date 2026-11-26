@@ -44,6 +44,27 @@ async function exercise() {
   pointer('pointerover', close, null, 'touch');
   await wait(600);
   check(!open(), 'Touch showed a tooltip');
+
+  const time = document.getElementById('time');
+  pointer('pointerover', time);
+  await wait(600);
+  check(open() && tip().textContent === 'Nov 26, 2026, 14:38', 'An accessible description did not show as the tooltip');
+  pointer('pointerout', time, document.body);
+
+  const long = document.getElementById('long');
+  pointer('pointerover', long);
+  await wait(600);
+  const { top, bottom } = tip().getBoundingClientRect();
+  check(open() && top >= 0 && bottom <= innerHeight, 'A long tooltip did not fit in the window');
+  pointer('pointerout', long, document.body);
+  await wait(700);
+
+  const summary = document.querySelector('#actions > summary');
+  summary.focus();
+  check(open() && tip().textContent === 'Conversation actions', 'Keyboard focus did not show the tooltip');
+  summary.parentElement.open = true;
+  await wait(50);
+  check(!open(), 'Opening the menu from the keyboard left its tooltip over the menu');
 }
 
 const assets = new URL('../assets/', import.meta.url);
@@ -52,6 +73,9 @@ const index = `<!doctype html><html><head><link rel="stylesheet" href="/style.cs
   <button id="close" aria-label="Close" data-tooltip="Close" data-shortcut="Esc">x</button>
   <button id="copy" aria-label="Copy text" data-tooltip="Copy text">c</button>
   <button id="menu" aria-haspopup="menu" aria-expanded="true" data-tooltip="Menu">m</button>
+  <time id="time" aria-description="Nov 26, 2026, 14:38">14:38</time>
+  <button id="long" aria-label="Session" aria-description="${'Check the release plan and report regressions. '.repeat(80)}">s</button>
+  <details id="actions"><summary aria-label="Conversation actions" data-tooltip="Conversation actions">a</summary><button>Find</button></details>
   <script type="module">
     import '/tooltip.js';
     try {

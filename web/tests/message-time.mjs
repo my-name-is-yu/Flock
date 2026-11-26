@@ -188,8 +188,8 @@ async function exercise() {
   const sessionRows = () => [...document.querySelectorAll('.session-row')];
   const sessionLabel = (row) => row?.querySelector('.activity-status span:last-child')?.textContent;
   const [finished, historical] = sessionRows();
-  check(sessionLabel(finished) === '17:30' && finished.dataset.tooltip.includes('17:30') &&
-    sessionLabel(historical) === 'Complete' && !historical.dataset.tooltip.includes('Started'),
+  check(sessionLabel(finished) === '17:30' && finished.getAttribute('aria-description').includes('17:30') &&
+    sessionLabel(historical) === 'Complete' && !historical.getAttribute('aria-description').includes('Started'),
     'The sidebar used the request time instead of the Session creation time');
   window.rollSessionDate();
   check(sessionLabel(sessionRows()[0]) === 'Yesterday', 'An open tab did not refresh Session time at local midnight');
@@ -321,7 +321,7 @@ async function exercise() {
     'The live collapse replaced an unchanged row or dropped focus from the combined row');
   check(shown().length === 1 && shown()[0].parentElement === merged && merged.querySelectorAll('time').length === 1,
     'The revealed timestamp did not follow the collapsed row');
-  check(merged.querySelectorAll('[aria-label="Reply to this result"]').length === 1 && !shown()[0].dataset.tooltip.includes('#17'),
+  check(merged.querySelectorAll('[aria-label="Reply to this result"]').length === 1 && !shown()[0].getAttribute('aria-description').includes('#17'),
     'The collapsed row lost its single reply or leaked an internal Task number');
   tap(merged.querySelector('.event-text'));
   check(!shown().length && window.scrollY === 0, 'Tapping the collapsed row did not close its timestamp in the conversation');

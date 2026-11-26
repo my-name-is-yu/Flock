@@ -173,7 +173,9 @@ svg { display: block; }
 }
 .tooltip:popover-open { opacity: 1; }
 @starting-style { .tooltip:popover-open { opacity: 0; } }
-.tooltip-label { overflow-wrap: anywhere; }
+.tooltip-label {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 10; overflow: hidden; overflow-wrap: anywhere;
+}
 .tooltip kbd {
   display: inline-grid; place-items: center; min-width: 1.25rem; height: 1.25rem; padding: 0 .24rem; flex: none;
   border-radius: 5px;
