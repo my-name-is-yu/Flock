@@ -2330,7 +2330,6 @@ function renderComposer() {
   const readOnly = context?.data?.canDecide === false;
   const bot = context?.data?.bot;
   const paused = !!bot?.paused && !context.dm;
-  // A Bot without a model can't answer, so offer setup instead of a message box.
   const needsModel = !!bot && !context.dm && !paused && !readOnly && !bot.model;
   const banner = paused ? 'paused' : needsModel ? 'setup' : null;
   const available = !!context?.data && !context.dm && (!!context.composer || readOnly || !!banner);
