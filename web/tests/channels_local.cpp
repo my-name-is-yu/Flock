@@ -8,6 +8,7 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/person.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
@@ -71,7 +72,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     };
     Store store(database);
     const Person owner{"admin", true}, sender{"alice"};
-    Policy{store}.setMember(owner, "release", sender.id, true);
+    BotAccess{store}.setMember(owner, "release", sender.id, true);
     const auto transport = std::make_shared<Transport>();
     const auto authenticate = [](auto credential, auto workspace) { return credential == "Bearer fixture-channel" && workspace == "W"; };
     const auto authorize = [&](auto workspace, auto user) -> std::optional<ChannelSender> {

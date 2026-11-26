@@ -1,3 +1,4 @@
+#include "policy_internal.hpp"
 #include "git_storage.hpp"
 #include "flock/decision_errors.hpp"
 #include "inbox_storage.hpp"
@@ -345,7 +346,7 @@ void InboxStorage::decideInbox(GitStorage& git, const Person& actor, const Inbox
         policyApprovals.decidePolicyApproval(actor, item, decision);
     } else if (kind == protected_input) {
         if (item.waitId || item.taskId || item.targetRevision || item.targetGeneration) throw RequestChanged{};
-        policy.fulfillSecret(actor, item.botId, item.itemId, textInput("value"));
+        policy_storage::fulfillSecret(database, policy, secretStorage, *this, actor, item.botId, item.itemId, textInput("value"));
     } else if (kind == conversation_model_budget) {
         if (!policy.allows(actor, Action::bot_decide, item.botId)) throw DecisionDenied{};
         auto paused = database.query(R"SQL(

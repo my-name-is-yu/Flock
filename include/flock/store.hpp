@@ -42,7 +42,7 @@ private:
     friend class ConversationIntake;
     friend class WebConversationIntake;
     friend class Runtime;
-    friend class Policy;
+    friend class StoreAccess;
     friend class T3Connections;
     friend class ExternalMcp;
     friend class SessionParticipation;

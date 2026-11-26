@@ -125,13 +125,12 @@ RunRef runRef(const Json& data) {
     return {field(data, "threadId"), field(data, "runId"), field(data, "link"), field(data, "gatewayEnvironmentId")};
 }
 
-Store::Impl::Impl(std::filesystem::path file, StoreOptions options)
-    : path(std::move(file)), memoryStorage(database, secretStorage, permissions, conversationTurns, std::move(options.memorySeed)),
+Store::Impl::Impl(Store& store, std::filesystem::path file, StoreOptions options)
+    : path(std::move(file)), permissions(store), botAccess(store), secretRequests(store),
+      memoryStorage(database, secretStorage, permissions, conversationTurns, std::move(options.memorySeed)),
       automationStorage(database, secretStorage, botLifecycle, permissions, std::move(options.automationModel), taskOperations) {
     database.open(path);
 }
-
-Policy::Policy(Store& store) : Policy(store.p_->permissions) {}
 
 void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
     const Id id = task.id;
@@ -166,7 +165,7 @@ void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
 }
 
 Store::Store(std::filesystem::path db) : Store(std::move(db), {}) {}
-Store::Store(std::filesystem::path db, StoreOptions options) : p_(std::make_unique<Impl>(std::move(db), std::move(options))) {}
+Store::Store(std::filesystem::path db, StoreOptions options) : p_(std::make_unique<Impl>(*this, std::move(db), std::move(options))) {}
 Store::~Store() = default;
 
 void GitEvents::protectGitCredential(std::string value) {

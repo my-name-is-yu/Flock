@@ -5,7 +5,8 @@
 #include "flock/web_conversation_intake.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/workspace_tools.hpp"
 #include "bot_tools.hpp"
@@ -240,7 +241,7 @@ struct Fixture {
                 {{"modelCallLimit", limit}, {"model", "test"}, {"modelProvider", "chatgpt"}}};
     }
     void block(Action action, std::string_view target, bool blocked = true) {
-        Policy{*store}.changeNeverRule(owner, action, target, blocked);
+        PolicyRules{*store}.changeNeverRule(owner, action, target, blocked);
     }
     Json batch(std::vector<Decision> calls, Id budget = 20, std::string bot = "alpha") {
         model.next = std::move(calls);
@@ -312,8 +313,9 @@ void workspaceFiles(Fixture& f) {
     check(f.run(call("workspace_write_file", {{"path", "script"}, {"text", "#!/bin/sh\nprintf updated"}})).at("ok") == true &&
               access((root / "script").c_str(), X_OK) == 0,
           "Workspace edit lost executable permissions");
-    const auto secret = Policy{*f.store}.requestSecret("beta", {"fixture-key"});
-    Policy{*f.store}.submitSecret(owner, "beta", secret, secretMarker);
+    SecretRequests secretRequests{*f.store};
+    const auto secret = secretRequests.requestSecret("beta", {"fixture-key"});
+    secretRequests.submitSecret(owner, "beta", secret, secretMarker);
     const auto secretFile = fs::directory_iterator(f.home / "secrets")->path();
     fs::create_directories(f.home / "workspaces" / "beta");
     const auto peer = f.home / "workspaces" / "beta" / "private";
@@ -598,8 +600,8 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
 void protectedArgumentsDoNotChangeToolTargets() {
     Fixture f;
     const std::string marker = "protected-model-argument-fixture";
-    Policy policy{*f.store};
-    policy.submitSecret(owner, "alpha", policy.requestSecret("alpha", {"argument-fixture"}), marker);
+    SecretRequests secretRequests{*f.store};
+    secretRequests.submitSecret(owner, "alpha", secretRequests.requestSecret("alpha", {"argument-fixture"}), marker);
     const auto calls = f.mcp->calls.load();
     const auto workspace = f.home / "workspaces" / "alpha";
     const auto writeFile = [](std::string path) {
@@ -685,7 +687,8 @@ void mcpToolOutcomes(Fixture& f) {
                              "invalid-structured-content", "invalid-is-error"})
         expectUnknown(f.run(invoke(name)), name);
 
-    Policy{*f.store}.setMode(owner, "supervised");
+    PolicyRules policyRules{*f.store};
+    policyRules.setMode(owner, "supervised");
     const auto success = f.run(invoke("extension"));
     check(success.at("ok") == true && success.at("untrustedData") == true &&
               success.at("data").at("content").at(0).at("text") == "Tool evidence" &&
@@ -702,13 +705,13 @@ void mcpToolOutcomes(Fixture& f) {
         f.runtime->runConversations();
         return f.model.seen.at(0).at("result");
     };
-    Policy{*f.store}.changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", true);
+    policyRules.changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", true);
     check(approveMcp("extension").at("ok") == true, "Ask first did not take precedence over a read-only hint");
-    Policy{*f.store}.changeNeverRule(owner, Action::mcp_invoke, "one", true);
+    policyRules.changeNeverRule(owner, Action::mcp_invoke, "one", true);
     check(f.run(invoke("extension")).at("ok") == false && Inbox(*f.store).inbox(owner).empty(),
           "Never did not take precedence over a read-only hint and Ask first");
-    Policy{*f.store}.changeNeverRule(owner, Action::mcp_invoke, "one", false);
-    Policy{*f.store}.changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", false);
+    policyRules.changeNeverRule(owner, Action::mcp_invoke, "one", false);
+    policyRules.changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", false);
 
     const auto compatible = approveMcp("compatible-content");
     check(compatible.at("ok") == true && compatible.at("data").at("content").size() == 3,
@@ -719,7 +722,7 @@ void mcpToolOutcomes(Fixture& f) {
               failure.at("data").at("content").at(0).at("text") == "Tool failed" && !failure.at("data").contains("isError"),
           "Definite MCP tool failure did not survive credential redaction");
 
-    Policy{*f.store}.setMode(owner, "full");
+    policyRules.setMode(owner, "full");
     const auto rejected = f.run(invoke("rejected"));
     check(rejected.at("ok") == false && !rejected.contains("delivery") && rejected.contains("error"),
           "JSON-RPC rejection was classified as an ambiguous dispatch");

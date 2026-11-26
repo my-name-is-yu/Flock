@@ -16,7 +16,10 @@
 #include "flock/base64.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/bot_access.hpp"
+#include "flock/policy_action.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
@@ -233,7 +236,7 @@ void messageReceipts(const std::filesystem::path& path) {
     Json accepted;
     {
         Store store(path);
-        Policy access{store};
+        BotAccess access{store};
         access.setMember(owner, "release", "requester", true);
         access.setMember(owner, "release", "other", true);
         access.setMember(owner, "triage", "requester", true);
@@ -656,9 +659,9 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     };
     web.authenticate = [](std::string_view credential) { return credential == "Bearer reader" ? Person{"reader"} : Person{}; };
     const Person owner{"fixture", true};
-    Policy policy{store};
-    policy.setMember(owner, "release", "reader", true);
-    policy.setMember(owner, "settings", "reader", true);
+    BotAccess access{store};
+    access.setMember(owner, "release", "reader", true);
+    access.setMember(owner, "settings", "reader", true);
     const auto server = startWeb(store, 0, web);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization", "Bearer reader"}});
@@ -677,7 +680,7 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     const std::string reverse = "/api/peer-conversation?bot=triage&peer=release";
     const auto anchor = "&anchor=" + std::to_string(targetId);
     Browser::checked(browser.client.Get(primary + anchor), 403);
-    policy.setMember(owner, "triage", "reader", true);
+    access.setMember(owner, "triage", "reader", true);
 
     const auto latest = browser.get(primary);
     check(latest.at("messages").front().at("id").get<Id>() > targetId, "fixture anchor appeared in the latest page");
@@ -725,9 +728,9 @@ void conversationRequestApproval(const std::filesystem::path& path) {
         if (person == administrator.id) return administrator.adminRoot;
         return std::nullopt;
     };
-    Policy policy{store};
-    policy.setMember(localOwner, "release", requester.id, true);
-    policy.setMode(localOwner, "supervised");
+    BotAccess{store}.setMember(localOwner, "release", requester.id, true);
+    PolicyRules rules{store};
+    rules.setMode(localOwner, "supervised");
     const auto server = startWeb(store, 0, web);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization", "Bearer requester"}});
@@ -767,7 +770,7 @@ void conversationRequestApproval(const std::filesystem::path& path) {
                   {"targetGeneration", item.at("targetGeneration")},
                   {"decision", "always_allow"}};
     browser.post("/api/inbox/decide", decision, 403);
-    check(browser.get("/api/inbox").at("items") == approvals && policy.rules().empty(),
+    check(browser.get("/api/inbox").at("items") == approvals && rules.rules().empty(),
           "a denied Flock-wide rule changed the request or policy");
     decision["decision"] = "allow_once";
     browser.post("/api/inbox/decide", decision);
@@ -1070,7 +1073,7 @@ void notificationEvents(const std::filesystem::path& path) {
     check(unshared.at("through") == 0 && unshared.at("scope").empty() && unshared.at("events").empty(),
           "a private reply changed a viewer's baseline");
     const auto adminBaseline = administrator.post(endpoint, Json::object());
-    Policy{store}.setMember(owner, "release", "reader", true);
+    BotAccess{store}.setMember(owner, "release", "reader", true);
     const auto baseline = notify(reader, unshared);
     check(baseline.at("through") == 0 && baseline.at("scope").at("release").get<Id>() > 0 && baseline.at("events").empty() &&
               baseline.at("inbox").empty(),
@@ -1135,7 +1138,7 @@ void notificationEvents(const std::filesystem::path& path) {
     runtime.runConversations();
     reply("triage", "last-private-reply");
     runtime.runConversations();
-    Policy{store}.setMember(owner, "triage", "reader", true);
+    BotAccess{store}.setMember(owner, "triage", "reader", true);
     const auto visiblePage = notify(reader, caughtUp);
     check(visiblePage.at("more") == false && visiblePage.at("events").size() == 1 &&
               visiblePage.at("events").at(0).at("botId") == "release" &&
@@ -1146,7 +1149,7 @@ void notificationEvents(const std::filesystem::path& path) {
     const auto sharedPage = notify(reader, visiblePage);
     check(sharedPage.at("events").size() == 1 && sharedPage.at("events").at(0).at("botId") == "triage",
           "the shared Bot's next reply did not enter the notification feed");
-    Policy{store}.setMember(owner, "triage", "reader", false);
+    BotAccess{store}.setMember(owner, "triage", "reader", false);
     check(!notify(reader, sharedPage).at("scope").contains("triage"), "notification scope exposed a Bot after unsharing");
 
     auto limited = web.intake("release", "Check in several steps");
@@ -1264,7 +1267,7 @@ void watchedBotView(const std::filesystem::path& path) {
         if (token == "Bearer owner") return localOwner;
         return Person{};
     };
-    Policy{store}.setMember(localOwner, "release", "reader", true);
+    BotAccess{store}.setMember(localOwner, "release", "reader", true);
     const auto intake = web.intake("release", "Check staging");
     TaskIntake(store).submit(intake);
     FixedModel model;
@@ -1308,7 +1311,7 @@ void watchedBotView(const std::filesystem::path& path) {
         const auto scrubbed = std::ranges::find_if(events, [&](const Json& event) { return event.at("id") == link; });
         check(scrubbed != events.end() && scrubbed->at("data").at("textHtml").get<std::string>().find("href=") == std::string::npos,
               "a watched projection retained a link containing newly protected text");
-        Policy{cli}.setMember(localOwner, "release", "reader", false);
+        BotAccess{cli}.setMember(localOwner, "release", "reader", false);
         Browser::checked(reader.client.Get(viewPath), 403);
         return false;
     });
@@ -1410,9 +1413,9 @@ void eventStream(const std::filesystem::path& path) {
 void conversationPermissions(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"fixture", true};
-    Policy policy{store};
-    policy.setMember(owner, "release", "reader", true);
-    policy.setMember(owner, "release", "decider", true);
+    BotAccess access{store};
+    access.setMember(owner, "release", "reader", true);
+    access.setMember(owner, "release", "decider", true);
     auto web = callbacks();
     web.authenticate = [](std::string_view credential) {
         if (credential == "Bearer reader") return Person{"reader"};
@@ -1474,10 +1477,10 @@ void conversationPermissions(const std::filesystem::path& path) {
     memberMessage["clientMessageId"] = "shared-member-message";
     reader.post("/api/messages", memberMessage, 201);
     runtime.runConversations();
-    policy.setMember(owner, "release", "reader", false);
+    access.setMember(owner, "release", "reader", false);
     Browser::checked(reader.client.Get(viewPath), 403);
     reader.post("/api/operations", answer, 403);
-    policy.setMember(owner, "release", "reader", true);
+    access.setMember(owner, "release", "reader", true);
 
     decider.post("/api/operations", answer);
     const auto authorized = decider.post("/api/messages", message, 201).at("messageId");
@@ -1682,7 +1685,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     };
     cb.createBot = [&](const Person& creator, const Json& profile, const std::optional<AvatarImage>& image) {
         const auto id = "bot-" + std::to_string(++counter);
-        Policy{store}.setOwner(creator, id);
+        BotAccess{store}.setOwner(creator, id);
         Json avatar = profile.at("avatar");
         if (image) {
             images.insert_or_assign(id, *image);
@@ -1858,8 +1861,8 @@ void botProfileEndpoints(const std::filesystem::path& path) {
                                            400);
         check(rejected.at("error") == "invalid_soul", "invalid role was accepted");
     }
-    const auto secret = Policy{store}.requestSecret("bot-1", {"fixture-role-token"});
-    Policy{store}.submitSecret(localOwner, "bot-1", secret, privateValue);
+    const auto secret = SecretRequests{store}.requestSecret("bot-1", {"fixture-role-token"});
+    SecretRequests{store}.submitSecret(localOwner, "bot-1", secret, privateValue);
     const auto credentials = browser.post("/api/bots/profile",
                                           {
                                               {"botId", "bot-1"},
@@ -1997,7 +2000,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
 }
 void settingsEndpoints(const std::filesystem::path& path) {
     Store store(path);
-    Policy{store}.changeNeverRule(localOwner, Action::repository_read, "github.com/org/private", true);
+    PolicyRules{store}.changeNeverRule(localOwner, Action::repository_read, "github.com/org/private", true);
     auto cb = callbacks();
     const Json t3Target{{"source", "url"}, {"mcpUrl", "https://t3.example/mcp"}};
     std::atomic<bool> t3Started = false;
@@ -2093,7 +2096,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
     crossOrigin.emplace("Origin", "https://example.invalid");
     const Json share{{"botId", "release"}, {"person", "alice"}, {"add", true}};
     Browser::checked(browser.client.Post("/api/bot-settings/members", crossOrigin, share.dump(), "application/json"), 403);
-    const auto secretRequest = Policy{store}.requestSecret("release", {"fixture-token"});
+    const auto secretRequest = SecretRequests{store}.requestSecret("release", {"fixture-token"});
     browser.post("/api/bot-settings/secret", {{"botId", "release"}, {"requestId", secretRequest}, {"value", privateValue}});
     browser.post("/api/bot-settings/secret", {{"botId", "release"}, {"requestId", secretRequest}, {"value", privateValue}}, 403);
     browser.post("/api/bot-settings/members", share);
@@ -2151,7 +2154,7 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Shared member lost read-only settings or gained access to model status");
     check(Browser::checked(browser.client.Get(modelsRoute), 403) == Json{{"error", "access_denied"}} && catalogCalls == 2,
           "shared member reached the model provider");
-    Policy{store}.setOwner(Person{"bot-owner"}, "triage");
+    BotAccess{store}.setOwner(Person{"bot-owner"}, "triage");
     Browser botOwner(*server);
     botOwner.client.set_default_headers({{"Authorization", "Bearer fixture-bot-owner"}});
     check(botOwner.get("/api/settings/models?bot=triage") == catalogResponse,
