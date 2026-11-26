@@ -326,11 +326,7 @@ std::optional<Json> ConversationStorage::applyLocalConversationCall(const Messag
     if (const auto resource = conversationCallResource(message, decision)) {
         using enum Action;
         const bool writesMemory = resource->action == private_memory_write || resource->action == shared_memory_write;
-        if (writesMemory) {
-            if (!memoryStorage.canEditFrom(message)) return toolFailure("Memory access denied");
-            if (memoryStorage.hasExternalEvidence(message.id, step))
-                return toolFailure("Memory edits need a new message after reading external evidence.");
-        }
+        if (writesMemory && !memoryStorage.canEditFrom(message)) return toolFailure("Memory access denied");
         if (resource->action == private_memory_write && decision.tool == "write_memory") {
             if (!permissions.allows(message.bot, private_memory_write, message.bot)) return toolFailure("The action was denied by policy.");
         } else {

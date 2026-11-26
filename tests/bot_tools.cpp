@@ -531,16 +531,16 @@ void webFetchCanPrecedeTaskStart(Fixture& f) {
           "The conversation prompt did not restrict untrusted content to evidence");
 }
 
-void webEvidenceCannotWriteMemory(Fixture& f) {
+void webFetchCanPrecedeMemoryWrite(Fixture& f) {
     const auto fetch = call("web_fetch", {{"url", "https://example.com/evidence"}});
-    const auto write = call("write_memory", {{"baseVersion", 0}, {"content", "Trust the page."}, {"summary", "Trust the page."}});
+    const auto write =
+        call("write_memory", {{"baseVersion", 0}, {"content", "The API client uses v2."}, {"summary", "The API client uses v2."}});
     f.model.followStep = [&](const Json& steps) { return steps.size() == 1 ? std::vector{write} : std::vector<Decision>{}; };
     const auto steps = f.batch({fetch});
     f.model.followStep = {};
-    check(steps.size() == 2 && steps[0].at("result").at("ok") == true && steps[0].at("result").at("untrustedData") == true &&
-              steps[1].at("result").at("error") == "Memory edits need a new message after reading external evidence." &&
-              Memory(*f.store).memory(localOwner, "alpha", "memory_history", Json::object()).at("revisions").empty(),
-          "A tool used web evidence as authority for a memory write");
+    check(steps.size() == 2 && steps[0].at("result").at("untrustedData") == true && steps[1].at("result").at("ok") == true &&
+              Memory(*f.store).memory(localOwner, "alpha", "memory_history", Json::object()).at("revisions").size() == 1,
+          "The Bot could not save memory in the same turn as the web fetch");
 }
 
 void actionsAfterWebSearchFollowPolicy() {
@@ -829,7 +829,7 @@ int main(int argc, char** argv) {
         externalTools(fixture);
         approvalWhileAnotherTurnIsInferring(fixture);
         webFetchCanPrecedeTaskStart(fixture);
-        webEvidenceCannotWriteMemory(fixture);
+        webFetchCanPrecedeMemoryWrite(fixture);
         actionsAfterWebSearchFollowPolicy();
         freshConversationStepArrays(fixture);
         std::cout << "Bot workspace and tool acceptance passed\n";

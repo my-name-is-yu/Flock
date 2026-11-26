@@ -35,7 +35,6 @@ public:
     SessionContext sessionContext(const SessionContextTarget&, const SoulLoader&, const SecretRedactor&, std::size_t bytes, Seconds now);
     Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&, Seconds now);
     Json conversationMemory(const conversation::Message&, std::string_view operation, const Json&, Seconds now);
-    bool hasExternalEvidence(Id message, int step) const;
     bool canEditFrom(const conversation::Message&);
     bool canLearnFrom(const TaskData&);
     void learnFromWork(const TaskData&, Id completion, Id report, std::string_view runId, const Json&, Seconds now);

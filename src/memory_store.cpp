@@ -366,21 +366,6 @@ ORDER BY r.id DESC LIMIT 21
     return result;
 }
 
-bool MemoryStorage::hasExternalEvidence(Id message, int step) const {
-    return database_
-        .query(R"SQL(
-SELECT 1
-FROM conversation_steps s, json_each(s.result) result
-WHERE s.message_id=? AND s.step<? AND
-  (json_extract(result.value,'$.untrustedData')=1 OR
-   (json_extract(result.value,'$.ok')=1 AND
-    json_extract(s.decision,'$[' || result.key || '].tool') IN ('flock_session_events','read_result')))
-LIMIT 1
-)SQL",
-               {message, step})
-        .next();
-}
-
 bool MemoryStorage::canEditFrom(const conversation::Message& message) {
     using enum conversation::PrincipalSource;
     return (message.principalSource == trusted || message.principalSource == web) && !message.routing.contains("sessionWake") &&
