@@ -1,15 +1,21 @@
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
 import { actionLabel, approvalSummary } from './action-labels.mjs';
 
+// One name per pending item, said as what the person needs to do; the sidebar and this panel share it.
+export const pendingKindLabels = {
+  user_question: 'Question for you',
+  pr_review: 'Review requested',
+  pr_reconciliation: 'Confirm the pull request',
+  unknown_delivery: 'Message to T3 unconfirmed',
+  protected_input: 'Secret needed',
+  policy_approval: 'Approval needed',
+};
 const labels = {
-  user_question: 'Question',
-  unknown_delivery: 'Unconfirmed message to T3',
-  protected_input: 'Secret value', pr_review: 'Pull request review',
-  pr_reconciliation: 'Unconfirmed pull request',
+  ...pendingKindLabels,
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
   reconcile: 'Checked again', request_changes: 'Changes requested',
   link_pr: 'Pull request linked', reject_pr: 'Rejected',
-  policy_approval: 'Approval', allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
+  allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
   allow_next_time: 'Allow rule saved for this Flock',
 };
 const actions = {
