@@ -80,10 +80,10 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
     }
     if (calls.size() == 1 && tool == "cancel_task" && hasDestinationSelector(decision.args))
         return sessionMessageStorage.cancelDestinationRun(message, step, decision, tool_batch::turnCallKey(message.id, step),
-                                                          decision.rejection.empty(), ctx.hasWebEvidence, ctx.shutdown);
+                                                          decision.rejection.empty(), ctx.shutdown);
     if (effectType == "array" || calls.size() > 1 || isBotTool(tool) ||
         tool_batch::conversationRead(tool) != tool_batch::ConversationRead::none) {
-        const ToolContext tools{message.bot, message.id, settings, ctx.hasWebEvidence};
+        const ToolContext tools{message.bot, message.id, settings};
         return conversationTools.runToolBatch(message, tools, step, calls, ctx) ? advance : stop;
     }
     const auto key = tool_batch::turnCallKey(message.id, step);
@@ -92,18 +92,18 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
         if (tool == "message_session" || tool == "fix_pull_request")
             return sessionMessageStorage.sendSessionMessage(message, step, decision, key, ctx);
         if (tool == "interrupt_session")
-            return sessionMessageStorage.runSessionEffect(message, step, decision, key, offered, ctx.hasWebEvidence, ctx.t3, ctx.shutdown);
+            return sessionMessageStorage.runSessionEffect(message, step, decision, key, offered, ctx.t3, ctx.shutdown);
     }
 
-    if (!offered || (ctx.hasWebEvidence && !allowedAfterWebEvidence(decision))) {
+    if (!offered) {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
         if (!authorizeTurn(message)) {
             transaction.commit();
             return stop;
         }
-        auto result = offered ? webEvidenceActionDenied() : toolFailure(decision.rejection);
-        if (!offered && isGitTool(tool) && gitStorage.gitEffectStarted(key)) {
+        auto result = toolFailure(decision.rejection);
+        if (isGitTool(tool) && gitStorage.gitEffectStarted(key)) {
             result["delivery"] = "unknown";
             result["error"] = "The host outcome is unknown. Check the target before retrying.";
         }

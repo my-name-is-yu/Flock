@@ -23,6 +23,5 @@ struct ConversationCallContext {
     const IntakeResolver& intake;
     const PeerResolver& peers;
     std::stop_token shutdown;
-    bool hasWebEvidence;
 };
 }

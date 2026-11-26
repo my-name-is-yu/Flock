@@ -135,8 +135,7 @@ struct SessionEffect {
 }
 
 CallOutcome SessionMessageStorage::runSessionEffect(const conversation::Message& message, int step, const Decision& decision,
-                                                    std::string_view key, bool offered, bool hasWebEvidence, T3& t3,
-                                                    std::stop_token shutdown) {
+                                                    std::string_view key, bool offered, T3& t3, std::stop_token shutdown) {
     using enum CallOutcome;
     const auto id = message.id;
     const auto fail = [&](const ToolError& error) {
@@ -188,8 +187,6 @@ CallOutcome SessionMessageStorage::runSessionEffect(const conversation::Message&
                                                                           "Check the Session before sending it again"}}}));
         } else if (!offered) {
             conversationTools.saveTurnResults(id, step, Json::array({toolFailure("Session control was not offered for this turn")}));
-        } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
-            conversationTools.saveTurnResults(id, step, Json::array({webEvidenceActionDenied()}));
         } else {
             try {
                 if (!args.is_object()) throw ToolError("Tool arguments must be an object");
@@ -518,11 +515,6 @@ CallOutcome SessionMessageStorage::sendSessionMessage(const conversation::Messag
             sessionSendReceipts.erase(id);
             return advance;
         }
-        if (ctx.hasWebEvidence && !allowedAfterWebEvidence(decision)) {
-            save(webEvidenceActionDenied());
-            transaction.commit();
-            return advance;
-        }
         try {
             std::string expectedCommit;
             Json source = nullptr;
@@ -768,7 +760,7 @@ VALUES(?,?,?,?,?,?,?)
 }
 
 CallOutcome SessionMessageStorage::cancelDestinationRun(const conversation::Message& message, int step, const Decision& decision,
-                                                        std::string_view key, bool offered, bool hasWebEvidence, std::stop_token shutdown) {
+                                                        std::string_view key, bool offered, std::stop_token shutdown) {
     using enum CallOutcome;
     if (shutdown.stop_requested()) return stop;
     std::optional<SessionDispatchFileLock> dispatch;
@@ -813,8 +805,6 @@ CallOutcome SessionMessageStorage::cancelDestinationRun(const conversation::Mess
     }
     if (!offered)
         save(toolFailure("The cancellation action was not offered"));
-    else if (hasWebEvidence && !allowedAfterWebEvidence(decision))
-        save(webEvidenceActionDenied());
     else
         try {
             if (!decision.args.is_object()) throw ToolError("Tool arguments must be an object");

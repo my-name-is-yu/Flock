@@ -1091,7 +1091,6 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         if (!message.channelScope.empty()) channelStorage.deliverChannels(shutdown);
         std::vector<ModelCall> calls;
         std::string effectType;
-        bool hasWebEvidence = false;
         bool reviewPreference = false;
         {
             std::lock_guard lock(database.mutex);
@@ -1124,16 +1123,6 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                                       {encodeCalls(calls), id, step});
                 }
             }
-            hasWebEvidence = database
-                                 .query(R"SQL(
-SELECT 1 FROM conversation_steps s, json_each(s.decision) call
-WHERE s.message_id=? AND s.step<?
-  AND json_extract(call.value,'$.tool') IN ('web_search','web_fetch')
-  AND json_extract(s.result,'$[' || call.key || '].untrustedData') = 1
-LIMIT 1
-)SQL",
-                                        {id, step})
-                                 .next();
             transaction.commit();
         }
         if (calls.empty()) {
@@ -1267,8 +1256,7 @@ WHERE conversation_steps.result IS NULL
                                                       .reconcileBotCreation = reconcileBotCreation,
                                                       .intake = intake,
                                                       .peers = peers,
-                                                      .shutdown = shutdown,
-                                                      .hasWebEvidence = hasWebEvidence});
+                                                      .shutdown = shutdown});
         if (outcome != CallOutcome::advance) return;
     }
 }

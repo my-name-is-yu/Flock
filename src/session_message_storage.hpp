@@ -53,10 +53,10 @@ public:
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
                                    const ConversationCallContext&);
     CallOutcome cancelDestinationRun(const conversation::Message&, int step, const Decision&, std::string_view key, bool offered,
-                                     bool hasWebEvidence, std::stop_token);
+                                     std::stop_token);
     void wakeSessionMessages(T3&, std::stop_token);
-    CallOutcome runSessionEffect(const conversation::Message&, int step, const Decision&, std::string_view key, bool offered,
-                                 bool hasWebEvidence, T3&, std::stop_token);
+    CallOutcome runSessionEffect(const conversation::Message&, int step, const Decision&, std::string_view key, bool offered, T3&,
+                                 std::stop_token);
 private:
     std::map<Id, SessionSendReceipt> sessionSendReceipts;
     void persistSessionSendReceipt(Id message, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
