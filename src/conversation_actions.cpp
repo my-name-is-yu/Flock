@@ -1150,7 +1150,6 @@ void TaskOperations::withdrawTaskQuestion(TaskData& task, Id waitId) {
     if (task.state != TaskState::waiting || !wait || wait->reason() != WaitReason::user_question || wait->id != waitId ||
         !waitStorage.waitIsActionable(task))
         throw Conflict("The question is no longer open");
-    if (std::holds_alternative<ProjectQuestionWait>(wait->details)) throw Conflict("Choose a T3 project before this task can start");
     auto updated = taskEvents.currentEvent(task);
     for (const auto* metadata : {"id", "failures", "retryAt", "evidence", "consumed"}) updated.erase(metadata);
     updated["withdrawnUserQuestion"] = wait->text;

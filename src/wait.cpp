@@ -14,7 +14,6 @@
 
 #include <cstdint>
 #include <limits>
-#include <map>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -42,7 +41,6 @@ constexpr std::array modelFailures{
     std::pair{WaitFailureCode::unsupported_reasoning_effort, std::string_view{"unsupported_reasoning_effort"}},
     std::pair{WaitFailureCode::authentication_required, std::string_view{"authentication_required"}},
 };
-constexpr std::string_view projectQuestionReason = "project_question";
 
 }
 
@@ -64,7 +62,7 @@ WaitReason Wait::reason() const {
     return std::visit(
         []<typename T>(const T& value) {
             if constexpr (std::is_same_v<T, SimpleWaitReason>) return waitReason(value);
-            if constexpr (std::is_same_v<T, ModelQuestionWait> || std::is_same_v<T, ProjectQuestionWait>) return WaitReason::user_question;
+            if constexpr (std::is_same_v<T, ModelQuestionWait>) return WaitReason::user_question;
             if constexpr (std::is_same_v<T, ModelFailureWait>) return WaitReason::model_failure;
             if constexpr (std::is_same_v<T, PolicyApprovalWait>) return WaitReason::policy_approval;
         },
@@ -73,7 +71,6 @@ WaitReason Wait::reason() const {
 
 std::span<const std::string> Wait::choices() const {
     if (const auto* question = std::get_if<ModelQuestionWait>(&details)) return question->choices;
-    if (const auto* question = std::get_if<ProjectQuestionWait>(&details)) return question->choices;
     return {};
 }
 
@@ -100,9 +97,6 @@ Json encodeWaitData(const Wait& wait) {
                 data["choices"] = value.choices;
                 data["decisionReason"] = value.decisionReason;
                 data["questionId"] = value.questionId;
-            } else if constexpr (std::is_same_v<T, ProjectQuestionWait>) {
-                data["choices"] = value.choices;
-                data["projectChoices"] = value.projects;
             } else if constexpr (std::is_same_v<T, ModelFailureWait>) {
                 if (value.code) data["failureCode"] = enumName(modelFailures, *value.code);
             } else if constexpr (std::is_same_v<T, PolicyApprovalWait>) {
@@ -119,24 +113,11 @@ Json to_json(const Wait& wait) {
     return data;
 }
 
-std::string_view storedWaitReason(const Wait& wait) {
-    return std::holds_alternative<ProjectQuestionWait>(wait.details) ? projectQuestionReason : waitReasonName(wait.reason());
-}
-
 namespace {
 WaitReason readWaitReason(const RecordDecoder& decoder, std::string_view name) {
     const auto reason = enumValue(reasons, name);
     if (!reason) decoder.fail("reason", "unknown wait reason");
     return *reason;
-}
-
-ProjectQuestionWait readProjectQuestion(const RecordDecoder& decoder, const Json& data) {
-    auto choices = decoder.get<std::vector<std::string>>(data, "choices");
-    const auto& projects = decoder.object(decoder.require(data, "projectChoices"), "projectChoices");
-    const auto project = decoder.nested("projectChoices");
-    std::map<std::string, std::string> ids;
-    for (const auto& [name, id] : projects.items()) ids.emplace(name, project.value<std::string>(id, name));
-    return {std::move(choices), std::move(ids)};
 }
 
 WaitDetails readWaitDetails(const RecordDecoder& decoder, const Json& data, WaitReason reason) {
@@ -185,9 +166,7 @@ Wait decodeWait(Id id, std::string_view reason, std::string_view data) {
     const auto row = std::to_string(id);
     const RecordDecoder decoder("waits", row);
     return decoder.decodeClosed(decoder.parse(data), [&](const Json& payload, const RecordDecoder& fields) {
-        auto details = reason == projectQuestionReason ? WaitDetails{readProjectQuestion(fields, payload)}
-                                                       : readWaitDetails(fields, payload, readWaitReason(fields, reason));
-        auto wait = readWaitPayload(fields, payload, std::move(details));
+        auto wait = readWaitPayload(fields, payload, readWaitDetails(fields, payload, readWaitReason(fields, reason)));
         wait.id = id;
         return wait;
     });
@@ -202,10 +181,7 @@ Wait decodeWaitingEntry(Id entry, const Json& data) {
     const RecordDecoder decoder("journal", row);
     return decoder.decodeClosed(data, [](const Json& payload, const RecordDecoder& fields) {
         const auto reason = readWaitReason(fields, fields.get<std::string>(payload, "reason"));
-        auto details = reason == WaitReason::user_question && payload.contains("projectChoices")
-                           ? WaitDetails{readProjectQuestion(fields, payload)}
-                           : readWaitDetails(fields, payload, reason);
-        auto wait = readWaitPayload(fields, payload, std::move(details));
+        auto wait = readWaitPayload(fields, payload, readWaitDetails(fields, payload, reason));
         wait.id = fields.get<Id>(payload, "id");
         wait.messageId = fields.optional<Id>(payload, "messageId");
         return wait;
@@ -249,7 +225,8 @@ Id WaitStorage::wait(TaskData& task, Wait waiting) {
     clearWait(task, "superseded");
     waiting.eventId = task.eventId;
     waiting.actionId = task.actionId;
-    database.exec("INSERT INTO waits(task_id,reason,data) VALUES(?,?,?)", {task.id, storedWaitReason(waiting), encodeWaitData(waiting)});
+    database.exec("INSERT INTO waits(task_id,reason,data) VALUES(?,?,?)",
+                  {task.id, waitReasonName(waiting.reason()), encodeWaitData(waiting)});
     waiting.id = database.last();
     journalStorage.journal(task.id, waiting);
     task.state = TaskState::waiting;

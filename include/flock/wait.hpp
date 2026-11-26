@@ -3,7 +3,6 @@
 #include "flock/run_ref.hpp"
 
 #include <cstdint>
-#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -25,17 +24,13 @@ struct ModelQuestionWait {
     std::string decisionReason;
     std::string questionId;
 };
-struct ProjectQuestionWait {
-    std::vector<std::string> choices;
-    std::map<std::string, std::string> projects;
-};
 struct ModelFailureWait {
     std::optional<WaitFailureCode> code;
 };
 struct PolicyApprovalWait {
     std::int64_t approvalId;
 };
-using WaitDetails = std::variant<SimpleWaitReason, ModelQuestionWait, ProjectQuestionWait, ModelFailureWait, PolicyApprovalWait>;
+using WaitDetails = std::variant<SimpleWaitReason, ModelQuestionWait, ModelFailureWait, PolicyApprovalWait>;
 
 struct WaitRun {
     RunRef run;

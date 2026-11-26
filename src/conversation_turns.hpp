@@ -56,7 +56,7 @@ struct BotTools;
 struct ConversationCallContext;
 struct ConversationInvitationEntry;
 struct Decision;
-struct LinkedTaskDestinations;
+struct TaskDestinations;
 struct ModelCall;
 struct ModelImage;
 struct Person;
@@ -103,7 +103,7 @@ public:
                  const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&, const PeerResolver&, std::stop_token);
     std::optional<Json> applyLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
                                                    Seconds now, ApprovalWait, const WorkSession* selectedSession,
-                                                   const LinkedTaskDestinations& linked);
+                                                   const TaskDestinations& linked);
     bool isNextTurn(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
     Person turnActor(const conversation::Message&);
@@ -131,9 +131,9 @@ private:
     const char* questionAnswerError(const TaskData& task, const conversation::Message&, const std::optional<Wait>&) const;
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
     Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
-                   const LinkedTaskDestinations& linked);
+                   const TaskDestinations& linked);
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now, const WorkSession* selectedSession,
-                       const LinkedTaskDestinations& linked);
+                       const TaskDestinations& linked);
     std::map<Id, ConversationModelCheckpoint> conversationCheckpoints;
     Database& database;
     AttachmentStorage& attachments;

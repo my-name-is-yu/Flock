@@ -6,6 +6,7 @@
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <functional>
@@ -22,15 +23,17 @@ class PeerStorage;
 class SecretStorage;
 class TaskEvents;
 class TaskRecords;
+class TaskRouting;
+struct T3Project;
 class WaitStorage;
 
 class runtime::TaskDecisions {
 public:
     TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage, JournalStorage& journalStorage,
                   MemoryStorage& memoryStorage, PeerStorage& peerStorage, SecretStorage& secretStorage, TaskEvents& taskEvents,
-                  TaskRecords& taskRecords, WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
-                  PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead, GitHost* gitHost,
-                  const std::function<Seconds()>& clock);
+                  TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage, TaskUpdates& updates, RunReports& reports,
+                  SessionHistory& history, PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead,
+                  GitHost* gitHost, const std::function<Seconds()>& clock);
 
     bool canComplete(const TaskData& task, const Json& event) const;
     struct LearningSource {
@@ -41,7 +44,7 @@ public:
     void rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision, std::string_view message,
                         bool replay = false);
     void accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision, std::string_view approvedInvocation = {},
-                const Json* launchDefaults = nullptr);
+                const Json* launchDefaults = nullptr, std::span<const T3Project> projects = {});
     bool continueStage(const TaskData& task, const Json* launchDefaults = nullptr);
     bool resumeGitApproval(const TaskData& task);
 private:
@@ -59,6 +62,7 @@ private:
     SecretStorage& secretStorage;
     TaskEvents& taskEvents;
     TaskRecords& taskRecords;
+    TaskRouting& taskRouting;
     WaitStorage& waitStorage;
     TaskUpdates& updates;
     RunReports& reports;

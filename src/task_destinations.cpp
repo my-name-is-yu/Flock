@@ -11,14 +11,15 @@
 #include "session_participation_storage.hpp"
 
 #include <algorithm>
-#include <cstddef>
+#include <iterator>
 #include <map>
-#include <optional>
+#include <mutex>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <variant>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace flockv0 {
 std::string TaskRouting::rememberedT3Project(std::string_view bot, std::string_view environment) const {
@@ -32,54 +33,51 @@ void TaskRouting::rememberT3Project(std::string_view bot, std::string_view envir
                   {bot, environment, project});
 }
 
-bool TaskRouting::projectQuestionOpen(std::string_view bot, std::string_view environment) const {
-    return database
-        .query("SELECT 1 FROM tasks t JOIN waits w ON w.task_id=t.id "
-               "WHERE t.bot_id=? AND t.environment_id=? AND t.project_id='' AND w.resolution IS NULL "
-               "AND w.reason='project_question' LIMIT 1",
-               {bot, environment})
-        .next();
-}
-
-ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, std::string_view environment, bool requireConnection) {
-    if (requireConnection && !sessionParticipationStorage.t3EnvironmentConnected(environment))
-        return "Connect this T3 environment under Connections in Flock Settings.";
-    auto& policy = permissions;
-    if (!policy.allows(bot, Action::environment_inspect, environment) || policy.forbidden(bot, Action::environment_launch, environment))
-        return "Flock cannot use this T3 environment under the current permissions.";
+ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, const TaskRoute& route, bool requireConnection) {
+    const auto& environment = route.environmentId;
+    const auto& gateway = route.gatewayEnvironmentId.empty() ? environment : route.gatewayEnvironmentId;
+    {
+        std::lock_guard lock(database.mutex);
+        if (requireConnection && !sessionParticipationStorage.t3EnvironmentConnected(gateway))
+            return "Connect this T3 environment under Connections in Flock Settings.";
+        if (!permissions.allows(bot, Action::environment_inspect, environment) ||
+            permissions.forbidden(bot, Action::environment_launch, environment))
+            return "Flock cannot use this T3 environment under the current permissions.";
+    }
     try {
-        auto projects = t3.projects(environment);
+        auto projects = t3.projects(T3EnvironmentRoute{environment, gateway});
         const auto scrub = permissions.secretRedactor(bot);
-        std::erase_if(projects, [&](const T3Project& project) { return scrub.text(project.id) != project.id; });
+        std::erase_if(projects, [&](const T3Project& project) { return project.id.empty() || scrub.text(project.id) != project.id; });
         return projects;
     } catch (const std::exception&) {
         return "Flock could not list projects. Check the T3 connection in Flock Settings.";
     }
 }
 
-namespace {
-ProjectQuestionWait projectQuestion(const std::vector<T3Project>& projects, const SecretRedactor& scrub) {
-    std::map<std::string, std::size_t> titles;
-    std::vector<std::string> names;
+Json projectChoices(const std::vector<T3Project>& projects, const SecretRedactor& scrub) {
+    auto choices = Json::array();
+    std::map<std::string, int> titles;
     for (const auto& project : projects) {
-        names.push_back(bounded(scrub.text(project.title), 140));
-        ++titles[names.back()];
+        auto title = bounded(scrub.text(project.title), 140);
+        ++titles[title];
+        choices.push_back({{"projectId", project.id}, {"title", std::move(title)}});
     }
-    ProjectQuestionWait question;
-    for (std::size_t index = 0; index < projects.size(); ++index) {
-        const auto& project = projects[index];
-        auto label = names[index];
-        if (titles.at(label) > 1 && !project.directory.empty()) label += " (" + bounded(scrub.text(project.directory), 40) + ")";
-        const auto base = label;
-        for (int suffix = 2; question.projects.contains(label); ++suffix) label = base + " #" + std::to_string(suffix);
-        question.choices.push_back(label);
-        question.projects.emplace(label, project.id);
+    for (std::size_t i = 0; i < projects.size(); ++i) {
+        auto& choice = choices.at(i);
+        if (titles.at(field(choice, "title")) > 1 && !projects[i].directory.empty())
+            choice["directory"] = bounded(scrub.text(projects[i].directory), 256);
     }
-    return question;
-}
+    return choices;
 }
 
-bool TaskRouting::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
+void TaskRouting::assignProject(TaskData& task, std::string_view project) {
+    if (peerStorage.recipientRouteWouldCycle(task.id, task.environmentId, project))
+        throw Conflict("This project would make project queues wait for one another. Choose another project.");
+    task.projectId = project;
+    rememberT3Project(task.botId, task.environmentId, project);
+}
+
+void TaskRouting::applyProjectCatalog(TaskData& task, const ProjectCatalog& catalog) {
     const auto& bot = task.botId;
     const auto& environment = task.environmentId;
     const auto pending = std::exchange(task.pendingDestination, std::nullopt);
@@ -87,41 +85,41 @@ bool TaskRouting::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
         const auto wait = waitStorage.currentWait(task.id);
         if (!wait || wait->reason() != WaitReason::settings || wait->text != text)
             waitStorage.wait(task, SimpleWaitReason::settings, std::string(text));
-        return true;
     };
     if (const auto* problem = std::get_if<std::string>(&catalog)) {
-        return showSettings(*problem);
+        showSettings(*problem);
+        return;
     }
-    auto& projects = std::get<std::vector<T3Project>>(catalog);
+    const auto& projects = std::get<std::vector<T3Project>>(catalog);
     const auto remembered = rememberedT3Project(bot, environment);
     if (!remembered.empty() && std::ranges::find(projects, remembered, &T3Project::id) == projects.end())
         database.exec("DELETE FROM bot_t3_projects WHERE bot_id=? AND environment_id=? AND project_id=?", {bot, environment, remembered});
-    if (projects.empty()) return showSettings("Add or unarchive a project in this T3 environment.");
-    const auto id = task.id;
-    const auto peer = peerStorage.peerExchange(id);
-    if (peer && peer->recipient == id && peer->kind == "work")
-        std::erase_if(projects,
-                      [&](const T3Project& project) { return peerStorage.peerWorkRouteWouldCycle(peer->sender, environment, project.id); });
     if (projects.empty()) {
-        return showSettings("Each project in this environment would make project queues wait for one another. "
-                            "This task can continue after the related work finishes or after moving to another environment.");
+        showSettings("Add or unarchive a project in this T3 environment.");
+        return;
     }
-    auto selected = pending ? std::ranges::find(projects, pending->route.projectId, &T3Project::id) : projects.end();
-    if (selected == projects.end()) selected = std::ranges::find(projects, remembered, &T3Project::id);
-    if (selected == projects.end() && projects.size() == 1) selected = projects.begin();
-    if (selected != projects.end()) {
-        waitStorage.clearWait(task, "connection_restored");
-        task.state = TaskState::queued;
-        task.projectId = selected->id;
-        if (auto* targets = std::get_if<RunTargets>(&task.destinations))
-            for (auto& target : *targets)
-                if (target.route.environmentId == environment && target.route.projectId.empty()) target.route.projectId = selected->id;
-        rememberT3Project(bot, environment, selected->id);
-        return true;
+    const auto peer = peerStorage.peerExchange(task.id);
+    const auto usable = [&](const T3Project& project) {
+        return !peer || peer->recipient != task.id || peer->kind != "work" ||
+               !peerStorage.peerWorkRouteWouldCycle(peer->sender, environment, project.id);
+    };
+    const auto preferred = [&](std::string_view id) {
+        const auto match = std::ranges::find(projects, id, &T3Project::id);
+        return match != projects.end() && usable(*match) ? match : projects.end();
+    };
+    auto selected = pending ? preferred(pending->route.projectId) : projects.end();
+    if (selected == projects.end()) selected = preferred(remembered);
+    if (selected == projects.end()) {
+        selected = std::ranges::find_if(projects, usable);
+        if (selected == projects.end()) {
+            showSettings("Each project in this environment would make project queues wait for one another. "
+                         "This task can continue after the related work finishes or after moving to another environment.");
+            return;
+        }
+        if (std::find_if(std::next(selected), projects.end(), usable) != projects.end()) selected = projects.end();
     }
-    if (projectQuestionOpen(bot, environment)) return false;
-    waitStorage.wait(task, projectQuestion(projects, permissions.secretRedactor(bot)),
-                     "Which T3 project should this Bot use in this environment?");
-    return true;
+    waitStorage.clearWait(task, "connection_restored");
+    task.state = TaskState::queued;
+    if (selected != projects.end()) assignProject(task, selected->id);
 }
 }

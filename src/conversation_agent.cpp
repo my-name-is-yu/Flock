@@ -394,7 +394,7 @@ Json ConversationStorage::conversationSteps(const Message& message, int step, st
 }
 
 Json ConversationStorage::turnInput(const Message& message, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
-                                    const LinkedTaskDestinations& linked) {
+                                    const TaskDestinations& linked) {
     if (message.principalSource == PrincipalSource::gitWebhook) {
         const auto& gitEvent = message.routing.at("gitEvent");
         const auto task = taskRecords.load(gitEvent.at("taskId").get<Id>());
@@ -519,24 +519,19 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
     }
 
     Json environments = Json::array();
-    const auto initial = taskRouting.taskEnvironment(message.bot, message.routing);
-    if (!initial.empty()) environments.push_back({{"name", initial}, {"environmentId", initial}, {"default", true}});
-    if (field(message.routing, "environmentId").empty())
-        for (const auto& environment : taskRouting.registeredT3Environments(message.bot))
-            if (environment != initial) environments.push_back({{"name", environment}, {"environmentId", environment}});
-    const auto& config = message.routing.at("config");
-    if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object()) {
-        for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) {
-            const auto id = taskRouting.taskEnvironment(message.bot, message.routing, alias.key());
-            if (!id.empty()) {
-                auto choice = Json{{"name", alias.key()}, {"environmentId", id}};
-                const auto gateway = conversationGatewayEnvironmentId(alias.value());
-                if (!gateway.empty()) choice["gatewayEnvironmentId"] = gateway;
-                environments.push_back(std::move(choice));
-            }
+    for (const auto& [name, route] : linked.configured) {
+        Json choice{{"name", name.empty() ? route.environmentId : name}, {"environmentId", route.environmentId}};
+        if (name.empty()) choice["default"] = true;
+        if (route.gatewayEnvironmentId != route.environmentId) choice["gatewayEnvironmentId"] = route.gatewayEnvironmentId;
+        if (const auto* projects = linked.projects(route); projects && !projects->empty()) {
+            choice["projects"] = projectChoices(*projects, scrub);
+            const auto preferred =
+                route.projectId.empty() ? taskRouting.rememberedT3Project(message.bot, route.environmentId) : route.projectId;
+            if (std::ranges::find(*projects, preferred, &T3Project::id) != projects->end()) choice["projectId"] = preferred;
         }
+        environments.push_back(std::move(choice));
     }
-    for (const auto& linkedChoice : linked.choices) {
+    for (const auto& linkedChoice : linked.linked) {
         environments.push_back({{"name", scrub.text(linkedChoice.name)},
                                 {"environmentId", linkedChoice.route.environmentId},
                                 {"projectId", linkedChoice.route.projectId},
@@ -572,7 +567,7 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
 }
 
 Json ConversationStorage::applyTurnTool(const Message& message, int step, const Decision& decision, Seconds now,
-                                        const WorkSession* selectedSession, const LinkedTaskDestinations& linked) {
+                                        const WorkSession* selectedSession, const TaskDestinations& linked) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -658,6 +653,11 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
         const auto id = taskOperations.startConversationTask(routing, bot, request, destination, message.id, sourceRef(result), resume,
                                                              selectedSession);
+        if (args.contains("projectId")) taskRouting.rememberT3Project(bot, destination.environmentId, destination.projectId);
+        if (const auto selected = args.find("environments"); selected != args.end())
+            for (std::size_t i = 0; i < targets.size(); ++i)
+                if (selected->at(i).contains("projectId"))
+                    taskRouting.rememberT3Project(bot, targets[i].route.environmentId, targets[i].route.projectId);
         if (!doneWhen.empty() || !targets.empty()) {
             auto task = taskRecords.load(id);
             if (!doneWhen.empty()) task.criteriaProposal = TaskCriteriaProposal{doneWhen, message.id};
@@ -692,6 +692,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         }
         const bool conflicting =
             taskOperations.acceptInstruction(task, message.id, step, instruction, sourceRef(result), change ? &*change : nullptr);
+        if (change && args.contains("projectId")) taskRouting.rememberT3Project(bot, change->route.environmentId, change->route.projectId);
         return {{"ok", true}, {"effect", conflicting ? "replanning" : "accepted"}, {"taskId", task.id}};
     }
     if (tool == "answer_task_question") {
@@ -1128,7 +1129,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                                : "I couldn't read this Bot's notes (" + diagnostic + "). Check its Role and memory.");
                 return;
             }
-            const auto linkedDestinations = taskRouting.discoverLinkedTaskDestinations(t3, message.bot);
+            const auto linkedDestinations = taskRouting.discoverTaskDestinations(t3, message, true);
             ModelInput input;
             {
                 std::lock_guard lock(database.mutex);

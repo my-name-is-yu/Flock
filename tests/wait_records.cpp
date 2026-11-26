@@ -32,10 +32,8 @@ void roundTrip(const WaitDetails& details, Json expected, std::optional<WaitRun>
     check(to_json(wait) == expected, "Wait encoded an unexpected public shape");
     auto storedData = expected;
     storedData.erase("reason");
-    const auto reason = storedWaitReason(wait);
-    check(reason == (std::holds_alternative<ProjectQuestionWait>(details) ? "project_question" : waitReasonName(wait.reason())) &&
-              encodeWaitData(wait) == storedData,
-          "Wait encoded an unexpected SQLite shape");
+    const auto reason = waitReasonName(wait.reason());
+    check(encodeWaitData(wait) == storedData, "Wait encoded an unexpected SQLite shape");
     const auto decoded = decodeWait(id, reason, storedData.dump());
     check(decoded.id == id && decoded.details.index() == details.index() && decoded.reason() == wait.reason(),
           "decoded wait lost its row ID or reason variant");
@@ -55,10 +53,6 @@ void roundTrips() {
         {"environmentId", "environment"}, {"ownerBotId", "bot"}, {"projectId", "project"},           {"revisionId", nullptr}};
     roundTrip(ModelQuestionWait{{"Yes", "No"}, "Need approval", "t3-question"}, question,
               WaitRun{{"thread", "run", "https://t3.test/thread", "gateway"}, "environment", RunAssignment{"bot", "project", {}}});
-
-    auto project = stored("user_question");
-    project.update({{"choices", Json::array({"Mobile", "Web"})}, {"projectChoices", {{"Mobile", "app"}, {"Web", "site"}}}});
-    roundTrip(ProjectQuestionWait{{"Mobile", "Web"}, {{"Mobile", "app"}, {"Web", "site"}}}, project);
 
     roundTrip(ModelFailureWait{}, stored("model_failure"));
     auto failure = stored("model_failure");
@@ -105,20 +99,6 @@ void decodeErrors() {
     auto nested = payload;
     nested["run"] = {{"threadId", "thread"}, {"runId", "run"}, {"link", 5}};
     rejects("settings", nested, "run.link", "expected a string");
-    auto modelQuestion = payload;
-    modelQuestion.update({{"choices", Json::array()}, {"questionId", ""}, {"decisionReason", ""}});
-    rejects("project_question", modelQuestion, "projectChoices", "missing required key");
-    modelQuestion["projectChoices"] = Json::object();
-    rejects("user_question", modelQuestion, "projectChoices", "unknown key");
-
-    auto entry = stored("settings");
-    entry["id"] = 47;
-    entry["choices"] = Json::array();
-    const auto decodeEntry = [&] { decodeWaitingEntry(101, entry); };
-    rejectsRecord(decodeEntry, "journal row 101", "choices", "unknown key");
-    entry.erase("choices");
-    entry["id"] = "47";
-    rejectsRecord(decodeEntry, "journal row 101", "id", "expected an integer");
 }
 }
 

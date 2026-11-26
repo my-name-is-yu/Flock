@@ -126,13 +126,37 @@ std::set<std::string> TaskRouting::registeredT3Environments(std::string_view bot
     return result;
 }
 
-LinkedTaskDestinations TaskRouting::discoverLinkedTaskDestinations(T3& t3, std::string_view bot) {
+namespace {
+auto catalogKey(const TaskRoute& route) {
+    return std::pair{route.environmentId, route.gatewayEnvironmentId.empty() ? route.environmentId : route.gatewayEnvironmentId};
+}
+}
+
+const std::vector<T3Project>* TaskDestinations::projects(const TaskRoute& route) const {
+    const auto catalog = catalogs.find(catalogKey(route));
+    return catalog == catalogs.end() ? nullptr : &catalog->second;
+}
+
+void TaskDestinations::chooseProject(TaskRoute& route, std::string_view project) const {
+    if (project.empty()) return;
+    const auto* listed = projects(route);
+    if ((!listed || std::ranges::find(*listed, project, &T3Project::id) == listed->end()) &&
+        !std::ranges::any_of(linked, [&](const RunTarget& choice) {
+            return catalogKey(choice.route) == catalogKey(route) && choice.route.projectId == project;
+        }))
+        throw conversation_storage::ToolError("Choose a listed projectId for the selected T3 environment.");
+    route.projectId = project;
+}
+
+TaskDestinations TaskRouting::discoverTaskDestinations(T3& t3, const conversation::Message& message, bool listProjects,
+                                                       const Json* change) {
+    const auto& bot = message.bot;
     std::set<std::string> gateways;
     {
         std::lock_guard lock(database.mutex);
         gateways = registeredT3Environments(bot);
     }
-    LinkedTaskDestinations result;
+    TaskDestinations result;
     const auto scrub = permissions.secretRedactor(bot);
     std::set<std::tuple<std::string, std::string, std::string>> seenRoutes;
     std::set<std::string> seenNames;
@@ -185,13 +209,60 @@ LinkedTaskDestinations TaskRouting::discoverLinkedTaskDestinations(T3& t3, std::
                     const auto label = bounded(scrub.text(link.label), 256 - identity.size() - projectLabel.size());
                     const auto name = label + identity + projectLabel;
                     if (!seenNames.insert(name).second) continue;
-                    result.choices.push_back({name, {target, project.id, gateway}});
+                    result.linked.push_back({name, {target, project.id, gateway}});
                 }
             } catch (const std::exception&) {
                 result.unavailable.push_back(scrub.text("Flock could not list projects for linked target " + link.label +
                                                         " through gateway " + gateway + ". Check linked-environment access in T3."));
             }
         }
+    }
+    if (!listProjects) return result;
+
+    std::map<std::pair<std::string, std::string>, TaskRoute> routes;
+    {
+        std::lock_guard lock(database.mutex);
+        const auto& routing = message.routing;
+        const auto add = [&](TaskRoute route) {
+            if (route.environmentId.empty()) return;
+            auto key = catalogKey(route);
+            routes.try_emplace(std::move(key), std::move(route));
+        };
+        const auto offer = [&](std::string_view name) {
+            auto route = taskRoute(bot, routing, name);
+            if (route.environmentId.empty()) return;
+            result.configured.push_back({std::string(name), route});
+            add(std::move(route));
+        };
+        offer({});
+        if (field(routing, "environmentId").empty()) {
+            const auto initial = result.configured.empty() ? std::string{} : result.configured.front().route.environmentId;
+            for (const auto& gateway : gateways)
+                if (gateway != initial) offer(gateway);
+        }
+        const auto& config = routing.at("config");
+        if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object())
+            for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) offer(alias.key());
+        if (change) {
+            const auto id = change->find("taskId");
+            if (id != change->end() && id->is_number_integer()) {
+                auto row = database.query("SELECT environment_id,project_id,data FROM tasks WHERE id=? AND bot_id=?", {*id, bot});
+                if (row.next()) {
+                    const auto data = row.json(2);
+                    TaskData task{.environmentId = row.string(0), .projectId = row.string(1), .config = data.at("config")};
+                    if (data.contains("gatewayEnvironmentId")) task.gatewayEnvironmentId = field(data, "gatewayEnvironmentId");
+                    const auto name = field(*change, "environment");
+                    if (name.empty())
+                        add({task.environmentId, task.projectId, task.gatewayEnvironmentId.value_or("")});
+                    else
+                        add(taskRoute(bot, routing, name, &task));
+                }
+            }
+        }
+    }
+    for (const auto& [key, route] : routes) {
+        auto catalog = readProjectCatalog(t3, bot, route, false);
+        if (auto* projects = std::get_if<std::vector<T3Project>>(&catalog)) result.catalogs.emplace(key, std::move(*projects));
     }
     return result;
 }
@@ -208,7 +279,7 @@ std::string TaskRouting::taskEnvironment(std::string_view bot, const Json& routi
 }
 
 TaskRoute TaskRouting::taskRoute(std::string_view bot, const Json& routing, std::string_view name, const TaskData* movingTask,
-                                 const LinkedTaskDestinations* linked) {
+                                 const TaskDestinations* linked) {
     using conversation_storage::ToolError;
     const auto configured = field(routing, "environmentId");
     const auto resolved = [&](TaskRoute route) {
@@ -254,7 +325,7 @@ TaskRoute TaskRouting::taskRoute(std::string_view bot, const Json& routing, std:
     if (route) *route = resolved(std::move(*route));
     const TaskRoute* discovered = nullptr;
     if (linked) {
-        for (const auto& choice : linked->choices) {
+        for (const auto& choice : linked->linked) {
             if (choice.name != name && choice.route.environmentId != name) continue;
             if (discovered) throw ToolError("This T3 environment has more than one linked route. Choose a specific destination name.");
             discovered = &choice.route;
@@ -275,36 +346,47 @@ TaskRoute TaskRouting::taskRoute(std::string_view bot, const Json& routing, std:
 }
 
 StartDestinations TaskRouting::startDestinations(const conversation::Message& message, const Json& args, bool resume,
-                                                 const WorkSession* selectedSession, const LinkedTaskDestinations& linked) {
+                                                 const WorkSession* selectedSession, const TaskDestinations& linked) {
     using conversation_storage::text;
     using conversation_storage::ToolError;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
     const auto environment = text(args, "environment", 256, false);
     const auto sessionRef = text(args, "sessionRef", 128, false);
+    const auto project = text(args, "projectId", 1024, args.contains("projectId"));
     StartDestinations destinations;
     const auto routeForName = [&](std::string_view name) { return taskRoute(bot, routing, name, nullptr, &linked); };
+    const auto resolveProject = [&](TaskRoute& route, std::string_view name) {
+        if (route.projectId.empty()) route.projectId = rememberedT3Project(bot, route.environmentId);
+        if (route.projectId.empty())
+            if (const auto* projects = linked.projects(route); projects && projects->size() == 1) route.projectId = projects->front().id;
+        if (route.projectId.empty())
+            throw ToolError("Choose a listed projectId for " + std::string(name) + " or ask which project to use.");
+    };
     destinations.commit = verifiedCommit(text(args, "commit", 64, false));
     if (resume && !destinations.commit.empty())
         throw ToolError("Commit verification is not supported when resuming a cancelled task; start a new task on its saved destination.");
     if (const auto environments = args.find("environments"); environments != args.end()) {
         if (!message.channelScope.empty() || routing.contains("sessionOrigin"))
             throw ToolError("Start work across T3 environments from a Flock conversation");
-        if (!environment.empty() || !sessionRef.empty() || selectedSession || resume)
+        if (!environment.empty() || !project.empty() || !sessionRef.empty() || selectedSession || resume)
             throw ToolError("Choose either multiple environments or a single destination for this request");
         if (!environments->is_array() || environments->empty()) throw ToolError("Choose one or more names or IDs from task.environments");
         std::set<std::pair<std::string, std::string>> selected;
         for (const auto& choice : *environments) {
-            const auto name = text(Json{{"environment", choice}}, "environment", 256, true);
+            const auto selection = choice.is_object() ? choice : Json{{"environment", choice}};
+            if (selection.size() != (selection.contains("projectId") ? 2 : 1))
+                throw ToolError("Use environment and projectId to select a destination.");
+            const auto name = text(selection, "environment", 256, true);
+            const auto selectedProject = text(selection, "projectId", 1024, selection.contains("projectId"));
             auto route = routeForName(name);
             if (route.environmentId.empty())
                 throw ToolError(
                     linked.unavailable.empty()
                         ? "Choose names or IDs from task.environments"
                         : "The linked destination is unavailable through its T3 gateway. Check the link and gateway; Flock will not use a different environment.");
-            if (route.projectId.empty()) route.projectId = rememberedT3Project(bot, route.environmentId);
-            if (route.projectId.empty())
-                throw ToolError("Choose a T3 project for " + name + " first, or configure its projectId in conversationEnvironments");
+            linked.chooseProject(route, selectedProject);
+            resolveProject(route, name);
             if (!selected.emplace(route.environmentId, route.projectId).second)
                 throw ToolError("Choose each environment and project only once");
             if (destinations.primary.environmentId.empty()) destinations.primary = route;
@@ -316,7 +398,8 @@ StartDestinations TaskRouting::startDestinations(const conversation::Message& me
     if (!sessionRef.empty() && (!selectedSession || !sessionReadStorage.permitsWorkSession(message, *selectedSession)))
         throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
     if (selectedSession) {
-        if (!environment.empty() || resume) throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
+        if (!environment.empty() || !project.empty() || resume)
+            throw ToolError("A selected T3 Session fixes the destination. Omit environment, projectId, and resume.");
         destinations.primary = {selectedSession->target.environmentId, selectedSession->projectId, {}};
     } else
         destinations.primary = environment.empty() ? taskRoute(bot, routing, environment) : routeForName(environment);
@@ -327,28 +410,32 @@ StartDestinations TaskRouting::startDestinations(const conversation::Message& me
                 : (linked.unavailable.empty()
                        ? "Unknown environment " + environment + "; use one of task.environments"
                        : "The linked destination is unavailable through its T3 gateway. Check the link and gateway; Flock will not use a different environment."));
+    linked.chooseProject(destinations.primary, project);
     if (!destinations.commit.empty()) {
-        if (destinations.primary.projectId.empty())
-            destinations.primary.projectId = rememberedT3Project(bot, destinations.primary.environmentId);
-        if (destinations.primary.projectId.empty()) throw ToolError("Choose a T3 project before verifying a commit");
-        destinations.targets.push_back({environment.empty() ? destinations.primary.environmentId : environment, destinations.primary});
+        const auto& name = environment.empty() ? destinations.primary.environmentId : environment;
+        resolveProject(destinations.primary, name);
+        destinations.targets.push_back({name, destinations.primary});
         permissions.secretRedactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
     }
     return destinations;
 }
 
 TaskChange TaskRouting::taskChange(const conversation::Message& message, const Json& args, const TaskData& task,
-                                   const LinkedTaskDestinations& linked) {
+                                   const TaskDestinations& linked) {
     using conversation_storage::text;
     using conversation_storage::ToolError;
     using limits::session_prompt::maxDecisionTextBytes;
     TaskChange change{text(args, "intent", maxDecisionTextBytes, false), text(args, "doneWhen", maxDecisionTextBytes, false), {}};
     const auto environment = text(args, "environment", 256, false);
-    if (change.intent.empty() && change.doneWhen.empty() && environment.empty())
-        throw ToolError("change_task needs intent, doneWhen, or environment; use send_to_task for other instructions");
-    if (!environment.empty()) {
-        change.route = taskRoute(message.bot, message.routing, environment, &task, &linked);
+    const auto project = text(args, "projectId", 1024, args.contains("projectId"));
+    if (change.intent.empty() && change.doneWhen.empty() && environment.empty() && project.empty())
+        throw ToolError("change_task needs intent, doneWhen, environment, or projectId; use send_to_task for other instructions");
+    if (!environment.empty() || !project.empty()) {
+        change.route = environment.empty()
+                           ? TaskRoute{task.environmentId, task.projectId, task.gatewayEnvironmentId.value_or(task.environmentId)}
+                           : taskRoute(message.bot, message.routing, environment, &task, &linked);
         if (change.route.environmentId.empty()) throw ToolError("Unknown environment " + environment + "; use one of task.environments");
+        linked.chooseProject(change.route, project);
         permissions.secretRedactor(message.bot)
             .requirePublic({change.route.environmentId, change.route.projectId, change.route.gatewayEnvironmentId});
     }

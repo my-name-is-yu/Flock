@@ -593,6 +593,14 @@ void responseContract() {
               initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
+    check(!toolParameters(initial, "delegate").at("properties").contains("projectId"), "a routed task offered project selection");
+    input.task["projects"] = Json::array({{{"projectId", "release"}, {"title", "Release"}}, {{"projectId", "docs"}, {"title", "Docs"}}});
+    const auto unresolved = responseRequest(input);
+    check(toolParameters(unresolved, "delegate").at("required").back() == "projectId" &&
+              Json::parse(requestText(unresolved)).at("task").at("projects") == input.task.at("projects"),
+          "the first task decision could not choose a listed project");
+    input.task.erase("projects");
+
     input.tools = {"start_task",
                    "send_to_task",
                    "change_task",
@@ -654,8 +662,10 @@ void responseContract() {
               turnTool("start_task")["properties"]["environments"]["minItems"] == 1 &&
               !turnTool("start_task")["properties"]["environments"].contains("maxItems") &&
               turnTool("start_task")["properties"]["commit"]["type"] == "string" &&
+              turnTool("start_task")["properties"]["projectId"]["type"] == "string" &&
               turnTool("change_task")["required"] == Json::array({"taskId", "generation", "revisionId", "instruction"}) &&
               turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&
+              turnTool("change_task")["properties"]["projectId"]["type"] == "string" &&
               turnTool("cancel_task")["required"] == Json::array({"taskId", "generation"}) &&
               turnTool("cancel_task")["properties"]["destination"]["type"] == "string" &&
               turnTool("cancel_task")["properties"]["environmentId"]["type"] == "string" &&

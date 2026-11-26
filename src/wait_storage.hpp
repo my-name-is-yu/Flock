@@ -13,7 +13,6 @@ class Statement;
 
 Json to_json(const Wait&);
 Json encodeWaitData(const Wait&);
-std::string_view storedWaitReason(const Wait&);
 Wait decodeWait(Id id, std::string_view reason, std::string_view data);
 Wait decodeWaitRow(const Statement&, int col = 0);
 Wait decodeWaitingEntry(Id entry, const Json& data);

@@ -57,12 +57,12 @@ runtime::TaskTurn::TaskTurn(Database& database, GitStorage& gitStorage, ModelCal
                             const std::function<Seconds()>& clock, GitHost* gitHost, const std::string& sessionRead, std::stop_token stop,
                             TaskUpdates& updates, RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges,
                             RunObserver& runs, SessionPrompts& prompts, TaskDecisions& decisions, BotSetupStorage& botSetup,
-                            const IntakeResolver& intake)
+                            const IntakeResolver& intake, T3& t3, bool requireT3Connection)
     : database(database), gitStorage(gitStorage), modelCalls(modelCalls), peerStorage(peerStorage), secretStorage(secretStorage),
       taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), memoryStorage(memoryStorage),
       model(model), soul(soul), clock(clock), gitHost(gitHost), sessionRead(sessionRead), stop(std::move(stop)), updates(updates),
       reports(reports), sessionHistory(sessionHistory), peerExchanges(peerExchanges), runs(runs), prompts(prompts), decisions(decisions),
-      botSetup(botSetup), intake(intake) {}
+      botSetup(botSetup), intake(intake), t3(t3), requireT3Connection(requireT3Connection) {}
 
 std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, const Json& event, const std::optional<PeerExchange>& peer,
                                                       bool canSend, bool canRead) {
@@ -84,6 +84,7 @@ std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, cons
     if (task.activeRun && task.question) return {"answer_session_question", "ask_user"};
     const bool receiving = peer && peer->recipient == id && peer->phase == "working";
     if (receiving && peer->kind == "consult") return {"reply_to_bot"};
+    if (task.projectId.empty()) return {"delegate", receiving ? "reply_to_bot" : "ask_user"};
     std::vector<std::string> tools{"delegate", receiving ? "reply_to_bot" : "ask_user"};
     if (RunReports::hasSettledRun(task)) {
         if (!task.newSessionRequired) {
@@ -197,7 +198,8 @@ void runtime::TaskTurn::persistTaskInferences() {
 std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& task, Json event, const Json& history,
                                                              const std::vector<std::string>& tools,
                                                              std::span<const OutboxInstruction> pending, Json choices,
-                                                             const std::optional<PeerExchange>& peer) {
+                                                             const std::optional<PeerExchange>& peer,
+                                                             const std::vector<T3Project>& projects) {
     if (event.at("kind") != "delivery_unconfirmed") {
         const auto prefill = sessionHistory.prefillHistory(task, event);
         if (prefill == SessionHistory::PrefillResult::Persisted) return std::nullopt;
@@ -209,6 +211,10 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
                     {"request", task.intent},
                     {"doneWhen", task.doneWhen},
                     {"revisionId", revisionJson(task.currentRevision)}};
+    if (!projects.empty()) {
+        summary["environmentId"] = task.environmentId;
+        summary["projects"] = projectChoices(projects, secretStorage.redactor(task.botId));
+    }
     if (!task.runTargets().empty()) {
         summary["runTargets"] = runTargetsJson(task.runTargets());
         if (task.requestedCommit) summary["requestedCommit"] = *task.requestedCommit;
@@ -392,8 +398,28 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message',
             std::erase(tools, "complete");
             std::erase(tools, "wait_for_event");
         }
+        std::vector<T3Project> projects;
+        if (task.projectId.empty() && std::ranges::find(tools, "delegate") != tools.end()) {
+            auto catalog = taskRouting.readProjectCatalog(t3, task.botId, {task.environmentId, {}, task.gatewayEnvironmentId.value_or("")},
+                                                          requireT3Connection);
+            if (const auto* problem = std::get_if<std::string>(&catalog)) {
+                updates.change(task, [&](TaskData& current) {
+                    waitStorage.wait(current, SimpleWaitReason::settings, *problem);
+                    return true;
+                });
+                return;
+            }
+            projects = std::get<std::vector<T3Project>>(std::move(catalog));
+            if (projects.empty()) {
+                updates.change(task, [&](TaskData& current) {
+                    waitStorage.wait(current, SimpleWaitReason::settings, "Add or unarchive a project in this T3 environment.");
+                    return true;
+                });
+                return;
+            }
+        }
         const bool replay = decision.has_value();
-        if (!decision) decision = inferDecision(task, event, history, tools, pending, std::move(choices), peer);
+        if (!decision) decision = inferDecision(task, event, history, tools, pending, std::move(choices), peer, projects);
         if (!decision || stop.stop_requested()) return;
         if (task.activeRun && !runs.questionStillOpen(task)) return;
         if (!decision->rejection.empty()) {
@@ -418,7 +444,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message',
                 throw Conflict("This action requires a brief reason");
             if (decision->setup && !botSetup.applyForTask(task, *decision->setup, clock(), decision->attemptId)) return;
             const auto defaults = decision->tool == "delegate" ? launchDefaults(task) : std::nullopt;
-            decisions.accept(task, event, *decision, {}, defaults ? &*defaults : nullptr);
+            decisions.accept(task, event, *decision, {}, defaults ? &*defaults : nullptr, projects);
         } catch (const Conflict& error) {
             decisions.rejectDecision(task, event, *decision, error.what());
         }

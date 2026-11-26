@@ -36,7 +36,7 @@ WITH slots AS MATERIALIZED (
   SELECT id FROM slots WHERE action_id IS NULL AND blocker_id IS NULL
   UNION
   SELECT id FROM tasks WHERE project_id='' AND state NOT IN ('completed','cancelled') AND (
-    state IN ('queued','cancelling') OR replanning=1
+    (state IN ('queued','cancelling') OR (state='deciding' AND environment_id<>'')) OR replanning=1
   )
   UNION
   SELECT task.id FROM tasks task JOIN waits wait ON wait.task_id=task.id AND wait.resolution IS NULL
@@ -96,18 +96,18 @@ std::vector<runtime::TaskScheduler::Work> runtime::TaskScheduler::nextBatch(std:
 bool runtime::TaskScheduler::selectProject(TaskData& task) {
     const auto now = clock();
     if (now < task.t3CheckAt.value_or(0)) return false;
-    const auto bot = task.botId;
-    const auto environment = task.environmentId;
-    {
-        std::lock_guard lock(database.mutex);
-        if (taskRouting.projectQuestionOpen(bot, environment)) return false;
-    }
-    auto catalog = taskRouting.readProjectCatalog(t3, bot, environment, requireT3Connection);
+    const auto catalog = taskRouting.readProjectCatalog(t3, task.botId, {task.environmentId, {}, task.gatewayEnvironmentId.value_or("")},
+                                                        requireT3Connection);
     return updates.change(
                task,
                [&](TaskData& current) {
-                   if (shutdown.stop_requested() || !taskRouting.applyProjectCatalog(current, std::move(catalog))) return false;
-                   current.t3CheckAt = current.projectId.empty() ? std::optional{now + 5} : std::nullopt;
+                   if (shutdown.stop_requested()) return false;
+                   taskRouting.applyProjectCatalog(current, catalog);
+                   if (current.state == TaskState::queued && current.projectId.empty()) {
+                       if (current.eventId == 0) taskEvents.event(current, "intake", {{"kind", "intake"}});
+                       current.state = TaskState::deciding;
+                   }
+                   current.t3CheckAt = current.state == TaskState::waiting ? std::optional{now + 5} : std::nullopt;
                    return true;
                },
                &task) &&
