@@ -1,4 +1,3 @@
-#include "flock/soul_loader.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
@@ -21,10 +20,11 @@
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
+#include "flock/soul_loader.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
@@ -405,8 +405,8 @@ void protectedArgumentKeyCannotReachTaskIntake() {
     Store store(fixture.database());
     RuntimeFixture execution(store);
     const std::string marker = "protected-top-level-key-fixture";
-    Policy policy{store};
-    policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"fixture"}), marker);
+    SecretRequests secretRequests{store};
+    secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"fixture"}), marker);
     Json observed;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
         observed = turn(input);
@@ -426,8 +426,8 @@ void rejectedSessionReadStillAllowsAnOrdinaryReply() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    Policy policy{store};
-    policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"fixture"}), "text");
+    SecretRequests secretRequests{store};
+    secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"fixture"}), "text");
     bool rejected = false;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
         const auto steps = turn(input);
@@ -456,8 +456,8 @@ void savedCallsAreCheckedBeforeExecution() {
     const auto protectedMessage = receive(store, "saved-protected", "Write my workspace file.");
     save(protectedMessage,
          {"workspace_write_file", {{"path", protectedPath}, {"text", "Fixture data"}}, "Saved before the path was protected"});
-    Policy access{store};
-    access.submitSecret(localOwner, "alpha", access.requestSecret("alpha", {"replay-fixture"}), protectedPath);
+    SecretRequests secretRequests{store};
+    secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"replay-fixture"}), protectedPath);
     const auto taskId = task(store, "Prepare repository evidence");
     const auto inFlight = receive(store, "saved-git-effect", "Comment on the issue.");
     const Json comment{{"taskId", taskId},  {"host", "github.com"}, {"repo", "example/fixture"},

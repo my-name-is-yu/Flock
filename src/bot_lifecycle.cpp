@@ -1,3 +1,4 @@
+#include "policy_internal.hpp"
 #include "session_dispatch_lock.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/decision_errors.hpp"
@@ -98,7 +99,7 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
         storage.database.exec("DELETE FROM bot_pauses WHERE bot=?", {bot});
     }
 
-    permissions.audit(actor, bot, paused ? "pause_bot" : "resume_bot", Json::object());
+    policy_storage::audit(storage.database, actor, bot, paused ? "pause_bot" : "resume_bot", Json::object());
     tx.commit();
 }
 
@@ -129,7 +130,7 @@ SELECT 1 WHERE
     storage.database.exec("INSERT INTO deleted_bots VALUES(?)", {bot});
     storage.database.exec("DELETE FROM bot_pauses WHERE bot=?", {bot});
     storage.automationStorage.retireAutomations(Json::array({bot}));
-    permissions.audit(actor, bot, "delete_bot", Json::object());
+    policy_storage::audit(storage.database, actor, bot, "delete_bot", Json::object());
     tx.commit();
 }
 }

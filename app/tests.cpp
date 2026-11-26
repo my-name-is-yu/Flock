@@ -1,3 +1,6 @@
+#include "flock/bot_access.hpp"
+#include "flock/policy.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
@@ -23,7 +26,6 @@
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
@@ -1035,7 +1037,7 @@ void botCreationCollisionIsRecoverable() {
     Bots bots(directory);
     Store store(temp.path / "state.db");
     const Person creator{"creator", false};
-    Policy{store}.setOwner(creator, "Source");
+    BotAccess{store}.setOwner(creator, "Source");
     NotesT3 t3;
     RuntimeOptions options;
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
@@ -1062,18 +1064,18 @@ void botProfilesAndAvatars() {
 
     {
         Store store(temp.path / "creation.db");
-        Policy policy{store};
+        SecretRequests secrets{store};
         const Person creator{"bot-creator", false};
         const Json profile{{"name", "Blue Lake"}, {"avatar", {{"kind", "shape"}, {"example", "sprout"}, {"color", "#69c9ac"}}}};
-        policy.submitSecret(localOwner, "secrets", policy.requestSecret("secrets", {"creation-fixture"}), "blue-lake");
+        secrets.submitSecret(localOwner, "secrets", secrets.requestSecret("secrets", {"creation-fixture"}), "blue-lake");
         bool rejected = false;
         try {
-            policy.createOwnedBot(creator, [&](const auto& publish) { return bots.create(profile, std::nullopt, publish); });
+            BotAccess{store}.createOwnedBot(creator, [&](const auto& publish) { return bots.create(profile, std::nullopt, publish); });
         } catch (const Conflict&) {
             rejected = true;
         }
         check(rejected && bots.cards().empty() && !std::filesystem::exists(temp.path / "bots" / ".flock-issued-ids" / "blue-lake") &&
-                  !policy.allows(creator, Action::bot_settings, "blue-lake"),
+                  !Policy{store}.allows(creator, Action::bot_settings, "blue-lake"),
               "Rejected owner registration left a profile, issued ID, or owner");
     }
 

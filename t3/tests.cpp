@@ -12,7 +12,8 @@
 #include "flock/model.hpp"
 #include "flock/participation.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/bot_access.hpp"
+#include "flock/policy_rules.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/run_report.hpp"
 #include "flock/runtime.hpp"
@@ -154,8 +155,8 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
         if (id == member.id) return false;
         return {};
     });
-    Policy{store}.setMember(localOwner, "release", member.id, true);
-    Policy{store}.setMember(localOwner, "triage", member.id, true);
+    BotAccess{store}.setMember(localOwner, "release", member.id, true);
+    BotAccess{store}.setMember(localOwner, "triage", member.id, true);
     T3Connections connections(store);
     const auto credential = connections.connect("env-1", member.id, 3210);
     const auto connection = connections.authenticate(credential);
@@ -166,7 +167,7 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     const auto resolve = [&](auto, auto) { return intake; };
     const auto message = participation.ask(*connection, start, resolve);
     check(participation.ask(*connection, start, resolve) == message, "The same Session ask created another turn");
-    Policy{store}.setMode(localOwner, "supervised");
+    PolicyRules{store}.setMode(localOwner, "supervised");
     const RuntimeOptions options{
         .peers = [](std::string_view bot) -> std::vector<PeerBot> {
             if (bot == "release") return {{"Triage", {"triage", "", "env-1", "project"}}};
@@ -207,7 +208,7 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
                                                     [](const Json& entry) { return entry.at("kind") == "session_lineage_unavailable"; }),
           "A launch fallback was not recorded on the task and in its journal");
 
-    Policy{store}.setMode(localOwner, "full");
+    PolicyRules{store}.setMode(localOwner, "full");
     const auto call = [&](const char* clientId, std::string tool, const Json& args) {
         model.next = {std::move(tool), args, "Check a Session from the origin turn"};
         WebConversationIntake(store).receiveWeb(member, intake, clientId, "Follow up on this work.", message);

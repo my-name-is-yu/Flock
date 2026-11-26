@@ -5,7 +5,10 @@
 #include "flock/board_inbox.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
@@ -133,7 +136,7 @@ void runningSessions(const std::filesystem::path& path) {
         policy.executeSessionResource(
             "env", adapter.running.at("Ernest"), readRepo,
             [&] {
-                Policy{authority}.changeNeverRule(owner, readRepo.action, readRepo.target, true);
+                PolicyRules{authority}.changeNeverRule(owner, readRepo.action, readRepo.target, true);
                 return true;
             },
             [&](Id) { completed.push_back("denied"); });
@@ -146,10 +149,12 @@ void runningSessions(const std::filesystem::path& path) {
 void policyRules(const std::filesystem::path& path) {
     Store store(path);
     Policy policy{store};
-    check(policy.mode() == "full" && policy.rules().empty(), "fresh installation is not Full");
+    PolicyRules rules{store};
+    BotAccess botAccess{store};
+    check(policy.mode() == "full" && rules.rules().empty(), "fresh installation is not Full");
     check(policy.check("Ernest", readRepo.action, readRepo.target) == PolicyResult::allow, "Full denied a read");
-    policy.changeNeverRule(owner, readRepo.action, readRepo.target, true);
-    policy.changeNeverRule(owner, Action::repository_write, "github.com/*/private*", true);
+    rules.changeNeverRule(owner, readRepo.action, readRepo.target, true);
+    rules.changeNeverRule(owner, Action::repository_write, "github.com/*/private*", true);
     check(policy.check("Reviewer", readRepo.action, readRepo.target) == PolicyResult::deny &&
               policy.allows("Ernest", readRepo.action, "github.com/org/public") &&
               !policy.allows("Ernest", Action::repository_write, "github.com/org/private-1") &&
@@ -157,13 +162,13 @@ void policyRules(const std::filesystem::path& path) {
               policy.allows("Ernest", Action::repository_write, "github.com/org/public-private") &&
               policy.allows("Ernest", Action::repository_review, "github.com/org/private"),
           "exact or wildcard matching failed");
-    policy.changeNeverRule(owner, readRepo.action, readRepo.target, false);
+    rules.changeNeverRule(owner, readRepo.action, readRepo.target, false);
     Store reopened(path);
-    check(Policy{reopened}.rules().size() == 1 && Policy{reopened}.allows("Ernest", readRepo), "rule changes were not persisted");
-    denied([&] { policy.changeNeverRule(admin, readRepo.action, readRepo.target, true); });
+    check(PolicyRules{reopened}.rules().size() == 1 && Policy{reopened}.allows("Ernest", readRepo), "rule changes were not persisted");
+    denied([&] { rules.changeNeverRule(admin, readRepo.action, readRepo.target, true); });
 
-    policy.setOwner(admin, "Ernest");
-    policy.setMember(admin, "Ernest", viewer.id, true);
+    botAccess.setOwner(admin, "Ernest");
+    botAccess.setMember(admin, "Ernest", viewer.id, true);
     const Person stranger{"stranger"};
     for (auto action : {Action::bot_view, Action::bot_talk, Action::bot_decide})
         check(policy.allows(admin, action, "Ernest") && policy.allows(viewer, action, "Ernest") &&
@@ -172,8 +177,8 @@ void policyRules(const std::filesystem::path& path) {
     check(policy.allows(admin, Action::bot_settings, "Ernest") && policy.allows(owner, Action::bot_settings, "Ernest") &&
               !policy.allows(viewer, Action::bot_settings, "Ernest"),
           "settings were not restricted to the owner");
-    denied([&] { policy.setMember(viewer, "Ernest", stranger.id, true); });
-    policy.setMember(admin, "Ernest", viewer.id, false);
+    denied([&] { botAccess.setMember(viewer, "Ernest", stranger.id, true); });
+    botAccess.setMember(admin, "Ernest", viewer.id, false);
     check(!policy.allows(viewer, Action::bot_talk, "Ernest"), "removed member retained access");
 }
 
@@ -183,7 +188,7 @@ void freshLaunch(const std::filesystem::path& path) {
     WorkModel model;
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; });
     auto task = TaskIntake(store).submit({"Fresh", "read repository", "env", "project"});
-    Policy{store}.changeNeverRule(owner, Action::environment_launch, "env", true);
+    PolicyRules{store}.changeNeverRule(owner, Action::environment_launch, "env", true);
     for (int i = 0; i < 6; ++i) runtime.tick();
     check(adapter.running.empty() && taskJson(Tasks(store).task(task)).at("wait").at("reason") == "settings",
           "pending launch permission reached T3");
@@ -192,31 +197,32 @@ void freshLaunch(const std::filesystem::path& path) {
 void freshPendingSecretRequests(const std::filesystem::path& path) {
     check(!std::filesystem::exists(path), "secret schema fixture must start with a fresh database");
     Store left(path), right(path);
-    Policy policy{left};
-    check(policy.botSettings(owner, "Ernest").at("secretInputs").empty(), "fresh protected input table is not empty");
+    BotAccess botAccess{left};
+    SecretRequests secretRequests{left};
+    check(botAccess.botSettings(owner, "Ernest").at("secretInputs").empty(), "fresh protected input table is not empty");
     const SecretRef ref{"fixture-token"};
     std::barrier start(2);
     auto request = [&](Store& store) {
         start.arrive_and_wait();
-        return Policy{store}.requestSecret("Ernest", ref);
+        return SecretRequests{store}.requestSecret("Ernest", ref);
     };
     auto other = std::async(std::launch::async, request, std::ref(right));
     const auto id = request(left);
     check(id == other.get(), "repeated secret request returned a different ID");
-    check(Policy{right}.requestSecret("Reviewer", ref) != id, "pending secret uniqueness crossed Bot boundaries");
-    denied([&] { policy.submitSecret(owner, "Ernest", id, "nest"); });
-    policy.submitSecret(owner, "Ernest", id, credential);
-    check(policy.botSettings(owner, "Ernest").at("secretInputs") ==
+    check(SecretRequests{right}.requestSecret("Reviewer", ref) != id, "pending secret uniqueness crossed Bot boundaries");
+    denied([&] { secretRequests.submitSecret(owner, "Ernest", id, "nest"); });
+    secretRequests.submitSecret(owner, "Ernest", id, credential);
+    check(botAccess.botSettings(owner, "Ernest").at("secretInputs") ==
               Json::array({{{"id", id}, {"name", ref.name}, {"status", "fulfilled"}}}),
           "duplicate request remained after fulfillment");
-    denied([&] { policy.requestSecret("Ernest", ref); });
-    denied([&] { policy.requestSecret("Reviewer", ref); });
+    denied([&] { secretRequests.requestSecret("Ernest", ref); });
+    denied([&] { secretRequests.requestSecret("Reviewer", ref); });
 }
 
 void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool publish, bool failReplay = false) {
     const Person creator{"creator", false};
     Store store(path);
-    Policy{store}.setOwner(creator, "Ernest");
+    BotAccess{store}.setOwner(creator, "Ernest");
     ToolModel model;
     Adapter t3;
     RuntimeOptions options;
@@ -289,6 +295,9 @@ void exercise(const std::filesystem::path& dir) {
     auto path = dir / "state.db";
     Store store(path);
     Policy policy{store};
+    PolicyRules rules{store};
+    BotAccess botAccess{store};
+    SecretRequests secretRequests{store};
     Intake ernest{"Ernest", "read", "env", "project"}, reviewer{"Reviewer", "review", "env", "project"};
     auto child = TaskIntake(store).submit(ernest), peerChild = TaskIntake(store).submit(reviewer);
     ToolModel model;
@@ -311,15 +320,15 @@ void exercise(const std::filesystem::path& dir) {
     auto connections = turn("list_connections");
     check(connections.find("github") != std::string::npos && connections.find("docs") != std::string::npos, "connection metadata");
     check(turn("request_secret_input", {{"name", "repo-token"}}).find("pending") != std::string::npos, "protected input request");
-    auto metadata = policy.botSettings(owner, "Ernest");
+    auto metadata = botAccess.botSettings(owner, "Ernest");
     Id input = metadata.at("secretInputs").at(0).at("id");
     check(turn("submit_secret", {{"requestId", input}, {"value", "text-supplied-value"}}).find("Tool unavailable") != std::string::npos &&
               Inbox(store).decisionHistory(owner).empty(),
           "A Bot response fulfilled a protected decision");
-    denied([&] { policy.submitSecret(viewer, "Ernest", input, credential); });
-    policy.submitSecret(owner, "Ernest", input, credential);
-    denied([&] { policy.requestSecret("Ernest", {"../outside"}); });
-    denied([&] { policy.submitSecret(admin, "Ernest", policy.requestSecret("Ernest", {"other"}), "other-value"); });
+    denied([&] { secretRequests.submitSecret(viewer, "Ernest", input, credential); });
+    secretRequests.submitSecret(owner, "Ernest", input, credential);
+    denied([&] { secretRequests.requestSecret("Ernest", {"../outside"}); });
+    denied([&] { secretRequests.submitSecret(admin, "Ernest", secretRequests.requestSecret("Ernest", {"other"}), "other-value"); });
     const Json sensitiveFields{{"kind", credential}, {"status", credential}, {"secret", credential}};
     check(policy.redactSecrets("Ernest", sensitiveFields).dump().find(credential) == std::string::npos,
           "external field mistaken for a trusted protocol tag");
@@ -328,32 +337,33 @@ void exercise(const std::filesystem::path& dir) {
     check(!stat((dir / "secrets").c_str(), &st) && (st.st_mode & 0777) == 0700, "directory permissions");
     check(!stat(vaultFile.c_str(), &st) && (st.st_mode & 0777) == 0600, "secret permissions");
     check(turn("list_secrets", Json::object(), credential).find("repo-token") != std::string::npos, "names unavailable");
-    policy.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true, [](auto v) { check(v == credential, "resolution"); });
-    policy.useSecret(peerChild, {"repo-token"}, "repo-token", "fixture-read", true,
-                     [](auto v) { check(v == credential, "shared resolution"); });
-    policy.changeNeverRule(owner, Action::secret_use, "repo-*", true);
-    denied([&] { policy.useSecret(peerChild, {"repo-token"}, "repo-token", "fixture-read", true, [](auto) {}); });
-    policy.changeNeverRule(owner, Action::secret_use, "repo-*", false);
+    secretRequests.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true,
+                             [](auto v) { check(v == credential, "resolution"); });
+    secretRequests.useSecret(peerChild, {"repo-token"}, "repo-token", "fixture-read", true,
+                             [](auto v) { check(v == credential, "shared resolution"); });
+    rules.changeNeverRule(owner, Action::secret_use, "repo-*", true);
+    denied([&] { secretRequests.useSecret(peerChild, {"repo-token"}, "repo-token", "fixture-read", true, [](auto) {}); });
+    rules.changeNeverRule(owner, Action::secret_use, "repo-*", false);
     try {
-        policy.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true, [](auto v) { throw Conflict(std::string(v)); });
+        secretRequests.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true, [](auto v) { throw Conflict(std::string(v)); });
         throw std::runtime_error("adapter exception disappeared");
     } catch (const Conflict& e) {
         check(std::string(e.what()).find(credential) == std::string::npos, "adapter error leaked");
     }
-    policy.changeNeverRule(owner, Action::environment_launch, "env", true);
+    rules.changeNeverRule(owner, Action::environment_launch, "env", true);
     const auto readiness = turn("check_environment_readiness", {{"environmentId", "env"}});
     check(readiness.find("/settings") != std::string::npos && readiness.find("/settings/Ernest") == std::string::npos,
           "Readiness did not link to Flock settings");
-    policy.changeNeverRule(owner, Action::environment_launch, "env", false);
+    rules.changeNeverRule(owner, Action::environment_launch, "env", false);
     check(turn("check_environment_readiness", {{"environmentId", "env"}}).find("\"ready\":true") != std::string::npos, "readiness");
     t3.connected = false;
     check(turn("check_environment_readiness").find("T3 sign-in") != std::string::npos, "OAuth denial");
     t3.connected = true;
-    policy.changeNeverRule(owner, Action::environment_configure, "env", true);
+    rules.changeNeverRule(owner, Action::environment_configure, "env", true);
     check(turn("update_bot_settings", {{"environmentId", "env"}, {"runTimeoutSeconds", 123}}).find("configure access required") !=
               std::string::npos,
           "settings mutation bypassed the Never rule");
-    policy.changeNeverRule(owner, Action::environment_configure, "env", false);
+    rules.changeNeverRule(owner, Action::environment_configure, "env", false);
     turn("update_bot_settings", {{"environmentId", "env"}, {"runTimeoutSeconds", 123}});
     check(turn("list_connections").find("\"runTimeoutSeconds\":123") != std::string::npos, "settings not effective");
     for (auto op : {"create_bot", "rename_bot"})
@@ -362,30 +372,30 @@ void exercise(const std::filesystem::path& dir) {
               "Full did not apply a Bot change");
     check(applied.size() == 2 && Inbox(store).inbox(owner).size() == 1, "Full queued a Bot change for review");
     denied([&] {
-        policy.applyBotChange("Ernest", Person{"member", false}, "rename_bot", "Target", "Hijacked", 0, 0, options.applyBotChange);
+        botAccess.applyBotChange("Ernest", Person{"member", false}, "rename_bot", "Target", "Hijacked", 0, 0, options.applyBotChange);
     });
     check(applied.size() == 2, "a non-owner renamed another person's Bot");
-    policy.changeNeverRule(owner, Action::bot_rename, "Target", true);
+    rules.changeNeverRule(owner, Action::bot_rename, "Target", true);
     check(
         turn("request_bot_change", {{"operation", "rename_bot"}, {"targetBotId", "Target"}, {"name", "Denied"}}).find("denied by policy") !=
                 std::string::npos &&
             applied.size() == 2,
         "Never allowed a Bot change");
     check(Conversations(store).conversation("Ernest").dump().find(credential) == std::string::npos &&
-              policy.botSettings(owner, "Ernest").dump().find(credential) == std::string::npos,
+              botAccess.botSettings(owner, "Ernest").dump().find(credential) == std::string::npos,
           "value in conversation or audit");
     check(chmod(vaultFile.c_str(), 0644) == 0, "fixture mode");
-    denied([&] { policy.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true, [](auto) {}); });
+    denied([&] { secretRequests.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true, [](auto) {}); });
     check(chmod(vaultFile.c_str(), 0600) == 0, "restore fixture mode");
     auto linkTarget = dir / "outside";
     std::filesystem::rename(vaultFile, linkTarget);
     std::filesystem::create_symlink(linkTarget, vaultFile);
-    denied([&] { policy.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true, [](auto) {}); });
+    denied([&] { secretRequests.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true, [](auto) {}); });
     std::filesystem::remove(vaultFile);
     std::filesystem::rename(linkTarget, vaultFile);
     std::filesystem::rename(dir / "secrets", dir / "original-vault");
     std::filesystem::create_directory_symlink(dir / "original-vault", dir / "secrets");
-    denied([&] { policy.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true, [](auto) {}); });
+    denied([&] { secretRequests.useSecret(child, {"repo-token"}, "repo-token", "fixture-read", true, [](auto) {}); });
     std::filesystem::remove(dir / "secrets");
     std::filesystem::rename(dir / "original-vault", dir / "secrets");
     model.next = {"list_secrets", Json::object(), "list"};

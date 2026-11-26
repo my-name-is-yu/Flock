@@ -6,6 +6,7 @@
 
 namespace flockv0 {
 class Policy;
+class SecretRequests;
 
 class Database;
 class SessionParticipationStorage;
@@ -16,10 +17,10 @@ struct Person;
 
 class BotSettingsStorage {
 public:
-    BotSettingsStorage(Database& database, Policy& permissions, SessionParticipationStorage& sessionParticipationStorage,
-                       TaskRouting& taskRouting)
-        : database(database), permissions(permissions), sessionParticipationStorage(sessionParticipationStorage), taskRouting(taskRouting) {
-    }
+    BotSettingsStorage(Database& database, Policy& permissions, SecretRequests& secretRequests,
+                       SessionParticipationStorage& sessionParticipationStorage, TaskRouting& taskRouting)
+        : database(database), permissions(permissions), secretRequests(secretRequests),
+          sessionParticipationStorage(sessionParticipationStorage), taskRouting(taskRouting) {}
 
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
@@ -27,6 +28,7 @@ public:
 private:
     Database& database;
     Policy& permissions;
+    SecretRequests& secretRequests;
     SessionParticipationStorage& sessionParticipationStorage;
     TaskRouting& taskRouting;
 };
