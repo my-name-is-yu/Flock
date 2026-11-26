@@ -11,7 +11,6 @@ function node(tag, className, text) {
   return element;
 }
 
-// "Eastern Time" reads better than "America/New_York"; fall back to the ID if the browser can't name it.
 function zoneName(zone) {
   try {
     return new Intl.DateTimeFormat('en', { timeZone: zone, timeZoneName: 'longGeneric' })
@@ -224,7 +223,6 @@ export function createRecurringRequests(bot, api) {
           node('p', 'cron-error', 'This request in the Bot’s configuration isn’t scheduled.'));
         rows.push(row);
       }
-      // With the add form right below, an empty list needs no label of its own.
       if (!rows.length && !canManage) rows.push(node('p', 'cron-empty', 'No recurring requests.'));
       list.replaceChildren(...rows);
       if (focused) {
