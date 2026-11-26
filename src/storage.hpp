@@ -6,6 +6,8 @@
 #include "task_records.hpp"
 #include "task_events.hpp"
 #include "journal_storage.hpp"
+#include "automation_storage.hpp"
+#include "memory_storage.hpp"
 #include "attachment_storage.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "peer_storage.hpp"
@@ -20,7 +22,6 @@
 #include "flock/board_inbox.hpp"
 #include "flock/git_host.hpp"
 #include "flock/channels.hpp"
-#include "flock/memory_automation.hpp"
 #include "flock/outbox.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
@@ -193,11 +194,11 @@ struct Store::Impl : Database {
     WaitStorage waitStorage{*this, *this, journalStorage, outboxStorage, peerStorage};
     TaskRecords taskRecords{*this, journalStorage, outboxStorage, waitStorage};
     const std::filesystem::path path;
-    const MemorySeed memorySeed;
-    const AutomationModelResolver automationModel;
     SecretStorage secretStorage{*this, path.parent_path()};
-    AttachmentStorage attachments{*this};
+    MemoryStorage memoryStorage;
     BotLifecycleStorage botLifecycle{*this};
+    AutomationStorage automationStorage;
+    AttachmentStorage attachments{*this};
     class SessionEvidence;
     std::map<ChannelKind, ChannelConnector> channels;
     std::map<std::string, std::shared_ptr<LocalMachine>, std::less<>> localMachines;
@@ -253,30 +254,6 @@ struct Store::Impl : Database {
     SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     bool t3EnvironmentConnected(std::string_view environment);
-    void retireAutomations(const Json& botIds);
-    BotNotes loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>&, Seconds now);
-    std::optional<SessionMemory> sessionMemory(const Command&, Seconds now);
-    void createMemory(std::string_view key, std::string_view bot, std::string_view id, std::string_view content, Seconds now);
-    std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
-    Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&, Seconds now, bool fromBot = false);
-    bool canReviewPreference(const conversation::Message&);
-    bool preferenceReviewPending(Id message, int step) const;
-    std::optional<ModelInput> preferenceReviewInput(const conversation::Message&, std::vector<std::string>, std::string feedback,
-                                                    Seconds now);
-    Json rememberPreference(const conversation::Message&, int step, const Json&, Seconds now);
-    void projectMemoryNotice(std::string_view bot, Json& data) const;
-    Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
-    Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
-    std::vector<ScheduleImportError> stageConfiguredSchedules(std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
-    void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
-    Json automations(std::string_view bot, Id before, bool activeOnly = false) const;
-    Json cancelAutomation(std::string_view bot, Id id);
-    void fireDueAutomations(Seconds now);
-    void skipDueAutomations(std::string_view bot, Seconds now);
-    std::vector<Id> dueAutomations(Seconds now, std::string_view bot = {}) const;
-    void processDueAutomation(Id, Seconds now, bool skip = false);
-    static void applyPlannerModel(Json& config, const PlannerModel&);
-    Json automationRoute(std::string_view bot, Json routing) const;
     Statement actionablePrReviews(std::string_view bot) const;
     Json gitTool(GitHost&, std::string_view bot, Id task, std::string_view environment, std::string_view project, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);

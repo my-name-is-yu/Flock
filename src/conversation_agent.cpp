@@ -556,10 +556,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     const auto& bot = message.bot;
     const auto& routing = message.routing;
     if (tool == "review_preference") {
-        if (step != 1 || !canReviewPreference(message)) throw ToolError("Automatic memory is unavailable");
+        if (step != 1 || !memoryStorage.canReviewPreference(message)) throw ToolError("Automatic memory is unavailable");
         return {{"ok", true}};
     }
-    if (tool == "remember_preference") return rememberPreference(message, step, args, now);
+    if (tool == "remember_preference") return memoryStorage.rememberPreference(message, step, args, now);
     if (tool == "skip_preference") return {{"ok", true}};
     if (tool == "read_tool_result") {
         const auto sourceMessage = identifier(args, "messageId", true);
@@ -589,8 +589,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             return workflowTool(tool, args, bot, message.id, step, routing);
         const auto actor = turnActor(message);
         auto result = botSettingsTool(bot, actor, message.id, routing, decision);
-        if (result.is_null()) result = memory(bot, actor, tool, args, now, true);
-        if (result.is_null()) result = automationTool(bot, actor, routing, decision, now);
+        if (result.is_null()) result = memoryStorage.memory(bot, actor, tool, args, now, true);
+        if (result.is_null()) result = automationStorage.automationTool(bot, actor, routing, decision, now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
         result["ok"] = true;
         return result;
@@ -949,11 +949,11 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const std::function<std::
     const auto available = [&](int step, bool reviewPreference) {
         if (reviewPreference) {
             std::vector<std::string> reviewTools{"skip_preference"};
-            if (canReviewPreference(message)) reviewTools.push_back("remember_preference");
+            if (memoryStorage.canReviewPreference(message)) reviewTools.push_back("remember_preference");
             return std::tuple{std::move(reviewTools), Json::array(), std::string_view{}};
         }
         auto offered = tools;
-        if (step == 1 && canReviewPreference(message)) offered.push_back("review_preference");
+        if (step == 1 && memoryStorage.canReviewPreference(message)) offered.push_back("review_preference");
         auto machines = Json::array();
         std::string_view followupStatus;
         if (notification) {
@@ -1050,7 +1050,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const std::function<std::
                 transaction.commit();
                 return;
             }
-            reviewPreference = preferenceReviewPending(id, step);
+            reviewPreference = memoryStorage.preferenceReviewPending(id, step);
             auto row = query("SELECT decision,result,json_type(effect) FROM conversation_steps WHERE message_id=? AND step=?", {id, step});
             if (row.next()) {
                 if (!row.string(1).empty()) continue;
@@ -1088,7 +1088,7 @@ LIMIT 1
             const auto now = clock();
             BotNotes botNotes;
             try {
-                if (!notification && !reviewPreference) botNotes = loadNotes(message.bot, soul, now);
+                if (!notification && !reviewPreference) botNotes = memoryStorage.loadNotes(message.bot, soul, now);
             } catch (const StorageError&) {
                 throw;
             } catch (const std::exception& error) {
@@ -1134,7 +1134,7 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                 }
                 auto [offered, machines, followupStatus] = available(step, reviewPreference);
                 if (reviewPreference) {
-                    auto prepared = preferenceReviewInput(message, std::move(offered), std::move(feedback), now);
+                    auto prepared = memoryStorage.preferenceReviewInput(message, std::move(offered), std::move(feedback), now);
                     if (!prepared) {
                         const std::vector<ModelCall> skipped{ModelCall{Decision{"skip_preference", Json::object(), {}}, {}}};
                         exec(R"SQL(

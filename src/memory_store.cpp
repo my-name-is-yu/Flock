@@ -1,6 +1,14 @@
+#include "memory_storage.hpp"
+
 #include "conversation_storage.hpp"
+#include "database.hpp"
+#include "secret_storage.hpp"
+#include "storage.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/limits.hpp"
+#include "flock/memory_automation.hpp"
+#include "flock/policy.hpp"
+#include "flock/secrets.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
 #include "flock/store.hpp"
@@ -18,6 +26,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 namespace flockv0 {
 namespace {
@@ -73,30 +82,33 @@ Json revisionView(const Statement& row) {
 }
 }
 
-BotNotes Store::Impl::loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>& soul, Seconds now) {
+MemoryStorage::MemoryStorage(Database& database, const SecretStorage& secretStorage, Store::Impl& remaining, Store::MemorySeed seed)
+    : database_(database), secretStorage_(secretStorage), remaining_(remaining), seed_(std::move(seed)) {}
+
+BotNotes MemoryStorage::loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>& soul, Seconds now) {
     BotNotes notes{soul ? bounded(soul(bot), maxBotRoleBytes) : std::string{}, {}};
     const auto key = privateKey(bot);
-    std::lock_guard lock(mutex);
-    if (auto doc = findMemory(db, key)) {
+    std::lock_guard lock(database_.mutex);
+    if (auto doc = findMemory(database_.db, key)) {
         notes.memory = std::move(doc->content);
         return notes;
     }
-    Transaction tx(db);
-    if (auto doc = findMemory(db, key))
+    Transaction tx(database_.db);
+    if (auto doc = findMemory(database_.db, key))
         notes.memory = std::move(doc->content);
     else
-        notes.memory = seedPrivateMemory(key, bot, secretStorage.redactor(bot), now);
+        notes.memory = seedPrivateMemory(key, bot, secretStorage_.redactor(bot), now);
     tx.commit();
     return notes;
 }
 
-std::optional<SessionMemory> Store::Impl::sessionMemory(const Command& command, Seconds now) {
+std::optional<SessionMemory> MemoryStorage::sessionMemory(const Command& command, Seconds now) {
     if (command.instruction.size() >= limits::session_prompt::maxBytes) return std::nullopt;
     const auto& bot = command.ownerBotId;
     const auto key = privateKey(bot);
-    const auto doc = findMemory(db, key);
+    const auto doc = findMemory(database_.db, key);
     const auto version = doc ? doc->version : Id{0};
-    const auto scrub = secretStorage.redactor(bot);
+    const auto scrub = secretStorage_.redactor(bot);
     auto excerpt = doc ? scrub.text(doc->content) : seedPrivateMemory(key, bot, scrub, now);
     if (excerpt.find_first_not_of(" \t\r\n") == excerpt.npos) return std::nullopt;
     const auto marker = sessionPrompt(command.actionId, {});
@@ -113,13 +125,13 @@ std::optional<SessionMemory> Store::Impl::sessionMemory(const Command& command, 
     auto section = heading + excerpt;
     if (truncated) section += truncation;
     if (command.tool == CommandTool::follow_up) {
-        auto prior = query(R"SQL(
+        auto prior = database_.query(R"SQL(
 SELECT o.memory_section,o.memory_excerpt_bytes
 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
 WHERE r.environment_id=? AND r.thread_id=? AND t.bot_id=?
   AND o.memory_version=?
 )SQL",
-                           {command.environmentId, command.target.threadId, bot, version});
+                                     {command.environmentId, command.target.threadId, bot, version});
         const auto prefix = std::string_view(section).substr(0, heading.size() + excerpt.size());
         while (prior.next()) {
             const auto saved = prior.string(0);
@@ -131,16 +143,16 @@ WHERE r.environment_id=? AND r.thread_id=? AND t.bot_id=?
     return SessionMemory{version, std::move(section), excerpt.size()};
 }
 
-void Store::Impl::createMemory(std::string_view key, std::string_view bot, std::string_view id, std::string_view content, Seconds now) {
-    exec(R"SQL(
+void MemoryStorage::createMemory(std::string_view key, std::string_view bot, std::string_view id, std::string_view content, Seconds now) {
+    database_.exec(R"SQL(
 INSERT INTO memory_documents(doc_key,scope_kind,owner_bot,doc_id,content,version,updated_at)
 VALUES(?,?,?,?,?,0,?)
 )SQL",
-         {key, bot.empty() ? "shared" : "private", bot.empty() ? Json(nullptr) : Json(bot), id, content, now});
+                   {key, bot.empty() ? "shared" : "private", bot.empty() ? Json(nullptr) : Json(bot), id, content, now});
 }
 
-std::string Store::Impl::seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor& scrub, Seconds now) {
-    auto content = memorySeed ? bounded(scrub.text(memorySeed(bot)), limits::memory::maxDocumentBytes) : std::string{};
+std::string MemoryStorage::seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor& scrub, Seconds now) {
+    auto content = seed_ ? bounded(scrub.text(seed_(bot)), limits::memory::maxDocumentBytes) : std::string{};
     createMemory(key, bot, "memory", content, now);
     return content;
 }
@@ -148,14 +160,14 @@ std::string Store::Impl::seedPrivateMemory(std::string_view key, std::string_vie
 Json Store::memory(const Person& actor, std::string_view bot, std::string_view operation, const Json& args) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    auto result = p_->memory(bot, actor, operation, args, unixTime());
+    auto result = p_->memoryStorage.memory(bot, actor, operation, args, unixTime());
     if (result.is_null()) throw Conflict("Unknown memory operation");
     tx.commit();
     return result;
 }
 
-Json Store::Impl::memory(std::string_view bot, const Person& actor, std::string_view operation, const Json& args, Seconds now,
-                         bool fromBot) {
+Json MemoryStorage::memory(std::string_view bot, const Person& actor, std::string_view operation, const Json& args, Seconds now,
+                           bool fromBot) {
     const bool reading = operation == "read_memory" || operation == "memory_history";
     const bool remembering = fromBot && operation == "remember_preference";
     if (!reading && operation != "propose_memory_edit" && operation != "apply_memory_edit" && operation != "revert_memory_edit" &&
@@ -166,16 +178,16 @@ Json Store::Impl::memory(std::string_view bot, const Person& actor, std::string_
     if (remembering && shared) throw Conflict("Automatic saves use private memory");
     const auto id = shared ? field(args, "docId") : "memory";
     const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
-    auto access = Policy(*this);
+    auto access = Policy(remaining_);
     if (!access.allows(actor, reading ? Action::bot_view : Action::bot_settings, bot) ||
         (shared && (!access.allows(actor, action, id) || (fromBot ? access.forbidden(bot, action, id) : !access.allows(bot, action, id)))))
         throw AccessDenied("Memory access denied");
 
     const auto key = shared ? "shared:" + id : privateKey(bot);
     const auto author = fromBot ? "bot:" + std::string(bot) : "person:" + actor.id;
-    const auto scrub = shared ? secretStorage.sharedRedactor() : secretStorage.redactor(bot);
+    const auto scrub = shared ? secretStorage_.sharedRedactor() : secretStorage_.redactor(bot);
     scrub.requirePublic({key, author});
-    auto doc = findMemory(db, key);
+    auto doc = findMemory(database_.db, key);
     if (!doc && !shared) doc = MemoryDocument{seedPrivateMemory(key, bot, scrub, now), 0, now};
     const auto [content, version, updatedAt] = doc.value_or(MemoryDocument{});
 
@@ -183,11 +195,11 @@ Json Store::Impl::memory(std::string_view bot, const Person& actor, std::string_
         return scrub.record({{"docKey", key}, {"content", content}, {"version", version}, {"updatedAt", updatedAt}});
     if (operation == "memory_history") {
         if (args.contains("revisionId")) {
-            auto row = query(R"SQL(
+            auto row = database_.query(R"SQL(
 SELECT id,version,base_version,author,diff_summary,created_at,reverted_from,previous_content,new_content
 FROM memory_revisions WHERE doc_key=? AND id=?
 )SQL",
-                             {key, requiredInteger(args, "revisionId")});
+                                       {key, requiredInteger(args, "revisionId")});
             if (!row.next()) throw Conflict("Memory revision not found");
             auto detail = revisionView(row);
             detail["previousContent"] = row.string(7);
@@ -196,11 +208,11 @@ FROM memory_revisions WHERE doc_key=? AND id=?
         }
         const Id proposal = args.contains("proposalId") ? requiredInteger(args, "proposalId") : 0;
         const auto proposalsBefore = args.contains("proposalsBefore") ? requiredInteger(args, "proposalsBefore") : 0;
-        auto proposals = query(R"SQL(
+        auto proposals = database_.query(R"SQL(
 SELECT id,base_version,rationale,author,status,created_at,decided_by,decided_at,diff_summary,proposed_content
 FROM memory_proposals WHERE doc_key=? AND (?=0 OR id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT 21
 )SQL",
-                               {key, proposal, proposal, proposalsBefore, proposalsBefore});
+                                         {key, proposal, proposal, proposalsBefore, proposalsBefore});
         Json edits = Json::array();
         Id nextProposal = 0;
         while (proposals.next()) {
@@ -219,11 +231,11 @@ FROM memory_proposals WHERE doc_key=? AND (?=0 OR id=?) AND (?=0 OR id<?) ORDER 
         }
         if (proposal) throw Conflict("Memory proposal not found");
         const auto before = args.contains("before") ? requiredInteger(args, "before") : 0;
-        auto revisions = query(R"SQL(
+        auto revisions = database_.query(R"SQL(
 SELECT id,version,base_version,author,diff_summary,created_at,reverted_from
 FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 21
 )SQL",
-                               {key, before, before});
+                                         {key, before, before});
         Json history = Json::array();
         Id next = 0;
         while (revisions.next()) {
@@ -244,9 +256,10 @@ FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 2
     const auto proposal = args.contains("proposalId") ? requiredInteger(args, "proposalId") : 0;
     if (operation == "reject_memory_edit") {
         if (!proposal) throw Conflict("A person and a proposal ID are required");
-        exec("UPDATE memory_proposals SET status='rejected',decided_by=?,decided_at=? WHERE doc_key=? AND id=? AND status='pending'",
-             {author, now, key, proposal});
-        if (!sqlite3_changes(db)) throw Conflict("Pending memory proposal not found");
+        database_.exec(
+            "UPDATE memory_proposals SET status='rejected',decided_by=?,decided_at=? WHERE doc_key=? AND id=? AND status='pending'",
+            {author, now, key, proposal});
+        if (!sqlite3_changes(database_.db)) throw Conflict("Pending memory proposal not found");
         return {{"proposalId", proposal}, {"status", "rejected"}};
     }
     const auto expected = requiredInteger(args, "baseVersion", 0);
@@ -255,13 +268,13 @@ FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 2
     Id reverted = 0;
     if (operation == "revert_memory_edit") {
         reverted = requiredInteger(args, "revisionId");
-        auto row = query("SELECT previous_content FROM memory_revisions WHERE doc_key=? AND id=?", {key, reverted});
+        auto row = database_.query("SELECT previous_content FROM memory_revisions WHERE doc_key=? AND id=?", {key, reverted});
         if (!row.next()) throw Conflict("Memory revision not found");
         updated = row.string(0);
     } else if (operation == "apply_memory_edit" && proposal) {
         if (args.contains("content")) throw Conflict("Choose either content or proposalId");
-        auto row = query("SELECT base_version,proposed_content FROM memory_proposals WHERE doc_key=? AND id=? AND status='pending'",
-                         {key, proposal});
+        auto row = database_.query(
+            "SELECT base_version,proposed_content FROM memory_proposals WHERE doc_key=? AND id=? AND status='pending'", {key, proposal});
         if (!row.next()) throw Conflict("Pending memory proposal not found");
         checkVersion(row.number(0), version);
         updated = row.string(1);
@@ -281,48 +294,51 @@ FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 2
     if (operation == "propose_memory_edit") {
         const auto rationale = field(args, "rationale");
         if (rationale.empty() || rationale.size() > 1000) throw Conflict("Enter a rationale up to 1,000 bytes");
-        exec(R"SQL(
+        database_.exec(R"SQL(
 INSERT INTO memory_proposals(doc_key,base_version,proposed_content,rationale,author,status,created_at,diff_summary)
 VALUES(?,?,?,?,?,'pending',?,?)
 )SQL",
-             {key, version, updated, scrub.text(rationale), author, now, summary});
-        return {{"docKey", key}, {"proposalId", last()}, {"baseVersion", version}, {"diffSummary", summary}, {"status", "pending"}};
+                       {key, version, updated, scrub.text(rationale), author, now, summary});
+        return {
+            {"docKey", key}, {"proposalId", database_.last()}, {"baseVersion", version}, {"diffSummary", summary}, {"status", "pending"}};
     }
 
-    exec("UPDATE memory_documents SET content=?,version=version+1,updated_at=? WHERE doc_key=? AND version=?",
-         {updated, now, key, expected});
-    if (!sqlite3_changes(db)) throw Conflict("Memory version conflict");
-    exec(R"SQL(
+    database_.exec("UPDATE memory_documents SET content=?,version=version+1,updated_at=? WHERE doc_key=? AND version=?",
+                   {updated, now, key, expected});
+    if (!sqlite3_changes(database_.db)) throw Conflict("Memory version conflict");
+    database_.exec(R"SQL(
 INSERT INTO memory_revisions(doc_key,version,base_version,author,diff_summary,previous_content,new_content,reverted_from,created_at)
 VALUES(?,?,?,?,?,?,?,?,?)
 )SQL",
-         {key, version + 1, version, author, summary, content, updated, reverted ? Json(reverted) : Json(nullptr), now});
-    const auto revision = last();
+                   {key, version + 1, version, author, summary, content, updated, reverted ? Json(reverted) : Json(nullptr), now});
+    const auto revision = database_.last();
     if (operation == "apply_memory_edit" && proposal)
-        exec("UPDATE memory_proposals SET status='applied',decided_by=?,decided_at=? WHERE id=?", {author, now, proposal});
+        database_.exec("UPDATE memory_proposals SET status='applied',decided_by=?,decided_at=? WHERE id=?", {author, now, proposal});
     return {{"docKey", key}, {"revisionId", revision}, {"version", version + 1}, {"diffSummary", summary}};
 }
 
-bool Store::Impl::canReviewPreference(const conversation::Message& message) {
+bool MemoryStorage::canReviewPreference(const conversation::Message& message) {
     using enum conversation::PrincipalSource;
     return (message.principalSource == trusted || message.principalSource == web) && !message.routing.contains("sessionWake") &&
-           !message.routing.contains("sessionInvitation") && Policy(*this).allows(turnActor(message), Action::bot_settings, message.bot);
+           !message.routing.contains("sessionInvitation") &&
+           Policy(remaining_).allows(remaining_.turnActor(message), Action::bot_settings, message.bot);
 }
 
-bool Store::Impl::preferenceReviewPending(Id id, int step) const {
-    return step == 2 && query(R"SQL(
+bool MemoryStorage::preferenceReviewPending(Id id, int step) const {
+    return step == 2 && database_
+                            .query(R"SQL(
 SELECT 1 FROM conversation_steps WHERE message_id=? AND step=1 AND json_array_length(decision)=1
 AND json_extract(decision,'$[0].tool')='review_preference' AND json_extract(result,'$[0].ok')=1
 )SQL",
-                              {id})
+                                   {id})
                             .next();
 }
 
-std::optional<ModelInput> Store::Impl::preferenceReviewInput(const conversation::Message& message, std::vector<std::string> tools,
-                                                             std::string feedback, Seconds now) {
+std::optional<ModelInput> MemoryStorage::preferenceReviewInput(const conversation::Message& message, std::vector<std::string> tools,
+                                                               std::string feedback, Seconds now) {
     if (!canReviewPreference(message)) return std::nullopt;
     try {
-        const auto current = memory(message.bot, turnActor(message), "read_memory", Json::object(), now);
+        const auto current = memory(message.bot, remaining_.turnActor(message), "read_memory", Json::object(), now);
         return ModelInput{.task = Json::object(),
                           .event = {{"kind", "private_memory_review"}, {"text", message.text}, {"baseVersion", current.at("version")}},
                           .history = Json::array(),
@@ -335,30 +351,31 @@ std::optional<ModelInput> Store::Impl::preferenceReviewInput(const conversation:
     }
 }
 
-Json Store::Impl::rememberPreference(const conversation::Message& message, int step, const Json& args, Seconds now) {
+Json MemoryStorage::rememberPreference(const conversation::Message& message, int step, const Json& args, Seconds now) {
     const auto quote = conversation_storage::text(args, "sourceQuote", limits::messages::maxBodyBytes, true);
     const auto summary = conversation_storage::text(args, "summary", 240, true);
     if (!preferenceReviewPending(message.id, step) || !canReviewPreference(message) || message.text.find(quote) == std::string::npos)
         throw Conflict("Use only words stated by the person in their current message");
-    auto result = memory(message.bot, turnActor(message), "remember_preference", args, now, true);
+    auto result = memory(message.bot, remaining_.turnActor(message), "remember_preference", args, now, true);
     if (!result.value("unchanged", false)) {
-        const Json notice{{"text", secretStorage.redactor(message.bot).text(summary)},
+        const Json notice{{"text", secretStorage_.redactor(message.bot).text(summary)},
                           {"revisionId", result.at("revisionId")},
                           {"version", result.at("version")},
                           {"replyToMessageId", message.id}};
-        exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'memory_remembered',?,?)", {now, notice, message.bot});
+        database_.exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'memory_remembered',?,?)",
+                       {now, notice, message.bot});
     }
     result["ok"] = true;
     return result;
 }
 
-void Store::Impl::projectMemoryNotice(std::string_view bot, Json& data) const {
-    auto state = query(R"SQL(
+void MemoryStorage::projectMemoryNotice(std::string_view bot, Json& data) const {
+    auto state = database_.query(R"SQL(
 SELECT d.version=?1, undo.id IS NOT NULL FROM memory_documents d
 LEFT JOIN memory_revisions undo ON undo.doc_key=d.doc_key AND undo.version=?1+1 AND undo.reverted_from=?2
 WHERE d.doc_key=?3
 )SQL",
-                       {data.at("version"), data.at("revisionId"), privateKey(bot)});
+                                 {data.at("version"), data.at("revisionId"), privateKey(bot)});
     if (!state.next()) return;
     data["canUndo"] = state.number(0) != 0;
     data["undone"] = state.number(1) != 0;

@@ -17,15 +17,17 @@
 #include <string_view>
 
 namespace flockv0 {
+class MemoryStorage;
 class OutboxStorage;
 
 class Runtime::Components::OutboxDispatch {
 public:
-    OutboxDispatch(Store::Impl& db, OutboxStorage& outboxStorage, T3& t3, const Policy& policy, TaskUpdates& updates,
-                   TaskQuestions& questions, RunReports& reports, RunObserver& runs, SessionPrompts& prompts,
+    OutboxDispatch(Store::Impl& db, OutboxStorage& outboxStorage, MemoryStorage& memoryStorage, T3& t3, const Policy& policy,
+                   TaskUpdates& updates, TaskQuestions& questions, RunReports& reports, RunObserver& runs, SessionPrompts& prompts,
                    const std::function<Seconds()>& clock, const IntakeResolver& intake, bool requireT3Connection, std::stop_token shutdown)
-        : db(db), outboxStorage(outboxStorage), t3(t3), policy(policy), updates(updates), questions(questions), reports(reports),
-          runs(runs), prompts(prompts), clock(clock), intake(intake), requireT3Connection(requireT3Connection), shutdown(shutdown) {}
+        : db(db), outboxStorage(outboxStorage), memoryStorage(memoryStorage), t3(t3), policy(policy), updates(updates),
+          questions(questions), reports(reports), runs(runs), prompts(prompts), clock(clock), intake(intake),
+          requireT3Connection(requireT3Connection), shutdown(shutdown) {}
 
     void stop(TaskData task);
     void step(const TaskData& task);
@@ -54,6 +56,7 @@ private:
 
     Store::Impl& db;
     OutboxStorage& outboxStorage;
+    MemoryStorage& memoryStorage;
     T3& t3;
     const Policy& policy;
     TaskUpdates& updates;

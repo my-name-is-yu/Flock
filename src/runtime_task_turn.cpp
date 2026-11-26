@@ -1,4 +1,6 @@
 #include "runtime_task_turn.hpp"
+
+#include "memory_storage.hpp"
 #include "flock/decision.hpp"
 #include "journal_peer.hpp"
 #include "journal_task.hpp"
@@ -37,12 +39,13 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::TaskTurn::TaskTurn(Store::Impl& db, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock,
-                                        GitHost* gitHost, const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates,
-                                        RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges,
-                                        RunObserver& runs, SessionPrompts& prompts, TaskDecisions& decisions)
-    : db(db), model(model), soul(soul), clock(clock), gitHost(gitHost), sessionRead(sessionRead), stop(std::move(stop)), updates(updates),
-      reports(reports), sessionHistory(sessionHistory), peerExchanges(peerExchanges), runs(runs), prompts(prompts), decisions(decisions) {}
+Runtime::Components::TaskTurn::TaskTurn(Store::Impl& db, MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul,
+                                        const std::function<Seconds()>& clock, GitHost* gitHost, const std::string& sessionRead,
+                                        std::stop_token stop, TaskUpdates& updates, RunReports& reports, SessionHistory& sessionHistory,
+                                        PeerExchanges& peerExchanges, RunObserver& runs, SessionPrompts& prompts, TaskDecisions& decisions)
+    : db(db), memoryStorage(memoryStorage), model(model), soul(soul), clock(clock), gitHost(gitHost), sessionRead(sessionRead),
+      stop(std::move(stop)), updates(updates), reports(reports), sessionHistory(sessionHistory), peerExchanges(peerExchanges), runs(runs),
+      prompts(prompts), decisions(decisions) {}
 
 std::vector<std::string> Runtime::Components::TaskTurn::available(const TaskData& task, const Json& event,
                                                                   const std::optional<PeerExchange>& peer, bool canSend, bool canRead) {
@@ -131,7 +134,7 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::inferDecision(const T
     const auto prefill = sessionHistory.prefillHistory(task, event);
     if (prefill == SessionHistory::PrefillResult::Persisted) return std::nullopt;
     if (prefill == SessionHistory::PrefillResult::UnavailableWithSettledReport) event["historyUnavailable"] = true;
-    const auto bot = db.loadNotes(task.botId, soul, clock());
+    const auto bot = memoryStorage.loadNotes(task.botId, soul, clock());
     Json summary = {{"id", task.id},
                     {"botId", task.botId},
                     {"request", task.intent},

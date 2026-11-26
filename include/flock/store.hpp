@@ -181,6 +181,8 @@ private:
     friend class JournalStorage;
     friend class TaskEvents;
     friend class WaitStorage;
+    friend class AutomationStorage;
+    friend class MemoryStorage;
     friend class Runtime;
     friend class Policy;
     friend class T3Connections;

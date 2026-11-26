@@ -91,7 +91,8 @@ RunRef runRef(const Json& data) {
 }
 
 Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelResolver model)
-    : path(std::move(file)), memorySeed(std::move(seed)), automationModel(std::move(model)) {
+    : path(std::move(file)), memoryStorage(*this, secretStorage, *this, std::move(seed)),
+      automationStorage(*this, secretStorage, botLifecycle, *this, std::move(model)) {
     open(path);
 }
 
@@ -413,9 +414,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     } else if (operation == "retry" && (reason == WaitReason::model_failure || isUndispatchedNotesWait(task))) {
         if (reason == WaitReason::bot_notes_unavailable) next = TaskState::queued;
         if (const auto* failure = std::get_if<ModelFailureWait>(&wait->details);
-            failure && failure->code == WaitFailureCode::unsupported_reasoning_effort && automationModel) {
-            if (const auto planner = automationModel(bot)) applyPlannerModel(task.config, *planner);
-        }
+            failure && failure->code == WaitFailureCode::unsupported_reasoning_effort)
+            automationStorage.refreshPlannerModel(bot, task.config);
         exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task.eventId});
         task.feedback.reset();
         journalStorage.journal(id, "model_retry", {{"waitId", waitId}});
@@ -565,7 +565,7 @@ ORDER BY page.id DESC)SQL",
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
-        if (event.at("kind") == "memory_remembered") p_->projectMemoryNotice(bot, event.at("data"));
+        if (event.at("kind") == "memory_remembered") p_->memoryStorage.projectMemoryNotice(bot, event.at("data"));
         if (rows.number(5)) event["data"].update(p_->channelContext(rows.number(0), bot, nullptr, viewer));
         if (rows.number(6)) event["data"]["question"] = decodeWaitRow(rows, 6).text;
         result.push_back(std::move(event));

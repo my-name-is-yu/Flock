@@ -1,4 +1,6 @@
 #include "runtime_maintenance.hpp"
+
+#include "automation_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"
 
@@ -7,9 +9,9 @@
 #include <string_view>
 
 namespace flockv0 {
-Runtime::Components::Maintenance::Maintenance(Store::Impl& db, const std::function<Seconds()>& clock, const ErrorReporter& automationError,
-                                              const ErrorReporter& storageContention)
-    : db(db), clock(clock), automationError(automationError), storageContention(storageContention) {}
+Runtime::Components::Maintenance::Maintenance(Store::Impl& db, AutomationStorage& automationStorage, const std::function<Seconds()>& clock,
+                                              const ErrorReporter& automationError, const ErrorReporter& storageContention)
+    : db(db), automationStorage(automationStorage), clock(clock), automationError(automationError), storageContention(storageContention) {}
 
 Seconds Runtime::Components::Maintenance::settleApprovals() {
     std::lock_guard lock(db.mutex);
@@ -23,7 +25,7 @@ Seconds Runtime::Components::Maintenance::settleApprovals() {
 std::optional<Seconds> Runtime::Components::Maintenance::fireDueAutomations() {
     try {
         const auto now = clock();
-        db.fireDueAutomations(now);
+        automationStorage.fireDueAutomations(now);
         return now;
     } catch (const StorageError&) {
         throw;
