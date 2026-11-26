@@ -293,6 +293,13 @@ void bareUrls() {
               "<blockquote><p>See <strong><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a>"
               "</strong></p></blockquote>",
           "Linking a bare URL broke the enclosing Markdown");
+    check(markdown::toHtml("https://example.com/[docs](https://example.org) and https://example.com/path**and more**") ==
+              "<p><a href=\"https://example.com/\">https://example.com/</a><a href=\"https://example.org\">docs</a> and "
+              "<a href=\"https://example.com/path\">https://example.com/path</a><strong>and more</strong></p>",
+          "A bare link swallowed an existing Markdown link or incomplete emphasis");
+    check(markdown::toHtml("[ref]: https://example.org/reference\nOpen https://example.com/?q=&amp; after") ==
+              "<p>Open <a href=\"https://example.com/?q=&amp;\">https://example.com/?q=&amp;</a> after</p>",
+          "Reference definitions or entity escaping changed a bare link");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");
