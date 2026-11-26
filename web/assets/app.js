@@ -2509,6 +2509,13 @@ function renderDetailNav(sections, current) {
       return tab;
     }));
   }
+  const recurringTab = detailNav.querySelector('[data-section="recurring"]');
+  if (recurringTab && recurringRequests && !recurringTab.contains(recurringRequests.count)) {
+    recurringTab.querySelector('.detail-tab-count')?.remove();
+    const count = node('span', 'detail-tab-count');
+    count.append(recurringRequests.count);
+    recurringTab.append(count);
+  }
   detailNav.setAttribute('aria-orientation', narrow.matches ? 'horizontal' : 'vertical');
   for (const tab of detailNav.children) {
     const selected = tab.dataset.section === current;
@@ -2765,9 +2772,6 @@ function generalContent(bot) {
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
   rows.append(pullRequestSetting(bot));
-  const requests = settingsRow('Recurring requests', '', () => selectSection('recurring', true));
-  requests.querySelector('.settings-row-value').append(recurringRequests.count);
-  rows.append(requests);
   const settings = document.createElement('a');
   settings.className = 'settings-row';
   settings.href = '/settings/' + encodeURIComponent(bot.id);
@@ -2813,7 +2817,7 @@ function roleCard(bot) {
   return detailRole.element;
 }
 function settingsContent(bot, section = 'general') {
-  elements['detail-title'].textContent = settingsSections[section][0];
+  elements['detail-title'].textContent = `${bot.name} settings`;
   if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
   return generalContent(bot);
 }

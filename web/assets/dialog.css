@@ -51,6 +51,8 @@
 .detail-tab:active { transform: scale(.98); }
 .detail-tab[aria-selected="true"] { background: var(--selected); color: var(--text); font-weight: 600; }
 .detail-tab svg { width: 1.05rem; height: 1.05rem; flex: none; }
+.detail-tab-count { margin-inline-start: auto; color: var(--text-3); font-weight: 500; font-variant-numeric: tabular-nums; }
+.detail-tab-count:empty { display: none; }
 
 .dialog-head { grid-area: head; display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 1.15rem .9rem .6rem var(--detail-pad); min-width: 0; }
 .dialog-head h2 { font-size: var(--text-lg); font-weight: 600; overflow-wrap: anywhere; }
@@ -169,7 +171,8 @@
 .settings-workspace-missing { margin: 0; color: var(--text-2); line-height: 1.6; }
 .settings-workspace-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .3rem 1rem; margin: 0; font-size: var(--text-sm); }
 .settings-workspace-facts dt { color: var(--text-2); }
-.settings-workspace-facts dd { margin: 0; font-family: var(--font-mono); font-size: var(--text-sm); overflow-wrap: anywhere; align-self: center; }
+.settings-workspace-facts dd { margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; align-self: center; }
+.settings-workspace-facts dd:nth-of-type(n+4) { font-family: var(--font-mono); }
 .settings-workspace-form { display: grid; gap: .6rem; }
 .settings-workspace-model { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
 @media (max-width: 640px) {
@@ -185,7 +188,7 @@
   outline: none; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
 }
-.settings-workspace-field select, .settings-workspace-facts dd:nth-of-type(-n+2) { font-family: var(--font-sans); }
+.settings-workspace-field select { font-family: var(--font-sans); }
 .settings-workspace-hint { margin: 0; color: var(--text-3); font-size: var(--text-xs); }
 .settings-row {
   display: flex; align-items: center; gap: .75rem; width: 100%; min-height: 3.1rem; padding: .7rem 1.1rem;
@@ -321,6 +324,7 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
   .dialog-body { padding-bottom: max(var(--detail-pad), env(safe-area-inset-bottom)); }
   .detail-nav { flex-direction: row; margin: 0 var(--detail-pad) .6rem; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
   .detail-tab { justify-content: center; padding: .42rem .5rem; font-size: var(--text-sm); }
+  .detail-tab-count { margin-inline-start: 0; }
   .detail-tab:hover { background: none; }
   .detail-tab[aria-selected="true"] { background: var(--overlay); box-shadow: 0 1px 3px var(--shadow-color); }
   .detail-tab svg { display: none; }

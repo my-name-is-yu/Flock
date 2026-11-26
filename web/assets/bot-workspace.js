@@ -66,6 +66,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   let draft;
   let catalog = { models: [], fallbackReasoningEfforts: [] };
   let editable = false;
+  let catalogRequested = false;
 
   function catalogModel(slug) {
     return catalog.models.find((model) => model.slug === slug);
@@ -92,6 +93,14 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     workspace = current;
     if (!editable) draft = null;
     showView();
+    if (editable && workspace.model && !catalogRequested && !catalog.models.length) {
+      catalogRequested = true;
+      loadModels().then((data) => {
+        if (catalog.models.length || !data?.models?.length) return;
+        catalog = { models: data.models, fallbackReasoningEfforts: data.fallbackReasoningEfforts ?? [] };
+        if (!draft) showView();
+      }).catch(() => {});
+    }
   }
   function showFeedback(message, error = false) {
     feedback.classList.toggle('error', error);
