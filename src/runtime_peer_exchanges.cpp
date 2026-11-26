@@ -78,7 +78,7 @@ void Runtime::Components::PeerExchanges::transitionPeer(const PeerExchange& peer
                  revisionJson(actor.currentRevision)});
     else
         db.exec("UPDATE peer_exchanges SET phase=?,last_message=? WHERE id=?", {phase, message.messageId, peer.id});
-    db.peerMessage(peer, message, forwardedSource);
+    db.peerStorage.peerMessage(peer, message, forwardedSource);
     updates.consumeEvent(actor);
     if (!closing) actor.state = TaskState::peer_waiting;
     if (terminal(task) || task.state == TaskState::cancelling) return;
@@ -109,8 +109,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
 
 void Runtime::Components::PeerExchanges::sendPeer(TaskData& sender, const Json& event, const TaskDecision& decision, PeerBot peer,
                                                   const std::string& action) {
-    if (db.botPaused(peer.intake.botId)) throw BotPaused{};
-    if (db.peerExchange(sender.id)) throw Conflict("Finish the current Bot exchange first");
+    if (db.botLifecycle.botPaused(peer.intake.botId)) throw BotPaused{};
+    if (db.peerStorage.peerExchange(sender.id)) throw Conflict("Finish the current Bot exchange first");
     const auto& args = decision.args;
     const auto note = field(args, "text");
     std::optional<ForwardedPeerMessage> forwarded;
@@ -126,7 +126,8 @@ void Runtime::Components::PeerExchanges::sendPeer(TaskData& sender, const Json& 
             throw Conflict("Let the assigned Run settle before requesting another Bot's work");
         peer.intake.environmentId = db.defaultT3Environment(peer.intake.botId, peer.intake.environmentId, sender.environmentId);
         if (peer.intake.environmentId.empty()) throw Conflict("Choose a T3 environment for the destination Bot in its configuration");
-        if (!peer.intake.projectId.empty() && db.peerWorkRouteWouldCycle(sender.id, peer.intake.environmentId, peer.intake.projectId))
+        if (!peer.intake.projectId.empty() &&
+            db.peerStorage.peerWorkRouteWouldCycle(sender.id, peer.intake.environmentId, peer.intake.projectId))
             throw Conflict("This work request would make two project queues wait for one another");
         if (!updates.admitWork(sender, decision, charge)) return;
         updates.establishCriteria(sender, args);
@@ -171,7 +172,7 @@ Json Runtime::Components::PeerExchanges::replyKinds(const TaskData& task, const 
 
 bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& event, const TaskDecision& decision,
                                                    const std::string& action) {
-    const auto peer = db.peerExchange(task.id);
+    const auto peer = db.peerStorage.peerExchange(task.id);
     if (!peer) throw Conflict("The Bot exchange has closed");
     const auto type = field(decision.args, "kind");
     const auto body = field(decision.args, "text");
@@ -181,7 +182,7 @@ bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& e
     const bool answering = type == "answer";
     const auto otherId = answering ? peer->recipient : peer->sender;
     auto other = db.taskRecords.load(otherId);
-    if (db.botPaused(other.botId)) throw BotPaused{};
+    if (db.botLifecycle.botPaused(other.botId)) throw BotPaused{};
     if (terminal(other) || other.state != TaskState::peer_waiting) throw Conflict("The other Bot is no longer waiting");
     const bool closing = type == "result" || type == "failed";
     if (closing && db.conversationPending(task.botId)) return false;
@@ -283,7 +284,7 @@ SELECT id,data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
 bool Runtime::Components::PeerExchanges::forwardedQuestionAnswer(const TaskData& task, const QuestionTarget& target) {
     std::lock_guard lock(db.mutex);
     const auto event = db.taskEvents.currentEvent(task);
-    const auto peer = db.peerExchange(task.id);
+    const auto peer = db.peerStorage.peerExchange(task.id);
     if (!peer || peer->recipient != task.id || peer->kind != "work" || peer->phase != "working" || event.is_null() ||
         event["consumed"] == true || field(event, "kind") != "bot_answer" || field(event, "messageType") != "answer" ||
         field(event, "requestKind") != peer->kind || field(event, "exchangeId") != peer->id ||

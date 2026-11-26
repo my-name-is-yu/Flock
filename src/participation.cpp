@@ -271,7 +271,7 @@ JOIN session_participations p ON p.id=a.participation_id WHERE a.person_id=? AND
         std::lock_guard lock(db.mutex);
         authorizedPerson();
         if (const auto message = replay()) return message;
-        if (db.botPaused(bot)) throw BotPaused{};
+        if (db.botLifecycle.botPaused(bot)) throw BotPaused{};
         const auto settings = T3Connections(store_).settings(connection.personId);
         if (settings)
             for (const auto& environment : settings->environments)
@@ -381,7 +381,7 @@ bool Store::Impl::inviteSessionBot(const conversation::Message& message, int ste
                 throw Conflict("Bot access is required");
             if (!peers || std::ranges::none_of(peers(message.bot), [&](const PeerBot& peer) { return peer.intake.botId == bot; }))
                 throw Conflict("The destination Bot is unavailable or not allowed");
-            if (botPaused(bot)) throw BotPaused{};
+            if (botLifecycle.botPaused(bot)) throw BotPaused{};
             const auto read = Resource::sessionRead(target.environmentId, target.threadId);
             if (!policy.allows(message.bot, read) || !policy.allows(bot, read)) throw Conflict(unavailable);
             if (!policy.allows(message.bot, Action::environment_inspect, target.environmentId) ||

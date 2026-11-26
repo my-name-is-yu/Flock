@@ -337,7 +337,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, std::s
     GitContext context{taskId, std::string(bot), std::string(environment), std::string(project), {}};
     {
         std::lock_guard lock(mutex);
-        if (botPaused(bot)) throw BotPaused{};
+        if (botLifecycle.botPaused(bot)) throw BotPaused{};
         if (taskId) {
             const auto task = taskRecords.load(taskId);
             if (task.botId != bot) throw Conflict("No task with this ID");
@@ -474,7 +474,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, std::s
     {
         std::lock_guard lock(mutex);
         Transaction tx(db);
-        if (botPaused(bot)) throw BotPaused{};
+        if (botLifecycle.botPaused(bot)) throw BotPaused{};
         auto previous = query("SELECT result FROM git_mutations WHERE task_id=? AND (invocation=? OR dedupe=?)"
                               " ORDER BY invocation=? DESC LIMIT 1",
                               {taskId, key, dedupe, key});

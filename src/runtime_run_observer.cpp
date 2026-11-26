@@ -27,10 +27,10 @@
 
 namespace flockv0 {
 bool Runtime::Components::RunObserver::shouldStop(const TaskData& task) {
-    if (db.replanReady(task)) return true;
+    if (db.peerStorage.replanReady(task)) return true;
     if (task.state != TaskState::cancelling) return false;
     std::lock_guard lock(db.mutex);
-    const auto peer = db.peerExchange(task.id);
+    const auto peer = db.peerStorage.peerExchange(task.id);
     return !peer || peer->recipient == task.id;
 }
 
@@ -259,7 +259,7 @@ void Runtime::Components::RunObserver::cancelDone(TaskData& task) {
     task.activeRun.reset();
     task.state = TaskState::cancelled;
     db.journalStorage.journalCancelled(task.id);
-    if (const auto peer = db.peerExchange(task.id); peer && peer->recipient == task.id)
+    if (const auto peer = db.peerStorage.peerExchange(task.id); peer && peer->recipient == task.id)
         peerExchanges.finishPeer(*peer, task, db.taskRecords.load(peer->sender), "cancelled",
                                  task.cancelledByBotPause ? "The receiving Bot is paused." : "The receiving Bot's task was cancelled.",
                                  actionId());
@@ -268,7 +268,7 @@ void Runtime::Components::RunObserver::cancelDone(TaskData& task) {
 void Runtime::Components::RunObserver::finishReplan(const TaskData& task) {
     updates.change(task, [&](TaskData& current) {
         const auto id = current.id;
-        const auto peer = db.peerExchange(id);
+        const auto peer = db.peerStorage.peerExchange(id);
         if (peer && !peer->allowsReplan(id)) return false;
         const auto oldEnvironment = current.environmentId;
         const auto oldProject = current.projectId;

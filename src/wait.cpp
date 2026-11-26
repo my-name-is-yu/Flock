@@ -1,3 +1,4 @@
+#include "peer_storage.hpp"
 #include "outbox_storage.hpp"
 #include "journal_storage.hpp"
 #include "database.hpp"
@@ -299,7 +300,7 @@ Id WaitStorage::waitAllowance(Id task, WaitReason reason) const {
 }
 
 bool WaitStorage::waitIsActionable(const TaskData& task) const {
-    return !remaining.replanReady(task);
+    return !peers.replanReady(task);
 }
 
 std::optional<Wait> WaitStorage::currentWait(Id task) const {

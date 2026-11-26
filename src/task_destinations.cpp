@@ -88,9 +88,10 @@ bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
         return true;
     }
     const auto id = task.id;
-    const auto peer = peerExchange(id);
+    const auto peer = peerStorage.peerExchange(id);
     if (peer && peer->recipient == id && peer->kind == "work")
-        std::erase_if(projects, [&](const T3Project& project) { return peerWorkRouteWouldCycle(peer->sender, environment, project.id); });
+        std::erase_if(projects,
+                      [&](const T3Project& project) { return peerStorage.peerWorkRouteWouldCycle(peer->sender, environment, project.id); });
     if (projects.empty()) {
         waitStorage.wait(task, SimpleWaitReason::settings,
                          "Each project in this environment would make project queues wait for one another. "

@@ -223,7 +223,7 @@ std::vector<ScheduleImportError> Store::syncSchedules(std::string_view bot, Seco
 
 std::vector<ScheduleImportError> Store::Impl::stageConfiguredSchedules(std::string_view bot,
                                                                        const std::vector<ConfiguredSchedule>& schedules, Seconds now) {
-    if (botDeleted(bot)) return {};
+    if (botLifecycle.botDeleted(bot)) return {};
     const auto scrub = secretStorage.redactor(bot);
     std::map<std::string_view, std::size_t> counts;
     for (const auto& schedule : schedules) ++counts[schedule.id];
@@ -391,7 +391,7 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
                      {id, now});
     if (!row.next()) return;
     const auto bot = row.string(0);
-    const bool skipped = skip || botPaused(bot);
+    const bool skipped = skip || botLifecycle.botPaused(bot);
     try {
         const auto def = row.json(1);
         const auto kind = field(def, "kind");
@@ -457,7 +457,7 @@ AND json_extract(definition,'$.source')=? ORDER BY id
         auto& receipts = received.try_emplace(bot, Json::array()).first->second;
         const auto def = rows.json(2);
         if (receipts.is_null() || !matchesEvent(def.at("eventFilter"), event, scrub)) continue;
-        if (p_->botPaused(bot)) {
+        if (p_->botLifecycle.botPaused(bot)) {
             receipts = nullptr;
             continue;
         }

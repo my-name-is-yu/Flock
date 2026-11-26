@@ -82,7 +82,7 @@ void Runtime::Components::TaskDecisions::acceptReplyOrCompletion(const TaskData&
     if (decision.tool == "reply_to_bot") {
         if (peerExchanges.replyPeer(current, event, decision, actionId())) updates.saveTask(current);
     } else {
-        if (db.peerExchange(id) || !canComplete(current, event)) return;
+        if (db.peerStorage.peerExchange(id) || !canComplete(current, event)) return;
         complete(current, event, decision);
     }
     transaction.commit();
