@@ -224,8 +224,6 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
     }
     updates.change(snapshot, [&](TaskData& current) {
         if (tool == "follow_up" && current.newSessionRequired) throw Conflict("Start a new Session in the current environment");
-        bool charge = false;
-        if (work && !updates.admitWork(current, decision, charge)) return true;
         if (work) updates.establishCriteria(current, args);
         updates.consumeEvent(current);
         const auto action = actionId();
@@ -237,9 +235,9 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
                                                  field(args, "question"));
             if (current.question) current.question->target = questionTarget(current, waitId);
         } else if (work && !current.runTargets().empty()) {
-            dispatch.queueDestinations(current, action, instruction, args, event, charge);
+            dispatch.queueDestinations(current, action, instruction, args, event);
         } else {
-            dispatch.queueAction(current, action, commandToolFromName(tool).value(), instruction, args, event, charge);
+            dispatch.queueAction(current, action, commandToolFromName(tool).value(), instruction, args, event);
         }
         return true;
     });
@@ -256,12 +254,10 @@ bool runtime::TaskDecisions::continueStage(const TaskData& task) {
         const auto tool = current.newSessionRequired ? CommandTool::delegate : CommandTool::follow_up;
         const TaskDecision decision{
             {std::string(commandToolName(tool)), Json::object(), "Apply accepted user instructions after the assigned Run settled"}};
-        bool charge = false;
-        if (!updates.admitWork(current, decision, charge)) return true;
         const auto action = actionId();
         if (event.contains("id")) updates.recordDecision(current, event, decision, action);
         updates.consumeEvent(current);
-        dispatch.queueAction(current, action, tool, "Continue this Flock task.", decision.args, event, charge);
+        dispatch.queueAction(current, action, tool, "Continue this Flock task.", decision.args, event);
         return true;
     });
 }

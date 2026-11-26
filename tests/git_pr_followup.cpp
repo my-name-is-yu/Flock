@@ -1,4 +1,3 @@
-#include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
 #include "fake_git.hpp"
@@ -102,16 +101,13 @@ private:
             const auto excerpt = steps.empty() ? git.at("summary") : steps.back().at("result").at("data").at("text");
             return {"fix_pull_request", {{"diagnosis", "The migration test needs attention."}, {"evidence", excerpt}}, {}};
         }
-        return {
-            "reply",
-            {{"text", event.value("gitFollowupStatus", "") == "limit_reached" ? "The pull request still needs work. How should I proceed?"
-                                                                              : "Git notification received."}},
-            {}};
+        return {"reply", {{"text", "Git notification received."}}, {}};
     }
 };
 
-GitWebhook failure(std::string id) {
-    return {hostName, std::move(id), repoName, "ci", "completed", {1}, sha, "Check failed", 81, {}, {}, GitFollowup::failedCheck};
+GitWebhook failure(std::string id, std::string head = sha) {
+    return {hostName,        std::move(id),  repoName, "ci", "completed", {1},
+            std::move(head), "Check failed", 81,       {},   {},          GitFollowup::failedCheck};
 }
 
 GitWebhook review(std::string id) {
@@ -197,26 +193,26 @@ void keepsWorkInOriginatingSession() {
               includes(sends.back().instruction, "\"path\":\"src/migration.cpp\"") && includes(sends.back().instruction, "\"line\":42") &&
               includes(sends.back().instruction, "/pull/1#discussion_r301"),
           "Review location and feedback were not quoted as evidence");
-    f.notify(review("another-review"));
-    check(sends.size() == 2 && !f.model.canFix && includes(TaskHistory(f.store).history(f.task).dump(), "How should I proceed?"),
-          "The cap did not ask for human input");
-    ConversationIntake(f.store).receive(testRequester, intake(), "resume-fixes", "Please continue fixing the PR.");
-    f.notify(failure("next-failure"));
-    check(sends.size() == 3, "A new message from the requester did not reset the cap");
     f.notify({hostName, "closed", repoName, "pull_request", "closed", {1}, sha, "Closed", 0});
     f.notify(review("review-after-close"));
-    check(sends.size() == 3 && !f.model.canFix, "A closed PR received an automatic fix request");
+    check(sends.size() == 2 && !f.model.canFix, "A closed PR received an automatic fix request");
 }
 
-void sessionAskResetsTheCap() {
+void followsRepeatedFailuresAcrossFiveHeads() {
     Fixture f(true, true, true);
-    f.notify(review("first"));
-    f.notify(review("second"));
-    f.notify(review("capped"));
-    check(f.sessions.sessionSends.size() == 2 && !f.model.canFix, "Session-originated work did not reach the cap");
-    f.ask("continue", "Please continue fixing the PR.");
-    f.notify(review("after-session-reply"));
-    check(f.sessions.sessionSends.size() == 3 && f.model.fixAcknowledged, "A direct T3 reply from the requester did not reset the cap");
+    const auto existingReviews = Inbox(f.store).inbox(testRequester, "owner");
+    for (int i = 0; i < 5; ++i) {
+        const std::string head(40, static_cast<char>('a' + i));
+        f.host->result["headSha"] = head;
+        f.notify(failure("failure-" + std::to_string(i), head));
+        const auto& sends = f.sessions.sessionSends;
+        check(sends.size() == static_cast<std::size_t>(i + 1) && f.model.fixAcknowledged &&
+                  includes(sends.back().instruction, "\"headSha\":\"" + head + "\"") &&
+                  includes(sends.back().instruction, "linker: missing symbol"),
+              "The failing check on the current head did not produce a follow-up");
+    }
+    check(historyCount(f.store, f.task, "git_pr_followup_requested") == 5, "Repeated failures did not record five fix requests");
+    check(Inbox(f.store).inbox(testRequester, "owner") == existingReviews, "Repeated failures added a Needs you item");
 }
 
 void recoversAcceptedSendAfterWriteContention() {
@@ -279,9 +275,7 @@ void followsCurrentChecksAcrossWebhookOrdering() {
     stale.headSha = before;
     f.notify(stale);
     check(!f.model.canFix && f.sessions.sessionSends.size() == 1, "An older check received a fix because a late webhook named its head");
-    auto current = failure("current-after-delayed-hook");
-    current.headSha = latest;
-    f.notify(current);
+    f.notify(failure("current-after-delayed-hook", latest));
     check(f.model.fixAcknowledged && f.sessions.sessionSends.size() == 2,
           "A late synchronize webhook suppressed a fix for the current head");
 }
@@ -342,13 +336,13 @@ void rejectsStaleSupervisedApproval(bool disconnect) {
     Inbox(f.store).decideInbox(testRequester, target(*card), "allow_once");
     f.runtime.runConversations();
     check(f.sessions.sessionSends.empty() && historyCount(f.store, f.task, "git_pr_followup_requested") == 0,
-          "A stale approval sent work or consumed the automatic follow-up quota");
+          "A stale approval recorded or sent a fix request");
 }
 }
 
 void testGitPrFollowup() {
     keepsWorkInOriginatingSession();
-    sessionAskResetsTheCap();
+    followsRepeatedFailuresAcrossFiveHeads();
     recoversAcceptedSendAfterWriteContention();
     skipsSupersededChecks();
     followsCurrentChecksAcrossWebhookOrdering();

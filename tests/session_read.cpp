@@ -2,14 +2,13 @@
 #include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/secret_ref.hpp"
-#include "flock/conversations.hpp"
-#include "flock/board_inbox.hpp"
 #include "flock/session_read.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
+#include "flock/model_error.hpp"
 #include "flock/person.hpp"
 #include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
@@ -17,6 +16,7 @@
 #include "flock/secret_requests.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/session_ref.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
@@ -184,12 +184,14 @@ struct Backend : T3 {
 struct Agent : Model {
     Decision next;
     Json result;
+    bool deferReply = false;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         if (input.event.at("kind") == "intake")
             return {"delegate", {{"instruction", "Investigate staging"}, {"doneWhen", "Report failure"}}, "Investigate"};
         const auto& steps = input.event.at("turn");
         if (!steps.empty()) {
+            if (std::exchange(deferReply, false)) throw ModelError("Temporary model outage", true);
             result = steps.back().at("result");
             return {"reply", {{"text", "Checked."}}, "Respond with the evidence"};
         }
@@ -205,6 +207,7 @@ struct Fixture {
     Agent model;
     Backend t3;
     int sequence = 0;
+    Seconds now = unixTime();
 
     Fixture() {
         char pattern[] = "/tmp/flock-session-read-XXXXXX";
@@ -221,7 +224,8 @@ struct Fixture {
     void restart() {
         runtime.reset();
         store = std::make_unique<Store>(dir / "state.db");
-        runtime = std::make_unique<Runtime>(*store, model, t3, [](auto) { return std::string{}; });
+        runtime =
+            std::make_unique<Runtime>(*store, model, t3, [](auto) { return std::string{}; }, RuntimeOptions{.clock = [&] { return now; }});
     }
     Intake intake(std::string bot) {
         return {std::move(bot), "Investigate staging", env, "release", {{"conversationEnvironments", {{"Remote", otherEnv}}}}};
@@ -413,7 +417,7 @@ void catalogResultsAreDeduplicatedAcrossRecordedBatches() {
 WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<65)
 INSERT INTO outbox(id,task_id,phase,tool,environment_id,project_id,instruction,data)
 SELECT printf('fixture-%02d',n),tasks.id,'accepted','delegate','desktop','project','',
-       '{"target":null,"questionId":"","answers":{},"instructions":[],"contextIds":{},"sourceResultRefs":[],"chargesBudget":false}'
+       '{"target":null,"questionId":"","answers":{},"instructions":[],"contextIds":{},"sourceResultRefs":[]}'
 FROM numbers CROSS JOIN tasks;
 INSERT INTO runs(action_id,task_id,environment_id,thread_id,run_id,link)
 SELECT id,task_id,'desktop',CASE WHEN id='fixture-65' THEN 'internal-staging-thread' ELSE id END,id,''
@@ -495,18 +499,14 @@ void connectedSearchRespectsCurrentAccess() {
           "a disconnected environment remained reachable using a saved reference");
 }
 
-void approvedCallSurvivesReadPreflightContention() {
+void deferredReplySurvivesReadPreflightContention() {
     Fixture f;
     f.model.next = {"flock_session_search", {{"query", "regression"}}, "Find the report"};
-    auto intake = f.intake("alpha");
-    intake.config["modelCallLimit"] = 1;
-    const auto receipt = ConversationIntake(*f.store).receive(localOwner, intake, "preflight-busy", "Look for the failure");
+    f.model.deferReply = true;
+    ConversationIntake(*f.store).receive(localOwner, f.intake("alpha"), "preflight-busy", "Look for the failure");
     f.runtime->runConversations();
-    const auto paused = Conversations(*f.store).pausedConversations("alpha");
-    check(paused.size() == 1 && f.model.result.is_null(), "turn did not pause after reading evidence");
-    const Id pauseId = paused.front().at("messageId");
-    Inbox(*f.store).decideInbox(
-        localOwner, {"alpha", InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId}, "approve");
+    check(!f.model.deferReply && f.model.result.is_null(), "the reply did not defer after reading evidence");
+    ++f.now;
     sqlite3* raw = nullptr;
     check(sqlite3_open(f.store->path().c_str(), &raw) == SQLITE_OK, "could not open the second writer");
     const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> writer(raw, sqlite3_close);
@@ -525,8 +525,7 @@ void approvedCallSurvivesReadPreflightContention() {
     check(sqlite3_exec(writer.get(), "ROLLBACK", nullptr, nullptr, nullptr) == SQLITE_OK, "could not release writer");
     f.t3.onRead = {};
     f.runtime->runConversations();
-    const auto after = Conversations(*f.store).pausedConversations("alpha");
-    check(!f.model.result.is_null() && after.empty(), "Conversation lost its approved call before model dispatch");
+    check(!f.model.result.is_null(), "the conversation lost its reply after the write lock cleared");
 }
 
 void redactionAndResumedHistory() {
@@ -562,27 +561,23 @@ void redactionAndResumedHistory() {
           "attachment exposed a protected value at the byte limit");
 
     const auto missing = f.call("flock_session_events", {{"sessionRef", "unknown"}, {"operation", "counts"}});
-    const auto pauseThenRevoke = [&](Decision step, const std::function<void()>& revoke) {
+    const auto deferThenRevoke = [&](Decision step, const std::function<void()>& revoke) {
         f.model.next = std::move(step);
         f.model.result = nullptr;
-        auto intake = f.intake("alpha");
-        intake.config["modelCallLimit"] = 1;
-        const auto receipt = ConversationIntake(*f.store).receive(localOwner, intake, std::to_string(++f.sequence), "Look for the failure");
+        f.model.deferReply = true;
+        ConversationIntake(*f.store).receive(localOwner, f.intake("alpha"), std::to_string(++f.sequence), "Look for the failure");
         f.runtime->runConversations();
-        const auto paused = Conversations(*f.store).pausedConversations("alpha");
-        check(paused.size() == 1 && f.model.result.is_null(), "turn did not pause after reading evidence");
+        check(!f.model.deferReply && f.model.result.is_null(), "the reply did not defer after reading evidence");
         revoke();
+        ++f.now;
         f.restart();
-        const Id pauseId = paused.front().at("messageId");
-        Inbox(*f.store).decideInbox(
-            localOwner, {"alpha", InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId}, "approve");
         f.runtime->runConversations();
         check(f.model.result.dump() == missing.dump(), "reopened turn exposed inaccessible cached evidence");
     };
-    pauseThenRevoke({"flock_session_events", attachment, "Read the log"}, [&] { f.t3.denyAttachment = true; });
-    pauseThenRevoke({"flock_session_search", Json::object(), "Find staging"}, [&] { f.t3.denied[staging] = true; });
+    deferThenRevoke({"flock_session_events", attachment, "Read the log"}, [&] { f.t3.denyAttachment = true; });
+    deferThenRevoke({"flock_session_search", Json::object(), "Find staging"}, [&] { f.t3.denied[staging] = true; });
     f.t3.denied[staging] = false;
-    pauseThenRevoke({"flock_session_search", Json::object(), "Find staging"}, [&] { f.blockSession(staging, true); });
+    deferThenRevoke({"flock_session_search", Json::object(), "Find staging"}, [&] { f.blockSession(staging, true); });
 }
 }
 
@@ -593,7 +588,7 @@ int main() {
         catalogResultsAreDeduplicatedAcrossRecordedBatches();
         connectedSearchRespectsCurrentAccess();
         redactionAndResumedHistory();
-        approvedCallSurvivesReadPreflightContention();
+        deferredReplySurvivesReadPreflightContention();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

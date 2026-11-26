@@ -52,16 +52,16 @@ assert.deepEqual(ids(previouslyEmpty), [1, 2, 3, 4]);
 assert.equal(previouslyEmpty.olderBefore, 0);
 
 const oldMessage = { id: 2, kind: 'conversation_message', data: { status: 'needs_you' } };
-const budgetReply = { id: 4, kind: 'conversation_reply', data: { replyToMessageId: 2, route: 'model_budget', status: 'needs_you' } };
-const loaded = { events: new Map([oldMessage, budgetReply, ...page([90, 91, 100], 90).events].map(e => [e.id, e])),
+const questionReply = { id: 4, kind: 'conversation_reply', data: { replyToMessageId: 2, status: 'needs_you' } };
+const loaded = { events: new Map([oldMessage, questionReply, ...page([90, 91, 100], 90).events].map(e => [e.id, e])),
   olderBefore: 2, newestEvent: 100 };
 await refreshEventHistory(loaded, page([100], 100), noPage, current);
-assert.deepEqual(loaded.events.get(4), budgetReply);
-const latestAfterApproval = { ...page([100, 101], 100), changedMessageIds: [2, 4, 91, 92] };
+assert.deepEqual(loaded.events.get(4), questionReply);
+const latestAfterAnswer = { ...page([100, 101], 100), changedMessageIds: [2, 4, 91, 92] };
 const corrected = { ...oldMessage, data: { status: 'received' } };
-const resolved = { ...budgetReply, data: { replyToMessageId: 2, status: 'done' } };
+const resolved = { ...questionReply, data: { replyToMessageId: 2, status: 'done' } };
 const delivered = { id: 91, kind: 'conversation_message', data: { deliveredToT3: true } };
-await refreshEventHistory(loaded, latestAfterApproval, cursor => {
+await refreshEventHistory(loaded, latestAfterAnswer, cursor => {
   if (cursor === 92) return { events: [delivered], olderBefore: 91 };
   if (cursor === 5) return { events: [{ id: 1 }, corrected, resolved], olderBefore: 0 };
   return noPage();
@@ -71,7 +71,7 @@ assert.deepEqual(loaded.events.get(2), corrected);
 assert.deepEqual(loaded.events.get(4), resolved);
 assert.equal(loaded.events.has(1), false);
 assert.equal(loaded.olderBefore, 2);
-await refreshEventHistory(loaded, { ...latestAfterApproval, changedMessageIds: [] }, noPage, current);
+await refreshEventHistory(loaded, { ...latestAfterAnswer, changedMessageIds: [] }, noPage, current);
 
 const report = {
   id: 6, kind: 'report', time: 100, taskId: 1,

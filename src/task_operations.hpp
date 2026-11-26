@@ -16,7 +16,6 @@ class AutomationStorage;
 class BotLifecycleStorage;
 class InboxStorage;
 class JournalStorage;
-class ModelCalls;
 class OutboxStorage;
 class PeerStorage;
 class SecretStorage;
@@ -38,13 +37,13 @@ enum class TaskSource { request, handoff, consultation };
 class TaskOperations {
 public:
     TaskOperations(Database& database, AutomationStorage& automationStorage, BotLifecycleStorage& botLifecycle, const Policy& permissions,
-                   JournalStorage& journalStorage, ModelCalls& modelCalls, OutboxStorage& outboxStorage, PeerStorage& peerStorage,
-                   SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting,
-                   WaitStorage& waitStorage, InboxStorage& inboxStorage)
+                   JournalStorage& journalStorage, OutboxStorage& outboxStorage, PeerStorage& peerStorage, SecretStorage& secretStorage,
+                   TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
+                   InboxStorage& inboxStorage)
         : database(database), automationStorage(automationStorage), botLifecycle(botLifecycle), permissions(permissions),
-          journalStorage(journalStorage), modelCalls(modelCalls), outboxStorage(outboxStorage), peerStorage(peerStorage),
-          secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting),
-          waitStorage(waitStorage), inboxStorage(inboxStorage) {}
+          journalStorage(journalStorage), outboxStorage(outboxStorage), peerStorage(peerStorage), secretStorage(secretStorage),
+          taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), inboxStorage(inboxStorage) {
+    }
 
     void recordTaskBlocker(TaskData&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(TaskData&, Id waitId);
@@ -63,7 +62,6 @@ private:
     BotLifecycleStorage& botLifecycle;
     const Policy& permissions;
     JournalStorage& journalStorage;
-    ModelCalls& modelCalls;
     OutboxStorage& outboxStorage;
     PeerStorage& peerStorage;
     SecretStorage& secretStorage;

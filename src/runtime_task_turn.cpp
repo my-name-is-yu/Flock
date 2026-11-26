@@ -150,8 +150,6 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
                     {"botId", task.botId},
                     {"request", task.intent},
                     {"doneWhen", task.doneWhen},
-                    {"remaining", task.allowance.remaining},
-                    {"additionalUsed", task.allowance.additionalUsed},
                     {"revisionId", revisionJson(task.currentRevision)}};
     if (!task.runTargets().empty()) {
         summary["runTargets"] = runTargetsJson(task.runTargets());
@@ -194,15 +192,9 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
         if (current.generation != task.generation || current.eventId != event["id"] || current.currentRevision != task.currentRevision ||
             current.state != TaskState::deciding)
             return std::nullopt;
-        attempt = modelCalls.takeReservedTaskCall(event["id"]);
-        if (!attempt) attempt = modelCalls.reserveModelCall(modelCalls.taskModelBudget(task.id), "task_decision", 0, task.id, event["id"]);
-        if (!attempt) {
-            waitStorage.wait(current, SimpleWaitReason::model_budget, "This request used its step allowance.");
-            updates.saveTask(current);
-        }
+        attempt = modelCalls.recordAttempt(modelCalls.taskModelScope(task.id), "task_decision", 0, task.id, event["id"]);
         transaction.commit();
     }
-    if (!attempt) return std::nullopt;
     if (gitHost && event.at("kind") == "result") gitStorage.projectTaskGitReads(*gitHost, task, event);
     TaskInference inference{task.generation, event.at("id"), attempt, task.currentRevision};
     try {

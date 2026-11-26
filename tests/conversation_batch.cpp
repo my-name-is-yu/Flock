@@ -18,7 +18,6 @@
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
 #include "flock/session_ref.hpp"
-#include "flock/conversations.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_session.hpp"
@@ -170,13 +169,12 @@ struct Fixture {
         options.storageContention = contention;
         runtime = std::make_unique<Runtime>(*store, model, t3, [](auto) { return std::string{}; }, options);
     }
-    void receive(std::vector<Decision> calls, int limit = 20) {
+    void receive(std::vector<Decision> calls) {
         model.first = {std::move(calls)};
         model.followUps.clear();
         model.turns.clear();
         message = ConversationIntake(*store)
-                      .receive(localOwner, {"alpha", "", "env", "project", {{"modelCallLimit", limit}}}, std::to_string(++sequence),
-                               "Check the fixture")
+                      .receive(localOwner, {"alpha", "", "env", "project", Json::object()}, std::to_string(++sequence), "Check the fixture")
                       .at("messageId");
     }
     auto connect() const {
@@ -249,7 +247,7 @@ void mixedReads() {
     };
     f.t3.onSearch = f.t3.onReadiness = rendezvous;
     f.t3.knownSession = true;
-    f.receive({search, readiness}, 2);
+    f.receive({search, readiness});
     f.runtime->runConversations();
     f.checkFinished(2);
     check(f.t3.searches == 1 && f.t3.readinessChecks == 1 && f.model.turns.size() == 2, "Expected two reads and exactly one reply attempt");
@@ -317,7 +315,7 @@ void storeRemainsResponsiveDuringMcpCapabilityChecks() {
 
 void followUpNeeded(const Decision& action, std::string_view guidance) {
     Fixture f;
-    f.receive({search, action}, 2);
+    f.receive({search, action});
     f.runtime->runConversations();
     f.checkFinished(2);
     const auto results = f.results();
@@ -345,8 +343,7 @@ void gatewayOnlyCancelDoesNotCancelBatchSibling() {
 void conflictingWorkspaceCalls() {
     Fixture f;
     f.receive({call("workspace_write_file", {{"path", "ordered.txt"}, {"text", "Fresh contents"}}),
-               call("workspace_read_file", {{"path", "ordered.txt"}})},
-              4);
+               call("workspace_read_file", {{"path", "ordered.txt"}})});
     f.runtime->runConversations();
     f.checkFinished(2);
     const auto results = f.results();
@@ -356,7 +353,7 @@ void conflictingWorkspaceCalls() {
 
 void rejectedCall() {
     Fixture f;
-    f.receive({search, readiness}, 2);
+    f.receive({search, readiness});
     f.model.first.rejections.emplace(1, "Invalid environment arguments");
     f.runtime->runConversations();
     f.checkFinished(2);
@@ -368,9 +365,9 @@ void rejectedCall() {
 
 void restartWithPartialResults() {
     Fixture f;
-    f.receive({search, readiness, invoke, readResource}, 5);
+    f.receive({search, readiness, invoke, readResource});
     const auto id = std::to_string(f.message);
-    const auto budget = "'message/" + id + "'";
+    const auto scope = "'message/" + id + "'";
     auto decisions = Json::array();
     for (const auto& action : f.model.first.calls)
         decisions.push_back({{"tool", action.tool}, {"args", action.args}, {"reason", action.reason}});
@@ -378,14 +375,9 @@ void restartWithPartialResults() {
                          {"sessions", Json::array()}};
     const Json inFlight{{"inFlight", true}};
     const auto slots = Json::array({completed, inFlight, inFlight, inFlight});
-    Fixture::write(f.connect().get(), "INSERT OR IGNORE INTO model_budgets(id,call_limit) VALUES(" + budget +
-                                          ",5);"
-                                          "UPDATE model_budgets SET attempts=3 WHERE id=" +
-                                          budget +
-                                          ";"
-                                          "INSERT INTO model_attempts(budget_id,purpose,time,message_id) VALUES(" +
-                                          budget + ",'conversation_turn',1," + id + "),(" + budget + ",'bot_tool',1," + id + "),(" +
-                                          budget + ",'bot_tool',1," + id +
+    Fixture::write(f.connect().get(), "INSERT INTO model_attempts(budget_id,purpose,time,message_id) VALUES(" + scope +
+                                          ",'conversation_turn',1," + id + "),(" + scope + ",'bot_tool',1," + id + "),(" + scope +
+                                          ",'bot_tool',1," + id +
                                           ");"
                                           "INSERT INTO conversation_steps(message_id,step,attempt_id,decision,effect) VALUES(" +
                                           id + ",1,(SELECT id FROM model_attempts WHERE purpose='conversation_turn' AND message_id=" + id +
@@ -419,7 +411,7 @@ void contendedSlotPersistence() {
         entered.set_value();
         resume.wait();
     };
-    f.receive({search, readiness}, 2);
+    f.receive({search, readiness});
     f.runtime->tickConcurrent();
     bool searchSaved = false;
     if (entered.get_future().wait_for(5s) == std::future_status::ready) {
@@ -610,23 +602,18 @@ void storeRemainsResponsiveDuringSessionEventRead() {
 }
 
 struct Measurement {
-    int conversationAttempts, botToolAttempts, budget, pauses;
+    int conversationAttempts, botToolAttempts;
     std::chrono::milliseconds elapsed;
 };
 
-Measurement measure(const std::vector<Decision>& reads, bool batch, int limit, Fixture& f) {
+Measurement measure(const std::vector<Decision>& reads, bool batch, Fixture& f) {
     const auto delay = [] { std::this_thread::sleep_for(200ms); };
     f.t3.onSearch = f.t3.onReadiness = f.t3.onEvents = f.mcp->onRead = delay;
     const auto start = std::chrono::steady_clock::now();
-    f.receive(batch ? reads : std::vector<Decision>{reads.front()}, limit);
+    f.receive(batch ? reads : std::vector<Decision>{reads.front()});
     if (!batch)
         for (auto read = reads.begin() + 1; read != reads.end(); ++read) f.model.followUps.push_back({{*read}});
     f.runtime->runConversations();
-    if (f.status() == "paused") {
-        const Id pause = Conversations(*f.store).pausedConversations("alpha").at(0).at("messageId");
-        Inbox(*f.store).decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, f.message, pause, 0, 0, pause}, "approve");
-        f.runtime->runConversations();
-    }
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
     f.checkFinished(batch ? 2 : static_cast<int>(reads.size()) + 1);
     const auto id = std::to_string(f.message);
@@ -640,42 +627,27 @@ Measurement measure(const std::vector<Decision>& reads, bool batch, int limit, F
     for (std::size_t i = 0; i < reads.size(); ++i)
         check(evidence[i].at("tool") == reads[i].tool && evidence[i].at("result").at("ok") == true,
               "A measured read failed or reached the model out of order");
-    return {purposes.at("conversation_turn"), purposes.value("bot_tool", 0),
-            std::stoi(f.query("SELECT attempts FROM model_budgets WHERE id='message/" + id + "'")),
-            std::stoi(f.query("SELECT count(*) FROM journal WHERE kind='conversation_reply'"
-                              " AND json_extract(data,'$.route')='model_budget' AND json_extract(data,'$.replyToMessageId')=" +
-                              id)),
-            elapsed};
+    return {purposes.at("conversation_turn"), purposes.value("bot_tool", 0), elapsed};
 }
 
 void measureBatches() {
-    std::cout << "| Scenario | Mode | Conversation attempts | Bot tool attempts | Budget units | Budget pauses | Wall ms |\n"
-                 "| --- | --- | ---: | ---: | ---: | ---: | ---: |\n";
-    const auto compare = [](std::string_view scenario, const auto& makeReads, int limit, int botAttempts, int baselinePauses) {
-        const auto run = [&](bool batch) {
+    std::cout << "| Scenario | Mode | Conversation attempts | Bot tool attempts | Wall ms |\n"
+                 "| --- | --- | ---: | ---: | ---: |\n";
+    const auto compare = [](std::string_view scenario, const auto& makeReads, int botAttempts) {
+        for (const bool batch : {false, true}) {
             Fixture f;
-            const auto m = measure(makeReads(f), batch, limit, f);
+            const auto m = measure(makeReads(f), batch, f);
             std::cout << "| " << scenario << " | " << (batch ? "batch" : "baseline") << " | " << m.conversationAttempts << " | "
-                      << m.botToolAttempts << " | " << m.budget << " | " << m.pauses << " | " << m.elapsed.count() << " |\n";
-            check(m.botToolAttempts == botAttempts && m.budget == m.conversationAttempts + m.botToolAttempts,
-                  "Measurement budget disagreed with attempt accounting");
-            return m;
-        };
-        const auto baseline = run(false);
-        const auto batch = run(true);
-        if (baseline.pauses != baselinePauses || batch.pauses != 0)
-            throw std::runtime_error("Unexpected budget pauses for " + std::string(scenario));
+                      << m.botToolAttempts << " | " << m.elapsed.count() << " |\n";
+            check(m.botToolAttempts == botAttempts, "Measurement disagreed with Bot tool attempt accounting");
+        }
     };
-    const auto searchAndReadiness = [](Fixture&) { return std::vector{search, readiness}; };
-    compare("Session search + readiness", searchAndReadiness, 20, 0, 0);
-    compare(
-        "Four conversation reads", [](Fixture& f) { return std::vector{search, readiness, sessionEvents(f), call("find_tasks")}; }, 20, 0,
-        0);
-    compare("Budget limit 2", searchAndReadiness, 2, 0, 1);
+    compare("Session search + readiness", [](Fixture&) { return std::vector{search, readiness}; }, 0);
+    compare("Four conversation reads", [](Fixture& f) { return std::vector{search, readiness, sessionEvents(f), call("find_tasks")}; }, 0);
     compare(
         "Bot tool reads",
         [](Fixture&) { return std::vector{readResource, call("mcp_read_resource", {{"server", "fixture"}, {"uri", "fixture://other"}})}; },
-        20, 2, 0);
+        2);
 }
 }
 

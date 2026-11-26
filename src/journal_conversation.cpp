@@ -22,7 +22,6 @@ using namespace std::literals;
 constexpr std::array replyRoutes{
     std::pair{ConversationReplyRoute::reply, "reply"sv},
     std::pair{ConversationReplyRoute::error, "error"sv},
-    std::pair{ConversationReplyRoute::model_budget, "model_budget"sv},
     std::pair{ConversationReplyRoute::bot_paused, "bot_paused"sv},
     std::pair{ConversationReplyRoute::session_access, "session_access"sv},
     std::pair{ConversationReplyRoute::session_left, "session_left"sv},
@@ -126,12 +125,5 @@ Id JournalStorage::journalConversationReply(std::optional<Id> task, std::string_
                                              bot);
     database.exec("UPDATE journal SET data=json_set(data,'$.messageId',id) WHERE id=?", {reply});
     return reply;
-}
-
-void JournalStorage::journalConversationBudgetApproved(Id message, Id pause, std::string_view bot) {
-    const auto status = enumName(replyStatuses, ConversationReplyStatus::done);
-    database.exec("UPDATE journal SET conversation_status=?1,data=json_set(data,'$.status',?1) WHERE id=?2", {status, pause});
-    database.writeJournal(std::nullopt, JournalKind::conversation_budget_approved, {{"messageId", message}, {"waitMessageId", pause}},
-                          {.messageId = message, .waitMessageId = pause}, bot);
 }
 }

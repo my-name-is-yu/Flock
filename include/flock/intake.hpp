@@ -11,7 +11,6 @@
 #include <vector>
 
 namespace flockv0 {
-Id initialModelCallLimit(const Json& config);
 
 // Routing and execution settings are saved at intake. Current instructions are loaded for each turn.
 struct Intake {

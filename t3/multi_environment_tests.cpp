@@ -688,40 +688,20 @@ void independentSlots(Scenario& fixture) {
     fixture.checkLaunches();
 }
 
-void deadlines(Scenario& fixture) {
+void longParallelRuns(Scenario& fixture) {
     fixture.start();
     fixture.awaitBothRunning();
-    const auto started = fixture.task();
-    const auto local = Scenario::result(started, fixture.local);
-    const auto mini = Scenario::result(started, fixture.mini);
-    fixture.now = std::max(local.at("deadline").get<Seconds>(), mini.at("deadline").get<Seconds>()) + 1;
-    fixture.advanceUntil([](const TaskView& task) { return task.wait && task.wait->reason() == WaitReason::deadline; },
-                         "an expired Run must notify the user");
-    const auto waiting = fixture.task();
-    const auto& wait = waiting.wait.value();
-    const auto* verification = wait.verification();
-    check(verification, "the deadline must identify the expired Run");
-    const bool localExpiredFirst = verification->actionId == local.at("actionId").get<std::string>();
-    const auto& overdue = localExpiredFirst ? fixture.local : fixture.mini;
-    const auto& sibling = localExpiredFirst ? fixture.mini : fixture.local;
-    check(wait.run && wait.run->environmentId == overdue.id() && wait.run->run.link == overdue.link(),
-          "the deadline must point to its own Run and environment");
-    sibling.configure({{"multiStatus", "completed"}});
-    fixture.advanceUntil([&](const TaskView& task) { return Scenario::result(task, sibling).value("status", "") == "completed"; },
-                         "a deadline wait must not stop another Run from settling");
-    const auto stillWaiting = fixture.task();
-    const auto waitId = wait.id;
-    check(stillWaiting.wait && stillWaiting.wait->id == waitId && stillWaiting.task.generation != waiting.task.generation,
-          "the sibling did not advance the task while preserving the original deadline");
-    const auto extension = fixture.now.load() + 120;
-    TaskControl(fixture.store).operate(localOwner, TaskTarget::from(waiting.task, waitId), "extend", {{"deadline", extension}});
-    const auto extended = fixture.task();
-    check(!extended.wait && Scenario::result(extended, overdue).at("deadline") == extension &&
-              Scenario::result(extended, sibling).at("deadline") == (localExpiredFirst ? mini : local).at("deadline"),
-          "extending changed the wrong deadline");
-    overdue.configure({{"multiStatus", "completed"}});
+    fixture.now += 2 * 86400;
+    fixture.local.configure({{"multiStatus", "completed"}});
+    fixture.advanceUntil([&](const TaskView& task) { return Scenario::result(task, fixture.local).value("status", "") == "completed"; },
+                         "the local Run must settle after a long silence");
+    const auto pending = fixture.task();
+    check(!pending.wait && pending.task.state == TaskState::running &&
+              Scenario::result(pending, fixture.mini).value("status", "") == "running",
+          "a long silent sibling Run paused the task");
+    fixture.mini.configure({{"multiStatus", "completed"}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; },
-                         "the extended Run must finish normally");
+                         "the second Run must finish after the first");
     fixture.checkLaunches();
 }
 
@@ -923,10 +903,10 @@ void recover(Scenario& fixture) {
         [&](const TaskView& task) {
             const auto local = Scenario::result(task, fixture.local);
             const auto mini = Scenario::result(task, fixture.mini);
-            return local.value("status", "") == "running" && local.contains("deadline") &&
-                   mini.value("status", "") == "confirmation_pending" && mini.contains("deadline");
+            return local.value("status", "") == "running" && mini.value("status", "") == "confirmation_pending";
         },
-        "recovered assigned and unconfirmed Runs both need deadlines");
+        "the Local Run must recover while the Mini launch remains unconfirmed");
+    fixture.now += 2 * 86400;
     fixture.local.configure({{"multiStatus", "completed"}});
     fixture.advanceUntil(
         [&](const TaskView& task) {
@@ -934,16 +914,10 @@ void recover(Scenario& fixture) {
                    Scenario::result(task, fixture.mini).value("status", "") == "confirmation_pending";
         },
         "only the Mini should await confirmation after restart");
-    check(Scenario::result(fixture.task(), fixture.mini).value("runId", "").empty(), "Flock attributed an unconfirmed launch");
+    const auto pending = fixture.task();
+    check(!pending.wait && Scenario::result(pending, fixture.mini).value("runId", "").empty(),
+          "a long reconciliation interrupted the task or attributed an unconfirmed launch");
     fixture.checkLaunches();
-    const auto pending = Scenario::result(fixture.task(), fixture.mini);
-    fixture.now = pending.at("deadline").get<Seconds>() + 1;
-    fixture.advanceUntil(
-        [&](const TaskView& task) {
-            const auto* verification = task.wait ? task.wait->verification() : nullptr;
-            return verification && verification->actionId == pending.at("actionId").get<std::string>();
-        },
-        "a lost launch receipt must surface its deadline during reconciliation");
     fixture.mini.configure({{"multiHideLaunch", false}, {"multiStatus", "completed"}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; },
                          "restart must adopt the saved Mini Run");
@@ -993,8 +967,8 @@ int main(int argc, char** argv) {
                 independentSlots(fixture);
             }
             {
-                Scenario fixture(local, mini, directory, commit, "deadlines");
-                deadlines(fixture);
+                Scenario fixture(local, mini, directory, commit, "long-parallel");
+                longParallelRuns(fixture);
             }
             {
                 Scenario fixture(local, mini, directory, commit, "partial");

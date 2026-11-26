@@ -135,7 +135,6 @@ void runtime::PeerExchanges::sendPeer(TaskData& sender, const Json& event, const
     }
     const auto kind = field(decision.args, "kind");
     const bool work = kind == "work";
-    bool charge = false;
     if (work) {
         if (sender.activeRun || !sender.actionId.empty())
             throw Conflict("Let the assigned Run settle before requesting another Bot's work");
@@ -144,7 +143,6 @@ void runtime::PeerExchanges::sendPeer(TaskData& sender, const Json& event, const
         if (!peer.intake.projectId.empty() &&
             peerStorage.peerWorkRouteWouldCycle(sender.id, peer.intake.environmentId, peer.intake.projectId))
             throw Conflict("This work request would make two project queues wait for one another");
-        if (!updates.admitWork(sender, decision, charge)) return;
         updates.establishCriteria(sender, args);
     }
     peer.intake.request = note.empty() && forwarded ? forwarded->text : note;
@@ -153,7 +151,6 @@ void runtime::PeerExchanges::sendPeer(TaskData& sender, const Json& event, const
     auto recipient = taskRecords.load(id);
     const PeerExchange exchange{action, kind, "working", "", sender.id, id};
     auto message = peerMessage(exchange, sender, recipient, "request", note, action);
-    message.chargesBudget = charge;
     message.forwarded = std::move(forwarded);
     transitionPeer(exchange, sender, recipient, message, message.forwarded ? sender.sourceMessageId : std::nullopt);
     updates.recordDecision(sender, event, decision, action);

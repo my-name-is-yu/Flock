@@ -58,7 +58,6 @@ bool validExternalId(std::string_view id) {
 Json route(const Intake& intake) {
     if (!validBotId(intake.botId) || intake.environmentId.empty() || intake.projectId.empty() || !intake.config.is_object())
         throw Conflict("Automation requires a configured Bot");
-    initialModelCallLimit(intake.config);
     return {{"environmentId", intake.environmentId}, {"projectId", intake.projectId}, {"config", intake.config}};
 }
 
@@ -397,14 +396,7 @@ void AutomationStorage::refreshPlannerModel(std::string_view bot, Json& config) 
 
 Json AutomationStorage::automationRoute(std::string_view bot, Json routing) const {
     if (!model_) return routing;
-    if (const auto current = model_(bot)) {
-        auto& config = routing.at("config");
-        applyPlannerModel(config, *current);
-        if (current->modelCallLimit)
-            config["modelCallLimit"] = *current->modelCallLimit;
-        else
-            config.erase("modelCallLimit");
-    }
+    if (const auto current = model_(bot)) applyPlannerModel(routing.at("config"), *current);
     return routing;
 }
 

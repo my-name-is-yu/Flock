@@ -13,13 +13,11 @@
 #include "flock/run_report.hpp"
 #include "flock/wait.hpp"
 #include "flock/outbox.hpp"
-#include "bot_settings_storage.hpp"
 #include "database.hpp"
 #include "flock/policy_action.hpp"
 #include "policy_approvals.hpp"
 #include "task_records.hpp"
 #include "task_routing.hpp"
-#include "wait_storage.hpp"
 
 #include <cstddef>
 #include <optional>
@@ -29,26 +27,6 @@
 namespace flockv0 {
 namespace {
 constexpr std::size_t maxDestinationEvidenceReads = 3;
-}
-
-bool runtime::OutboxDispatch::destinationDeadline(TaskData& task, DestinationRun& run, Seconds now) {
-    if (task.state == TaskState::cancelling || !run.outstanding()) return false;
-    const auto& action = run.actionId;
-    const auto& environment = run.environmentId;
-    const bool missing = !run.deadline;
-    if (missing) {
-        auto launch = database.query(R"SQL(
-SELECT time FROM journal WHERE task_id=? AND kind='send_started'
-AND action_id=? ORDER BY id LIMIT 1)SQL",
-                                     {task.id, action});
-        const auto startedAt = launch.next() ? launch.number(0) : now;
-        run.deadline = startedAt + botSettingsStorage.environmentTimeout(task.botId, environment, task.config);
-    }
-    const auto deadline = *run.deadline;
-    if (deadline <= 0 || now < deadline || task.state == TaskState::waiting) return missing;
-    waitStorage.wait(task, DeadlineWait{VerificationDeadline{deadline, action}}, run.name + " reached its deadline",
-                     WaitRun{run.ref, environment});
-    return true;
 }
 
 void runtime::OutboxDispatch::stepDestination(const TaskData& task, const DestinationRun& run) {
@@ -91,10 +69,6 @@ void runtime::OutboxDispatch::stepDestination(const TaskData& task, const Destin
         });
         return;
     }
-    const bool unconfirmedRunNeedsDeadlineCheck =
-        phase == OutboxPhase::started && !stopping && (!run.deadline || (task.state != TaskState::waiting && now >= *run.deadline));
-    if (unconfirmedRunNeedsDeadlineCheck)
-        updates.changeTask(id, [&](TaskData& current) { return destinationDeadline(current, destinationRun(current, key), now); });
     if (now < run.retryAt.value_or(0)) return;
     if (phase == OutboxPhase::ready) {
         std::lock_guard lock(database.mutex);
@@ -127,7 +101,6 @@ void runtime::OutboxDispatch::stepDestination(const TaskData& task, const Destin
         if (!saved.outstanding() || saved.ref.threadId != ref.threadId || saved.ref.runId != ref.runId) return false;
         const auto savedAction = outboxStorage.outbox(current, key);
         const bool stopping = current.state == TaskState::cancelling || destinationStopRequested(savedAction, ref);
-        bool changed = false;
         if (observed.kind == Kind::Unavailable) {
             const bool sessionMissing =
                 stopping && database
@@ -137,18 +110,17 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
 )SQL",
                                        {id, key, saved.environmentId, saved.ref.gatewayEnvironmentId, ref.threadId, ref.runId})
                                 .next();
-            changed = setDestinationStatus(
+            return setDestinationStatus(
                 saved, DestinationRunPhase::confirmation_pending,
                 sessionMissing ? "T3 could not find this Session when Flock tried to stop it. Check its delegated Sessions in T3. "
                                  "Flock is keeping the project on hold until the work settles."
                                : "Flock could not confirm the Run's status in T3.");
-        } else if (observed.kind == Kind::Question || observed.kind == Kind::ExternalInput)
-            changed = setDestinationStatus(saved, DestinationRunPhase::confirmation_pending,
-                                           "Review the pending input or approval in this T3 Session.");
-        else if (!stopping)
-            changed =
-                setDestinationStatus(saved, observed.status == "queued" ? DestinationRunPhase::queued : DestinationRunPhase::running, {});
-        return (!stopping && destinationDeadline(current, saved, now)) || changed;
+        }
+        if (observed.kind == Kind::Question || observed.kind == Kind::ExternalInput)
+            return setDestinationStatus(saved, DestinationRunPhase::confirmation_pending,
+                                        "Review the pending input or approval in this T3 Session.");
+        return !stopping &&
+               setDestinationStatus(saved, observed.status == "queued" ? DestinationRunPhase::queued : DestinationRunPhase::running, {});
     });
     if (!stopping || observed.kind == Kind::Settling || observed.kind == Kind::Unavailable || now < run.stopRetryAt.value_or(0)) return;
     if (!updates.changeTask(id, [&](TaskData& current) {

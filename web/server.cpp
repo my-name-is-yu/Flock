@@ -206,11 +206,6 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
 
 Json operationData(const Json& body, std::string_view operation) {
     if (operation == "answer") return {{"text", requiredText(body, "text", limits::messages::maxWaitAnswerBytes)}};
-    if (operation == "extend") {
-        const auto deadline = bodyId(body, "deadline");
-        if (deadline <= unixTime()) throw InputError("invalid_deadline");
-        return {{"deadline", deadline}};
-    }
     if (operation == "reconcile") {
         Json data = Json::object();
         for (const auto* key : {"threadId", "runId", "questionId"}) {
@@ -221,7 +216,7 @@ Json operationData(const Json& body, std::string_view operation) {
             throw InputError("invalid_reconciliation_target");
         return data;
     }
-    if (operation != "approve" && operation != "retry" && operation != "cancel") throw InputError("invalid_operation");
+    if (operation != "retry" && operation != "cancel") throw InputError("invalid_operation");
     return Json::object();
 }
 
@@ -667,8 +662,7 @@ private:
             const auto id = web::field(item, "botId");
             if (!page.scope.contains(id) || !item.value("canDecide", false) || web::field(item, "status") == "expired") continue;
             const auto kind = web::field(item, "itemKind");
-            const auto& eventId = item.at(kind == "conversation_model_budget" ? "waitId" : "itemId");
-            inbox.push_back({{"id", eventId}, {"botId", id}, {"botName", names.at(id)}, {"kind", kind}});
+            inbox.push_back({{"id", item.at("itemId")}, {"botId", id}, {"botName", names.at(id)}, {"kind", kind}});
         }
         for (auto& event : page.events) event["botName"] = names.at(web::field(event, "botId"));
         return {{"through", page.through},

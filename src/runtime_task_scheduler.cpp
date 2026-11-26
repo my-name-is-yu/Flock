@@ -109,7 +109,7 @@ void runtime::TaskScheduler::activate(TaskData task) {
         auto turn = database.query("SELECT 1 FROM task_project_slots WHERE id=? AND blocker_id IS NULL", {current.id});
         if (!turn.next()) return false;
         if (current.workflow && !current.lastRun) {
-            dispatch.queueAction(current, actionId(), CommandTool::delegate, "", Json::object(), Json::object(), false);
+            dispatch.queueAction(current, actionId(), CommandTool::delegate, "", Json::object(), Json::object());
             return true;
         }
         if (current.eventId == 0) taskEvents.event(current, "intake", {{"kind", "intake"}});

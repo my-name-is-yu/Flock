@@ -40,7 +40,6 @@ constexpr std::pair<Action, std::string_view> actions[] = {
     {Action::mcp_invoke, "mcp.invoke"},
     {Action::mcp_read_resource, "mcp.read_resource"},
     {Action::environment_inspect, "environment.inspect"},
-    {Action::environment_configure, "environment.configure"},
     {Action::environment_launch, "environment.launch"},
     {Action::shared_memory_read, "shared_memory.read"},
     {Action::shared_memory_write, "shared_memory.write"},
