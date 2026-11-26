@@ -63,7 +63,7 @@ Observation Runtime::Components::RunObserver::observe(const TaskData& task) {
 bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Observation& observed) {
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
-    auto task = db.load(snapshot.id);
+    auto task = db.taskRecords.load(snapshot.id);
     if (task.generation != snapshot.generation || task.eventId != snapshot.eventId || task.currentRevision != snapshot.currentRevision ||
         task.activeRun != snapshot.activeRun)
         return false;
@@ -72,7 +72,7 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
     const bool changed = [&] {
         const auto run = task.activeRun.value().ref;
         const auto state = task.state;
-        const auto wait = db.currentWait(task.id);
+        const auto wait = db.waitStorage.currentWait(task.id);
         const auto reason = wait ? std::optional{wait->reason()} : std::nullopt;
         const bool connectionWait = reason == WaitReason::auth || reason == WaitReason::settings;
         const bool replanning = task.replanning;
@@ -100,13 +100,13 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
             if (sqlite3_changes(db.db)) {
                 if (observed.evidence == RunEvidence::Availability::ReportUnavailable && !observed.resultRunId.empty() &&
                     state != TaskState::cancelling && !replanning) {
-                    db.journalRunSettled(task.id, report);
+                    db.journalStorage.journalRunSettled(task.id, report);
                     task.pendingRunReport = PendingRunReport{std::move(report), clock() + 5, 0};
                 } else
                     reports.writeRunReport(task, report);
             }
             if (task.runStop) {
-                db.journal(task.id, "interrupt_settled", runStopJson(*task.runStop));
+                db.journalStorage.journal(task.id, "interrupt_settled", runStopJson(*task.runStop));
                 task.runStop.reset();
             }
             if (state == TaskState::cancelling)
@@ -121,7 +121,7 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
         if (task.selectedSession && observed.kind != Observation::Kind::Unavailable) {
             if (observed.kind == Observation::Kind::Running && observed.status == "queued") {
                 if (connectionWait) {
-                    db.clearWait(task, "connection_restored");
+                    db.waitStorage.clearWait(task, "connection_restored");
                     task.state = TaskState::running;
                 }
                 if (task.queuedInT3) return connectionWait;
@@ -148,29 +148,29 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
             questions.closeQuestion(task, "session_question", "replaced");
             updates.consumeEvent(task);
             const Json data = {{"kind", "question"}, {"run", runJson(run)}, {"question", questionJson(observed.question)}};
-            db.event(task, "question/" + task.environmentId + "/" + run.threadId + "/" + observed.question.requestId, data);
+            db.taskEvents.event(task, "question/" + task.environmentId + "/" + run.threadId + "/" + observed.question.requestId, data);
             task.question =
                 TaskQuestion{observed.question.fields, {std::nullopt, task.eventId, taskWaitRun(task), observed.question.requestId}};
-            db.journal(task.id, "session_question", data);
+            db.journalStorage.journal(task.id, "session_question", data);
             task.state = TaskState::deciding;
             return true;
         }
         if (observed.kind == Observation::Kind::ExternalInput) {
             if (reason == WaitReason::t3_input) return false;
-            db.unlockQuestion(task, "requires_t3");
+            db.waitStorage.unlockQuestion(task, "requires_t3");
             updates.consumeEvent(task);
-            db.wait(task, SimpleWaitReason::t3_input, bounded(observed.status, 2048));
+            db.waitStorage.wait(task, SimpleWaitReason::t3_input, bounded(observed.status, 2048));
             return true;
         }
         if (observed.kind == Observation::Kind::Unavailable) {
             if (observed.status == "auth" && reason != WaitReason::auth) {
                 questions.suspendQuestion(task);
-                db.wait(task, SimpleWaitReason::auth, "T3 authentication is unavailable");
+                db.waitStorage.wait(task, SimpleWaitReason::auth, "T3 authentication is unavailable");
                 return true;
             }
             if (observed.status == "settings" && reason != WaitReason::settings) {
                 questions.suspendQuestion(task);
-                db.wait(task, SimpleWaitReason::settings, "T3 connection settings need attention");
+                db.waitStorage.wait(task, SimpleWaitReason::settings, "T3 connection settings need attention");
                 return true;
             }
         }
@@ -182,12 +182,12 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
             return true;
         }
         if (available && connectionWait) {
-            db.clearWait(task, "connection_restored");
+            db.waitStorage.clearWait(task, "connection_restored");
             task.state = TaskState::running;
             return true;
         }
         if (state == TaskState::running && task.deadline > 0 && clock() >= task.deadline) {
-            db.wait(task, DeadlineWait{}, "This request reached its deadline");
+            db.waitStorage.wait(task, DeadlineWait{}, "This request reached its deadline");
             return true;
         }
         return leftQueue;
@@ -239,7 +239,7 @@ void Runtime::Components::RunObserver::interruptRun(const TaskData& task) {
     if (outcome != InterruptOutcome::Requested) return stopNote(requested, "Waiting for T3 to confirm this work has stopped");
     std::lock_guard lock(db.mutex);
     Transaction transaction(db.db);
-    db.journalInterrupt(task.id, stop);
+    db.journalStorage.journalInterrupt(task.id, stop);
     transaction.commit();
 }
 
@@ -258,9 +258,9 @@ void Runtime::Components::RunObserver::cancelDone(TaskData& task) {
     task.cancelledInstructions = std::exchange(task.pendingInstructions, {});
     task.activeRun.reset();
     task.state = TaskState::cancelled;
-    db.journalCancelled(task.id);
+    db.journalStorage.journalCancelled(task.id);
     if (const auto peer = db.peerExchange(task.id); peer && peer->recipient == task.id)
-        peerExchanges.finishPeer(*peer, task, db.load(peer->sender), "cancelled",
+        peerExchanges.finishPeer(*peer, task, db.taskRecords.load(peer->sender), "cancelled",
                                  task.cancelledByBotPause ? "The receiving Bot is paused." : "The receiving Bot's task was cancelled.",
                                  actionId());
 }
@@ -278,7 +278,7 @@ void Runtime::Components::RunObserver::finishReplan(const TaskData& task) {
         const bool moving =
             destination && (destination->route.environmentId != oldEnvironment || destination->route.gatewayEnvironmentId != oldGateway ||
                             (destination->pinned && destination->route.projectId != oldProject));
-        const auto event = db.currentEvent(current);
+        const auto event = db.taskEvents.currentEvent(current);
         const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true && event["kind"] == "bot_answer";
         if (moving) {
             current.environmentId = destination->route.environmentId;
@@ -289,20 +289,20 @@ void Runtime::Components::RunObserver::finishReplan(const TaskData& task) {
                 current.gatewayEnvironmentId = destination->route.gatewayEnvironmentId;
             current.newSessionRequired = true;
             current.selectedSession.reset();
-            db.journal(id, "session_destination_changed",
-                       {{"from", oldEnvironment},
-                        {"to", destination->route.environmentId},
-                        {"fromProject", oldProject},
-                        {"toProject", current.projectId},
-                        {"revisionId", revisionJson(current.currentRevision)}});
+            db.journalStorage.journal(id, "session_destination_changed",
+                                      {{"from", oldEnvironment},
+                                       {"to", destination->route.environmentId},
+                                       {"fromProject", oldProject},
+                                       {"toProject", current.projectId},
+                                       {"revisionId", revisionJson(current.currentRevision)}});
         }
         if (destination && (destination->pinned || destination->route.projectId.empty())) current.pendingDestination.reset();
         questions.closeQuestion(current, "user_instruction");
         if (!preservePeerAnswer) {
             updates.consumeEvent(current);
             const auto report = reports.settledSessionReport(current);
-            db.event(current, "replan/" + std::to_string(current.generation),
-                     report ? encodeRunReport(report->data) : Json{{"kind", "intake"}});
+            db.taskEvents.event(current, "replan/" + std::to_string(current.generation),
+                                report ? encodeRunReport(report->data) : Json{{"kind", "intake"}});
         }
         const bool needsQueue =
             moving || current.state == TaskState::queued || current.projectId.empty() || (current.workflow && !current.lastRun);
@@ -321,7 +321,8 @@ void Runtime::Components::RunObserver::stopNote(const TaskData& snapshot, const 
         auto& saved = cancel ? task.cancellationDetail : task.replanningDetail;
         if (saved == detail) return false;
         saved = detail;
-        db.journal(task.id, cancel ? "cancelling" : "replanning", {{"detail", detail}, {"run", assignedRunJson(task.activeRun)}});
+        db.journalStorage.journal(task.id, cancel ? "cancelling" : "replanning",
+                                  {{"detail", detail}, {"run", assignedRunJson(task.activeRun)}});
         return true;
     });
 }

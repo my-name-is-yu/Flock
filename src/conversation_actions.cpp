@@ -232,7 +232,7 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
     std::lock_guard lock(mutex);
     Transaction transaction(db);
     if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step}).next()) return stop;
-    if (outcome.value("ok", false)) journalInterrupt(effect->taskId, {id, step, effect->run});
+    if (outcome.value("ok", false)) journalStorage.journalInterrupt(effect->taskId, {id, step, effect->run});
     saveTurnResults(id, step, Json::array({outcome}));
     transaction.commit();
     return advance;
@@ -256,14 +256,14 @@ bool Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& rec
           receipt.taskId, receipt.actionId, delivery.delivery == "queued" ? "queued" : "started",
           secretStorage.redactor(receipt.bot).text(delivery.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
     if (!receipt.taskId || receipt.actionId.empty()) return true;
-    auto task = load(receipt.taskId);
+    auto task = taskRecords.load(receipt.taskId);
     if (terminal(task)) return true;
     auto& run = destinationRun(task, receipt.actionId);
     auto report = query(R"SQL(
 SELECT 1 FROM journal WHERE task_id=? AND kind='report'
 AND run_environment_id=? AND run_id=? AND run_thread_id=? LIMIT 1)SQL",
                         {receipt.taskId, run.environmentId, run.ref.runId, run.ref.threadId});
-    if ((!run.outstanding() || report.next()) && advanceDestinationSessionMessageRun(task, run)) save(task);
+    if ((!run.outstanding() || report.next()) && advanceDestinationSessionMessageRun(task, run)) taskRecords.save(task);
     return true;
 }
 
@@ -898,7 +898,7 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
             (*origin)["title"] = "";
         const ConversationWakeEntry wake{wait.target.environmentId, wait.target.threadId, std::move(title), reason, wait.message};
         routing["sessionWake"] = encodeConversationWake(wake);
-        const auto id = journalConversationMessage(wait.bot, {wake});
+        const auto id = journalStorage.journalConversationMessage(wait.bot, {wake});
         exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,'',?,?,?,? FROM messages WHERE bot_id=?
@@ -928,7 +928,7 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
     if (selectedSession) secretStorage.redactor(bot).requirePublic(selectedSession->target.threadId);
     const auto id = submit({std::string(bot), std::string(request), destination.environmentId, destination.projectId, routing.at("config")},
                            messageId, reference ? &*reference : nullptr);
-    auto task = load(id);
+    auto task = taskRecords.load(id);
     if (!destination.gatewayEnvironmentId.empty() && destination.gatewayEnvironmentId != destination.environmentId)
         task.gatewayEnvironmentId = destination.gatewayEnvironmentId;
     if (const auto origin = routing.find("sessionOrigin"); origin != routing.end())
@@ -953,7 +953,7 @@ WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.
     task.sourceMessageCoversFullRequest = !reference && message.next() && message.string(0) == request;
     if (resume) {
         const auto priorId = reference.value().taskId;
-        const auto prior = load(priorId);
+        const auto prior = taskRecords.load(priorId);
         const auto criteria = effectiveDoneWhen(prior);
         if (!criteria.empty()) task.criteriaProposal = TaskCriteriaProposal{criteria, std::nullopt};
         const auto& pending = prior.cancelledInstructions;
@@ -981,11 +981,11 @@ WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.
             item.revisionId.reset();
             item.conflicting = false;
             if (item.source) rememberSourceResult(task, *item.source);
-            journal(id, item);
+            journalStorage.journal(id, item);
             task.pendingInstructions.push_back(std::move(item));
         }
     }
-    save(task);
+    taskRecords.save(task);
     return id;
 }
 
@@ -1027,11 +1027,11 @@ bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std:
         const bool intentChanged = oldIntent != intent;
         if (criteriaChanged || intentChanged) {
             if (task.currentRevision)
-                revision = addRevision(task, intent, done, messageId);
+                revision = taskRecords.addRevision(task, intent, done, messageId);
             else {
                 task.intent = intent;
                 if (criteriaChanged) task.criteriaProposal = TaskCriteriaProposal{done, messageId};
-                journal(task.id, "task_contract_changed", {{"messageId", messageId}});
+                journalStorage.journal(task.id, "task_contract_changed", {{"messageId", messageId}});
             }
             if (intentChanged) task.sourceMessageCoversFullRequest = false;
             conflicting = true;
@@ -1047,22 +1047,22 @@ bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std:
         task.replanning = true;
         releaseModelCall(takeReservedTaskCall(task.eventId));
         if (isUndispatchedNotesWait(task)) {
-            clearWait(task, "request_changed");
+            waitStorage.clearWait(task, "request_changed");
             task.state = TaskState::queued;
-        } else if (task.state == TaskState::waiting && waitIsActionable(task)) {
-            auto previous = currentWait(task.id);
+        } else if (task.state == TaskState::waiting && waitStorage.waitIsActionable(task)) {
+            auto previous = waitStorage.currentWait(task.id);
             if (!previous) throw DecisionUnavailable{};
             const auto reason = previous->reason();
-            if (const auto allowance = waitAllowance(task.id, reason)) previous->allowance = allowance;
-            clearWait(task, "request_changed");
-            const auto waitId = wait(task, std::move(*previous));
+            if (const auto allowance = waitStorage.waitAllowance(task.id, reason)) previous->allowance = allowance;
+            waitStorage.clearWait(task, "request_changed");
+            const auto waitId = waitStorage.wait(task, std::move(*previous));
             if (task.question) task.question->target = questionTarget(task, reason == WaitReason::user_question ? waitId : 0);
         }
     }
     if (task.question) task.question->suspendedDecision.reset();
-    journal(task.id, pending);
+    journalStorage.journal(task.id, pending);
     task.pendingInstructions.push_back(std::move(pending));
-    save(task);
+    taskRecords.save(task);
     return conflicting;
 }
 
@@ -1070,8 +1070,8 @@ void Store::Impl::recordTaskBlocker(TaskData& task, std::string_view reason, Id 
     if ((!reason.empty() && !conversation_storage::hasText(reason)) || reason.size() > 2000)
         throw Conflict("Provide a blocker reason of up to 2,000 bytes, or an empty string to clear it");
     if (waitId) {
-        const auto wait = currentWait(task.id);
-        if (reason.empty() || task.state != TaskState::waiting || !wait || wait->id != waitId || !waitIsActionable(task))
+        const auto wait = waitStorage.currentWait(task.id);
+        if (reason.empty() || task.state != TaskState::waiting || !wait || wait->id != waitId || !waitStorage.waitIsActionable(task))
             throw DecisionUnavailable{};
     }
     const auto publicReason = secretStorage.redactor(task.botId).text(std::string(reason));
@@ -1081,26 +1081,26 @@ void Store::Impl::recordTaskBlocker(TaskData& task, std::string_view reason, Id 
         task.blocker = RecordedTaskBlocker{publicReason, waitId ? std::optional{waitId} : std::nullopt};
     auto entry = Json{{"blockerReason", publicReason}, {"targetRevision", task.currentRevision.value_or(0)}};
     if (waitId) entry["waitId"] = waitId;
-    journal(task.id, reason.empty() ? "blocker_cleared" : "blocker_recorded", entry);
-    save(task);
+    journalStorage.journal(task.id, reason.empty() ? "blocker_cleared" : "blocker_recorded", entry);
+    taskRecords.save(task);
 }
 
 void Store::Impl::withdrawTaskQuestion(TaskData& task, Id waitId) {
-    const auto wait = currentWait(task.id);
+    const auto wait = waitStorage.currentWait(task.id);
     if (task.state != TaskState::waiting || !wait || wait->reason() != WaitReason::user_question || wait->id != waitId ||
-        !waitIsActionable(task))
+        !waitStorage.waitIsActionable(task))
         throw Conflict("The question is no longer open");
     if (std::holds_alternative<ProjectQuestionWait>(wait->details)) throw Conflict("Choose a T3 project before this task can start");
-    auto updated = currentEvent(task);
+    auto updated = taskEvents.currentEvent(task);
     for (const auto* metadata : {"id", "failures", "retryAt", "evidence", "consumed"}) updated.erase(metadata);
     updated["withdrawnUserQuestion"] = wait->text;
-    consumeEvent(task);
-    event(task, "withdraw/" + std::to_string(waitId), updated);
-    clearWait(task, "withdrawn");
+    taskEvents.consumeEvent(task);
+    taskEvents.event(task, "withdraw/" + std::to_string(waitId), updated);
+    waitStorage.clearWait(task, "withdrawn");
     if (task.question) task.question->target = questionTarget(task);
-    journal(task.id, "question_withdrawn", {{"waitId", waitId}});
+    journalStorage.journal(task.id, "question_withdrawn", {{"waitId", waitId}});
     task.state = TaskState::deciding;
-    save(task);
+    taskRecords.save(task);
 }
 
 }

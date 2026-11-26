@@ -1,3 +1,9 @@
+#include "json_fields.hpp"
+#include "database.hpp"
+#include "journal_storage.hpp"
+#include "task_events.hpp"
+#include "task_records.hpp"
+#include "wait_storage.hpp"
 #include "runtime_task_updates.hpp"
 #include "journal_task.hpp"
 #include "flock/types.hpp"
@@ -17,17 +23,17 @@ namespace flockv0 {
 void Runtime::Components::TaskUpdates::saveTask(TaskData& task, std::optional<DecisionCheckpoint> resumedDecision) {
     if (resumedDecision) resumedDecision->generation = task.generation + 1;
     task.pendingDecision = std::move(resumedDecision);
-    db.save(task);
+    records.save(task);
 }
 
 void Runtime::Components::TaskUpdates::consumeEvent(TaskData& task) {
     task.feedback.reset();
-    db.consumeEvent(task);
+    events.consumeEvent(task);
 }
 
 TaskData Runtime::Components::TaskUpdates::snapshot(Id id) {
-    std::lock_guard lock(db.mutex);
-    return db.load(id);
+    std::lock_guard lock(database.mutex);
+    return records.load(id);
 }
 
 bool Runtime::Components::TaskUpdates::checkpointMatches(const DecisionCheckpoint& checkpoint, const TaskData& task) {
@@ -35,11 +41,11 @@ bool Runtime::Components::TaskUpdates::checkpointMatches(const DecisionCheckpoin
 }
 
 bool Runtime::Components::TaskUpdates::admitWork(TaskData& task, const TaskDecision& decision, bool& charge) {
-    charge = task.lastRun || db.query("SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1", {task.id}).next();
+    charge = task.lastRun || database.query("SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1", {task.id}).next();
     if (!charge) return true;
     if (task.allowance.remaining == 0) {
-        db.wait(task, WorkBudgetWait{workBudgetTool(decision.tool), decision.reason, waitUsage(decision.usage)},
-                "This request used its allowance for follow-up work.");
+        waits.wait(task, WorkBudgetWait{workBudgetTool(decision.tool), decision.reason, waitUsage(decision.usage)},
+                   "This request used its allowance for follow-up work.");
         return false;
     }
     --task.allowance.remaining;
@@ -51,16 +57,16 @@ void Runtime::Components::TaskUpdates::establishCriteria(TaskData& task, const J
     if (task.currentRevision) return;
     const auto source = task.sourceMessageId.value_or(0);
     if (const auto& proposal = task.criteriaProposal)
-        db.addRevision(task, task.intent, proposal->doneWhen, proposal->sourceMessageId.value_or(source));
+        records.addRevision(task, task.intent, proposal->doneWhen, proposal->sourceMessageId.value_or(source));
     else
-        db.addRevision(task, task.intent, field(args, "doneWhen"), source);
+        records.addRevision(task, task.intent, field(args, "doneWhen"), source);
     task.criteriaProposal.reset();
 }
 
 void Runtime::Components::TaskUpdates::recordDecision(const TaskData& task, const Json& event, const TaskDecision& decision,
                                                       std::string_view action) {
-    db.journal(task.id, DecisionEntry{event.at("id").get<Id>(), task.currentRevision, std::string(action), decision, event.at("evidence"),
-                                      decision.usage});
+    journal.journal(task.id, DecisionEntry{event.at("id").get<Id>(), task.currentRevision, std::string(action), decision,
+                                           event.at("evidence"), decision.usage});
 }
 
 void Runtime::Components::TaskUpdates::refundUnsentWork(TaskData& task, const Outbox& action) {

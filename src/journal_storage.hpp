@@ -1,0 +1,66 @@
+#pragma once
+
+#include <optional>
+#include <string_view>
+#include "flock/json.hpp"
+#include "flock/store.hpp"
+#include "flock/types.hpp"
+
+namespace flockv0 {
+
+class Database;
+struct AssignedRun;
+struct CompletionEntry;
+struct ConversationInterruptEntry;
+struct ConversationMessageEntry;
+struct ConversationReplyEntry;
+struct DecisionEntry;
+struct DeliveredInstructionEntry;
+struct GitPrFollowupEntry;
+struct OutboxInstruction;
+struct PeerEvidenceEntry;
+struct PrReviewRequestedEntry;
+struct RunReportEntry;
+struct RunStop;
+struct SendStartedEntry;
+struct SessionStop;
+struct SettledRunReport;
+struct TaskRevisionEntry;
+struct ToolErrorEntry;
+struct UserAnswerEntry;
+struct Wait;
+enum class JournalKind;
+
+class JournalStorage {
+public:
+    JournalStorage(Database& database, Store::Impl& remaining) : database(database), remaining(remaining) {}
+
+    Id journal(Id, std::string_view kind, const Json&);
+    Id journal(Id, const Wait&);
+    Id journal(Id, const CompletionEntry&);
+    Id journal(Id, const ToolErrorEntry&);
+    Id journal(Id, const DecisionEntry&);
+    Id journalCancelRequested(Id, SessionStop);
+    Id journalCancelled(Id);
+    Id journal(Id, const UserAnswerEntry&);
+    Id journal(Id, const OutboxInstruction&);
+    Id journal(Id, const DeliveredInstructionEntry&);
+    Id journal(Id, const TaskRevisionEntry&);
+    Id journal(Id, const SendStartedEntry&);
+    Id journal(Id, const RunReportEntry&);
+    Id journal(Id, const PeerEvidenceEntry&, const Json& usage);
+    Id journal(Id, const PrReviewRequestedEntry&);
+    Id journal(Id, const GitPrFollowupEntry&);
+    Id journalRunSettled(Id, const SettledRunReport&);
+    Id journalConversationMessage(std::string_view bot, const ConversationMessageEntry&);
+    Id journalConversationReply(std::optional<Id> task, std::string_view bot, const ConversationReplyEntry&);
+    void journalConversationBudgetApproved(Id message, Id pause, std::string_view bot);
+    Id journalInterrupt(Id, const RunStop&);
+    Id journalInterrupt(Id, const ConversationInterruptEntry&);
+private:
+    Id writeRunReportJournal(Id, JournalKind, const RunReportEntry&);
+private:
+    Database& database;
+    Store::Impl& remaining;
+};
+}

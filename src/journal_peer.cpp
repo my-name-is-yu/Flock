@@ -1,3 +1,4 @@
+#include "journal_storage.hpp"
 #include "journal_peer.hpp"
 #include "journal.hpp"
 #include "record_decode.hpp"
@@ -132,21 +133,22 @@ void Store::Impl::peerMessage(const PeerExchange& exchange, const BotMessageEntr
     writeJournal(exchange.recipient, JournalKind::bot_message, data, keys);
 }
 
-Id Store::Impl::journal(Id task, const PeerEvidenceEntry& entry, const Json& usage) {
+Id JournalStorage::journal(Id task, const PeerEvidenceEntry& entry, const Json& usage) {
     auto data = encodePeerEvidence(entry);
     if (!usage.empty()) data["usage"] = usage;
-    return writeJournal(task, JournalKind::read_bot_evidence, data, {.exchangeId = entry.exchangeId, .peerMessageId = entry.messageId});
+    return database.writeJournal(task, JournalKind::read_bot_evidence, data,
+                                 {.exchangeId = entry.exchangeId, .peerMessageId = entry.messageId});
 }
 
-Id Store::Impl::journal(Id task, const PrReviewRequestedEntry& entry) {
-    return writeJournal(task, JournalKind::pr_review_requested,
-                        {{"itemId", entry.itemId}, {"title", entry.title}, {"text", entry.text}, {"prUrl", entry.prUrl}},
-                        {.prReviewItemId = entry.itemId});
+Id JournalStorage::journal(Id task, const PrReviewRequestedEntry& entry) {
+    return database.writeJournal(task, JournalKind::pr_review_requested,
+                                 {{"itemId", entry.itemId}, {"title", entry.title}, {"text", entry.text}, {"prUrl", entry.prUrl}},
+                                 {.prReviewItemId = entry.itemId});
 }
 
-Id Store::Impl::journal(Id task, const GitPrFollowupEntry& entry) {
-    return writeJournal(task, JournalKind::git_pr_followup_requested,
-                        {{"operationId", entry.operationId}, {"eventId", entry.eventId}, {"messageId", entry.messageId}},
-                        {.gitEventId = entry.eventId, .operationId = entry.operationId});
+Id JournalStorage::journal(Id task, const GitPrFollowupEntry& entry) {
+    return database.writeJournal(task, JournalKind::git_pr_followup_requested,
+                                 {{"operationId", entry.operationId}, {"eventId", entry.eventId}, {"messageId", entry.messageId}},
+                                 {.gitEventId = entry.eventId, .operationId = entry.operationId});
 }
 }

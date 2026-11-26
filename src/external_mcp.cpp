@@ -178,14 +178,14 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db, Transaction::Mode::read);
     const auto owner = authorizeTask(connection, taskId);
-    const auto task = db.load(taskId);
+    const auto task = db.taskRecords.load(taskId);
     const auto scrub = db.secretStorage.redactor(owner.bot);
     const auto publicText = [&](std::string_view text) { return redactConnectionTokens(scrub.text(text)); };
     Json data{{"taskId", taskId},    {"bot", owner.bot},  {"status", taskStateName(task.state)},
               {"question", nullptr}, {"result", nullptr}, {"sessionRun", nullptr}};
-    if (const auto wait = db.currentWait(taskId)) {
+    if (const auto wait = db.waitStorage.currentWait(taskId)) {
         data["waitReason"] = waitReasonName(wait->reason());
-        if (task.state == TaskState::waiting && wait->reason() == WaitReason::user_question && db.waitIsActionable(task)) {
+        if (task.state == TaskState::waiting && wait->reason() == WaitReason::user_question && db.waitStorage.waitIsActionable(task)) {
             auto choices = Json::array();
             for (const auto& choice : wait->choices()) choices.push_back(publicText(choice));
             const auto target = TaskTarget::from(task, wait->id);

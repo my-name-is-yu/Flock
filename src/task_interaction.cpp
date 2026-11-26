@@ -1,6 +1,9 @@
+#include "wait_storage.hpp"
+#include "flock/secrets.hpp"
+#include "database.hpp"
+#include "task_records.hpp"
 #include "task_interaction_storage.hpp"
 #include "record_decode.hpp"
-#include "storage.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
@@ -160,8 +163,9 @@ void redactQuestion(Question& question, const SecretRedactor& scrub) {
     }
 }
 
-void Store::Impl::saveDecisionCheckpoint(TaskData& task, DecisionCheckpoint checkpoint) {
+void TaskRecords::saveDecisionCheckpoint(TaskData& task, DecisionCheckpoint checkpoint) {
     task.pendingDecision = std::move(checkpoint);
-    exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?)) WHERE id=?", {checkpointJson(*task.pendingDecision), task.id});
+    database.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?)) WHERE id=?",
+                  {checkpointJson(*task.pendingDecision), task.id});
 }
 }

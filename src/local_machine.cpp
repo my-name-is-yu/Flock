@@ -266,7 +266,7 @@ void Store::decideLocalConnection(const Person& actor, Id id, bool approve) {
     if (row.string(3) != "pending") throw Conflict("Local connection is no longer pending");
     if (approve) {
         const auto machine = p_->localMachines.find(row.string(1));
-        const auto task = p_->readTask(row, 6);
+        const auto task = p_->taskRecords.readTask(row, 6);
         const auto& active = task.activeRun;
         if (machine == p_->localMachines.end() || machine->second->owner() != actor.id ||
             (task.state != TaskState::running && task.state != TaskState::waiting) || !active || active->ref.threadId != row.string(4) ||

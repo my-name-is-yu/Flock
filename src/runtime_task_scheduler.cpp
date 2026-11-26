@@ -105,7 +105,7 @@ void Runtime::Components::TaskScheduler::activate(TaskData task) {
             dispatch.queueAction(current, actionId(), CommandTool::delegate, "", Json::object(), Json::object(), false);
             return true;
         }
-        if (current.eventId == 0) db.event(current, "intake", {{"kind", "intake"}});
+        if (current.eventId == 0) db.taskEvents.event(current, "intake", {{"kind", "intake"}});
         current.state = TaskState::deciding;
         return true;
     });

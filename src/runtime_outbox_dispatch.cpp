@@ -86,9 +86,9 @@ void Runtime::Components::OutboxDispatch::stop(TaskData task) {
             if (!outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::superseded, OutboxPhase::ready)) return false;
             updates.refundUnsentWork(current, *action);
             current.actionId.clear();
-            db.clearWait(current, "superseded_instruction");
-            db.journal(current.id, "delivery_superseded",
-                       {{"actionId", action->command.actionId}, {"revisionId", revisionJson(current.currentRevision)}});
+            db.waitStorage.clearWait(current, "superseded_instruction");
+            db.journalStorage.journal(current.id, "delivery_superseded",
+                                      {{"actionId", action->command.actionId}, {"revisionId", revisionJson(current.currentRevision)}});
             return true;
         });
         return;
@@ -133,7 +133,7 @@ void Runtime::Components::OutboxDispatch::instructionDelivery(TaskData& task, co
         const auto copy =
             std::ranges::find_if(pending, [&](const OutboxInstruction& p) { return p.messageId == item.messageId && p.step == item.step; });
         if (copy != pending.end()) pending.erase(copy);
-        db.journal(task.id, DeliveredInstructionEntry{action.command.actionId, item, action.revisionId, task.activeRun});
+        db.journalStorage.journal(task.id, DeliveredInstructionEntry{action.command.actionId, item, action.revisionId, task.activeRun});
     }
 }
 
@@ -182,11 +182,11 @@ AssignedRun Runtime::Components::OutboxDispatch::recordRunAssignment(const TaskD
     }
     auto sources = Json::array();
     for (const auto& source : action.sourceResultRefs) sources.push_back(sourceJson(source));
-    db.journal(task.id, "run_started",
-               {{"run", destination ? destinationRunJson(*destination) : assignedRunJson(run)},
-                {"actionId", cmd.actionId},
-                {"revisionId", revisionJson(action.revisionId)},
-                {"sourceResultRefs", std::move(sources)}});
+    db.journalStorage.journal(task.id, "run_started",
+                              {{"run", destination ? destinationRunJson(*destination) : assignedRunJson(run)},
+                               {"actionId", cmd.actionId},
+                               {"revisionId", revisionJson(action.revisionId)},
+                               {"sourceResultRefs", std::move(sources)}});
     return run;
 }
 
@@ -259,7 +259,7 @@ void Runtime::Components::OutboxDispatch::applyDelivery(Id id, const Outbox& act
         }
         if (!outcome.launchWarning.empty()) {
             task.launchWarning = db.secretStorage.redactor(task.botId).text(outcome.launchWarning);
-            db.journal(id, "session_lineage_unavailable", {{"actionId", key}, {"text", *task.launchWarning}});
+            db.journalStorage.journal(id, "session_lineage_unavailable", {{"actionId", key}, {"text", *task.launchWarning}});
         }
         const bool cancelling = task.state == TaskState::cancelling;
         const bool reply = action.command.tool == CommandTool::answer_session_question;
@@ -281,9 +281,9 @@ void Runtime::Components::OutboxDispatch::applyDelivery(Id id, const Outbox& act
             return true;
         }
         if (accepted) {
-            db.clearWait(task, "delivery_confirmed");
+            db.waitStorage.clearWait(task, "delivery_confirmed");
             if (reply)
-                db.unlockQuestion(task, "answered");
+                db.waitStorage.unlockQuestion(task, "answered");
             else {
                 task.activeRun = recordRunAssignment(task, action, outcome.run);
                 if (action.sessionParticipationId)
@@ -308,7 +308,8 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 }
             }
             if (reply)
-                db.journal(id, "session_answered", {{"requestId", action.command.questionId}, {"actionId", action.command.actionId}});
+                db.journalStorage.journal(id, "session_answered",
+                                          {{"requestId", action.command.questionId}, {"actionId", action.command.actionId}});
             task.actionId.clear();
             if (!cancelling) task.state = TaskState::running;
             return true;
@@ -323,7 +324,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         if (delivery == DeliveryOutcome::Unknown && !outcome.run.threadId.empty() && action.phase == OutboxPhase::ready && !reply &&
             !cancelling) {
             rememberRunCandidate(action, outcome.run);
-            db.journal(id, "run_id_pending", {{"actionId", action.command.actionId}, {"thread", runJson(outcome.run)}});
+            db.journalStorage.journal(id, "run_id_pending", {{"actionId", action.command.actionId}, {"thread", runJson(outcome.run)}});
             return true;
         }
         const auto reason = outcome.kind == Delivery::Kind::Auth       ? SimpleWaitReason::auth
@@ -342,11 +343,11 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         if (cancelling) {
             if (task.cancellationDetail == detail && delivery == DeliveryOutcome::Unknown) return false;
             task.cancellationDetail = detail;
-            db.journal(id, "cancelling", {{"detail", detail}, {"actionId", action.command.actionId}});
+            db.journalStorage.journal(id, "cancelling", {{"detail", detail}, {"actionId", action.command.actionId}});
         } else {
-            const auto wait = db.currentWait(id);
+            const auto wait = db.waitStorage.currentWait(id);
             if (!wait || wait->reason() != waitReason(reason) || wait->text != detail)
-                db.wait(task, reason, std::move(detail));
+                db.waitStorage.wait(task, reason, std::move(detail));
             else if (delivery == DeliveryOutcome::Unknown)
                 return false;
         }
@@ -401,7 +402,7 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
     if (destination) dispatch.emplace(db.path, SessionDispatchFileLock::Mode::shared);
     if (firstSend || destination) {
         std::lock_guard lock(db.mutex);
-        const auto current = db.load(id);
+        const auto current = db.taskRecords.load(id);
         if (firstSend && (db.botPaused(cmd.ownerBotId) || current.state == TaskState::cancelling || current.generation != task.generation))
             return;
         if (destination) {
@@ -420,8 +421,8 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
             current.state = !current.activeRun ? TaskState::deciding : TaskState::running;
             current.feedback = approvalError(gate);
             if (current.state == TaskState::deciding)
-                db.event(current, "policy/" + cmd.actionId, {{"kind", "policy_outcome"}, {"text", approvalError(gate)}});
-            db.journal(id, "policy_action_closed", {{"actionId", cmd.actionId}, {"text", approvalError(gate)}});
+                db.taskEvents.event(current, "policy/" + cmd.actionId, {{"kind", "policy_outcome"}, {"text", approvalError(gate)}});
+            db.journalStorage.journal(id, "policy_action_closed", {{"actionId", cmd.actionId}, {"text", approvalError(gate)}});
             return true;
         });
     };
@@ -492,7 +493,7 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
             {
                 std::lock_guard lock(db.mutex);
                 Transaction tx(db.db);
-                const auto current = destination ? db.load(id) : task;
+                const auto current = destination ? db.taskRecords.load(id) : task;
                 if (destination && current.state == TaskState::cancelling) return;
                 gate = assess(current, false);
                 tx.commit();
@@ -571,7 +572,7 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                         current.deadline = deadline;
                 }
             }
-            db.journal(current.id, SendStartedEntry{action.command.actionId});
+            db.journalStorage.journal(current.id, SendStartedEntry{action.command.actionId});
             return true;
         };
         if (!(destination ? updates.changeTask(id, startSend) : updates.change(task, startSend))) {

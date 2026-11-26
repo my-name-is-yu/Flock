@@ -12,7 +12,7 @@ bool Store::Impl::automationBeforeDispatch(Id task) const {
 
 bool Store::Impl::isUndispatchedNotesWait(const TaskData& task) const {
     if (task.state != TaskState::waiting || !automationBeforeDispatch(task.id)) return false;
-    const auto wait = currentWait(task.id);
+    const auto wait = waitStorage.currentWait(task.id);
     return wait && wait->reason() == WaitReason::bot_notes_unavailable;
 }
 

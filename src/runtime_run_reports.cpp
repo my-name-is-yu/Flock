@@ -29,9 +29,9 @@ void Runtime::Components::RunReports::writeRunReport(TaskData& task, const Settl
     const auto entry = runReportEntry(report);
     const auto& run = report.run.ref;
     if (task.state != TaskState::cancelling && !task.replanning) {
-        db.event(task, "result/" + report.run.environmentId + "/" + run.threadId + "/" + run.runId, encodeRunReport(entry));
+        db.taskEvents.event(task, "result/" + report.run.environmentId + "/" + run.threadId + "/" + run.runId, encodeRunReport(entry));
     }
-    const auto reportId = db.journal(task.id, entry);
+    const auto reportId = db.journalStorage.journal(task.id, entry);
     if (task.workflow) {
         task.pendingStageReport = reportId;
         db.settleStageReport(task);
@@ -141,7 +141,7 @@ void Runtime::Components::RunReports::retryRunReport(const TaskData& task, const
     const auto evidence = fetchRunEvidence(task, env, report.run, report.resultRunId, report.status);
     const bool available = evidence.availability != RunEvidence::Availability::ReportUnavailable;
     updates.change(task, [&](TaskData& current) {
-        const auto latest = db.currentEvent(current);
+        const auto latest = db.taskEvents.currentEvent(current);
         if (latest.is_null() || latest.at("consumed") == true || current.state != TaskState::deciding) return false;
         const auto target = reportRetry(current, latest);
         if (!target || target->id != retry->id || target->data != report) return false;

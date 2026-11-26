@@ -339,7 +339,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, std::s
         std::lock_guard lock(mutex);
         if (botPaused(bot)) throw BotPaused{};
         if (taskId) {
-            const auto task = load(taskId);
+            const auto task = taskRecords.load(taskId);
             if (task.botId != bot) throw Conflict("No task with this ID");
             if (generation && task.generation != *generation) throw RequestChanged{};
             if (op != "read" && (task.state == TaskState::cancelled || task.state == TaskState::cancelling))
@@ -388,7 +388,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, std::s
         PolicyOrigin origin;
         if (turn) origin = policyOrigin(loadTurnMessage(turn));
         if (taskId) {
-            const auto task = load(taskId);
+            const auto task = taskRecords.load(taskId);
             if (generation && task.generation != *generation) throw RequestChanged{};
             if (!turn)
                 origin = taskPolicyOrigin(task);
@@ -501,9 +501,9 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
 )SQL",
                  {reviewKey, taskId, repo.host, repo.repo, args.at("prNumber"), eventCursor, args.at("reviewers").dump()});
         }
-        journal(taskId, "git_mutation",
-                secretStorage.sharedRedactor().record(
-                    gitJournal(context, decision.tool, repo, {{"status", "pending"}, {"target", audit}, {"reason", decision.reason}})));
+        journalStorage.journal(taskId, "git_mutation",
+                               secretStorage.sharedRedactor().record(gitJournal(
+                                   context, decision.tool, repo, {{"status", "pending"}, {"target", audit}, {"reason", decision.reason}})));
         tx.commit();
     }
     try {
@@ -532,14 +532,15 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
                                                  {{repo, repo, {}, {}}, pr, url, {}, sha, false}, GitWatchStart::mutationAdmission);
         }
         if (requestedReview && result.at("watchAttached") == true)
-            gitInboxItem(load(taskId), reviewKey, url, "Pull request awaiting review", "Review requested on the Git host.");
+            gitInboxItem(taskRecords.load(taskId), reviewKey, url, "Pull request awaiting review", "Review requested on the Git host.");
         else if (submittedReview)
-            gitInboxItem(load(taskId), "review/" + actionId(), url, "Pull request review submitted", field(args, "verdict"));
+            gitInboxItem(taskRecords.load(taskId), "review/" + actionId(), url, "Pull request review submitted", field(args, "verdict"));
     }
     exec("UPDATE git_mutations SET result=?1,dedupe=CASE WHEN json_extract(?1,'$.status')='failed' THEN NULL ELSE dedupe END"
          " WHERE task_id=?2 AND invocation=?3",
          {result, taskId, key});
-    journal(taskId, "git_mutation", scrub.record(gitJournal(context, decision.tool, repo, {{"target", audit}, {"outcome", result}})));
+    journalStorage.journal(taskId, "git_mutation",
+                           scrub.record(gitJournal(context, decision.tool, repo, {{"target", audit}, {"outcome", result}})));
     tx.commit();
     return result;
 }

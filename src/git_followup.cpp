@@ -23,7 +23,7 @@ std::optional<Store::Impl::GitPrFollowup> Store::Impl::gitPrFollowup(const conve
     if (kind.empty()) return std::nullopt;
 
     const auto taskId = event.at("taskId").get<Id>();
-    const auto task = load(taskId);
+    const auto task = taskRecords.load(taskId);
     try {
         const auto config = intake ? intake(message.bot, {}).config : task.config;
         if (!config.value("fixPullRequests", true)) return std::nullopt;
@@ -146,6 +146,6 @@ std::string Store::Impl::gitPrFollowupInstruction(const conversation::Message& m
 
 void Store::Impl::recordGitPrFollowup(const conversation::Message& message, const GitPrFollowup& followup) {
     const auto& eventId = message.routing.at("gitEvent").at("eventId").get_ref<const std::string&>();
-    journal(followup.origin.task, GitPrFollowupEntry{followup.operation, eventId, message.id});
+    journalStorage.journal(followup.origin.task, GitPrFollowupEntry{followup.operation, eventId, message.id});
 }
 }

@@ -223,7 +223,7 @@ Runtime::Components::SessionPrompts::WorkPrompt Runtime::Components::SessionProm
 void Runtime::Components::SessionPrompts::prepareDelegation(const TaskData& task, Outbox& action) {
     auto instruction = *action.instructionBase;
     const auto contract = sessionContract(task);
-    const auto event = db.currentEvent(task);
+    const auto event = db.taskEvents.currentEvent(task);
     auto prompt = workPrompt(task, event, action.command.actionId.size(), &contract);
     const auto scrub = db.secretStorage.redactor(task.botId);
     instruction += prompt.instruction;

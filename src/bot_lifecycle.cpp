@@ -70,7 +70,7 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
         std::vector<Id> openTasks;
         while (tasks.next()) openTasks.push_back(tasks.number(0));
         for (const auto id : openTasks) {
-            auto task = p_->load(id);
+            auto task = p_->taskRecords.load(id);
             if (terminal(task) || task.state == TaskState::cancelling) continue;
             task.cancelledByBotPause = true;
             p_->requestCancellation(task);

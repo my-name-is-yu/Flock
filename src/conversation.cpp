@@ -42,26 +42,6 @@ void Store::setWebIdentityResolver(WebIdentityResolver resolver, bool liveIntera
     p_->webIdentity = {std::move(resolver), liveInteractiveRoles};
 }
 
-Id Store::Impl::addRevision(TaskData& task, std::string_view intent, std::string_view doneWhen, Id source) {
-    if (!hasText(intent) || !hasText(doneWhen)) throw Conflict("Task revision needs intent and completion criteria");
-    if (source) {
-        auto row = query("SELECT 1 FROM messages WHERE id=? AND bot_id=?", {source, task.botId});
-        if (!row.next()) throw Conflict("Task revision must come from this Bot's conversation");
-    }
-    exec(R"SQL(
-INSERT INTO task_revisions(task_id,number,intent,done_when,source_message_id)
-SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
-)SQL",
-         {task.id, intent, doneWhen, source ? Json(source) : Json(nullptr), task.id});
-    const auto revision = last();
-    task.currentRevision = revision;
-    task.blocker.reset();
-    task.intent = intent;
-    task.doneWhen = doneWhen;
-    journal(task.id, TaskRevisionEntry{revision, source});
-    return revision;
-}
-
 bool Store::Impl::conversationPending(std::string_view bot) const {
     // Start with the running-turn index so long Bot histories do not add work.
     return query(R"SQL(
@@ -180,7 +160,7 @@ WHERE j.id=?1 AND m.bot_id=?2 AND m.person_id=?3
         event.detail = std::move(publicInvitation);
     }
     scrub.requirePublic({routing.botId, actor.id, clientId, saved});
-    const auto id = journalConversationMessage(routing.botId, event);
+    const auto id = journalStorage.journalConversationMessage(routing.botId, event);
     exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=?

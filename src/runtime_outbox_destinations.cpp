@@ -38,7 +38,8 @@ AND action_id=? ORDER BY id LIMIT 1)SQL",
     }
     const auto deadline = *run.deadline;
     if (deadline <= 0 || now < deadline || task.state == TaskState::waiting) return missing;
-    db.wait(task, DeadlineWait{VerificationDeadline{deadline, action}}, run.name + " reached its deadline", WaitRun{run.ref, environment});
+    db.waitStorage.wait(task, DeadlineWait{VerificationDeadline{deadline, action}}, run.name + " reached its deadline",
+                        WaitRun{run.ref, environment});
     return true;
 }
 
@@ -156,7 +157,7 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
         {
             std::lock_guard lock(db.mutex);
             Transaction tx(db.db);
-            const auto current = db.load(id);
+            const auto current = db.taskRecords.load(id);
             const auto resource = Resource{Action::t3_send, Resource::sessionRead(cmd.environmentId, ref.threadId).target};
             const auto& approval = *action->stop->approval;
             auto origin = db.taskPolicyOrigin(current);

@@ -417,8 +417,9 @@ void Policy::executeSessionResource(std::string_view environment, const RunRef& 
         throw Conflict("Resource execution failed");
     }
     std::lock_guard lock(db_.mutex);
-    db_.journal(task, "resource_used",
-                {{"target", resource.target}, {"action", actionName(resource.action)}, {"threadId", run.threadId}, {"runId", run.runId}});
+    db_.journalStorage.journal(
+        task, "resource_used",
+        {{"target", resource.target}, {"action", actionName(resource.action)}, {"threadId", run.threadId}, {"runId", run.runId}});
 }
 
 void Policy::requireWebIdentity() {
@@ -480,7 +481,7 @@ void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destinati
         std::lock_guard lock(db_.mutex);
         Transaction tx(db_.db);
         if (!upstream || !ref.valid() || !identifier(destination) || !identifier(operation)) throw Conflict("Secret access denied");
-        const auto entry = db_.load(task);
+        const auto entry = db_.taskRecords.load(task);
         const auto& bot = entry.botId;
         if (db_.botPaused(bot) || forbidden(bot, Action::secret_use, ref.name)) throw Conflict("Secret access denied");
         const auto seen = db_.query("SELECT 1 FROM secret_destinations WHERE destination=?", {destination}).next();

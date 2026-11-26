@@ -97,7 +97,7 @@ PolicyOrigin Store::Impl::taskPolicyOrigin(const TaskData& task) {
     } else {
         auto exchange = query("SELECT sender_task FROM peer_exchanges WHERE recipient_task=? AND sender_task<?", {id, id});
         if (exchange.next()) {
-            const auto parent = taskPolicyOrigin(load(exchange.number(0)));
+            const auto parent = taskPolicyOrigin(taskRecords.load(exchange.number(0)));
             origin.requester = parent.requester;
             origin.background = parent.background;
             origin.anchor = parent.anchor;
@@ -150,12 +150,12 @@ void Store::Impl::releasePolicyTurn(Id turn) {
 void Store::Impl::releasePolicyTask(Id approval, std::string_view resolution) {
     auto row = query("SELECT task,wait_id,resume_state FROM policy_approvals WHERE id=? AND wait_id<>0", {approval});
     if (!row.next()) return;
-    auto task = load(row.number(0));
-    const auto wait = currentWait(row.number(0));
+    auto task = taskRecords.load(row.number(0));
+    const auto wait = waitStorage.currentWait(row.number(0));
     if (task.state != TaskState::waiting || !wait || wait->id != row.number(1)) return;
-    clearWait(task, resolution);
+    waitStorage.clearWait(task, resolution);
     task.state = decodeTaskState(task.id, row.string(2));
-    save(task);
+    taskRecords.save(task);
     exec("UPDATE policy_approvals SET generation=? WHERE id=?", {task.generation, approval});
 }
 
@@ -181,7 +181,7 @@ WHERE a.status IN ('pending','approved')
         releasePolicyTurn(change.turn);
         releasePolicyTask(change.id, change.status);
         Policy(*this).audit(Person{}, {}, "approval_closed", {{"itemId", change.id}, {"status", change.status}});
-        if (change.task) journal(change.task, "policy_approval", {{"itemId", change.id}, {"status", change.status}});
+        if (change.task) journalStorage.journal(change.task, "policy_approval", {{"itemId", change.id}, {"status", change.status}});
     }
 }
 
@@ -196,7 +196,7 @@ ApprovalGate Store::Impl::approveAction(const PolicyOrigin& origin, const Resour
     const auto deny = [&](std::string_view reason) {
         auto details = secretStorage.sharedRedactor().record({{"action", action}, {"target", resource.target}, {"reason", reason}});
         policy.audit(Person{}, origin.bot, "action_denied", details);
-        if (origin.task) journal(origin.task, "policy_denied", details);
+        if (origin.task) journalStorage.journal(origin.task, "policy_denied", details);
         return ApprovalGate::denied;
     };
     if (botPaused(origin.bot)) return ApprovalGate::stale;
@@ -268,16 +268,16 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
         exec("UPDATE conversation_turns SET status='policy_waiting' WHERE message_id=? AND status='running'", {origin.turn});
     if (origin.task) {
         if (!origin.turn && (operation.starts_with("outbox/") || operation.starts_with("git/"))) {
-            auto task = load(origin.task);
+            auto task = taskRecords.load(origin.task);
             if (task.state != TaskState::waiting) {
                 const auto resume = taskStateName(task.state);
-                const auto waitId = wait(task, PolicyApprovalWait{card}, std::string(action) + " · " + resource.target);
-                save(task);
+                const auto waitId = waitStorage.wait(task, PolicyApprovalWait{card}, std::string(action) + " · " + resource.target);
+                taskRecords.save(task);
                 exec("UPDATE policy_approvals SET wait_id=?,resume_state=?,generation=?,card_generation=? WHERE id=?",
                      {waitId, resume, task.generation, task.generation, card});
             }
         }
-        journal(origin.task, "policy_approval", {{"itemId", card}, {"status", "pending"}});
+        journalStorage.journal(origin.task, "policy_approval", {{"itemId", card}, {"status", "pending"}});
     }
     policy.audit(Person{}, origin.bot, "approval_requested", {{"itemId", card}, {"action", action}, {"target", resource.target}});
     if (origin.anchor) channelApprovalNotice(origin.anchor);

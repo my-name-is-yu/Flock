@@ -1,3 +1,6 @@
+#include "outbox_storage.hpp"
+#include "journal_storage.hpp"
+#include "database.hpp"
 #include "storage.hpp"
 #include "record_decode.hpp"
 #include "flock/types.hpp"
@@ -281,4 +284,72 @@ Wait decodeWaitingEntry(Id entry, const Json& data) {
 Wait Store::waitingEvent(const Json& event) {
     return decodeWaitingEntry(event.at("id"), event.at("data"));
 }
+
+Id WaitStorage::waitAnchor(Id task, Id wait) const {
+    auto row = database.query("SELECT id FROM journal WHERE task_id=? AND kind='waiting' AND conversation_bot_id IS NULL"
+                              " AND wait_id=? ORDER BY id DESC LIMIT 1",
+                              {task, wait});
+    return row.next() ? row.number(0) : 0;
+}
+
+Id WaitStorage::waitAllowance(Id task, WaitReason reason) const {
+    if (reason == WaitReason::model_budget) return remaining.taskModelBudget(task).initialLimit;
+    if (reason == WaitReason::budget) return initialWorkAllowance;
+    return 0;
+}
+
+bool WaitStorage::waitIsActionable(const TaskData& task) const {
+    return !remaining.replanReady(task);
+}
+
+std::optional<Wait> WaitStorage::currentWait(Id task) const {
+    auto row = database.query("SELECT id,reason,data FROM waits WHERE task_id=? AND resolution IS NULL", {task});
+    if (!row.next()) return std::nullopt;
+    return decodeWaitRow(row);
+}
+
+std::optional<Wait> WaitStorage::projectedWait(Id task, const Statement& row, int col) const {
+    const auto id = row.number(col);
+    if (!id) return std::nullopt;
+    auto wait = decodeWaitRow(row, col);
+    if (const auto anchor = waitAnchor(task, wait.id)) wait.messageId = anchor;
+    if (const auto allowance = waitAllowance(task, wait.reason())) wait.allowance = allowance;
+    return wait;
+}
+
+Id WaitStorage::wait(TaskData& task, WaitDetails details, std::string text, std::optional<WaitRun> run) {
+    return wait(task, {.details = std::move(details), .text = std::move(text), .run = run ? std::move(run) : taskWaitRun(task)});
+}
+
+Id WaitStorage::wait(TaskData& task, Wait waiting) {
+    clearWait(task, "superseded");
+    waiting.eventId = task.eventId;
+    if (!waiting.run && waiting.reason() == WaitReason::unknown_delivery) {
+        const auto action = outboxStorage.outbox(task);
+        if (action && action->command.candidate && !action->command.candidate->link.empty())
+            waiting.run = WaitRun{*action->command.candidate};
+    }
+    waiting.actionId = task.actionId;
+    database.exec("INSERT INTO waits(task_id,reason,data) VALUES(?,?,?)", {task.id, storedWaitReason(waiting), encodeWaitData(waiting)});
+    waiting.id = database.last();
+    journalStorage.journal(task.id, waiting);
+    task.state = TaskState::waiting;
+    return waiting.id;
+}
+
+void WaitStorage::clearWait(TaskData& task, std::string_view resolution) {
+    auto row = database.query("UPDATE waits SET resolution=? WHERE task_id=? AND resolution IS NULL RETURNING id", {resolution, task.id});
+    if (!row.next()) return;
+    const auto id = row.number(0);
+    row.next();
+    if (task.blocker && task.blocker->waitId == id) task.blocker.reset();
+    journalStorage.journal(task.id, "wait_closed", {{"waitId", id}, {"resolution", resolution}});
+}
+
+void WaitStorage::unlockQuestion(TaskData& task, std::string_view reason) {
+    if (!task.question) return;
+    journalStorage.journal(task.id, "session_question_closed", {{"requestId", task.question->target.requestId}, {"resolution", reason}});
+    task.question.reset();
+}
+
 }

@@ -190,16 +190,16 @@ ORDER BY w.id DESC
 )SQL";
         auto waits = p_->query(waitSql.c_str(), {id});
         while (waits.next()) {
-            const auto task = p_->readTask(waits, 3);
+            const auto task = p_->taskRecords.readTask(waits, 3);
             const auto wait = decodeWaitRow(waits);
             const auto waitId = wait.id;
             const auto reason = wait.reason();
             const auto kind = inboxWaitKind(reason);
-            if (!kind || !p_->waitIsActionable(task)) continue;
+            if (!kind || !p_->waitStorage.waitIsActionable(task)) continue;
             Json view{{"requestTitle", taskTitle(task)}, {"request", task.request}, {"prompt", wait.text}, {"choices", wait.choices()}};
-            if (const auto allowance = p_->waitAllowance(task.id, reason); allowance) view["allowance"] = allowance;
+            if (const auto allowance = p_->waitStorage.waitAllowance(task.id, reason); allowance) view["allowance"] = allowance;
             add({id, *kind, waitId, waitId, task.id, task.currentRevision.value_or(0), task.generation}, std::move(view),
-                p_->waitAnchor(task.id, waitId));
+                p_->waitStorage.waitAnchor(task.id, waitId));
         }
         auto turns = p_->query(R"SQL(
 SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
@@ -232,7 +232,7 @@ ORDER BY p.id DESC
                               "Supply a value for " + inputs.string(1), inputs.number(3));
         auto reviews = p_->actionablePrReviews(id);
         while (reviews.next()) {
-            const auto task = p_->readTask(reviews, 7);
+            const auto task = p_->taskRecords.readTask(reviews, 7);
             const auto kind = reviews.number(4) ? pr_reconciliation : pr_review;
             add({id, kind, reviews.number(0), 0, task.id, task.currentRevision.value_or(0), task.generation},
                 {{"requestTitle", taskTitle(task)},
@@ -261,7 +261,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?)
     if (target.taskId) {
         auto entry = key(target);
         entry.update(Json{{"decidedBy", actor.id}, {"decidedAt", now}, {"decision", decision}});
-        journal(target.taskId, "inbox_decision", entry);
+        journalStorage.journal(target.taskId, "inbox_decision", entry);
     }
 }
 
@@ -346,7 +346,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
     } else if (kind == pr_review || kind == pr_reconciliation) {
         if (!policy.allows(actor, Action::bot_decide, item.botId)) throw DecisionDenied{};
         if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?", {item.taskId, item.botId}).next()) throw RequestChanged{};
-        const auto task = p_->load(item.taskId);
+        const auto task = p_->taskRecords.load(item.taskId);
         auto review = p_->query("SELECT target_revision,status,operation_id IS NOT NULL"
                                 " FROM pr_review_items WHERE id=? AND task_id=?",
                                 {item.itemId, item.taskId});
@@ -390,6 +390,6 @@ void Store::Impl::insertPrReview(const TaskData& task, std::string_view url, std
          " VALUES(?,?,?,?,?,?,?,?)",
          {task.id, task.currentRevision.value_or(0), url, savedTitle, savedPrompt, gitKey.empty() ? Json(nullptr) : Json(gitKey),
           operationId.empty() ? Json(nullptr) : Json(operationId), candidates});
-    if (operationId.empty()) journal(task.id, PrReviewRequestedEntry{last(), savedTitle, savedPrompt, std::string(url)});
+    if (operationId.empty()) journalStorage.journal(task.id, PrReviewRequestedEntry{last(), savedTitle, savedPrompt, std::string(url)});
 }
 }

@@ -100,7 +100,7 @@ SELECT )SQL" + taskProjection() +
                             " FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1";
     auto ancestor = query(sql.c_str(), {taskId});
     if (!ancestor.next()) throw Conflict("The originating task is missing");
-    const auto root = readTask(ancestor);
+    const auto root = taskRecords.readTask(ancestor);
     if (root.sourceMessageId) return messageModelBudget(*root.sourceMessageId);
     return {"task/" + std::to_string(root.id), initialModelCallLimit(root.config)};
 }
@@ -170,11 +170,11 @@ WHERE w.resolution IS NULL AND w.task_id<>? AND w.reason='model_budget' AND t.st
         if (policy.allows(actor, Action::bot_decide, waits.string(1)) && taskModelBudget(task).id == budget) tasks.push_back(task);
     }
     for (const auto id : tasks) {
-        auto task = load(id);
-        if (!waitIsActionable(task)) continue;
-        clearWait(task, "approve");
+        auto task = taskRecords.load(id);
+        if (!waitStorage.waitIsActionable(task)) continue;
+        waitStorage.clearWait(task, "approve");
         task.state = TaskState::deciding;
-        save(task);
+        taskRecords.save(task);
     }
 
     struct PausedMessage {
@@ -283,11 +283,11 @@ void Store::Impl::pauseTurn(const conversation::Message& message) {
                           ? std::optional{message.routing.at("gitEvent").at("taskId").get<Id>()}
                           : std::nullopt;
     const auto text = modelBudgetPauseText(message.text);
-    const auto reply = journalConversationReply(task, message.bot,
-                                                {.replyToMessageId = message.id,
-                                                 .text = std::string(text),
-                                                 .status = ConversationReplyStatus::needs_you,
-                                                 .route = ConversationReplyRoute::model_budget});
+    const auto reply = journalStorage.journalConversationReply(task, message.bot,
+                                                               {.replyToMessageId = message.id,
+                                                                .text = std::string(text),
+                                                                .status = ConversationReplyStatus::needs_you,
+                                                                .route = ConversationReplyRoute::model_budget});
     if (!message.channelScope.empty()) queueChannelReply(message.id, reply, text);
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?", {reply, message.id});
 }
@@ -328,6 +328,6 @@ WHERE s.message_id=? AND s.result IS NULL AND json_type(s.effect)='array' AND sl
 void Store::Impl::resumeMessageModelCall(std::string_view bot, Id message, Id waitMessageId, Id attempt) {
     exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
          {attempt ? Json(attempt) : Json(nullptr), message});
-    journalConversationBudgetApproved(message, waitMessageId, bot);
+    journalStorage.journalConversationBudgetApproved(message, waitMessageId, bot);
 }
 }

@@ -59,9 +59,9 @@ struct Runtime::Impl {
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
         : db(*store.p_), policy(store.policy()), model(m), t3(adapter), soul(std::move(loader)),
           options(withDefaultBotTools(std::move(opts))), maintenance(db, options.clock, options.automationError, options.storageContention),
-          prompts(db), updates(db), questions(db), history(db, t3, policy, updates, options.sessionRead),
-          reports(db, t3, policy, updates, history, options.clock), peerExchanges(db, policy, updates, reports, history, options.peers),
-          workers(db, t3, maintenance),
+          prompts(db), updates(db, db.journalStorage, db.taskEvents, db.taskRecords, db.waitStorage), questions(db, db.waitStorage),
+          history(db, t3, policy, updates, options.sessionRead), reports(db, t3, policy, updates, history, options.clock),
+          peerExchanges(db, policy, updates, reports, history, options.peers), workers(db, t3, maintenance),
           runs(db, db.outboxStorage, t3, updates, questions, reports, peerExchanges, options.clock, workers.stopToken()),
           dispatch(db, db.outboxStorage, t3, policy, updates, questions, reports, runs, prompts, options.clock, options.intake,
                    options.requireT3Connection, workers.stopToken()),

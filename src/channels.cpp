@@ -434,7 +434,7 @@ void Store::Impl::channelNotice(Id source, std::string_view bot, std::string_vie
     if (!sqlite3_changes(db)) return;
     std::string notice(reason);
     if (supportsReplies) notice += followUp;
-    const auto reply = journalConversationReply(std::nullopt, bot, {.replyToMessageId = source, .text = notice});
+    const auto reply = journalStorage.journalConversationReply(std::nullopt, bot, {.replyToMessageId = source, .text = notice});
     if (supportsReplies) queueChannelReply(source, reply, notice);
 }
 

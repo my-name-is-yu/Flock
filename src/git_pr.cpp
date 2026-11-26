@@ -103,8 +103,8 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
                   runJson(context.run), intent});
             auto pending = prResult(request.operationId, "pending");
             pending["reason"] = reason;
-            journal(context.taskId, "git_mutation",
-                    secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, pending)));
+            journalStorage.journal(context.taskId, "git_mutation",
+                                   secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, pending)));
         } else {
             if (operation.number(1) != context.taskId || operation.string(2) != context.botId)
                 throw Conflict("This PR target belongs to another task");
@@ -138,7 +138,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
     if (terminalPrOperation(previous)) return prResult(request.operationId, previous, saved.number(1), saved.string(2));
 
     const auto run = saved.json(3);
-    const auto task = load(context.taskId);
+    const auto task = taskRecords.load(context.taskId);
     const auto scrub = secretStorage.sharedRedactor();
     std::string_view state = rejected ? "failed" : "ambiguous";
     Id number = 0;
@@ -180,7 +180,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
         auto entry = gitJournal(context, "git_open_pr", base, result);
         entry["run"] = run;
         entry["recovered"] = state == "created" && !create;
-        journal(context.taskId, "git_mutation", scrub.record(std::move(entry)));
+        journalStorage.journal(context.taskId, "git_mutation", scrub.record(std::move(entry)));
     }
     transaction.commit();
     return scrub.record(result, SecretRedactor::Fields::external);
@@ -230,7 +230,8 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
     exec("UPDATE git_pr_operations SET status=?,pr_number=?,url=? WHERE operation_id=?",
          {status, link ? Json(number) : Json(nullptr), link ? Json(url) : Json(nullptr), operation});
     exec("UPDATE pr_review_items SET status=? WHERE id=?", {link ? "linked" : "rejected", item.itemId});
-    journal(item.taskId, "git_mutation",
-            secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, prResult(operation, status, number, url))));
+    journalStorage.journal(
+        item.taskId, "git_mutation",
+        secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, prResult(operation, status, number, url))));
 }
 }

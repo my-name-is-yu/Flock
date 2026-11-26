@@ -1,10 +1,9 @@
 #pragma once
 
+#include "database.hpp"
 #include "runtime_components.hpp"
-#include "storage.hpp"
+#include "task_records.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
-#include "flock/runtime.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
@@ -15,9 +14,14 @@
 #include <utility>
 
 namespace flockv0 {
+class JournalStorage;
+class TaskEvents;
+class WaitStorage;
+
 class Runtime::Components::TaskUpdates {
 public:
-    explicit TaskUpdates(Store::Impl& db) : db(db) {}
+    TaskUpdates(Database& database, JournalStorage& journal, TaskEvents& events, TaskRecords& records, WaitStorage& waits)
+        : database(database), journal(journal), events(events), records(records), waits(waits) {}
 
     TaskData snapshot(Id id);
     void saveTask(TaskData& task, std::optional<DecisionCheckpoint> resumedDecision = std::nullopt);
@@ -30,9 +34,9 @@ public:
     static void refundUnsentWork(TaskData&, const Outbox&);
 
     bool changeTask(Id id, const auto& update, TaskData* saved = nullptr) {
-        std::lock_guard lock(db.mutex);
-        Transaction transaction(db.db);
-        auto task = db.load(id);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
+        auto task = records.load(id);
         if (!update(task)) return false;
         saveTask(task);
         transaction.commit();
@@ -50,6 +54,10 @@ public:
             saved);
     }
 private:
-    Store::Impl& db;
+    Database& database;
+    JournalStorage& journal;
+    TaskEvents& events;
+    TaskRecords& records;
+    WaitStorage& waits;
 };
 }
