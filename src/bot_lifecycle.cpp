@@ -2,7 +2,7 @@
 #include "session_dispatch_lock.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/decision_errors.hpp"
-#include "storage.hpp"
+#include "store_access.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "database.hpp"
 #include "conversation_storage.hpp"
@@ -30,7 +30,7 @@ bool BotLifecycleStorage::botDeleted(std::string_view bot) const {
 }
 
 bool BotLifecycle::botDeleted(std::string_view bot) const {
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     return storage.botLifecycle.botDeleted(bot);
 }
@@ -40,13 +40,13 @@ bool BotLifecycleStorage::botPaused(std::string_view bot) const {
 }
 
 bool BotLifecycle::botPaused(std::string_view bot) const {
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     return storage.botLifecycle.botPaused(bot);
 }
 
 void BotLifecycle::setBotPaused(const Person& actor, std::string_view bot, bool paused, const std::function<Seconds()>& clock) {
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     const SessionDispatchFileLock dispatch(storage.path, SessionDispatchFileLock::Mode::exclusive);
     std::lock_guard lock(storage.database.mutex);
     Transaction tx(storage.database.db);
@@ -104,7 +104,7 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
 }
 
 void BotLifecycle::deleteBot(const Person& actor, std::string_view bot) {
-    auto& storage = *store_.p_;
+    auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     Transaction tx(storage.database.db);
     Policy permissions{store_};
