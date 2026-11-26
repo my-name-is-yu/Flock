@@ -54,7 +54,7 @@ std::optional<T3ConnectRequest> parseT3ConnectRequest(const Json& args) {
 void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
     server.Get("/api/settings", [&](const httplib::Request& req, httplib::Response& res) {
         const auto actor = person(callbacks, req);
-        auto policy = store.policy();
+        Policy policy{store};
         const bool canManage = policy.allows(actor, Action::rules_manage, "installation");
         Json model = nullptr;
         if (canManage && callbacks.modelStatus) {
@@ -104,7 +104,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
     server.Get("/api/settings/models", [&](const httplib::Request& req, httplib::Response& res) {
         const auto bot = req.get_param_value("bot");
         if (req.get_param_value_count("bot") != 1 || !validBotId(bot)) return reply(res, 400, {{"error", "invalid_bot"}});
-        if (!store.policy().allows(person(callbacks, req), Action::bot_settings, bot)) return reply(res, 403, {{"error", "access_denied"}});
+        if (!Policy{store}.allows(person(callbacks, req), Action::bot_settings, bot)) return reply(res, 403, {{"error", "access_denied"}});
         Json catalog = {{"fallbackReasoningEfforts", fallbackReasoningEfforts()}};
         try {
             if (callbacks.modelCatalog) {
@@ -118,14 +118,14 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
     });
     server.Get("/api/settings/installation", [&](const httplib::Request& req, httplib::Response& res) {
         const auto actor = person(callbacks, req);
-        if (!store.policy().allows(actor, Action::rules_manage, "installation")) return reply(res, 403, {{"error", "access_denied"}});
+        if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) return reply(res, 403, {{"error", "access_denied"}});
         if (!callbacks.installationSettings) return reply(res, 404, {{"error", "settings_unavailable"}});
         reply(res, 200, callbacks.installationSettings(actor));
     });
     server.Post(R"(/api/settings/installation/(access|system|github|channels|tools))",
                 [&](const httplib::Request& req, httplib::Response& res) {
                     const auto actor = person(callbacks, req);
-                    if (!store.policy().allows(actor, Action::rules_manage, "installation"))
+                    if (!Policy{store}.allows(actor, Action::rules_manage, "installation"))
                         return reply(res, 403, {{"error", "access_denied"}});
                     if (!callbacks.changeInstallationSettings) return reply(res, 404, {{"error", "settings_unavailable"}});
                     if (req.body.size() > 32 * 1024) return reply(res, 413, {{"error", "payload_too_large"}});
@@ -144,7 +144,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                     }
                 });
     const auto botChannelAccess = [&store, &callbacks](const Person& actor, std::string_view bot) {
-        auto policy = store.policy();
+        Policy policy{store};
         if (!validBotId(bot) || !policy.allows(actor, Action::rules_manage, "installation") ||
             !policy.allows(actor, Action::bot_settings, bot))
             return false;
@@ -168,7 +168,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             if (args.at("action") == "setSender") {
                 const auto member = args.at("sender").at("personId").get<std::string>();
                 const auto target = callbacks.configuredPerson ? callbacks.configuredPerson(member) : std::nullopt;
-                if (!target || !store.policy().allows(Person{target->id, false}, Action::bot_talk, bot))
+                if (!target || !Policy{store}.allows(Person{target->id, false}, Action::bot_talk, bot))
                     return reply(res, 400, {{"error", "invalid_sender"}, {"message", "Choose a person who can talk to this Bot."}});
             }
             reply(res, 200, {{"bridges", callbacks.changeBotChannel(bot, args)}});
@@ -183,7 +183,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
     server.Get("/api/bot-settings", [&](const httplib::Request& req, httplib::Response& res) {
         if (req.get_param_value_count("bot") != 1 || req.get_param_value("bot").empty()) return reply(res, 400, {{"error", "invalid_bot"}});
         try {
-            auto view = store.policy().botSettings(person(callbacks, req), req.get_param_value("bot"));
+            auto view = Policy{store}.botSettings(person(callbacks, req), req.get_param_value("bot"));
             view["canManageMembers"] = view.at("canManage").get<bool>() && hasWebIdentities(callbacks);
             reply(res, 200, view);
         } catch (const Conflict&) {
@@ -195,7 +195,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         try {
             const auto args = Json::parse(req.body);
             const auto actor = person(callbacks, req);
-            if (!store.policy().allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
+            if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
             if (!args.is_object() || args.size() != (args.contains("switchAccount") ? 2 : 1))
                 return reply(res, 400, {{"error", "invalid_input"}});
             const auto reconsent = args.at("reconsent").get<bool>();
@@ -217,7 +217,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         if (req.body.size() > 1024) return reply(res, 413, {{"error", "payload_too_large"}});
         const auto args = Json::parse(req.body, nullptr, false);
         if (!args.is_object() || !args.empty()) return reply(res, 400, {{"error", "invalid_input"}});
-        if (!store.policy().allows(person(callbacks, req), Action::rules_manage, "installation"))
+        if (!Policy{store}.allows(person(callbacks, req), Action::rules_manage, "installation"))
             return reply(res, 403, {{"error", "access_denied"}});
         if (!callbacks.modelLogout) return reply(res, 409, {{"error", "sign_out_unavailable"}});
         try {
@@ -232,7 +232,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         if (req.body.size() > 8192) return reply(res, 413, {{"error", "payload_too_large"}});
         try {
             const auto actor = person(callbacks, req);
-            if (!store.policy().allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
+            if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
             const auto target = parseT3ConnectRequest(Json::parse(req.body));
             if (!target) return reply(res, 400, {{"error", "invalid_input"}});
             if (!callbacks.t3Connect) return reply(res, 409, {{"error", "connect_unavailable"}});
@@ -251,7 +251,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
     server.Post("/api/settings/t3-disconnect", [&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 8192) return reply(res, 413, {{"error", "payload_too_large"}});
         try {
-            if (!store.policy().allows(person(callbacks, req), Action::rules_manage, "installation")) throw DecisionDenied{};
+            if (!Policy{store}.allows(person(callbacks, req), Action::rules_manage, "installation")) throw DecisionDenied{};
             const auto args = Json::parse(req.body);
             if (!args.is_object() || args.size() != 1) return reply(res, 400, {{"error", "invalid_input"}});
             const auto& value = args.at("environmentId");
@@ -276,7 +276,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         try {
             const auto args = Json::parse(req.body);
             const auto actor = person(callbacks, req);
-            auto policy = store.policy();
+            Policy policy{store};
             if (!policy.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
             if (req.matches[1] == "mode")
                 policy.setMode(actor, args.at("mode").get<std::string>());
@@ -307,7 +307,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             const auto actor = person(callbacks, req);
             const auto bot = args.at("botId").get<std::string>();
             if (!args.is_object() || args.size() != 3) return reply(res, 400, {{"error", "invalid_input"}});
-            auto policy = store.policy();
+            Policy policy{store};
             if (req.matches[1] == "members") {
                 if (!hasWebIdentities(callbacks)) return reply(res, 409, {{"error", "configure_web_identities_first"}});
                 const auto member = args.at("person").get<std::string>();

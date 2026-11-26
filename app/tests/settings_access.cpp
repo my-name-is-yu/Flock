@@ -45,7 +45,7 @@ void accessLifecycle() {
     rejects<Conflict>([&] { other.change(localOwner, {{"operation", "activate"}, {"password", "not it"}}); },
                       "Incorrect bootstrap password unlocked the installation");
     other.change(localOwner, {{"operation", "activate"}, {"password", firstPassword}});
-    check(access.enabled() && store.policy().requiresIdentity(), "Activation did not require identity across connections");
+    check(access.enabled() && Policy{store}.requiresIdentity(), "Activation did not require identity across connections");
     check(identity.authenticate("").id.empty() && identity.authenticate(firstHeader) == localOwner,
           "Activation did not exchange local access for verified credentials");
     rejects<Conflict>([&] { access.change(localOwner, {{"operation", "role"}, {"person", localOwner.id}, {"adminRoot", false}}); },

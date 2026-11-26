@@ -474,7 +474,7 @@ Json botList(Store& store, const Json& bots) {
 
 Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
     auto events = Conversations(store).conversation(bot, before, conversationSize + 1, Conversations::ConversationEvents::all, viewer);
-    const auto redactor = store.policy().secretRedactor(bot);
+    const auto redactor = Policy{store}.secretRedactor(bot);
     for (auto& event : events)
         if (field(event, "kind") == "waiting") event["data"] = waitView(Tasks::waitingEvent(event));
     events = redactor.record(std::move(events), SecretRedactor::Fields::external);
@@ -489,7 +489,7 @@ Json conversation(Store& store, std::string_view bot, Id before, std::string_vie
 }
 
 Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before, Id anchor, std::string_view viewer) {
-    const auto policy = store.policy();
+    const Policy policy{store};
     const markdown::SensitiveText sensitive = [&](std::string_view text) {
         return containsProtectedText(policy, bot, text) || containsProtectedText(policy, peer, text);
     };

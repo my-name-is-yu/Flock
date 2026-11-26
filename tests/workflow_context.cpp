@@ -161,7 +161,7 @@ const std::string shaA(40, 'a'), shaB(40, 'b');
 
 void workflowLaunchUsesPolicyAndRedactsQueuedPrompt() {
     Fixture f;
-    auto policy = f.store->policy();
+    Policy policy{*f.store};
     const Person owner{"owner", true};
     policy.changeNeverRule(owner, Action::environment_launch, "env", true);
     const std::string secret = "workflow-credential-registered-after-queueing";
@@ -193,7 +193,7 @@ void expansionRedactsBeforeSearchAndPaging() {
     const auto original = f.turn(prefix + secret + " tail");
     const auto compacted = f.call("compact_conversation", {{"endMessageId", original}, {"summary", "Notes: " + secret}});
     const auto compaction = compacted.at("compaction").at("compactionId");
-    auto policy = f.store->policy();
+    Policy policy{*f.store};
     policy.submitSecret({"owner", true}, "bot", policy.requestSecret("bot", {"context-credential"}), secret);
     const auto first = f.call("expand_context", {{"compactionId", compaction}, {"startMessageId", original}});
     const auto second = f.call("expand_context", {{"cursor", first.at("nextCursor")}});
@@ -228,7 +228,7 @@ void expansionRejectsStaleCursors() {
         const auto& steps = input.event.at("turn");
         if (steps.empty()) return {"expand_context", range, "Read the first page"};
         if (steps.size() == 1) {
-            auto policy = f.store->policy();
+            Policy policy{*f.store};
             policy.submitSecret({"owner", true}, "bot", policy.requestSecret("bot", {"paging-fixture"}), secret);
             return {"expand_context", continuation, "Continue the first page"};
         }

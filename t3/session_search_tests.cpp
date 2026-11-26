@@ -61,7 +61,7 @@ struct SearchConversation {
         : store(database), runtime(store, model, t3, [](std::string_view) { return std::string{}; }) {}
 
     void blockSession(std::string_view thread, bool blocked = false) {
-        store.policy().changeNeverRule(localOwner, Action::session_read, Resource::sessionRead("env-1", thread).target, blocked);
+        Policy{store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead("env-1", thread).target, blocked);
     }
 
     Json call(std::string tool, Json args, std::string bot = "release") {
@@ -256,12 +256,12 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     const auto resource = Resource::sessionRead("env-1", thread).target;
     const auto sends = [&] { return effects("t3_thread_send").size(); };
     const auto before = sends();
-    store->policy().changeNeverRule(localOwner, Action::t3_send, resource, true);
+    Policy{*store}.changeNeverRule(localOwner, Action::t3_send, resource, true);
     receive("never");
     runtime->runConversations();
     check(sends() == before && model.result.at("ok") == false, "Never permitted a Session send");
-    store->policy().changeNeverRule(localOwner, Action::t3_send, resource, false);
-    store->policy().setMode(localOwner, "supervised");
+    Policy{*store}.changeNeverRule(localOwner, Action::t3_send, resource, false);
+    Policy{*store}.setMode(localOwner, "supervised");
     const auto origin = receive("supervised");
     runtime->runConversations();
     const auto item = Inbox(*store).inbox(localOwner).at(0);
@@ -377,7 +377,7 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     runtime->runConversations();
     check(model.wakes.size() == 1, "Restart repeated an already delivered wake");
 
-    store->policy().setMode(localOwner, "full");
+    Policy{*store}.setMode(localOwner, "full");
     fixture({{"botRunStatus", "queued"}, {"botRunContinuation", ""}});
     receive("full");
     runtime->runConversations();
@@ -404,7 +404,7 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
         }
         ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
     };
-    store->policy().setOwner(localOwner, intake.botId);
+    Policy{*store}.setOwner(localOwner, intake.botId);
     Channels(*store).connectChannel({ChannelKind::slack, channelCapabilities(ChannelKind::slack),
                                      [](auto token, auto workspace) { return token == "fixture" && workspace == "test"; },
                                      [&](auto, auto) -> std::optional<ChannelSender> { return ChannelSender{intake.botId, localOwner.id}; },
@@ -428,7 +428,7 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     slack("history");
     check(model.result.at("ok") == false, "A channel turn read a Session outside the Slack thread");
     model.next = send;
-    store->policy().setMode(localOwner, "supervised");
+    Policy{*store}.setMode(localOwner, "supervised");
     fixture({{"botRunStatus", "queued"}});
     Channels(*store).receiveChannel(ChannelKind::slack, "fixture",
                                     {{"workspaceId", "test"},

@@ -39,7 +39,7 @@ void Store::setBotPaused(const Person& actor, std::string_view bot, bool paused,
     const SessionDispatchFileLock dispatch(p_->path, SessionDispatchFileLock::Mode::exclusive);
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    auto permissions = policy();
+    Policy permissions{*this};
     if (!permissions.allows(actor, Action::bot_settings, bot)) throw DecisionDenied{};
     if (p_->botLifecycle.botPaused(bot) == paused) return;
 
@@ -95,7 +95,7 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
 void Store::deleteBot(const Person& actor, std::string_view bot) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    auto permissions = policy();
+    Policy permissions{*this};
     if (!permissions.allows(actor, Action::bot_settings, bot)) throw DecisionDenied{};
     if (p_->query(R"SQL(
 SELECT 1 WHERE

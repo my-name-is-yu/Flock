@@ -57,7 +57,7 @@ template <class F> void handle(const Request& req, Response& res, F run) {
 }
 
 Json requireBot(Store& store, const WebCallbacks& callbacks, const Person& actor, std::string_view bot, Action action) {
-    if (!store.policy().allows(actor, action, bot)) throw AccessDenied("Bot access denied");
+    if (!Policy{store}.allows(actor, action, bot)) throw AccessDenied("Bot access denied");
     auto known = callbacks.bots();
     const auto found = std::ranges::find_if(known, [&](const Json& item) { return field(item, "id") == bot; });
     if (found == known.end()) throw Conflict("Bot not found");
@@ -79,7 +79,7 @@ Json unscheduledRequests(Store& store, std::string_view bot, const Json& profile
             field(*saved, "timezone") != field(entry, "timezone") || field(*saved, "request") != request)
             requests.push_back(request);
     }
-    return store.policy().redactSecrets(bot, requests);
+    return Policy{store}.redactSecrets(bot, requests);
 }
 }
 
@@ -114,7 +114,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             const bool activeOnly = req.get_param_value("active") == "1";
             auto page = Automations(store).automations(actor, bot, before, activeOnly);
             if (activeOnly && !before) {
-                const auto policy = store.policy();
+                const Policy policy{store};
                 page["canManage"] = policy.allows(actor, Action::bot_settings, bot) && policy.allows(actor, Action::bot_decide, bot);
                 page["unscheduledRequests"] = unscheduledRequests(store, bot, profile);
             }

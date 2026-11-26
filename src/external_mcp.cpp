@@ -1,4 +1,5 @@
 #include "flock/external_mcp.hpp"
+#include "flock/policy.hpp"
 #include "flock/limits.hpp"
 #include "connector_credentials.hpp"
 #include "journal_task.hpp"
@@ -52,7 +53,7 @@ ExternalMcpCredential ExternalMcp::connect(std::string_view person, const std::v
     db.exec("INSERT INTO external_mcp_connections VALUES(?,?,?)",
             {credential.connectionId, actor.id, connector_credentials::digest(credential.bearerToken)});
     for (const auto& bot : bots) {
-        if (!store_.policy().allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
+        if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
         db.exec("INSERT OR IGNORE INTO external_mcp_allowed_bots VALUES(?,?)", {credential.connectionId, bot});
     }
     tx.commit();
@@ -93,7 +94,7 @@ WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
                           {connection.id, bot});
     if (!grant.next()) throw Conflict(std::string(botUnavailable));
     const auto actor = db.sessionParticipationStorage.sessionActor(grant.string(0));
-    if (!store_.policy().allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
+    if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
 
     const auto fingerprint = connector_credentials::digest(Json::array({bot, text}).dump());
     auto receipt = db.query("SELECT request_digest,task_id FROM external_mcp_receipts WHERE connection_id=? AND request_id=?",
@@ -136,7 +137,7 @@ WHERE r.connection_id=? AND r.task_id=? AND c.token_digest IS NOT NULL
     if (!row.next()) throw Conflict(std::string(taskUnavailable));
     auto actor = db.sessionParticipationStorage.sessionActor(row.string(0));
     auto bot = row.string(1);
-    if (!store_.policy().allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(taskUnavailable));
+    if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(taskUnavailable));
     return {std::move(actor), std::move(bot)};
 }
 
@@ -149,7 +150,7 @@ Json ExternalMcp::completionRun(const OwnedTask& owner, const CompletionEntry& c
 
     const auto& peerBot = dependency->botId;
     const auto& message = dependency->messageId;
-    const auto policy = store_.policy();
+    const Policy policy{store_};
     if (message.empty() || !policy.allows(owner.actor, Action::bot_view, peerBot)) return nullptr;
     const auto source = std::ranges::find_if(dependency->evidence, [&](const CompletionEvidence& ref) {
         return ref.kind == CompletionEvidenceKind::peer_report && ref.messageId == message;
@@ -211,7 +212,7 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
 
     const auto environment = field(run, "environmentId");
     const auto thread = field(run, "threadId");
-    if (!environment.empty() && !thread.empty() && store_.policy().allows(owner.bot, Resource::sessionRead(environment, thread))) {
+    if (!environment.empty() && !thread.empty() && Policy{store_}.allows(owner.bot, Resource::sessionRead(environment, thread))) {
         Json session{{"environmentId", environment}, {"threadId", thread}, {"link", field(run, "link")}};
         const auto encoded = session.dump();
         if (scrub.record(session, SecretRedactor::Fields::external) == session && redactConnectionTokens(encoded) == encoded)

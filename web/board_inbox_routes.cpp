@@ -53,7 +53,7 @@ void setBotNames(Json& rows, Store& store, const WebCallbacks& callbacks) {
     for (auto& row : rows) {
         const auto& id = row.at("botId").get_ref<const std::string&>();
         const auto name = names.find(id);
-        if (name != names.end() && !name->second.empty()) row["botName"] = store.policy().redactSecrets(id, name->second);
+        if (name != names.end() && !name->second.empty()) row["botName"] = Policy{store}.redactSecrets(id, name->second);
     }
 }
 }

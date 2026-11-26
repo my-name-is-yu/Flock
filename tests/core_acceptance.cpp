@@ -393,7 +393,7 @@ void selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun() {
 void selectedWorkRechecksConnectionAfterApproval() {
     Fixture f;
     const auto task = seedSelectedTask(f);
-    f.store->policy().setMode(localOwner, "supervised");
+    Policy{*f.store}.setMode(localOwner, "supervised");
     f.wait(task, "policy_approval");
     const auto item = Inbox(*f.store).inbox(localOwner).at(0);
     check(item.at("requestTitle").get<std::string>().starts_with("t3.send"), "Selected work used the new-Thread policy");
@@ -1154,7 +1154,7 @@ void settledReportCanRecoverAfterRestart() {
     for (const bool available : {false, true}) {
         Fixture f;
         const std::string secret = "private-report-diagnostic";
-        auto policy = f.store->policy();
+        Policy policy{*f.store};
         policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"diagnostic"}), secret);
         const auto id = f.submit();
         f.model.script = [&](const ModelInput& i) {
@@ -1382,7 +1382,7 @@ void redactedHistoryPagination() {
     f.read = "on_demand";
     f.restart();
     const std::string secret = "fixture-history-secret";
-    auto policy = f.store->policy();
+    Policy policy{*f.store};
     policy.submitSecret({"fixture", true}, "alpha", policy.requestSecret("alpha", {"history-token"}), secret);
     f.t3.historyPages = {
         {"Token: " + secret, {}, {}, "history-item", "7", 64, true},
@@ -1645,7 +1645,7 @@ void peerCompletionRespectsSessionReadPolicy() {
     f.reach(sender, "peer_waiting");
     const Id recipient = Tasks(*f.store).tasks("beta").front().task.id;
     f.reach(recipient, "running");
-    f.store->policy().changeNeverRule({"fixture", true}, Action::session_read, Resource::sessionRead("e", "thread-1").target, true);
+    Policy{*f.store}.changeNeverRule({"fixture", true}, Action::session_read, Resource::sessionRead("e", "thread-1").target, true);
     f.t3.finish("run-1");
     f.reach(recipient, "completed");
     f.restart();
@@ -2305,7 +2305,7 @@ void modelBudgetFollowsBotConsultation() {
           "the recipient reached the provider without approval, or restart changed its wait");
     Store writer(f.directory / "state.db");
     const Person verifier{"verifier", false};
-    writer.policy().setMember(localOwner, "beta", verifier.id, true);
+    Policy{writer}.setMember(localOwner, "beta", verifier.id, true);
     executeSql(f.directory / "state.db", R"SQL(
 INSERT INTO journal(time,kind,data,conversation_bot_id)
 VALUES(0,'conversation_budget_wait','{}','alpha');
@@ -3005,7 +3005,7 @@ void prefillInFull() {
     Fixture f;
     f.read = "prefill";
     f.restart();
-    auto policy = f.store->policy();
+    Policy policy{*f.store};
     for (const auto& [name, token] : std::map<std::string, std::string>{{"first", "result"}, {"second", "complete"}}) {
         auto request = policy.requestSecret("alpha", {name});
         policy.submitSecret({"fixture", true}, "alpha", request, token);
@@ -3188,7 +3188,7 @@ int main() {
                                                                                         };
                                                                                         const auto task = f.submit();
                                                                                         f.reach(task, "running");
-                                                                                        f.store->policy().setMode(localOwner, "supervised");
+                                                                                        Policy{*f.store}.setMode(localOwner, "supervised");
                                                                                         Conversations(*f.store).receive(
                                                                                             localOwner, {"alpha", "", "e", "separate"},
                                                                                             "unrelated", "Create another Bot");
@@ -3213,7 +3213,7 @@ int main() {
                                                                                         };
                                                                                         const auto task = f.submit();
                                                                                         f.reach(task, "running");
-                                                                                        f.store->policy().changeNeverRule(
+                                                                                        Policy{*f.store}.changeNeverRule(
                                                                                             localOwner, Action::environment_launch, "e",
                                                                                             true);
                                                                                         f.t3.finish("run-1", "failed");
@@ -3225,7 +3225,7 @@ int main() {
                                                                                    {"Never blocks ordinary launch with a T3 connection",
                                                                                     [] {
                                                                                         Fixture f;
-                                                                                        f.store->policy().changeNeverRule(
+                                                                                        Policy{*f.store}.changeNeverRule(
                                                                                             localOwner, Action::environment_launch, "e",
                                                                                             true);
                                                                                         T3Connections(*f.store).connect("e", localOwner.id,

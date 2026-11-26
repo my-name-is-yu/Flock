@@ -236,7 +236,7 @@ struct Fixture {
                 {{"modelCallLimit", limit}, {"model", "test"}, {"modelProvider", "chatgpt"}}};
     }
     void block(Action action, std::string_view target, bool blocked = true) {
-        store->policy().changeNeverRule(owner, action, target, blocked);
+        Policy{*store}.changeNeverRule(owner, action, target, blocked);
     }
     Json batch(std::vector<Decision> calls, Id budget = 20, std::string bot = "alpha") {
         model.next = std::move(calls);
@@ -308,8 +308,8 @@ void workspaceFiles(Fixture& f) {
     check(f.run(call("workspace_write_file", {{"path", "script"}, {"text", "#!/bin/sh\nprintf updated"}})).at("ok") == true &&
               access((root / "script").c_str(), X_OK) == 0,
           "Workspace edit lost executable permissions");
-    const auto secret = f.store->policy().requestSecret("beta", {"fixture-key"});
-    f.store->policy().submitSecret(owner, "beta", secret, secretMarker);
+    const auto secret = Policy{*f.store}.requestSecret("beta", {"fixture-key"});
+    Policy{*f.store}.submitSecret(owner, "beta", secret, secretMarker);
     const auto secretFile = fs::directory_iterator(f.home / "secrets")->path();
     fs::create_directories(f.home / "workspaces" / "beta");
     const auto peer = f.home / "workspaces" / "beta" / "private";
@@ -593,7 +593,7 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
 void protectedArgumentsDoNotChangeToolTargets() {
     Fixture f;
     const std::string marker = "protected-model-argument-fixture";
-    auto policy = f.store->policy();
+    Policy policy{*f.store};
     policy.submitSecret(owner, "alpha", policy.requestSecret("alpha", {"argument-fixture"}), marker);
     const auto calls = f.mcp->calls.load();
     const auto workspace = f.home / "workspaces" / "alpha";
@@ -680,7 +680,7 @@ void mcpToolOutcomes(Fixture& f) {
                              "invalid-structured-content", "invalid-is-error"})
         expectUnknown(f.run(invoke(name)), name);
 
-    f.store->policy().setMode(owner, "supervised");
+    Policy{*f.store}.setMode(owner, "supervised");
     const auto success = f.run(invoke("extension"));
     check(success.at("ok") == true && success.at("untrustedData") == true &&
               success.at("data").at("content").at(0).at("text") == "Tool evidence" &&
@@ -697,13 +697,13 @@ void mcpToolOutcomes(Fixture& f) {
         f.runtime->runConversations();
         return f.model.seen.at(0).at("result");
     };
-    f.store->policy().changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", true);
+    Policy{*f.store}.changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", true);
     check(approveMcp("extension").at("ok") == true, "Ask first did not take precedence over a read-only hint");
-    f.store->policy().changeNeverRule(owner, Action::mcp_invoke, "one", true);
+    Policy{*f.store}.changeNeverRule(owner, Action::mcp_invoke, "one", true);
     check(f.run(invoke("extension")).at("ok") == false && Inbox(*f.store).inbox(owner).empty(),
           "Never did not take precedence over a read-only hint and Ask first");
-    f.store->policy().changeNeverRule(owner, Action::mcp_invoke, "one", false);
-    f.store->policy().changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", false);
+    Policy{*f.store}.changeNeverRule(owner, Action::mcp_invoke, "one", false);
+    Policy{*f.store}.changeRule(owner, RuleKind::ask, Action::mcp_invoke, "one", false);
 
     const auto compatible = approveMcp("compatible-content");
     check(compatible.at("ok") == true && compatible.at("data").at("content").size() == 3,
@@ -714,7 +714,7 @@ void mcpToolOutcomes(Fixture& f) {
               failure.at("data").at("content").at(0).at("text") == "Tool failed" && !failure.at("data").contains("isError"),
           "Definite MCP tool failure did not survive credential redaction");
 
-    f.store->policy().setMode(owner, "full");
+    Policy{*f.store}.setMode(owner, "full");
     const auto rejected = f.run(invoke("rejected"));
     check(rejected.at("ok") == false && !rejected.contains("delivery") && rejected.contains("error"),
           "JSON-RPC rejection was classified as an ambiguous dispatch");
