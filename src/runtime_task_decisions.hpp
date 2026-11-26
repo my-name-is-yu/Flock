@@ -2,7 +2,6 @@
 
 #include "runtime_components.hpp"
 #include "journal_task.hpp"
-#include "flock/runtime.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
@@ -13,6 +12,7 @@
 namespace flockv0 {
 class ConversationStorage;
 class Database;
+class GitHost;
 class GitStorage;
 class JournalStorage;
 class PeerStorage;
@@ -21,7 +21,7 @@ class TaskEvents;
 class TaskRecords;
 class WaitStorage;
 
-class Runtime::Components::TaskDecisions {
+class runtime::TaskDecisions {
 public:
     TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage, JournalStorage& journalStorage,
                   PeerStorage& peerStorage, SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,

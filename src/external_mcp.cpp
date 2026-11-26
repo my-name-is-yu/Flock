@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/external_mcp.hpp"
 #include "flock/bot_id.hpp"
@@ -10,7 +11,6 @@
 #include "task_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/wait.hpp"

@@ -20,8 +20,9 @@ class SessionParticipationStorage;
 class ChannelStorage;
 class Database;
 class PolicyApprovals;
+class T3;
 
-class Runtime::Components::DatabaseLock {
+class runtime::DatabaseLock {
 public:
     DatabaseLock(Database& db, const std::filesystem::path& path, PolicyApprovals& approvals, const std::function<Seconds()>& clock);
     ~DatabaseLock();
@@ -33,7 +34,7 @@ private:
     int fd;
 };
 
-class Runtime::Components::Workers {
+class runtime::Workers {
 public:
     static constexpr unsigned batchLimit = 4;
 

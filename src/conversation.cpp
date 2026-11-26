@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/web_conversation_intake.hpp"
 #include "local_machine_storage.hpp"
 #include "flock/decision_errors.hpp"
@@ -17,7 +18,6 @@
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/session_ref.hpp"

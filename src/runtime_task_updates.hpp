@@ -18,7 +18,7 @@ class TaskEvents;
 class TaskRecords;
 class WaitStorage;
 
-class Runtime::Components::TaskUpdates {
+class runtime::TaskUpdates {
 public:
     TaskUpdates(Database& database, JournalStorage& journal, TaskEvents& events, TaskRecords& records, WaitStorage& waits)
         : database(database), journal(journal), events(events), records(records), waits(waits) {}

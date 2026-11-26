@@ -1,7 +1,8 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_list.hpp"
 #include "../views.hpp"
-#include "http_fixture.hpp"
+#include "http_session_fixture.hpp"
 #include "flock/identity.hpp"
 #include "flock/tasks.hpp"
 #include "flock/external_mcp.hpp"
@@ -14,6 +15,7 @@
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
@@ -181,7 +183,7 @@ void pausedBotRefusesExternalMessages() {
     Mcp client(*server, token);
     Json ask{{"bot", "release"}, {"text", "Check the release"}, {"requestId", "before-pause"}};
     const auto receipt = client.success(submitTool, ask);
-    store.setBotPaused(localOwner, "release", true);
+    BotLifecycle(store).setBotPaused(localOwner, "release", true);
     check(client.success(submitTool, ask) == receipt, "Pause changed an existing external MCP receipt");
 
     ask["requestId"] = "while-paused";
@@ -198,7 +200,7 @@ void pausedBotRefusesExternalMessages() {
 
     const auto other = client.success(submitTool, {{"bot", "triage"}, {"text", "Check triage"}, {"requestId", "other-bot"}});
     check(other.at("status") == "received", "Pause prevented submitting to another Bot");
-    store.setBotPaused(localOwner, "release", false);
+    BotLifecycle(store).setBotPaused(localOwner, "release", false);
     check(client.success(submitTool, ask).at("taskId") != receipt.at("taskId"), "Resume did not admit fresh external work");
 }
 

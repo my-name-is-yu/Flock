@@ -2,7 +2,6 @@
 
 #include "flock/store_options.hpp"
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <functional>

@@ -5,7 +5,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <optional>
@@ -25,8 +24,6 @@ struct Excerpt {
     std::size_t nextOffset = 0;
     bool more = false;
 };
-inline constexpr unsigned sessionPageLimit = 20;
-
 struct SessionPreview {
     std::string text;
     bool truncated = false;
@@ -36,7 +33,6 @@ struct SessionMetadata {
     std::vector<SessionPreview> messages;
     bool moreMessages = false;
 };
-using SessionReadDeadline = std::optional<std::chrono::steady_clock::time_point>;
 struct SessionReadTimeout : std::runtime_error {
     SessionReadTimeout() : std::runtime_error("Session read deadline exceeded") {}
 };

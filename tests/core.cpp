@@ -8,6 +8,7 @@
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/store.hpp"
+#include "flock/intake.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
 #include "flock/task.hpp"

@@ -1,11 +1,8 @@
 #pragma once
 #include "flock/bot_change.hpp"
 #include "flock/json.hpp"
-#include "flock/person.hpp"
-#include "flock/run_ref.hpp"
 #include "flock/types.hpp"
 
-#include <exception>
 #include <functional>
 #include <optional>
 #include <string>
@@ -19,6 +16,8 @@ class PolicyApprovals;
 class SecretStorage;
 class Store;
 class TaskRecords;
+struct Person;
+struct RunRef;
 
 enum class Action {
     bot_view,
@@ -93,7 +92,6 @@ public:
     void changeRule(const Person&, RuleKind, Action, std::string_view target, bool add);
     Json rules() const;
     void changeNeverRule(const Person&, Action, std::string_view target, bool add);
-    using PublishOwnedBot = std::function<void(std::string_view, const std::function<void()>&)>;
     Json createOwnedBot(const Person&, const std::function<Json(const PublishOwnedBot&)>&);
     void setOwner(const Person& creator, std::string_view bot);
     void setMember(const Person&, std::string_view bot, std::string_view person, bool add);
@@ -104,7 +102,6 @@ public:
     Json redactSecrets(std::string_view bot, const Json& view) const;
     void requireWebIdentity();
     bool requiresIdentity() const;
-    struct BotCreationUncertain : std::exception {};
     Id applyBotChange(std::string_view bot, const Person& creator, std::string_view operation, std::string_view target,
                       std::string_view name, Id message, int step, const ApplyBotChange&,
                       const ReconcileBotCreation* onExhausted = nullptr);
@@ -125,6 +122,7 @@ private:
     PolicyApprovals& policyApprovals_;
     friend class InboxStorage;
     friend class PolicyApprovals;
+    friend class BotLifecycle;
     friend class Store;
 };
 }

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "flock/json.hpp"
-#include "flock/model_error.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -44,16 +43,9 @@ struct Authorization {
     std::string code, clientId, redirectUri;
 };
 
-struct Failure : ModelError {
-    Failure(std::string message, bool transient = false, std::string providerCode = {}, Json usage = Json::object(),
-            ModelErrorCode code = ModelErrorCode::inference_failed);
-    std::string providerCode;
-};
-
 const Json& field(const Json&, std::string_view);
 std::string stringField(const Json&, std::string_view);
 Json tokenUsage(const Json&);
-Failure remoteFailure(std::string_view site, long status, const Json&, std::string_view requestId = {}, Json usage = Json::object());
 bool validAccessToken(std::string_view);
 
 HttpResponse httpRequest(const HttpRequest&);

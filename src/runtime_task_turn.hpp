@@ -4,7 +4,6 @@
 #include "peer_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
-#include "flock/model_error.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 #include "flock/outbox_instruction.hpp"
@@ -24,7 +23,9 @@
 
 namespace flockv0 {
 class Database;
+class GitHost;
 class GitStorage;
+class Model;
 class ModelCalls;
 class PeerStorage;
 class SecretStorage;
@@ -35,24 +36,29 @@ class WaitStorage;
 
 class MemoryStorage;
 
-class Runtime::Components::TaskTurn {
+class runtime::TaskTurn {
 public:
     TaskTurn(Database& database, GitStorage& gitStorage, ModelCalls& modelCalls, PeerStorage& peerStorage, SecretStorage& secretStorage,
              TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
-             MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock, GitHost* gitHost,
-             const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
-             SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs, SessionPrompts& prompts,
-             TaskDecisions& decisions);
+             MemoryStorage& memoryStorage, Model& model, const std::function<std::string(std::string_view)>& soul,
+             const std::function<Seconds()>& clock, GitHost* gitHost, const std::string& sessionRead, std::stop_token stop,
+             TaskUpdates& updates, RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs,
+             SessionPrompts& prompts, TaskDecisions& decisions);
 
     void decide(const TaskData& task);
     void persistTaskInferences();
 private:
     enum class FailureCause { Model, BotNotes, UnsupportedReasoningEffort };
+    struct InferenceFailure {
+        std::string detail;
+        bool transient;
+        FailureCause cause = FailureCause::Model;
+    };
     struct TaskInference {
         Id generation, eventId, attemptId;
         std::optional<Id> revisionId;
         Json usage = Json::object();
-        std::variant<ModelCall, ModelError> outcome{};
+        std::variant<ModelCall, InferenceFailure> outcome{};
     };
 
     std::vector<std::string> available(const TaskData& task, const Json& event, const std::optional<PeerExchange>& peer, bool canSend,
@@ -76,7 +82,7 @@ private:
     WaitStorage& waitStorage;
     MemoryStorage& memoryStorage;
     Model& model;
-    const SoulLoader& soul;
+    const std::function<std::string(std::string_view)>& soul;
     const std::function<Seconds()>& clock;
     GitHost* gitHost;
     const std::string& sessionRead;

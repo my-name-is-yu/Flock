@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
@@ -587,7 +588,7 @@ private:
             return error(res, 404, "bot_not_found");
         }
         try {
-            store_.deleteBot(actor, bot);
+            BotLifecycle(store_).deleteBot(actor, bot);
         } catch (const DecisionDenied&) {
             return error(res, 403, "access_denied");
         } catch (const BotBusy&) {
@@ -609,7 +610,7 @@ private:
         if (!Policy{store_}.allows(actor, Action::bot_settings, bot)) return error(res, 403, "access_denied");
         if (findBot(bot).is_null()) return error(res, 404, "bot_not_found");
         try {
-            store_.setBotPaused(actor, bot, paused->get<bool>());
+            BotLifecycle(store_).setBotPaused(actor, bot, paused->get<bool>());
         } catch (const DecisionDenied&) {
             return error(res, 403, "access_denied");
         }
@@ -680,7 +681,7 @@ private:
         Policy policy{store_};
         view["canDecide"] = policy.allows(actor, Action::bot_decide, bot);
         view["bot"]["canDelete"] = policy.allows(actor, Action::bot_settings, bot);
-        view["bot"]["paused"] = store_.botPaused(bot);
+        view["bot"]["paused"] = BotLifecycle(store_).botPaused(bot);
         return view;
     }
 
@@ -751,7 +752,7 @@ private:
             const auto id = web::field(bot, "id");
             bot = redactBot(id, bot);
             bot["canDelete"] = policy.allows(person, Action::bot_settings, id);
-            bot["paused"] = store_.botPaused(id);
+            bot["paused"] = BotLifecycle(store_).botPaused(id);
             if (auto about = bot.find("about"); about != bot.end()) {
                 const auto& soul = about->get_ref<const std::string&>();
                 const auto firstLine = std::string_view(soul).substr(0, soul.find_first_of("\r\n"));

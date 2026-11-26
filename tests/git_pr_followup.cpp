@@ -2,6 +2,7 @@
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
 #include "fake_git.hpp"
+#include "fake_git_sessions.hpp"
 #include "model.hpp"
 #include "flock/identity.hpp"
 #include "flock/tasks.hpp"

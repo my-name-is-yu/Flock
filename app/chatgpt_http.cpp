@@ -3,7 +3,7 @@
 #include "flock/bot_profile.hpp"
 #include "flock/detail/traffic_recording.hpp"
 #include "flock/json.hpp"
-#include "flock/model_error.hpp"
+#include "chatgpt_failure.hpp"
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>

@@ -1,8 +1,9 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_intake.hpp"
 #include "flock/task_list.hpp"
 #include "flock/web_conversation_intake.hpp"
-#include "http_fixture.hpp"
+#include "http_session_fixture.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/identity.hpp"
 #include "flock/tasks.hpp"
@@ -18,10 +19,12 @@
 #include "flock/policy.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/session_ref.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
+#include "flock/session_prompt.hpp"
 #include "flock/t3_session.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
@@ -336,7 +339,7 @@ void pausedBotStopsSessionMessages() {
         mcp.call("flock_ask", next).at("structuredContent");
         runtime.runConversations();
         check(t3.sends == 3 && t3.reconciliations == 0, "The unconfirmed reply was retried before Pause");
-        store.setBotPaused(localOwner, "release", true);
+        BotLifecycle(store).setBotPaused(localOwner, "release", true);
         check(mcp.call("flock_ask", ask).at("structuredContent") == receipt, "Pause changed an existing Session ask receipt");
         ask["requestId"] = "while-paused";
     }
@@ -358,7 +361,7 @@ void pausedBotStopsSessionMessages() {
     runtime.runConversations();
     check(t3.stopChecks == std::map<std::string, int>{{"bot-reply-1", 2}, {"bot-reply-2", 2}},
           "The accepted interruptions were not checked for settlement");
-    store.setBotPaused(localOwner, "release", false, [&] { return now; });
+    BotLifecycle(store).setBotPaused(localOwner, "release", false, [&] { return now; });
     t3.recoveryVisible = true;
     now += 5;
     runtime.runConversations();
@@ -371,9 +374,9 @@ void pausedBotStopsSessionMessages() {
               t3.observations == observations && t3.sends == 3 && model.wakes == 1,
           "Resume revived a wake for a stopped Bot reply or failed to settle the recovered Run");
     check(mcp.call("flock_ask", ask).contains("structuredContent"), "Resume did not admit a fresh Session ask");
-    store.setBotPaused(localOwner, "release", true);
-    store.deleteBot(localOwner, "release");
-    check(store.botDeleted("release"), "An interrupted reply in a deleted Session blocked Bot deletion");
+    BotLifecycle(store).setBotPaused(localOwner, "release", true);
+    BotLifecycle(store).deleteBot(localOwner, "release");
+    check(BotLifecycle(store).botDeleted("release"), "An interrupted reply in a deleted Session blocked Bot deletion");
 }
 
 void webSendParticipation() {

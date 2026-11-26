@@ -4,7 +4,6 @@
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
-#include "flock/t3_command.hpp"
 #include "flock/command.hpp"
 #include "flock/task.hpp"
 #include "flock/run_ref.hpp"
@@ -17,6 +16,8 @@
 #include <filesystem>
 
 namespace flockv0 {
+struct Command;
+struct Delivery;
 struct Observation;
 
 class BotLifecycleStorage;
@@ -28,6 +29,7 @@ class Policy;
 class PolicyApprovals;
 class SessionParticipationStorage;
 class SessionReadStorage;
+class T3;
 class TaskEvents;
 class TaskRecords;
 class TaskRouting;
@@ -37,7 +39,7 @@ class WaitStorage;
 class MemoryStorage;
 class OutboxStorage;
 
-class Runtime::Components::OutboxDispatch {
+class runtime::OutboxDispatch {
 public:
     OutboxDispatch(Database& database, BotLifecycleStorage& botLifecycle, BotSettingsStorage& botSettingsStorage,
                    ConversationStorage& conversationTurns, JournalStorage& journalStorage, const std::filesystem::path& path,

@@ -15,12 +15,12 @@
 #include <variant>
 
 namespace flockv0 {
-void Runtime::Components::TaskQuestions::closeQuestion(TaskData& task, std::string_view reason, std::string_view resolution) {
+void runtime::TaskQuestions::closeQuestion(TaskData& task, std::string_view reason, std::string_view resolution) {
     waits.clearWait(task, reason);
     waits.unlockQuestion(task, resolution.empty() ? reason : resolution);
 }
 
-void Runtime::Components::TaskQuestions::suspendQuestion(TaskData& task) {
+void runtime::TaskQuestions::suspendQuestion(TaskData& task) {
     if (!task.question) return;
     auto& question = *task.question;
     if (const auto wait = waits.currentWait(task.id)) {
@@ -32,7 +32,7 @@ void Runtime::Components::TaskQuestions::suspendQuestion(TaskData& task) {
     if (pending && TaskUpdates::checkpointMatches(*pending, task)) question.suspendedDecision = *pending;
 }
 
-std::optional<DecisionCheckpoint> Runtime::Components::TaskQuestions::resumeQuestion(TaskData& task) {
+std::optional<DecisionCheckpoint> runtime::TaskQuestions::resumeQuestion(TaskData& task) {
     auto& question = *task.question;
     const auto& target = question.target;
     const auto waitId = std::exchange(question.suspendedWaitId, std::nullopt);

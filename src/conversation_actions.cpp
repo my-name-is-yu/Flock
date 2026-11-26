@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "flock/t3_session.hpp"
 #include "flock/decision_errors.hpp"
 #include "task_run_reports.hpp"
 #include "session_read_storage.hpp"
@@ -272,9 +273,14 @@ CallOutcome SessionMessageStorage::runSessionEffect(const conversation::Message&
 }
 
 namespace {
-bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
-    return receipt.kind == Delivery::Kind::Accepted && receipt.run.threadId == target.threadId && !receipt.run.runId.empty() &&
-           (receipt.delivery == "started" || receipt.delivery == "queued");
+SessionSendOutcome sessionSendOutcome(const SessionTarget& target, Delivery delivery) {
+    using enum SessionSendOutcome::Status;
+    if (delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == target.threadId && !delivery.run.runId.empty()) {
+        if (delivery.delivery == "started") return {Started, std::move(delivery.run), {}};
+        if (delivery.delivery == "queued") return {Queued, std::move(delivery.run), {}};
+    }
+    const auto status = delivery.definitelyUnsent ? Unsent : delivery.kind == Delivery::Kind::NotAccepted ? NotAccepted : Unknown;
+    return {status, {}, std::move(delivery.detail)};
 }
 }
 
@@ -296,15 +302,16 @@ void SessionMessageStorage::recordPendingRuns(const SessionTarget& target) {
 
 bool SessionMessageStorage::recordSessionSendRun(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
     const auto& target = receipt.target;
-    const auto& delivery = receipt.delivery;
-    if (!acceptedSessionSend(target, delivery)) return false;
+    const auto& outcome = receipt.outcome;
+    using enum SessionSendOutcome::Status;
+    if (outcome.status != Started && outcome.status != Queued) return false;
     database.exec(
         "INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment,"
         "task_id,action_id,delivery,link,interrupt_at) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,0),NULLIF(?,''),?,?,?)",
-        {message, receipt.bot, target.environmentId, target.threadId, delivery.run.runId, receipt.title,
+        {message, receipt.bot, target.environmentId, target.threadId, outcome.run.runId, receipt.title,
          interruptAt || !receipt.notify || sessionParticipationStorage.sessionParticipationStopped(receipt.bot, target, message) ? 1 : 0,
-         target.gatewayEnvironmentId, receipt.taskId, receipt.actionId, delivery.delivery == "queued" ? "queued" : "started",
-         secretStorage.redactor(receipt.bot).text(delivery.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
+         target.gatewayEnvironmentId, receipt.taskId, receipt.actionId, outcome.status == Queued ? "queued" : "started",
+         secretStorage.redactor(receipt.bot).text(outcome.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
     if (!receipt.taskId || receipt.actionId.empty()) return true;
     auto task = taskRecords.load(receipt.taskId);
     if (terminal(task)) return true;
@@ -330,9 +337,10 @@ WHERE message_id=? AND step=? AND result IS NULL
 
 void SessionMessageStorage::persistSessionSendReceipt(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
     const auto& target = receipt.target;
-    const auto& delivery = receipt.delivery;
+    const auto& outcome = receipt.outcome;
+    using enum SessionSendOutcome::Status;
     const bool accepted = recordSessionSendRun(message, receipt, interruptAt);
-    const bool settled = accepted || delivery.definitelyUnsent || (interruptAt && delivery.kind == Delivery::Kind::NotAccepted);
+    const bool settled = accepted || outcome.status == Unsent || (interruptAt && outcome.status == NotAccepted);
     if (settled) {
         database.exec("DELETE FROM session_message_sends WHERE action=? AND message_id=? AND coalesce(step,-1)=?",
                       {receipt.requestId, message, receipt.step});
@@ -348,10 +356,10 @@ UPDATE conversation_steps SET effect=NULL WHERE message_id=? AND step=?
     if (receipt.step < 0 || interruptAt) return;
     Json result;
     if (accepted) {
-        result = {{"ok", true}, {"delivery", delivery.delivery}};
+        result = {{"ok", true}, {"delivery", outcome.status == Queued ? "queued" : "started"}};
         if (receipt.notify) result.update({{"environmentId", target.environmentId}, {"threadId", target.threadId}});
     } else {
-        result = toolFailure(delivery.detail.empty() ? "Could not confirm delivery to T3" : delivery.detail);
+        result = toolFailure(outcome.detail.empty() ? "Could not confirm delivery to T3" : outcome.detail);
         if (!settled) result["delivery"] = "unknown";
     }
     saveSessionSendResult(receipt.bot, message, receipt.step, std::move(result));
@@ -420,7 +428,7 @@ WHERE s.action=? AND s.message_id=? AND s.interrupt_at<=?
                                   {command.ownerBotId,
                                    target,
                                    {},
-                                   std::move(delivery),
+                                   sessionSendOutcome(target, std::move(delivery)),
                                    static_cast<int>(row.number(0)),
                                    row.number(1),
                                    row.string(2),
@@ -749,10 +757,11 @@ VALUES(?,?,?,?,?,?,?)
     }
     std::lock_guard lock(database.mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
-    const auto checkpoint = sessionSendReceipts
-                                .insert_or_assign(id, SessionSendReceipt{message.bot, target, std::move(title), std::move(receipt), step,
-                                                                         savedTaskId, savedActionId, command.actionId, !fixesPullRequest})
-                                .first;
+    const auto checkpoint =
+        sessionSendReceipts
+            .insert_or_assign(id, SessionSendReceipt{message.bot, target, std::move(title), sessionSendOutcome(target, std::move(receipt)),
+                                                     step, savedTaskId, savedActionId, command.actionId, !fixesPullRequest})
+            .first;
     Transaction transaction(database.db);
     persistSessionSendReceipt(id, checkpoint->second);
     transaction.commit();

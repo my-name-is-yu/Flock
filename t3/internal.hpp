@@ -2,7 +2,6 @@
 
 #include "flock/json.hpp"
 #include "flock/session_ref.hpp"
-#include "flock/t3_session.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
@@ -17,6 +16,15 @@
 
 namespace flockv0::recording {
 class Capture;
+}
+
+namespace flockv0 {
+struct SessionAttachment;
+struct SessionCounts;
+struct SessionEvent;
+struct SessionEventFilter;
+struct SessionEventPage;
+struct SessionMetadata;
 }
 
 namespace flockv0::t3detail {

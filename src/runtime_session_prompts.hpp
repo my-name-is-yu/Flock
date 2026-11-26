@@ -2,7 +2,6 @@
 
 #include "runtime_components.hpp"
 #include "flock/types.hpp"
-#include "flock/runtime.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/outbox.hpp"
@@ -20,7 +19,7 @@ class TaskEvents;
 
 class WorkflowStorage;
 
-class Runtime::Components::SessionPrompts {
+class runtime::SessionPrompts {
 public:
     SessionPrompts(Database& database, SecretStorage& secretStorage, TaskEvents& taskEvents, WorkflowStorage& workflowStorage)
         : database(database), secretStorage(secretStorage), taskEvents(taskEvents), workflowStorage(workflowStorage) {}

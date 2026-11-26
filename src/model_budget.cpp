@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversations.hpp"
 #include "database.hpp"
 #include "wait_storage.hpp"
@@ -13,7 +14,6 @@
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"

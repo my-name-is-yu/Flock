@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "flock/intake.hpp"
 #include "model.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
@@ -7,9 +8,7 @@
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/session_ref.hpp"
-#include "flock/store.hpp"
 #include "flock/t3.hpp"
-#include "flock/t3_command.hpp"
 #include "flock/t3_session.hpp"
 #include "flock/types.hpp"
 

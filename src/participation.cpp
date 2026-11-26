@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/bot_lifecycle.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/policy.hpp"
 #include "session_message_storage.hpp"
@@ -16,7 +17,6 @@
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_session.hpp"

@@ -3,6 +3,7 @@
 #include "conversation_turns.hpp"
 #include "memory_storage.hpp"
 #include "flock/outbox.hpp"
+#include "flock/session_prompt.hpp"
 #include "flock/t3_command.hpp"
 
 #include "conversation_storage.hpp"
@@ -16,10 +17,8 @@
 #include "flock/secrets.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
-#include "flock/t3_command.hpp"
 #include "flock/outbox.hpp"
 #include "json_fields.hpp"
 

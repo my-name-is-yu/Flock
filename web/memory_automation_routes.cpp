@@ -6,7 +6,6 @@
 #include "flock/json.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>

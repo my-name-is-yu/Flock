@@ -8,7 +8,6 @@
 #include "flock/limits.hpp"
 #include "journal_conversation.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/secrets.hpp"
 

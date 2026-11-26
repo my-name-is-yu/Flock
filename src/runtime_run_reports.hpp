@@ -18,11 +18,12 @@ namespace flockv0 {
 class Database;
 class JournalStorage;
 class Policy;
+class T3;
 class TaskEvents;
 
 class WorkflowStorage;
 
-class Runtime::Components::RunReports {
+class runtime::RunReports {
 public:
     struct JournalReport {
         Id id;

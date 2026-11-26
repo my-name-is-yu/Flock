@@ -38,7 +38,7 @@
 #include <sqlite3.h>
 
 namespace flockv0 {
-bool Runtime::Components::RunObserver::shouldStop(const TaskData& task) {
+bool runtime::RunObserver::shouldStop(const TaskData& task) {
     if (peerStorage.replanReady(task)) return true;
     if (task.state != TaskState::cancelling) return false;
     std::lock_guard lock(database.mutex);
@@ -46,8 +46,8 @@ bool Runtime::Components::RunObserver::shouldStop(const TaskData& task) {
     return !peer || peer->recipient == task.id;
 }
 
-Observation Runtime::Components::RunObserver::observeRun(const std::string& bot, const std::string& environment, const Json& config,
-                                                         const RunRef& run) {
+Observation runtime::RunObserver::observeRun(const std::string& bot, const std::string& environment, const Json& config,
+                                             const RunRef& run) {
     try {
         auto observed = t3.observe(environment, config, run);
         const auto scrub = secretStorage.redactor(bot);
@@ -67,12 +67,12 @@ Observation Runtime::Components::RunObserver::observeRun(const std::string& bot,
     }
 }
 
-Observation Runtime::Components::RunObserver::observe(const TaskData& task) {
+Observation runtime::RunObserver::observe(const TaskData& task) {
     const auto& run = task.activeRun.value();
     return observeRun(task.botId, run.environmentId, task.config, run.ref);
 }
 
-bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Observation& observed) {
+bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& observed) {
     std::lock_guard lock(database.mutex);
     Transaction tx(database.db);
     auto task = taskRecords.load(snapshot.id);
@@ -209,7 +209,7 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
     return changed;
 }
 
-bool Runtime::Components::RunObserver::questionStillOpen(const TaskData& task) {
+bool runtime::RunObserver::questionStillOpen(const TaskData& task) {
     const auto observed = observe(task);
     if (ingest(task, observed) || observed.kind != Observation::Kind::Question) return false;
     if (!task.question || task.question->target.requestId != observed.question.requestId) return false;
@@ -220,7 +220,7 @@ bool Runtime::Components::RunObserver::questionStillOpen(const TaskData& task) {
     return savedTarget == target && peerExchanges.forwardedQuestionAnswer(task, savedTarget);
 }
 
-void Runtime::Components::RunObserver::interruptRun(const TaskData& task) {
+void runtime::RunObserver::interruptRun(const TaskData& task) {
     const auto& stop = task.runStop.value();
     if (!task.activeRun || task.activeRun != stop.run || (task.state == TaskState::cancelling) != (stop.intent == RunStopIntent::cancel))
         return;
@@ -255,7 +255,7 @@ void Runtime::Components::RunObserver::interruptRun(const TaskData& task) {
     transaction.commit();
 }
 
-void Runtime::Components::RunObserver::cancelDone(TaskData& task) {
+void runtime::RunObserver::cancelDone(TaskData& task) {
     questions.closeQuestion(task, "cancelled");
     if (!task.actionId.empty()) {
         const auto action = outboxStorage.outbox(task);
@@ -277,7 +277,7 @@ void Runtime::Components::RunObserver::cancelDone(TaskData& task) {
                                  actionId());
 }
 
-void Runtime::Components::RunObserver::finishReplan(const TaskData& task) {
+void runtime::RunObserver::finishReplan(const TaskData& task) {
     updates.change(task, [&](TaskData& current) {
         const auto id = current.id;
         const auto peer = peerStorage.peerExchange(id);
@@ -327,7 +327,7 @@ void Runtime::Components::RunObserver::finishReplan(const TaskData& task) {
     });
 }
 
-void Runtime::Components::RunObserver::stopNote(const TaskData& snapshot, const std::string& detail) {
+void runtime::RunObserver::stopNote(const TaskData& snapshot, const std::string& detail) {
     updates.change(snapshot, [&](TaskData& task) {
         const bool cancel = task.state == TaskState::cancelling;
         auto& saved = cancel ? task.cancellationDetail : task.replanningDetail;

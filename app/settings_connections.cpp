@@ -1,4 +1,5 @@
 #include "settings_connections.hpp"
+#include "flock/bot_lifecycle.hpp"
 #include "flock/bot_id.hpp"
 #include "bot_tools.hpp"
 #include "git_github.hpp"
@@ -6,7 +7,6 @@
 #include "flock/channel_bridge_settings.hpp"
 #include "flock/channels.hpp"
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <curl/curl.h>
@@ -457,7 +457,7 @@ Json SettingsConnections::botChannels(std::string_view botId) const {
     return botChannelsLocked(botId);
 }
 
-Json SettingsConnections::changeBotChannel(std::string_view botId, const Json& input, const Store& store) {
+Json SettingsConnections::changeBotChannel(std::string_view botId, const Json& input, Store& store) {
     if (!validBotId(botId) || !input.is_object()) throw Conflict("Invalid Bot channel settings");
     if (hostChannels_) throw Conflict("These channel settings are managed on the Flock host");
     try {
@@ -473,7 +473,7 @@ Json SettingsConnections::changeBotChannel(std::string_view botId, const Json& i
         auto& senders = channels.at(type).at(id).at("senders");
         if (const auto existing = senders.find(senderId); existing != senders.end()) {
             const auto& assigned = existing->at("botId").get_ref<const std::string&>();
-            if (assigned != botId && (action != "setSender" || !store.botDeleted(assigned)))
+            if (assigned != botId && (action != "setSender" || !BotLifecycle(store).botDeleted(assigned)))
                 throw Conflict("This sender is linked to another Bot");
         }
         if (action == "removeSender")

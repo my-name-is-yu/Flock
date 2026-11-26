@@ -15,10 +15,6 @@ namespace flockv0 {
 struct BotNotes {
     std::string soul, memory;
 };
-struct BotNotesUnavailable : Conflict {
-    using Conflict::Conflict;
-};
-
 struct ModelTurn {
     std::vector<Decision> calls;
     Json usage = Json::object();

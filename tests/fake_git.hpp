@@ -2,17 +2,10 @@
 #include "flock/task_history.hpp"
 #include "flock/git_host.hpp"
 #include "flock/board_inbox.hpp"
-#include "flock/command.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
-#include "flock/run_ref.hpp"
-#include "flock/runtime.hpp"
-#include "flock/session_ref.hpp"
-#include "flock/store.hpp"
-#include "flock/t3.hpp"
-#include "flock/t3_command.hpp"
-#include "flock/t3_session.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
@@ -24,7 +17,6 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -56,41 +48,6 @@ struct Directory {
         std::error_code error;
         std::filesystem::remove_all(path, error);
     }
-};
-
-class Sessions final : public T3 {
-public:
-    std::string authGeneration(const std::string&, const Json&) override { return "t3-fixture"; }
-    std::vector<Command> sessionSends;
-    std::optional<SessionTarget> askOrigin;
-    std::function<void()> afterSessionSend;
-
-    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
-        if (!askOrigin || target != *askOrigin) return std::nullopt;
-        return SessionMetadata{.title = "Original request", .project = "Fixture project", .projectId = "project"};
-    }
-    Delivery send(const Command& command) override {
-        if (command.tool == CommandTool::message_session) {
-            sessionSends.push_back(command);
-            if (afterSessionSend) afterSessionSend();
-            return {Delivery::Kind::Accepted,
-                    {command.target.threadId, "followup-" + std::to_string(sessionSends.size()), {}, command.gatewayEnvironmentId},
-                    {},
-                    false,
-                    "queued"};
-        }
-        return {
-            Delivery::Kind::Accepted, {"thread-" + command.projectId, "run-" + command.projectId, {}, command.gatewayEnvironmentId}, {}};
-    }
-    Delivery reconcile(const Command&) override { return {}; }
-    Observation observe(const std::string&, const Json&, const RunRef&) override {
-        Observation result;
-        result.kind = Observation::Kind::Finished;
-        result.status = "completed";
-        result.report = "Pushed branch change with tests";
-        return result;
-    }
-    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
 class FakeHost final : public GitHost {

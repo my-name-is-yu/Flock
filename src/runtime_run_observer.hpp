@@ -18,6 +18,7 @@ class Database;
 class JournalStorage;
 class PeerStorage;
 class SecretStorage;
+class T3;
 class TaskEvents;
 class TaskRecords;
 class WaitStorage;
@@ -25,7 +26,7 @@ class WaitStorage;
 class OutboxStorage;
 class WorkflowStorage;
 
-class Runtime::Components::RunObserver {
+class runtime::RunObserver {
 public:
     RunObserver(Database& database, BotSettingsStorage& botSettingsStorage, JournalStorage& journalStorage, PeerStorage& peerStorage,
                 SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage,

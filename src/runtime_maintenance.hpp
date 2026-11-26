@@ -3,7 +3,6 @@
 #include "runtime_components.hpp"
 #include "database.hpp"
 #include "flock/types.hpp"
-#include "flock/runtime.hpp"
 
 #include <functional>
 #include <optional>
@@ -18,7 +17,7 @@ class AutomationStorage;
 class WorkflowStorage;
 class PolicyApprovals;
 
-class Runtime::Components::Maintenance {
+class runtime::Maintenance {
     using ErrorReporter = std::function<void(std::string_view)>;
 public:
     Maintenance(Database&, AutomationStorage&, WorkflowStorage&, PolicyApprovals&, const std::function<Seconds()>& clock,

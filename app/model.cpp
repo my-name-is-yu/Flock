@@ -4,9 +4,9 @@
 #include "flock/git_host.hpp"
 #include "flock/json.hpp"
 #include "flock/limits.hpp"
+#include "flock/session_read.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
-#include "flock/t3_session.hpp"
 #include "flock/workspace_tools.hpp"
 
 #include <nlohmann/json.hpp>
@@ -273,7 +273,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
                       : "Inclusive latest event timestamp in UTC (ISO 8601 ending in Z).",
              false);
         integer("limit", "Maximum results per page, default 10.");
-        fields["limit"]["maximum"] = sessionPageLimit;
+        fields["limit"]["maximum"] = session_read::pageSize;
         text("cursor", "Opaque nextCursor from the preceding page with the same filters.", false);
     } else if (name == "list_secrets") {
         description = "List secret reference names.";

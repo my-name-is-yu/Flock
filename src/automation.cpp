@@ -13,7 +13,6 @@
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
 #include "flock/person.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/decision.hpp"
 #include "json_fields.hpp"

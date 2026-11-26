@@ -135,7 +135,7 @@ struct Store::Impl {
                                                             policyApprovals};
     SessionReadStorage sessionReadStorage{database,       secretStorage,  sessionParticipationStorage, permissions, conversationTurns,
                                           channelStorage, policyApprovals};
-    explicit Impl(std::filesystem::path path, MemorySeed, AutomationModelResolver);
+    explicit Impl(std::filesystem::path path, StoreOptions);
 };
 
 }

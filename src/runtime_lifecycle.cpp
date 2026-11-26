@@ -22,8 +22,8 @@
 #include <unistd.h>
 
 namespace flockv0 {
-Runtime::Components::DatabaseLock::DatabaseLock(Database& db, const std::filesystem::path& path, PolicyApprovals& approvals,
-                                                const std::function<Seconds()>& clock)
+runtime::DatabaseLock::DatabaseLock(Database& db, const std::filesystem::path& path, PolicyApprovals& approvals,
+                                    const std::function<Seconds()>& clock)
     : db(db), approvals(approvals) {
     const auto lockPath = std::filesystem::canonical(path).string() + ".runtime.lock";
     fd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
@@ -40,7 +40,7 @@ Runtime::Components::DatabaseLock::DatabaseLock(Database& db, const std::filesys
     }
 }
 
-Runtime::Components::DatabaseLock::~DatabaseLock() {
+runtime::DatabaseLock::~DatabaseLock() {
     {
         std::lock_guard lock(db.mutex);
         approvals.setClock(unixTime);
@@ -48,7 +48,7 @@ Runtime::Components::DatabaseLock::~DatabaseLock() {
     close(fd);
 }
 
-void Runtime::Components::Workers::drain(TaskTurn& taskTurn) {
+void runtime::Workers::drain(TaskTurn& taskTurn) {
     requestStop();
     conversations.clear();
     tasks.clear();
@@ -61,7 +61,7 @@ void Runtime::Components::Workers::drain(TaskTurn& taskTurn) {
     }
 }
 
-template <class Key> void Runtime::Components::Workers::collect(std::map<Key, std::future<void>>& workers, std::string_view operation) {
+template <class Key> void runtime::Workers::collect(std::map<Key, std::future<void>>& workers, std::string_view operation) {
     for (auto it = workers.begin(); it != workers.end();) {
         if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             auto result = std::move(it->second);
@@ -72,33 +72,33 @@ template <class Key> void Runtime::Components::Workers::collect(std::map<Key, st
     }
 }
 
-void Runtime::Components::Workers::collect(std::future<void>& worker, std::string_view operation) {
+void runtime::Workers::collect(std::future<void>& worker, std::string_view operation) {
     if (worker.valid() && worker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         maintenance.deferContendedWork(operation, [&] { worker.get(); });
 }
 
-void Runtime::Components::Workers::collectCompleted() {
+void runtime::Workers::collectCompleted() {
     collect(conversations, "conversation worker");
     collect(tasks, "task worker");
     collect(channels, "channel worker");
 }
 
-void Runtime::Components::Workers::startChannels() {
+void runtime::Workers::startChannels() {
     if (!channels.valid() && channelStorage.channelDeliveryDue())
         channels = std::async(std::launch::async, [storage = &channelStorage, stop = stopToken()] { storage->deliverChannels(stop); });
 }
 
-void Runtime::Components::Workers::wakeSessions() {
+void runtime::Workers::wakeSessions() {
     sessionParticipationStorage.settleSessionQueueCancellations(t3, stopToken());
     sessionMessageStorage.wakeSessionMessages(t3, stopToken());
 }
 
-void Runtime::Components::Workers::stepSessionWake() {
+void runtime::Workers::stepSessionWake() {
     collect(sessionWake, "Session wake worker");
     if (!sessionWake.valid()) sessionWake = std::async(std::launch::async, [this] { wakeSessions(); });
 }
 
-void Runtime::Components::Workers::startConversations(const std::function<Seconds()>& clock, const std::function<void(Id)>& run) {
+void runtime::Workers::startConversations(const std::function<Seconds()>& clock, const std::function<void(Id)>& run) {
     if (conversations.size() >= batchLimit) return;
     for (const auto& [bot, id] : conversationTurns.pendingConversations(batchLimit, clock())) {
         if (conversations.size() >= batchLimit) break;
@@ -108,7 +108,7 @@ void Runtime::Components::Workers::startConversations(const std::function<Second
     }
 }
 
-void Runtime::Components::Workers::startTasks(TaskScheduler& scheduler, const std::function<void(const TaskScheduler::Work&)>& step) {
+void runtime::Workers::startTasks(TaskScheduler& scheduler, const std::function<void(const TaskScheduler::Work&)>& step) {
     for (const auto& work : scheduler.nextBatch(batchLimit - tasks.size(), [this](const auto& job) { return isActive(job); }))
         tasks.emplace(work, std::async(std::launch::async, step, work));
 }

@@ -15,7 +15,6 @@
 #include "task_records.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/secrets.hpp"
 #include "flock/json.hpp"
 #include "flock/t3.hpp"

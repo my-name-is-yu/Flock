@@ -7,7 +7,7 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/runtime.hpp"
-#include "flock/store.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
 

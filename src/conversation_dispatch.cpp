@@ -188,7 +188,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
             conversationTools.saveTurnResults(id, step, Json::array({Json{{"ok", true}, {"changeId", changeId}, {"status", "applied"}}}));
             completed.commit();
             return advance;
-        } catch (const Policy::BotCreationUncertain&) {
+        } catch (const BotCreationUncertain&) {
             deferConversation(id, ctx.clock());
             return stop;
         } catch (const Conflict& error) {

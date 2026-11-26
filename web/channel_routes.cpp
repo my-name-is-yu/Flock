@@ -5,7 +5,6 @@
 #include "flock/channels.hpp"
 #include "flock/json.hpp"
 #include "flock/run_ref.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>

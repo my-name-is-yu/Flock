@@ -1,24 +1,37 @@
 #pragma once
 
 #include "flock/json.hpp"
-#include "flock/run_ref.hpp"
 #include "flock/run_report.hpp"
 #include "flock/session_ref.hpp"
-#include "flock/t3_command.hpp"
-#include "flock/t3_session.hpp"
 #include "flock/task_interaction.hpp"
 #include "flock/types.hpp"
 
-#include <nlohmann/json.hpp>
-
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 namespace flockv0 {
+struct Command;
+struct Excerpt;
+struct ReadRequest;
+struct SessionAttachment;
+struct SessionCounts;
+struct SessionEvent;
+struct SessionEventFilter;
+struct SessionEventPage;
+struct SessionMetadata;
+
+struct Delivery {
+    enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
+    RunRef run;
+    std::string detail;
+    bool definitelyUnsent = false;
+    std::string delivery = {};
+    std::string launchWarning = {};
+};
+
 struct Observation {
     enum class Kind { Running, Question, ExternalInput, Settling, Finished, Unavailable } kind = Kind::Running;
     Question question;
@@ -69,10 +82,8 @@ public:
         return evidence;
     }
     virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
-    virtual InterruptOutcome interruptSessionMessage(const std::string& environmentId, const RunRef& run) {
-        return interrupt(environmentId, Json::object(), run);
-    }
-    virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
+    virtual InterruptOutcome interruptSessionMessage(const std::string& environmentId, const RunRef& run);
+    virtual Excerpt read(const ReadRequest&);
     virtual std::vector<T3Project> projects(std::string_view) { return {}; }
     virtual std::vector<T3Project> projects(const T3EnvironmentRoute& route) { return projects(route.environmentId); }
     virtual T3EnvironmentLinks linkedEnvironments(std::string_view) { return {}; }
@@ -80,10 +91,10 @@ public:
                                                                                    SessionReadDeadline) {
         return {};
     }
-    virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
-    virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }
-    virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view) { return {}; }
-    virtual std::optional<SessionCounts> sessionCounts(const SessionTarget&) { return {}; }
-    virtual std::optional<SessionAttachment> sessionAttachment(const SessionTarget&, std::string_view, std::string_view) { return {}; }
+    virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {});
+    virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&);
+    virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view);
+    virtual std::optional<SessionCounts> sessionCounts(const SessionTarget&);
+    virtual std::optional<SessionAttachment> sessionAttachment(const SessionTarget&, std::string_view, std::string_view);
 };
 }

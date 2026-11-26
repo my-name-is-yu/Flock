@@ -9,7 +9,6 @@
 #include "flock/secrets.hpp"
 #include "flock/json.hpp"
 #include "flock/run_ref.hpp"
-#include "flock/store.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
 #include "flock/wait.hpp"

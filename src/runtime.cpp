@@ -1,4 +1,5 @@
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/policy.hpp"
 #include "channel_storage.hpp"
 #include "runtime_lifecycle.hpp"
@@ -13,15 +14,13 @@
 #include "runtime_task_questions.hpp"
 #include "runtime_task_scheduler.hpp"
 #include "runtime_task_turn.hpp"
+#include "flock/t3.hpp"
 #include "runtime_task_updates.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"
-#include "flock/model.hpp"
-#include "flock/t3.hpp"
 #include "flock/task.hpp"
 #include "storage.hpp"
 #include "wait_storage.hpp"
-#include "flock/policy.hpp"
 #include "policy_approvals.hpp"
 #include "task_routing.hpp"
 #include "flock/workspace_tools.hpp"
@@ -48,20 +47,20 @@ struct Runtime::Impl {
     T3& t3;
     SoulLoader soul;
     RuntimeOptions options;
-    Components::Maintenance maintenance;
-    Components::SessionPrompts prompts;
-    Components::TaskUpdates updates;
-    Components::TaskQuestions questions;
-    Components::SessionHistory history;
-    Components::RunReports reports;
-    Components::PeerExchanges peerExchanges;
-    Components::Workers workers;
-    Components::RunObserver runs;
-    Components::OutboxDispatch dispatch;
-    Components::TaskDecisions decisions;
-    Components::TaskTurn taskTurn;
-    Components::TaskScheduler taskScheduler;
-    Components::DatabaseLock lock;
+    runtime::Maintenance maintenance;
+    runtime::SessionPrompts prompts;
+    runtime::TaskUpdates updates;
+    runtime::TaskQuestions questions;
+    runtime::SessionHistory history;
+    runtime::RunReports reports;
+    runtime::PeerExchanges peerExchanges;
+    runtime::Workers workers;
+    runtime::RunObserver runs;
+    runtime::OutboxDispatch dispatch;
+    runtime::TaskDecisions decisions;
+    runtime::TaskTurn taskTurn;
+    runtime::TaskScheduler taskScheduler;
+    runtime::DatabaseLock lock;
 
     void runTurn(Id id) {
         conversationTurns.runTurn(id, model, t3, soul, options.clock, *options.botTools, options.gitHost.get(), options.applyBotChange,
@@ -105,7 +104,7 @@ struct Runtime::Impl {
 
     ~Impl() { workers.drain(taskTurn); }
 
-    void step(const Components::TaskScheduler::Work& work) {
+    void step(const runtime::TaskScheduler::Work& work) {
         if (workers.stopToken().stop_requested()) return;
         const auto id = work.taskId;
         auto task = updates.snapshot(id);
@@ -134,6 +133,8 @@ struct Runtime::Impl {
     }
 };
 
+Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul) : Runtime(store, model, t3, std::move(soul), {}) {}
+
 Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOptions options)
     : p_(std::make_unique<Impl>(*store.p_, Policy{store}, model, t3, std::move(soul), std::move(options))) {}
 Runtime::~Runtime() = default;
@@ -161,11 +162,11 @@ void Runtime::tick() {
     p_->maintenance.fireDueAutomations();
     p_->gitStorage.deliverGitWebhooks();
     p_->workers.wakeSessions();
-    for (const auto& [bot, id] : p_->conversationTurns.pendingConversations(Components::Workers::batchLimit, p_->options.clock()))
+    for (const auto& [bot, id] : p_->conversationTurns.pendingConversations(runtime::Workers::batchLimit, p_->options.clock()))
         p_->runTurn(id);
     p_->maintenance.advanceWorkflows();
     for (const auto& work :
-         p_->taskScheduler.nextBatch(Components::Workers::batchLimit, [this](const auto& job) { return p_->workers.isActive(job); }))
+         p_->taskScheduler.nextBatch(runtime::Workers::batchLimit, [this](const auto& job) { return p_->workers.isActive(job); }))
         p_->step(work);
     p_->channelStorage.deliverChannels(p_->workers.stopToken());
 }

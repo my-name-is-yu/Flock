@@ -3,15 +3,13 @@
 #include "flock/automations.hpp"
 #include "flock/store_options.hpp"
 #include "flock/bot_change.hpp"
+#include "flock/bot_notes_error.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
 #include "flock/limits.hpp"
 #include "flock/memory_automation.hpp"
-#include "flock/model.hpp"
-#include "flock/policy.hpp"
 #include "flock/session_settings.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
@@ -599,7 +597,7 @@ void Bots::apply(const BotChange& change) try {
     throw Conflict("Unable to save Bot profile");
 }
 
-Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image, const Policy::PublishOwnedBot& publishOwned) {
+Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image, const PublishOwnedBot& publishOwned) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
     const auto name = validatedBotName(profile);
     std::string role = "custom";

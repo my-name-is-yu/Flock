@@ -1,7 +1,7 @@
 #include "chatgpt.hpp"
 #include "flock/base64.hpp"
 #include "flock/json.hpp"
-#include "flock/model_error.hpp"
+#include "chatgpt_failure.hpp"
 
 #include <cctz/time_zone.h>
 #include <curl/curl.h>

@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
@@ -28,10 +29,12 @@
 #include "flock/model_error.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/session_ref.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
+#include "flock/session_prompt.hpp"
 #include "flock/t3_session.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
@@ -355,7 +358,7 @@ struct Fixture {
     }
     void restart() {
         runtime.reset();
-        store = std::make_unique<Store>(dir / "state.db", memorySeed);
+        store = std::make_unique<Store>(dir / "state.db", StoreOptions{.memorySeed = memorySeed});
         RuntimeOptions options;
         options.clock = [this] { return now; };
         options.requireT3Connection = requireT3Connection;
@@ -435,9 +438,9 @@ void pauseCancelsOpenWorkAcrossRestart() {
     const auto pausedRun = f.task(active).at("activeRun").at("runId").get<std::string>();
     {
         Store writer(f.dir / "state.db");
-        writer.setBotPaused(localOwner, "alpha", true);
+        BotLifecycle(writer).setBotPaused(localOwner, "alpha", true);
     }
-    check(f.store->botPaused("alpha") && f.task(active)["state"] == "cancelling" && f.task(queued)["state"] == "cancelled",
+    check(BotLifecycle(*f.store).botPaused("alpha") && f.task(active)["state"] == "cancelling" && f.task(queued)["state"] == "cancelled",
           "pause did not cancel active and queued work");
     check(f.response(pending).at("text") == botPausedMessage, "pause did not close a queued message");
     try {
@@ -452,7 +455,7 @@ void pauseCancelsOpenWorkAcrossRestart() {
     }
 
     f.restart();
-    check(f.store->botPaused("alpha"), "pause did not survive a Runtime restart");
+    check(BotLifecycle(*f.store).botPaused("alpha"), "pause did not survive a Runtime restart");
     f.tick(3);
     check(f.t3.interrupted == std::vector{std::pair{std::string("desktop"), pausedRun}},
           "pause did not interrupt the exact Run through the stop path");
@@ -460,7 +463,7 @@ void pauseCancelsOpenWorkAcrossRestart() {
     f.reach(active, "cancelled");
     check(f.t3.sent.size() == 1 && f.model.turnInputs.empty(), "paused work was processed");
 
-    f.store->setBotPaused(localOwner, "alpha", false, [&] { return f.now; });
+    BotLifecycle(*f.store).setBotPaused(localOwner, "alpha", false, [&] { return f.now; });
     f.script("New message", {say("Ready again.")});
     check(f.response(f.receive("new", "New message")).at("text") == "Ready again.", "resume did not restore new conversations");
     check(f.model.turnInputs.size() == 1 && f.task(queued)["state"] == "cancelled", "resume replayed unfinished work");
@@ -471,8 +474,8 @@ void pauseDiscardsInFlightModelResult() {
     f.script("Start work", {start()});
     f.model.beforeTurn = [&](const ModelInput&) {
         Store writer(f.dir / "state.db");
-        writer.setBotPaused(localOwner, "alpha", true);
-        writer.setBotPaused(localOwner, "alpha", false, [&] { return f.now; });
+        BotLifecycle(writer).setBotPaused(localOwner, "alpha", true);
+        BotLifecycle(writer).setBotPaused(localOwner, "alpha", false, [&] { return f.now; });
     };
     const auto receipt = f.receive("in-flight", "Start work");
     f.tick(3);
@@ -3177,7 +3180,7 @@ void pauseRecoversTheRetainedSavedFollowup(bool sessionMissing = false) {
     f.t3.finish(original, "Original report stopped holding the destination");
     f.advanceUntil([&] { return destinationRunFor(f.task(taskId), "cloud").value("status", "") == "confirmation_pending"; },
                    "the lost receipt did not hold the destination");
-    f.store->setBotPaused(localOwner, "alpha", true);
+    BotLifecycle(*f.store).setBotPaused(localOwner, "alpha", true);
     f.restart();
     f.runtime->runConversations();
     const auto pending = persistedTaskDiagnostics(f, taskId, messageId);
@@ -3197,7 +3200,7 @@ void pauseRecoversTheRetainedSavedFollowup(bool sessionMissing = false) {
     check(run.at("runId") == followup.runId && run.at("gatewayEnvironmentId") == "desktop" && run.at("status") == "queued" &&
               recovered.at("sendSteps").empty() && f.t3.interruptedOnlyVia("cloud", followup.runId, "desktop") && f.t3.sent.size() == 2,
           ("Pause did not clear the matching effect and stop the exact recovered Run: " + recovered.dump()).c_str());
-    f.store->setBotPaused(localOwner, "alpha", false, [&] { return f.now; });
+    BotLifecycle(*f.store).setBotPaused(localOwner, "alpha", false, [&] { return f.now; });
     const auto sibling = oneLinkedDestinationTask(f, "pause-recovery-sibling", "Queue behind the recovered Run");
     f.tick();
     check(f.task(sibling).at("state") == "queued", "the recovered Run released the project before settlement");

@@ -12,6 +12,7 @@
 #include "flock/policy.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_connection.hpp"

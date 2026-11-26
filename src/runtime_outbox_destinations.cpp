@@ -31,7 +31,7 @@ namespace {
 constexpr std::size_t maxDestinationEvidenceReads = 3;
 }
 
-bool Runtime::Components::OutboxDispatch::destinationDeadline(TaskData& task, DestinationRun& run, Seconds now) {
+bool runtime::OutboxDispatch::destinationDeadline(TaskData& task, DestinationRun& run, Seconds now) {
     if (task.state == TaskState::cancelling || !run.outstanding()) return false;
     const auto& action = run.actionId;
     const auto& environment = run.environmentId;
@@ -51,7 +51,7 @@ AND action_id=? ORDER BY id LIMIT 1)SQL",
     return true;
 }
 
-void Runtime::Components::OutboxDispatch::stepDestination(const TaskData& task, const DestinationRun& run) {
+void runtime::OutboxDispatch::stepDestination(const TaskData& task, const DestinationRun& run) {
     const auto id = task.id;
     const auto& key = run.actionId;
     std::optional<Outbox> action;

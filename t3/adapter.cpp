@@ -11,6 +11,7 @@
 #include "flock/session_settings.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
+#include "flock/session_prompt.hpp"
 #include "flock/t3_mcp.hpp"
 #include "flock/t3_session.hpp"
 #include "flock/task_interaction.hpp"
