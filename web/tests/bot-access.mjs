@@ -44,10 +44,10 @@ async function exercise() {
   const rows = () => [...document.querySelectorAll('#machines .settings-row')];
   const status = document.getElementById('status');
   const action = async (session, name, success) => {
-    const item = rows().find(row => row.querySelector('.row-label small')?.textContent === `Session ${session}`);
+    const item = rows().find(row => row.querySelector('.row-label small')?.textContent === `T3 thread ${session}`);
     check(item, `Missing the connection for ${session}`);
     const control = [...item.querySelectorAll('button')].find(button => button.textContent === name);
-    check(control?.closest('[role="group"]')?.getAttribute('aria-label') === `Laptop · Session ${session}`,
+    check(control?.closest('[role="group"]')?.getAttribute('aria-label') === `Laptop · T3 thread ${session}`,
       `Missing a named action for ${session}`);
     control.click();
     for (let attempt = 0; attempt < 20 && status.textContent !== success; attempt++)

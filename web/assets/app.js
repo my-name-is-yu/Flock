@@ -29,7 +29,7 @@ const elements = Object.fromEntries([
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-paused-banner', 'bot-paused-description', 'resume-bot',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
-  'bot-editor', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
+  'bot-editor', 'bot-activity', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
   'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
@@ -99,7 +99,7 @@ const waitLabels = {
   model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
     'I couldn’t choose my next step after several attempts. Try again to continue.'],
   bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s role and memory, then try again.'],
-  t3_input: ['Action in T3', 'Open the Session in T3 to approve or answer.'],
+  t3_input: ['Action in T3', 'Open the thread in T3 to approve or answer.'],
   deadline: ['Deadline extension', 'This request reached its deadline. You can set a new one.'],
   unknown_delivery: ['Message to T3 unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Check again asks T3 without resending anything.'],
   auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then check again.'],
@@ -112,8 +112,8 @@ const pendingActionLabels = {
   deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
 };
 const closedLabels = {
-  answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
-  session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
+  answer: 'Answered', run_finished: 'Work ended', cancel: 'Stop requested',
+  session_question: 'The question changed in T3', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
   approve: 'Approved', extend: 'Deadline extended', reconcile: 'Check requested', supply: 'Secret saved',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock', deny: 'Denied', expired: 'Approval expired',
   stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
@@ -175,7 +175,6 @@ let detail = null;
 let profileAvatar = null;
 let profileKey = '';
 let profileMotion;
-let scopeAvatar = null;
 let scopeKey = '';
 let connection = 'loading';
 
@@ -886,9 +885,7 @@ function renderHeader() {
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
   if (nextScopeKey !== scopeKey) {
-    scopeAvatar?.destroy();
-    scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
-    if (bot) elements['activity-scope-name'].textContent = bot.name;
+    if (bot) elements['activity-scope-name'].textContent = `${bot.name} activity`;
     if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
     else document.documentElement.style.removeProperty('--bot-accent');
   }
@@ -1513,7 +1510,7 @@ function eventCard(event, context, place, report) {
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
-    const name = `T3 Session “${session.title || session.threadId}”`;
+    const name = `T3 thread “${session.title || session.threadId}”`;
     const wakeText = {
       finished: `Work finished in ${name}`,
       failed: `Work stopped before finishing in ${name}`,
@@ -1632,7 +1629,7 @@ function eventCard(event, context, place, report) {
     replyTarget = ['Reply to this review', { kind: 'review', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
-      : data.report || (data.destination ? 'No Session report is available.' : 'The session submitted a report.');
+      : data.report || (data.destination ? 'No report is available.' : 'The work is done.');
     text.textContent = copy;
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
@@ -1650,10 +1647,10 @@ function eventCard(event, context, place, report) {
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
     if (outcome === 'completed') {
-      text.append(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Session complete: '));
+      text.append(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Work complete: '));
     } else if (['failed', 'cancelled', 'interrupted', 'rolled_back'].includes(outcome)) {
       const tone = outcome === 'failed' ? 'result-failed' : 'result-interrupted';
-      text.append(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Session ${stateLabels[outcome].toLowerCase()}: `));
+      text.append(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Work ${stateLabels[outcome].toLowerCase()}: `));
     }
     text.append(document.createTextNode(data.text ?? ''));
     const link = runIcon(data.run);
@@ -3199,7 +3196,7 @@ async function loadSessions() {
     if (context !== view) return;
     mergeSessionTasks(context, page.sessionTasks);
     context.sessionsBefore = page.sessionsBefore;
-  } catch { if (context === view) setNotice(context, 'Could not load earlier sessions.', true); }
+  } catch { if (context === view) setNotice(context, 'Could not load earlier requests.', true); }
   finally {
     context.loadingSessions = false;
     if (context === view) renderActivity();
