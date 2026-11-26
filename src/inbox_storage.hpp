@@ -27,12 +27,15 @@ enum class WaitReason;
 
 std::optional<InboxKind> inboxWaitKind(WaitReason);
 
+class PolicyApprovals;
 class InboxStorage {
 public:
     InboxStorage(Database& database, SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage,
-                 JournalStorage& journalStorage, Store::Impl& remaining, ModelCalls& modelCalls, TaskOperations& taskOperations)
+                 JournalStorage& journalStorage, Store::Impl& remaining, ModelCalls& modelCalls, TaskOperations& taskOperations,
+                 PolicyApprovals& policyApprovals)
         : database(database), secretStorage(secretStorage), taskRecords(taskRecords), waitStorage(waitStorage),
-          journalStorage(journalStorage), remaining(remaining), modelCalls(modelCalls), taskOperations(taskOperations) {}
+          journalStorage(journalStorage), remaining(remaining), modelCalls(modelCalls), taskOperations(taskOperations),
+          policyApprovals(policyApprovals) {}
 
     Json inbox(const Person&, std::string_view bot) const;
     Json decisionHistory(const Person&, std::string_view bot) const;
@@ -50,6 +53,7 @@ private:
     WaitStorage& waitStorage;
     JournalStorage& journalStorage;
     Store::Impl& remaining;
+    PolicyApprovals& policyApprovals;
     ModelCalls& modelCalls;
     TaskOperations& taskOperations;
 };

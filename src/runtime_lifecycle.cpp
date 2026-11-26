@@ -1,4 +1,6 @@
 #include "runtime_lifecycle.hpp"
+#include "channel_storage.hpp"
+#include "policy_approvals.hpp"
 #include "flock/participation.hpp"
 #include "runtime_maintenance.hpp"
 #include "runtime_task_turn.hpp"
@@ -18,8 +20,10 @@
 #include <unistd.h>
 
 namespace flockv0 {
-Runtime::Components::DatabaseLock::DatabaseLock(Store::Impl& db, const std::function<Seconds()>& clock) : db(db) {
-    const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
+Runtime::Components::DatabaseLock::DatabaseLock(Database& db, const std::filesystem::path& path, PolicyApprovals& approvals,
+                                                const std::function<Seconds()>& clock)
+    : db(db), approvals(approvals) {
+    const auto lockPath = std::filesystem::canonical(path).string() + ".runtime.lock";
     fd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
     if (fd < 0 || ::flock(fd, LOCK_EX | LOCK_NB) != 0) {
         if (fd >= 0) close(fd);
@@ -27,7 +31,7 @@ Runtime::Components::DatabaseLock::DatabaseLock(Store::Impl& db, const std::func
     }
     try {
         std::lock_guard lock(db.mutex);
-        db.policyClock = clock;
+        approvals.setClock(clock);
     } catch (...) {
         close(fd);
         throw;
@@ -37,7 +41,7 @@ Runtime::Components::DatabaseLock::DatabaseLock(Store::Impl& db, const std::func
 Runtime::Components::DatabaseLock::~DatabaseLock() {
     {
         std::lock_guard lock(db.mutex);
-        db.policyClock = unixTime;
+        approvals.setClock(unixTime);
     }
     close(fd);
 }
@@ -78,8 +82,8 @@ void Runtime::Components::Workers::collectCompleted() {
 }
 
 void Runtime::Components::Workers::startChannels() {
-    if (!channels.valid() && db.channelDeliveryDue())
-        channels = std::async(std::launch::async, [db = &db, stop = stopToken()] { db->deliverChannels(stop); });
+    if (!channels.valid() && channelStorage.channelDeliveryDue())
+        channels = std::async(std::launch::async, [storage = &channelStorage, stop = stopToken()] { storage->deliverChannels(stop); });
 }
 
 void Runtime::Components::Workers::wakeSessions() {

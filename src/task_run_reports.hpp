@@ -5,11 +5,11 @@
 #include "flock/json.hpp"
 #include "flock/outbox.hpp"
 #include "flock/run_ref.hpp"
-#include "flock/store.hpp"
 
 namespace flockv0 {
 
 class Database;
+class PolicyApprovals;
 class JournalStorage;
 class OutboxStorage;
 class WaitStorage;
@@ -25,16 +25,16 @@ void setReportEvidence(Json&, const RunEvidence&);
 
 class TaskRunReports {
 public:
-    TaskRunReports(Database& database, Store::Impl& remaining, JournalStorage& journalStorage, OutboxStorage& outboxStorage,
+    TaskRunReports(Database& database, PolicyApprovals& policyApprovals, JournalStorage& journalStorage, OutboxStorage& outboxStorage,
                    WaitStorage& waitStorage)
-        : database(database), remaining(remaining), journalStorage(journalStorage), outboxStorage(outboxStorage), waitStorage(waitStorage) {
-    }
+        : database(database), policyApprovals(policyApprovals), journalStorage(journalStorage), outboxStorage(outboxStorage),
+          waitStorage(waitStorage) {}
 
     bool advanceDestinationSessionMessageRun(TaskData&, DestinationRun&);
     bool recordDestinationReport(TaskData& task, DestinationRun& run, const Observation&);
 private:
     Database& database;
-    Store::Impl& remaining;
+    PolicyApprovals& policyApprovals;
     JournalStorage& journalStorage;
     OutboxStorage& outboxStorage;
     WaitStorage& waitStorage;

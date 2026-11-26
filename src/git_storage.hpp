@@ -36,13 +36,15 @@ namespace conversation {
 struct Message;
 }
 
+class PolicyApprovals;
 class GitStorage {
 public:
     GitStorage(Database& database, SecretStorage& secretStorage, InboxStorage& inboxStorage, TaskRecords& taskRecords,
                JournalStorage& journalStorage, const WebIdentityState& webIdentity, Store::Impl& remaining,
-               const BotLifecycleStorage& botLifecycle)
+               const BotLifecycleStorage& botLifecycle, PolicyApprovals& policyApprovals)
         : database(database), secretStorage(secretStorage), inboxStorage(inboxStorage), taskRecords(taskRecords),
-          journalStorage(journalStorage), webIdentity(webIdentity), remaining(remaining), botLifecycle(botLifecycle) {}
+          journalStorage(journalStorage), webIdentity(webIdentity), remaining(remaining), botLifecycle(botLifecycle),
+          policyApprovals(policyApprovals) {}
 
     Json gitTool(GitHost&, std::string_view bot, Id task, std::string_view environment, std::string_view project, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
@@ -92,6 +94,7 @@ private:
     JournalStorage& journalStorage;
     const WebIdentityState& webIdentity;
     Store::Impl& remaining;
+    PolicyApprovals& policyApprovals;
     const BotLifecycleStorage& botLifecycle;
     std::optional<Id> gitWebhooksDrainedAt;
     std::multiset<GitPrKey> gitPrMutationsInFlight, gitFeedbackMutationsInFlight;

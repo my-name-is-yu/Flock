@@ -1,4 +1,5 @@
 #include "journal_storage.hpp"
+#include "channel_storage.hpp"
 #include "journal_task.hpp"
 #include "journal.hpp"
 #include "outbox_storage.hpp"
@@ -183,7 +184,7 @@ Id JournalStorage::journal(Id task, const CompletionEntry& entry) {
     if (const auto* workflow = std::get_if<WorkflowCompletion>(&entry.details); workflow && workflow->outcome)
         keys.workflowOutcome = enumName(workflowOutcomes, *workflow->outcome);
     const auto id = database.writeJournal(task, JournalKind::completed, encodeCompletion(entry), keys);
-    remaining.queueChannelTaskUpdate(task, id, entry.text);
+    channelStorage.queueChannelTaskUpdate(task, id, entry.text);
     return id;
 }
 
@@ -204,7 +205,7 @@ Id JournalStorage::journalCancelRequested(Id task, SessionStop stop) {
 
 Id JournalStorage::journalCancelled(Id task) {
     const auto id = database.writeJournal(task, JournalKind::cancelled, Json::object(), {});
-    remaining.queueChannelTaskUpdate(task, id, "The task was cancelled.");
+    channelStorage.queueChannelTaskUpdate(task, id, "The task was cancelled.");
     return id;
 }
 }

@@ -253,7 +253,8 @@ WHERE j.conversation_bot_id IS NULL AND (
 
 std::optional<Store::BotViewStamp> Store::botViewStamp() const {
     std::lock_guard lock(p_->mutex);
-    if (!p_->channels.empty() || p_->query("SELECT 1 FROM protected_inputs WHERE status='fulfilled' LIMIT 1").next()) return std::nullopt;
+    if (p_->channelStorage.hasConnectors() || p_->query("SELECT 1 FROM protected_inputs WHERE status='fulfilled' LIMIT 1").next())
+        return std::nullopt;
     return BotViewStamp{changeStamp(), p_->secretStorage.gitCredentialCount()};
 }
 
@@ -574,7 +575,7 @@ ORDER BY page.id DESC)SQL",
     while (rows.next()) {
         auto event = journalRow(rows);
         if (event.at("kind") == "memory_remembered") p_->memoryStorage.projectMemoryNotice(bot, event.at("data"));
-        if (rows.number(5)) event["data"].update(p_->channelContext(rows.number(0), bot, nullptr, viewer));
+        if (rows.number(5)) event["data"].update(p_->channelStorage.channelContext(rows.number(0), bot, nullptr, viewer));
         if (rows.number(6)) event["data"]["question"] = decodeWaitRow(rows, 6).text;
         result.push_back(std::move(event));
     }

@@ -389,12 +389,12 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
         PolicyOrigin origin;
-        if (turn) origin = remaining.policyOrigin(remaining.loadTurnMessage(turn));
+        if (turn) origin = policyApprovals.policyOrigin(remaining.loadTurnMessage(turn));
         if (taskId) {
             const auto task = taskRecords.load(taskId);
             if (generation && task.generation != *generation) throw RequestChanged{};
             if (!turn)
-                origin = remaining.taskPolicyOrigin(task);
+                origin = policyApprovals.taskPolicyOrigin(task);
             else {
                 origin.task = taskId;
                 origin.revision = task.currentRevision.value_or(0);
@@ -405,7 +405,7 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
             const auto action = *parseAction("repository." + std::string(op));
             const auto key = turn ? std::string(invocation) : "git/" + std::to_string(taskId) + "/" + std::string(invocation);
             const auto payload = Json::array({decision.tool, decision.args});
-            const auto gate = remaining.approveAction(origin, {action, repo.resource()}, key, payload, remaining.policyClock());
+            const auto gate = policyApprovals.approveAction(origin, {action, repo.resource()}, key, payload, policyApprovals.now());
             if (gate == ApprovalGate::waiting && !turn) {
                 Json resume{{"tool", decision.tool}, {"args", decision.args}, {"invocation", invocation}};
                 if (op != "read") resume["reason"] = secretStorage.sharedRedactor().text(decision.reason);

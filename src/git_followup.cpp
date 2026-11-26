@@ -73,7 +73,7 @@ LIMIT 2
             const auto actor = remaining.turnActor(source);
             if (Policy(remaining).allows(actor, Action::bot_talk, source.bot) &&
                 (source.principalSource != session || remaining.activeSessionOrigin(source)))
-                requester = remaining.policyOrigin(source).requester;
+                requester = policyApprovals.policyOrigin(source).requester;
         }
     } else if (const auto& requesterId = task.requester) {
         const auto& person = *requesterId;

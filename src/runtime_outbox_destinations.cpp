@@ -160,7 +160,7 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
             const auto current = db.taskRecords.load(id);
             const auto resource = Resource{Action::t3_send, Resource::sessionRead(cmd.environmentId, ref.threadId).target};
             const auto& approval = *action->stop->approval;
-            auto origin = db.taskPolicyOrigin(current);
+            auto origin = db.policyApprovals.taskPolicyOrigin(current);
             origin.scope = approval.scope;
             origin.requester = approval.requester;
             origin.anchor = approval.anchor;
@@ -170,8 +170,8 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
             origin.generation = approval.generation;
             origin.revision = approval.revisionId;
             const auto& operationId = action->stop->operation;
-            gate = db.approveAction(origin, resource, std::string(runStopOperation) + operationId, stopPolicyJson(approval), now, true,
-                                    Store::Impl::ApprovalWait::defer);
+            gate = db.policyApprovals.approveAction(origin, resource, std::string(runStopOperation) + operationId, stopPolicyJson(approval),
+                                                    now, true, ApprovalWait::defer);
             if (gate != ApprovalGate::waiting) {
                 auto saved = outboxStorage.outbox(current, key);
                 if (saved && saved->stop && saved->stop->operation == operationId) {

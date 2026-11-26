@@ -210,11 +210,12 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
         }
         const Resource resource{Action::t3_send,
                                 Resource::sessionRead(effect->command.environmentId, effect->command.target.threadId).target};
-        auto origin = policyOrigin(message);
+        auto origin = policyApprovals.policyOrigin(message);
         origin.task = effect->taskId;
         origin.generation = effect->generation;
         origin.revision = ownTask(effect->taskId, message).currentRevision.value_or(0);
-        const auto gate = approveAction(origin, resource, key, Json::array({decision.tool, args, run}), policyClock());
+        const auto gate =
+            policyApprovals.approveAction(origin, resource, key, Json::array({decision.tool, args, run}), policyApprovals.now());
         if (gate != ApprovalGate::allow) {
             if (gate != ApprovalGate::waiting) fail(ToolError(std::string(approvalError(gate))));
             transaction.commit();
@@ -317,7 +318,7 @@ UPDATE conversation_steps SET effect=NULL WHERE message_id=? AND step=?
 }
 
 void Store::Impl::stopPausedBotParticipation(std::string_view bot) {
-    const auto now = policyClock();
+    const auto now = policyApprovals.now();
     exec("UPDATE session_message_waits SET notified=1,interrupt_at=coalesce(interrupt_at,?) WHERE bot=? AND run_finished=0", {now, bot});
     exec(R"SQL(
 UPDATE session_message_sends SET interrupt_at=? WHERE interrupt_at IS NULL
@@ -335,7 +336,7 @@ SELECT s.message_id,m.bot_id,s.environment,s.thread,s.gateway_environment,s.acti
 FROM session_message_sends s JOIN messages m ON m.id=s.message_id
 WHERE s.interrupt_at<=? ORDER BY s.interrupt_at,s.rowid LIMIT 20
 )SQL",
-                          {policyClock()});
+                          {policyApprovals.now()});
         while (rows.next()) {
             Command command;
             command.tool = CommandTool::message_session;
@@ -358,7 +359,7 @@ WHERE s.interrupt_at<=? ORDER BY s.interrupt_at,s.rowid LIMIT 20
         }
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        const auto now = policyClock();
+        const auto now = policyApprovals.now();
         auto row = query(R"SQL(
 SELECT coalesce(s.step,-1),json_extract(step.effect,'$.taskId'),json_extract(step.effect,'$.actionId')
 FROM session_message_sends s LEFT JOIN conversation_steps step
@@ -402,7 +403,7 @@ void Store::Impl::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
         std::lock_guard lock(mutex);
         auto rows = query("SELECT rowid,environment,thread,run,gateway_environment FROM session_message_waits "
                           "WHERE interrupt_at<=? ORDER BY interrupt_at,rowid",
-                          {policyClock()});
+                          {policyApprovals.now()});
         while (rows.next()) pending.push_back({rows.number(0), rows.string(1), {rows.string(2), rows.string(3), {}, rows.string(4)}});
     }
     for (const auto& item : pending) {
@@ -420,7 +421,7 @@ UPDATE session_message_waits
 SET interrupt_at=?,run_finished=?,session_missing=max(session_missing,?)
 WHERE rowid=? AND interrupt_at IS NOT NULL AND environment=? AND gateway_environment=? AND thread=? AND run=?
 )SQL",
-             {finished ? Json(nullptr) : Json(policyClock() + 5), finished ? 1 : 0, missing ? 1 : 0, item.key, item.environment,
+             {finished ? Json(nullptr) : Json(policyApprovals.now() + 5), finished ? 1 : 0, missing ? 1 : 0, item.key, item.environment,
               item.run.gatewayEnvironmentId, item.run.threadId, item.run.runId});
     }
 }
@@ -582,7 +583,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
             transaction.commit();
             return advance;
         }
-        auto origin = policyOrigin(message);
+        auto origin = policyApprovals.policyOrigin(message);
         auto approvalOperation = std::string(key);
         Json policyPayload{decision.tool, decision.args, command.authGeneration};
         if (fixesPullRequest) {
@@ -630,7 +631,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                 return advance;
             }
         }
-        const auto gate = approveAction(origin, resource, approvalOperation, policyPayload, policyClock());
+        const auto gate = policyApprovals.approveAction(origin, resource, approvalOperation, policyPayload, policyApprovals.now());
         if (gate != ApprovalGate::allow) {
             if (gate != ApprovalGate::waiting) save(toolFailure(approvalError(gate)));
             transaction.commit();
@@ -797,12 +798,12 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
                 const bool recoveredRun = phase == OutboxPhase::started && hasRun;
                 if (exactRun || recoveredRun) {
                     const Resource resource{Action::t3_send, Resource::sessionRead(selected.environmentId, selected.ref.threadId).target};
-                    auto origin = policyOrigin(message);
+                    auto origin = policyApprovals.policyOrigin(message);
                     origin.task = taskId;
                     origin.generation = generation;
                     origin.revision = task.currentRevision.value_or(0);
-                    const auto gate = approveAction(origin, resource, key,
-                                                    Json::array({decision.tool, decision.args, runJson(selected.ref)}), policyClock());
+                    const auto gate = policyApprovals.approveAction(
+                        origin, resource, key, Json::array({decision.tool, decision.args, runJson(selected.ref)}), policyApprovals.now());
                     if (gate != ApprovalGate::allow) {
                         if (gate != ApprovalGate::waiting) fail(ToolError(std::string(approvalError(gate))));
                         transaction.commit();
@@ -812,7 +813,7 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
                 OutboxStop stop{.operation = std::string(key)};
                 if (!selected.ref.runId.empty()) stop.run = OutboxRunIdentity{selected.ref.threadId, selected.ref.runId};
                 if (phase == OutboxPhase::started && !recoveredRun) {
-                    const auto origin = policyOrigin(message);
+                    const auto origin = policyApprovals.policyOrigin(message);
                     stop.approval = OutboxStopApproval{.decision = {decision.tool, decision.args, {}},
                                                        .generation = generation,
                                                        .revisionId = task.currentRevision.value_or(0),

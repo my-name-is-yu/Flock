@@ -294,7 +294,7 @@ void ModelCalls::pauseTurn(const conversation::Message& message) {
                                                                 .text = std::string(text),
                                                                 .status = ConversationReplyStatus::needs_you,
                                                                 .route = ConversationReplyRoute::model_budget});
-    if (!message.channelScope.empty()) remaining.queueChannelReply(message.id, reply, text);
+    if (!message.channelScope.empty()) channelStorage.queueChannelReply(message.id, reply, text, Json::array());
     database.exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?", {reply, message.id});
 }
 

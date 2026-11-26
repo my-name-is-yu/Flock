@@ -339,7 +339,7 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             auto args = decision.at("args");
             if (args.is_object() && decision["tool"] == "channel_send_attachment") args.erase("contentBase64");
             if (args.is_object() && decision["tool"] == "publish_artifact") args.erase("html");
-            auto result = channelToolStatus(message.id, message.bot, results.at(i), &images);
+            auto result = channelStorage.channelToolStatus(message.id, message.bot, results.at(i), &images);
             if (args.is_object() && args.contains("docId")) {
                 const bool reading = decision.at("tool") == "read_memory" || decision.at("tool") == "memory_history";
                 const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
@@ -408,7 +408,7 @@ ORDER BY id DESC LIMIT 1
         const auto task = taskRecords.load(taskId);
         Json view = {{"taskId", taskId}, {"request", bounded(task.request, 800)}, {"environmentId", task.environmentId}};
         view.update(taskState(task, message));
-        if (!localMachines.empty() && task.activeRun)
+        if (localMachineStorage.hasMachines() && task.activeRun)
             view["activeSession"] = {{"threadId", task.activeRun->ref.threadId}, {"runId", task.activeRun->ref.runId}};
         if (task.sourceTaskId) view["sourceTaskId"] = *task.sourceTaskId;
         if (auto result = latestResult(taskId); !result.is_null()) view["latestResult"] = std::move(result);
@@ -524,7 +524,7 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
                                 {"linked", true}});
     }
 
-    const auto channel = channelContext(message.id, message.bot, &images);
+    const auto channel = channelStorage.channelContext(message.id, message.bot, &images);
     auto turn = conversationSteps(message, step, images);
     const auto expandedBytes = ConversationContextStorage::boundExpandedContext(turn);
     auto history = conversationContextStorage.conversationHistory(message, summaries, expandedBytes);
@@ -577,8 +577,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             throw ToolError("Unknown tool result in this turn");
         return {{"ok", true}};
     }
-    if (auto result = channelTool(message.id, bot, decision); !result.is_null()) return result;
-    if (auto result = localMachineTool(bot, message.channelScope, decision); !result.is_null()) return result;
+    if (auto result = channelStorage.channelTool(message.id, bot, decision); !result.is_null()) return result;
+    if (auto result = localMachineStorage.localMachineTool(bot, message.channelScope, decision); !result.is_null()) return result;
     if (std::ranges::find(webTools, tool) != webTools.end()) {
         if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
         if (tool == "continue_fresh_session") {
@@ -810,7 +810,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         const auto results = steps.json(1);
         for (std::size_t i = 0; i < results.size(); ++i) {
             const auto& result = results.at(i);
-            if (result.contains("artifact") && channelToolStatus(message.id, message.bot, result).value("ok", false))
+            if (result.contains("artifact") && channelStorage.channelToolStatus(message.id, message.bot, result).value("ok", false))
                 artifacts.push_back(result.at("artifact"));
             if (!result.value("ok", false) || !result.contains("effect")) continue;
             Json action = {{"tool", calls.at(i).at("tool")}, {"effect", result.at("effect")}};
@@ -852,8 +852,8 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                        .suggestions = suggestions.is_array() && !suggestions.empty() ? scrub.payload(suggestions) : Json(),
                                        .artifacts = artifacts.empty() ? Json() : std::move(artifacts)};
     const auto replyId = journalStorage.journalConversationReply(linked, message.bot, entry);
-    if (!message.channelScope.empty() && channelMessageAuthorized(message.id, message.bot))
-        queueChannelReply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
+    if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot))
+        channelStorage.queueChannelReply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
     exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});
     modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
     exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {replyId, message.id});
@@ -909,7 +909,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
-        if (!message.channelScope.empty() && channelMessageAuthorized(message.id, message.bot)) return true;
+        if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot)) return true;
     } else if (Policy(*this).allows(turnActor(message), Action::bot_talk, message.bot))
         return true;
     if (const auto attempt = modelCalls.takeReservedConversationCall(message.id)) modelCalls.releaseModelCall(attempt);
@@ -984,8 +984,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const std::function<std::
                 }
             }
         } else {
-            for (const auto& [machineId, machine] : localMachines)
-                if (permitsLocalMachineOwner(machine->owner(), message.bot)) machines.push_back(machineId);
+            machines = localMachineStorage.availableMachines(message.bot);
             if (!machines.empty()) offered.push_back("request_local_machine_connection");
         }
         return std::tuple{std::move(offered), std::move(machines), followupStatus};
@@ -1053,7 +1052,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const std::function<std::
     };
     if (!persistModelCheckpoint()) return;
     for (int step = 1; step < std::numeric_limits<int>::max() && !shutdown.stop_requested(); ++step) {
-        if (!message.channelScope.empty()) deliverChannels(shutdown);
+        if (!message.channelScope.empty()) channelStorage.deliverChannels(shutdown);
         std::vector<ModelCall> calls;
         std::string effectType;
         bool hasWebEvidence = false;

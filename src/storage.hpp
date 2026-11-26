@@ -21,9 +21,13 @@
 #include "attachment_storage.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "peer_storage.hpp"
+#include "channel_storage.hpp"
+#include "local_machine_storage.hpp"
 #include "outbox_storage.hpp"
 #include "run_ref_storage.hpp"
 #include "secret_storage.hpp"
+#include "policy_approvals.hpp"
+#include "policy_origin.hpp"
 #include "web_identity_state.hpp"
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
@@ -136,17 +140,15 @@ private:
     int fd_;
 };
 
-enum class ApprovalGate { allow, waiting, denied, expired, stale };
-std::string_view approvalError(ApprovalGate);
 struct Store::Impl : Database {
-    ModelCalls modelCalls{*this, botLifecycle, *this, journalStorage, secretStorage, taskRecords, waitStorage};
+    ModelCalls modelCalls{*this, botLifecycle, *this, journalStorage, secretStorage, taskRecords, waitStorage, channelStorage};
     TaskOperations taskOperations{*this,       automationStorage, botLifecycle, *this,       journalStorage, modelCalls,  outboxStorage,
                                   peerStorage, secretStorage,     taskEvents,   taskRecords, taskRouting,    waitStorage, inboxStorage};
     TaskRouting taskRouting{*this, *this, peerStorage, secretStorage, waitStorage};
-    TaskRunReports taskRunReports{*this, *this, journalStorage, outboxStorage, waitStorage};
+    TaskRunReports taskRunReports{*this, policyApprovals, journalStorage, outboxStorage, waitStorage};
     OutboxStorage outboxStorage{*this};
     PeerStorage peerStorage{*this};
-    JournalStorage journalStorage{*this, *this};
+    JournalStorage journalStorage{*this, channelStorage};
     TaskEvents taskEvents{*this, modelCalls};
     WaitStorage waitStorage{*this, journalStorage, outboxStorage, peerStorage, modelCalls};
     TaskRecords taskRecords{*this, journalStorage, outboxStorage, waitStorage};
@@ -159,51 +161,21 @@ struct Store::Impl : Database {
     ConversationContextStorage conversationContextStorage{*this, secretStorage, attachments};
     WorkflowStorage workflowStorage{*this, taskRecords, taskEvents, journalStorage, secretStorage, *this, taskOperations, taskRouting};
     class SessionEvidence;
-    std::map<ChannelKind, ChannelConnector> channels;
-    std::map<std::string, std::shared_ptr<LocalMachine>, std::less<>> localMachines;
-    std::vector<std::string> rootPeople;
     WebIdentityState webIdentity;
-    InboxStorage inboxStorage{*this, secretStorage, taskRecords, waitStorage, journalStorage, *this, modelCalls, taskOperations};
-    GitStorage gitStorage{*this, secretStorage, inboxStorage, taskRecords, journalStorage, webIdentity, *this, botLifecycle};
-    std::string artifactOrigin, webOrigin;
-    std::mutex deliveryMutex;
+    InboxStorage inboxStorage{*this, secretStorage, taskRecords,    waitStorage,    journalStorage,
+                              *this, modelCalls,    taskOperations, policyApprovals};
+    GitStorage gitStorage{*this,       secretStorage, inboxStorage, taskRecords,    journalStorage,
+                          webIdentity, *this,         botLifecycle, policyApprovals};
+    Policy permissions{*this};
+    ChannelStorage channelStorage{*this, path, permissions, secretStorage, webIdentity, journalStorage, *this, policyApprovals};
+    LocalMachineStorage localMachineStorage{*this, permissions, secretStorage, webIdentity, taskRecords};
     std::mutex sessionQueueCancellationMutex;
-    std::function<Seconds()> policyClock = unixTime;
+    PolicyApprovals policyApprovals{*this,          secretStorage, webIdentity,  taskRecords,    waitStorage,
+                                    journalStorage, *this,         botLifecycle, channelStorage, inboxStorage};
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource, std::string_view clientId, std::string_view text,
                            Id replyTo = 0, const SessionOrigin* origin = nullptr, const ConversationInvitationEntry* invitation = nullptr);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
-    void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
-    bool channelMessageAuthorized(Id, std::string_view bot) const;
-    Json channelContext(Id, std::string_view bot, std::vector<ModelImage>* images = nullptr, std::string_view viewer = {}) const;
-    std::optional<ChannelResource> channelAttachment(Id source, Id attachment, std::string_view bot) const;
-    Json channelTool(Id, std::string_view bot, const Decision&);
-    void channelApprovalNotice(Id source);
-    void channelNotice(Id source, std::string_view bot, std::string_view reason, bool supportsReplies, std::string_view followUp = {});
-    void channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies);
-    bool permitsLocalMachineOwner(std::string_view owner, std::string_view bot) const;
-    Json localMachineTool(std::string_view bot, std::string_view scope, const Decision&);
-    std::optional<Resource> channelToolPolicy(Id, std::string_view tool);
-    void queueChannelReply(Id source, Id reply, std::string_view text, const Json& suggestions = Json::array());
-    void queueChannelTaskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions = {});
-    bool channelDeliveryDue() const;
-    void deliverChannels(std::stop_token = {});
-    void dropPausedBotDeliveries(std::string_view bot);
-    Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<ModelImage>* images = nullptr) const;
-    bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
-                        std::string_view operation) const;
-    PolicyOrigin policyOrigin(const conversation::Message&);
-    PolicyOrigin taskPolicyOrigin(const TaskData&);
-    enum class ApprovalWait { pause, defer };
-    ApprovalGate approveAction(const PolicyOrigin&, const Resource&, std::string_view operation, const Json& payload, Seconds now,
-                               bool claim = true, ApprovalWait = ApprovalWait::pause);
-    void consumePolicyApproval(std::string_view operation);
-    bool currentPolicyApproval(Id turn, Id task, Id revision, Id generation, std::string_view operation) const;
-    void settlePolicyApprovals(std::optional<Seconds> now = {});
-    void decidePolicyApproval(const Person&, const InboxTarget&, std::string_view);
-    Json policyApprovalCards(const Person&, std::string_view bot);
-    void releasePolicyTurn(Id turn);
-    void releasePolicyTask(Id approval, std::string_view resolution);
     Person sessionActor(std::string_view person);
     bool activeSessionOrigin(const conversation::Message&) const;
     bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
