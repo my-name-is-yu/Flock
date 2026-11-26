@@ -19,6 +19,10 @@ function fixtures() {
     Object.assign(bot, { canDelete, paused: false, model: '' });
     document.dispatchEvent(new Event('visibilitychange'));
   };
+  window.renameBot = (name) => {
+    bot.name = name;
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   window.fetch = async (path, { body } = {}) => {
     if (path === '/api/bots') return Response.json([bot]);
     if (path === '/api/inbox') return Response.json({ items: [] });
@@ -115,6 +119,15 @@ async function exercise() {
   window.unconfigureBot(true);
   await waitFor(() => !resume.hidden, 'The owner could not set up a Bot without a model');
   check(resume.textContent === 'Choose a model', 'The setup action did not say what it does');
+  const longName = 'INFRASTRUCTUREMONITORINGSERVICES';
+  window.renameBot(longName);
+  await waitFor(() => $('#composer-banner-title').textContent === `${longName} isn’t set up yet`, 'The setup banner did not name the Bot');
+  pauseBanner.style.width = '296px';
+  const bannerBox = pauseBanner.getBoundingClientRect();
+  const actionBox = resume.getBoundingClientRect();
+  check(actionBox.left >= bannerBox.left && actionBox.right <= bannerBox.right,
+    'A long Bot name pushed Choose a model out of a narrow setup banner');
+  pauseBanner.style.width = '';
   resume.click();
   check(settings.open && !$('.settings-workspace-form').hidden, 'Choose a model did not open the model editor');
 }
