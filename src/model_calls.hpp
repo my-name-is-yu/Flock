@@ -10,26 +10,13 @@
 
 namespace flockv0 {
 
-class ChannelStorage;
 class Database;
 class Policy;
 class BotLifecycleStorage;
-class JournalStorage;
 class SecretStorage;
-class TaskRecords;
-class WaitStorage;
 class Model;
 class SecretRedactor;
 struct ModelInput;
-struct Person;
-namespace conversation {
-struct Message;
-}
-
-struct ModelBudget {
-    std::string id;
-    Id initialLimit;
-};
 
 bool modelArgumentsContainProtected(const SecretRedactor&, std::string_view tool, const Json& args);
 
@@ -44,33 +31,22 @@ struct CheckedModelTurn {
 
 class ModelCalls {
 public:
-    ModelCalls(Database& database, BotLifecycleStorage& botLifecycle, const Policy& permissions, JournalStorage& journalStorage,
-               SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage, ChannelStorage& channelStorage)
-        : database(database), botLifecycle(botLifecycle), permissions(permissions), journalStorage(journalStorage),
-          secretStorage(secretStorage), taskRecords(taskRecords), waitStorage(waitStorage), channelStorage(channelStorage) {}
+    ModelCalls(Database& database, BotLifecycleStorage& botLifecycle, const Policy& permissions, SecretStorage& secretStorage)
+        : database(database), botLifecycle(botLifecycle), permissions(permissions), secretStorage(secretStorage) {}
 
-    void approveMessageModelCall(const Person&, std::string_view bot, Id message, Id pause);
-    ModelBudget messageModelBudget(Id messageId) const;
-    ModelBudget taskModelBudget(Id taskId) const;
-    Id reserveModelCall(const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    std::string messageModelScope(Id messageId) const;
+    std::string taskModelScope(Id taskId) const;
+    Id recordAttempt(std::string_view scope, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    void recordBotTool(std::string_view scope, Id messageId);
     Id takeReservedConversationCall(Id messageId);
-    Id takeReservedTaskCall(Id event);
     void releaseModelCall(Id attempt);
-    Id approveModelBudget(const Person&, const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
-    void resumeSharedModelBudgetWaits(const Person&, std::string_view budget, Id approvedMessage, Id approvedTask);
-    void resumeMessageModelCall(std::string_view bot, Id message, Id pause, Id attempt);
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args, bool gitNotification) const;
     ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered, bool gitNotification);
     CheckedModelTurn callModel(std::string_view bot, Model&, const ModelInput&);
-    void pauseTurn(const conversation::Message&);
 private:
     Database& database;
     BotLifecycleStorage& botLifecycle;
     const Policy& permissions;
-    JournalStorage& journalStorage;
     SecretStorage& secretStorage;
-    TaskRecords& taskRecords;
-    WaitStorage& waitStorage;
-    ChannelStorage& channelStorage;
 };
 }

@@ -6,7 +6,6 @@
 #include "bot_settings_storage.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/types.hpp"
-#include "flock/person.hpp"
 #include "flock/json.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
@@ -37,11 +36,6 @@ std::set<std::string> environments(const Json& routing) {
         if (auto id = conversationEnvironmentId(alias); !id.empty()) ids.insert(std::move(id));
     return ids;
 }
-}
-
-Seconds BotSettingsStorage::environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const {
-    auto row = database.query("SELECT timeout FROM environment_settings WHERE bot=? AND environment=?", {bot, environment});
-    return row.next() ? row.number(0) : config.value("runTimeoutSeconds", Seconds{1800});
 }
 
 Json BotSettingsStorage::readiness(std::string_view bot, const Json& routing, const Json& args, T3& t3) {
@@ -79,8 +73,7 @@ Json BotSettingsStorage::readiness(std::string_view bot, const Json& routing, co
     return {{"ready", true}};
 }
 
-Json BotSettingsStorage::botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing,
-                                         const Decision& decision) {
+Json BotSettingsStorage::botSettingsTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision& decision) {
     Policy policy = permissions;
     const auto& tool = decision.tool;
     const auto& args = decision.args;
@@ -108,25 +101,8 @@ Json BotSettingsStorage::botSettingsTool(std::string_view bot, const Person& act
                     {"mcpServers", config.value("mcpServers", Json::array())}};
         auto ids = environments(routing);
         if (field(routing, "environmentId").empty()) ids.merge(taskRouting.registeredT3Environments(bot));
-        for (const auto& id : ids) {
-            Json entry{{"environmentId", id}};
-            if (policy.allows(bot, Action::environment_inspect, id)) entry["runTimeoutSeconds"] = environmentTimeout(bot, id, config);
-            result["environments"].push_back(entry);
-        }
+        for (const auto& id : ids) result["environments"].push_back({{"environmentId", id}});
         return result;
-    }
-    if (tool == "update_bot_settings") {
-        if (!policy.allows(actor, Action::bot_settings, bot)) throw AccessDenied("Bot settings access denied");
-        const auto id = argument(args, "environmentId");
-        if (taskRouting.taskEnvironment(bot, routing, id) != id || policy.forbidden(bot, Action::environment_configure, id))
-            throw Conflict("Environment configure access required");
-        if (!args.contains("runTimeoutSeconds") || !args.at("runTimeoutSeconds").is_number_integer())
-            throw Conflict("Integer timeout required");
-        const auto timeout = args.at("runTimeoutSeconds").get<Id>();
-        if (timeout < 1 || timeout > 2147483647) throw Conflict("Invalid timeout");
-        database.exec("INSERT INTO environment_settings VALUES(?,?,?) ON CONFLICT(bot,environment) DO UPDATE SET timeout=excluded.timeout",
-                      {bot, id, timeout});
-        return {{"updated", true}};
     }
     return nullptr;
 }

@@ -71,10 +71,7 @@ Json stored() {
             {"doneWhen", "Provide results"},
             {"config", {{"model", "example"}, {"custom", Json::array({"one", "two"})}}},
             {"eventId", 0},
-            {"deadline", 0},
             {"createdAt", 1700000000},
-            {"remaining", 3},
-            {"additionalUsed", 0},
             {"feedback", "Run is ready"},
             {"question", nullptr}};
 }
@@ -142,7 +139,6 @@ Json storedExecution() {
     auto data = stored();
     data.update(
         {{"eventId", 51},
-         {"deadline", 100},
          {"runStop", {{"intent", "cancel"}, {"run", nullptr}, {"reconcileAt", 80}}},
          {"queuedInT3", true},
          {"cancelledByBotPause", true},
@@ -170,7 +166,7 @@ UPDATE tasks SET state='cancelling',data=?,action_id='action',last_run=?,replann
 )SQL",
                {data, assigned(), saved.task});
     const auto task = saved.load();
-    check(task.actionId == "action" && task.eventId == 51 && task.deadline == 100 && !task.activeRun, "Execution anchors did not decode");
+    check(task.actionId == "action" && task.eventId == 51 && !task.activeRun, "Execution anchors did not decode");
     const auto& run = task.lastRun.value();
     check(run.ref.runId == "assigned" && run.ref.gatewayEnvironmentId == "gateway" && run.environmentId == "net" &&
               run.assignment.ownerBotId == "bot" && !run.assignment.revisionId,
@@ -218,14 +214,9 @@ VALUES(?,0,'Mini','mini','repo','queued','{}')
     check(queued.runTargets().size() == 1 && queued.runTargets().front().route.projectId == "repo" && queued.runResults().empty(),
           "Queued destination did not retain its route");
 
-    const Json progress{{"gatewayEnvironmentId", "local"},
-                        {"threadId", "mini-thread"},
-                        {"link", ""},
-                        {"deadline", 100},
-                        {"retryAt", 90},
-                        {"stopRetryAt", 95},
-                        {"evidenceAttempts", 1},
-                        {"detail", "Waiting for a receipt"}};
+    const Json progress{
+        {"gatewayEnvironmentId", "local"}, {"threadId", "mini-thread"},        {"link", ""}, {"retryAt", 90}, {"stopRetryAt", 95},
+        {"evidenceAttempts", 1},           {"detail", "Waiting for a receipt"}};
     const Json report{{"threadId", "local-thread"},
                       {"runId", "local-run"},
                       {"link", "t3://local"},
@@ -247,8 +238,8 @@ VALUES(?,1,'Local','local','other','send-local','rolled_back',?)
     const auto running = saved.load();
     const auto& result = running.runResults().front();
     check(running.runTargets().empty() && running.runResults().size() == 2 && result.inPhase(DestinationRunPhase::confirmation_pending) &&
-              result.ref.threadId == "mini-thread" && result.deadline == 100 && result.retryAt == 90 && result.stopRetryAt == 95 &&
-              result.evidenceAttempts == 1 && !running.runResults().back().outstanding(),
+              result.ref.threadId == "mini-thread" && result.retryAt == 90 && result.stopRetryAt == 95 && result.evidenceAttempts == 1 &&
+              !running.runResults().back().outstanding(),
           "Destination progress and order changed on round-trip");
 
     saved.exec("UPDATE tasks SET run_outcome='partial_failure' WHERE id=?", {saved.task});
@@ -290,9 +281,6 @@ void decodeErrors() {
         rejects(invalid.dump(), key, "unknown key");
     }
     auto invalid = stored();
-    invalid["remaining"] = "3";
-    rejects(invalid.dump(), "remaining", "expected an integer");
-    invalid = stored();
     invalid["criteriaSourceMessageId"] = 3;
     rejects(invalid.dump(), "criteriaSourceMessageId", "requires proposed completion criteria");
     invalid = stored();
@@ -308,9 +296,6 @@ void executionDecodeErrors() {
     auto invalid = base;
     invalid["eventId"] = nullptr;
     rejects(invalid.dump(), "eventId", "expected an integer");
-    invalid = base;
-    invalid["deadline"] = "100";
-    rejects(invalid.dump(), "deadline", "expected an integer");
     invalid = base;
     invalid["pendingRunReport"]["report"]["run"].erase("revisionId");
     rejects(invalid.dump(), "pendingRunReport.report.run.revisionId", "missing required key");

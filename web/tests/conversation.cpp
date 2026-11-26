@@ -250,7 +250,7 @@ WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
                         std::string(request),
                         bot == "triage" ? "linked env" : "local-env",
                         std::string(bot),
-                        {{"token", privateValue}, {"runTimeoutSeconds", 1800}}};
+                        {{"token", privateValue}}};
             }};
 }
 
@@ -503,8 +503,7 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     runtime.runConversations();
     const auto page = browser.get("/api/view?bot=release");
     const auto asked = conversationReply(page, question.at("messageId"));
-    check(asked.at("suggestions") == Json::array({"local-env", "backup"}) && page.at("pausedConversations").empty() &&
-              page.at("waits").empty() && TaskList(store).tasks().empty(),
+    check(asked.at("suggestions") == Json::array({"local-env", "backup"}) && page.at("waits").empty() && TaskList(store).tasks().empty(),
           "the Bot's question was not an ordinary message with its suggested replies");
     const auto receipt = send("choose-backup", "backup", asked.at("messageId"));
     tick(runtime, 4);
@@ -579,21 +578,14 @@ void parallelVerificationInView(const std::filesystem::path& path) {
           "the saved Session row lost its active destination state or name");
     t3.localFinished = true;
     runtime.tick();
-    const auto saved = TaskList(store).tasks("release").at(0);
-    const auto& prior = saved.task.runResults()[1];
-    now = prior.deadline.value() + 1;
+    now += 48 * 3600;
     runtime.tick();
-    const auto overdue = browser.get("/api/view?bot=release").at("waits").at(0);
-    check(overdue.at("wait").at("reason") == "deadline" && overdue.at("wait").at("run").is_null(),
-          "an unconfirmed overdue launch must omit the missing Session link");
+    check(browser.get("/api/view?bot=release").at("waits").empty() && Inbox(store).inbox(localOwner, "release").empty(),
+          "A pending destination launch prompted for intervention after a long wait");
     t3.miniReceipt = true;
     now += 6;
     tick(runtime, 2);
     const auto running = browser.get("/api/view?bot=release");
-    const auto recovered = running.at("waits").at(0).at("wait");
-    check(recovered.at("id") == overdue.at("wait").at("id") &&
-              recovered.at("run").at("link") == "https://app.t3.codes/threads/mini-env/verification-thread",
-          "recovering a Run must refresh its link on the original deadline");
     const auto task = running.at("parallelTasks").at(0);
     const auto& runs = task.at("runs");
     check(runs.at(0).at("state") == "completed" && runs.at(0).at("commit") == commit && runs.at(1).at("state") == "confirmation_pending" &&
@@ -733,8 +725,8 @@ void conversationEntry(const std::filesystem::path& path) {
     runtime.runConversations();
     const auto estimatePage = browser.get("/api/view?bot=release");
     const auto estimateReply = conversationReply(estimatePage, estimate.at("messageId"));
-    check(estimateReply.at("text") == "見積もりに必要な明細の件数を教えてください。" && estimatePage.at("pausedConversations").empty() &&
-              estimatePage.at("waits").empty() && TaskList(store).tasks().size() == 1,
+    check(estimateReply.at("text") == "見積もりに必要な明細の件数を教えてください。" && estimatePage.at("waits").empty() &&
+              TaskList(store).tasks().size() == 1,
           "the Bot's question left pending state or started work");
     const auto detail =
         browser.post("/api/messages", {{"botId", "release"}, {"clientMessageId", "estimate-detail"}, {"text", budgetDetail}}, 201);
@@ -1523,80 +1515,6 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/view?bot=release"), 403);
 }
 
-void approveModelCallBeforeTask(const std::filesystem::path& path) {
-    Store webStore(path);
-    auto store = std::make_unique<Store>(path);
-    FixedModel model;
-    FixedT3 t3;
-    const auto start = [&] { return std::make_unique<Runtime>(*store, model, t3, [](auto) { return std::string{}; }); };
-    auto runtime = start();
-    auto webCallbacks = callbacks();
-    webCallbacks.intake = [original = webCallbacks.intake](std::string_view bot, std::string_view request) {
-        auto intake = original(bot, request);
-        intake.config["modelCallLimit"] = 2;
-        return intake;
-    };
-    const auto task = TaskIntake(*store).submit(webCallbacks.intake("release", comparisonRequest));
-    auto server = startWeb(webStore, 0, std::move(webCallbacks));
-    Browser browser(*server);
-    tick(*runtime, 3);
-    t3.observations["thread-release"] = {
-        .kind = Observation::Kind::Finished, .status = "completed", .report = proposedOptions, .itemId = "comparison-report"};
-    tick(*runtime, 2);
-    model.comparisonResult = conversationCompletion(browser.get("/api/view?bot=release"), task).at("id");
-    const auto receipt =
-        browser.post("/api/messages", {{"botId", "release"}, {"clientMessageId", "compound"}, {"text", compoundExplanation}}, 201);
-    runtime->runConversations();
-    const auto waiting = browser.get("/api/view?bot=release");
-    const auto wait = waiting.at("pausedConversations").at(0);
-    const auto reply = conversationReply(waiting, receipt.at("messageId"));
-    check(wait.at("route") == "model_budget" && wait.at("allowance") == 2 && wait.at("messageId") == reply.at("messageId") &&
-              waiting.at("presence") == "waiting" && model.turns == 2 && model.explained == 0,
-          "the third call reached the fixture or the pause was not shown");
-    runtime.reset();
-    store = std::make_unique<Store>(path);
-    runtime = start();
-    tick(*runtime, 3);
-    check(model.turns == 2 && model.explained == 0, "the paused turn resumed without approval");
-
-    const auto independent =
-        browser.post("/api/messages", {{"botId", "release"}, {"clientMessageId", "independent"}, {"text", "Who are you?"}}, 201);
-    runtime->runConversations();
-    check(conversationReply(browser.get("/api/view?bot=release"), independent.at("messageId")).at("text") == "I'm the release Bot." &&
-              model.turns == 3,
-          "a paused turn blocked an independent message to the same Bot");
-
-    Json approval = {{"botId", "triage"},
-                     {"itemKind", "conversation_model_budget"},
-                     {"itemId", wait.at("replyToMessageId")},
-                     {"waitId", wait.at("messageId")},
-                     {"taskId", 0},
-                     {"targetRevision", 0},
-                     {"targetGeneration", wait.at("messageId")},
-                     {"decision", "approve"}};
-    browser.post("/api/inbox/decide", approval, 409);
-    const auto cursor = browser.get("/api/view?bot=release").at("historyCursor").dump();
-    approval["botId"] = "release";
-    browser.post("/api/inbox/decide", approval);
-    browser.post("/api/inbox/decide", approval, 409);
-    const auto approved = browser.get("/api/view?bot=release&changesAfter=" + cursor);
-    const auto& events = approved.at("events");
-    const auto input =
-        std::find_if(events.begin(), events.end(), [&](const Json& event) { return event.at("id") == receipt.at("messageId"); });
-    check(approved.at("changedMessageIds") == Json::array({receipt.at("messageId"), wait.at("messageId")}) &&
-              browser.get("/api/view?bot=triage&changesAfter=" + cursor).at("changedMessageIds").empty() && input != events.end() &&
-              input->at("data").at("status") == "received" && conversationReply(approved, receipt.at("messageId")).at("status") == "done" &&
-              approved.at("pausedConversations").empty(),
-          "Approval did not invalidate both changed events for the owning Bot before resuming the turn");
-    runtime->runConversations();
-    const auto resumed = browser.get("/api/view?bot=release");
-    const auto& answer = resumed.at("events").back().at("data");
-    check(resumed.at("pausedConversations").empty() && answer.at("route") == "reply" &&
-              answer.at("replyToMessageId") == receipt.at("messageId") && model.turns == 4 && model.explained == 1 &&
-              model.summarized == 1 && TaskList(*store).tasks().size() == 1 && t3.launches == 1,
-          "approval did not resume the unfinished turn from its saved steps");
-}
-
 struct AuthorityModel final : Model {
     std::vector<std::string> inputs;
     std::function<void()> demoteDuringCall;
@@ -1611,7 +1529,6 @@ struct AuthorityModel final : Model {
                            (input.event.dump() + input.task.dump() + input.history.dump() + input.config.dump()).find("Bearer fixture-") !=
                                std::string::npos;
         const auto first = input.event.at("turn").empty();
-        if (request == "Paused retained root" && first) return {{{"find_tasks", {{"query", "release"}}, "Find release tasks"}}};
         if (request == "Demoted during model call") demoteDuringCall();
         const auto call = first ? Decision{"start_task", {{"request", request}}, "Start requested work"}
                                 : Decision{"reply", {{"text", "Authorized conversation reply"}}, "Reply to the user"};
@@ -1633,11 +1550,6 @@ void queuedWebAuthority(const std::filesystem::path& path) {
     const auto setup = [&](Store& store, const Json& accounts) {
         writeWebIdentities(identities, accounts);
         auto web = callbacks();
-        web.intake = [original = web.intake](std::string_view bot, std::string_view request) {
-            auto intake = original(bot, request);
-            if (request.starts_with("Paused")) intake.config["modelCallLimit"] = 1;
-            return intake;
-        };
         configureWebIdentities(store, identities, web);
         return startWeb(store, 0, std::move(web));
     };
@@ -1650,8 +1562,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
     };
     AuthorityModel model;
     FixedT3 t3;
-    Id demotedQueue, removedQueue, retainedQueue, memberQueue, demotedPause, retainedPause, mixedQueue, trustedQueue, taskFromDemotedTurn;
-    Json pauses;
+    Id demotedQueue, removedQueue, retainedQueue, memberQueue, priorTask, mixedQueue, trustedQueue, taskFromDemotedTurn;
     {
         Store store(path);
         auto server = setup(store, Json::array({identity(demoted, localOwner.id, true), identity(removed, "removed", true),
@@ -1660,13 +1571,11 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         Browser browser(*server);
         BotAccess{store}.setMember(localOwner, "release", "member", true);
         BotAccess{store}.setMember(localOwner, "release", "removed", true);
-        demotedPause = send(browser, demoted, "Paused demoted root");
-        retainedPause = send(browser, retained, "Paused retained root");
+        priorTask = send(browser, demoted, "Work requested before demotion");
         Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
         runtime.runConversations();
-        pauses = browser.get(view).at("pausedConversations");
         const auto tasks = TaskList(store).tasks();
-        check(pauses.size() == 2 && tasks.size() == 1, "Fixture did not pause two turns after creating one task");
+        check(tasks.size() == 1 && tasks.front().task.sourceMessageId == priorTask, "Fixture did not create the prior task");
         taskFromDemotedTurn = tasks.front().task.id;
 
         demotedQueue = send(browser, demoted, "Queued demoted root");
@@ -1685,15 +1594,6 @@ void queuedWebAuthority(const std::filesystem::path& path) {
                                                 identity("Bearer fixture-other", "mixed", true)}));
         Browser browser(*server);
         signIn(browser, retained);
-        for (const auto& pause : pauses)
-            browser.post("/api/inbox/decide", {{"botId", "release"},
-                                               {"itemKind", "conversation_model_budget"},
-                                               {"itemId", pause.at("replyToMessageId")},
-                                               {"waitId", pause.at("messageId")},
-                                               {"taskId", 0},
-                                               {"targetRevision", 0},
-                                               {"targetGeneration", pause.at("messageId")},
-                                               {"decision", "approve"}});
         model.inputs.clear();
         Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
         runtime.runConversations();
@@ -1704,18 +1604,17 @@ void queuedWebAuthority(const std::filesystem::path& path) {
                     return event.at("data").at("route");
             return Json(nullptr);
         };
-        for (auto id : {demotedQueue, removedQueue, mixedQueue, demotedPause})
+        for (auto id : {demotedQueue, removedQueue, mixedQueue})
             check(latestRoute(id) == "access", "Queued or resumed message retained unavailable Web authority");
-        for (auto id : {retainedQueue, memberQueue, trustedQueue, retainedPause})
+        for (auto id : {retainedQueue, memberQueue, trustedQueue})
             check(latestRoute(id) == "reply", "A currently authorized queued or resumed message was denied");
-        const std::vector<std::string> expected{"Paused retained root",
-                                                "Queued retained root",
+        const std::vector<std::string> expected{"Queued retained root",
                                                 "Queued retained root",
                                                 "Queued demoted root with Bot membership",
                                                 "Queued demoted root with Bot membership",
                                                 "Trusted local owner",
                                                 "Trusted local owner"};
-        check(model.inputs == expected && TaskList(store).tasks().size() == 4 && page.at("pausedConversations").empty(),
+        check(model.inputs == expected && TaskList(store).tasks().size() == 4,
               "Access changes delivered model context or ran work for a revoked actor");
         check(!model.leakedCredential && page.dump().find("Bearer fixture-") == std::string::npos,
               "Web credentials entered a model request or conversation output");
@@ -1865,7 +1764,6 @@ int main(int argc, char** argv) {
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");
         botRoleSavesRequireCompleteOriginal(directory.path / "role-edit");
-        approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         queuedWebAuthority(directory.path / "queued-web-authority.sqlite");
         memoryAutomationEndpoints(directory.path / "automation.sqlite");
         std::cout << "web conversation behavior passed\n";

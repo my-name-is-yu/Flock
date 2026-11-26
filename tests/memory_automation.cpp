@@ -13,6 +13,7 @@
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
+#include "flock/model_error.hpp"
 #include "flock/person.hpp"
 #include "flock/bot_access.hpp"
 #include "flock/policy_rules.hpp"
@@ -88,9 +89,14 @@ struct Adapter : T3 {
 struct Script : Model {
     std::vector<Decision> choices;
     std::vector<ModelInput> inputs;
+    bool deferReply = false;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         inputs.push_back(input);
+        if (deferReply && !input.event.at("turn").empty()) {
+            deferReply = false;
+            throw ModelError("Temporary model outage", true);
+        }
         if (!choices.empty()) {
             check(input.tools.end() != std::find(input.tools.begin(), input.tools.end(), choices.front().tool),
                   "Conversation tool was not advertised");
@@ -126,7 +132,8 @@ void memoryFlow(const std::filesystem::path& db) {
     Adapter adapter;
     Script bot;
     RuntimeOptions options;
-    options.clock = [] { return Seconds{1'767'456'000}; };
+    Seconds now = 1'767'456'000;
+    options.clock = [&] { return now; };
     Runtime runtime(store, bot, adapter, {}, options);
     const auto turn = [&](const Intake& target, std::string_view id, std::vector<Decision> choices) {
         const auto start = bot.inputs.size();
@@ -182,13 +189,11 @@ void memoryFlow(const std::filesystem::path& db) {
     const auto memberStep = bot.inputs.size();
     bot.choices = {{"apply_memory_edit", {{"baseVersion", 2}, {"content", "Member edit"}}, "Change memory"},
                    {"remove_schedule", {{"id", 1}}, "Remove schedule"},
-                   {"update_bot_settings", {{"environmentId", alpha.environmentId}, {"runTimeoutSeconds", 1}}, "Change timeout"},
                    reply()};
     ConversationIntake(store).receive(member, alpha, "member-mutation", "Change memory and schedules");
     runtime.runConversations();
     check(lastResult(bot.inputs.at(memberStep + 1)).at("error") == "Memory access denied" &&
-              lastResult(bot.inputs.at(memberStep + 2)).at("error") == "Automation change denied" &&
-              lastResult(bot.inputs.at(memberStep + 3)).at("error") == "Bot settings access denied",
+              lastResult(bot.inputs.at(memberStep + 2)).at("error") == "Automation change denied",
           "Member chat bypassed owner-only mutations");
 
     const auto shared =
@@ -270,15 +275,13 @@ void memoryFlow(const std::filesystem::path& db) {
     const auto sharedContent = Memory(store).memory(owner, "beta", "read_memory", {{"docId", path}});
     check(sharedContent.at("content") == "Example: [redacted]", "Shared text exposed another Bot's protected value");
 
-    auto limited = beta;
-    limited.config["modelCallLimit"] = 1;
+    bot.deferReply = true;
     bot.choices = {{"read_memory", {{"docId", path}}, "Check the playbook"}, reply()};
-    const auto receipt = ConversationIntake(store).receive(localOwner, limited, "paused-shared-read", "Check the shared playbook");
+    ConversationIntake(store).receive(localOwner, beta, "deferred-shared-read", "Check the shared playbook");
     runtime.runConversations();
-    const Id pauseId = Conversations(store).pausedConversations(beta.botId).at(0).at("messageId");
+    check(!bot.deferReply && bot.choices.size() == 1, "the reply did not defer after reading memory");
     policyRules.changeNeverRule(owner, Action::shared_memory_read, path, true);
-    Inbox(store).decideInbox(owner, {beta.botId, InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId},
-                             "approve");
+    ++now;
     runtime.runConversations();
     check(bot.choices.empty() && lastResult(bot.inputs.back()).at("ok") == false &&
               bot.inputs.back().event.dump().find("Example: [redacted]") == std::string::npos,

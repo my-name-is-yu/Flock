@@ -17,7 +17,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     fallbackReasoningEfforts: ['low', 'medium', 'high'],
   };
   let catalogCalls = 0;
-  let saved = { environmentId: 'new-environment', model: 'new-saved-model', modelCallLimit: 20 };
+  let saved = { environmentId: 'new-environment', model: 'new-saved-model' };
   const card = createBotWorkspaceCard(async (patch) => {
     patches.push(patch);
     if (patches.length === 1) throw new Error('invalid_workspace');
@@ -30,7 +30,6 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   const edit = card.element.querySelector('.settings-card-edit');
   const form = card.element.querySelector('form');
   const model = form.elements.model;
-  const allowance = form.elements.modelCallLimit;
   const effort = form.elements.reasoningEffort;
   const effortOptions = () => Array.from(effort.options, (option) => option.value).join(',');
   const chooseModel = (value) => {
@@ -46,13 +45,14 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   placeRows(body, [document.createElement('header'), card.element]);
   edit.click();
   check(edit.hidden && form.hidden, 'A viewer could open the workspace editor');
-  card.update({ modelCallLimit: 20 }, true);
+  card.update({}, true);
   edit.click();
   await settle();
+  check(!form.elements.modelCallLimit && !card.element.textContent.includes('Steps per request'),
+    'The workspace still displays a step limit');
   check(!environment.value && form.querySelector('datalist option').value === 'suggested-environment',
     'The connected environment should be suggested without pinning it');
   check(!form.querySelector('#settings-model-feedback').hidden, 'A catalog failure did not show feedback');
-  check(allowance.valueAsNumber === 20, 'The default allowance was missing from the editor');
   cancel.click();
 
   edit.click();
@@ -67,7 +67,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     'Bot setup submitted without a model');
   cancel.click();
 
-  card.update({ environmentId: 'original-environment', projectId: 'original-project', model: 'unlisted-model', modelCallLimit: 20 });
+  card.update({ environmentId: 'original-environment', projectId: 'original-project', model: 'unlisted-model' });
   edit.click();
   await settle();
   check(catalogCalls === 3 && model.value === 'unlisted-model' &&
@@ -96,7 +96,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     'Save sent an unchanged field or did not trim the draft');
   const facts = card.element.querySelectorAll('dd');
   check(form.hidden && facts[0].textContent === 'new-saved-model' && facts[1].textContent === 'Model default' &&
-    facts[2].textContent === '20' && facts[3].textContent === 'new-environment' && facts[4].textContent === 'draft-project',
+    facts.length === 4 && facts[2].textContent === 'new-environment' && facts[3].textContent === 'draft-project',
     'Save did not show the current settings');
 
   edit.click();
@@ -121,7 +121,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     'Clearing an existing project could disable configured schedules');
   cancel.click();
 
-  saved = { model: 'personal-model', modelCallLimit: 20 };
+  saved = { model: 'personal-model' };
   card.update(saved);
   edit.click();
   await settle();
@@ -140,23 +140,11 @@ async function exercise(createBotWorkspaceCard, placeRows) {
 
   edit.click();
   await settle();
-  allowance.value = '0';
-  save.click();
-  await settle();
-  check(!form.hidden && allowance.validity.rangeUnderflow && patches.length === 4,
-    'A zero allowance was submitted');
-  allowance.value = '12';
-  save.click();
-  await settle();
-  check(JSON.stringify(patches[4]) === '{"modelCallLimit":12}' && form.hidden && facts[2].textContent === '12',
-    'An allowance-only save changed other fields or did not show the saved value');
-  edit.click();
-  await settle();
   check(effortOptions() === ',low,ultra', 'Advertised efforts were replaced by the fallback list');
   effort.value = 'ultra';
   save.click();
   await settle();
-  check(JSON.stringify(patches[5]) === '{"reasoningEffort":"ultra"}' && facts[1].textContent === 'Ultra',
+  check(JSON.stringify(patches[4]) === '{"reasoningEffort":"ultra"}' && facts[1].textContent === 'Ultra',
     'Saving a reasoning effort changed another field or failed to show it');
 
   edit.click();
@@ -166,8 +154,24 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   check(effortOptions() === '' && effort.value === '', 'A model with no advertised levels offered an override');
   save.click();
   await settle();
-  check(JSON.stringify(patches[6]) === '{"model":"no-reasoning","reasoningEffort":""}' &&
+  check(JSON.stringify(patches[5]) === '{"model":"no-reasoning","reasoningEffort":""}' &&
     facts[1].textContent === 'Model default', 'Changing the model left an unsupported effort saved');
+
+  let viewModelLoads = 0;
+  const viewer = createBotWorkspaceCard(async () => ({}), async () => [], async () => {
+    viewModelLoads++;
+    return catalog;
+  });
+  const current = { model: 'next-model' };
+  const modelLabel = viewer.element.querySelector('.settings-workspace-facts dd');
+  viewer.update(current);
+  await settle();
+  check(viewModelLoads === 0 && modelLabel.textContent === 'next-model',
+    'Read-only settings requested the editor-only model catalog');
+  viewer.update(current, true);
+  await settle();
+  check(viewModelLoads === 1 && modelLabel.textContent === 'Next model',
+    'Editable settings did not show the model name before opening the editor');
 }
 
 const directory = mkdtempSync(join(tmpdir(), 'flock-bot-workspace-'));

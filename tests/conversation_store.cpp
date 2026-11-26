@@ -537,9 +537,8 @@ void transientFailureResumesAfterTheLastFinishedStep() {
         const auto other = receive(store, "beta", "Hello beta", 0, Fixture::bot("beta"));
         for (int i = 0; i < 24; ++i) execution.runtime.runConversations();
         check(TaskList(store).tasks("alpha").size() == 1 && reply(store, message).is_null() && reply(store, later).is_null() &&
-                  reply(store, other, "beta")["text"] == "Hello." && calls[0] == 2 && calls[1] == 1 &&
-                  Conversations(store).pausedConversations("alpha").empty(),
-              "A fixed-clock outage spent the budget or displaced a Bot's oldest turn");
+                  reply(store, other, "beta")["text"] == "Hello." && calls[0] == 2 && calls[1] == 1,
+              "A fixed-clock outage retried early or displaced a Bot's oldest turn");
     }
     Store restarted(fixture.database());
     RuntimeFixture execution(restarted);
@@ -567,12 +566,8 @@ void transientFailureResumesAfterTheLastFinishedStep() {
               reply(restarted, message)["text"] == "Queued." && reply(restarted, later)["text"] == "In the changelog.",
           "Restart repeated a finished step or lost a turn");
     check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 4,
-          "The failed call was not counted against the message budget");
+          "The failed call was not recorded");
     check(fixture.count("SELECT count(*) FROM conversation_retries") == 0, "A completed turn kept stale retry metadata");
-    check(fixture.count("SELECT attempts FROM model_budgets WHERE id='message/" + std::to_string(message) + "'") == 4 &&
-              fixture.count("SELECT count(*) FROM messages WHERE id=" + std::to_string(message) +
-                            " AND json_type(routing,'$.modelBudgetId') IS NULL") == 1,
-          "Restart lost the deterministic budget or stored a redundant routing ID");
 }
 
 void concurrentWorkerRecoversFromWriterContention(bool repairResponse) {
@@ -614,7 +609,6 @@ void concurrentWorkerRecoversFromWriterContention(bool repairResponse) {
         return say("Done.");
     };
     auto intake = Fixture::bot();
-    intake.config["modelCallLimit"] = 2;
     const auto blocked = receive(store, "blocked", "Wait for SQLite", 0, intake);
     Id other = 0;
     execution.runtime.tickConcurrent();
@@ -654,7 +648,6 @@ void repairSurvivesRestart(bool alreadyClaimed) {
         Store store(fixture.database());
         RuntimeFixture execution(store);
         auto intake = Fixture::bot();
-        intake.config["modelCallLimit"] = 3;
         message = receive(store, "repair", "Write a release note", 0, intake);
         execution.model.conversation = [&](const ModelInput& input) -> Decision {
             if (turn(input).empty()) return {"start_task", {{"request", "Write a release note"}}, "Start the requested task"};
@@ -695,27 +688,6 @@ void repairSurvivesRestart(bool alreadyClaimed) {
     if (alreadyClaimed)
         check(fixture.count("SELECT count(*) FROM conversation_model_failures WHERE reason='repair_interrupted'") == 1,
               "The interrupted repair lost its diagnostic");
-}
-
-void invalidResponseRepairRespectsBudget(bool hasBudget) {
-    Fixture fixture;
-    Store store(fixture.database());
-    RuntimeFixture execution(store);
-    auto intake = Fixture::bot();
-    const Id limit = hasBudget ? 3 : 1;
-    intake.config["modelCallLimit"] = limit;
-    const auto message = receive(store, "invalid", "Inspect the T3 environment", 0, intake);
-    execution.model.conversation = [](const ModelInput&) -> Decision {
-        throw ModelError("Unexpected batch", ModelErrorCode::invalid_tool_count);
-    };
-    execution.runtime.runConversations();
-    const auto attempts = hasBudget ? 2 : 1;
-    check(execution.model.turns.size() == attempts && reply(store, message).at("route") == "error" &&
-              fixture.count("SELECT count(*) FROM model_attempts") == attempts &&
-              fixture.count("SELECT count(*) FROM conversation_model_failures") == attempts &&
-              fixture.count("SELECT count(*) FROM conversation_steps WHERE decision IS NOT NULL OR effect IS NOT NULL") == 0 &&
-              execution.t3.launches == 0,
-          "A rejected repair retried again, increased the budget, or ran a tool");
 }
 
 void shutdownLeavesAnUnsentRunReadyForRestart() {
@@ -906,175 +878,23 @@ void longResultsAreReadInChunks() {
           "A long result was not readable in UTF-8 safe chunks");
 }
 
-void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
-    Fixture fixture;
-    Store store(fixture.database());
-    auto limited = Fixture::bot();
-    limited.config["modelCallLimit"] = 14;
-    int calls = 0;
-    const auto script = [&](const ModelInput& input) -> Decision {
-        if (input.event["text"] == "Thanks") return say("You're welcome.");
-        if (++calls <= 27) return {"find_tasks", Json::object(), "Look"};
-        return say("Nothing yet.");
-    };
-    const auto paused = receive(store, "limited", "What is running?", 0, limited);
-    const auto later = receive(store, "later", "Thanks");
-    {
-        RuntimeFixture execution(store);
-        execution.model.conversation = script;
-        execution.runtime.runConversations();
-    }
-    const auto pauses = Conversations(store).pausedConversations("alpha");
-    check(calls == 14 && pauses.size() == 1 && pauses[0]["allowance"] == 14 && pauses[0]["route"] == "model_budget" &&
-              reply(store, paused)["route"] == "model_budget" && reply(store, later)["text"] == "You're welcome.",
-          "A paused turn blocked a later message or was not reported");
-    const auto waitMessage = pauses[0]["messageId"].get<Id>();
-    const InboxTarget target{"alpha",    InboxKind::conversation_model_budget, pauses.at(0).at("replyToMessageId"), waitMessage, 0, 0,
-                             waitMessage};
-    Store reopened(fixture.database());
-    const auto history = Conversations(reopened).conversation("alpha");
-    const auto input = std::ranges::find_if(history, [&](const Json& row) { return row.at("id") == paused; });
-    check(input != history.end() && input->at("data").at("status") == "needs_you", "Reopening the journal lost a persisted pause");
-    const auto beforeApproval = Conversations(reopened).conversation("alpha", 0, 2);
-    const auto cursor = Conversations(reopened).conversationChangesSince(std::nullopt, "alpha").through;
-    std::barrier ready(2);
-    const auto approve = [&](Store& connection) {
-        ready.arrive_and_wait();
-        try {
-            Inbox(connection).decideInbox(localOwner, target, "approve");
-            return true;
-        } catch (const DecisionUnavailable&) {
-            return false;
-        }
-    };
-    auto first = std::async(std::launch::async, [&] { return approve(store); });
-    const auto second = approve(reopened);
-    check(second != first.get(), "The same pause was accepted twice or both approvals failed");
-    const auto changes = Conversations(reopened).conversationChangesSince(cursor, "alpha");
-    const auto afterApproval = Conversations(reopened).conversation("alpha", 0, 2);
-    check(changes.through > cursor && changes.messages.at("alpha") == std::vector<Id>{paused, waitMessage} && afterApproval.size() == 2 &&
-              afterApproval.at(0).at("id") == beforeApproval.at(0).at("id") &&
-              afterApproval.at(1).at("id") == beforeApproval.at(1).at("id"),
-          "Approval did not invalidate both entries or consumed a visible page slot");
-    check(reply(reopened, paused).at("status") == "done" &&
-              fixture.count("SELECT count(*) FROM journal WHERE conversation_status='done' AND id=" + std::to_string(waitMessage)) == 1,
-          "Approval did not update the saved pause and its status column together");
-    bool rejected = false;
-    try {
-        Inbox(store).decideInbox(localOwner, target, "approve");
-    } catch (const Conflict&) {
-        rejected = true;
-    }
-    check(rejected && Conversations(store).pausedConversations("alpha").empty(), "The same pause was approved twice");
-    Store afterRestart(fixture.database());
-    RuntimeFixture resumed(afterRestart);
-    resumed.model.conversation = script;
-    resumed.runtime.runConversations();
-    Json answered;
-    for (const auto& row : Conversations(store).conversation("alpha", 0, 200))
-        if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == paused && row["data"]["route"] == "reply")
-            answered = row["data"];
-    check(answered["text"] == "Nothing yet." && calls == 28 &&
-              fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(paused)) == 28 &&
-              fixture.count("SELECT call_limit FROM model_budgets WHERE id='message/" + std::to_string(paused) + "'") == 28,
-          "The full renewed allowance did not survive restart or was granted twice");
-}
-
-void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
-    Fixture fixture;
-    Store store(fixture.database());
-    auto limited = Fixture::bot();
-    limited.config["modelCallLimit"] = 3;
-    auto unrelated = Fixture::bot("beta");
-    unrelated.config["modelCallLimit"] = 1;
-    const auto message = receive(store, "shared", "Write a release note", 0, limited);
-    receive(store, "unrelated", "Check another request", 0, unrelated);
-    const auto script = [&](const ModelInput& input) -> Decision {
-        const auto steps = turn(input).size();
-        if (input.event.at("text") == "Check another request" || (steps > 0 && steps < 3))
-            return {"find_tasks", Json::object(), "Look up the work"};
-        if (steps == 0) return {"start_task", {{"request", "Write a release note"}}, "Start it"};
-        return say("I started the release note.");
-    };
-    Id taskId = 0;
-    {
-        RuntimeFixture execution(store);
-        execution.model.conversation = script;
-        execution.runtime.runConversations();
-        taskId = TaskList(store).tasks("alpha").at(0).task.id;
-        execution.reach(store, taskId, "waiting");
-    }
-    const auto task = Tasks(store).task(taskId);
-    const auto taskTarget = TaskTarget::from(task.task, task.wait.value().id);
-    const auto pause = Conversations(store).pausedConversations("alpha").at(0).at("messageId").get<Id>();
-    const InboxTarget turnTarget{"alpha", InboxKind::conversation_model_budget, message, pause, 0, 0, pause};
-    check(task.wait->reason() == WaitReason::model_budget && Conversations(store).pausedConversations("beta").size() == 1,
-          "The fixture did not exhaust the shared and independent allowances");
-    const auto beforeApproval = Conversations(store).conversationChangesSince(std::nullopt, "alpha").through;
-    if (approveTask)
-        TaskControl(store).operate(localOwner, taskTarget, "approve");
-    else
-        Inbox(store).decideInbox(localOwner, turnTarget, "approve");
-    const auto changes = Conversations(store).conversationChangesSince(beforeApproval, "alpha");
-    check(Conversations(store).pausedConversations("alpha").empty() && taskJson(Tasks(store).task(taskId)).at("wait").is_null() &&
-              Conversations(store).pausedConversations("beta").size() == 1 &&
-              changes.messages.at("alpha") == std::vector<Id>{message, pause},
-          "Renewal did not clear both shared pauses, invalidate the conversation, or preserve the independent pause");
-    bool rejected = false;
-    try {
-        if (approveTask)
-            Inbox(store).decideInbox(localOwner, turnTarget, "approve");
-        else
-            TaskControl(store).operate(localOwner, taskTarget, "approve");
-    } catch (const Conflict&) {
-        rejected = true;
-    }
-    check(rejected, "A sibling pause could grant another block from a stale approval");
-
-    Store reopened(fixture.database());
-    RuntimeFixture resumed(reopened);
-    resumed.model.conversation = script;
-    resumed.runtime.runConversations();
-    resumed.finish(reopened, taskId, "The release note is ready.");
-    auto events = Conversations(reopened).conversation("alpha", 0, 200);
-    check(std::ranges::any_of(events,
-                              [&](const Json& row) {
-                                  return row.at("kind") == "conversation_reply" && row.at("data").at("replyToMessageId") == message &&
-                                         row.at("data").at("text") == "I started the release note.";
-                              }) &&
-              Inbox(reopened).inbox(localOwner, "alpha").empty() &&
-              fixture.count("SELECT call_limit FROM model_budgets WHERE id='message/" + std::to_string(message) + "'") == 6,
-          "Shared work did not finish after restart with exactly one new block");
-}
-
-void notesFailureReleasesUnusedApproval() {
+void longTurnFinishesWithoutAnAllowance() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    auto limited = Fixture::bot();
-    limited.config["modelCallLimit"] = 1;
-    execution.model.conversation = [](const ModelInput&) -> Decision {
-        return {"start_task", {{"request", "Write a release note"}}, "Start it"};
+    constexpr int reads = 505;
+    int calls = 0;
+    execution.model.conversation = [&](const ModelInput&) -> Decision {
+        if (++calls > reads) return say("I checked the work.");
+        return {"find_tasks", {{"query", "Release"}}, "Check current work"};
     };
-    const auto message = receive(store, "approval-notes", "Write a release note", 0, limited);
+    const auto message = receive(store, "long", "Check the release repeatedly");
     execution.runtime.runConversations();
-    const auto tasks = taskJson(TaskList(store).tasks("alpha"));
-    const auto pauses = Conversations(store).pausedConversations("alpha");
-    check(tasks.size() == 1 && pauses.size() == 1, "The turn did not start a task and pause for approval");
-    const Id pause = pauses.at(0).at("messageId");
-    Inbox(store).decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, message, pause, 0, 0, pause}, "approve");
-
-    execution.notes = [](std::string_view) -> std::string { throw std::runtime_error("SOUL.md is unreadable"); };
-    execution.runtime.runConversations();
-    const auto failure = Conversations(store).conversation("alpha", 0, 1).at(0).at("data");
-    check(execution.model.turns.size() == 1 && failure.at("route") == "error" && failure.at("replyToMessageId") == message,
-          "The resumed turn did not fail before model dispatch");
-    check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 1,
-          "The failed turn consumed an unused approved call");
-
-    execution.notes = [](std::string_view) { return std::string{}; };
-    execution.reach(store, tasks.at(0).at("id"), "running");
-    check(execution.t3.launches == 1, "The shared approval did not allow the task to launch once");
+    check(calls == reads + 1 && reply(store, message).at("text") == "I checked the work." && Inbox(store).inbox(localOwner).empty(),
+          "Repeated decisions did not finish without an allowance");
+    check(fixture.count("SELECT count(*) FROM model_attempts WHERE purpose='conversation_turn' AND message_id=" +
+                        std::to_string(message)) == reads + 1,
+          "The uncapped turn did not account for every inference");
 }
 
 void replyTargetsReachTheTurn() {
@@ -1156,8 +976,6 @@ int main() {
         concurrentWorkerRecoversFromWriterContention(true);
         repairSurvivesRestart(false);
         repairSurvivesRestart(true);
-        invalidResponseRepairRespectsBudget(false);
-        invalidResponseRepairRespectsBudget(true);
         concurrentWorkerSurfacesStructuralStorageFailure();
         shutdownLeavesAnUnsentRunReadyForRestart();
         modelFailureReportsWhatWasAlreadyDone();
@@ -1165,10 +983,7 @@ int main() {
         toolErrorsReturnToTheModel();
         boundedContextAndOlderTasks();
         longResultsAreReadInChunks();
-        budgetPauseLetsLaterMessagesRunAndApprovalResumes();
-        oneApprovalResumesSharedBudgetWaits(false);
-        oneApprovalResumesSharedBudgetWaits(true);
-        notesFailureReleasesUnusedApproval();
+        longTurnFinishesWithoutAnAllowance();
         replyTargetsReachTheTurn();
         conversationPagesCombineTaskAndMessageHistory();
         std::cout << "Conversation Store acceptance passed\n";

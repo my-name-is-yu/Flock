@@ -8,11 +8,19 @@ import { promisify } from 'node:util';
 
 function fixtures() {
   window.EventSource = undefined;
-  const bot = { id: 'release', name: 'Release', paused: false, canDelete: true, presence: 'idle' };
+  const bot = { id: 'release', name: 'Release', model: 'demo', paused: false, canDelete: true, presence: 'idle' };
   window.pauseChanges = [];
   window.sentMessages = [];
   window.sharePausedBot = () => {
     Object.assign(bot, { canDelete: false, paused: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  window.unconfigureBot = (canDelete) => {
+    Object.assign(bot, { canDelete, paused: false, model: '' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  window.renameBot = (name) => {
+    bot.name = name;
     document.dispatchEvent(new Event('visibilitychange'));
   };
   window.fetch = async (path, { body } = {}) => {
@@ -51,8 +59,8 @@ async function exercise() {
   const settings = $('#detail');
   const confirmation = $('#bot-pause');
   const pauseSetting = () => $('#bot-pause-setting');
-  const pauseBanner = $('#bot-paused-banner');
-  const resume = $('#resume-bot');
+  const pauseBanner = $('#composer-banner');
+  const resume = $('#composer-banner-action');
   const composer = $('#composer');
   const message = $('#message');
   const menuItems = () => [...document.querySelectorAll('#bot-menu [role="menuitem"]')];
@@ -62,7 +70,7 @@ async function exercise() {
   message.value = 'Draft for after resume';
   message.dispatchEvent(new Event('input'));
   $('#profile-avatar-button').click();
-  check(settings.open && pauseSetting().textContent === 'Pause', 'The owner could not find Pause in settings');
+  check(settings.open && pauseSetting().textContent === 'Pause…', 'The owner could not find Pause in settings');
   pauseSetting().click();
   check(confirmation.open && $('#bot-pause-title').textContent === 'Pause Release?', 'Pause did not confirm the Bot');
   $('#bot-pause-cancel').click();
@@ -70,7 +78,7 @@ async function exercise() {
   await new Promise(resolve => setTimeout(resolve, 20));
   pauseSetting().click();
   $('#bot-pause-confirm').click();
-  await waitFor(() => !confirmation.open && pauseSetting().textContent === 'Resume', 'Settings did not switch to Resume');
+  await waitFor(() => !confirmation.open && pauseSetting().textContent === 'Resume…', 'Settings did not switch to Resume');
   check(pauseChanges.length === 1 && pauseChanges[0].botId === 'release' && pauseChanges[0].paused === true,
     'Settings did not pause the selected Bot');
   $('#close-detail').click();
@@ -90,7 +98,7 @@ async function exercise() {
   $('#bot-pause-confirm').click();
   await waitFor(() => !confirmation.open && !pauseBanner.hidden, 'The Bot menu could not pause');
   menu.click();
-  menuItems().find(item => item.textContent === 'Resume').click();
+  menuItems().find(item => item.textContent === 'Resume…').click();
   $('#bot-pause-confirm').click();
   await waitFor(() => !confirmation.open && pauseBanner.hidden, 'The Bot menu could not resume');
 
@@ -98,10 +106,30 @@ async function exercise() {
   await waitFor(() => !pauseBanner.hidden, 'A paused Bot still showed its composer to a member');
   check(resume.hidden, 'A member could resume from the composer');
   menu.click();
-  check(menuItems().every(item => !['Pause…', 'Resume'].includes(item.textContent)), 'A member could manage pause from the menu');
+  check(menuItems().every(item => !['Pause…', 'Resume…'].includes(item.textContent)), 'A member could manage pause from the menu');
   menu.click();
   $('#profile-avatar-button').click();
   check(settings.open && !pauseSetting(), 'A member could manage pause from settings');
+  $('#close-detail').click();
+
+  window.unconfigureBot(false);
+  await waitFor(() => pauseBanner.dataset.state === 'setup', 'A Bot without a model still showed its composer');
+  check(composer.hidden && resume.hidden && $('#composer-banner-title').textContent === 'Release isn’t set up yet',
+    'A member could send to, or set up, a Bot without a model');
+  window.unconfigureBot(true);
+  await waitFor(() => !resume.hidden, 'The owner could not set up a Bot without a model');
+  check(resume.textContent === 'Choose a model', 'The setup action did not say what it does');
+  const longName = 'INFRASTRUCTUREMONITORINGSERVICES';
+  window.renameBot(longName);
+  await waitFor(() => $('#composer-banner-title').textContent === `${longName} isn’t set up yet`, 'The setup banner did not name the Bot');
+  pauseBanner.style.width = '296px';
+  const bannerBox = pauseBanner.getBoundingClientRect();
+  const actionBox = resume.getBoundingClientRect();
+  check(actionBox.left >= bannerBox.left && actionBox.right <= bannerBox.right,
+    'A long Bot name pushed Choose a model out of a narrow setup banner');
+  pauseBanner.style.width = '';
+  resume.click();
+  check(settings.open && !$('.settings-workspace-form').hidden, 'Choose a model did not open the model editor');
 }
 
 const assets = new URL('../assets/', import.meta.url);

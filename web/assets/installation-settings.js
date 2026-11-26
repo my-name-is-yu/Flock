@@ -134,7 +134,7 @@ function appendConnectionStates(container, {
 }) {
   if (typeof checked === 'boolean') {
     const badge = statusBadge(checked ? checkedLabel : failedLabel, checked ? 'checked' : 'error');
-    if (checkedAt) badge.title = `Last checked ${new Date(checkedAt * 1000).toLocaleString()}`;
+    if (checkedAt) badge.setAttribute('aria-description', `Last checked ${new Date(checkedAt * 1000).toLocaleString()}`);
     container.append(badge);
   } else if (configured && !hostManaged) container.append(statusBadge('Registered'));
   if (hostManaged) container.append(statusBadge('Managed on host'));
@@ -278,7 +278,7 @@ function editChannel(type, entry = {}) {
     return result;
   };
   if (channels.hostManaged) {
-    openEditor(title, 'The Flock host manages these bridge settings.',
+    openEditor(title, 'These bridge settings are set on the computer running Flock.',
       entriesList(entries, (bridge) => `Local port ${bridge.port}`,
         {test, status: (bridge) => ({...bridgeStatus(bridge), hostManaged: true})}), checkResult);
     return;
@@ -311,7 +311,7 @@ function editChannel(type, entry = {}) {
     if (credential) body.credential = credential;
     return saveInstallation('channels', body);
   }, actions);
-  openEditor(title, 'Register a bridge running on the Flock host. Choose which Bot replies from its Access page.',
+  openEditor(title, 'Register a bridge on the computer running Flock. Choose which Bot replies from its Access page.',
     list, checkResult, form);
 }
 
@@ -338,7 +338,7 @@ function editMachines(entry = {}) {
     settingField('personId', 'Owner’s person ID', {required: true, value: entry.personId, placeholder: 'local-owner'}),
   ], editing ? 'Save machine' : 'Add machine', ({id, personId}) =>
     saveInstallation('channels', {action: 'saveMachine', id: id.trim(), personId: personId.trim()}));
-  openEditor('Local machines', 'Register the Flock host for approved requests to read local files.', list, form);
+  openEditor('Local machines', 'Let approved requests read files on the computer running Flock.', list, form);
 }
 
 function editChannelOptions() {
@@ -381,7 +381,7 @@ function registeredEntry(entry) {
 function editMcp(entry = {}) {
   const {hostManaged, mcpServers} = installation.connections.tools;
   if (hostManaged) {
-    openEditor('MCP servers', 'The Flock host manages these shared connections.', entriesList(mcpServers, (server) => server.url));
+    openEditor('MCP servers', 'These shared connections are set on the computer running Flock.', entriesList(mcpServers, (server) => server.url));
     return;
   }
   const editing = Boolean(entry.id);
@@ -414,7 +414,7 @@ function editSkill(entry = {}) {
   const {hostManaged, skills} = installation.connections.tools;
   const skillLabel = (skill) => `${skill.path}${skill.available === false ? ' · Folder unavailable' : ''}`;
   if (hostManaged) {
-    openEditor('Skills', 'The Flock host manages these skill folders.', entriesList(skills, skillLabel));
+    openEditor('Skills', 'These skill folders are set on the computer running Flock.', entriesList(skills, skillLabel));
     return;
   }
   const editing = Boolean(entry.id);
@@ -432,7 +432,7 @@ function editSkill(entry = {}) {
     settingField('path', 'Skill folder', {required: true, value: entry.path, placeholder: 'writing'}),
   ], editing ? 'Save skill' : 'Add skill', ({id, path}) =>
     saveInstallation('tools', {action: 'saveSkill', id: id.trim(), path: path.trim()}));
-  openEditor('Skills', 'Register an existing skill folder from the Flock host’s managed skills directory.', list, form);
+  openEditor('Skills', 'Register a skill folder from the managed skills directory on the computer running Flock.', list, form);
 }
 
 function renderIntegrations(connections) {
@@ -456,7 +456,7 @@ function renderIntegrations(connections) {
       const checked = bridges.some((bridge) => bridge.reachable === false) ? false
         : configured && bridges.every((bridge) => bridge.reachable === true) ? true : undefined;
       const description = type === 'slack' ? 'Connect a workspace through its local bridge.'
-        : 'Connect Messages through a bridge on the Flock host.';
+        : 'Connect Messages through a bridge on the computer running Flock.';
       connectionRow('integrations', name, description, {
         configured, checked, checkedLabel: bridges.length > 1 ? 'Bridges reachable' : 'Bridge reachable',
         checkedAt: bridges.length === 1 ? bridges[0].checkedAt : undefined,
@@ -467,7 +467,7 @@ function renderIntegrations(connections) {
     }
     const viewMachines = !hostManaged && canManageHost || channels.localMachines.length > 0;
     connectionRow('integrations', 'Local machines', canManageHost
-      ? 'Manage hosts that can receive requests for local files.'
+      ? 'Computers where approved requests can read local files.'
       : 'The installation owner manages access to local machines.', {
       configured: channels.localMachines.length > 0, pending: channels.localMachinesPending,
       hostManaged, readOnly: hostManaged || !canManageHost, manage: viewMachines ? editMachines : null,
@@ -486,7 +486,7 @@ function renderIntegrations(connections) {
       configured: tools.mcpServers.length > 0, pending: tools.mcpPending, hostManaged, readOnly: hostManaged,
       manage: !hostManaged || tools.mcpServers.length ? editMcp : null,
     });
-    connectionRow('tools', 'Skills', 'Reusable instructions available on the Flock host.', {
+    connectionRow('tools', 'Skills', 'Reusable instructions on the computer running Flock.', {
       configured: tools.skills.length > 0, pending: tools.skillsPending, hostManaged, readOnly: hostManaged,
       manage: !hostManaged || tools.skills.length ? editSkill : null,
     });
@@ -527,7 +527,7 @@ function showCredential(title, {person, password}, {activate} = {}) {
 
 async function activateAdmin(password) {
   const response = await postSettings('installation/access', {operation: 'activate', person: 'local-owner', password});
-  if (!response.ok) throw new Error('Could not enable shared access. Generate a new password and try again.');
+  if (!response.ok) throw new Error('Could not enable sharing. Generate a new password and try again.');
   location.reload();
   return false;
 }
@@ -539,7 +539,7 @@ async function prepareAccess(event) {
   try {
     const data = await saveInstallation('access', {operation: 'prepare'}, '');
     showCredential('Administrator password', data.credential, {
-      activate: {label: 'Enable shared access', commit: activateAdmin},
+      activate: {label: 'Enable sharing', commit: activateAdmin},
     });
   } catch (error) {
     $('status').textContent = error.message;
@@ -591,12 +591,12 @@ async function activatePassword(person, password) {
 function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
   $('access').replaceChildren();
   if (mode === 'local') {
-    const item = row('access', rowLabel('Private to this computer', 'Enable shared access to create sign-ins for other people.'));
+    const item = row('access', rowLabel('Private to this computer', 'Enable sharing to create sign-ins for other people.'));
     if (pendingUntil) {
       const actions = element('div', '', 'row-actions');
       actionButton(actions, 'Generate new password', prepareAccess);
       actionButton(actions, 'Confirm password',
-        () => confirmCredential('Administrator password', 'local-owner', 'Enable shared access', activateAdmin), true);
+        () => confirmCredential('Administrator password', 'local-owner', 'Enable sharing', activateAdmin), true);
       item.append(actions);
     } else actionButton(item, 'Enable sharing', prepareAccess, true);
     return;
@@ -637,23 +637,20 @@ function editSystem(key, state) {
   const isPort = key === 'port';
   const field = isPort
     ? settingField('value', 'Preferred port', {type: 'number', value: state.saved.port, placeholder: 'Use default', wide: true})
-    : settingField('value', 'Load Session information', {
+    : settingField('value', 'When Bots read T3 threads', {
       value: state.saved.sessionRead ?? '', choices: {'': 'Use default', ...sessionReadOptions}, wide: true,
     });
   const form = buildForm([field], 'Save', ({value}) =>
     saveInstallation('system', {[key]: value ? (isPort ? Number(value) : value) : null}));
-  openEditor(isPort ? 'Web port' : 'T3 Session information',
+  openEditor(isPort ? 'Web port' : 'Read T3 threads',
     isPort ? 'Flock will use this port after restart. Leave it blank to use the default.'
-      : 'Choose when Bots should load context from T3 Sessions. Changes apply after restart.', form);
+      : 'Bots can read the T3 threads of their own work when a report isn’t enough. Changes apply after restart.', form);
 }
 
-function systemValues(title, current, next) {
+function systemValues(title, current, next, pending) {
+  if (!pending) return rowLabel(title, String(current));
   const values = element('span', '', 'system-values');
-  for (const [label, value] of [['Current', current], ['Next start', next]]) {
-    const field = element('span');
-    field.append(element('b', label), ' ', String(value));
-    values.append(field);
-  }
+  values.append(String(current), ' → ', element('b', String(next)), ' after restart');
   return rowLabel(title, values);
 }
 
@@ -663,18 +660,16 @@ function renderSystem(state) {
     row('system', rowLabel('Server settings unavailable', 'Sign in as an installation administrator to manage this server.'));
     return;
   }
-  const {active, next, saved, overrides, restartRequired} = state;
-  const nextPort = next ? next.port : overrides.port ? active.port : saved.port;
-  const nextRead = next ? next.sessionRead : overrides.sessionRead ? active.sessionRead : saved.sessionRead;
-  const port = row('system', systemValues('Web port', active.port || 'Automatic', nextPort || 'Automatic'));
+  const {active, next, overrides, pending} = state;
+  const port = row('system', systemValues('Web port', active.port || 'Automatic', next.port || 'Automatic', pending.port));
   if (overrides.port) port.append(statusBadge('Set at launch'));
   else actionButton(port, 'Change', () => editSystem('port', state)).setAttribute('aria-label', 'Change Web port');
-  const sessionRead = row('system', systemValues('T3 Session information', sessionReadOptions[active.sessionRead],
-    sessionReadOptions[nextRead] ?? sessionReadOptions.off));
+  const sessionRead = row('system', systemValues('Read T3 threads', sessionReadOptions[active.sessionRead],
+    sessionReadOptions[next.sessionRead], pending.sessionRead));
   if (overrides.sessionRead) sessionRead.append(statusBadge('Set at launch'));
   else actionButton(sessionRead, 'Change', () => editSystem('sessionRead', state))
-    .setAttribute('aria-label', 'Change T3 Session information');
-  if (restartRequired) restartNotice('system');
+    .setAttribute('aria-label', 'Change when Bots read T3 threads');
+  if (pending.port || pending.sessionRead) restartNotice('system');
 }
 
 export function showInstallationUnavailable() {

@@ -14,7 +14,7 @@ struct BotProfileError : Conflict {
 };
 
 inline constexpr std::size_t maxBotRoleBytes = 8192;
-inline constexpr const char* botRunSettingFields[] = {"environmentId", "projectId", "model", "reasoningEffort", "modelCallLimit"};
+inline constexpr const char* botRunSettingFields[] = {"environmentId", "projectId", "model", "reasoningEffort"};
 
 std::string validatedBotName(const Json& profile);
 std::string validatedBotSoul(const Json& soul);

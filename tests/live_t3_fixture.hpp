@@ -98,7 +98,10 @@ public:
             return {"ask_user",
                     {{"question", "The fixture Run did not produce a successful report. Check T3."}},
                     "The Run status and report do not provide the required evidence."};
-        if (request == "summary-follow" && input.task.at("additionalUsed") == 0)
+        const bool followedUp = std::ranges::any_of(input.history, [](const Json& row) {
+            return row.at("kind") == "decision" && row.contains("data") && row.at("data").at("tool") == "follow_up";
+        });
+        if (request == "summary-follow" && !followedUp)
             return {"follow_up",
                     {{"instruction",
                       "Check that you named both owners from notes.md, and repeat the two pending items. Do not modify any files."}},
@@ -113,7 +116,7 @@ public:
             if (input.evidence.size() != 1 || input.evidence[0].at("text").get<std::string>().empty())
                 throw Conflict("The saved live excerpt was not restored");
         }
-        if (request == "ambiguous-question" && input.task.at("additionalUsed") == 0)
+        if (request == "ambiguous-question" && !followedUp)
             return {"follow_up", {{"instruction", sameQuestion}}, "Repeat the exact same question on a separate Run."};
         if ((request.starts_with("summary") || request == "delegated-result") &&
             (report.find("Mina") == std::string::npos || report.find("Alex") == std::string::npos))
@@ -141,7 +144,7 @@ inline Id submit(Store& store, std::string_view environmentId, std::string_view 
                  std::string_view providerId = {}, std::string_view model = {}) {
     if (std::ranges::find(t3Scenarios, scenario) == std::ranges::end(t3Scenarios))
         throw Conflict("Unknown T3 fixture case: " + std::string(scenario));
-    Json config = {{"runTimeoutSeconds", 300}, {"session", {{"runtimeMode", "auto"}}}};
+    Json config = {{"session", {{"runtimeMode", "auto"}}}};
     if (!providerId.empty() || !model.empty()) {
         config["session"]["providerInstanceId"] = providerId;
         config["session"]["model"] = model;

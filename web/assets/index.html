@@ -23,8 +23,11 @@
   <div class="workspace">
     <aside id="navigation" class="sidebar" aria-label="Bot navigation">
       <div class="sidebar-head">
+        <button id="toggle-chat-sidebar" class="icon-button toggle-chat-sidebar wide-only" type="button" aria-controls="navigation" aria-expanded="true" aria-label="Hide Bot list" data-tooltip="Hide Bot list">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9.5 5v14"/></svg>
+        </button>
         <h2 id="bots-heading" class="sidebar-title">Bots</h2>
-        <button id="new-bot-button" class="icon-button new-bot-button" type="button" aria-label="New Bot" title="New Bot" aria-haspopup="dialog">
+        <button id="new-bot-button" class="icon-button new-bot-button" type="button" aria-label="New Bot" data-tooltip="New Bot" aria-haspopup="dialog">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         </button>
         <button id="close-navigation" class="icon-button narrow-only" type="button" aria-label="Close Bot list">
@@ -37,15 +40,15 @@
           <div id="bot-list" class="bot-list"></div>
         </section>
         <div id="bot-activity" class="bot-activity" role="group" aria-labelledby="activity-scope-name" hidden>
-        <p class="activity-scope"><span id="activity-scope-avatar" class="avatar"></span><span id="activity-scope-name" class="activity-scope-name"></span></p>
+        <p id="activity-scope-name" class="sr-only"></p>
         <section class="nav-section" aria-labelledby="waits-heading">
           <div class="section-heading"><h2 id="waits-heading">Needs you</h2><span id="wait-count" class="count" hidden>0</span></div>
           <div id="wait-list" class="activity-list"></div>
         </section>
         <section class="nav-section" aria-labelledby="sessions-heading">
-          <div class="section-heading"><h2 id="sessions-heading">Sessions</h2></div>
+          <div class="section-heading"><h2 id="sessions-heading">Requests</h2></div>
           <div id="session-list" class="activity-list"></div>
-          <button id="more-sessions" class="text-button load-sessions" type="button" hidden>Show earlier sessions</button>
+          <button id="more-sessions" class="text-button load-sessions" type="button" hidden>Show earlier requests</button>
         </section>
         </div>
       </div>
@@ -67,19 +70,21 @@
           <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Open Bot list">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
+          <button id="show-chat-sidebar" class="icon-button header-menu wide-only" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Show Bot list" data-tooltip="Show Bot list" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9.5 5v14"/></svg>
+          </button>
           <div id="profile-identity" class="profile-identity header-identity" hidden>
-            <button id="profile-avatar-button" class="profile-face profile-face-button" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" title="Bot settings">
+            <button id="profile-avatar-button" class="profile-face profile-face-button" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" data-tooltip="Bot settings">
               <span id="profile-avatar" class="avatar avatar-profile" aria-hidden="true"></span>
               <span class="status-indicator" aria-hidden="true"></span>
             </button>
             <h1 id="profile-heading" class="profile-heading profile-caption" aria-labelledby="profile-name">
               <span id="profile-name" class="profile-name" dir="auto"></span>
-              <button id="needs-you" type="button" class="needs-you" aria-labelledby="profile-name needs-you-text" aria-controls="decision-panel" aria-expanded="false" aria-keyshortcuts="Alt+Alt" hidden>
+              <button id="needs-you" type="button" class="needs-you" data-tooltip="Open" data-shortcut="⌥ ⌥" data-tooltip-anchor=".profile-caption" aria-labelledby="profile-name needs-you-text" aria-controls="decision-panel" aria-expanded="false" aria-keyshortcuts="Alt+Alt" hidden>
                 <span id="needs-you-text">Needs you · <span id="needs-you-count"></span></span>
               </button>
               <span id="profile-status" class="profile-status" hidden></span>
             </h1>
-            <span id="needs-you-tooltip" class="needs-you-tooltip" aria-hidden="true"><span>Open</span><kbd>⌥</kbd><kbd>⌥</kbd></span>
           </div>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
           <div id="peer-identity" class="peer-identity header-identity" hidden>
@@ -93,13 +98,13 @@
             </h1>
             <span id="peer-description" hidden>Read-only conversation between Bots</span>
           </div>
-          <button id="peer-back" class="icon-button peer-back" type="button" title="Back to conversation (Esc)" hidden>
+          <button id="peer-back" class="icon-button peer-back" type="button" data-tooltip="Back to conversation" data-shortcut="Esc" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
             <span id="peer-back-label" class="sr-only"></span>
           </button>
           <div id="profile-toolbar" class="profile-toolbar" role="group" aria-label="Conversation controls" hidden>
             <details id="conversation-actions" class="conversation-actions">
-              <summary class="icon-button" aria-label="Conversation actions" title="Conversation actions">
+              <summary class="icon-button" aria-label="Conversation actions" data-tooltip="Conversation actions">
                 <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/></svg>
               </summary>
               <div class="conversation-actions-list">
@@ -117,22 +122,19 @@
                 </button>
               </div>
             </details>
-            <button id="toggle-chat-sidebar" class="icon-button toggle-chat-sidebar" type="button" aria-controls="navigation" aria-expanded="true" aria-label="Hide Bot sidebar" title="Hide Bot sidebar">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9.5 5v14"/></svg>
-            </button>
           </div>
         </div>
       </header>
       <div id="conversation-find" class="conversation-find" role="search" aria-label="Conversation" hidden>
         <div class="find-bar">
           <input type="text" role="searchbox" aria-label="Find in conversation" placeholder="Find in conversation" enterkeyhint="search" maxlength="200" autocomplete="off" spellcheck="false">
-          <button type="button" class="icon-button find-previous" aria-label="Previous match" title="Previous match" disabled>
+          <button type="button" class="icon-button find-previous" aria-label="Previous match" data-tooltip="Previous match" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
           </button>
-          <button type="button" class="icon-button find-next" aria-label="Next match" title="Next match" disabled>
+          <button type="button" class="icon-button find-next" aria-label="Next match" data-tooltip="Next match" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
           </button>
-          <button type="button" class="icon-button find-close" aria-label="Close find" title="Close find">
+          <button type="button" class="icon-button find-close" aria-label="Close find" data-tooltip="Close find">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
           </button>
         </div>
@@ -158,19 +160,22 @@
               <h2 id="decision-heading">Needs you</h2>
               <span id="decision-position" class="decision-position" aria-live="polite"></span>
               <div class="decision-controls">
-                <button id="decision-previous" class="icon-button" type="button" aria-label="Previous item" title="Previous item" disabled>
+                <button id="decision-previous" class="icon-button" type="button" aria-label="Previous item" data-tooltip="Previous item" disabled>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 14 5-5 5 5"/></svg>
                 </button>
-                <button id="decision-next" class="icon-button" type="button" aria-label="Next item" title="Next item" disabled>
+                <button id="decision-next" class="icon-button" type="button" aria-label="Next item" data-tooltip="Next item" disabled>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
                 </button>
+                <button id="decision-history" class="icon-button decision-history" type="button" aria-label="History" aria-pressed="false" data-tooltip="History" hidden>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>
+                </button>
                 <details id="decision-more" class="decision-more">
-                  <summary class="icon-button" aria-label="More actions" title="More actions">
+                  <summary class="icon-button" aria-label="More actions" data-tooltip="More actions">
                     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/></svg>
                   </summary>
                   <div id="decision-more-list" class="decision-more-list"></div>
                 </details>
-                <button id="decision-close" class="icon-button" type="button" aria-label="Close" title="Close (Esc)">
+                <button id="decision-close" class="icon-button" type="button" aria-label="Close" data-tooltip="Close" data-shortcut="Esc">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
                 </button>
               </div>
@@ -186,12 +191,12 @@
       </button>
       <div class="composer-container" id="composer-container" hidden>
         <p id="view-only-notice" class="view-only-notice" role="status" hidden>View only</p>
-        <div id="bot-paused-banner" class="bot-paused-banner" hidden>
+        <div id="composer-banner" class="composer-banner" hidden>
           <div>
-            <p class="bot-paused-title">This Bot is paused</p>
-            <p id="bot-paused-description" class="bot-paused-description" role="status"></p>
+            <p id="composer-banner-title" class="composer-banner-title"></p>
+            <p id="composer-banner-description" class="composer-banner-description" role="status"></p>
           </div>
-          <button id="resume-bot" class="dialog-button primary" type="button" aria-describedby="bot-paused-description">Resume</button>
+          <button id="composer-banner-action" class="dialog-button primary" type="button" aria-describedby="composer-banner-description"></button>
         </div>
         <form id="composer" class="composer">
           <div id="decision-reply-context" class="decision-reply-context" hidden>
@@ -202,7 +207,7 @@
             <div id="reply-context" class="reply-context" hidden>
               <svg class="reply-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
               <p class="reply-target"><span id="reply-label" class="reply-label"></span> <span id="reply-summary" class="reply-summary" dir="auto"></span></p>
-              <button id="cancel-reply" type="button" class="reply-cancel" aria-label="Cancel reply" title="Cancel reply (Esc)">
+              <button id="cancel-reply" type="button" class="reply-cancel" aria-label="Cancel reply" data-tooltip="Cancel reply" data-shortcut="Esc">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
               </button>
             </div>
@@ -212,7 +217,7 @@
             <ul id="screenshot-previews" class="screenshot-previews" aria-label="Attached screenshots" hidden></ul>
             <div class="composer-toolbar">
               <input id="screenshot-input" type="file" accept="image/png,image/jpeg" multiple hidden>
-              <button id="attach-screenshots" class="icon-button attach-screenshots" type="button" aria-label="Attach screenshots" title="Attach screenshots">
+              <button id="attach-screenshots" class="icon-button attach-screenshots" type="button" aria-label="Attach images" data-tooltip="Attach images">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
               </button>
               <span id="notice" class="notice" role="status"></span>
@@ -228,7 +233,7 @@
   <dialog id="detail" class="detail" aria-labelledby="detail-title">
     <div class="dialog-head">
       <h2 id="detail-title"></h2>
-      <button id="close-detail" type="button" class="icon-button dialog-close" aria-label="Close">
+      <button id="close-detail" type="button" class="icon-button dialog-close" aria-label="Close" data-tooltip="Close" data-shortcut="Esc">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>
       </button>
     </div>
@@ -250,7 +255,7 @@
   <dialog id="bot-delete" class="detail bot-delete-dialog" aria-labelledby="bot-delete-title" aria-describedby="bot-delete-description">
     <div class="dialog-head"><h2 id="bot-delete-title"></h2></div>
     <div class="dialog-body">
-      <p id="bot-delete-description">This removes the Bot and stops its schedules. Past activity stays in storage, and this conversation will be unavailable in Flock.</p>
+      <p id="bot-delete-description">This removes the Bot and its recurring requests. Its past work isn’t erased, but you won’t be able to open this conversation again.</p>
       <p id="bot-delete-feedback" class="bot-delete-feedback" role="status"></p>
       <div class="bot-delete-actions">
         <button id="bot-delete-cancel" type="button" class="dialog-button quiet" autofocus>Cancel</button>

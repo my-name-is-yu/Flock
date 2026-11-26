@@ -105,20 +105,18 @@ SELECT coalesce(max(m.id),0) FROM messages m WHERE m.bot_id=? AND m.person_id=? 
                                 {requesterBot, requester, int(trusted), int(web), int(channel)});
     human.next();
     const auto anchor = human.number(0);
-    auto attempts = database.query(R"SQL(
-SELECT coalesce(max(git_event_id=?),0),count(*) FILTER (WHERE id>?)
-FROM journal WHERE task_id=? AND kind='git_pr_followup_requested' AND operation_id=?
-)SQL",
-                                   {event.at("eventId"), anchor, taskId, operation});
-    attempts.next();
+    const auto alreadyRequested =
+        database
+            .query("SELECT 1 FROM journal WHERE task_id=? AND kind='git_pr_followup_requested' AND operation_id=? AND git_event_id=?",
+                   {taskId, operation, event.at("eventId")})
+            .next();
     using enum GitPrFollowup::Status;
-    const auto status = attempts.number(0) ? attempted : attempts.number(1) >= 2 ? limitReached : available;
     return GitPrFollowup{std::move(destination),
                          {message.bot, "git-pr/" + operation, std::move(requester), anchor, message.id, taskId,
                           task.currentRevision.value_or(0), task.generation, true},
                          operation,
                          std::move(target),
-                         status};
+                         alreadyRequested ? attempted : available};
 }
 
 bool GitStorage::currentGitPrCheck(GitHost& host, const conversation::Message& message) {

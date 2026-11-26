@@ -151,7 +151,6 @@ Json waitView(const Wait& wait) {
     const auto reason = wait.reason();
     Json view = {{"id", wait.id}, {"reason", waitReasonName(reason)}};
     if (wait.messageId) view["messageId"] = *wait.messageId;
-    if (wait.allowance) view["allowance"] = *wait.allowance;
     if (reason == WaitReason::user_question || reason == WaitReason::t3_input) view["text"] = wait.text;
     if (reason == WaitReason::user_question) view["choices"] = wait.choices();
     return view;
@@ -293,7 +292,6 @@ std::string_view displayState(const TaskData& task) {
 Json taskSummary(const TaskData& task) {
     Json result = {{"state", displayState(task)}, {"id", task.id}, {"request", task.request}, {"generation", task.generation}};
     if (task.currentRevision) result["currentRevision"] = *task.currentRevision;
-    result["deadline"] = task.deadline;
     result["createdAt"] = task.createdAt;
     if (const auto& workflow = task.workflow) {
         result["workflowId"] = workflow->id;
@@ -324,11 +322,6 @@ Json currentWait(const TaskData& task, const Wait& wait) {
         const auto& saved = wait.run->run;
         const auto environment = wait.run->environmentId && !wait.run->environmentId->empty() ? *wait.run->environmentId : env;
         run = runView(environment, saved.threadId, saved.runId, saved.link);
-    }
-    if (const auto* verification = wait.verification()) {
-        result["deadline"] = verification->deadline;
-        const auto saved = std::ranges::find(task.runResults(), verification->actionId, &DestinationRun::actionId);
-        if (saved != task.runResults().end()) run = runView(saved->environmentId, saved->ref.threadId, saved->ref.runId, saved->ref.link);
     }
     if (run.is_null()) run = runView(task.lastRun, env);
     return result;
@@ -445,7 +438,7 @@ Json botSettings(const Json& bot) {
     auto view = botSummary(bot);
     view["soul"] = field(bot, "soul");
     view["fixPullRequests"] = bot.value("fixPullRequests", true);
-    copyFields(view, bot, {"environmentId", "projectId", "model", "reasoningEffort", "modelCallLimit"});
+    copyFields(view, bot, {"environmentId", "projectId", "model", "reasoningEffort"});
     return view;
 }
 
@@ -544,13 +537,6 @@ Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changed
     result["workflows"] = Workflows(store).workflows(id);
     result["compactions"] = Conversations(store).compactions(id, 0, 1);
     result["bot"] = botSettings(bot);
-    auto& paused = result["pausedConversations"] = Json::array();
-    for (const auto& turn : Conversations(store).pausedConversations(id)) {
-        Json view = Json::object();
-        copyFields(view, turn, {"messageId", "replyToMessageId", "text", "route", "allowance"});
-        paused.push_back(std::move(view));
-    }
-    if (!paused.empty() && (result["presence"] == "idle" || result["presence"] == "queued")) result["presence"] = "waiting";
     return result;
 }
 } // namespace flockv0::web

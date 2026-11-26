@@ -1045,8 +1045,6 @@ void notificationEvents(const std::filesystem::path& path) {
     struct NotificationModel : FixedModel {
         ModelTurn decide(const ModelInput& input) override {
             if (input.event.at("kind") == "conversation_turn") {
-                if (input.event.at("text") == "Check in several steps" && input.event.at("turn").size() < 2)
-                    return {{{"find_tasks", {{"query", "release"}}, "Find the current work"}}};
                 return {{{"reply", {{"text", "A reply"}}, "Respond to the request"}}};
             }
             if (input.event.at("kind") == "intake" && input.task.at("request") == "Choose a publish date")
@@ -1151,27 +1149,6 @@ void notificationEvents(const std::filesystem::path& path) {
           "the shared Bot's next reply did not enter the notification feed");
     BotAccess{store}.setMember(owner, "triage", "reader", false);
     check(!notify(reader, sharedPage).at("scope").contains("triage"), "notification scope exposed a Bot after unsharing");
-
-    auto limited = web.intake("release", "Check in several steps");
-    limited.config["modelCallLimit"] = 1;
-    const auto receipt = ConversationIntake(store).receive(owner, limited, "repeat-approval", limited.request);
-    runtime.runConversations();
-    const auto budgetItem = [](const Json& items, const char* kind) {
-        const auto found = std::ranges::find_if(items, [&](const Json& item) { return item.at(kind) == "conversation_model_budget"; });
-        check(found != items.end(), "missing conversation approval: " + items.dump());
-        return *found;
-    };
-    auto firstApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"), "itemKind");
-    const auto firstAlert = budgetItem(reader.post(endpoint, Json::object()).at("inbox"), "kind");
-    check(firstAlert.at("id") == firstApproval.at("waitId"), "the alert did not identify the pending approval");
-    firstApproval["decision"] = "approve";
-    administrator.post("/api/inbox/decide", firstApproval);
-    runtime.runConversations();
-    const auto secondApproval = budgetItem(administrator.get("/api/inbox?bot=release").at("items"), "itemKind");
-    const auto secondAlert = budgetItem(reader.post(endpoint, Json::object()).at("inbox"), "kind");
-    check(secondApproval.at("itemId") == receipt.at("messageId") && secondAlert.at("id") == secondApproval.at("waitId") &&
-              secondAlert.at("id") != firstAlert.at("id"),
-          "another approval for the same message did not get a distinct alert");
 }
 
 void recurringRequestStatus(const std::filesystem::path& path) {
@@ -1886,6 +1863,10 @@ void botProfileEndpoints(const std::filesystem::path& path) {
               workspace.at("avatar").at("imageUrl") == originalUrl && workspace.at("environmentId") == "env-1" &&
               workspace.at("projectId") == "project-1" && workspace.at("model") == "first-model",
           "run settings update lost another setting or failed to return the model and destination");
+    for (const auto* removed : {"modelCallLimit", "runTimeoutSeconds"}) {
+        check(!workspace.contains(removed), "a removed setting was returned");
+        browser.post("/api/bots/profile", {{"botId", "bot-1"}, {removed, 20}}, 400);
+    }
     for (const auto& extra : {"name", "soul", "avatar", "role", "modelProvider"}) {
         const auto rejected = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"model", "next-model"}, {extra, "stale"}}, 400);
         check(rejected.at("error") == "invalid_profile_update", "model update accepted an unrelated field");
@@ -1901,22 +1882,6 @@ void botProfileEndpoints(const std::filesystem::path& path) {
           "partial update replaced the project or model");
     const auto modelOnly = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"model", "next-model"}}, 200);
     check(modelOnly.at("model") == "next-model" && modelOnly.at("projectId") == "project-1", "model-only update lost the workspace");
-    const auto allowance = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"modelCallLimit", 12}}, 200);
-    check(allowance.at("modelCallLimit") == 12 && allowance.at("model") == "next-model" && allowance.at("projectId") == "project-1",
-          "saving the allowance changed the model or destination");
-    for (const auto& invalid : Json::array({nullptr, "15", true, -1, 0, 1.5, 2147483648LL})) {
-        const auto rejected = browser.post("/api/bots/profile",
-                                           {
-                                               {"botId", "bot-1"},
-                                               {"modelCallLimit", invalid},
-                                               {"model", "other-model"},
-                                           },
-                                           400);
-        check(rejected.at("error") == "invalid_model_call_limit", "invalid allowance was accepted");
-    }
-    const auto settingsView = browser.get("/api/view?bot=bot-1").at("bot");
-    check(settingsView.at("modelCallLimit") == 12 && settingsView.at("model") == "next-model",
-          "the Bot settings view lost saved settings or an invalid update changed them");
     check(browser.get("/api/view?bot=bot-1").at("bot").at("model") == "next-model", "Bot settings view lost its model");
     for (const auto& invalid : {Json(nullptr), Json(1), Json("high effort"), Json(" low ")}) {
         const auto rejected = browser.post("/api/bots/profile", {{"botId", "bot-1"}, {"reasoningEffort", invalid}}, 400);

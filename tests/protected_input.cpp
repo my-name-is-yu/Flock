@@ -359,13 +359,6 @@ void exercise(const std::filesystem::path& dir) {
     t3.connected = false;
     check(turn("check_environment_readiness").find("T3 sign-in") != std::string::npos, "OAuth denial");
     t3.connected = true;
-    rules.changeNeverRule(owner, Action::environment_configure, "env", true);
-    check(turn("update_bot_settings", {{"environmentId", "env"}, {"runTimeoutSeconds", 123}}).find("configure access required") !=
-              std::string::npos,
-          "settings mutation bypassed the Never rule");
-    rules.changeNeverRule(owner, Action::environment_configure, "env", false);
-    turn("update_bot_settings", {{"environmentId", "env"}, {"runTimeoutSeconds", 123}});
-    check(turn("list_connections").find("\"runTimeoutSeconds\":123") != std::string::npos, "settings not effective");
     for (auto op : {"create_bot", "rename_bot"})
         check(turn("request_bot_change", {{"operation", op}, {"targetBotId", "Target"}, {"name", "New"}}).find("\"status\":\"applied\"") !=
                   std::string::npos,

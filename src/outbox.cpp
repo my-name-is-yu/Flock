@@ -281,8 +281,7 @@ Json outboxPayload(const OutboxAction& outbox) {
                  {"answers", command.answers},
                  {"instructions", Json::array()},
                  {"contextIds", contextJson(outbox.contextIds)},
-                 {"sourceResultRefs", Json::array()},
-                 {"chargesBudget", outbox.chargesBudget}};
+                 {"sourceResultRefs", Json::array()}};
     if (!command.gatewayEnvironmentId.empty()) data["gatewayEnvironmentId"] = command.gatewayEnvironmentId;
     if (outbox.destinationAction) data["destinationAction"] = true;
     if (outbox.commit) {
@@ -368,7 +367,6 @@ Outbox decodeOutboxRow(const Statement& columns) {
     outbox.instructions = readArray(row.require(data, "instructions"), row.nested("instructions"), readInstruction);
     outbox.contextIds = readContext(row.require(data, "contextIds"), row.nested("contextIds"));
     outbox.sourceResultRefs = readArray(row.require(data, "sourceResultRefs"), row.nested("sourceResultRefs"), readSource);
-    outbox.chargesBudget = row.get<bool>(data, "chargesBudget");
     outbox.destinationAction = row.optional<bool>(data, "destinationAction").value_or(false);
     if (data.contains("expectedCommit") || data.contains("markedCommitChecks"))
         outbox.commit = OutboxCommit{row.get<std::string>(data, "expectedCommit"), row.get<bool>(data, "markedCommitChecks")};

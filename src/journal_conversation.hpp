@@ -23,7 +23,7 @@ struct ConversationMessageEntry {
     std::variant<std::monostate, ConversationInvitationEntry, ConversationWakeEntry> detail;
 };
 
-enum class ConversationReplyRoute { reply, error, model_budget, bot_paused, session_access, session_left, channel_access, access };
+enum class ConversationReplyRoute { reply, error, bot_paused, session_access, session_left, channel_access, access };
 enum class ConversationReplyStatus { done, working, stopping, needs_you };
 
 struct ConversationReplyEntry {

@@ -1,6 +1,7 @@
+import '/tooltip.js';
 import { handleComposerEnter, isComposerSuggestionKey } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
-import { actionLabel, approvalSummary, continuationLabel } from '/action-labels.mjs';
+import { actionLabel, approvalSummary } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { browserNotificationsEnabled, createBrowserNotifications, onNotificationPreferenceChange } from '/browser-notifications.mjs';
@@ -27,9 +28,9 @@ const elements = Object.fromEntries([
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-summary', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
-  'bot-paused-banner', 'bot-paused-description', 'resume-bot',
+  'composer-banner', 'composer-banner-title', 'composer-banner-description', 'composer-banner-action',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
-  'bot-editor', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
+  'bot-editor', 'bot-activity', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
   'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
@@ -93,28 +94,25 @@ const stateLabels = {
 // Bot's own first-person wording for its conversation bubble.
 const waitLabels = {
   user_question: ['Question from $BOT', '$BOT is waiting for your answer.', 'I’m waiting for your answer.'],
-  budget: ['Follow-up allowance used', 'This request used its allowance for follow-up work.'],
   policy_approval: ['Approval needed', '$BOT is waiting for your approval before it continues.', 'I need your approval before I continue.'],
-  model_budget: ['Step allowance used', 'This request used its step allowance.'],
   model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
     'I couldn’t choose my next step after several attempts. Try again to continue.'],
   bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s role and memory, then try again.'],
-  t3_input: ['Action in T3', 'Open the Session in T3 to approve or answer.'],
-  deadline: ['Deadline extension', 'This request reached its deadline. You can set a new one.'],
+  t3_input: ['Action in T3', 'Open the thread in T3 to approve or answer.'],
   unknown_delivery: ['Message to T3 unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Check again asks T3 without resending anything.'],
   auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then check again.'],
   settings: ['T3 settings', 'This work is paused because of the T3 connection or execution settings. Fix them, then check again.'],
 };
 // Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
 const pendingActionLabels = {
-  budget: 'Continue…', model_budget: 'Continue…', model_failure: 'Try again…',
+  model_failure: 'Try again…',
   bot_notes_unavailable: 'Try again…',
-  deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
+  t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
 };
 const closedLabels = {
-  answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
-  session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
-  approve: 'Approved', extend: 'Deadline extended', reconcile: 'Check requested', supply: 'Secret saved',
+  answer: 'Answered', run_finished: 'Work ended', cancel: 'Stop requested',
+  session_question: 'The question changed in T3', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
+  approve: 'Approved', reconcile: 'Check requested', supply: 'Secret saved',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock', deny: 'Denied', expired: 'Approval expired',
   stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
   superseded: 'Replaced', superseded_instruction: 'Replaced by a newer instruction',
@@ -128,14 +126,13 @@ const decisionConfirmations = {
   deny: () => 'Denied.',
   approve: () => 'Approved.',
   request_changes: (name) => `Change request recorded for ${name}.`,
-  extend: () => 'Deadline extended.',
   reconcile: () => 'Check requested.',
   supply: () => 'Secret saved.',
   link_pr: () => 'Pull request linked.',
   reject_pr: () => 'Pull request link rejected.',
 };
 const errors = {
-  invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
+  invalid_text: 'Check the message and its length.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
   operation_conflict: 'Flock already processed this action or the pending request changed.',
   request_changed: 'The request changed. Review its current details before acting again.',
@@ -175,7 +172,6 @@ let detail = null;
 let profileAvatar = null;
 let profileKey = '';
 let profileMotion;
-let scopeAvatar = null;
 let scopeKey = '';
 let connection = 'loading';
 
@@ -223,6 +219,12 @@ function waitText(wait, { spokenByBot = false } = {}) {
   const fallback = withBotName((spokenByBot && labels?.[2]) || labels?.[1]);
   if (wait.reason === 'policy_approval') return fallback;
   return wait.text || fallback || 'Refresh the pending request.';
+}
+function quotedText(source) {
+  const data = source?.data;
+  if (!data) return 'Earlier message';
+  if (source.kind === 'waiting') return waitText(data, { spokenByBot: true });
+  return data.report || data.text || data.title || 'Earlier message';
 }
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
@@ -514,10 +516,10 @@ function menuPopover(bot) {
       selectBot(bot.id);
       void decisions.openHistory(sidebar.querySelector(`[data-focus="${CSS.escape(`menu:${bot.id}`)}"]`));
     }],
-    ['Open settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
+    ['Settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
   if (bot.canDelete) {
-    actions.push([bot.paused ? 'Resume' : 'Pause…', bot.paused ? sidebarIcons.resume : sidebarIcons.pause, () => {
+    actions.push([bot.paused ? 'Resume…' : 'Pause…', bot.paused ? sidebarIcons.resume : sidebarIcons.pause, () => {
       closeMenu();
       botPause.open(bot, () => focusKey(`menu:${bot.id}`));
     }]);
@@ -533,7 +535,7 @@ function menuPopover(bot) {
   };
   list.append(...actions.map(menuItem));
   if (bot.canDelete) {
-    const remove = menuItem(['Delete', sidebarIcons.trash, () => {
+    const remove = menuItem(['Delete…', sidebarIcons.trash, () => {
       closeMenu();
       botDeletion.open(bots.find(({ id }) => id === bot.id), document.activeElement);
     }], actions.length);
@@ -590,11 +592,6 @@ function createSidebarEntry(botId) {
   const pinName = node('span', 'pin-name');
   const status = node('span', 'sr-only');
   select.append(rowUnread, face, text, pinName, status);
-  const tooltip = node('span', 'pin-tooltip');
-  tooltip.setAttribute('aria-hidden', 'true');
-  const tooltipName = node('span');
-  const shortcutLabel = node('kbd');
-  tooltip.append(tooltipName, shortcutLabel);
   const toggle = menuButton(botId);
   const decisionCount = button(null, 'decision-count', () => {
     selectBot(botId);
@@ -602,7 +599,7 @@ function createSidebarEntry(botId) {
   });
   decisionCount.dataset.focus = `decisions:${botId}`;
   decisionCount.setAttribute('aria-controls', 'decision-panel');
-  row.append(select, tooltip, decisionCount, toggle);
+  row.append(select, decisionCount, toggle);
   row.addEventListener('contextmenu', (event) => {
     event.preventDefault();
     setMenu(botId, 'first');
@@ -631,14 +628,16 @@ function createSidebarEntry(botId) {
       face.className = pinned ? 'pin-face' : '';
       avatarHost.classList.toggle('pin-avatar', pinned);
       avatarHost.classList.toggle('bot-avatar', !pinned);
-      tooltip.hidden = pinName.hidden = !pinned;
+      pinName.hidden = !pinned;
       text.hidden = pinned;
       const shortcut = pinned && pinIndex < 9 ? pinIndex + 1 : null;
-      shortcutLabel.hidden = shortcut === null;
       if (shortcut) {
-        shortcutLabel.textContent = `⌥⇧${shortcut}`;
+        select.dataset.shortcut = `⌥⇧${shortcut}`;
         select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
-      } else select.removeAttribute('aria-keyshortcuts');
+      } else {
+        delete select.dataset.shortcut;
+        select.removeAttribute('aria-keyshortcuts');
+      }
 
       if (previousBot?.name !== bot.name) {
         nameText.textContent = pinName.textContent = bot.name;
@@ -646,7 +645,8 @@ function createSidebarEntry(botId) {
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
       const presence = bot.paused ? 'paused' : bot.presence;
-      tooltipName.textContent = bot.paused ? `${bot.name} · Paused` : bot.name;
+      if (pinned) select.dataset.tooltip = bot.paused ? `${bot.name} · Paused` : bot.name;
+      else delete select.dataset.tooltip;
       const showWaitingPreview = presence === 'waiting' && !count;
       const previewLabel = showWaitingPreview || bot.paused ? stateLabels[presence] : bot.preview || '';
       if (previewText.data !== previewLabel) previewText.data = previewLabel;
@@ -709,20 +709,6 @@ function skeletonRows(count, className = 'skeleton-row') {
     row.append(lines);
     return row;
   });
-}
-
-let emptyBotRow;
-function newBotRow() {
-  if (emptyBotRow) return emptyBotRow;
-  emptyBotRow = node('div', 'bot-row new-bot-row');
-  const select = button(null, 'bot-select', () => openNewBot(emptyBotRow.querySelector('button')));
-  const mark = node('span', 'new-bot-mark');
-  mark.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
-  const text = node('span', 'bot-text');
-  text.append(node('span', 'bot-name', 'New Bot'), node('span', 'bot-preview', 'No Bots yet'));
-  select.append(mark, text);
-  emptyBotRow.append(select);
-  return emptyBotRow;
 }
 
 function draftRow(draft) {
@@ -802,7 +788,6 @@ function renderBots() {
   const rows = unpinned.map(rowFor);
   if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
   if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length && !botDraft) rows.push(newBotRow());
   placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
   unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
@@ -876,19 +861,17 @@ function renderHeader() {
     const backLabel = `Back to ${owner.name}`;
     elements['peer-back-label'].textContent = backLabel;
     elements['peer-back'].setAttribute('aria-label', backLabel);
-    elements['peer-back'].title = `${backLabel} (Esc)`;
+    elements['peer-back'].dataset.tooltip = backLabel;
     if (changed('peer-heading', [owner.id, owner.name, owner.avatar, peer.id, peer.name])) {
       elements['peer-faces'].replaceChildren(avatar(owner, 'avatar-profile'));
       elements['peer-name-first'].textContent = owner.name;
       elements['peer-name-second'].textContent = peer.name;
-      elements['peer-heading'].title = `${owner.name} › ${peer.name}`;
+      elements['peer-heading'].dataset.tooltip = `${owner.name} › ${peer.name}`;
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
   if (nextScopeKey !== scopeKey) {
-    scopeAvatar?.destroy();
-    scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
-    if (bot) elements['activity-scope-name'].textContent = bot.name;
+    if (bot) elements['activity-scope-name'].textContent = `${bot.name} activity`;
     if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
     else document.documentElement.style.removeProperty('--bot-accent');
   }
@@ -918,8 +901,8 @@ function renderHeader() {
   const name = elements['profile-name'];
   identity.dataset.state = offline ? 'offline' : presence;
   profile.setAttribute('aria-label', settingsLabel);
+  profile.dataset.tooltip = settingsLabel;
   name.textContent = bot.name;
-  name.title = settingsLabel;
   elements['profile-status'].textContent = showStatus ? status : '';
   elements['profile-status'].hidden = !showStatus;
   if (showStatus) profile.setAttribute('aria-describedby', 'profile-status');
@@ -938,7 +921,9 @@ function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
   const title = [session.name, request].filter(Boolean).join(' · ');
   const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
-  row.title = [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · ');
+  const details = [Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean);
+  row.dataset.tooltip = [...details, title].filter(Boolean).join(' · ');
+  if (details.length) row.append(node('span', 'sr-only', ` · ${details.join(' · ')}`));
   if (link) {
     row.href = link;
     row.target = '_blank';
@@ -1003,8 +988,9 @@ function workflowInspectors(data, open) {
       const link = linkToRun(stage.runRef, 'Open');
       if (link) head.append(link);
       row.append(node('span', 'workflow-stage-mark'), text);
-      row.title = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
-        .filter(Boolean).join('\n');
+      const versions = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
+        .filter(Boolean).join(' · ');
+      if (versions) row.setAttribute('aria-description', versions);
       list.append(row);
     }
     item.append(list);
@@ -1036,7 +1022,7 @@ function renderActivity() {
         ? [actionLabel(item.action), item.displayTarget ?? item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
       const row = activityRow('button', 'wait-row', title, status, 'waiting');
       row.type = 'button';
-      row.title = item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title;
+      row.setAttribute('aria-description', item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title);
       row.addEventListener('click', () => {
         openNavigation(false);
         decisions.openItem(item, row);
@@ -1142,11 +1128,18 @@ function icon(name, className = 'glyph') {
   host.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
   return host;
 }
+function setMessageHtml(element, html) {
+  element.innerHTML = html;
+  for (const link of element.querySelectorAll('a[href]')) {
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
+}
 function iconButton(name, label, click) {
   const control = button(null, 'icon-button msg-action', click);
   control.dataset.timelineAction = name;
   control.setAttribute('aria-label', label);
-  control.title = label;
+  control.dataset.tooltip = label;
   control.append(icon(name));
   return control;
 }
@@ -1159,12 +1152,12 @@ async function copyMessage(control, text) {
     control.dataset.copied = 'true';
     control.replaceChildren(icon('copied'));
     control.setAttribute('aria-label', 'Copied');
-    control.title = 'Copied';
+    control.dataset.tooltip = 'Copied';
     control._copyTimer = setTimeout(() => {
       delete control.dataset.copied;
       control.replaceChildren(icon('copy'));
       control.setAttribute('aria-label', 'Copy text');
-      control.title = 'Copy text';
+      control.dataset.tooltip = 'Copy text';
     }, 1600);
   } catch { if (view) setNotice(view, 'Could not copy the text.', true); }
 }
@@ -1194,22 +1187,6 @@ function readOnlyChoices(choices) {
   for (const choice of choices) options.append(node('li', null, choice));
   return options;
 }
-function pausedDecision(botId, turn) {
-  return { botId, itemKind: 'conversation_model_budget', itemId: turn.replyToMessageId, waitId: turn.messageId,
-    taskId: 0, targetRevision: 0, targetGeneration: turn.messageId };
-}
-function pausedActions(turn) {
-  const context = view;
-  const item = pausedDecision(context.id, turn);
-  const actions = node('div', 'event-actions');
-  const approve = button(continuationLabel(turn.allowance), 'button', () => {
-    const current = context.data?.pausedConversations?.find((entry) => entry.messageId === item.waitId);
-    void submitConversationDecision(context, item, current && pausedDecision(context.id, current), 'approve');
-  });
-  approve.disabled = decisions.busy(item);
-  actions.append(approve);
-  return actions;
-}
 function nextSuggestion(context) {
   const composer = context?.composer;
   if (context?.data?.canDecide !== true || context.dm || context.source || !composer) return null;
@@ -1220,8 +1197,7 @@ function nextSuggestion(context) {
   for (const event of context.events.values()) if (event.kind !== 'wait_closed' && (!latest || event.id > latest.id)) latest = event;
   if (latest?.kind !== 'conversation_reply') return null;
   const text = latest.data.suggestions?.[0];
-  if (typeof text !== 'string' || !text.trim() ||
-      context.data.pausedConversations?.some((item) => item.messageId === latest.data.messageId)) return null;
+  if (typeof text !== 'string' || !text.trim()) return null;
   const drafts = screenshotsFor(composer);
   if ([0, latest.id].some((anchor) => {
     const draft = drafts?.get(anchor);
@@ -1247,7 +1223,7 @@ function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
   const time = node('time', 'msg-time', clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
-  time.title = [fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
+  time.setAttribute('aria-description', [fullTime.format(timestamp), extra].filter(Boolean).join(' · '));
   return time;
 }
 
@@ -1431,12 +1407,23 @@ function cardSourceAction(item, close) {
     void showConversationMessage(view, id, { bot: participant(item.conversationBotId ?? item.botId), preferLoaded: true });
   });
 }
+function appendTrailingIcon(text, icon) {
+  const last = text.lastChild;
+  const at = last?.nodeType === Node.TEXT_NODE ? last.data.trimEnd().search(/\S+$/) : -1;
+  // Long URLs and unspaced CJK text still need to wrap inside the bubble.
+  if (at >= 0 && last.data.trimEnd().length - at <= 24) {
+    const word = last.splitText(at);
+    const glued = node('span', 'trailing-icon');
+    glued.append(word, icon);
+    text.append(glued);
+  } else text.append(icon);
+}
 function runIcon(run) {
   const link = linkToRun(run);
   if (!link) return null;
   link.className = 'run-link';
   link.dataset.timelineAction = `run:${link.href}`;
-  link.title = 'Open in T3';
+  link.dataset.tooltip = 'Open in T3';
   link.setAttribute('aria-label', 'Open in T3');
   link.replaceChildren(icon('open'));
   return link;
@@ -1501,7 +1488,7 @@ function eventCard(event, context, place, report) {
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
-    const name = `T3 Session “${session.title || session.threadId}”`;
+    const name = `T3 thread “${session.title || session.threadId}”`;
     const wakeText = {
       finished: `Work finished in ${name}`,
       failed: `Work stopped before finishing in ${name}`,
@@ -1563,6 +1550,7 @@ function eventCard(event, context, place, report) {
   const actions = node('div', 'msg-actions');
   actions.append(time);
   const extras = [];
+  let quote = null;
   let replyTarget = null;
   let copy = data.text ?? '';
   const pendingWait = event.kind === 'waiting' && !context.readOnly ? context.waits.get(data.id) : null;
@@ -1592,20 +1580,17 @@ function eventCard(event, context, place, report) {
       }
     }
   } else if (event.kind === 'conversation_reply') {
-    const paused = context.paused.get(data.messageId);
-    if (paused) text.textContent = copy = paused.text;
-    else if (typeof data.textHtml === 'string') {
+    if (typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
-      text.innerHTML = data.textHtml;
+      setMessageHtml(text, data.textHtml);
     } else text.textContent = data.text ?? '';
     text.classList.add('foldable-text');
     bubble.append(text);
-    if (paused && context.canDecide) extras.push(pausedActions(paused));
-    else if (data.suggestions?.length) {
+    if (data.suggestions?.length) {
       if (context.canDecide) extras.push(suggestionActions(event));
       else bubble.append(readOnlyChoices(data.suggestions));
     }
-    if (!paused) replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
+    replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
   } else if (event.kind === 'pr_review_requested') {
     text.textContent = data.title;
     bubble.append(text);
@@ -1620,11 +1605,11 @@ function eventCard(event, context, place, report) {
     replyTarget = ['Reply to this review', { kind: 'review', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
-      : data.report || (data.destination ? 'No Session report is available.' : 'The session submitted a report.');
+      : data.report || (data.destination ? 'No report is available.' : 'The work is done.');
     text.textContent = copy;
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
-    if (link) text.append(link);
+    if (link) appendTrailingIcon(text, link);
     bubble.append(text);
     if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
     if (data.destination) {
@@ -1638,21 +1623,21 @@ function eventCard(event, context, place, report) {
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
     if (outcome === 'completed') {
-      text.append(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Session complete: '));
+      text.append(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Work complete: '));
     } else if (['failed', 'cancelled', 'interrupted', 'rolled_back'].includes(outcome)) {
       const tone = outcome === 'failed' ? 'result-failed' : 'result-interrupted';
-      text.append(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Session ${stateLabels[outcome].toLowerCase()}: `));
+      text.append(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Work ${stateLabels[outcome].toLowerCase()}: `));
     }
     text.append(document.createTextNode(data.text ?? ''));
     const link = runIcon(data.run);
-    if (link) text.append(link);
+    if (link) appendTrailingIcon(text, link);
     bubble.append(text);
     if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
   } else {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     if (event.kind === 'conversation_message' && typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
-      text.innerHTML = data.textHtml;
+      setMessageHtml(text, data.textHtml);
     } else text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
     text.classList.add('foldable-text');
@@ -1663,18 +1648,19 @@ function eventCard(event, context, place, report) {
     if (event.kind === 'user_answer') {
       const question = data.question;
       if (question && !place.afterQuestion) {
-        const quote = node('p', 'msg-quote');
+        quote = node('p', 'msg-quote');
         quote.append(icon('reply'), node('span', null, question));
-        quote.title = question;
-        row.insertBefore(quote, meta.nextSibling);
+        quote.dataset.tooltip = question;
       }
     }
-    if (event.kind === 'conversation_message' && data.replyToMessageId) {
-      const original = button('Open original message', 'text-button open-original-message', () => {
+    if (event.kind === 'conversation_message' && place.replyQuote) {
+      quote = button(null, 'msg-quote msg-quote-link', () => {
         void showConversationMessage(view, data.replyToMessageId, { preferLoaded: true });
       });
-      original.dataset.timelineAction = 'open-original';
-      extras.push(original);
+      quote.dataset.timelineAction = 'open-original';
+      quote.setAttribute('aria-label', `Show the message this replies to: ${place.replyQuote}`);
+      quote.append(icon('reply'), node('span', null, place.replyQuote));
+      quote.dataset.tooltip = place.replyQuote;
     }
     if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
     else if (event.id === context.latestWebMessageId && data.status === 'received')
@@ -1688,12 +1674,13 @@ function eventCard(event, context, place, report) {
     }
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
-      const owner = bots.find((item) => item.id === blocker.botId)?.name ?? blocker.botId;
-      // Truncate only the blocking request so "Queued after" and the owner stay readable on narrow screens.
       const note = node('p', 'msg-note msg-queued');
-      note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
-      if (blocker.botId !== context.bot?.id) note.append(node('span', 'msg-queued-owner', `· ${owner}`));
-      note.title = `Starts when “${blocker.request}” (${owner}) finishes`;
+      if (blocker.request) {
+        note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
+        note.setAttribute('aria-description', `Starts when “${blocker.request}” finishes`);
+      } else {
+        note.append(icon('clock'), node('span', null, 'Waiting for another Bot to finish in this project'));
+      }
       extras.push(note);
     }
   }
@@ -1721,11 +1708,6 @@ function eventCard(event, context, place, report) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
   }
-  if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Answer this question', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
-    reply.disabled = decisions.busy(taskWaitDecision(view.id, pendingWait));
-    actions.append(reply);
-  }
 
   if (context.canDecide && replyTarget) {
     const [label, target] = replyTarget;
@@ -1733,7 +1715,7 @@ function eventCard(event, context, place, report) {
   }
   if (!actions.querySelector('button:not(:disabled)')) row.tabIndex = 0;
   line.append(bubble, actions);
-  row.append(line, ...extras);
+  row.append(...(quote ? [quote] : []), line, ...extras);
   const revealed = context.revealedTimeRow;
   if (noHover.matches && (revealed === row.id || (report && revealed === `event-${report.id}`))) line.after(time);
   return row;
@@ -1763,7 +1745,7 @@ function setWorkingText(row, label) {
   if (current?.textContent === label) return;
   status.querySelector('.working-label.leaving')?.remove();
   const next = node('span', 'working-label', label);
-  next.title = label;
+  next.dataset.tooltip = label;
   if (current && !reducedMotion.matches) {
     current.setAttribute('aria-hidden', 'true');
     current.classList.add('leaving');
@@ -1989,7 +1971,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   }
   if (changed('timeline', view?.id, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued,
     decisions.pendingKeys(), listLoaded, data?.presence, data?.activeSessions, data?.parallelTasks, data?.sessionTasks,
-    data?.pausedConversations, bots, dayFormat.format(Date.now()),
+    bots, dayFormat.format(Date.now()),
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     const added = updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
@@ -2084,7 +2066,6 @@ function conversationRows(data, events, keep, source) {
     canDecide: !source && !!view?.composer,
     readOnly: !!source,
     revealedTimeRow: view?.revealedTimeRow,
-    paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
     parallelTasks: new Map((data?.parallelTasks ?? []).map((task) => [task.id, task.runs])),
@@ -2106,6 +2087,7 @@ function conversationRows(data, events, keep, source) {
     }
   }
   const shown = timelineMessages(events, dayLabel);
+  const eventsById = new Map(events.map((event) => [event.id, event]));
   const rows = [];
   let peerMessages = [];
   const appendPeerMessages = () => {
@@ -2120,16 +2102,19 @@ function conversationRows(data, events, keep, source) {
   };
   let day = '';
   let previous = null;
+  let previousReport = null;
   shown.forEach(({ event, report }, index) => {
     const eventDay = dayLabel(event.time);
     if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
       rows.push(keep(`day-${event.id}`, eventDay, () => node('p', 'day', eventDay)));
       day = eventDay;
-      previous = null;
+      previous = previousReport = null;
     }
-    if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
+    if (event.kind === 'bot_message') { peerMessages.push(event); previous = previousReport = null; return; }
     const place = messagePlacement(previous, event, shown[index + 1]?.event);
+    const replyId = event.kind === 'conversation_message' ? event.data.replyToMessageId : 0;
+    place.replyQuote = replyId && ![previous?.id, previousReport?.id].includes(replyId) ? quotedText(eventsById.get(replyId)) : null;
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const approval = replacements.get(event.id);
     if (approval) {
@@ -2140,21 +2125,19 @@ function conversationRows(data, events, keep, source) {
         return card;
       }));
       previous = event;
+      previousReport = null;
       return;
     }
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
     const waitDecision = wait && taskWaitDecision(view.id, wait);
-    const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
     const request = ['request', 'conversation_message'].includes(event.kind);
     const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
-    const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
-        place.groupStart, place.taskStart, place.afterQuestion, wait,
+        place.groupStart, place.taskStart, place.afterQuestion, place.replyQuote, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         waitDecision && decisions.busy(waitDecision),
-        wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), paused,
-        paused && decisions.busy(pausedDecision(view.id, paused)), blocker, blockedOwner,
+        wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), blocker,
         request ? timeline.parallelTasks.get(event.taskId) : null,
         event.kind === 'memory_remembered' && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
@@ -2168,6 +2151,7 @@ function conversationRows(data, events, keep, source) {
         rows.push(keep(`policy-${item.itemId}`, [item, decisions.busy(item)], () => decisions.inlinePolicyCard(item)));
     }
     previous = event;
+    previousReport = report;
   });
   appendPeerMessages();
   // A new chat stays blank: the header already shows the Bot's avatar and name.
@@ -2181,7 +2165,7 @@ function conversationRows(data, events, keep, source) {
         flock.setAttribute('aria-hidden', 'true');
         for (const example of ['chat', 'sprout', 'controller']) flock.append(avatar({ id: example, avatar: { example } }));
         empty.append(flock, node('h2', null, 'Create your first Bot'),
-          node('p', null, 'A Bot takes your requests, runs the work in T3 Sessions and reports back here.'),
+          node('p', null, 'A Bot takes your requests, gets the work done and reports back here.'),
           button('New Bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
       } else {
         empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
@@ -2197,8 +2181,8 @@ function conversationRows(data, events, keep, source) {
   return rows;
 }
 
-function setNotice(context, text, isError = false) {
-  notices.set(context.id, { text, isError });
+function setNotice(context, text, isError = false, { quiet = false } = {}) {
+  notices.set(context.id, { text, isError, quiet });
   if (showingComposer(context.id)) renderComposer();
 }
 const composerLimit = (limits, reply, decision) =>
@@ -2247,7 +2231,7 @@ function renderScreenshots(draft, disabled) {
       const item = node('li', 'screenshot-preview');
       const preview = node('img');
       preview.alt = image.attachment.name;
-      preview.title = image.attachment.name;
+      preview.dataset.tooltip = image.attachment.name;
       preview.src = image.preview;
       const remove = button('×', 'icon-button remove-screenshot', () => {
         const hadFocus = document.activeElement === remove;
@@ -2262,7 +2246,7 @@ function renderScreenshots(draft, disabled) {
         }
       });
       remove.setAttribute('aria-label', `Remove ${image.attachment.name}`);
-      remove.title = `Remove ${image.attachment.name}`;
+      remove.dataset.tooltip = `Remove ${image.attachment.name}`;
       item.append(preview, remove);
       return item;
     }));
@@ -2313,7 +2297,7 @@ function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
     target ? fieldLabel : working ? `Guide ${data.bot.name} while it works` : `Message ${data.bot.name}`;
   const sendLabel = answering ? 'Send answer' : target ? 'Send reply' : 'Send message';
   elements.send.setAttribute('aria-label', sendLabel);
-  elements.send.title = sendLabel;
+  elements.send.dataset.tooltip = sendLabel;
 
   const summaryId = inboxReply ? 'decision-reply-target' : 'reply-summary';
   elements.message.setAttribute('aria-describedby', target ? `${summaryId} notice` : 'notice');
@@ -2331,23 +2315,32 @@ function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
 function renderComposer() {
   const context = view;
   const readOnly = context?.data?.canDecide === false;
-  const paused = !!context?.data?.bot?.paused && !context.dm;
-  const available = !!context?.data && !context.dm && (!!context.composer || readOnly || paused);
-  const canDecide = available && !!context.composer;
+  const bot = context?.data?.bot;
+  const paused = !!bot?.paused && !context.dm;
+  const needsModel = !!bot && !context.dm && !paused && !readOnly && !bot.model;
+  const banner = paused ? 'paused' : needsModel ? 'setup' : null;
+  const available = !!context?.data && !context.dm && (!!context.composer || readOnly || !!banner);
+  const canDecide = available && !!context.composer && !banner;
   const wasComposing = elements.composer.contains(document.activeElement);
-  const resume = elements['resume-bot'];
-  const canResume = paused && context.data.bot.canDelete;
-  elements['bot-paused-banner'].hidden = !paused;
-  resume.hidden = !canResume;
-  const pauseDescription = elements['bot-paused-description'];
-  const description = !paused ? '' : context.resumeError ||
-    (canResume ? 'Resume to send a message.' : 'The Bot’s owner or a Flock administrator can resume it.');
-  if (pauseDescription.textContent !== description) pauseDescription.textContent = description;
-  pauseDescription.classList.toggle('error', paused && !!context.resumeError);
+  const action = elements['composer-banner-action'];
+  const canAct = !!banner && bot.canDelete === true;
+  elements['composer-banner'].hidden = !banner;
+  elements['composer-banner'].dataset.state = banner ?? '';
+  action.hidden = !canAct;
+  action.textContent = banner === 'setup' ? 'Choose a model' : 'Resume';
+  const title = banner === 'paused' ? 'This Bot is paused' : banner === 'setup' ? `${bot.name} isn’t set up yet` : '';
+  if (elements['composer-banner-title'].textContent !== title) elements['composer-banner-title'].textContent = title;
+  const bannerDescription = elements['composer-banner-description'];
+  const description = banner === 'paused' ? context.resumeError ||
+      (canAct ? 'Resume to send a message.' : 'The Bot’s owner or a Flock administrator can resume it.')
+    : banner === 'setup' ? (canAct ? 'Choose a model to start talking.' : 'The Bot’s owner or a Flock administrator can set it up.')
+    : '';
+  if (bannerDescription.textContent !== description) bannerDescription.textContent = description;
+  bannerDescription.classList.toggle('error', paused && !!context.resumeError);
   elements['composer-container'].hidden = !available;
   elements.composer.hidden = !canDecide;
-  elements['view-only-notice'].hidden = !available || paused || canDecide;
-  if (paused && wasComposing) (canResume ? resume : headerFocusTarget()).focus({ preventScroll: true });
+  elements['view-only-notice'].hidden = !available || !!banner || canDecide;
+  if (banner && wasComposing) (canAct ? action : headerFocusTarget()).focus({ preventScroll: true });
   const decision = canDecide ? decisions.composer() : null;
   const review = canDecide ? decisions.reviewReply() : null;
   if (!canDecide) {
@@ -2394,6 +2387,7 @@ function renderComposer() {
     (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
   elements.notice.classList.toggle('error', !!(notice?.isError || screenshotError));
   elements.notice.classList.toggle('fading', !closedReply && !screenshotError && !!notice?.fading);
+  elements.notice.classList.toggle('sr-only', !closedReply && !screenshotError && !!notice?.quiet);
   scheduleNoticeFade(context, notice);
 }
 
@@ -2505,6 +2499,13 @@ function renderDetailNav(sections, current) {
       return tab;
     }));
   }
+  const recurringTab = detailNav.querySelector('[data-section="recurring"]');
+  if (recurringTab && recurringRequests && !recurringTab.contains(recurringRequests.count)) {
+    recurringTab.querySelector('.detail-tab-count')?.remove();
+    const count = node('span', 'detail-tab-count');
+    count.append(recurringRequests.count);
+    recurringTab.append(count);
+  }
   detailNav.setAttribute('aria-orientation', narrow.matches ? 'horizontal' : 'vertical');
   for (const tab of detailNav.children) {
     const selected = tab.dataset.section === current;
@@ -2533,11 +2534,12 @@ function settingsRow(label, value, click) {
 }
 function pullRequestSetting(bot) {
   const row = node('label', 'settings-row');
-  const label = node('span', 'settings-row-label', 'Fix failing checks and review feedback');
+  const label = node('span', 'settings-row-label', 'Fix failing checks and review feedback on its pull requests');
   const toggle = node('input', 'settings-row-switch');
   const feedback = node('span', 'settings-card-feedback error');
   feedback.setAttribute('role', 'status');
   toggle.type = 'checkbox';
+  toggle.setAttribute('role', 'switch');
   toggle.checked = bot.fixPullRequests;
   toggle.disabled = !bot.canDelete;
   toggle.addEventListener('change', async () => {
@@ -2632,7 +2634,7 @@ function focusAfterBotDeletion() {
     return;
   }
   if (!narrow.matches && workspace.classList.contains('sidebar-collapsed')) {
-    byId('toggle-chat-sidebar').focus();
+    sidebarShow.focus();
     return;
   }
   if (view) focusKey(`bot:${view.id}`);
@@ -2661,11 +2663,17 @@ async function setBotPaused(bot, paused) {
 }
 const botPause = mountBotPause(byId('bot-pause'), setBotPaused);
 
-elements['resume-bot'].addEventListener('click', async (event) => {
+elements['composer-banner-action'].addEventListener('click', async (event) => {
   const control = event.currentTarget;
   const context = view;
   const bot = context?.data?.bot;
-  if (!bot?.paused || !bot.canDelete) return;
+  if (!bot?.canDelete) return;
+  if (!bot.paused && !bot.model) {
+    openDetail({ kind: 'settings', section: 'general' });
+    detailWorkspace?.edit();
+    return;
+  }
+  if (!bot.paused) return;
   control.disabled = true;
   context.resumeError = '';
   renderComposer();
@@ -2687,9 +2695,9 @@ function generalContent(bot) {
   const avatarButton = button(null, 'settings-avatar-button', () => openEditAppearance(bot));
   avatarButton.setAttribute('aria-label', 'Change avatar');
   const face = node('span', 'settings-avatar');
-  const avatarTip = node('span', 'settings-avatar-tooltip', 'Change avatar');
-  avatarTip.setAttribute('aria-hidden', 'true');
-  avatarButton.append(face, avatarTip);
+  avatarButton.dataset.tooltip = 'Change avatar';
+  avatarButton.dataset.tooltipSide = 'top';
+  avatarButton.append(face);
   detailAvatar = { mount: () => showAvatar(face, bot, { still: false }) };
 
   const nameWrap = node('div', 'settings-name-wrap');
@@ -2699,7 +2707,7 @@ function generalContent(bot) {
 
   function renderNameDisplay() {
     const nameBtn = button(null, 'settings-name-button', beginInlineRename);
-    nameBtn.title = 'Rename Bot';
+    nameBtn.setAttribute('aria-description', 'Rename Bot');
     nameBtn.append(node('span', 'settings-name', bot.name));
     nameBtn.insertAdjacentHTML('beforeend', pencilIcon);
     nameWrap.replaceChildren(nameBtn);
@@ -2761,18 +2769,15 @@ function generalContent(bot) {
   hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
   rows.append(pullRequestSetting(bot));
-  const requests = settingsRow('Recurring requests', '', () => selectSection('recurring', true));
-  requests.querySelector('.settings-row-value').append(recurringRequests.count);
-  rows.append(requests);
   const settings = document.createElement('a');
   settings.className = 'settings-row';
   settings.href = '/settings/' + encodeURIComponent(bot.id);
   settings.append(node('span', 'settings-row-label', 'Access'));
   settings.insertAdjacentHTML('beforeend', chevron);
   rows.append(settings);
-  const activity = settingsRow('Bot activity', bot.paused ? 'Paused' : 'Active');
+  const activity = settingsRow('Status', bot.paused ? 'Paused' : 'Active');
   if (bot.canDelete) {
-    const pause = button(bot.paused ? 'Resume' : 'Pause', 'dialog-button quiet',
+    const pause = button(bot.paused ? 'Resume…' : 'Pause…', 'dialog-button quiet',
       () => botPause.open(bot, () => byId('bot-pause-setting')?.focus({ preventScroll: true })));
     pause.id = 'bot-pause-setting';
     pause.setAttribute('aria-haspopup', 'dialog');
@@ -2780,7 +2785,7 @@ function generalContent(bot) {
   }
   rows.append(activity);
   if (bot.canDelete) {
-    const remove = button('Delete', 'settings-row danger', (event) => botDeletion.open(bot, event.currentTarget));
+    const remove = button('Delete…', 'settings-row danger', (event) => botDeletion.open(bot, event.currentTarget));
     remove.id = 'delete-bot-settings';
     remove.setAttribute('aria-haspopup', 'dialog');
     rows.append(remove);
@@ -2809,35 +2814,11 @@ function roleCard(bot) {
   return detailRole.element;
 }
 function settingsContent(bot, section = 'general') {
-  elements['detail-title'].textContent = settingsSections[section][0];
+  elements['detail-title'].textContent = `${bot.name} settings`;
   if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
   return generalContent(bot);
 }
-function waitForm(label, fields, submit, id) {
-  const form = node('form', 'wait-form');
-  if (id) form.id = id;
-  for (const field of fields) {
-    const wrapper = node('label', null, field.label);
-    const input = node('input');
-    Object.assign(input, { name: field.name, type: field.type ?? 'text', value: field.value ?? '', required: field.required ?? false });
-    wrapper.append(input);
-    form.append(wrapper);
-  }
-  const action = button(label, 'dialog-button');
-  action.type = 'submit';
-  if (id) action.setAttribute('form', id);
-  else form.append(action);
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    submit(Object.fromEntries(new FormData(form)));
-  });
-  return [form, action];
-}
-function localDateTime(timestamp) {
-  const date = new Date(timestamp);
-  return new Date(timestamp - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-}
-function waitContent(context, task, deadlineDraft) {
+function waitContent(context, task) {
   const wait = task.wait;
   const canDecide = !!context.composer;
   elements['detail-title'].textContent = waitLabel(wait.reason);
@@ -2846,8 +2827,6 @@ function waitContent(context, task, deadlineDraft) {
   if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
   const reason = node('div', 'wait-reason');
   reason.append(node('p', 'wait-text', waitText(wait)));
-  if (wait.reason === 'deadline' && task.deadline)
-    reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
   const content = [request, reason];
   const actions = node('div', 'wait-actions');
   const primary = node('div', 'wait-primary');
@@ -2869,20 +2848,8 @@ function waitContent(context, task, deadlineDraft) {
   }
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
-  } else if (wait.reason === 'budget' || wait.reason === 'model_budget') {
-    primary.append(action(continuationLabel(wait.allowance, wait.reason === 'budget' ? 'round' : 'step'), 'approve'));
-  } else if (['model_failure', 'bot_notes_unavailable'].includes(wait.reason)) primary.append(action('Try again', 'retry'));
-  else if (wait.reason === 'deadline') {
-    const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
-      type: 'datetime-local', value: deadlineDraft ?? localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
-      const next = Math.floor(new Date(deadline).getTime() / 1000);
-      if (next > Date.now() / 1000) perform('extend', { deadline: next });
-      else showDetailError(errors.invalid_deadline);
-    }, 'wait-deadline-form');
-    form.dataset.waitId = String(wait.id);
-    submit.classList.add('primary');
-    content.push(form);
-    primary.append(submit);
+  } else if (['model_failure', 'bot_notes_unavailable'].includes(wait.reason)) {
+    primary.append(action('Try again', 'retry'));
   } else if (['unknown_delivery', 'auth', 'settings'].includes(wait.reason)) {
     primary.append(action('Check again', 'reconcile'));
   }
@@ -2940,11 +2907,11 @@ function renderDetail() {
     const bot = view.data.bot;
     labelDetail(`${bot.name} settings`);
     renderDetailNav(settingsTabs, detail.section);
-    const { soul, environmentId, projectId, model, reasoningEffort, modelCallLimit, ...settings } = bot;
+    const { soul, environmentId, projectId, model, reasoningEffort, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
     const canEdit = bot.canDelete === true;
     detailRole?.update(soul, canEdit);
-    detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort, modelCallLimit }, canEdit);
+    detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort }, canEdit);
     return;
   }
   labelDetail(null);
@@ -2977,15 +2944,8 @@ function renderDetail() {
     }
     return;
   }
-  const { generation, ...waitDetails } = task;
-  const waitGeneration = task.wait.reason === 'deadline' ? null : generation;
-  if (changed('detail', detail, waitDetails, waitGeneration, waitLabel(task.wait.reason), waitText(task.wait))) {
-    const input = elements['detail-body'].querySelector('#wait-deadline-form input');
-    const sameWait = input?.form?.dataset.waitId === String(task.wait.id);
-    const restoreFocus = sameWait && input === document.activeElement;
-    replaceDetail(() => waitContent(view, task, sameWait ? input.value : undefined));
-    if (restoreFocus) elements['detail-body'].querySelector('#wait-deadline-form input')?.focus();
-  }
+  if (changed('detail', detail, task, waitLabel(task.wait.reason), waitText(task.wait)))
+    replaceDetail(() => waitContent(view, task));
   const item = taskWaitDecision(view.id, task);
   const busy = decisions.busy(item);
   for (const control of elements['detail-body'].querySelectorAll('button, input')) {
@@ -3187,7 +3147,7 @@ async function loadSessions() {
     if (context !== view) return;
     mergeSessionTasks(context, page.sessionTasks);
     context.sessionsBefore = page.sessionsBefore;
-  } catch { if (context === view) setNotice(context, 'Could not load earlier sessions.', true); }
+  } catch { if (context === view) setNotice(context, 'Could not load earlier requests.', true); }
   finally {
     context.loadingSessions = false;
     if (context === view) renderActivity();
@@ -3257,7 +3217,7 @@ async function submit(event) {
     if (review && view === context && decisions.reviewReply()?.messageId === review.messageId) {
       decisions.close({ focus: false });
     }
-    setNotice(context, 'Message received.');
+    setNotice(context, 'Message received.', false, { quiet: true });
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
@@ -3330,6 +3290,7 @@ elements['close-navigation'].addEventListener('click', () => openNavigation(fals
 navBackdrop?.addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
 const sidebarToggle = byId('toggle-chat-sidebar');
+const sidebarShow = byId('show-chat-sidebar');
 const sidebarResizer = elements['sidebar-resizer'];
 const sidebarMinWidth = 216;
 const sidebarMaxWidth = 416;
@@ -3340,19 +3301,18 @@ function setSidebarWidth(px, persist = false) {
   if (persist) save('flock-sidebar-width', clamped);
 }
 function setSidebarCollapsed(collapsed) {
+  const moveFocus = document.activeElement === (collapsed ? sidebarToggle : sidebarShow);
   workspace.classList.toggle('sidebar-collapsed', collapsed);
-  const label = collapsed ? 'Show Bot sidebar' : 'Hide Bot sidebar';
   sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
-  sidebarToggle.setAttribute('aria-label', label);
-  sidebarToggle.title = label;
+  sidebarShow.hidden = !collapsed;
+  if (moveFocus) (collapsed ? sidebarShow : sidebarToggle).focus({ preventScroll: true });
 }
 const storedSidebarWidth = saved('flock-sidebar-width', null);
 if (Number.isFinite(storedSidebarWidth) && storedSidebarWidth >= sidebarMinWidth && storedSidebarWidth <= sidebarMaxWidth) {
   setSidebarWidth(storedSidebarWidth, false);
 }
-sidebarToggle.addEventListener('click', () => {
-  setSidebarCollapsed(!workspace.classList.contains('sidebar-collapsed'));
-});
+sidebarToggle.addEventListener('click', () => setSidebarCollapsed(true));
+sidebarShow.addEventListener('click', () => setSidebarCollapsed(false));
 if (sidebarResizer) {
   let dragPointer = null;
   let lastWidth = storedSidebarWidth ?? 296;

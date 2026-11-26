@@ -46,7 +46,7 @@ struct DestinationRun {
     RunRef ref{};
     bool explicitDirectGateway = false;
     DestinationRunStatus status = DestinationRunPhase::queued;
-    std::optional<std::int64_t> deadline{}, retryAt{}, stopRetryAt{};
+    std::optional<std::int64_t> retryAt{}, stopRetryAt{};
     unsigned evidenceAttempts = 0;
     std::optional<DestinationReport> report{};
     std::optional<std::string> detail{};
@@ -90,10 +90,6 @@ struct TaskCriteriaProposal {
     std::optional<std::int64_t> sourceMessageId;
 };
 
-struct TaskWorkAllowance {
-    int remaining = 0, additionalUsed = 0;
-};
-
 struct TaskData {
     std::int64_t id = 0, generation = 0;
     TaskState state = TaskState::queued;
@@ -102,7 +98,7 @@ struct TaskData {
     std::optional<PendingDestination> pendingDestination{};
     std::optional<std::int64_t> currentRevision{};
     std::string actionId{};
-    std::int64_t eventId = 0, deadline = 0;
+    std::int64_t eventId = 0;
     std::optional<AssignedRun> activeRun{}, lastRun{};
     std::optional<RunStop> runStop{};
     std::variant<std::monostate, RunTargets, RunResults> destinations{};
@@ -116,7 +112,6 @@ struct TaskData {
     bool newSessionRequired = false, freshContextRequested = false;
     std::optional<std::string> launchWarning{};
     std::int64_t createdAt = 0;
-    TaskWorkAllowance allowance{};
     std::optional<TaskCriteriaProposal> criteriaProposal{};
     std::optional<std::string> requestedCommit{}, feedback{};
     std::optional<TaskQuestion> question{};

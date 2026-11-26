@@ -55,7 +55,6 @@ struct OutboxAction {
     std::vector<OutboxInstruction> instructions;
     OutboxContext contextIds;
     std::vector<OutboxSource> sourceResultRefs;
-    bool chargesBudget = false;
     bool destinationAction = false;
     std::optional<OutboxCommit> commit;
     std::optional<std::int64_t> sessionParticipationId;

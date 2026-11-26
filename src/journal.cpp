@@ -153,7 +153,6 @@ Id JournalStorage::journal(Id task, const Wait& wait) {
     auto data = encodeWaitData(wait);
     data["reason"] = waitReasonName(reason);
     data["id"] = wait.id;
-    if (wait.allowance) data["allowance"] = *wait.allowance;
     const auto id = database.writeJournal(task, JournalKind::waiting, data, {.waitId = wait.id, .waitReason = reason});
     if (reason == WaitReason::user_question) channelStorage.queueChannelTaskUpdate(task, id, wait.text, wait.choices());
     return id;

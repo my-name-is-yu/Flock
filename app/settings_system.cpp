@@ -101,7 +101,7 @@ Json SettingsSystem::viewLocked(unsigned t3Port) const {
             {"saved", {{"port", savedPort}, {"sessionRead", savedRead}}},
             {"next", {{"port", nextPort ? Json(nextPort) : Json(nullptr)}, {"sessionRead", nextRead}}},
             {"overrides", {{"port", cliPort_.has_value()}, {"sessionRead", cliSessionRead_}}},
-            {"restartRequired", pendingPort || pendingRead}};
+            {"pending", {{"port", pendingPort}, {"sessionRead", pendingRead}}}};
 }
 
 Json SettingsSystem::view(unsigned t3Port) const {

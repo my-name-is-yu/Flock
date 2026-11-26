@@ -1,3 +1,4 @@
+import '/tooltip.js';
 import { accentColor } from '/avatars.js';
 import { listenForBrowserNotifications } from '/browser-notifications.mjs';
 import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
@@ -90,7 +91,7 @@ function renderPeople({canManage, canManageMembers, members}) {
     row(people, rowLabel('Managed by the owner', 'The Bot’s owner decides who else can use it.'));
   } else if (!members.length) {
     const detail = canManageMembers ? ['Add a person’s ID below to share this Bot with them.']
-      : ['Enable shared sign-in in ', settingsLink('access', 'Flock settings'), ' to share this Bot.'];
+      : ['Choose Enable sharing in ', settingsLink('access', 'Access'), ' to share this Bot.'];
     row(people, rowLabel('No one added', ...detail));
   }
   for (const person of members) {
@@ -150,7 +151,7 @@ function renderChannelLinks(bridges) {
   channelForm.hidden = !bridges.some(bridge => !bridge.hostManaged);
   if (!bridges.length) {
     row('channel-links', rowLabel('No channels connected', 'Set up Slack or iMessage in ',
-      settingsLink('connections', 'Flock settings'), ' to link senders to this Bot.'));
+      settingsLink('connections', 'Connections'), ' to link senders to this Bot.'));
   } else if (channelForm.hidden) {
     row('channel-links', rowLabel('Managed by the server', 'Sender links for these channels are set on the computer running Flock.'));
   } else if (!bridges.some(bridge => bridge.senders.length)) {
@@ -244,7 +245,7 @@ async function loadMachines() {
       entry.append(element('code', path));
       paths.append(entry);
     }
-    const session = `Session ${threadId}`;
+    const session = `T3 thread ${threadId}`;
     const label = rowLabel(machineId, session);
     label.append(paths);
     const item = row(rows, label);

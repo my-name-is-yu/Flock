@@ -20,24 +20,17 @@ Wait decodeWaitingEntry(Id entry, const Json& data);
 Json waitRunJson(const std::optional<WaitRun>&);
 std::optional<WaitRun> decodeWaitRun(const Json&, const RecordDecoder&);
 std::optional<WaitRun> taskWaitRun(const TaskData& task);
-WaitUsage waitUsage(const Json&);
-WorkBudgetTool workBudgetTool(std::string_view);
 
 class Database;
 class JournalStorage;
 class OutboxStorage;
 class PeerStorage;
 
-class ModelCalls;
 class WaitStorage {
 public:
-    static constexpr int initialWorkAllowance = 3;
+    WaitStorage(Database& database, JournalStorage& journalStorage, OutboxStorage& outboxStorage, PeerStorage& peers)
+        : database(database), journalStorage(journalStorage), outboxStorage(outboxStorage), peers(peers) {}
 
-    WaitStorage(Database& database, JournalStorage& journalStorage, OutboxStorage& outboxStorage, PeerStorage& peers,
-                ModelCalls& modelCalls)
-        : database(database), journalStorage(journalStorage), outboxStorage(outboxStorage), peers(peers), modelCalls(modelCalls) {}
-
-    Id waitAllowance(Id taskId, WaitReason reason) const;
     bool waitIsActionable(const TaskData& task) const;
     Id waitAnchor(Id task, Id wait) const;
     Id wait(TaskData&, Wait);
@@ -51,6 +44,5 @@ private:
     JournalStorage& journalStorage;
     OutboxStorage& outboxStorage;
     PeerStorage& peers;
-    ModelCalls& modelCalls;
 };
 }
