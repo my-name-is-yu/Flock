@@ -1,7 +1,6 @@
 #include "runtime_maintenance.hpp"
 
 #include "automation_storage.hpp"
-#include "workflow_storage.hpp"
 #include "policy_approvals.hpp"
 #include "flock/types.hpp"
 #include "database.hpp"
@@ -11,11 +10,11 @@
 #include <string_view>
 
 namespace flockv0 {
-runtime::Maintenance::Maintenance(Database& database, AutomationStorage& automationStorage, WorkflowStorage& workflowStorage,
-                                  PolicyApprovals& approvals, const std::function<Seconds()>& clock, const ErrorReporter& automationError,
+runtime::Maintenance::Maintenance(Database& database, AutomationStorage& automationStorage, PolicyApprovals& approvals,
+                                  const std::function<Seconds()>& clock, const ErrorReporter& automationError,
                                   const ErrorReporter& storageContention)
-    : database(database), automationStorage(automationStorage), workflowStorage(workflowStorage), approvals(approvals), clock(clock),
-      automationError(automationError), storageContention(storageContention) {}
+    : database(database), automationStorage(automationStorage), approvals(approvals), clock(clock), automationError(automationError),
+      storageContention(storageContention) {}
 
 Seconds runtime::Maintenance::settleApprovals() {
     std::lock_guard lock(database.mutex);
@@ -40,12 +39,6 @@ std::optional<Seconds> runtime::Maintenance::fireDueAutomations() {
     }
 }
 
-Seconds runtime::Maintenance::advanceWorkflows() {
-    const auto now = clock();
-    workflowStorage.advanceWorkflows(now);
-    return now;
-}
-
 void runtime::Maintenance::scanIfChanged(std::optional<ScanStamp>& completed, std::string_view operation, const auto& work) {
     const auto now = clock();
     std::optional<ScanStamp> beforeScan;
@@ -65,7 +58,4 @@ void runtime::Maintenance::fireDueAutomationsIfChanged() {
     scanIfChanged(automationsCheckedAt, "automations", [&] { return fireDueAutomations(); });
 }
 
-void runtime::Maintenance::advanceWorkflowsIfChanged() {
-    scanIfChanged(workflowsCheckedAt, "workflows", [&] { return advanceWorkflows(); });
-}
 }

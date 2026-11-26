@@ -122,9 +122,6 @@ VALUES
     ('index', 'sqlite_autoindex_t3_events_1', 't3_events', NULL),
     ('index', 'sqlite_autoindex_task_revisions_1', 'task_revisions', NULL),
     ('index', 'sqlite_autoindex_task_run_destinations_1', 'task_run_destinations', NULL),
-    ('index', 'sqlite_autoindex_workflow_dependencies_1', 'workflow_dependencies', NULL),
-    ('index', 'sqlite_autoindex_workflow_stages_1', 'workflow_stages', NULL),
-    ('index', 'sqlite_autoindex_workflow_stages_2', 'workflow_stages', NULL),
     ('index', 'tasks_bot', 'tasks', 'CREATE INDEX tasks_bot ON tasks(bot_id,id DESC)'),
     ('index', 'tasks_external_check', 'tasks', 'CREATE INDEX tasks_external_check ON tasks(external_check_at) WHERE external_check_at IS NOT NULL'),
     ('index', 'tasks_route', 'tasks', 'CREATE INDEX tasks_route ON tasks(environment_id,project_id,id)
@@ -263,7 +260,7 @@ VALUES
   exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
   git_event_id TEXT, operation_id TEXT,
   reply_to_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
-  session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER, workflow_outcome TEXT,
+  session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER,
   CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL))'),
     ('table', 'local_machine_connections', 'local_machine_connections', 'CREATE TABLE local_machine_connections(
       id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -410,7 +407,7 @@ VALUES
   pending_environment_id TEXT, pending_project_id TEXT, pending_gateway_environment_id TEXT,
   pending_pinned INTEGER CHECK(pending_pinned IN (0,1)),
   active_run TEXT, active_thread_id TEXT, active_run_id TEXT, last_run TEXT,
-  action_id TEXT NOT NULL, workflow_id INTEGER, workflow_stage_id TEXT, workflow_artifact_version TEXT, trigger_data TEXT,
+  action_id TEXT NOT NULL, trigger_data TEXT,
   origin_environment_id TEXT, origin_thread_id TEXT, origin_gateway_environment_id TEXT, origin_title TEXT,
   selected_environment_id TEXT, selected_thread_id TEXT, selected_gateway_environment_id TEXT, selected_project_id TEXT,
   run_outcome TEXT, external_check_at INTEGER, data TEXT NOT NULL,
@@ -419,27 +416,6 @@ VALUES
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   reason TEXT NOT NULL, data TEXT NOT NULL, resolution TEXT)'),
     ('table', 'web_identity_required', 'web_identity_required', 'CREATE TABLE web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1))'),
-    ('table', 'workflow_artifacts', 'workflow_artifacts', 'CREATE TABLE workflow_artifacts(
-        report_id INTEGER PRIMARY KEY REFERENCES journal,workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,
-        version TEXT NOT NULL,FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages)'),
-    ('table', 'workflow_dependencies', 'workflow_dependencies', 'CREATE TABLE workflow_dependencies(
-        workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,parent_id TEXT NOT NULL,report_id INTEGER REFERENCES journal,
-        artifact_version TEXT NOT NULL DEFAULT '''',
-        PRIMARY KEY(workflow_id,stage_id,parent_id),
-        FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages,
-        FOREIGN KEY(workflow_id,parent_id) REFERENCES workflow_stages)'),
-    ('table', 'workflow_stages', 'workflow_stages', 'CREATE TABLE workflow_stages(workflow_id INTEGER NOT NULL REFERENCES workflows,
-        stage_id TEXT NOT NULL,spec TEXT NOT NULL,task_id INTEGER UNIQUE REFERENCES tasks,result_id INTEGER REFERENCES journal,instruction TEXT,status TEXT NOT NULL DEFAULT ''pending'',
-        input TEXT NOT NULL DEFAULT '''',output TEXT NOT NULL DEFAULT '''',deadline INTEGER NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0,
-        confirmed_state TEXT NOT NULL DEFAULT '''',confirmed_at INTEGER NOT NULL DEFAULT 0,unreachable INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY(workflow_id,stage_id))'),
-    ('table', 'workflow_verdicts', 'workflow_verdicts', 'CREATE TABLE workflow_verdicts(
-        report_id INTEGER PRIMARY KEY REFERENCES journal,workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,
-        version TEXT NOT NULL,verdict TEXT NOT NULL CHECK(verdict IN (''pass'',''fail'')),
-        FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages)'),
-    ('table', 'workflows', 'workflows', 'CREATE TABLE workflows(
-        id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,routing TEXT NOT NULL,request TEXT NOT NULL,
-        message_id INTEGER NOT NULL REFERENCES messages,stop_requested INTEGER NOT NULL DEFAULT 0)'),
     ('trigger', 'stop_terminal_pr_watches', 'tasks', 'CREATE TRIGGER stop_terminal_pr_watches AFTER UPDATE OF state ON tasks
 WHEN new.state IN (''completed'',''cancelled'',''cancelling'') AND old.state<>new.state
 BEGIN
@@ -484,17 +460,6 @@ SELECT t.message_id,
                   (SELECT conversation_status FROM journal WHERE id=t.reply_id),''access_revoked'')
   END AS status
 FROM conversation_turns t'),
-    ('view', 'outdated_workflow_stages', 'outdated_workflow_stages', 'CREATE VIEW outdated_workflow_stages AS
-        WITH RECURSIVE outdated(workflow_id,stage_id) AS (
-          SELECT d.workflow_id,d.stage_id FROM workflow_dependencies d JOIN workflow_stages p
-            ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
-            WHERE d.report_id IS NOT NULL AND (p.status<>''completed'' OR p.output<>d.artifact_version
-              OR (p.result_id IS NOT d.report_id AND
-                  (d.artifact_version='''' OR json_extract(p.spec,''$.role'') NOT IN (''implement'',''verify''))))
-          UNION
-          SELECT d.workflow_id,d.stage_id FROM workflow_dependencies d JOIN outdated p
-            ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id)
-        SELECT * FROM outdated'),
     ('view', 'project_route_queue', 'project_route_queue', 'CREATE VIEW project_route_queue AS
 WITH candidates AS (
   SELECT task.id,task.state AS slot_state,task.project_id,task.environment_id,NULL AS action_id
@@ -536,9 +501,8 @@ WITH queue AS (
   FROM project_route_queue
 )
 SELECT q.id,q.environment_id,q.project_id,q.action_id,
-       CASE WHEN q.id<>q.head_id AND (owner.workflow_id IS NULL OR owner.workflow_id IS NOT t.workflow_id)
-       THEN q.head_id END AS blocker_id
-FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id'),
+       CASE WHEN q.id<>q.head_id THEN q.head_id END AS blocker_id
+FROM queue q'),
     ('view', 'task_project_slots', 'task_project_slots', 'CREATE VIEW task_project_slots AS
 SELECT id,CASE WHEN count(blocker_id)=count(*) THEN min(blocker_id) END AS blocker_id
 FROM project_route_slots GROUP BY id');

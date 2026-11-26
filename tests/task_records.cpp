@@ -147,7 +147,6 @@ Json storedExecution() {
          {"cancelledInstructions",
           Json::array({{{"messageId", 60}, {"step", 1}, {"text", "Check output"}, {"revisionId", nullptr}, {"conflicting", false}}})},
          {"pendingRunReport", {{"report", report}, {"retryAt", 90}, {"attempts", 1}}},
-         {"pendingStageReport", 71},
          {"t3CheckAt", 95},
          {"newSessionRequired", true},
          {"freshContextRequested", true},
@@ -176,7 +175,7 @@ UPDATE tasks SET state='cancelling',data=?,action_id='action',last_run=?,replann
     const auto& pending = task.pendingRunReport.value();
     check(pending.report.run == run && pending.report.resultRunId == "continuation" &&
               pending.report.evidence.availability == RunEvidence::Availability::ReportUnavailable && pending.attempts == 1 &&
-              pending.retryAt == 90 && task.pendingStageReport == 71 && task.t3CheckAt == 95,
+              pending.retryAt == 90 && task.t3CheckAt == 95,
           "Report or delivery recovery did not decode");
     check(task.cancelledInstructions.size() == 1 && task.cancelledInstructions.front().messageId == 60 && task.replanning &&
               task.queuedInT3 && task.cancelledByBotPause && task.cancellationDetail == "Waiting for delivery" &&
@@ -272,9 +271,9 @@ void decodeErrors() {
         invalid[key] = 42;
         rejects(invalid.dump(), key, "expected a string");
     }
-    for (const auto* key : {"typo", "id", "state", "generation", "request", "actionId", "activeRun", "lastRun", "pendingDestination",
-                            "runTargets", "runResults", "currentRevision", "replanning", "sessionOrigin", "selectedSession",
-                            "sourceMessageId", "workflowId", "trigger", "runOutcome"}) {
+    for (const auto* key :
+         {"typo", "id", "state", "generation", "request", "actionId", "activeRun", "lastRun", "pendingDestination", "runTargets",
+          "runResults", "currentRevision", "replanning", "sessionOrigin", "selectedSession", "sourceMessageId", "trigger", "runOutcome"}) {
         auto invalid = stored();
         invalid[key] = nullptr;
         rejects(invalid.dump(), key, "unknown key");
@@ -361,10 +360,14 @@ void acceptedInstructionRoundTrips() {
 
 void completionAndFeedbackRoundTrips() {
     const Json assignedRun = storedExecution().at("pendingRunReport").at("report").at("run");
-    const Json workflow{{"text", "Stage failed"}, {"revisionId", 7}, {"source", assignedRun}, {"workflowOutcome", "failed"}};
-    const auto stage = decodeCompletion(id, workflow);
-    check(stage.source() && stage.source()->assignment && encodeCompletion(stage) == workflow,
-          "Workflow completion lost its assigned Run or its outcome");
+    const Json task{{"text", "Checks passed"},
+                    {"revisionId", 7},
+                    {"reason", "The report confirms the checks"},
+                    {"doneWhen", "Run the checks"},
+                    {"source", assignedRun}};
+    const auto completion = decodeCompletion(id, task);
+    check(completion.source() && completion.source()->assignment && encodeCompletion(completion) == task,
+          "Task completion lost its assigned Run");
 
     const Json fanout{{"text", "One of two finished"},
                       {"revisionId", nullptr},

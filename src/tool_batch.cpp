@@ -26,7 +26,6 @@ constexpr ReadSpec conversationBatchReads[]{{"flock_session_search", Conversatio
                                             {"flock_session_events", ConversationRead::session, CallClass::gated_read},
                                             {"find_tasks", ConversationRead::store},
                                             {"read_result", ConversationRead::store},
-                                            {"workflow_status", ConversationRead::store},
                                             {"list_schedules", ConversationRead::store},
                                             {"list_secrets", ConversationRead::store},
                                             {"list_connections", ConversationRead::store},

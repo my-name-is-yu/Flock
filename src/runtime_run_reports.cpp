@@ -1,6 +1,5 @@
 #include "runtime_run_reports.hpp"
 #include "task_run_reports.hpp"
-#include "workflow_storage.hpp"
 #include "runtime_session_history.hpp"
 #include "runtime_task_state.hpp"
 #include "runtime_task_updates.hpp"
@@ -27,11 +26,10 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-runtime::RunReports::RunReports(Database& database, JournalStorage& journalStorage, TaskEvents& taskEvents,
-                                WorkflowStorage& workflowStorage, T3& t3, const Policy& policy, TaskUpdates& updates,
-                                SessionHistory& history, const std::function<Seconds()>& clock)
-    : database(database), journalStorage(journalStorage), taskEvents(taskEvents), workflowStorage(workflowStorage), t3(t3), policy(policy),
-      updates(updates), history(history), clock(clock) {}
+runtime::RunReports::RunReports(Database& database, JournalStorage& journalStorage, TaskEvents& taskEvents, T3& t3, const Policy& policy,
+                                TaskUpdates& updates, SessionHistory& history, const std::function<Seconds()>& clock)
+    : database(database), journalStorage(journalStorage), taskEvents(taskEvents), t3(t3), policy(policy), updates(updates),
+      history(history), clock(clock) {}
 
 void runtime::RunReports::writeRunReport(TaskData& task, const SettledRunReport& report) {
     const auto entry = runReportEntry(report);
@@ -39,11 +37,7 @@ void runtime::RunReports::writeRunReport(TaskData& task, const SettledRunReport&
     if (task.state != TaskState::cancelling && !task.replanning) {
         taskEvents.event(task, "result/" + report.run.environmentId + "/" + run.threadId + "/" + run.runId, encodeRunReport(entry));
     }
-    const auto reportId = journalStorage.journal(task.id, entry);
-    if (task.workflow) {
-        task.pendingStageReport = reportId;
-        workflowStorage.settleStageReport(task);
-    }
+    journalStorage.journal(task.id, entry);
 }
 
 RunEvidence runtime::RunReports::fetchRunEvidence(const TaskData& task, const std::string& environment, RunRef source,

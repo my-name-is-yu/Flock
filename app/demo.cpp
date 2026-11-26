@@ -24,6 +24,7 @@ constexpr std::string_view setupRequest = "Rename yourself to Release Scout and 
 constexpr std::string_view fridayRequest = "Remember that we deploy on Fridays.";
 constexpr std::string_view fridayMemory = "Deploy on Fridays.";
 constexpr std::string_view verifyProjectRequest = "Show me how to verify this project";
+constexpr std::string_view releaseSummaryRequest = "Implement the release summary in Demo project, then verify it in a separate Session.";
 constexpr std::string_view verificationReport = "The demo project's full check runs with ./scripts/verify.sh.";
 constexpr std::string_view verificationRunSuffix = "-verify-project";
 
@@ -31,7 +32,15 @@ class DemoModel final : public Model {
     ModelTurn decide(const ModelInput& in) override {
         const auto event = in.event.value("kind", "");
         if (event == "conversation_turn") {
+            const auto request = in.event.value("text", "");
             const auto& turn = in.event.at("turn");
+            const auto& reply = in.event.at("replyTo");
+            if (request == releaseSummaryRequest && reply.is_null() && (turn.empty() || turn.back().at("result").value("ok", false))) {
+                if (turn.size() >= 2)
+                    return {{{"reply", {{"text", "I queued the implementation and a separate verification Session."}}, {}}}};
+                const auto taskRequest = turn.empty() ? "Implement the release summary" : "Verify the release summary";
+                return {{{"start_task", {{"request", taskRequest}, {"projectId", "demo-project"}}, {}}}};
+            }
             if (!turn.empty()) {
                 const auto& last = turn.back();
                 const bool ok = last.at("result").value("ok", false);
@@ -44,14 +53,14 @@ class DemoModel final : public Model {
                                                                     : "I queued your request.";
                 return {{{"reply", {{"text", text}}, {}}}};
             }
-            if (in.event.value("text", "") == setupRequest && std::ranges::find(in.tools, botSetupTool) != in.tools.end()) {
+            if (request == setupRequest && std::ranges::find(in.tools, botSetupTool) != in.tools.end()) {
                 auto role = in.notes.soul;
                 if (!role.empty() && !role.ends_with('\n')) role += '\n';
                 role += "Always run ./scripts/verify.sh before reporting.";
                 return {{{std::string(botSetupTool), {{"name", "Release Scout"}, {"soul", std::move(role)}}, {}},
                          {"reply", {{"text", "I’m now Release Scout. I’ll run ./scripts/verify.sh before reporting."}}, {}}}};
             }
-            if (in.event.at("text") == fridayRequest && std::ranges::find(in.tools, "write_memory") != in.tools.end()) {
+            if (request == fridayRequest && std::ranges::find(in.tools, "write_memory") != in.tools.end()) {
                 auto content = in.notes.memory;
                 if (content.find(fridayMemory) == content.npos) {
                     if (!content.empty() && !content.ends_with('\n')) content += '\n';
@@ -61,14 +70,13 @@ class DemoModel final : public Model {
                           {{"baseVersion", in.event.at("memoryVersion")}, {"content", content}, {"summary", fridayMemory}},
                           {}}}};
             }
-            const auto& reply = in.event.at("replyTo");
             if (reply.is_object() && reply.value("kind", "") == "task_question" && reply.value("current", false)) {
                 return {{{"answer_task_question",
                           {{"taskId", reply["taskId"]},
                            {"waitId", reply["waitId"]},
                            {"revisionId", reply["revisionId"]},
                            {"generation", reply["generation"]},
-                           {"text", in.event.value("text", "")}},
+                           {"text", request}},
                           {}}}};
             }
             if (reply.is_object() && reply.value("kind", "") == "result")
@@ -77,7 +85,7 @@ class DemoModel final : public Model {
                 const auto source = reply.value("inReplyTo", Json::object()).value("replyToMessageId", Json(nullptr));
                 if (!source.is_null()) return {{{"read_result", {{"messageId", source}}, {}}}};
             }
-            return {{{"start_task", {{"request", in.event.value("text", "")}}, {}}}};
+            return {{{"start_task", {{"request", request}}, {}}}};
         }
         if (event == "result" && in.task.contains("userInstructions")) {
             const bool follow = std::ranges::find(in.tools, "follow_up") != in.tools.end();

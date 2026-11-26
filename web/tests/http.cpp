@@ -143,10 +143,8 @@ void boundary(Browser& browser) {
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"), 400);
     Browser::checked(browser.client.Get("/api/view?bot=missing"), 404);
     check(browser.get("/api/view?bot=release").at("composerPerson").is_null(), "local composer was given an authenticated identity");
-    for (const std::string path : {"/api/compactions", "/api/workflows"}) {
-        check(browser.get(path + "?bot=release").is_array(), "Missing inspector collection");
-        Browser::checked(browser.client.Get(path + "?bot=missing"), 404);
-    }
+    check(browser.get("/api/compactions?bot=release").is_array(), "Missing conversation summaries");
+    Browser::checked(browser.client.Get("/api/compactions?bot=missing"), 404);
     browser.post("/api/requests", {{"botId", "release"}, {"clientRequestId", "draft"}, {"request", "test"}}, 404);
 }
 
@@ -2182,7 +2180,6 @@ void settingsEndpoints(const std::filesystem::path& path) {
               view->get_header_value("X-Flock-Viewer") == "\"alice\"",
           "list and conversation did not expose the same authenticated viewer scope");
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"), 403);
-    Browser::checked(browser.client.Get("/api/workflows?bot=triage"), 403);
     Browser::checked(browser.client.Get("/api/compactions?bot=triage"), 403);
     Browser::checked(browser.client.Get("/api/events?bot=triage"), 403);
     Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"), 403);

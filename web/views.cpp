@@ -2,7 +2,6 @@
 #include "flock/task_list.hpp"
 #include "views.hpp"
 #include "flock/peer_conversations.hpp"
-#include "flock/workflows.hpp"
 #include "flock/conversations.hpp"
 #include "flock/markdown.hpp"
 #include "flock/policy.hpp"
@@ -238,7 +237,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
             details["actions"] = Json::array();
             for (const auto& action : *actions) {
                 Json item = Json::object();
-                copyFields(item, action, {"tool", "taskId", "workflowId", "stageId", "effect"});
+                copyFields(item, action, {"tool", "taskId", "effect"});
                 details["actions"].push_back(std::move(item));
             }
         }
@@ -301,11 +300,6 @@ Json taskSummary(const TaskData& task) {
     if (task.state == TaskState::external_waiting && task.waitingNote) result["waitingNote"] = *task.waitingNote;
     if (task.currentRevision) result["currentRevision"] = *task.currentRevision;
     result["createdAt"] = task.createdAt;
-    if (const auto& workflow = task.workflow) {
-        result["workflowId"] = workflow->id;
-        result["stageId"] = workflow->stageId;
-        result["inputArtifactVersion"] = workflow->inputArtifactVersion;
-    }
     return result;
 }
 
@@ -551,7 +545,6 @@ Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changed
     } else {
         result.update(sessions(store, id, 0));
     }
-    result["workflows"] = Workflows(store).workflows(id);
     result["compactions"] = Conversations(store).compactions(id, 0, 1);
     result["bot"] = botSettings(bot);
     return result;

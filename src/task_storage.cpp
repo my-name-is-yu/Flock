@@ -288,7 +288,6 @@ void decodeTaskFields(TaskData& task, const Json& data, const RecordDecoder& row
         task.cancelledInstructions = taskInstructions(*found, task.id, "cancelledInstructions");
     if (const auto found = row.find(data, "pendingRunReport"); found != data.end())
         task.pendingRunReport = row.nested("pendingRunReport").decodeClosed(*found, decodePendingRunReport);
-    task.pendingStageReport = row.optional<Id>(data, "pendingStageReport");
     task.t3CheckAt = row.optional<Seconds>(data, "t3CheckAt");
     task.newSessionRequired = row.optional<bool>(data, "newSessionRequired").value_or(false);
     task.freshContextRequested = row.optional<bool>(data, "freshContextRequested").value_or(false);
@@ -334,7 +333,6 @@ Json encodeTaskPayload(const TaskData& task) {
     if (const auto& pending = task.pendingRunReport)
         data["pendingRunReport"] = {
             {"report", settledRunReportJson(pending->report)}, {"retryAt", pending->retryAt}, {"attempts", pending->attempts}};
-    if (task.pendingStageReport) data["pendingStageReport"] = *task.pendingStageReport;
     if (task.t3CheckAt) data["t3CheckAt"] = *task.t3CheckAt;
     if (task.newSessionRequired) data["newSessionRequired"] = true;
     if (task.freshContextRequested) data["freshContextRequested"] = true;
@@ -365,11 +363,6 @@ Json encodeTask(const TaskData& task) {
     if (task.replanning) data["replanning"] = true;
     if (task.sourceMessageId) data["sourceMessageId"] = *task.sourceMessageId;
     if (task.trigger) data["trigger"] = taskTriggerJson(*task.trigger);
-    if (task.workflow) {
-        data["workflowId"] = task.workflow->id;
-        data["stageId"] = task.workflow->stageId;
-        data["inputArtifactVersion"] = task.workflow->inputArtifactVersion;
-    }
     if (const auto& selected = task.selectedSession) {
         auto session = sessionTargetJson(selected->target);
         session["projectId"] = selected->projectId;
@@ -450,10 +443,10 @@ namespace {
 constexpr std::string_view taskColumns =
     "bot_id,environment_id,project_id,state,generation,request,source_message_id,current_revision,replanning,"
     "pending_environment_id,pending_project_id,pending_gateway_environment_id,pending_pinned,"
-    "active_run,active_thread_id,active_run_id,last_run,action_id,workflow_id,workflow_stage_id,workflow_artifact_version,trigger_data,"
+    "active_run,active_thread_id,active_run_id,last_run,action_id,trigger_data,"
     "origin_environment_id,origin_thread_id,origin_gateway_environment_id,origin_title,"
     "selected_environment_id,selected_thread_id,selected_gateway_environment_id,selected_project_id,run_outcome,external_check_at,data";
-constexpr std::string_view taskPlaceholders = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+constexpr std::string_view taskPlaceholders = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
 Json optionalId(std::optional<Id> value) {
     return value ? Json(*value) : Json(nullptr);
@@ -464,7 +457,6 @@ Json taskBindings(const TaskData& task, Id generation) {
     const auto& active = task.activeRun;
     const auto& origin = task.sessionOrigin;
     const auto& selected = task.selectedSession;
-    const auto& workflow = task.workflow;
     const auto outcome = task.runOutcome();
     auto activeData = assignedRunJson(active);
     if (active) {
@@ -489,9 +481,6 @@ Json taskBindings(const TaskData& task, Id generation) {
                         active ? Json(active->ref.runId) : Json(nullptr),
                         assignedRunJson(task.lastRun),
                         task.actionId,
-                        workflow ? Json(workflow->id) : Json(nullptr),
-                        workflow ? Json(workflow->stageId) : Json(nullptr),
-                        workflow ? Json(workflow->inputArtifactVersion) : Json(nullptr),
                         task.trigger ? taskTriggerJson(*task.trigger) : Json(nullptr),
                         origin ? Json(origin->target.environmentId) : Json(nullptr),
                         origin ? Json(origin->target.threadId) : Json(nullptr),
@@ -568,8 +557,6 @@ TaskData TaskRecords::readTask(const Statement& row, int col) const {
     }
     ++col;
     task.actionId = row.string(col++);
-    if (!row.null(col)) task.workflow = TaskWorkflow{row.number(col), row.string(col + 1), row.string(col + 2)};
-    col += 3;
     if (!row.null(col)) {
         const auto trigger = decoder.nested("trigger");
         task.trigger = trigger.decodeClosed(trigger.parse(row.string(col)), decodeTaskTrigger);

@@ -30,7 +30,6 @@
 #include "task_run_reports.hpp"
 #include "wait_storage.hpp"
 #include "web_identity_state.hpp"
-#include "workflow_storage.hpp"
 #include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
 #include "flock/secret_requests.hpp"
@@ -72,8 +71,7 @@ struct Store::Impl {
                                           taskRecords,
                                           taskRouting,
                                           waitStorage,
-                                          webIdentity,
-                                          workflowStorage};
+                                          webIdentity};
     ConversationTools conversationTools{database,           attachments, conversationTurns, permissions,        path,
                                         botSettingsStorage, modelCalls,  policyApprovals,   sessionReadStorage, secretStorage};
     SessionMessageStorage sessionMessageStorage{database,
@@ -108,8 +106,6 @@ struct Store::Impl {
     AutomationStorage automationStorage;
     AttachmentStorage attachments{database};
     ConversationContextStorage conversationContextStorage{database, secretStorage, attachments};
-    WorkflowStorage workflowStorage{database,      taskRecords,       taskEvents,     journalStorage,
-                                    secretStorage, conversationTurns, taskOperations, taskRouting};
     WebIdentityState webIdentity;
     InboxStorage inboxStorage{database, secretStorage, taskRecords, waitStorage, permissions, taskOperations, policyApprovals};
     GitStorage gitStorage{database,    secretStorage,     taskRecords,  journalStorage,  webIdentity,

@@ -953,72 +953,18 @@ function sessionRow(request, session, status, tone, startedAt) {
   }
   return row;
 }
-const workflowStatusLabels = {
-  pending: 'Not started', running: 'In progress', completed: 'Done', failed: 'Failed',
-  needs_verification: 'Needs another check', stop_requested: 'Stopping', stopped: 'Stopped',
-};
-const stageStatusLabels = {
-  pending: 'Waiting', ready: 'Starting', running: 'Working', completed: 'Done', failed: 'Failed',
-  stopped: 'Stopped', stop_requested: 'Stopping', unreachable: 'Not responding',
-};
-const stageTone = (status) => ({ completed: 'done', running: 'live', ready: 'live', failed: 'failed', unreachable: 'failed', stopped: 'stopped' })[status] ?? 'waiting';
-const workflowTone = (status) => ({ running: 'live', failed: 'failed', needs_verification: 'waiting', stop_requested: 'waiting' })[status] ?? '';
-const humanStatus = (labels, status) => labels[status] ?? (status.charAt(0).toUpperCase() + status.slice(1)).replaceAll('_', ' ');
-
-function workflowInspectors(data, open) {
-  const sections = [];
-  const section = (key, title, status, tone) => {
+function conversationSummaries(compactions, open) {
+  return compactions.map((compaction) => {
     const item = node('details', 'activity-details');
-    item.dataset.inspector = key;
-    item.open = open.has(key);
+    item.dataset.inspector = `summary-${compaction.compactionId}`;
+    item.open = open.has(item.dataset.inspector);
     const summary = node('summary', 'activity');
-    const line = node('span', `activity-status ${tone}`.trim());
-    line.append(node('span', 'activity-mark'), node('span', null, status));
-    summary.append(node('span', 'activity-title', title), line);
-    item.append(summary);
-    sections.push(item);
+    const status = node('span', 'activity-status');
+    status.append(node('span', 'activity-mark'), node('span', null, `Summary of ${compaction.originalCount} messages`));
+    summary.append(node('span', 'activity-title', 'Earlier conversation'), status);
+    item.append(summary, node('p', 'activity-details-body', compaction.summary));
     return item;
-  };
-  for (const workflow of data?.workflows ?? []) {
-    const stages = workflow.stages ?? [];
-    const done = stages.filter((stage) => stage.status === 'completed' && !stage.outdated).length;
-    const status = [humanStatus(workflowStatusLabels, workflow.status), stages.length ? `${done} of ${stages.length} steps` : '']
-      .filter(Boolean).join(' · ');
-    const item = section(`workflow-${workflow.workflowId}`, workflow.request, status, workflowTone(workflow.status));
-    const list = node('ol', 'workflow-stages');
-    for (const stage of stages) {
-      const verdict = stage.currentVerdict;
-      const row = node('li', 'workflow-stage');
-      row.dataset.tone = stage.outdated ? 'waiting' : stageTone(stage.status);
-      const notes = [];
-      if (verdict) notes.push(verdict === 'pass' ? ['Check passed', 'pass'] : ['Check failed', 'fail']);
-      if (stage.outdated) notes.push(['Needs a rerun after earlier changes', 'warn']);
-      if (stage.deadlineExceeded) notes.push(['Taking longer than planned', 'warn']);
-      if (stage.stopRequested && stage.status === 'unreachable') notes.push(['Stop requested', 'warn']);
-      const text = node('span', 'workflow-stage-text');
-      const head = node('span', 'workflow-stage-head');
-      head.append(node('span', 'workflow-stage-name', stage.name), node('span', 'workflow-stage-status', humanStatus(stageStatusLabels, stage.status)));
-      text.append(head);
-      for (const [note, tone] of notes) {
-        const line = node('span', 'workflow-stage-note', note);
-        line.dataset.tone = tone;
-        text.append(line);
-      }
-      const link = linkToRun(stage.runRef, 'Open');
-      if (link) head.append(link);
-      row.append(node('span', 'workflow-stage-mark'), text);
-      const versions = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
-        .filter(Boolean).join(' · ');
-      if (versions) row.setAttribute('aria-description', versions);
-      list.append(row);
-    }
-    item.append(list);
-  }
-  for (const summary of data?.compactions ?? []) {
-    const item = section(`summary-${summary.compactionId}`, 'Earlier conversation', `Summary of ${summary.originalCount} messages`, '');
-    item.append(node('p', 'activity-details-body', summary.summary));
-  }
-  return sections;
+  });
 }
 function finishedSessionRow(request, session) {
   const startedAt = Date.parse(session.createdAt);
@@ -1172,13 +1118,13 @@ function renderActivity() {
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
   if (changed('sessions', view?.id, loading, canStop, history, activeTasks, parallelTasks,
-    data?.workflows, data?.compactions, dayFormat.format(Date.now()))) {
+    data?.compactions, dayFormat.format(Date.now()))) {
     const revealedSessions = previousSessionsLoading && !loading;
     previousSessionsLoading = loading;
     const rows = requestGroups(history, activeTasks, parallelTasks, canStop);
     const list = elements['session-list'];
     const open = new Set(Array.from(list.querySelectorAll('details[open]'), (item) => item.dataset.inspector));
-    rows.push(...workflowInspectors(data, open));
+    rows.push(...conversationSummaries(data?.compactions ?? [], open));
     list.setAttribute('aria-busy', loading);
     list.replaceChildren(...rows);
     if (loading) list.append(...skeletonRows(2));

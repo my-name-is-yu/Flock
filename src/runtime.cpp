@@ -47,7 +47,6 @@ struct Runtime::Impl {
     GitStorage& gitStorage;
     TaskEvents& taskEvents;
     TaskRecords& taskRecords;
-    WorkflowStorage& workflowStorage;
     Policy policy;
     Model& model;
     T3& t3;
@@ -81,23 +80,21 @@ struct Runtime::Impl {
     Impl(StoreAccess::Impl& storage, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
         : database(storage.database), waitStorage(storage.waitStorage), channelStorage(storage.channelStorage),
           conversationTurns(storage.conversationTurns), gitStorage(storage.gitStorage), taskEvents(storage.taskEvents),
-          taskRecords(storage.taskRecords), workflowStorage(storage.workflowStorage), policy(storage.permissions), model(m), t3(adapter),
-          soul(std::move(loader)), options(withDefaultBotTools(std::move(opts))),
-          maintenance(storage.database, storage.automationStorage, storage.workflowStorage, storage.policyApprovals, options.clock,
-                      options.automationError, options.storageContention),
-          prompts(storage.database, storage.secretStorage, storage.memoryStorage, storage.taskEvents, storage.workflowStorage, soul),
+          taskRecords(storage.taskRecords), policy(storage.permissions), model(m), t3(adapter), soul(std::move(loader)),
+          options(withDefaultBotTools(std::move(opts))), maintenance(storage.database, storage.automationStorage, storage.policyApprovals,
+                                                                     options.clock, options.automationError, options.storageContention),
+          prompts(storage.database, storage.secretStorage, storage.memoryStorage, storage.taskEvents, soul),
           updates(storage.database, storage.journalStorage, storage.taskEvents, storage.taskRecords),
           questions(storage.database, storage.waitStorage), history(storage.database, t3, policy, updates, options.sessionRead),
-          reports(storage.database, storage.journalStorage, storage.taskEvents, storage.workflowStorage, t3, policy, updates, history,
-                  options.clock),
+          reports(storage.database, storage.journalStorage, storage.taskEvents, t3, policy, updates, history, options.clock),
           peerExchanges(storage.database, storage.botLifecycle, storage.conversationTurns, storage.journalStorage, storage.peerStorage,
                         storage.taskEvents, storage.taskOperations, storage.taskRecords, storage.taskRouting, storage.waitStorage, policy,
                         updates, reports, history, options.peers),
           workers(storage.conversationTurns, storage.sessionMessageStorage, storage.sessionParticipationStorage, channelStorage, t3,
                   maintenance),
           runs(storage.database, storage.journalStorage, storage.peerStorage, storage.secretStorage, storage.taskEvents,
-               storage.taskRecords, storage.waitStorage, storage.outboxStorage, storage.workflowStorage, t3, updates, questions, reports,
-               peerExchanges, options.clock, workers.stopToken()),
+               storage.taskRecords, storage.waitStorage, storage.outboxStorage, t3, updates, questions, reports, peerExchanges,
+               options.clock, workers.stopToken()),
           dispatch(storage.database, storage.botLifecycle, storage.conversationTurns, storage.journalStorage, storage.path,
                    storage.policyApprovals, storage.sessionParticipationStorage, storage.sessionReadStorage, storage.taskEvents,
                    storage.taskRecords, storage.taskRouting, storage.taskRunReports, storage.waitStorage, storage.outboxStorage, t3, policy,
@@ -111,8 +108,8 @@ struct Runtime::Impl {
                    storage.taskRecords, storage.taskRouting, storage.waitStorage, storage.memoryStorage, model, soul, options.clock,
                    options.gitHost.get(), options.sessionRead, workers.stopToken(), updates, reports, history, peerExchanges, runs, prompts,
                    decisions, storage.botSetup, options.intake, t3, options.requireT3Connection),
-          taskScheduler(storage.database, storage.taskEvents, storage.taskRouting, t3, updates, dispatch, options.requireT3Connection,
-                        options.clock, workers.stopToken()),
+          taskScheduler(storage.database, storage.taskEvents, storage.taskRouting, t3, updates, options.requireT3Connection, options.clock,
+                        workers.stopToken()),
           lock(storage.database, storage.path, storage.policyApprovals, options.clock) {}
 
     ~Impl() { workers.drain(taskTurn); }
@@ -128,9 +125,7 @@ struct Runtime::Impl {
             return;
         }
         if (!task.runResults().empty()) return;
-        if (task.pendingStageReport)
-            updates.change(task, [&](TaskData& current) { return workflowStorage.settleStageReport(current); });
-        else if (runs.shouldStop(task))
+        if (runs.shouldStop(task))
             dispatch.stop(task);
         else if (task.pendingRunReport)
             reports.recoverRunReport(task);
@@ -141,7 +136,7 @@ struct Runtime::Impl {
             if (task.state != TaskState::deciding) return;
             if (!decisions.resumeGitApproval(task)) {
                 const auto defaults = task.freshContextRequested && task.newSessionRequired ? taskTurn.launchDefaults(task) : std::nullopt;
-                if (!decisions.continueStage(task, defaults ? &*defaults : nullptr)) taskTurn.decide(task);
+                if (!decisions.continueFreshSession(task, defaults ? &*defaults : nullptr)) taskTurn.decide(task);
             }
         } else {
             if (task.activeRun && (state == TaskState::running || state == TaskState::waiting || state == TaskState::sending) &&
@@ -193,7 +188,6 @@ void Runtime::tick() {
     p_->workers.wakeSessions();
     for (const auto& [bot, id] : p_->conversationTurns.pendingConversations(runtime::Workers::batchLimit, p_->options.clock()))
         p_->runTurn(id);
-    p_->maintenance.advanceWorkflows();
     for (const auto& work :
          p_->taskScheduler.nextBatch(runtime::Workers::batchLimit, [this](const auto& job) { return p_->workers.isActive(job); }))
         p_->step(work);
@@ -208,7 +202,6 @@ void Runtime::tickConcurrent() {
     p_->workers.startChannels();
     p_->workers.stepSessionWake();
     p_->workers.startConversations(p_->options.clock, [impl = p_.get()](Id id) { impl->runTurn(id); });
-    p_->maintenance.advanceWorkflowsIfChanged();
     p_->maintenance.deferContendedWork("task scheduling", [&] {
         p_->taskTurn.persistTaskInferences();
         p_->workers.startTasks(p_->taskScheduler, [impl = p_.get()](const auto& work) { impl->step(work); });

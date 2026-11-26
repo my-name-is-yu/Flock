@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 26;
+constexpr Id schemaVersion = 27;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -21,7 +21,7 @@ CREATE TABLE tasks(
   pending_environment_id TEXT, pending_project_id TEXT, pending_gateway_environment_id TEXT,
   pending_pinned INTEGER CHECK(pending_pinned IN (0,1)),
   active_run TEXT, active_thread_id TEXT, active_run_id TEXT, last_run TEXT,
-  action_id TEXT NOT NULL, workflow_id INTEGER, workflow_stage_id TEXT, workflow_artifact_version TEXT, trigger_data TEXT,
+  action_id TEXT NOT NULL, trigger_data TEXT,
   origin_environment_id TEXT, origin_thread_id TEXT, origin_gateway_environment_id TEXT, origin_title TEXT,
   selected_environment_id TEXT, selected_thread_id TEXT, selected_gateway_environment_id TEXT, selected_project_id TEXT,
   run_outcome TEXT, external_check_at INTEGER, data TEXT NOT NULL,
@@ -47,7 +47,7 @@ CREATE TABLE journal(
   exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
   git_event_id TEXT, operation_id TEXT,
   reply_to_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
-  session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER, workflow_outcome TEXT,
+  session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER,
   CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
 CREATE INDEX journal_task ON journal(task_id,id);
 CREATE UNIQUE INDEX bot_setup_operation ON journal(operation_id) WHERE kind='bot_setup_updated';
@@ -315,39 +315,6 @@ CREATE VIEW compactable_messages AS
             OR (j.kind='waiting' AND j.wait_reason='user_question')
             OR (j.kind='user_answer' AND j.user_answer_conversation IS NOT 1)));
 
-CREATE TABLE workflows(
-        id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,routing TEXT NOT NULL,request TEXT NOT NULL,
-        message_id INTEGER NOT NULL REFERENCES messages,stop_requested INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE workflow_stages(workflow_id INTEGER NOT NULL REFERENCES workflows,
-        stage_id TEXT NOT NULL,spec TEXT NOT NULL,task_id INTEGER UNIQUE REFERENCES tasks,result_id INTEGER REFERENCES journal,instruction TEXT,status TEXT NOT NULL DEFAULT 'pending',
-        input TEXT NOT NULL DEFAULT '',output TEXT NOT NULL DEFAULT '',deadline INTEGER NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0,
-        confirmed_state TEXT NOT NULL DEFAULT '',confirmed_at INTEGER NOT NULL DEFAULT 0,unreachable INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY(workflow_id,stage_id));
-CREATE TABLE workflow_dependencies(
-        workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,parent_id TEXT NOT NULL,report_id INTEGER REFERENCES journal,
-        artifact_version TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY(workflow_id,stage_id,parent_id),
-        FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages,
-        FOREIGN KEY(workflow_id,parent_id) REFERENCES workflow_stages);
-CREATE VIEW outdated_workflow_stages AS
-        WITH RECURSIVE outdated(workflow_id,stage_id) AS (
-          SELECT d.workflow_id,d.stage_id FROM workflow_dependencies d JOIN workflow_stages p
-            ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
-            WHERE d.report_id IS NOT NULL AND (p.status<>'completed' OR p.output<>d.artifact_version
-              OR (p.result_id IS NOT d.report_id AND
-                  (d.artifact_version='' OR json_extract(p.spec,'$.role') NOT IN ('implement','verify'))))
-          UNION
-          SELECT d.workflow_id,d.stage_id FROM workflow_dependencies d JOIN outdated p
-            ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id)
-        SELECT * FROM outdated;
-CREATE TABLE workflow_artifacts(
-        report_id INTEGER PRIMARY KEY REFERENCES journal,workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,
-        version TEXT NOT NULL,FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages);
-CREATE TABLE workflow_verdicts(
-        report_id INTEGER PRIMARY KEY REFERENCES journal,workflow_id INTEGER NOT NULL,stage_id TEXT NOT NULL,
-        version TEXT NOT NULL,verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail')),
-        FOREIGN KEY(workflow_id,stage_id) REFERENCES workflow_stages);
-
 CREATE TABLE memory_documents(
   doc_key TEXT PRIMARY KEY, scope_kind TEXT NOT NULL, owner_bot TEXT, doc_id TEXT NOT NULL,
   content TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL,
@@ -462,9 +429,8 @@ WITH queue AS (
   FROM project_route_queue
 )
 SELECT q.id,q.environment_id,q.project_id,q.action_id,
-       CASE WHEN q.id<>q.head_id AND (owner.workflow_id IS NULL OR owner.workflow_id IS NOT t.workflow_id)
-       THEN q.head_id END AS blocker_id
-FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
+       CASE WHEN q.id<>q.head_id THEN q.head_id END AS blocker_id
+FROM queue q;
 CREATE VIEW task_project_slots AS
 SELECT id,CASE WHEN count(blocker_id)=count(*) THEN min(blocker_id) END AS blocker_id
 FROM project_route_slots GROUP BY id;

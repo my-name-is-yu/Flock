@@ -644,11 +644,6 @@ void responseContract() {
                    "read_result",
                    "find_tasks",
                    "reply",
-                   "start_workflow",
-                   "workflow_status",
-                   "instruct_workflow_stage",
-                   "stop_workflow_stage",
-                   "stop_workflow",
                    "compact_conversation",
                    "expand_context",
                    "continue_fresh_session",
@@ -673,11 +668,6 @@ void responseContract() {
     const auto turn = responseRequest(input);
     const auto turnTool = [&](std::string_view name) -> const Json& { return toolParameters(turn, name); };
     check(turn.at("tools").at(0).at("tools").size() == input.tools.size() &&
-              turnTool("start_workflow")["properties"]["stages"]["items"]["required"] == Json::array({"stageId", "role"}) &&
-              turnTool("workflow_status")["required"].back() == "workflowId" &&
-              turnTool("instruct_workflow_stage")["required"].back() == "instruction" &&
-              turnTool("stop_workflow_stage")["required"].back() == "stageId" &&
-              turnTool("stop_workflow")["required"].back() == "workflowId" &&
               turnTool("compact_conversation")["required"].back() == "summary" &&
               turnTool("expand_context")["properties"].contains("compactionId") &&
               turnTool("continue_fresh_session")["required"].back() == "taskId" &&
@@ -688,6 +678,7 @@ void responseContract() {
               turnTool("start_task")["required"] == Json::array({"request"}) &&
               turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&
               turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
+              turnTool("start_task")["properties"]["sourceResultMessageId"]["type"] == "integer" &&
               turnTool("start_task")["properties"]["environments"]["minItems"] == 1 &&
               !turnTool("start_task")["properties"]["environments"].contains("maxItems") &&
               turnTool("start_task")["properties"]["commit"]["type"] == "string" &&

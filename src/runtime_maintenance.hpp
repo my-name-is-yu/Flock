@@ -14,21 +14,18 @@ namespace flockv0 {
 class Database;
 
 class AutomationStorage;
-class WorkflowStorage;
 class PolicyApprovals;
 
 class runtime::Maintenance {
     using ErrorReporter = std::function<void(std::string_view)>;
 public:
-    Maintenance(Database&, AutomationStorage&, WorkflowStorage&, PolicyApprovals&, const std::function<Seconds()>& clock,
+    Maintenance(Database&, AutomationStorage&, PolicyApprovals&, const std::function<Seconds()>& clock,
                 const ErrorReporter& automationError, const ErrorReporter& storageContention);
 
     Seconds settleApprovals();
     std::optional<Seconds> fireDueAutomations();
-    Seconds advanceWorkflows();
     void settleApprovalsIfChanged();
     void fireDueAutomationsIfChanged();
-    void advanceWorkflowsIfChanged();
 
     void deferContendedWork(std::string_view operation, const auto& work) {
         try {
@@ -49,11 +46,10 @@ private:
 
     Database& database;
     AutomationStorage& automationStorage;
-    WorkflowStorage& workflowStorage;
     PolicyApprovals& approvals;
     const std::function<Seconds()>& clock;
     const ErrorReporter& automationError;
     const ErrorReporter& storageContention;
-    std::optional<ScanStamp> approvalsCheckedAt, automationsCheckedAt, workflowsCheckedAt;
+    std::optional<ScanStamp> approvalsCheckedAt, automationsCheckedAt;
 };
 }

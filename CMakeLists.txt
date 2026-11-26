@@ -72,7 +72,7 @@ flock_fetch_cmark()
 
 add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/journal.cpp src/task_storage.cpp src/task_context.cpp src/task_interaction.cpp src/wait.cpp src/outbox.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
-                       src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_calls.cpp src/channels.cpp src/local_machine.cpp
+                       src/context_compaction.cpp src/session_read.cpp src/model_calls.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/runtime_maintenance.cpp src/runtime_task_scheduler.cpp src/runtime_lifecycle.cpp
                        src/runtime_task_turn.cpp
                        src/runtime_task_decisions.cpp
@@ -145,10 +145,10 @@ if(BUILD_TESTING)
   flock_replay_model(automation_notes_edit_historical verify-automation-routing --historical=notes-edit
     "An edited automation stayed outside the queue after the project became idle")
 
-  add_executable(flock_workflow_context tests/workflow_context.cpp)
-  target_link_libraries(flock_workflow_context PRIVATE flock_core)
-  target_compile_options(flock_workflow_context PRIVATE -Wall -Wextra -Wpedantic)
-  add_test(NAME flock_workflow_context COMMAND flock_workflow_context)
+  add_executable(flock_conversation_context tests/conversation_context.cpp)
+  target_link_libraries(flock_conversation_context PRIVATE flock_core)
+  target_compile_options(flock_conversation_context PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_conversation_context COMMAND flock_conversation_context)
   add_executable(flock_memory_automation tests/memory_automation.cpp)
   target_link_libraries(flock_memory_automation PRIVATE flock_core)
   target_compile_options(flock_memory_automation PRIVATE -Wall -Wextra -Wpedantic)

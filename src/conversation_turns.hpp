@@ -44,7 +44,6 @@ class TaskRecords;
 class TaskRouting;
 class WaitStorage;
 struct WebIdentityState;
-class WorkflowStorage;
 class GitHost;
 class Model;
 class T3;
@@ -82,7 +81,7 @@ public:
                         PeerStorage& peerStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
                         SessionMessageStorage& sessionMessageStorage, SessionParticipationStorage& sessionParticipationStorage,
                         SessionReadStorage& sessionReadStorage, TaskOperations& taskOperations, TaskRecords& taskRecords,
-                        TaskRouting& taskRouting, WaitStorage& waitStorage, WebIdentityState& webIdentity, WorkflowStorage& workflowStorage)
+                        TaskRouting& taskRouting, WaitStorage& waitStorage, WebIdentityState& webIdentity)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
           botAccess(botAccess), botSettingsStorage(botSettingsStorage), botSetup(botSetup), channelStorage(channelStorage),
           conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
@@ -90,7 +89,7 @@ public:
           modelCalls(modelCalls), peerStorage(peerStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
           sessionMessageStorage(sessionMessageStorage), sessionParticipationStorage(sessionParticipationStorage),
           sessionReadStorage(sessionReadStorage), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
-          waitStorage(waitStorage), webIdentity(webIdentity), workflowStorage(workflowStorage) {}
+          waitStorage(waitStorage), webIdentity(webIdentity) {}
 
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
                  conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&, const Json& attachments);
@@ -162,6 +161,5 @@ private:
     TaskRouting& taskRouting;
     WaitStorage& waitStorage;
     WebIdentityState& webIdentity;
-    WorkflowStorage& workflowStorage;
 };
 }

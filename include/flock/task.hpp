@@ -106,7 +106,7 @@ struct TaskData {
     std::optional<std::string> replanningDetail{}, cancellationDetail{};
     std::vector<OutboxInstruction> pendingInstructions{}, cancelledInstructions{};
     std::optional<PendingRunReport> pendingRunReport{};
-    std::optional<std::int64_t> pendingStageReport{}, t3CheckAt{};
+    std::optional<std::int64_t> t3CheckAt{};
     std::optional<WorkSession> selectedSession{};
     std::optional<SessionOrigin> sessionOrigin{};
     bool newSessionRequired = false, freshContextRequested = false;
@@ -125,7 +125,6 @@ struct TaskData {
     std::vector<OutboxSource> sourceResultRefs{};
     std::optional<TaskRestart> restartContext{};
     std::optional<TaskTrigger> trigger{};
-    std::optional<TaskWorkflow> workflow{};
     std::optional<TaskPeerOutcome> peerOutcome{};
     nlohmann::json config = nlohmann::json::object();
 

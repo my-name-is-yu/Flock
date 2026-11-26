@@ -25,10 +25,6 @@ constexpr std::array evidenceKinds{
     std::pair{CompletionEvidenceKind::peer_report, "peer_report"sv},
     std::pair{CompletionEvidenceKind::session_read, "session_read"sv},
 };
-constexpr std::array workflowOutcomes{
-    std::pair{WorkflowCompletionOutcome::completed, "completed"sv},
-    std::pair{WorkflowCompletionOutcome::failed, "failed"sv},
-};
 
 Json evidenceJson(const CompletionEvidence& evidence) {
     Json data{{"environmentId", evidence.environmentId},
@@ -91,22 +87,14 @@ CompletionEntry readCompletion(const Json& data, const RecordDecoder& row) {
         return {std::move(text), revision,
                 FanoutCompletion{row.get<std::string>(data, "doneWhen"), decodeRunOutcome(*outcome, row),
                                  row.optional<std::string>(data, "requestedCommit")}};
-    if (auto reason = row.optional<std::string>(data, "reason"))
-        return {std::move(text), revision,
-                TaskCompletion{std::move(*reason), row.get<std::string>(data, "doneWhen"), readCompletionProvenance(data, row)}};
-    auto run = decodeOutboxSourceRun(row.require(data, "source"), row.nested("source"));
-    std::optional<WorkflowCompletionOutcome> outcome;
-    if (const auto state = row.optional<std::string>(data, "workflowOutcome")) {
-        outcome = enumValue(workflowOutcomes, *state);
-        if (!outcome) row.fail("workflowOutcome", "unknown workflow outcome");
-    }
-    return {std::move(text), revision, WorkflowCompletion{std::move(run), outcome}};
+    return {
+        std::move(text), revision,
+        TaskCompletion{row.get<std::string>(data, "reason"), row.get<std::string>(data, "doneWhen"), readCompletionProvenance(data, row)}};
 }
 }
 
 const OutboxSourceRun* CompletionEntry::source() const {
     if (const auto* task = std::get_if<TaskCompletion>(&details)) return std::get_if<OutboxSourceRun>(&task->provenance);
-    if (const auto* workflow = std::get_if<WorkflowCompletion>(&details)) return &workflow->source;
     return nullptr;
 }
 
@@ -119,14 +107,11 @@ Json encodeCompletion(const CompletionEntry& entry) {
     Json data{{"text", entry.text}, {"revisionId", entry.revisionId ? Json(*entry.revisionId) : Json(nullptr)}};
     if (const auto* task = std::get_if<TaskCompletion>(&entry.details)) {
         encodeTaskDetails(data, *task);
-    } else if (const auto* fanout = std::get_if<FanoutCompletion>(&entry.details)) {
-        data["doneWhen"] = fanout->doneWhen;
-        data["runOutcome"] = runOutcomeName(fanout->outcome);
-        if (fanout->requestedCommit) data["requestedCommit"] = *fanout->requestedCommit;
     } else {
-        const auto& workflow = std::get<WorkflowCompletion>(entry.details);
-        data["source"] = sourceRunJson(workflow.source);
-        if (workflow.outcome) data["workflowOutcome"] = enumName(workflowOutcomes, *workflow.outcome);
+        const auto& fanout = std::get<FanoutCompletion>(entry.details);
+        data["doneWhen"] = fanout.doneWhen;
+        data["runOutcome"] = runOutcomeName(fanout.outcome);
+        if (fanout.requestedCommit) data["requestedCommit"] = *fanout.requestedCommit;
     }
     return data;
 }
@@ -181,10 +166,7 @@ Json encodeJournalDecision(const DecisionEntry& entry) {
 }
 
 Id JournalStorage::journal(Id task, const CompletionEntry& entry) {
-    JournalKeys keys{.revisionId = entry.revisionId};
-    if (const auto* workflow = std::get_if<WorkflowCompletion>(&entry.details); workflow && workflow->outcome)
-        keys.workflowOutcome = enumName(workflowOutcomes, *workflow->outcome);
-    const auto id = database.writeJournal(task, JournalKind::completed, encodeCompletion(entry), keys);
+    const auto id = database.writeJournal(task, JournalKind::completed, encodeCompletion(entry), {.revisionId = entry.revisionId});
     channelStorage.queueChannelTaskUpdate(task, id, entry.text);
     return id;
 }

@@ -179,8 +179,8 @@ INSERT INTO journal(task_id,time,kind,data,conversation_bot_id,wait_id,wait_reas
                     action_id,run_environment_id,run_thread_id,run_id,run_gateway_id,result_run_id,run_status,revision_id,stop_requested,
                     message_id,instruction_step,exchange_id,peer_message_id,forwarded_source_message_id,
                     git_event_id,operation_id,reply_to_message_id,task_question_message_id,conversation_route,
-                    conversation_status,session_participation_id,session_stop_id,feedback_event_id,workflow_outcome)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    conversation_status,session_participation_id,session_stop_id,feedback_event_id)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 )SQL",
          {sqlValue(task),
           unixTime(),
@@ -212,8 +212,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           sqlValue(keys.conversationStatus),
           sqlValue(keys.sessionParticipationId),
           sqlValue(keys.sessionStopId),
-          sqlValue(keys.feedbackEventId),
-          sqlValue(keys.workflowOutcome)});
+          sqlValue(keys.feedbackEventId)});
     return last();
 }
 

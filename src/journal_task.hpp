@@ -43,17 +43,10 @@ struct FanoutCompletion {
     std::optional<std::string> requestedCommit;
 };
 
-enum class WorkflowCompletionOutcome { completed, failed };
-
-struct WorkflowCompletion {
-    OutboxSourceRun source;
-    std::optional<WorkflowCompletionOutcome> outcome;
-};
-
 struct CompletionEntry {
     std::string text;
     std::optional<Id> revisionId;
-    std::variant<TaskCompletion, FanoutCompletion, WorkflowCompletion> details;
+    std::variant<TaskCompletion, FanoutCompletion> details;
     const OutboxSourceRun* source() const;
 };
 
