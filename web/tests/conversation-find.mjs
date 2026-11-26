@@ -1,8 +1,11 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 
 async function exercise(mountConversationFind) {
   const $ = (selector) => document.querySelector(selector);
@@ -34,7 +37,7 @@ async function exercise(mountConversationFind) {
       if (scope === triage) return Promise.resolve({ events: [item(3, 'Triage update')], olderBefore: 0 });
       if (!before) return Promise.resolve({ events: [item(40, 'Handoff [draft] today'),
         item(41, 'Use the [redacted] marker in exported reports.'), item(42, 'Handoff [draft]', 'bot_message'),
-        ...Array.from({ length: 5 }, (_, index) => item(43 + index, `Short window match ${index + 1}`)),
+        ...Array.from({ length: 7 }, (_, index) => item(43 + index, `Short window match ${index + 1}`)),
       ], olderBefore: 40 });
       if (before === 40) return Promise.resolve({ events: [item(11, 'Old handoff [draft] <img src=x>')], olderBefore: 11 });
       const run = { environmentId: 'local', threadId: 'release', runId: 'run' };
@@ -82,11 +85,9 @@ async function exercise(mountConversationFind) {
   check(status.textContent === '2 of 3 matches' && calls.at(-1).before === 9 && more.hidden,
     'Earlier search did not continue from its own cursor or settle the final count');
   $('.find-next').click();
-  key(input, 'Enter');
-  check(opened.at(-1)[1] === 7, 'Next did not select the earliest result');
+  check(opened.at(-1)[1] === 7, 'Next did not immediately jump to the earliest result');
   $('.find-previous').click();
-  key(input, 'Enter');
-  check(opened.at(-1)[1] === 11, 'Previous did not return to the older result');
+  check(opened.at(-1)[1] === 11, 'Previous did not immediately jump to the older result');
 
   const literalQuery = 'the [redacted] marker';
   type(literalQuery);
@@ -150,13 +151,13 @@ async function exercise(mountConversationFind) {
   type('Short window match');
   await wait();
   const results = $('.find-results');
-  for (let index = 0; index < 4; index++) key(input, 'ArrowDown');
+  for (let index = 0; index < 6; index++) key(input, 'ArrowDown');
   const selected = $('.find-match[aria-current="true"]').getBoundingClientRect();
   const list = results.getBoundingClientRect();
   const panelBottom = panel.getBoundingClientRect().bottom;
-  check(results.children.length === 5 && results.scrollTop > 0 &&
+  check(results.children.length === 7 && results.scrollTop > 0 &&
     selected.top >= list.top - 1 && selected.bottom <= list.bottom + 1,
-    'Keyboard navigation must scroll the selected result into view');
+    'Keyboard navigation must render all matches and scroll the selected result into view');
   const available = $('#jump-to-latest').getBoundingClientRect().top - panelBottom;
   check(!more.hidden && more.getBoundingClientRect().bottom < panelBottom,
     'Search earlier must stay visible inside Find');
@@ -195,4 +196,89 @@ try {
   if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the find checks');
 } finally {
   rmSync(directory, { recursive: true, force: true });
+}
+
+function appFixtures() {
+  window.EventSource = undefined;
+  const bot = { id: 'release', name: 'Release', model: 'demo', paused: false, canDelete: true, presence: 'idle' };
+  const time = Math.floor(Date.now() / 1000) - 600;
+  const longText = Array.from({ length: 24 }, (_, i) => `Long line ${i + 1} for folding needlecheck`).join('\n');
+  const events = [
+    { id: 1, kind: 'conversation_message', time, data: { text: longText } },
+    { id: 2, kind: 'conversation_reply', time: time + 10, data: { text: 'Second match needlecheck' } },
+  ];
+  window.fetch = async (path) => {
+    if (path === '/api/bots') return Response.json([bot]);
+    if (path === '/api/inbox') return Response.json({ items: [] });
+    if (path.startsWith('/api/schedules?')) return Response.json({ active: [], history: [], canManage: true });
+    if (path.startsWith('/api/view?')) {
+      return Response.json({
+        bot, events, olderBefore: 0, presence: 'idle', activeSessions: [], activeTasks: [], parallelTasks: [],
+        sessionTasks: [], sessionsBefore: 0, sessionCursor: 0, waits: [], canDecide: true,
+        composerPerson: 'local-owner', limits: { messageBytes: 16000, waitAnswerBytes: 8000, attachments: 4 },
+      });
+    }
+    if (path.startsWith('/api/conversation?')) return Response.json({ events, olderBefore: 0 });
+    return Response.json({ error: 'unknown_path' }, { status: 404 });
+  };
+}
+
+async function exerciseAppFolding() {
+  const $ = (selector) => document.querySelector(selector);
+  const check = (value, message) => { if (!value) throw new Error(message); };
+  async function waitFor(predicate, message) {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 15));
+    }
+    check(predicate(), message);
+  }
+  await waitFor(() => $('#event-1 .bubble[data-fold="folded"]') && $('#find-conversation'),
+    'Long message did not initially fold');
+  $('#find-conversation').click();
+  await waitFor(() => !$('#conversation-find').hidden, 'Find panel did not open');
+  const search = $('#conversation-find input');
+  search.value = 'needlecheck';
+  search.dispatchEvent(new Event('input', { bubbles: true }));
+  await waitFor(() => document.querySelectorAll('.find-match').length === 2, 'Find did not return both matches');
+  // First match is #event-2 (newest); clicking next jumps to #event-1 and unfolds it.
+  $('.find-next').click();
+  await waitFor(() => $('#event-1')?.classList.contains('conversation-source-target'),
+    'Next match button did not jump to the folded message');
+  check($('#event-1 .bubble')?.dataset.fold === 'unfolded', 'Jumping to a folded match did not unfold it');
+}
+
+const appIndex = read('index.html').replace('<script type="module" src="/app.js"></script>', `
+  <script>(${appFixtures})();</script>
+  <script type="module">
+    import '/app.js';
+    try {
+      await (${exerciseAppFolding})();
+      document.documentElement.dataset.flockResult = 'pass';
+    } catch (error) {
+      document.documentElement.dataset.flockResult = error?.stack || error?.message || String(error);
+    }
+  </script>`);
+const contentTypes = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
+const server = createServer((request, response) => {
+  const { pathname } = new URL(request.url, 'http://localhost');
+  try {
+    response.setHeader('Content-Type', pathname === '/' ? 'text/html' : contentTypes[extname(pathname)] ?? 'application/octet-stream');
+    response.end(pathname === '/' ? appIndex : readFileSync(new URL(`.${pathname}`, assets)));
+  } catch {
+    response.writeHead(404).end();
+  }
+});
+const appDirectory = mkdtempSync(join(tmpdir(), 'flock-conversation-find-app-'));
+try {
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
+    '--disable-background-networking', `--user-data-dir=${appDirectory}`, '--virtual-time-budget=4000', '--dump-dom',
+    `http://127.0.0.1:${server.address().port}/?bot=release`], { encoding: 'utf8', timeout: 25000 });
+  const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
+  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish folding-on-jump checks');
+} finally {
+  server.close();
+  rmSync(appDirectory, { recursive: true, force: true });
 }
