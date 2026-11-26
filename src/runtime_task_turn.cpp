@@ -20,6 +20,7 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
+#include "flock/bot_notes_error.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 #include "flock/wait.hpp"
@@ -49,20 +50,20 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::TaskTurn::TaskTurn(Database& database, GitStorage& gitStorage, ModelCalls& modelCalls, PeerStorage& peerStorage,
-                                        SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,
-                                        TaskRouting& taskRouting, WaitStorage& waitStorage, MemoryStorage& memoryStorage, Model& model,
-                                        const SoulLoader& soul, const std::function<Seconds()>& clock, GitHost* gitHost,
-                                        const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
-                                        SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs,
-                                        SessionPrompts& prompts, TaskDecisions& decisions)
+runtime::TaskTurn::TaskTurn(Database& database, GitStorage& gitStorage, ModelCalls& modelCalls, PeerStorage& peerStorage,
+                            SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting,
+                            WaitStorage& waitStorage, MemoryStorage& memoryStorage, Model& model,
+                            const std::function<std::string(std::string_view)>& soul, const std::function<Seconds()>& clock,
+                            GitHost* gitHost, const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates,
+                            RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs,
+                            SessionPrompts& prompts, TaskDecisions& decisions)
     : database(database), gitStorage(gitStorage), modelCalls(modelCalls), peerStorage(peerStorage), secretStorage(secretStorage),
       taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), memoryStorage(memoryStorage),
       model(model), soul(soul), clock(clock), gitHost(gitHost), sessionRead(sessionRead), stop(std::move(stop)), updates(updates),
       reports(reports), sessionHistory(sessionHistory), peerExchanges(peerExchanges), runs(runs), prompts(prompts), decisions(decisions) {}
 
-std::vector<std::string> Runtime::Components::TaskTurn::available(const TaskData& task, const Json& event,
-                                                                  const std::optional<PeerExchange>& peer, bool canSend, bool canRead) {
+std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, const Json& event, const std::optional<PeerExchange>& peer,
+                                                      bool canSend, bool canRead) {
     if (!task.runTargets().empty()) return {"delegate", "ask_user"};
     const auto id = task.id;
     if (peer && peer->sender == id && peer->phase == "question") return {"reply_to_bot", "ask_user"};
@@ -86,8 +87,7 @@ std::vector<std::string> Runtime::Components::TaskTurn::available(const TaskData
     return tools;
 }
 
-void Runtime::Components::TaskTurn::recordFailure(TaskData& task, const Json& event, std::string_view detail, bool transient,
-                                                  FailureCause cause) {
+void runtime::TaskTurn::recordFailure(TaskData& task, const Json& event, std::string_view detail, bool transient, FailureCause cause) {
     const auto attempts = event["failures"].get<int>() + 1;
     const auto why = bounded(secretStorage.redactor(task.botId).text(std::string(detail)), 2048);
     database.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?",
@@ -104,15 +104,14 @@ void Runtime::Components::TaskTurn::recordFailure(TaskData& task, const Json& ev
     }
 }
 
-void Runtime::Components::TaskTurn::failure(const TaskData& task, const Json& event, std::string_view detail, bool transient,
-                                            FailureCause cause) {
+void runtime::TaskTurn::failure(const TaskData& task, const Json& event, std::string_view detail, bool transient, FailureCause cause) {
     updates.change(task, [&](TaskData& current) {
         recordFailure(current, event, detail, transient, cause);
         return true;
     });
 }
 
-std::optional<TaskDecision> Runtime::Components::TaskTurn::persistTaskInference(Id id) {
+std::optional<TaskDecision> runtime::TaskTurn::persistTaskInference(Id id) {
     const auto found = taskInferences.find(id);
     const auto& inference = found->second;
     Transaction transaction(database.db);
@@ -121,10 +120,8 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::persistTaskInference(
     std::optional<TaskDecision> decision;
     if (current.state == TaskState::deciding && current.generation == inference.generation && current.eventId == inference.eventId &&
         current.currentRevision == inference.revisionId) {
-        if (const auto* error = std::get_if<ModelError>(&inference.outcome)) {
-            const auto cause = error->code == ModelErrorCode::unsupported_reasoning_effort ? FailureCause::UnsupportedReasoningEffort
-                                                                                           : FailureCause::Model;
-            recordFailure(current, taskEvents.currentEvent(current), error->what(), error->transient, cause);
+        if (const auto* error = std::get_if<InferenceFailure>(&inference.outcome)) {
+            recordFailure(current, taskEvents.currentEvent(current), error->detail, error->transient, error->cause);
             updates.saveTask(current);
         } else {
             const auto& call = std::get<ModelCall>(inference.outcome);
@@ -137,15 +134,15 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::persistTaskInference(
     return decision;
 }
 
-void Runtime::Components::TaskTurn::persistTaskInferences() {
+void runtime::TaskTurn::persistTaskInferences() {
     std::lock_guard lock(database.mutex);
     while (!taskInferences.empty()) persistTaskInference(taskInferences.begin()->first);
 }
 
-std::optional<TaskDecision> Runtime::Components::TaskTurn::inferDecision(const TaskData& task, Json event, const Json& history,
-                                                                         const std::vector<std::string>& tools,
-                                                                         std::span<const OutboxInstruction> pending, Json choices,
-                                                                         const std::optional<PeerExchange>& peer) {
+std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& task, Json event, const Json& history,
+                                                             const std::vector<std::string>& tools,
+                                                             std::span<const OutboxInstruction> pending, Json choices,
+                                                             const std::optional<PeerExchange>& peer) {
     const auto prefill = sessionHistory.prefillHistory(task, event);
     if (prefill == SessionHistory::PrefillResult::Persisted) return std::nullopt;
     if (prefill == SessionHistory::PrefillResult::UnavailableWithSettledReport) event["historyUnavailable"] = true;
@@ -217,10 +214,12 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::inferDecision(const T
         if (turn.calls.size() == 1)
             inference.outcome = std::move(turn.calls.front());
         else
-            inference.outcome = ModelError("Return one task action", false);
+            inference.outcome = InferenceFailure{"Return one task action", false};
     } catch (const ModelError& error) {
         inference.usage = error.usage;
-        inference.outcome = error;
+        const auto cause =
+            error.code == ModelErrorCode::unsupported_reasoning_effort ? FailureCause::UnsupportedReasoningEffort : FailureCause::Model;
+        inference.outcome = InferenceFailure{error.what(), error.transient, cause};
     }
     const auto id = task.id;
     std::lock_guard lock(database.mutex);
@@ -228,7 +227,7 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::inferDecision(const T
     return persistTaskInference(id);
 }
 
-void Runtime::Components::TaskTurn::decide(const TaskData& task) {
+void runtime::TaskTurn::decide(const TaskData& task) {
     if (task.activeRun && !runs.questionStillOpen(task)) return;
     if (stop.stop_requested()) return;
     Json event, history = Json::array();

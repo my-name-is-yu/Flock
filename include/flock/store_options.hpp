@@ -16,4 +16,9 @@ struct PlannerModel {
 };
 
 using AutomationModelResolver = std::function<std::optional<PlannerModel>(std::string_view botId)>;
+
+struct StoreOptions {
+    MemorySeed memorySeed = {};
+    AutomationModelResolver automationModel = {};
+};
 }

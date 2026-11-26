@@ -7,6 +7,8 @@
 #include <system_error>
 
 namespace flockv0::session_read {
+inline constexpr unsigned pageSize = 20;
+
 inline bool contains(std::string_view text, std::string_view query) {
     const auto lower = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? c + 'a' - 'A' : c; };
     return query.empty() || std::ranges::search(text, query, {}, lower, lower).begin() != text.end();

@@ -1,7 +1,7 @@
 #include "model.hpp"
 #include "flock/base64.hpp"
 #include "flock/json.hpp"
-#include "flock/model_error.hpp"
+#include "chatgpt_failure.hpp"
 
 #include <nlohmann/json.hpp>
 #include <openssl/rand.h>

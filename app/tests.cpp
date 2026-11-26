@@ -19,16 +19,18 @@
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
+#include "flock/session_read.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
+#include "flock/store_options.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
-#include "flock/t3_session.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
 #include "flock/wait.hpp"
@@ -123,7 +125,7 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     config["modelCallLimit"] = 9;
     createBot(folder / "release", config, "", "");
     Bots bots(folder);
-    Store store(temp.path / "state.db", {}, [&](std::string_view id) { return bots.plannerModel(id); });
+    Store store(temp.path / "state.db", {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
     const auto now = utc(2026, 1, 1, 12, 0);
     const auto saved = bots.get("release").intake("");
     Automations(store).createAutomation(
@@ -171,9 +173,8 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery) {
     createBot(folder / "release", botConfig(), "Release role", "");
     createBot(folder / "triage", botConfig(), "Triage role", "");
     const Bots bots(folder);
-    Store store(
-        temp.path / "tasks.db", [&](std::string_view bot) { return bots.initialMemory(bot); },
-        [&](std::string_view bot) { return bots.plannerModel(bot); });
+    Store store(temp.path / "tasks.db", {.memorySeed = [&](std::string_view bot) { return bots.initialMemory(bot); },
+                                         .automationModel = [&](std::string_view bot) { return bots.plannerModel(bot); }});
     const auto due = utc(2026, 1, 2, 0, 0);
     const Json schedule = {{"kind", "schedule"}, {"cron", "0 0 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Daily check"}};
     for (const auto* bot : {"release", "triage"})
@@ -234,7 +235,7 @@ void notesAndRoutingOnRestart() {
     NotesT3 t3;
     Id firstId, secondId, waitId;
     {
-        Store store(db, seed);
+        Store store(db, {.memorySeed = seed});
         Runtime runtime(store, model, t3, soul);
         firstId = TaskIntake(store).submit(bots.get("first").intake("Request for first Bot"));
         runtime.tick();
@@ -247,7 +248,7 @@ void notesAndRoutingOnRestart() {
               "same-project tasks must queue across Bots");
     }
     {
-        Store store(db, seed);
+        Store store(db, {.memorySeed = seed});
         Runtime runtime(store, model, t3, soul);
         TaskControl(store).operate(localOwner, TaskTarget::from(Tasks(store).task(firstId).task, waitId), "answer", {{"text", "main"}});
         rejects<Conflict>(
@@ -274,7 +275,7 @@ void notesAndRoutingOnRestart() {
     createBot(folder / "first", botConfig("new-model"), "New SOUL would now ask for something different", "First updated memory");
     t3.finished = true;
     {
-        Store store(db, seed);
+        Store store(db, {.memorySeed = seed});
         Memory(store).memory({"fixture", true}, "first", "apply_memory_edit", {{"baseVersion", 0}, {"content", "First updated memory"}});
         Runtime runtime(store, model, t3, soul);
         for (int i = 0; i < 4; ++i) runtime.tick();
@@ -357,11 +358,11 @@ void notesAcrossConversationAndWork() {
     createBot(folder / "first", botConfig("first-model"), first.soul + "界tail", first.memory + "tail");
     createBot(folder / "second", botConfig("second-model"), second.soul, second.memory);
     const Bots bots(folder);
-    Store store(temp.path / "tasks.db", [&](std::string_view bot) {
-        auto memory = bots.initialMemory(bot);
-        if (!memory.empty()) memory += std::string(64, 'X');
-        return memory;
-    });
+    Store store(temp.path / "tasks.db", {.memorySeed = [&](std::string_view bot) {
+                    auto memory = bots.initialMemory(bot);
+                    if (!memory.empty()) memory += std::string(64, 'X');
+                    return memory;
+                }});
     NotesT3 t3;
     t3.finished = true;
     std::optional<std::string> noteReadError;
@@ -672,7 +673,7 @@ void responseContract() {
           "Session search and event schemas do not match their contracts");
     for (const auto* schema : {&search, &events}) {
         const auto& fields = schema->at("properties");
-        check(fields.at("limit").at("minimum") == 1 && fields.at("limit").at("maximum") == sessionPageLimit &&
+        check(fields.at("limit").at("minimum") == 1 && fields.at("limit").at("maximum") == session_read::pageSize &&
                   fields.at("fromTime").at("type") == "string" && fields.at("toTime").at("type") == "string" && !fields.contains("botId"),
               "Session tool bounds or authenticated identity changed");
     }

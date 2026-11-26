@@ -1,6 +1,5 @@
 #include "flock/identity.hpp"
 #include "flock/web.hpp"
-#include "flock/store.hpp"
 
 #include <filesystem>
 #include <utility>

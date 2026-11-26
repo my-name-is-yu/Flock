@@ -26,17 +26,16 @@ struct HistoryUnavailable : ModelError {
 };
 }
 
-Runtime::Components::SessionHistory::SessionHistory(Database& database, T3& t3, const Policy& policy, TaskUpdates& updates,
-                                                    const std::string& mode)
+runtime::SessionHistory::SessionHistory(Database& database, T3& t3, const Policy& policy, TaskUpdates& updates, const std::string& mode)
     : database(database), t3(t3), policy(policy), updates(updates), mode(mode) {}
 
-std::size_t Runtime::Components::SessionHistory::readOffset(const Json& args) {
+std::size_t runtime::SessionHistory::readOffset(const Json& args) {
     if (args.contains("offset") && (!args["offset"].is_number_integer() || args["offset"].get<Id>() < 0))
         throw Conflict("Invalid history offset");
     return args.value("offset", std::size_t{0});
 }
 
-SessionExcerptEntry Runtime::Components::SessionHistory::readExcerpt(std::string_view bot, const ReadRequest& req) {
+SessionExcerptEntry runtime::SessionHistory::readExcerpt(std::string_view bot, const ReadRequest& req) {
     const auto scrub = policy.secretRedactor(bot);
     const auto excerpt = [&] {
         try {
@@ -64,7 +63,7 @@ SessionExcerptEntry Runtime::Components::SessionHistory::readExcerpt(std::string
             excerpt.nextOffset > req.offset || clipped};
 }
 
-bool Runtime::Components::SessionHistory::readEvidence(const TaskData& task, const Json& event, const Json& args, const Json& usage) {
+bool runtime::SessionHistory::readEvidence(const TaskData& task, const Json& event, const Json& args, const Json& usage) {
     ReadRequest req;
     req.environmentId = task.environmentId;
     req.gatewayEnvironmentId = task.gatewayEnvironmentId.value_or("");
@@ -99,21 +98,20 @@ bool Runtime::Components::SessionHistory::readEvidence(const TaskData& task, con
     });
 }
 
-void Runtime::Components::SessionHistory::appendEventEvidence(const TaskData& task, const Json& event, const Json& entry) {
+void runtime::SessionHistory::appendEventEvidence(const TaskData& task, const Json& event, const Json& entry) {
     auto evidence = event.at("evidence");
     if (evidence.size() >= maxEvidenceReads) throw Conflict("History read allowance exhausted");
     evidence.push_back(entry);
     database.exec("UPDATE events SET evidence=? WHERE id=? AND task_id=?", {evidence, event["id"], task.id});
 }
 
-void Runtime::Components::SessionHistory::recordSessionRead(const TaskData& task, const Json& event, Json entry, const Json& usage) {
+void runtime::SessionHistory::recordSessionRead(const TaskData& task, const Json& event, Json entry, const Json& usage) {
     appendEventEvidence(task, event, entry);
     if (!usage.empty()) entry["usage"] = usage;
     database.writeJournal(task.id, "session_read", entry);
 }
 
-Runtime::Components::SessionHistory::PrefillResult Runtime::Components::SessionHistory::prefillHistory(const TaskData& task,
-                                                                                                       const Json& event) {
+runtime::SessionHistory::PrefillResult runtime::SessionHistory::prefillHistory(const TaskData& task, const Json& event) {
     if (mode != "prefill" || !event["evidence"].empty() || (event["kind"] != "result" && !event.contains("sessionResult")))
         return PrefillResult::NotNeeded;
     const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;

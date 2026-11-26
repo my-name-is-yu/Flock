@@ -2,7 +2,6 @@
 
 #include "model_calls.hpp"
 #include "flock/json.hpp"
-#include "flock/model_error.hpp"
 #include "flock/types.hpp"
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -10,9 +9,11 @@
 #include <vector>
 
 namespace flockv0 {
+enum class ModelErrorCode;
+
 struct ConversationModelFailure {
     std::optional<Seconds> retryFrom;
-    ModelErrorCode code = ModelErrorCode::inference_failed;
+    ModelErrorCode code;
 };
 
 struct ConversationModelCheckpoint {

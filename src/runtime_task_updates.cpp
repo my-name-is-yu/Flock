@@ -19,31 +19,31 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-void Runtime::Components::TaskUpdates::saveTask(TaskData& task, std::optional<DecisionCheckpoint> resumedDecision) {
+void runtime::TaskUpdates::saveTask(TaskData& task, std::optional<DecisionCheckpoint> resumedDecision) {
     if (resumedDecision) resumedDecision->generation = task.generation + 1;
     task.pendingDecision = std::move(resumedDecision);
     records.save(task);
 }
 
-void Runtime::Components::TaskUpdates::consumeEvent(TaskData& task) {
+void runtime::TaskUpdates::consumeEvent(TaskData& task) {
     task.feedback.reset();
     events.consumeEvent(task);
 }
 
-TaskData Runtime::Components::TaskUpdates::snapshot(Id id) {
+TaskData runtime::TaskUpdates::snapshot(Id id) {
     std::lock_guard lock(database.mutex);
     return loadTask(id);
 }
 
-TaskData Runtime::Components::TaskUpdates::loadTask(Id id) {
+TaskData runtime::TaskUpdates::loadTask(Id id) {
     return records.load(id);
 }
 
-bool Runtime::Components::TaskUpdates::checkpointMatches(const DecisionCheckpoint& checkpoint, const TaskData& task) {
+bool runtime::TaskUpdates::checkpointMatches(const DecisionCheckpoint& checkpoint, const TaskData& task) {
     return checkpoint.eventId == task.eventId && checkpoint.generation == task.generation && checkpoint.revisionId == task.currentRevision;
 }
 
-bool Runtime::Components::TaskUpdates::admitWork(TaskData& task, const TaskDecision& decision, bool& charge) {
+bool runtime::TaskUpdates::admitWork(TaskData& task, const TaskDecision& decision, bool& charge) {
     charge = task.lastRun || database.query("SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1", {task.id}).next();
     if (!charge) return true;
     if (task.allowance.remaining == 0) {
@@ -56,7 +56,7 @@ bool Runtime::Components::TaskUpdates::admitWork(TaskData& task, const TaskDecis
     return true;
 }
 
-void Runtime::Components::TaskUpdates::establishCriteria(TaskData& task, const Json& args) {
+void runtime::TaskUpdates::establishCriteria(TaskData& task, const Json& args) {
     if (task.currentRevision) return;
     const auto source = task.sourceMessageId.value_or(0);
     if (const auto& proposal = task.criteriaProposal)
@@ -66,13 +66,12 @@ void Runtime::Components::TaskUpdates::establishCriteria(TaskData& task, const J
     task.criteriaProposal.reset();
 }
 
-void Runtime::Components::TaskUpdates::recordDecision(const TaskData& task, const Json& event, const TaskDecision& decision,
-                                                      std::string_view action) {
+void runtime::TaskUpdates::recordDecision(const TaskData& task, const Json& event, const TaskDecision& decision, std::string_view action) {
     journal.journal(task.id, DecisionEntry{event.at("id").get<Id>(), task.currentRevision, std::string(action), decision,
                                            event.at("evidence"), decision.usage});
 }
 
-void Runtime::Components::TaskUpdates::refundUnsentWork(TaskData& task, const Outbox& action) {
+void runtime::TaskUpdates::refundUnsentWork(TaskData& task, const Outbox& action) {
     if (action.chargesBudget) {
         ++task.allowance.remaining;
         --task.allowance.additionalUsed;

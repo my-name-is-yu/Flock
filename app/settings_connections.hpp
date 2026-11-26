@@ -33,7 +33,7 @@ public:
     Json view() const;
     Json change(std::string_view section, const Json& input);
     Json botChannels(std::string_view botId) const;
-    Json changeBotChannel(std::string_view botId, const Json& input, const Store&);
+    Json changeBotChannel(std::string_view botId, const Json& input, Store&);
 private:
     struct Check {
         bool passed;

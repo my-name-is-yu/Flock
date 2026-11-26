@@ -16,6 +16,7 @@
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
+#include "flock/session_prompt.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/types.hpp"
 

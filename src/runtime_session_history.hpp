@@ -3,7 +3,6 @@
 #include "runtime_components.hpp"
 #include "journal_peer.hpp"
 #include "flock/json.hpp"
-#include "flock/t3_session.hpp"
 #include "flock/task.hpp"
 
 #include <cstddef>
@@ -15,8 +14,10 @@
 namespace flockv0 {
 class Database;
 class Policy;
+class T3;
+struct ReadRequest;
 
-class Runtime::Components::SessionHistory {
+class runtime::SessionHistory {
 public:
     enum class PrefillResult { NotNeeded, Persisted, UnavailableWithSettledReport };
     static constexpr std::size_t maxEvidenceReads = 3;

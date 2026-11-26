@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_list.hpp"
@@ -16,9 +17,10 @@
 #include "flock/policy.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
+#include "flock/store_options.hpp"
 #include "flock/t3.hpp"
-#include "flock/t3_command.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
 
@@ -113,7 +115,7 @@ const Json& lastResult(const ModelInput& input) {
 }
 
 void memoryFlow(const std::filesystem::path& db) {
-    Store store(db, [](std::string_view id) { return id == "alpha" ? "Prefer CSV.\n" : "Beta private."; });
+    Store store(db, {.memorySeed = [](std::string_view id) { return id == "alpha" ? "Prefer CSV.\n" : "Beta private."; }});
     Policy policy{store};
     const std::string path = "team/staging.md";
 
@@ -285,7 +287,7 @@ void proactiveMemory(const std::filesystem::path& db) {
     constexpr auto preferred = "Release-note format: CSV.\nKeep release notes under one page.\n";
     constexpr auto correction = "Use Markdown instead of CSV for future release notes.";
     constexpr auto corrected = "Release-note format: Markdown.\nKeep release notes under one page.\n";
-    Store store(db, [seed](auto) { return seed; });
+    Store store(db, {.memorySeed = [seed](auto) { return seed; }});
     Script model;
     Adapter adapter;
     Runtime runtime(store, model, adapter, {});
@@ -358,7 +360,7 @@ void proactiveMemory(const std::filesystem::path& db) {
 }
 
 void unavailablePreferenceReviewStillReplies(const std::filesystem::path& db) {
-    Store store(db, [](auto) { return "Prefer CSV."; });
+    Store store(db, {.memorySeed = [](auto) { return "Prefer CSV."; }});
     Policy policy{store};
     policy.submitSecret(owner, alpha.botId, policy.requestSecret(alpha.botId, {"fixture-token"}), "memory");
     Script model;
@@ -380,7 +382,7 @@ void unavailablePreferenceReviewStillReplies(const std::filesystem::path& db) {
 }
 
 void memoryRedactionLimit(const std::filesystem::path& db) {
-    Store store(db, [](auto) { return "Original"; });
+    Store store(db, {.memorySeed = [](auto) { return "Original"; }});
     Policy policy{store};
     const auto secret = policy.requestSecret(alpha.botId, {"short-fixture-value"});
     policy.submitSecret(owner, alpha.botId, secret, "z9q7");
@@ -521,18 +523,18 @@ void pausedSchedules(const std::filesystem::path& db) {
         duringDowntime = reminder(store, alpha, first + 75);
         afterResume = reminder(store, alpha, next + 15);
         reminder(store, beta, first + 15);
-        store.setBotPaused(owner, alpha.botId, true);
+        BotLifecycle(store).setBotPaused(owner, alpha.botId, true);
     }
     {
         Store restarted(db);
-        check(restarted.botPaused(alpha.botId), "Bot pause was lost on restart");
+        check(BotLifecycle(restarted).botPaused(alpha.botId), "Bot pause was lost on restart");
         Automations(restarted).fireDueAutomations(first + 15);
         check(TaskList(restarted).tasks(alpha.botId).empty() && TaskList(restarted).tasks(beta.botId).size() == 1,
               "A paused schedule fired or a different Bot's reminder was skipped");
     }
     {
         Store restarted(db);
-        restarted.setBotPaused(owner, alpha.botId, false, [&] { return resumedAt; });
+        BotLifecycle(restarted).setBotPaused(owner, alpha.botId, false, [&] { return resumedAt; });
         Automations(restarted).fireDueAutomations(resumedAt);
         check(TaskList(restarted).tasks(alpha.botId).empty(), "Resume replayed missed occurrences");
         const auto schedules = Automations(restarted).automations(owner, alpha.botId).at("automations");
@@ -675,7 +677,7 @@ void pausedWebhookFanout(const std::filesystem::path& db) {
         Policy{store}.setMember(owner, alpha.botId, sender.id, true);
         Automations(store).createAutomation(owner, alpha, trigger, now);
         Automations(store).createAutomation(owner, beta, trigger, now);
-        store.setBotPaused(owner, alpha.botId, true);
+        BotLifecycle(store).setBotPaused(owner, alpha.botId, true);
 
         const auto shared = deliver(store, owner, "shared");
         activeReceipts = shared.at("tasks");
@@ -688,7 +690,7 @@ void pausedWebhookFanout(const std::filesystem::path& db) {
     }
     {
         Store restarted(db);
-        restarted.setBotPaused(owner, alpha.botId, false, [&] { return now + 1; });
+        BotLifecycle(restarted).setBotPaused(owner, alpha.botId, false, [&] { return now + 1; });
         const auto shared = deliver(restarted, owner, "shared");
         const auto privateEvent = deliver(restarted, sender, "alpha-only");
         check(shared.at("duplicate") == true && shared.at("skippedBots") == paused && shared.at("tasks") == activeReceipts &&

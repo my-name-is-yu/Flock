@@ -62,7 +62,7 @@ void attachMetadata(SessionEvent& result, const Json& item) {
     for (const auto& file : *files) {
         auto value = attachment(file);
         if (!value) continue;
-        if (result.attachments.size() == sessionPageLimit) {
+        if (result.attachments.size() == session_read::pageSize) {
             result.attachmentsTruncated = true;
             break;
         }
@@ -83,7 +83,7 @@ std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path& dire
     return withSession(
         directory, target,
         [&](Client& client) -> std::optional<SessionMetadata> {
-            const auto page = readThread(client, target.threadId, "messages", includeMessages ? sessionPageLimit : 1,
+            const auto page = readThread(client, target.threadId, "messages", includeMessages ? session_read::pageSize : 1,
                                          includeMessages ? 240 : 1, {{"beforePosition", maxHistoryPosition}});
             const auto& thread = member(page, "thread");
             SessionMetadata metadata{str(thread, "title"),
@@ -119,7 +119,7 @@ std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path& dire
 
 std::optional<SessionEventPage> sessionEvents(const std::filesystem::path& directory, const SessionTarget& target,
                                               const SessionEventFilter& filter) {
-    if (filter.limit == 0 || filter.limit > sessionPageLimit ||
+    if (filter.limit == 0 || filter.limit > session_read::pageSize ||
         (filter.afterPosition && (*filter.afterPosition < 0 || *filter.afterPosition > maxHistoryPosition)))
         throw Failure(Failure::Kind::Settings, "Invalid Session event pagination");
     return withSession(directory, target, [&](Client& client) -> std::optional<SessionEventPage> {

@@ -27,13 +27,13 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::RunReports::RunReports(Database& database, JournalStorage& journalStorage, TaskEvents& taskEvents,
-                                            WorkflowStorage& workflowStorage, T3& t3, const Policy& policy, TaskUpdates& updates,
-                                            SessionHistory& history, const std::function<Seconds()>& clock)
+runtime::RunReports::RunReports(Database& database, JournalStorage& journalStorage, TaskEvents& taskEvents,
+                                WorkflowStorage& workflowStorage, T3& t3, const Policy& policy, TaskUpdates& updates,
+                                SessionHistory& history, const std::function<Seconds()>& clock)
     : database(database), journalStorage(journalStorage), taskEvents(taskEvents), workflowStorage(workflowStorage), t3(t3), policy(policy),
       updates(updates), history(history), clock(clock) {}
 
-void Runtime::Components::RunReports::writeRunReport(TaskData& task, const SettledRunReport& report) {
+void runtime::RunReports::writeRunReport(TaskData& task, const SettledRunReport& report) {
     const auto entry = runReportEntry(report);
     const auto& run = report.run.ref;
     if (task.state != TaskState::cancelling && !task.replanning) {
@@ -46,8 +46,8 @@ void Runtime::Components::RunReports::writeRunReport(TaskData& task, const Settl
     }
 }
 
-RunEvidence Runtime::Components::RunReports::fetchRunEvidence(const TaskData& task, const std::string& environment, RunRef source,
-                                                              std::string_view resultRunId, std::string_view status) {
+RunEvidence runtime::RunReports::fetchRunEvidence(const TaskData& task, const std::string& environment, RunRef source,
+                                                  std::string_view resultRunId, std::string_view status) {
     source.runId = resultRunId;
     RunEvidence evidence;
     try {
@@ -63,7 +63,7 @@ RunEvidence Runtime::Components::RunReports::fetchRunEvidence(const TaskData& ta
     return evidence;
 }
 
-void Runtime::Components::RunReports::recoverRunReport(const TaskData& task) {
+void runtime::RunReports::recoverRunReport(const TaskData& task) {
     const auto& pending = task.pendingRunReport.value();
     if (clock() < pending.retryAt) return;
     auto report = pending.report;
@@ -81,12 +81,11 @@ void Runtime::Components::RunReports::recoverRunReport(const TaskData& task) {
     });
 }
 
-bool Runtime::Components::RunReports::hasSettledRun(const TaskData& task) {
+bool runtime::RunReports::hasSettledRun(const TaskData& task) {
     return !task.activeRun && task.lastRun && hasRun(task.lastRun->ref);
 }
 
-std::optional<Runtime::Components::RunReports::JournalReport>
-Runtime::Components::RunReports::settledSessionReport(const TaskData& task) const {
+std::optional<runtime::RunReports::JournalReport> runtime::RunReports::settledSessionReport(const TaskData& task) const {
     if (!task.lastRun || !hasRun(task.lastRun->ref)) return std::nullopt;
     const auto& run = task.lastRun->ref;
     auto report = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
@@ -96,13 +95,12 @@ Runtime::Components::RunReports::settledSessionReport(const TaskData& task) cons
     return JournalReport{report.number(0), std::move(data)};
 }
 
-bool Runtime::Components::RunReports::sessionReportUnavailable(const TaskData& task) const {
+bool runtime::RunReports::sessionReportUnavailable(const TaskData& task) const {
     const auto report = settledSessionReport(task);
     return report && report->data.evidence.availability == RunEvidence::Availability::ReportUnavailable;
 }
 
-std::optional<Runtime::Components::RunReports::JournalReport> Runtime::Components::RunReports::reportRetry(const TaskData& task,
-                                                                                                           const Json& event) const {
+std::optional<runtime::RunReports::JournalReport> runtime::RunReports::reportRetry(const TaskData& task, const Json& event) const {
     if (!hasSettledRun(task) || task.replanning || task.newSessionRequired || task.lastRun->assignment.revisionId != task.currentRevision)
         return std::nullopt;
     auto retry = settledSessionReport(task);
@@ -133,7 +131,7 @@ AND revision_id IS ?
     return std::nullopt;
 }
 
-void Runtime::Components::RunReports::retryRunReport(const TaskData& task, const Json& event, const TaskDecision& decision) {
+void runtime::RunReports::retryRunReport(const TaskData& task, const Json& event, const TaskDecision& decision) {
     const auto retry = [&] {
         std::lock_guard lock(database.mutex);
         return reportRetry(task, event);

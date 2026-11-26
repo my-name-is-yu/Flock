@@ -5,7 +5,6 @@
 #include "journal_task.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
-#include "flock/runtime.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
@@ -30,7 +29,7 @@ class WaitStorage;
 
 struct PeerExchange;
 
-class Runtime::Components::PeerExchanges {
+class runtime::PeerExchanges {
 public:
     struct PeerResult {
         Id taskId;

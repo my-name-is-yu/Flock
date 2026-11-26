@@ -4,7 +4,6 @@
 #include "conversation_storage.hpp"
 #include "flock/git_host.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "t3_credentials.hpp"

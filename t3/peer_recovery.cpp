@@ -8,6 +8,7 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_mcp.hpp"

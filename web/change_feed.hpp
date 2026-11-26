@@ -4,7 +4,6 @@
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -22,6 +21,10 @@
 #include <utility>
 #include <variant>
 #include <vector>
+
+namespace flockv0 {
+class Store;
+}
 
 namespace flockv0::web {
 

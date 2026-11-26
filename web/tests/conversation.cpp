@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
@@ -23,7 +24,9 @@
 #include "flock/policy.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
+#include "flock/store_options.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
 #include "flock/task.hpp"
@@ -882,7 +885,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     const auto server = startWeb(store, 0, web);
     Browser browser(*server);
     if (authenticated) browser.client.set_default_headers({{"Authorization", "Bearer fixture-author"}});
-    if (access == PeerAccess::paused) store.setBotPaused(localOwner, "reviewer", true);
+    if (access == PeerAccess::paused) BotLifecycle(store).setBotPaused(localOwner, "reviewer", true);
     constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
 
     const auto hello = browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "hello"}, {"text", greeting}}, 201);
@@ -1158,7 +1161,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     writeBot("release", {{"name", "Release"}, {"allowedBots", {"verifier"}}, {"conversationEnvironments", {{"backup", "backup-env"}}}});
     writeBot("verifier", {{"name", "Verifier"}});
     const app::Bots bots(home / "bots");
-    Store store(home / "conversation.sqlite", [&](std::string_view bot) { return bots.initialMemory(bot); });
+    Store store(home / "conversation.sqlite", {.memorySeed = [&](std::string_view bot) { return bots.initialMemory(bot); }});
     std::exception_ptr fixtureError;
     app::ChatGPTModel model(credentials, [&](const app::chatgpt::HttpRequest& request) {
         try {
@@ -1732,7 +1735,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
 }
 
 void memoryAutomationEndpoints(const std::filesystem::path& path) {
-    Store store(path, [](auto) { return "Initial convention"; });
+    Store store(path, {.memorySeed = [](auto) { return "Initial convention"; }});
     auto cb = callbacks();
     cb.clock = [] { return Seconds{2'000'000'000}; };
     cb.authenticate = [](std::string_view credential) {

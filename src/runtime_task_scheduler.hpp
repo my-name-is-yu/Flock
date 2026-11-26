@@ -14,10 +14,11 @@
 
 namespace flockv0 {
 class Database;
+class T3;
 class TaskEvents;
 class TaskRouting;
 
-class Runtime::Components::TaskScheduler {
+class runtime::TaskScheduler {
 public:
     struct Work {
         Id taskId = 0;

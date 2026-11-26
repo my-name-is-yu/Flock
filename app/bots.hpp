@@ -4,8 +4,6 @@
 #include "flock/bot_profile.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
-#include "flock/policy.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
@@ -18,6 +16,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace flockv0 {
+class Store;
+}
 
 namespace flockv0::app {
 struct Bot {
@@ -43,8 +45,7 @@ public:
     Json skillCards() const;
     void apply(const BotChange&);
     bool reconcileCreation(const BotChange&);
-    Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt,
-                const Policy::PublishOwnedBot& publishOwned = {});
+    Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt, const PublishOwnedBot& publishOwned = {});
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     Json updateRunSettings(Store&, std::string_view id, const Json& settings, Seconds now, const ScheduleReporter&,
                            const Json& modelCatalog = Json::array());

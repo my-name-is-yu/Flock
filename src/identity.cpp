@@ -4,7 +4,6 @@
 #include "web_identity_state.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 
 #include <filesystem>

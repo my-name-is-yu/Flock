@@ -37,12 +37,10 @@
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
-#include "flock/store.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
-#include "flock/t3.hpp"
 #include "flock/decision.hpp"
 #include "flock/task.hpp"
 #include "flock/wait.hpp"
@@ -1225,7 +1223,7 @@ SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=ca
                 }
                 transaction.commit();
             }
-            ConversationModelCheckpoint checkpoint{0, step, Json::object(), ConversationModelFailure{}};
+            ConversationModelCheckpoint checkpoint{0, step, Json::object(), ConversationModelFailure{{}, ModelErrorCode::inference_failed}};
             try {
                 if (!reviewPreference) {
                     sessionReadStorage.authorizeSessionHistory(message, input.event.at("turn"), t3);

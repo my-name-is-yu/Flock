@@ -10,7 +10,6 @@
 #include "database.hpp"
 #include "record_decode.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/wait.hpp"

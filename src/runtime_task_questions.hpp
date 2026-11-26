@@ -11,7 +11,7 @@ namespace flockv0 {
 class Database;
 class WaitStorage;
 
-class Runtime::Components::TaskQuestions {
+class runtime::TaskQuestions {
 public:
     TaskQuestions(Database& database, WaitStorage& waits) : database(database), waits(waits) {}
 

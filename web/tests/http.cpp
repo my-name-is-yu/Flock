@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_intake.hpp"
@@ -9,7 +10,7 @@
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/t3_connection.hpp"
-#include "http_fixture.hpp"
+#include "http_session_fixture.hpp"
 #include "../change_feed.hpp"
 #include "../../tests/fake_git.hpp"
 #include "flock/base64.hpp"
@@ -21,6 +22,7 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/task.hpp"
@@ -1233,7 +1235,7 @@ void pausedWebhookStatus(const std::filesystem::path& path) {
     trigger("release", "release-only");
     trigger("release", "shared");
     trigger("triage", "shared");
-    store.setBotPaused(localOwner, "release", true);
+    BotLifecycle(store).setBotPaused(localOwner, "release", true);
 
     const auto server = startWeb(store, 0, web);
     Browser browser(*server);

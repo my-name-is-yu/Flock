@@ -46,18 +46,17 @@ std::string gitInvocation(const TaskDecision& decision) {
 }
 }
 
-Runtime::Components::TaskDecisions::TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage,
-                                                  JournalStorage& journalStorage, PeerStorage& peerStorage, SecretStorage& secretStorage,
-                                                  TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage,
-                                                  TaskUpdates& updates, RunReports& reports, SessionHistory& history,
-                                                  PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead,
-                                                  GitHost* gitHost)
+runtime::TaskDecisions::TaskDecisions(Database& database, ConversationStorage& conversationTurns, GitStorage& gitStorage,
+                                      JournalStorage& journalStorage, PeerStorage& peerStorage, SecretStorage& secretStorage,
+                                      TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage, TaskUpdates& updates,
+                                      RunReports& reports, SessionHistory& history, PeerExchanges& peerExchanges, OutboxDispatch& dispatch,
+                                      const std::string& sessionRead, GitHost* gitHost)
     : database(database), conversationTurns(conversationTurns), gitStorage(gitStorage), journalStorage(journalStorage),
       peerStorage(peerStorage), secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords), waitStorage(waitStorage),
       updates(updates), reports(reports), history(history), peerExchanges(peerExchanges), dispatch(dispatch), sessionRead(sessionRead),
       gitHost(gitHost) {}
 
-bool Runtime::Components::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
+bool runtime::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
     if (task.replanning) return false;
     if (!task.newSessionRequired && RunReports::hasSettledRun(task) && task.lastRun->assignment.revisionId == task.currentRevision &&
         !reports.sessionReportUnavailable(task))
@@ -68,8 +67,8 @@ bool Runtime::Components::TaskDecisions::canComplete(const TaskData& task, const
     return task.currentRevision.has_value() || (peer->kind == "consult" && event.at("status") == "completed");
 }
 
-void Runtime::Components::TaskDecisions::rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision,
-                                                        std::string_view message, bool replay) {
+void runtime::TaskDecisions::rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision, std::string_view message,
+                                            bool replay) {
     updates.change(task, [&](TaskData& current) {
         const bool unknown = replay && isGitTool(decision.tool) && gitStorage.gitEffectStarted(gitInvocation(decision), current.id);
         const auto why = unknown ? "The host outcome is unknown. Check the target before retrying." : bounded(message, 2048);
@@ -87,8 +86,7 @@ void Runtime::Components::TaskDecisions::rejectDecision(const TaskData& task, co
     });
 }
 
-void Runtime::Components::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, const Json& event,
-                                                                 const TaskDecision& decision) {
+void runtime::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, const Json& event, const TaskDecision& decision) {
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);
     const auto id = snapshot.id;
@@ -105,7 +103,7 @@ void Runtime::Components::TaskDecisions::acceptReplyOrCompletion(const TaskData&
     transaction.commit();
 }
 
-void Runtime::Components::TaskDecisions::complete(TaskData& current, const Json& event, const TaskDecision& decision) {
+void runtime::TaskDecisions::complete(TaskData& current, const Json& event, const TaskDecision& decision) {
     const auto& pending = current.pendingInstructions;
     auto ids = Json::array();
     for (const auto& item : pending) ids.push_back({{"messageId", item.messageId}, {"step", item.step}});
@@ -125,8 +123,8 @@ void Runtime::Components::TaskDecisions::complete(TaskData& current, const Json&
     updates.saveTask(current);
 }
 
-void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision,
-                                                std::string_view approvedInvocation) {
+void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision,
+                                    std::string_view approvedInvocation) {
     const auto& args = decision.args;
     const auto& tool = decision.tool;
     if (isGitTool(tool)) {
@@ -247,7 +245,7 @@ void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const 
     });
 }
 
-bool Runtime::Components::TaskDecisions::continueStage(const TaskData& task) {
+bool runtime::TaskDecisions::continueStage(const TaskData& task) {
     if ((!task.workflow && !task.freshContextRequested) || !RunReports::hasSettledRun(task) || task.pendingInstructions.empty())
         return false;
     return updates.change(task, [&](TaskData& current) {
@@ -268,7 +266,7 @@ bool Runtime::Components::TaskDecisions::continueStage(const TaskData& task) {
     });
 }
 
-bool Runtime::Components::TaskDecisions::resumeGitApproval(const TaskData& task) {
+bool runtime::TaskDecisions::resumeGitApproval(const TaskData& task) {
     Json saved, event;
     {
         std::lock_guard lock(database.mutex);
@@ -285,7 +283,7 @@ bool Runtime::Components::TaskDecisions::resumeGitApproval(const TaskData& task)
     return true;
 }
 
-CompletionProvenance Runtime::Components::TaskDecisions::completionProvenance(const TaskData& task, const Json& event) {
+CompletionProvenance runtime::TaskDecisions::completionProvenance(const TaskData& task, const Json& event) {
     if (auto peer = peerExchanges.peerCompletion(task, event)) return std::move(*peer);
     const auto& report = event.contains("sessionResult") ? event.at("sessionResult") : event;
     if (report.is_null()) return std::monostate{};

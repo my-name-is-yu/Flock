@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/tasks.hpp"
 #include "flock/task_list.hpp"
 #include "flock/conversation_intake.hpp"
@@ -48,8 +49,8 @@
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
 #include "flock/store.hpp"
+#include "flock/store_options.hpp"
 #include "flock/json.hpp"
-#include "flock/t3_command.hpp"
 #include "flock/command.hpp"
 #include "flock/task.hpp"
 #include "flock/run_ref.hpp"
@@ -93,11 +94,6 @@ std::string bounded(std::string_view text, std::size_t bytes) {
     while (bytes && (static_cast<unsigned char>(text[bytes]) & 0xc0) == 0x80) --bytes;
     return std::string(text.substr(0, bytes));
 }
-std::string sessionPrompt(const std::string& actionId, const std::string& instruction) {
-    const auto marker = "\n\n[Flock action ID: " + actionId + "]";
-    return instruction.ends_with(marker) ? instruction : instruction + marker;
-}
-
 std::string field(const Json& j, std::string_view key) {
     const auto found = j.find(key);
     return found != j.end() && found->is_string() ? found->get<std::string>() : std::string{};
@@ -129,9 +125,9 @@ RunRef runRef(const Json& data) {
     return {field(data, "threadId"), field(data, "runId"), field(data, "link"), field(data, "gatewayEnvironmentId")};
 }
 
-Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelResolver model)
-    : path(std::move(file)), memoryStorage(database, secretStorage, permissions, conversationTurns, std::move(seed)),
-      automationStorage(database, secretStorage, botLifecycle, permissions, std::move(model), taskOperations) {
+Store::Impl::Impl(std::filesystem::path file, StoreOptions options)
+    : path(std::move(file)), memoryStorage(database, secretStorage, permissions, conversationTurns, std::move(options.memorySeed)),
+      automationStorage(database, secretStorage, botLifecycle, permissions, std::move(options.automationModel), taskOperations) {
     database.open(path);
 }
 
@@ -169,8 +165,8 @@ void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
     }
 }
 
-Store::Store(std::filesystem::path db, MemorySeed seed, AutomationModelResolver automationModel)
-    : p_(std::make_unique<Impl>(std::move(db), std::move(seed), std::move(automationModel))) {}
+Store::Store(std::filesystem::path db) : Store(std::move(db), {}) {}
+Store::Store(std::filesystem::path db, StoreOptions options) : p_(std::make_unique<Impl>(std::move(db), std::move(options))) {}
 Store::~Store() = default;
 
 void GitEvents::protectGitCredential(std::string value) {

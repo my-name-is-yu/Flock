@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
@@ -21,12 +22,13 @@
 #include "flock/identity.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
-#include "flock/model.hpp"
 #include "flock/model_error.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
+#include "flock/store_options.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/t3_mcp.hpp"
@@ -139,9 +141,10 @@ Store openStore(const std::filesystem::path& home) {
     return Store(home / "flock.sqlite3");
 }
 
-Json activeBotCards(const Store& store, Json cards) {
+Json activeBotCards(Store& store, Json cards) {
+    const BotLifecycle lifecycle(store);
     cards.erase(std::remove_if(cards.begin(), cards.end(),
-                               [&](const Json& card) { return store.botDeleted(card.at("id").get_ref<const std::string&>()); }),
+                               [&](const Json& card) { return lifecycle.botDeleted(card.at("id").get_ref<const std::string&>()); }),
                 cards.end());
     return cards;
 }
@@ -218,7 +221,8 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (result.portChanged)
         std::cerr << "T3 skills use Flock Web port " << result.port << ". Restart 'flock run' if it is already running.\n";
     try {
-        syncT3Skills(activeBotCards(openStore(home), bots.skillCards()));
+        auto store = openStore(home);
+        syncT3Skills(activeBotCards(store, bots.skillCards()));
     } catch (const std::exception& error) {
         std::cerr << "Could not export T3 skills: " << error.what() << '\n';
     }
@@ -280,9 +284,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             throw Conflict("Unknown run option: " + option);
     }
     const IntakeResolver intake = [&](std::string_view botId, std::string_view request) { return bots.get(botId).intake(request); };
-    Store store(
-        home / "flock.sqlite3", [&](std::string_view id) { return bots.initialMemory(id); },
-        [&](std::string_view id) { return bots.plannerModel(id); });
+    Store store(home / "flock.sqlite3", {.memorySeed = [&](std::string_view id) { return bots.initialMemory(id); },
+                                         .automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
     SettingsSystem system(home, port, sessionRead);
     SettingsConnections connections(home);
     SettingsAccess access(store, home, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
@@ -310,7 +313,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.botTools = connections.loadTools();
     options.peers = [&](std::string_view botId) {
         auto peers = bots.peers(botId);
-        std::erase_if(peers, [&](const PeerBot& peer) { return store.botDeleted(peer.intake.botId); });
+        std::erase_if(peers, [&](const PeerBot& peer) { return BotLifecycle(store).botDeleted(peer.intake.botId); });
         return peers;
     };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
@@ -539,7 +542,10 @@ int runCli(Arguments& args) {
     if (command == "bots") {
         args.end();
         auto cards = bots.cards();
-        if (std::filesystem::exists(home / "flock.sqlite3")) cards = activeBotCards(openStore(home), std::move(cards));
+        if (std::filesystem::exists(home / "flock.sqlite3")) {
+            auto store = openStore(home);
+            cards = activeBotCards(store, std::move(cards));
+        }
         print(cards);
     } else if (command == "run")
         daemon(args, home, bots);

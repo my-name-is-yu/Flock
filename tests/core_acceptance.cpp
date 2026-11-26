@@ -1,3 +1,4 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
@@ -23,7 +24,9 @@
 #include "flock/run_ref.hpp"
 #include "flock/run_report.hpp"
 #include "flock/runtime.hpp"
+#include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
+#include "flock/store_options.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
 #include "flock/t3_session.hpp"
@@ -292,7 +295,8 @@ struct Fixture {
     }
     void restart() {
         runtime.reset();
-        store = std::make_unique<Store>(directory / "state.db", [&](std::string_view id) { return notes.at(std::string(id)).memory; });
+        store = std::make_unique<Store>(directory / "state.db",
+                                        StoreOptions{.memorySeed = [&](std::string_view id) { return notes.at(std::string(id)).memory; }});
         RuntimeOptions options{[&] { return now; }, read};
         options.requireT3Connection = requireT3Connection;
         options.peers = [&](std::string_view source) {
@@ -452,8 +456,8 @@ void pauseDuringPreflightPreventsSend() {
     f.reach(id, "sending");
     f.t3.onPreflight = [&] {
         Store settings(f.directory / "state.db");
-        settings.setBotPaused(localOwner, "alpha", true);
-        settings.setBotPaused(localOwner, "alpha", false, [&] { return f.now; });
+        BotLifecycle(settings).setBotPaused(localOwner, "alpha", true);
+        BotLifecycle(settings).setBotPaused(localOwner, "alpha", false, [&] { return f.now; });
     };
     f.reach(id, "cancelled");
     check(f.t3.seen.empty() && f.logs(id, "send_started") == 0, "A send in preflight survived pause and resume");
@@ -528,7 +532,7 @@ void resumeSkipsOccurrencesWhileWaitingForDispatch() {
     Automations(settings).createAutomation(
         localOwner, {"alpha", "Check staging", "e", "p", Json::object()},
         {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", fireAt}, {"request", "Check staging"}}, f.now);
-    settings.setBotPaused(localOwner, "alpha", true);
+    BotLifecycle(settings).setBotPaused(localOwner, "alpha", true);
 
     const auto id = f.submit("Other work", "beta");
     f.model.script = [](const ModelInput&) { return work(); };
@@ -550,7 +554,7 @@ void resumeSkipsOccurrencesWhileWaitingForDispatch() {
     std::promise<void> resumeEntered;
     auto resume = std::async(std::launch::async, [&] {
         resumeEntered.set_value();
-        settings.setBotPaused(localOwner, "alpha", false, [&] { return clock.load(); });
+        BotLifecycle(settings).setBotPaused(localOwner, "alpha", false, [&] { return clock.load(); });
     });
     resumeEntered.get_future().wait();
     const bool waited = resume.wait_for(100ms) == std::future_status::timeout;
@@ -560,7 +564,7 @@ void resumeSkipsOccurrencesWhileWaitingForDispatch() {
     resume.get();
 
     Automations(settings).fireDueAutomations(fireAt);
-    check(waited && !settings.botPaused("alpha") && TaskList(settings).tasks("alpha").empty(),
+    check(waited && !BotLifecycle(settings).botPaused("alpha") && TaskList(settings).tasks("alpha").empty(),
           "Resume replayed a reminder that became due while dispatch held the lock");
 }
 

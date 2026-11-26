@@ -1,5 +1,4 @@
 #include "flock/detail/traffic_recording.hpp"
-#include "flock/t3.hpp"
 
 #include <cerrno>
 #include <cstdio>

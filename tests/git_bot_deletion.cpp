@@ -1,7 +1,9 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
 #include "fake_git.hpp"
+#include "fake_git_sessions.hpp"
 #include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/git_events.hpp"
@@ -156,11 +158,11 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
               "Expected a pending review on the completed task");
         bool blockedByReview = false;
         try {
-            store.deleteBot(localOwner, "owner");
+            BotLifecycle(store).deleteBot(localOwner, "owner");
         } catch (const BotBusy&) {
             blockedByReview = true;
         }
-        check(blockedByReview && !store.botDeleted("owner"), "A pending Git review did not block Bot deletion");
+        check(blockedByReview && !BotLifecycle(store).botDeleted("owner"), "A pending Git review did not block Bot deletion");
         Inbox(store).decideInbox(localOwner, target(pending.at(0)), "approve");
 
         sibling = TaskIntake(store).submit(intake("sibling", "sibling-project"));
@@ -180,7 +182,7 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         check(GitEvents(store).receiveGitWebhook({hostName, "shared-commit", repoName, "ci", "completed", {}, sha, "Shared SHA", 0}),
               "Could not save the shared-commit event");
         runtime.runConversations();
-        store.deleteBot(localOwner, "owner");
+        BotLifecycle(store).deleteBot(localOwner, "owner");
         check(GitEvents(store).receiveGitWebhook({hostName, "retired-watch", repoName, "ci", "completed", {1}, sha, "Retired PR", 0}),
               "Could not save an explicit event after deletion");
         runtime.runConversations();

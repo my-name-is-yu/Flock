@@ -1,7 +1,9 @@
+#include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
 #include "fake_git.hpp"
+#include "fake_git_sessions.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/tasks.hpp"
@@ -349,7 +351,7 @@ void pausedGitNotifications() {
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1,
               "Git notification fixture did not finish its watched request");
-        store.setBotPaused(localOwner, "owner", true);
+        BotLifecycle(store).setBotPaused(localOwner, "owner", true);
         check(GitEvents(store).receiveGitWebhook({hostName, "paused-delivery", repoName, "comment", "created", {1}, sha, "Paused", 0}),
               "Paused delivery was not acknowledged");
         runtime.runConversations();
@@ -360,7 +362,7 @@ void pausedGitNotifications() {
     {
         Store restarted(path);
         Runtime runtime(restarted, script, sessions, {}, options(host));
-        restarted.setBotPaused(localOwner, "owner", false);
+        BotLifecycle(restarted).setBotPaused(localOwner, "owner", false);
         runtime.runConversations();
         check(script.notifications == 0 && historyCount(restarted, task, "git_webhook") == 0,
               "Resume backfilled a Git webhook received during the pause");

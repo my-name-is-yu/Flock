@@ -55,7 +55,7 @@ std::string argument(const Json& args, const char* key, std::size_t max = 1024) 
 unsigned pageSize(const Json& args) {
     const auto limit = args.find("limit");
     if (limit == args.end() || limit->is_null()) return 10;
-    if (!limit->is_number_integer() || *limit < 1 || *limit > sessionPageLimit) throw Conflict("Invalid limit");
+    if (!limit->is_number_integer() || *limit < 1 || *limit > session_read::pageSize) throw Conflict("Invalid limit");
     return limit->get<unsigned>();
 }
 
@@ -592,7 +592,7 @@ JOIN json_each(?3) target ON target.value=entry.value
         if (detail && event.kind == "error") result["error"] = text;
         auto& files = result["attachments"] = Json::array();
         for (const auto& file : event.attachments) {
-            if (files.size() == sessionPageLimit) {
+            if (files.size() == session_read::pageSize) {
                 truncated = true;
                 break;
             }

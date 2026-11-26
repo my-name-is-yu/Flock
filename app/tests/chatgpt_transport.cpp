@@ -1,10 +1,9 @@
 #include "../chatgpt.hpp"
+#include "../chatgpt_failure.hpp"
 #include "../model.hpp"
 #include "fixtures.hpp"
 #include "flock/base64.hpp"
 #include "flock/json.hpp"
-#include "flock/model.hpp"
-#include "flock/model_error.hpp"
 
 #include <nlohmann/json.hpp>
 

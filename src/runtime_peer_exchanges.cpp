@@ -1,4 +1,4 @@
-#include "flock/store.hpp"
+#include "flock/bot_lifecycle.hpp"
 #include "runtime_peer_exchanges.hpp"
 #include "runtime_run_reports.hpp"
 #include "runtime_session_history.hpp"
@@ -32,18 +32,16 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::PeerExchanges::PeerExchanges(Database& database, BotLifecycleStorage& botLifecycle,
-                                                  ConversationStorage& conversationTurns, JournalStorage& journalStorage,
-                                                  PeerStorage& peerStorage, TaskEvents& taskEvents, TaskOperations& taskOperations,
-                                                  TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
-                                                  const Policy& policy, TaskUpdates& updates, RunReports& reports, SessionHistory& history,
-                                                  const PeerResolver& resolvePeers)
+runtime::PeerExchanges::PeerExchanges(Database& database, BotLifecycleStorage& botLifecycle, ConversationStorage& conversationTurns,
+                                      JournalStorage& journalStorage, PeerStorage& peerStorage, TaskEvents& taskEvents,
+                                      TaskOperations& taskOperations, TaskRecords& taskRecords, TaskRouting& taskRouting,
+                                      WaitStorage& waitStorage, const Policy& policy, TaskUpdates& updates, RunReports& reports,
+                                      SessionHistory& history, const PeerResolver& resolvePeers)
     : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), journalStorage(journalStorage),
       peerStorage(peerStorage), taskEvents(taskEvents), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
       waitStorage(waitStorage), policy(policy), updates(updates), reports(reports), history(history), resolvePeers(resolvePeers) {}
 
-std::optional<Runtime::Components::PeerExchanges::PeerResult> Runtime::Components::PeerExchanges::peerResult(const TaskData& task,
-                                                                                                             const Json& event) const {
+std::optional<runtime::PeerExchanges::PeerResult> runtime::PeerExchanges::peerResult(const TaskData& task, const Json& event) const {
     if (event.at("kind") != "bot_result") return std::nullopt;
     auto exchange =
         database.query(R"SQL(
@@ -57,12 +55,12 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
     return PeerResult{exchange.number(0), exchange.string(1), exchange.string(2)};
 }
 
-std::vector<PeerBot> Runtime::Components::PeerExchanges::peersFor(std::string_view bot) const {
+std::vector<PeerBot> runtime::PeerExchanges::peersFor(std::string_view bot) const {
     if (!resolvePeers) return {};
     return resolvePeers(bot);
 }
 
-PeerBot Runtime::Components::PeerExchanges::allowedPeer(std::string_view sender, std::string_view botId) const {
+PeerBot runtime::PeerExchanges::allowedPeer(std::string_view sender, std::string_view botId) const {
     if (botId.empty() || sender == botId) throw Conflict("Choose an allowed peer Bot");
     const auto peers = peersFor(sender);
     const auto peer = std::find_if(peers.begin(), peers.end(), [&](const PeerBot& p) { return p.intake.botId == botId; });
@@ -70,8 +68,8 @@ PeerBot Runtime::Components::PeerExchanges::allowedPeer(std::string_view sender,
     return *peer;
 }
 
-BotMessageEntry Runtime::Components::PeerExchanges::peerMessage(const PeerExchange& peer, const TaskData& from, const TaskData& to,
-                                                                std::string_view type, std::string_view body, std::string_view messageId) {
+BotMessageEntry runtime::PeerExchanges::peerMessage(const PeerExchange& peer, const TaskData& from, const TaskData& to,
+                                                    std::string_view type, std::string_view body, std::string_view messageId) {
     return {.exchangeId = peer.id,
             .messageId = std::string(messageId),
             .fromBotId = from.botId,
@@ -82,8 +80,8 @@ BotMessageEntry Runtime::Components::PeerExchanges::peerMessage(const PeerExchan
             .replyTo = peer.lastMessage.empty() ? std::nullopt : std::optional{peer.lastMessage}};
 }
 
-void Runtime::Components::PeerExchanges::transitionPeer(const PeerExchange& peer, TaskData& actor, TaskData& task,
-                                                        const BotMessageEntry& message, std::optional<Id> forwardedSource) {
+void runtime::PeerExchanges::transitionPeer(const PeerExchange& peer, TaskData& actor, TaskData& task, const BotMessageEntry& message,
+                                            std::optional<Id> forwardedSource) {
     const auto& type = message.messageType;
     const bool closing = message.status.has_value();
     const auto kind = closing ? "bot_result" : "bot_" + type;
@@ -112,7 +110,7 @@ void Runtime::Components::PeerExchanges::transitionPeer(const PeerExchange& peer
     updates.saveTask(task);
 }
 
-std::optional<ForwardedPeerMessage> Runtime::Components::PeerExchanges::forwardableUserMessage(const TaskData& task) const {
+std::optional<ForwardedPeerMessage> runtime::PeerExchanges::forwardableUserMessage(const TaskData& task) const {
     if (!task.sourceMessageId || !task.sourceMessageCoversFullRequest.value_or(false)) return std::nullopt;
     const auto sourceId = *task.sourceMessageId;
     auto row = database.query(R"SQL(
@@ -124,8 +122,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
     return ForwardedPeerMessage{row.string(0), row.number(1)};
 }
 
-void Runtime::Components::PeerExchanges::sendPeer(TaskData& sender, const Json& event, const TaskDecision& decision, PeerBot peer,
-                                                  const std::string& action) {
+void runtime::PeerExchanges::sendPeer(TaskData& sender, const Json& event, const TaskDecision& decision, PeerBot peer,
+                                      const std::string& action) {
     if (botLifecycle.botPaused(peer.intake.botId)) throw BotPaused{};
     if (peerStorage.peerExchange(sender.id)) throw Conflict("Finish the current Bot exchange first");
     const auto& args = decision.args;
@@ -161,8 +159,8 @@ void Runtime::Components::PeerExchanges::sendPeer(TaskData& sender, const Json& 
     updates.recordDecision(sender, event, decision, action);
 }
 
-void Runtime::Components::PeerExchanges::finishPeer(const PeerExchange& exchange, TaskData& recipient, TaskData sender,
-                                                    std::string_view status, std::string_view text, const std::string& action) {
+void runtime::PeerExchanges::finishPeer(const PeerExchange& exchange, TaskData& recipient, TaskData sender, std::string_view status,
+                                        std::string_view text, const std::string& action) {
     const auto type = status == "completed" ? std::string_view{"result"} : status;
     auto message = peerMessage(exchange, recipient, sender, type, text, action);
     message.status = status;
@@ -174,7 +172,7 @@ void Runtime::Components::PeerExchanges::finishPeer(const PeerExchange& exchange
     transitionPeer(exchange, recipient, sender, message);
 }
 
-Json Runtime::Components::PeerExchanges::replyKinds(const TaskData& task, const PeerExchange& peer) const {
+Json runtime::PeerExchanges::replyKinds(const TaskData& task, const PeerExchange& peer) const {
     if (peer.sender == task.id && peer.phase == "question") return Json::array({"answer"});
     if (peer.recipient != task.id || peer.phase != "working") return Json::array();
     Json kinds = {"question"};
@@ -187,8 +185,7 @@ Json Runtime::Components::PeerExchanges::replyKinds(const TaskData& task, const 
     return kinds;
 }
 
-bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& event, const TaskDecision& decision,
-                                                   const std::string& action) {
+bool runtime::PeerExchanges::replyPeer(TaskData& task, const Json& event, const TaskDecision& decision, const std::string& action) {
     const auto peer = peerStorage.peerExchange(task.id);
     if (!peer) throw Conflict("The Bot exchange has closed");
     const auto type = field(decision.args, "kind");
@@ -218,7 +215,7 @@ bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& e
     return true;
 }
 
-void Runtime::Components::PeerExchanges::readPeerEvidence(const TaskData& task, const Json& event, const TaskDecision& decision) {
+void runtime::PeerExchanges::readPeerEvidence(const TaskData& task, const Json& event, const TaskDecision& decision) {
     const auto& args = decision.args;
     const auto messageId = field(args, "messageId");
     if (event["kind"] != "bot_result" || messageId.empty() || event["messageId"] != messageId)
@@ -251,7 +248,7 @@ void Runtime::Components::PeerExchanges::readPeerEvidence(const TaskData& task, 
     });
 }
 
-std::optional<PeerCompletion> Runtime::Components::PeerExchanges::peerCompletion(const TaskData& task, const Json& event) {
+std::optional<PeerCompletion> runtime::PeerExchanges::peerCompletion(const TaskData& task, const Json& event) {
     const auto peer = peerResult(task, event);
     if (!peer) return std::nullopt;
 
@@ -298,7 +295,7 @@ SELECT id,data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
     return result;
 }
 
-bool Runtime::Components::PeerExchanges::forwardedQuestionAnswer(const TaskData& task, const QuestionTarget& target) {
+bool runtime::PeerExchanges::forwardedQuestionAnswer(const TaskData& task, const QuestionTarget& target) {
     std::lock_guard lock(database.mutex);
     const auto event = taskEvents.currentEvent(task);
     const auto peer = peerStorage.peerExchange(task.id);

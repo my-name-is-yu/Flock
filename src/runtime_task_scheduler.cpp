@@ -21,13 +21,12 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::TaskScheduler::TaskScheduler(Database& database, TaskEvents& taskEvents, TaskRouting& taskRouting, T3& t3,
-                                                  TaskUpdates& updates, OutboxDispatch& dispatch, bool requireT3Connection,
-                                                  std::stop_token shutdown)
+runtime::TaskScheduler::TaskScheduler(Database& database, TaskEvents& taskEvents, TaskRouting& taskRouting, T3& t3, TaskUpdates& updates,
+                                      OutboxDispatch& dispatch, bool requireT3Connection, std::stop_token shutdown)
     : database(database), taskEvents(taskEvents), taskRouting(taskRouting), t3(t3), updates(updates), dispatch(dispatch),
       requireT3Connection(requireT3Connection), shutdown(shutdown) {}
 
-std::vector<Runtime::Components::TaskScheduler::Work> Runtime::Components::TaskScheduler::eligible() {
+std::vector<runtime::TaskScheduler::Work> runtime::TaskScheduler::eligible() {
     std::lock_guard lock(database.mutex);
     auto rows = database.query(R"SQL(
 WITH slots AS MATERIALIZED (
@@ -74,8 +73,8 @@ ORDER BY 1,2)SQL",
     return result;
 }
 
-std::vector<Runtime::Components::TaskScheduler::Work>
-Runtime::Components::TaskScheduler::nextBatch(std::size_t slots, const std::function<bool(const Work&)>& isActive) {
+std::vector<runtime::TaskScheduler::Work> runtime::TaskScheduler::nextBatch(std::size_t slots,
+                                                                            const std::function<bool(const Work&)>& isActive) {
     if (slots == 0) return {};
     auto jobs = eligible();
     std::erase_if(jobs, isActive);
@@ -87,7 +86,7 @@ Runtime::Components::TaskScheduler::nextBatch(std::size_t slots, const std::func
     return jobs;
 }
 
-bool Runtime::Components::TaskScheduler::selectProject(TaskData& task) {
+bool runtime::TaskScheduler::selectProject(TaskData& task) {
     const auto bot = task.botId;
     const auto environment = task.environmentId;
     {
@@ -104,7 +103,7 @@ bool Runtime::Components::TaskScheduler::selectProject(TaskData& task) {
            !task.projectId.empty();
 }
 
-void Runtime::Components::TaskScheduler::activate(TaskData task) {
+void runtime::TaskScheduler::activate(TaskData task) {
     if (task.projectId.empty() && !selectProject(task)) return;
     updates.change(task, [&](TaskData& current) {
         auto turn = database.query("SELECT 1 FROM task_project_slots WHERE id=? AND blocker_id IS NULL", {current.id});

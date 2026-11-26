@@ -5,6 +5,7 @@
 #include "flock/board_inbox.hpp"
 #include "flock/web.hpp"
 #include "../../tests/fake_git.hpp"
+#include "../../tests/fake_git_sessions.hpp"
 #include "flock/decision.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"

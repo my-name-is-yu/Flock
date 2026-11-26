@@ -8,7 +8,6 @@
 #include "flock/board_inbox.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
-#include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/wait.hpp"

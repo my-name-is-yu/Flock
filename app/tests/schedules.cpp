@@ -7,6 +7,7 @@
 #include "flock/memory_automation.hpp"
 #include "flock/person.hpp"
 #include "flock/store.hpp"
+#include "flock/store_options.hpp"
 #include "flock/task.hpp"
 #include "flock/task_context.hpp"
 #include "flock/types.hpp"
@@ -287,7 +288,7 @@ void automationFiringsUseCurrentPlannerSettings() {
     original["modelCallLimit"] = 9;
     createBot(folder, original, "", "");
     Bots bots(home);
-    Store store(temp.path / "tasks.db", {}, [&](std::string_view id) { return bots.plannerModel(id); });
+    Store store(temp.path / "tasks.db", {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
     const Person owner{"fixture", true};
     const auto firstDue = utc(2026, 1, 2, 0, 0);
     const auto nextDue = utc(2026, 1, 3, 0, 0);
@@ -367,7 +368,7 @@ void unreadableProfileKeepsAutomationDelivery() {
     createBot(home / "release", botConfig("release-saved"), "", "");
     createBot(home / "triage", botConfig("triage-saved"), "", "");
     Bots bots(home);
-    Store store(temp.path / "tasks.db", {}, [&](std::string_view id) { return bots.plannerModel(id); });
+    Store store(temp.path / "tasks.db", {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
     const Person owner{"fixture", true};
     const auto due = utc(2026, 1, 2, 0, 0);
     const Json schedule = {{"kind", "schedule"}, {"cron", "0 0 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Daily check"}};
