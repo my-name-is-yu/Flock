@@ -1,7 +1,16 @@
-#include "storage.hpp"
+#include "flock/policy.hpp"
+#include "bot_lifecycle_storage.hpp"
+#include "database.hpp"
+#include "inbox_storage.hpp"
+#include "journal_storage.hpp"
+#include "policy_approvals.hpp"
+#include "secret_storage.hpp"
+#include "task_records.hpp"
+#include "flock/board_inbox.hpp"
+#include "flock/secrets.hpp"
+#include "flock/task.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
-#include "flock/store.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/json.hpp"
 #include "flock/run_ref.hpp"
@@ -15,6 +24,7 @@
 #include <utility>
 
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 namespace flockv0 {
 namespace {
@@ -151,12 +161,13 @@ Resource Resource::sessionRead(std::string_view environment, std::string_view th
     return {Action::session_read, Json::array({environment, thread}).dump()};
 }
 
-Policy Store::policy() {
-    return Policy(*p_);
-}
+Policy::Policy(Database& database, const BotLifecycleStorage& botLifecycle, const TaskRecords& taskRecords, JournalStorage& journalStorage,
+               SecretStorage& secretStorage, InboxStorage& inboxStorage, PolicyApprovals& policyApprovals)
+    : database_(database), botLifecycle_(botLifecycle), taskRecords_(taskRecords), journalStorage_(journalStorage),
+      secretStorage_(secretStorage), inboxStorage_(inboxStorage), policyApprovals_(policyApprovals) {}
 
 SecretRedactor Policy::secretRedactor(std::string_view bot) const {
-    return db_.secretStorage.redactor(bot);
+    return secretStorage_.redactor(bot);
 }
 
 Json Policy::redactSecrets(std::string_view bot, const Json& data) const {
@@ -169,21 +180,21 @@ PolicyResult Policy::check(std::string_view bot, Action action, std::string_view
 
 bool Policy::forbidden(std::string_view bot, Action action, std::string_view target) const {
     if (!validBotId(bot) || target.empty()) return true;
-    std::lock_guard lock(db_.mutex);
-    if (db_.botLifecycle.botDeleted(bot)) return true;
-    auto rows = db_.query("SELECT target FROM policy_rules WHERE kind='never' AND action=?", {actionName(action)});
+    std::lock_guard lock(database_.mutex);
+    if (botLifecycle_.botDeleted(bot)) return true;
+    auto rows = database_.query("SELECT target FROM policy_rules WHERE kind='never' AND action=?", {actionName(action)});
     while (rows.next())
         if (targetMatches(rows.string(0), target)) return true;
     return false;
 }
 
 PolicyResult Policy::check(std::string_view bot, const Resource& resource) const {
-    std::lock_guard lock(db_.mutex);
+    std::lock_guard lock(database_.mutex);
     if (forbidden(bot, resource.action, resource.target)) return PolicyResult::deny;
     if (mode() == "full") return PolicyResult::allow;
-    auto rows = db_.query("SELECT kind,target,exact FROM policy_rules WHERE kind<>'never' AND action=?"
-                          " ORDER BY kind DESC",
-                          {actionName(resource.action)});
+    auto rows = database_.query("SELECT kind,target,exact FROM policy_rules WHERE kind<>'never' AND action=?"
+                                " ORDER BY kind DESC",
+                                {actionName(resource.action)});
     while (rows.next()) {
         const auto pattern = rows.string(1);
         if (rows.number(2) ? pattern == resource.target : targetMatches(pattern, resource.target))
@@ -193,9 +204,9 @@ PolicyResult Policy::check(std::string_view bot, const Resource& resource) const
 }
 
 PolicyResult Policy::check(Id task, Action action, std::string_view target) const {
-    std::lock_guard lock(db_.mutex);
-    auto row = db_.query("SELECT bot_id FROM tasks WHERE id=?", {task});
-    return row.next() && !db_.botLifecycle.botPaused(row.string(0)) ? check(row.string(0), action, target) : PolicyResult::deny;
+    std::lock_guard lock(database_.mutex);
+    auto row = database_.query("SELECT bot_id FROM tasks WHERE id=?", {task});
+    return row.next() && !botLifecycle_.botPaused(row.string(0)) ? check(row.string(0), action, target) : PolicyResult::deny;
 }
 
 PolicyResult Policy::check(const Person& actor, Action action, std::string_view target) const {
@@ -204,26 +215,26 @@ PolicyResult Policy::check(const Person& actor, Action action, std::string_view 
     if (action == Action::rules_manage || action == Action::shared_memory_read || action == Action::shared_memory_write)
         return actor.adminRoot ? PolicyResult::allow : PolicyResult::deny;
     if (!validBotId(target)) return PolicyResult::deny;
-    std::lock_guard lock(db_.mutex);
-    if (db_.botLifecycle.botDeleted(target)) return PolicyResult::deny;
-    if (actor.adminRoot || db_.query("SELECT 1 FROM bot_owners WHERE bot=? AND person=?", {target, actor.id}).next())
+    std::lock_guard lock(database_.mutex);
+    if (botLifecycle_.botDeleted(target)) return PolicyResult::deny;
+    if (actor.adminRoot || database_.query("SELECT 1 FROM bot_owners WHERE bot=? AND person=?", {target, actor.id}).next())
         return PolicyResult::allow;
     if ((action == Action::bot_view || action == Action::bot_talk || action == Action::bot_decide) &&
-        db_.query("SELECT 1 FROM bot_members WHERE bot=? AND person=?", {target, actor.id}).next())
+        database_.query("SELECT 1 FROM bot_members WHERE bot=? AND person=?", {target, actor.id}).next())
         return PolicyResult::allow;
     return PolicyResult::deny;
 }
 
 std::string Policy::mode() const {
-    std::lock_guard lock(db_.mutex);
-    auto row = db_.query("SELECT mode FROM policy_settings WHERE id=1");
+    std::lock_guard lock(database_.mutex);
+    auto row = database_.query("SELECT mode FROM policy_settings WHERE id=1");
     if (!row.next()) throw Conflict("Installation policy unavailable");
     return row.string(0);
 }
 
 Json Policy::rules() const {
-    std::lock_guard lock(db_.mutex);
-    auto rows = db_.query("SELECT kind,action,target,created_at FROM policy_rules ORDER BY action,target");
+    std::lock_guard lock(database_.mutex);
+    auto rows = database_.query("SELECT kind,action,target,created_at FROM policy_rules ORDER BY action,target");
     Json result = Json::array();
     while (rows.next())
         result.push_back({{"kind", rows.string(0)}, {"action", rows.string(1)}, {"target", rows.string(2)}, {"createdAt", rows.number(3)}});
@@ -233,19 +244,19 @@ Json Policy::rules() const {
 void Policy::setMode(const Person& actor, std::string_view value) {
     if (!allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
     if (value != "full" && value != "supervised") throw Conflict("Unknown policy mode");
-    std::lock_guard lock(db_.mutex);
-    Transaction tx(db_.db);
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
     if (mode() != value) {
-        db_.exec("UPDATE policy_settings SET mode=?,revision=revision+1 WHERE id=1", {value});
+        database_.exec("UPDATE policy_settings SET mode=?,revision=revision+1 WHERE id=1", {value});
         audit(actor, "", "mode_changed", {{"mode", value}});
-        db_.policyApprovals.settlePolicyApprovals();
+        policyApprovals_.settlePolicyApprovals();
     }
     tx.commit();
 }
 
 void Policy::changeRule(const Person& actor, RuleKind kind, Action action, std::string_view target, bool add) {
-    std::lock_guard lock(db_.mutex);
-    Transaction tx(db_.db);
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
     if (!allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
     writeRule(actor, kind, action, target, add, false);
     tx.commit();
@@ -257,24 +268,24 @@ void Policy::changeNeverRule(const Person& actor, Action action, std::string_vie
 
 void Policy::writeRule(const Person& actor, RuleKind kind, Action action, std::string_view target, bool add, bool fromCard) {
     if (!identifier(target)) throw Conflict("Invalid policy rule target");
-    db_.secretStorage.sharedRedactor().requirePublic({actor.id, target});
+    secretStorage_.sharedRedactor().requirePublic({actor.id, target});
     const auto name = actionName(action), type = ruleName(kind);
     if (add) {
-        db_.exec("INSERT INTO policy_rules(kind,action,target,created_at,exact) VALUES(?,?,?,?,?)"
-                 " ON CONFLICT(kind,action,target) DO NOTHING",
-                 {type, name, target, unixTime(), fromCard});
-        if (!sqlite3_changes(db_.db)) return;
+        database_.exec("INSERT INTO policy_rules(kind,action,target,created_at,exact) VALUES(?,?,?,?,?)"
+                       " ON CONFLICT(kind,action,target) DO NOTHING",
+                       {type, name, target, unixTime(), fromCard});
+        if (!sqlite3_changes(database_.db)) return;
     } else
-        db_.exec("DELETE FROM policy_rules WHERE kind=? AND action=? AND target=?", {type, name, target});
+        database_.exec("DELETE FROM policy_rules WHERE kind=? AND action=? AND target=?", {type, name, target});
     audit(actor, "", add ? "rule_added" : "rule_removed", {{"kind", type}, {"action", name}, {"target", target}});
 }
 
 Json Policy::createOwnedBot(const Person& creator, const std::function<Json(const PublishOwnedBot&)>& create) {
-    std::lock_guard lock(db_.mutex);
+    std::lock_guard lock(database_.mutex);
     if (!allows(creator, Action::bot_create, "")) throw DecisionDenied{};
-    db_.secretStorage.sharedRedactor().requirePublic({creator.id});
+    secretStorage_.sharedRedactor().requirePublic({creator.id});
     return create([&](std::string_view bot, const std::function<void()>& publish) {
-        Transaction ownership(db_.db);
+        Transaction ownership(database_.db);
         setOwner(creator, bot);
         publish();
         ownership.commit();
@@ -282,49 +293,50 @@ Json Policy::createOwnedBot(const Person& creator, const std::function<Json(cons
 }
 
 void Policy::setOwner(const Person& creator, std::string_view bot) {
-    std::lock_guard lock(db_.mutex);
+    std::lock_guard lock(database_.mutex);
     if (!validBotId(bot) || !allows(creator, Action::bot_create, bot)) throw DecisionDenied{};
-    if (db_.botLifecycle.botDeleted(bot)) throw Conflict("This Bot ID has already been used");
-    db_.secretStorage.sharedRedactor().requirePublic({creator.id, bot});
-    if (db_.query("SELECT 1 FROM bot_creation_intents WHERE target=?", {bot}).next()) throw Conflict("Bot creation is already in progress");
-    db_.exec("INSERT INTO bot_owners VALUES(?,?)", {bot, creator.id});
+    if (botLifecycle_.botDeleted(bot)) throw Conflict("This Bot ID has already been used");
+    secretStorage_.sharedRedactor().requirePublic({creator.id, bot});
+    if (database_.query("SELECT 1 FROM bot_creation_intents WHERE target=?", {bot}).next())
+        throw Conflict("Bot creation is already in progress");
+    database_.exec("INSERT INTO bot_owners VALUES(?,?)", {bot, creator.id});
 }
 
 void Policy::setMember(const Person& actor, std::string_view bot, std::string_view person, bool add) {
-    std::lock_guard lock(db_.mutex);
-    Transaction tx(db_.db);
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
     if (!allows(actor, Action::bot_settings, bot) || !identifier(person)) throw DecisionDenied{};
-    db_.secretStorage.sharedRedactor().requirePublic({actor.id, bot, person});
+    secretStorage_.sharedRedactor().requirePublic({actor.id, bot, person});
     if (add)
-        db_.exec("INSERT OR IGNORE INTO bot_members VALUES(?,?)", {bot, person});
+        database_.exec("INSERT OR IGNORE INTO bot_members VALUES(?,?)", {bot, person});
     else
-        db_.exec("DELETE FROM bot_members WHERE bot=? AND person=?", {bot, person});
+        database_.exec("DELETE FROM bot_members WHERE bot=? AND person=?", {bot, person});
     audit(actor, bot, add ? "add_member" : "remove_member", {{"person", person}});
     tx.commit();
 }
 
 Json Policy::botSettings(const Person& actor, std::string_view bot) const {
-    std::lock_guard lock(db_.mutex);
+    std::lock_guard lock(database_.mutex);
     if (!allows(actor, Action::bot_view, bot)) throw DecisionDenied{};
     const bool owner = allows(actor, Action::bot_settings, bot);
     Json result{
-        {"canManage", owner}, {"paused", db_.botLifecycle.botPaused(bot)}, {"members", Json::array()}, {"secretInputs", Json::array()}};
+        {"canManage", owner}, {"paused", botLifecycle_.botPaused(bot)}, {"members", Json::array()}, {"secretInputs", Json::array()}};
     if (owner) {
-        auto members = db_.query("SELECT person FROM bot_members WHERE bot=? ORDER BY person", {bot});
+        auto members = database_.query("SELECT person FROM bot_members WHERE bot=? ORDER BY person", {bot});
         while (members.next()) result["members"].push_back(members.string(0));
     }
-    auto inputs = db_.query("SELECT id,name,status FROM protected_inputs p WHERE bot=? AND"
-                            " (status='fulfilled' OR NOT EXISTS (SELECT 1 FROM protected_inputs"
-                            " WHERE name=p.name AND status='fulfilled')) ORDER BY id",
-                            {bot});
+    auto inputs = database_.query("SELECT id,name,status FROM protected_inputs p WHERE bot=? AND"
+                                  " (status='fulfilled' OR NOT EXISTS (SELECT 1 FROM protected_inputs"
+                                  " WHERE name=p.name AND status='fulfilled')) ORDER BY id",
+                                  {bot});
     while (inputs.next())
         result["secretInputs"].push_back({{"id", inputs.number(0)}, {"name", inputs.string(1)}, {"status", inputs.string(2)}});
-    return db_.secretStorage.redactor(bot).record(result);
+    return secretStorage_.redactor(bot).record(result);
 }
 
 void Policy::audit(const Person& actor, std::string_view bot, std::string_view action, const Json& details) {
-    db_.exec("INSERT INTO policy_journal(time,actor,bot,action,details) VALUES(?,?,?,?,?)",
-             {unixTime(), actor.id, bot, action, details.dump()});
+    database_.exec("INSERT INTO policy_journal(time,actor,bot,action,details) VALUES(?,?,?,?,?)",
+                   {unixTime(), actor.id, bot, action, details.dump()});
 }
 
 Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::string_view operation, std::string_view target,
@@ -334,14 +346,14 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
     const auto requestKey = std::to_string(message) + "-" + std::to_string(step);
     if (!apply) throw Conflict("Bot changes are unavailable");
     const BotChange change{std::string(operation), std::string(target), botName(name), requestKey};
-    std::lock_guard lock(db_.mutex);
-    if (auto completed = db_.query("SELECT id FROM bot_changes WHERE request_key=?", {requestKey}); completed.next())
+    std::lock_guard lock(database_.mutex);
+    if (auto completed = database_.query("SELECT id FROM bot_changes WHERE request_key=?", {requestKey}); completed.next())
         return completed.number(0);
-    if (db_.botLifecycle.botDeleted(target)) throw Conflict("This Bot ID has already been used");
+    if (botLifecycle_.botDeleted(target)) throw Conflict("This Bot ID has already been used");
 
     std::string owner;
     if (create) {
-        auto pending = db_.query("SELECT person FROM bot_creation_intents WHERE request_key=? AND target=?", {requestKey, target});
+        auto pending = database_.query("SELECT person FROM bot_creation_intents WHERE request_key=? AND target=?", {requestKey, target});
         if (pending.next()) owner = pending.string(0);
     }
     if (owner.empty()) {
@@ -349,27 +361,28 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
             forbidden(bot, create ? Action::bot_create : Action::bot_rename, target))
             throw Conflict("Bot change denied by policy");
         if (!identifier(creator.id) || (!create && !allows(creator, Action::bot_settings, target))) throw DecisionDenied{};
-        db_.secretStorage.redactor(bot).requirePublic({name, target});
+        secretStorage_.redactor(bot).requirePublic({name, target});
         if (create) {
-            Transaction intent(db_.db);
-            db_.secretStorage.sharedRedactor().requirePublic({creator.id, target});
-            if (db_.query("SELECT 1 FROM bot_owners WHERE bot=? UNION ALL SELECT 1 FROM bot_creation_intents WHERE target=?",
-                          {target, target})
+            Transaction intent(database_.db);
+            secretStorage_.sharedRedactor().requirePublic({creator.id, target});
+            if (database_
+                    .query("SELECT 1 FROM bot_owners WHERE bot=? UNION ALL SELECT 1 FROM bot_creation_intents WHERE target=?",
+                           {target, target})
                     .next())
                 throw Conflict("Target Bot already exists");
             owner = creator.id;
-            db_.exec("INSERT INTO bot_creation_intents VALUES(?,?,?)", {requestKey, target, owner});
+            database_.exec("INSERT INTO bot_creation_intents VALUES(?,?,?)", {requestKey, target, owner});
             intent.commit();
         }
     }
-    Transaction completion(db_.db);
-    if (auto completed = db_.query("SELECT id FROM bot_changes WHERE request_key=?", {requestKey}); completed.next())
+    Transaction completion(database_.db);
+    if (auto completed = database_.query("SELECT id FROM bot_changes WHERE request_key=?", {requestKey}); completed.next())
         return completed.number(0);
     try {
         apply(change);
     } catch (const Conflict&) {
         // A rejected application leaves no published profile.
-        if (create) db_.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
+        if (create) database_.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
         completion.commit();
         throw;
     } catch (...) {
@@ -383,19 +396,19 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
             throw BotCreationUncertain{};
         }
         if (!published) {
-            db_.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
+            database_.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
             completion.commit();
             throw Conflict("Unable to apply Bot change");
         }
     }
 
     if (create) {
-        db_.exec("INSERT INTO bot_owners VALUES(?,?)", {target, owner});
-        db_.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
+        database_.exec("INSERT INTO bot_owners VALUES(?,?)", {target, owner});
+        database_.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
     }
-    db_.exec("INSERT INTO bot_changes(bot,operation,target,name,request_key,source_message_id) VALUES(?,?,?,?,?,?)",
-             {bot, operation, target, change.name, requestKey, message});
-    const auto id = db_.last();
+    database_.exec("INSERT INTO bot_changes(bot,operation,target,name,request_key,source_message_id) VALUES(?,?,?,?,?,?)",
+                   {bot, operation, target, change.name, requestKey, message});
+    const auto id = database_.last();
     completion.commit();
     return id;
 }
@@ -404,9 +417,9 @@ void Policy::executeSessionResource(std::string_view environment, const RunRef& 
                                     const std::function<bool()>& upstreamPermits, const std::function<void(Id)>& execute) const {
     Id task;
     {
-        std::lock_guard lock(db_.mutex);
-        auto row = db_.query("SELECT task_id FROM runs WHERE environment_id=? AND thread_id=? AND run_id=?",
-                             {environment, run.threadId, run.runId});
+        std::lock_guard lock(database_.mutex);
+        auto row = database_.query("SELECT task_id FROM runs WHERE environment_id=? AND thread_id=? AND run_id=?",
+                                   {environment, run.threadId, run.runId});
         if (!row.next()) throw Conflict("Unknown Session");
         task = row.number(0);
     }
@@ -417,34 +430,34 @@ void Policy::executeSessionResource(std::string_view environment, const RunRef& 
     } catch (...) {
         throw Conflict("Resource execution failed");
     }
-    std::lock_guard lock(db_.mutex);
-    db_.journalStorage.journal(
+    std::lock_guard lock(database_.mutex);
+    journalStorage_.journal(
         task, "resource_used",
         {{"target", resource.target}, {"action", actionName(resource.action)}, {"threadId", run.threadId}, {"runId", run.runId}});
 }
 
 void Policy::requireWebIdentity() {
-    std::lock_guard lock(db_.mutex);
-    db_.exec("INSERT OR IGNORE INTO web_identity_required VALUES(1)");
+    std::lock_guard lock(database_.mutex);
+    database_.exec("INSERT OR IGNORE INTO web_identity_required VALUES(1)");
 }
 
 bool Policy::requiresIdentity() const {
-    std::lock_guard lock(db_.mutex);
-    return db_.query("SELECT 1 FROM web_identity_required").next();
+    std::lock_guard lock(database_.mutex);
+    return database_.query("SELECT 1 FROM web_identity_required").next();
 }
 
 Id Policy::requestSecret(std::string_view bot, const SecretRef& ref, Id sourceMessage) {
     if (!validBotId(bot) || !ref.valid()) throw Conflict("Invalid Bot or secret reference");
-    std::lock_guard lock(db_.mutex);
-    db_.secretStorage.redactor(bot).requirePublic({bot, ref.name});
-    auto row = db_.query(R"SQL(
+    std::lock_guard lock(database_.mutex);
+    secretStorage_.redactor(bot).requirePublic({bot, ref.name});
+    auto row = database_.query(R"SQL(
 INSERT INTO protected_inputs(bot,name,file,source_message_id)
  SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM protected_inputs WHERE name=?2 AND status='fulfilled')
  ON CONFLICT(bot,name) WHERE status='pending' DO UPDATE
  SET source_message_id=coalesce(protected_inputs.source_message_id,excluded.source_message_id)
  RETURNING id
 )SQL",
-                         {bot, ref.name, actionId(), sourceMessage ? Json(sourceMessage) : Json(nullptr)});
+                               {bot, ref.name, actionId(), sourceMessage ? Json(sourceMessage) : Json(nullptr)});
     if (!row.next()) throw Conflict("Protected input unavailable");
     const auto id = row.number(0);
     row.next();
@@ -452,51 +465,51 @@ INSERT INTO protected_inputs(bot,name,file,source_message_id)
 }
 
 void Policy::submitSecret(const Person& actor, std::string_view bot, Id request, std::string_view value) {
-    std::lock_guard lock(db_.mutex);
-    Transaction tx(db_.db);
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
     fulfillSecret(actor, bot, request, value);
     tx.commit();
 }
 
 void Policy::fulfillSecret(const Person& actor, std::string_view bot, Id request, std::string_view value) {
     if (!allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
-    auto row = db_.query(R"SQL(
+    auto row = database_.query(R"SQL(
 SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pending'
  AND NOT EXISTS (SELECT 1 FROM protected_inputs WHERE name=p.name AND status='fulfilled')
 )SQL",
-                         {bot, request});
+                               {bot, request});
     if (!row.next()) throw DecisionUnavailable{};
     const auto name = row.string(1);
     if (value.empty() || name.find(value) != name.npos || bot.find(value) != bot.npos) throw Conflict("Invalid protected value");
-    db_.secretStorage.redactor(bot).requirePublic(actor.id);
+    secretStorage_.redactor(bot).requirePublic(actor.id);
     audit(actor, bot, "supply_secret", {{"requestId", request}, {"resourceKind", "secret"}, {"resourceId", name}});
-    db_.inboxStorage.recordInboxDecision(actor, {std::string(bot), InboxKind::protected_input, request, 0, 0, 0, 0}, "supply");
-    db_.exec("UPDATE protected_inputs SET status='fulfilled' WHERE id=?", {request});
-    db_.secretStorage.insert({row.string(0)}, value);
+    inboxStorage_.recordInboxDecision(actor, {std::string(bot), InboxKind::protected_input, request, 0, 0, 0, 0}, "supply");
+    database_.exec("UPDATE protected_inputs SET status='fulfilled' WHERE id=?", {request});
+    secretStorage_.insert({row.string(0)}, value);
 }
 
 void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destination, std::string_view operation, bool upstream,
                        const std::function<void(std::string_view)>& adapter) const {
     std::string value;
     {
-        std::lock_guard lock(db_.mutex);
-        Transaction tx(db_.db);
+        std::lock_guard lock(database_.mutex);
+        Transaction tx(database_.db);
         if (!upstream || !ref.valid() || !identifier(destination) || !identifier(operation)) throw Conflict("Secret access denied");
-        const auto entry = db_.taskRecords.load(task);
+        const auto entry = taskRecords_.load(task);
         const auto& bot = entry.botId;
-        if (db_.botLifecycle.botPaused(bot) || forbidden(bot, Action::secret_use, ref.name)) throw Conflict("Secret access denied");
-        const auto seen = db_.query("SELECT 1 FROM secret_destinations WHERE destination=?", {destination}).next();
+        if (botLifecycle_.botPaused(bot) || forbidden(bot, Action::secret_use, ref.name)) throw Conflict("Secret access denied");
+        const auto seen = database_.query("SELECT 1 FROM secret_destinations WHERE destination=?", {destination}).next();
         const auto key = "secret/" + Json::array({task, operation}).dump();
-        const auto gate = db_.policyApprovals.approveAction(
-            db_.policyApprovals.taskPolicyOrigin(entry), {Action::secret_use, std::string(destination), seen}, key,
-            Json{{"secret", ref.name}, {"destination", destination}}, db_.policyApprovals.now());
+        const auto gate =
+            policyApprovals_.approveAction(policyApprovals_.taskPolicyOrigin(entry), {Action::secret_use, std::string(destination), seen},
+                                           key, Json{{"secret", ref.name}, {"destination", destination}}, policyApprovals_.now());
         if (gate != ApprovalGate::allow) {
             tx.commit();
             throw Conflict(gate == ApprovalGate::waiting ? "Secret use is waiting for policy approval." : std::string(approvalError(gate)));
         }
-        auto row = db_.query("SELECT file FROM protected_inputs WHERE name=? AND status='fulfilled'", {ref.name});
+        auto row = database_.query("SELECT file FROM protected_inputs WHERE name=? AND status='fulfilled'", {ref.name});
         if (!row.next()) throw Conflict("Secret unavailable");
-        value = db_.secretStorage.read({row.string(0)});
+        value = secretStorage_.read({row.string(0)});
         tx.commit();
     }
     try {
@@ -504,7 +517,7 @@ void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destinati
     } catch (...) {
         throw Conflict("Secret adapter failed");
     }
-    std::lock_guard lock(db_.mutex);
-    db_.exec("INSERT OR IGNORE INTO secret_destinations VALUES(?)", {destination});
+    std::lock_guard lock(database_.mutex);
+    database_.exec("INSERT OR IGNORE INTO secret_destinations VALUES(?)", {destination});
 }
 }

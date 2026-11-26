@@ -165,7 +165,7 @@ Id ModelCalls::approveModelBudget(const Person& actor, const ModelBudget& budget
 
 void ModelCalls::resumeSharedModelBudgetWaits(const Person& actor, std::string_view budget, Id approvedMessage, Id approvedTask) {
     if (!database.query("SELECT 1 FROM model_budgets WHERE id=? AND attempts<call_limit", {budget}).next()) return;
-    const auto policy = Policy(remaining);
+    const auto& policy = permissions;
     std::vector<Id> tasks;
     auto waits = database.query(R"SQL(
 SELECT w.task_id,t.bot_id FROM waits w CROSS JOIN tasks t ON t.id=w.task_id
@@ -214,10 +214,10 @@ ModelCall ModelCalls::checkModelCall(std::string_view bot, Decision call, const 
         rejection = "Tool unavailable for this turn";
         if (secretStorage.redactor(bot).containsProtected(call.tool)) call.tool.clear();
     } else if (sharedMemoryTool(call.tool) && call.args.contains("docId") &&
-               Policy(remaining).forbidden(bot,
-                                           (call.tool == "read_memory" || call.tool == "memory_history") ? Action::shared_memory_read
-                                                                                                         : Action::shared_memory_write,
-                                           field(call.args, "docId"))) {
+               permissions.forbidden(bot,
+                                     (call.tool == "read_memory" || call.tool == "memory_history") ? Action::shared_memory_read
+                                                                                                   : Action::shared_memory_write,
+                                     field(call.args, "docId"))) {
         rejection = "Memory access denied";
     } else {
         const auto scrub = modelCallRedactor(bot, call.tool, call.args, gitNotification);

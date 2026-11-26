@@ -1,3 +1,4 @@
+#include "flock/store.hpp"
 #include "runtime_peer_exchanges.hpp"
 #include "runtime_run_reports.hpp"
 #include "runtime_session_history.hpp"

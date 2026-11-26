@@ -170,10 +170,10 @@ struct Store::Impl : Database {
                                                 sessionReadStorage,
                                                 taskRecords,
                                                 taskRunReports};
-    ModelCalls modelCalls{*this, botLifecycle, *this, journalStorage, secretStorage, taskRecords, waitStorage, channelStorage};
-    TaskOperations taskOperations{*this,       automationStorage, botLifecycle, *this,       journalStorage, modelCalls,  outboxStorage,
+    ModelCalls modelCalls{*this, botLifecycle, permissions, journalStorage, secretStorage, taskRecords, waitStorage, channelStorage};
+    TaskOperations taskOperations{*this,       automationStorage, botLifecycle, permissions, journalStorage, modelCalls,  outboxStorage,
                                   peerStorage, secretStorage,     taskEvents,   taskRecords, taskRouting,    waitStorage, inboxStorage};
-    TaskRouting taskRouting{*this, *this, peerStorage, secretStorage, waitStorage, sessionReadStorage, sessionParticipationStorage};
+    TaskRouting taskRouting{*this, permissions, peerStorage, secretStorage, waitStorage, sessionReadStorage, sessionParticipationStorage};
     TaskRunReports taskRunReports{*this, policyApprovals, journalStorage, outboxStorage, waitStorage};
     OutboxStorage outboxStorage{*this};
     PeerStorage peerStorage{*this};
@@ -191,8 +191,8 @@ struct Store::Impl : Database {
     WorkflowStorage workflowStorage{*this,         taskRecords,       taskEvents,     journalStorage,
                                     secretStorage, conversationTurns, taskOperations, taskRouting};
     WebIdentityState webIdentity;
-    InboxStorage inboxStorage{*this, secretStorage, taskRecords,    waitStorage,    journalStorage,
-                              *this, modelCalls,    taskOperations, policyApprovals};
+    InboxStorage inboxStorage{*this,       secretStorage, taskRecords,    waitStorage,    journalStorage,
+                              permissions, modelCalls,    taskOperations, policyApprovals};
     GitStorage gitStorage{*this,
                           secretStorage,
                           inboxStorage,
@@ -204,7 +204,7 @@ struct Store::Impl : Database {
                           botLifecycle,
                           policyApprovals,
                           sessionParticipationStorage};
-    Policy permissions{*this};
+    Policy permissions{*this, botLifecycle, taskRecords, journalStorage, secretStorage, inboxStorage, policyApprovals};
     ChannelStorage channelStorage{*this, path, permissions, secretStorage, webIdentity, journalStorage, conversationTurns, policyApprovals};
     LocalMachineStorage localMachineStorage{*this, permissions, secretStorage, webIdentity, taskRecords};
     PolicyApprovals policyApprovals{*this,       secretStorage,     webIdentity,  taskRecords,    waitStorage, journalStorage,

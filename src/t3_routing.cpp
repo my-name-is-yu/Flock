@@ -114,7 +114,7 @@ std::string verifiedCommit(std::string commit) {
 
 std::set<std::string> TaskRouting::registeredT3Environments(std::string_view bot) {
     std::set<std::string> result;
-    Policy policy(remaining);
+    auto& policy = permissions;
     auto rows = database.query("SELECT environment_id FROM t3_connected_environments");
     while (rows.next()) {
         auto id = rows.string(0);
@@ -159,7 +159,7 @@ LinkedTaskDestinations TaskRouting::discoverLinkedTaskDestinations(T3& t3, std::
             bool permitted = false;
             {
                 std::lock_guard lock(database.mutex);
-                Policy policy(remaining);
+                auto& policy = permissions;
                 permitted =
                     policy.allows(bot, Action::environment_inspect, target) && !policy.forbidden(bot, Action::environment_launch, target);
             }
@@ -265,7 +265,7 @@ TaskRoute TaskRouting::taskRoute(std::string_view bot, const Json& routing, std:
             "This destination name resolves to both a configured route and a linked T3 gateway. Choose an unambiguous destination.");
     if (!registeredT3Environments(bot).contains(discovered->gatewayEnvironmentId))
         throw ToolError("The selected T3 gateway is no longer connected. Flock will not switch gateways.");
-    Policy policy(remaining);
+    auto& policy = permissions;
     if (!policy.allows(bot, Action::environment_inspect, discovered->environmentId) ||
         policy.forbidden(bot, Action::environment_launch, discovered->environmentId))
         throw ToolError("Flock cannot launch in the linked target under the current permissions.");

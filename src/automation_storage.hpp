@@ -10,6 +10,7 @@
 namespace flockv0 {
 class BotLifecycleStorage;
 class Database;
+class Policy;
 class SecretRedactor;
 class SecretStorage;
 struct ConfiguredSchedule;
@@ -21,7 +22,7 @@ struct ScheduleImportError;
 class TaskOperations;
 class AutomationStorage {
 public:
-    AutomationStorage(Database&, const SecretStorage&, const BotLifecycleStorage&, Store::Impl&, Store::AutomationModelResolver,
+    AutomationStorage(Database&, const SecretStorage&, const BotLifecycleStorage&, const Policy&, Store::AutomationModelResolver,
                       TaskOperations&);
 
     void retireAutomations(const Json& botIds);
@@ -42,7 +43,7 @@ private:
     Database& database_;
     const SecretStorage& secretStorage_;
     const BotLifecycleStorage& lifecycle_;
-    Store::Impl& remaining_;
+    const Policy& permissions_;
     const Store::AutomationModelResolver model_;
     TaskOperations& taskOperations;
 };
