@@ -515,8 +515,12 @@ std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::ve
     const auto readLine = [&](int line) -> std::optional<FormattedBareUrl> {
         if (line < 1 || static_cast<std::size_t>(line) > lines.size()) return std::nullopt;
         auto raw = lines[line - 1];
-        if (static_cast<std::size_t>(line) < lines.size() && raw.ends_with('\\')) raw.remove_suffix(1);
-        return formattedBareUrlOnLine(node, raw);
+        if (auto span = formattedBareUrlOnLine(node, raw)) return span;
+        if (!raw.ends_with('\\')) return std::nullopt;
+        raw.remove_suffix(1);
+        auto span = formattedBareUrlOnLine(node, raw);
+        if (span && cmark_node_get_type(cmark_node_next(span->last)) == CMARK_NODE_LINEBREAK) return span;
+        return std::nullopt;
     };
     const int physical = physicalSourceLine(node, containingParagraph(node));
     if (auto span = readLine(physical)) return span;
