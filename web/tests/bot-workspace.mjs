@@ -168,6 +168,12 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   await settle();
   check(JSON.stringify(patches[6]) === '{"model":"no-reasoning","reasoningEffort":""}' &&
     facts[1].textContent === 'Model default', 'Changing the model left an unsupported effort saved');
+
+  const viewer = createBotWorkspaceCard(async () => ({}), async () => [], async () => catalog);
+  viewer.update({ model: 'next-model', modelCallLimit: 20 });
+  await settle();
+  check(viewer.element.querySelector('.settings-workspace-facts dd').textContent === 'Next model',
+    'The settings showed the model slug instead of its name');
 }
 
 const directory = mkdtempSync(join(tmpdir(), 'flock-bot-workspace-'));

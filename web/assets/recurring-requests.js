@@ -223,7 +223,7 @@ export function createRecurringRequests(bot, api) {
         const control = [...list.querySelectorAll('[data-schedule-id]')].find((button) => button.dataset.scheduleId === focused);
         (control ?? list).focus({ preventScroll: true });
       }
-      count.data = automations.length ? String(automations.length) : 'None';
+      count.data = automations.length ? String(automations.length) : '';
       form.hidden = !canManage;
       signature = next;
     } catch {
