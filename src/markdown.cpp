@@ -333,12 +333,12 @@ std::vector<std::string_view> sourceLines(std::string_view source) {
     }
 }
 
-std::size_t inlineContentEnd(cmark_node* node, int line, std::size_t lineLength) {
+std::size_t inlineContentEnd(cmark_node* node, int line, int adjustment, std::size_t lineLength) {
     for (auto* parent = cmark_node_parent(node); parent; parent = cmark_node_parent(parent)) {
         const auto type = cmark_node_get_type(parent);
         if (type != CMARK_NODE_EMPH && type != CMARK_NODE_STRONG) break;
         if (cmark_node_get_end_line(parent) != line) continue;
-        const auto end = cmark_node_get_end_column(parent);
+        const auto end = cmark_node_get_end_column(parent) + adjustment;
         const int delimiter = type == CMARK_NODE_STRONG ? 2 : 1;
         if (end >= delimiter) lineLength = std::min(lineLength, static_cast<std::size_t>(end - delimiter));
     }
@@ -349,17 +349,18 @@ bool isUrlFormatting(cmark_node_type type) {
     return type == CMARK_NODE_EMPH || type == CMARK_NODE_STRONG;
 }
 
-int physicalSourceLine(cmark_node* node) {
+cmark_node* containingParagraph(cmark_node* node) {
+    for (auto* parent = cmark_node_parent(node); parent; parent = cmark_node_parent(parent))
+        if (cmark_node_get_type(parent) == CMARK_NODE_PARAGRAPH) return parent;
+    return nullptr;
+}
+
+int physicalSourceLine(cmark_node* node, cmark_node* paragraph) {
     const int line = cmark_node_get_start_line(node);
-    while (auto* parent = cmark_node_parent(node)) {
-        if (cmark_node_get_type(parent) == CMARK_NODE_PARAGRAPH) {
-            auto* last = cmark_node_last_child(parent);
-            while (last && cmark_node_get_end_line(last) == 0) last = cmark_node_previous(last);
-            return last ? line + std::max(0, cmark_node_get_end_line(parent) - cmark_node_get_end_line(last)) : line;
-        }
-        node = parent;
-    }
-    return line;
+    if (!paragraph) return line;
+    auto* last = cmark_node_last_child(paragraph);
+    while (last && cmark_node_get_end_line(last) == 0) last = cmark_node_previous(last);
+    return last ? line + std::max(0, cmark_node_get_end_line(paragraph) - cmark_node_get_end_line(last)) : line;
 }
 
 std::string decodeBareUrl(std::string_view url) {
@@ -379,18 +380,12 @@ struct FormattedBareUrl {
     cmark_node* last;
 };
 
-std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::vector<std::string_view>& lines) {
-    auto* adjacent = cmark_node_next(node);
-    if (!adjacent || !isUrlFormatting(cmark_node_get_type(adjacent))) return std::nullopt;
+std::optional<FormattedBareUrl> formattedBareUrlAt(cmark_node* node, std::string_view raw, int adjustment) {
     const int line = cmark_node_get_start_line(node);
-    const int column = cmark_node_get_start_column(node);
-    const int end = cmark_node_get_end_column(node);
-    const int physicalLine = physicalSourceLine(node);
-    if (physicalLine < 1 || static_cast<std::size_t>(physicalLine) > lines.size() || column < 1 || end < column ||
-        cmark_node_get_end_line(node) != line)
-        return std::nullopt;
-    const auto raw = lines[physicalLine - 1];
-    const auto content = raw.substr(0, inlineContentEnd(node, line, raw.size()));
+    const int column = cmark_node_get_start_column(node) + adjustment;
+    const int end = cmark_node_get_end_column(node) + adjustment;
+    if (column < 1 || end < column || cmark_node_get_end_line(node) != line) return std::nullopt;
+    const auto content = raw.substr(0, inlineContentEnd(node, line, adjustment, raw.size()));
     const auto textEnd = std::min(content.size(), static_cast<std::size_t>(end));
     const auto literal = value(cmark_node_get_literal(node));
 
@@ -402,11 +397,11 @@ std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::ve
 
         auto offset = textEnd;
         cmark_node* last = node;
-        for (auto* next = adjacent; next && offset < start + url.size(); next = cmark_node_next(next)) {
+        for (auto* next = cmark_node_next(node); next && offset < start + url.size(); next = cmark_node_next(next)) {
             const auto type = cmark_node_get_type(next);
-            const int nextEnd = cmark_node_get_end_column(next);
+            const int nextEnd = cmark_node_get_end_column(next) + adjustment;
             if (cmark_node_get_start_line(next) != line || cmark_node_get_end_line(next) != line ||
-                cmark_node_get_start_column(next) != static_cast<int>(offset) + 1 || nextEnd <= static_cast<int>(offset) ||
+                cmark_node_get_start_column(next) + adjustment != static_cast<int>(offset) + 1 || nextEnd <= static_cast<int>(offset) ||
                 (type != CMARK_NODE_TEXT && !isUrlFormatting(type)) ||
                 (isUrlFormatting(type) && static_cast<std::size_t>(nextEnd) > start + url.size()))
                 break;
@@ -420,7 +415,7 @@ std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::ve
         std::string following;
         if (cmark_node_get_type(last) == CMARK_NODE_TEXT) {
             constexpr std::string_view prefix = "https://url.invalid/";
-            const auto lastStart = static_cast<std::size_t>(cmark_node_get_start_column(last) - 1);
+            const auto lastStart = static_cast<std::size_t>(cmark_node_get_start_column(last) + adjustment - 1);
             if (lastStart > start + url.size()) continue;
             const auto consumed = url.substr(lastStart - start);
             const auto decoded = decodeBareUrl(std::string(prefix) + std::string(consumed)).substr(prefix.size());
@@ -433,6 +428,24 @@ std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::ve
             return FormattedBareUrl{destination, literal.substr(0, literal.size() - first.size()), std::move(following), last};
     }
     return std::nullopt;
+}
+
+std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::vector<std::string_view>& lines) {
+    auto* adjacent = cmark_node_next(node);
+    if (!adjacent || !isUrlFormatting(cmark_node_get_type(adjacent))) return std::nullopt;
+    auto* paragraph = containingParagraph(node);
+    const auto line = physicalSourceLine(node, paragraph);
+    if (line < 1 || static_cast<std::size_t>(line) > lines.size()) return std::nullopt;
+    const auto raw = lines[line - 1];
+    if (auto span = formattedBareUrlAt(node, raw, 0)) return span;
+    if (!paragraph || line == cmark_node_get_start_line(paragraph)) return std::nullopt;
+    const auto indentation = raw.find_first_not_of(" \t");
+    if (indentation == raw.npos) return std::nullopt;
+    if (indentation > 0)
+        if (auto span = formattedBareUrlAt(node, raw, static_cast<int>(indentation))) return span;
+    const int paragraphIndent = cmark_node_get_start_column(paragraph) - 1;
+    if (paragraphIndent <= 0 || paragraphIndent == static_cast<int>(indentation)) return std::nullopt;
+    return formattedBareUrlAt(node, raw, static_cast<int>(indentation) - paragraphIndent);
 }
 
 void promoteBareLinks(cmark_node* node, const std::vector<std::string_view>& lines) {

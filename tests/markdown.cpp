@@ -313,6 +313,13 @@ void bareUrls() {
     check(markdown::toHtml("[ref]: https://example.org/reference\nOpen https://example.com/__init__.py after") ==
               "<p>Open <a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a> after</p>",
           "A preceding reference definition truncated the bare filename");
+    check(markdown::toHtml("See the file:\n   https://example.com/__init__.py") ==
+              "<p>See the file:<br>\n<a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a></p>",
+          "Indentation truncated a bare filename on a continuation line");
+    check(markdown::toHtml("> See the file:\nhttps://example.com/?a=1&amp;b=__init__.py") ==
+              "<blockquote><p>See the file:<br>\n"
+              "<a href=\"https://example.com/?a=1&amp;b=__init__.py\">https://example.com/?a=1&amp;b=__init__.py</a></p></blockquote>",
+          "A lazy quoted continuation truncated a bare URL with a character reference");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");
