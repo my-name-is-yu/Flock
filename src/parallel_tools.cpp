@@ -1,3 +1,4 @@
+#include "tool_call_result.hpp"
 #include "storage.hpp"
 #include "conversation_storage.hpp"
 #include "tool_batch.hpp"
@@ -260,7 +261,7 @@ private:
             }
             using enum tool_batch::ConversationRead;
             switch (tool_batch::conversationRead(call.tool)) {
-            case session: return store_.sessionReadTool(message_, call, ctx_.t3, callKey(slot));
+            case session: return store_.sessionReadStorage.sessionReadTool(message_, call, ctx_.t3, callKey(slot));
             case environment_readiness: {
                 if (!message_.channelScope.empty()) return CompletedToolCall{toolFailure("Use Flock Web for this action")};
                 auto result = store_.readiness(message_.bot, message_.routing, call.args, ctx_.t3);

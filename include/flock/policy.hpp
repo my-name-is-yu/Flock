@@ -119,6 +119,8 @@ private:
     friend class MemoryStorage;
     friend class InboxStorage;
     friend class GitStorage;
+    friend class SessionParticipationStorage;
+    friend class SessionReadStorage;
     friend class Store;
     friend class ModelCalls;
     friend class TaskOperations;

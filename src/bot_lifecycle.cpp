@@ -1,3 +1,4 @@
+#include "session_dispatch_lock.hpp"
 #include "storage.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "database.hpp"
@@ -78,7 +79,7 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
             p_->taskOperations.requestCancellation(task);
         }
         p_->policyApprovals.settlePolicyApprovals();
-        p_->stopPausedBotParticipation(bot);
+        p_->sessionParticipationStorage.stopPausedBotParticipation(bot);
         p_->channelStorage.dropPausedBotDeliveries(bot);
     } else {
         p_->automationStorage.skipDueAutomations(bot, clock());

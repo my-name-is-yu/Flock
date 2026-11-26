@@ -1,3 +1,4 @@
+#include "session_stop.hpp"
 #include "journal_storage.hpp"
 #include "channel_storage.hpp"
 #include "journal_task.hpp"

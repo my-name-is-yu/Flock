@@ -187,6 +187,8 @@ private:
     friend class GitStorage;
     friend class WorkflowStorage;
     friend class ChannelStorage;
+    friend class SessionParticipationStorage;
+    friend class SessionReadStorage;
     friend class Runtime;
     friend class Policy;
     friend class PolicyApprovals;

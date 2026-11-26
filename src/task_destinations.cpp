@@ -40,7 +40,7 @@ bool TaskRouting::projectQuestionOpen(std::string_view bot, std::string_view env
 }
 
 ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, std::string_view environment, bool requireConnection) {
-    if (requireConnection && !remaining.t3EnvironmentConnected(environment))
+    if (requireConnection && !sessionParticipationStorage.t3EnvironmentConnected(environment))
         return "Connect this T3 environment in Settings, then try again.";
     Policy policy(remaining);
     if (!policy.allows(bot, Action::environment_inspect, environment) || policy.forbidden(bot, Action::environment_launch, environment))

@@ -6,6 +6,7 @@
 #include "model_calls.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "automation_storage.hpp"
+#include "session_stop.hpp"
 #include "wait_storage.hpp"
 #include "task_events.hpp"
 #include "journal_storage.hpp"
