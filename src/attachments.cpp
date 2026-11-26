@@ -1,4 +1,7 @@
-#include "storage.hpp"
+#include "attachment_storage.hpp"
+#include "database.hpp"
+#include "workspace_internal.hpp"
+#include "flock/channels.hpp"
 #include "flock/limits.hpp"
 #include "image_headers.hpp"
 #include "flock/types.hpp"
@@ -69,34 +72,38 @@ Json metadata(const Json& value) {
 }
 }
 
-void Store::Impl::saveAttachments(Id message, const Json& attachments) {
+void AttachmentStorage::saveAttachments(Id message, const Json& attachments) {
     if (!attachments.is_array() || attachments.size() > maxAttachments) throw Conflict("Attachments exceed the message limit");
     for (std::size_t i = 0; i < attachments.size(); ++i) {
         const auto& attachment = attachments[i];
         const auto id = std::to_string(i + 1);
         auto view = metadata(attachment);
         view["attachmentId"] = id;
-        exec("INSERT INTO message_attachments VALUES(?,?,?,?)", {message, id, view, attachment});
+        db_.exec("INSERT INTO message_attachments VALUES(?,?,?,?)", {message, id, view, attachment});
     }
 }
 
-Json Store::Impl::attachmentViews(Id message) const {
-    auto rows = query("SELECT attachment_id FROM message_attachments WHERE message_id=? ORDER BY attachment_id", {message});
+Json AttachmentStorage::attachmentViews(Id message) const {
+    auto rows = db_.query("SELECT attachment_id FROM message_attachments WHERE message_id=? ORDER BY attachment_id", {message});
     auto result = Json::array();
     while (rows.next()) result.push_back({{"attachmentId", rows.string(0)}});
     return result;
 }
 
-Statement Store::Impl::scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const {
-    return query("SELECT a.metadata,a.payload FROM message_attachments a JOIN messages m ON m.id=a.message_id "
-                 "WHERE m.bot_id=? AND a.message_id<=? AND a.message_id=? AND a.attachment_id=?",
-                 {bot, throughMessage, toolId(args, "messageId"), toolText(args, "attachmentId", 128)});
+Statement AttachmentStorage::scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const {
+    return db_.query("SELECT a.metadata,a.payload FROM message_attachments a JOIN messages m ON m.id=a.message_id "
+                     "WHERE m.bot_id=? AND a.message_id<=? AND a.message_id=? AND a.attachment_id=?",
+                     {bot, throughMessage, toolId(args, "messageId"), toolText(args, "attachmentId", 128)});
 }
 
-Json Store::Impl::inspectAttachment(std::string_view bot, Id throughMessage, const Json& args) {
+bool AttachmentStorage::hasAttachment(std::string_view bot, Id throughMessage, const Json& args) const {
+    return scopedAttachment(bot, throughMessage, args).next();
+}
+
+Json AttachmentStorage::inspectAttachment(std::string_view bot, Id throughMessage, const Json& args) {
     Json view, attachment;
     {
-        std::lock_guard lock(mutex);
+        std::lock_guard lock(db_.mutex);
         auto row = scopedAttachment(bot, throughMessage, args);
         if (!row.next()) throw Conflict("Attachment is unavailable in this conversation");
         view = row.json(0);
@@ -110,7 +117,7 @@ Json Store::Impl::inspectAttachment(std::string_view bot, Id throughMessage, con
     return view;
 }
 
-std::vector<ModelImage> Store::Impl::inspectedImages(std::string_view bot, Id message, const Json& steps) const {
+std::vector<ModelImage> AttachmentStorage::inspectedImages(std::string_view bot, Id message, const Json& steps) const {
     std::vector<ModelImage> images;
     std::set<std::pair<Id, std::string>> seen;
     for (auto it = steps.rbegin(); it != steps.rend() && images.size() < maxAttachments; ++it) {

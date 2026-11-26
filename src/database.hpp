@@ -16,6 +16,7 @@ struct sqlite3_stmt;
 
 namespace flockv0 {
 struct RunRef;
+class Store;
 enum class WaitReason;
 
 enum class JournalKind {
@@ -101,6 +102,7 @@ public:
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;
 
+    static Database& of(Store&);
     void open(const std::filesystem::path&);
     Statement query(const char*) const;
     Statement query(const char*, const Json&) const;

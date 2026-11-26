@@ -694,7 +694,7 @@ TaskView Store::Impl::taskDetails(Id id, bool includeBlocker) const {
 
 void Store::Impl::addTaskDetails(TaskView& view) const {
     const auto& task = view.task;
-    if (auto pending = outbox(task)) view.pendingAction.emplace(std::move(*pending));
+    if (auto pending = outboxStorage.outbox(task)) view.pendingAction.emplace(std::move(*pending));
     auto revisions = query("SELECT id,number,intent,done_when,source_message_id FROM task_revisions"
                            " WHERE task_id=? ORDER BY number",
                            {task.id});

@@ -1,5 +1,8 @@
 #pragma once
 #include "database.hpp"
+#include "attachment_storage.hpp"
+#include "outbox_storage.hpp"
+#include "run_ref_storage.hpp"
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
 #include "workspace_internal.hpp"
@@ -77,8 +80,6 @@ inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 inline constexpr std::string_view runStopOperation = "run-stop/";
 QuestionTarget questionTarget(const TaskData&, Id waitId = 0);
 std::string effectiveDoneWhen(const TaskData& task);
-Json runJson(const RunRef&);
-RunRef runRef(const Json&);
 DestinationRun& destinationRun(TaskData& task, std::string_view action);
 bool destinationStopRequested(const std::optional<Outbox>& action, const RunRef&);
 RunEvidence boundedReportEvidence(const RunEvidence&);
@@ -198,6 +199,8 @@ struct Store::Impl : Database {
     const MemorySeed memorySeed;
     const AutomationModelResolver automationModel;
     SecretStore secrets{path.parent_path()};
+    OutboxStorage outboxStorage{*this};
+    AttachmentStorage attachments{*this};
     class SessionEvidence;
     std::map<ChannelKind, ChannelConnector> channels;
     std::map<std::string, std::shared_ptr<LocalMachine>, std::less<>> localMachines;
@@ -352,12 +355,7 @@ struct Store::Impl : Database {
     void appendStageRequirements(std::string& instruction, const TaskData& task) const;
     void stageObservation(const TaskData& task, const Observation&, Seconds now);
     bool settleStageReport(TaskData& task);
-    void saveAttachments(Id, const Json&);
-    Json inspectAttachment(std::string_view bot, Id throughMessage, const Json&);
-    Json attachmentViews(Id) const;
-    Statement scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
-    std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
     Json workspaceTool(const ToolContext&, const Decision&);
     std::optional<Resource> authorizedBotToolScope(std::string_view bot, const Decision&);
     void validateBotTool(const ToolContext&, const Decision&);
@@ -525,12 +523,6 @@ struct Store::Impl : Database {
     void clearWait(TaskData&, std::string_view resolution);
     bool recordDestinationReport(TaskData& task, DestinationRun& run, const Observation&);
     void consumeEvent(const TaskData&);
-    std::optional<Outbox> outbox(const TaskData&, std::string_view actionId = {}) const;
-    void insertOutbox(Id task, const Outbox&);
-    bool saveOutbox(const Outbox&, std::optional<OutboxPhase> expected = {});
-    bool setOutboxPhase(std::string_view id, OutboxPhase, std::optional<OutboxPhase> expected = {});
-    bool startOutbox(const Outbox&, std::string_view authGeneration);
-    bool prepareOutbox(const Outbox&);
     void unlockQuestion(TaskData&, std::string_view reason);
 private:
     Id writeRunReportJournal(Id, JournalKind, const RunReportEntry&);
