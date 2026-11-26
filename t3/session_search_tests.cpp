@@ -1,3 +1,4 @@
+#include "flock/identity.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
@@ -225,7 +226,7 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     auto store = std::make_unique<Store>(database);
     auto runtime = std::make_unique<Runtime>(*store, model, t3, [](std::string_view) { return std::string{}; });
     const auto configureIdentity = [&] {
-        store->setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+        WebIdentity(*store).setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
             if (person == localOwner.id) return true;
             return {};
         });
@@ -404,18 +405,18 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
         ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
     };
     store->policy().setOwner(localOwner, intake.botId);
-    store->connectChannel({ChannelKind::slack, channelCapabilities(ChannelKind::slack),
-                           [](auto token, auto workspace) { return token == "fixture" && workspace == "test"; },
-                           [&](auto, auto) -> std::optional<ChannelSender> { return ChannelSender{intake.botId, localOwner.id}; },
-                           std::make_shared<SlackTransport>()});
+    Channels(*store).connectChannel({ChannelKind::slack, channelCapabilities(ChannelKind::slack),
+                                     [](auto token, auto workspace) { return token == "fixture" && workspace == "test"; },
+                                     [&](auto, auto) -> std::optional<ChannelSender> { return ChannelSender{intake.botId, localOwner.id}; },
+                                     std::make_shared<SlackTransport>()});
     const auto slack = [&](std::string_view id) {
-        store->receiveChannel(ChannelKind::slack, "fixture",
-                              {{"workspaceId", "test"},
-                               {"threadRef", "slack-thread"},
-                               {"externalMessageId", id},
-                               {"senderId", "sender"},
-                               {"text", "Check staging."}},
-                              [&](auto, auto) { return intake; });
+        Channels(*store).receiveChannel(ChannelKind::slack, "fixture",
+                                        {{"workspaceId", "test"},
+                                         {"threadRef", "slack-thread"},
+                                         {"externalMessageId", id},
+                                         {"senderId", "sender"},
+                                         {"text", "Check staging."}},
+                                        [&](auto, auto) { return intake; });
         runtime->runConversations();
     };
     const auto send = model.next;
@@ -429,13 +430,13 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     model.next = send;
     store->policy().setMode(localOwner, "supervised");
     fixture({{"botRunStatus", "queued"}});
-    store->receiveChannel(ChannelKind::slack, "fixture",
-                          {{"workspaceId", "test"},
-                           {"threadRef", "slack-thread"},
-                           {"externalMessageId", "slack-ask"},
-                           {"senderId", "sender"},
-                           {"text", "Send an update to T3."}},
-                          [&](auto, auto) { return intake; });
+    Channels(*store).receiveChannel(ChannelKind::slack, "fixture",
+                                    {{"workspaceId", "test"},
+                                     {"threadRef", "slack-thread"},
+                                     {"externalMessageId", "slack-ask"},
+                                     {"senderId", "sender"},
+                                     {"text", "Send an update to T3."}},
+                                    [&](auto, auto) { return intake; });
     runtime->runConversations();
     const auto items = Inbox(*store).inbox(localOwner);
     const auto card = std::ranges::find_if(

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "flock/notifications.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/json.hpp"
@@ -45,7 +46,7 @@ public:
     };
     using Cursor = std::map<Scope, std::uint64_t>;
     struct BotVersion {
-        Store::BotViewStamp stamp;
+        Notifications::BotViewStamp stamp;
         Json descriptor;
     };
     struct Projection {

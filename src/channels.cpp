@@ -729,23 +729,23 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
         database.exec("UPDATE channel_deliveries SET state=?,external_id=? WHERE id=? AND state='unknown'", {next, external, key});
     }
 }
-void Store::connectChannel(ChannelConnector connector) {
-    p_->channelStorage.connectChannel(std::move(connector));
+void Channels::connectChannel(ChannelConnector connector) {
+    channels_.connectChannel(std::move(connector));
 }
 
-void Store::artifactBaseUrl(std::string url) {
-    p_->channelStorage.artifactBaseUrl(std::move(url));
+void Channels::artifactBaseUrl(std::string url) {
+    channels_.artifactBaseUrl(std::move(url));
 }
 
-Json Store::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event, const IntakeResolver& routing) {
-    return p_->channelStorage.receiveChannel(kind, credential, event, routing);
+Json Channels::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event, const IntakeResolver& routing) {
+    return channels_.receiveChannel(kind, credential, event, routing);
 }
 
-std::optional<ChannelResource> Store::attachment(const Person& person, Id id) const {
-    return p_->channelStorage.attachment(person, id);
+std::optional<ChannelResource> Channels::attachment(const Person& person, Id id) const {
+    return channels_.attachment(person, id);
 }
 
-std::optional<ChannelResource> Store::artifact(std::string_view id) const {
-    return p_->channelStorage.artifact(id);
+std::optional<ChannelResource> Channels::artifact(std::string_view id) const {
+    return channels_.artifact(id);
 }
 }

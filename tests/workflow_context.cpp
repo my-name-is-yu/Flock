@@ -1,3 +1,5 @@
+#include "flock/notifications.hpp"
+#include "flock/workflows.hpp"
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
@@ -149,7 +151,7 @@ struct Fixture {
         require(bot.result.is_object() && bot.result.value("ok", false), tool + " failed: " + bot.result.dump());
         return bot.result;
     }
-    Json status() { return store->workflows("bot").at(0); }
+    Json status() { return Workflows(*store).workflows("bot").at(0); }
     void ticks(int count) {
         for (int i = 0; i < count; ++i) runtime->tick();
     }
@@ -452,11 +454,11 @@ void rerunRevisedDependentStage() {
                            {"instruction", "Use the revised assignment."}});
     f.ticks(2);
     require(f.t3.interrupts.contains("run-2"), "active verifier did not stop for the revision");
-    const auto cursor = f.store->notificationEventsSince(localOwner, {"bot"}, std::nullopt, {});
+    const auto cursor = Notifications(*f.store).notificationEventsSince(localOwner, {"bot"}, std::nullopt, {});
     f.t3.finish("run-2", Json::object(), "interrupted");
     f.ticks(5);
     require(f.t3.commands.size() == 3, "revised verifier did not start");
-    require(f.store->notificationEventsSince(localOwner, {"bot"}, cursor.through, cursor.scope).events.empty(),
+    require(Notifications(*f.store).notificationEventsSince(localOwner, {"bot"}, cursor.through, cursor.scope).events.empty(),
             "an interrupted verifier emitted a failure alert after its assignment was revised");
     f.t3.finish("run-3", {{"artifactVersion", shaA}, {"verdict", "pass"}});
     f.ticks(1);
@@ -490,7 +492,7 @@ void rejectInvalidGraphAndArtifact() {
            {{"request", "Invalid cycle"},
             {"stages", Json::array({{{"stageId", "a"}, {"role", "implement"}, {"dependsOn", {"b"}}},
                                     {{"stageId", "b"}, {"role", "verify"}, {"dependsOn", {"a"}}}})}});
-    require(f.bot.result.at("ok") == false && f.store->workflows("bot").empty(), "partial cyclic workflow was saved");
+    require(f.bot.result.at("ok") == false && Workflows(*f.store).workflows("bot").empty(), "partial cyclic workflow was saved");
     f.call("start_workflow", {{"request", "Implement feature"}});
     f.ticks(2);
     f.t3.finish("run-1", {{"artifactVersion", "main"}});
@@ -548,11 +550,11 @@ void uncertainLaunchAndStageStop() {
     f.ticks(1);
     require(f.t3.interrupts.contains("run-1") && f.status()["stages"][0]["status"] == "stop_requested",
             "stage interrupt acknowledgement treated as terminal");
-    const auto cursor = f.store->notificationEventsSince(localOwner, {"bot"}, std::nullopt, {});
+    const auto cursor = Notifications(*f.store).notificationEventsSince(localOwner, {"bot"}, std::nullopt, {});
     f.t3.finish("run-1", Json::object(), "cancelled");
     f.ticks(2);
     require(f.status()["stages"][0]["status"] == "stopped" && f.t3.commands.size() == 1, "dependent of stopped stage ran");
-    require(f.store->notificationEventsSince(localOwner, {"bot"}, cursor.through, cursor.scope).events.empty(),
+    require(Notifications(*f.store).notificationEventsSince(localOwner, {"bot"}, cursor.through, cursor.scope).events.empty(),
             "a requested stop emitted a failure alert");
 }
 
@@ -561,10 +563,10 @@ void workflowFailureNotifications() {
         Fixture f;
         f.call("start_workflow", {{"request", "Implement feature"}});
         f.ticks(2);
-        const auto cursor = f.store->notificationEventsSince(localOwner, {"bot"}, std::nullopt, {});
+        const auto cursor = Notifications(*f.store).notificationEventsSince(localOwner, {"bot"}, std::nullopt, {});
         f.t3.finish("run-1", Json::object(), status);
         f.ticks(3);
-        const auto page = f.store->notificationEventsSince(localOwner, {"bot"}, cursor.through, cursor.scope);
+        const auto page = Notifications(*f.store).notificationEventsSince(localOwner, {"bot"}, cursor.through, cursor.scope);
         require(f.status()["stages"][0]["status"] == "failed" && page.events.size() == 1 && page.events[0]["kind"] == "failure",
                 "a failed stage did not emit exactly one failure alert");
     }
@@ -576,12 +578,12 @@ void stoppedStageNotificationsDistinguishFailures() {
         const auto id = f.call("start_workflow", {{"request", "Implement feature"}}).at("workflowId");
         f.ticks(2);
         f.call("stop_workflow_stage", {{"workflowId", id}, {"stageId", "implement"}});
-        const auto cursor = f.store->notificationEventsSince(localOwner, {"bot"}, std::nullopt, {});
+        const auto cursor = Notifications(*f.store).notificationEventsSince(localOwner, {"bot"}, std::nullopt, {});
         f.t3.finish("run-1", Json::object(), status);
         f.ticks(3);
         require(f.t3.interrupts.empty() && f.status()["stages"][0]["status"] == "stopped",
                 "the stop-race fixture did not settle before an interrupt acknowledgement");
-        const auto page = f.store->notificationEventsSince(localOwner, {"bot"}, cursor.through, cursor.scope);
+        const auto page = Notifications(*f.store).notificationEventsSince(localOwner, {"bot"}, cursor.through, cursor.scope);
         if (std::string_view(status) == "interrupted")
             require(page.events.empty(), "an interrupted stage emitted a failure alert before the stop was acknowledged");
         else

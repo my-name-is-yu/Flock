@@ -1,4 +1,5 @@
 #pragma once
+#include "flock/intake.hpp"
 #include "flock/json.hpp"
 #include "flock/types.hpp"
 
@@ -80,4 +81,22 @@ std::shared_ptr<LocalMachine> hostLocalMachine(std::string owner);
 
 std::string encodeAttachment(std::string_view);
 std::string decodeAttachment(std::string_view, std::size_t maxBytes);
+
+class Store;
+class ChannelStorage;
+struct Person;
+
+class Channels {
+public:
+    explicit Channels(Store&);
+
+    void connectChannel(ChannelConnector);
+    void artifactBaseUrl(std::string url);
+    Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
+    std::optional<ChannelResource> artifact(std::string_view id) const;
+    std::optional<ChannelResource> attachment(const Person&, Id id) const;
+private:
+    ChannelStorage& channels_;
+};
+
 }

@@ -1,4 +1,5 @@
 #include "http_fixture.hpp"
+#include "flock/identity.hpp"
 #include "flock/tasks.hpp"
 #include "flock/channels.hpp"
 #include "flock/decision.hpp"
@@ -78,7 +79,7 @@ void channelEndpoints(const std::filesystem::path& database) {
         return std::nullopt;
     };
     for (const auto channel : {ChannelKind::slack, ChannelKind::imessage})
-        store.connectChannel({channel, channelCapabilities(channel), authenticate, authorize, transport});
+        Channels(store).connectChannel({channel, channelCapabilities(channel), authenticate, authorize, transport});
     WebCallbacks cb{
         .bots = [] { return Json::array({{{"id", "release"}, {"name", "Release"}}}); },
         .intake = [](std::string_view bot, std::string_view request) -> Intake {
@@ -155,7 +156,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     server.reset();
     event["text"] = "Prepare session";
     event["externalMessageId"] = "prepare-local";
-    store.receiveChannel(ChannelKind::slack, "Bearer fixture-channel", event, cb.intake);
+    Channels(store).receiveChannel(ChannelKind::slack, "Bearer fixture-channel", event, cb.intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
     const auto active = Tasks(store).activeTasks("release").at(0).task.activeRun;
     check(active.has_value(), "Fixture Session did not start");
@@ -167,7 +168,7 @@ void channelEndpoints(const std::filesystem::path& database) {
                    {"rules", Json::array({{{"operation", "read_file"}, {"path", localFile.string()}}})}};
     event["text"] = "Request local";
     event["externalMessageId"] = "local-headless";
-    store.receiveChannel(ChannelKind::slack, "Bearer fixture-channel", event, cb.intake);
+    Channels(store).receiveChannel(ChannelKind::slack, "Bearer fixture-channel", event, cb.intake);
     runtime.runConversations();
     check(model.review.at("status") == "pending" && !model.review.contains("reviewUrl") &&
               model.review.at("reviewInstructions").get<std::string>().find("this Bot's Access, and review Connected computers") !=
@@ -233,7 +234,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     event["externalMessageId"] = "queued-before-revocation";
     Browser::checked(sessionBridge.Post(slack, credential, event.dump(), "application/json"), 201);
     const auto sentBeforeRevocation = transport->replies.size();
-    store.setWebIdentityResolver([&](std::string_view person) -> std::optional<bool> {
+    WebIdentity(store).setWebIdentityResolver([&](std::string_view person) -> std::optional<bool> {
         if (person == owner.id) return true;
         return std::nullopt;
     });

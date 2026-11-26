@@ -1,6 +1,7 @@
 #include "channel_routes.hpp"
 #include "http_payload.hpp"
 #include "settings_routes.hpp"
+#include "flock/local_machines.hpp"
 #include "flock/channels.hpp"
 #include "flock/json.hpp"
 #include "flock/run_ref.hpp"
@@ -47,7 +48,7 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
         try {
             const auto event = Json::parse(req.body);
             if (!event.is_object()) return reply(res, 400, {{"error", "invalid_event"}});
-            reply(res, 201, store.receiveChannel(kind, req.get_header_value("Authorization"), event, callbacks.intake));
+            reply(res, 201, Channels(store).receiveChannel(kind, req.get_header_value("Authorization"), event, callbacks.intake));
         } catch (const ChannelAccessDenied&) {
             reply(res, 403, {{"error", "channel_access_denied"}});
         } catch (const Json::exception&) {
@@ -57,7 +58,7 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
         }
     });
     server.Get(R"(/api/artifacts/(flock-[0-9a-f]{32}))", [&](const auto& req, auto& res) {
-        const auto artifact = store.artifact(req.matches[1].str());
+        const auto artifact = Channels(store).artifact(req.matches[1].str());
         if (!artifact) return reply(res, 404, {{"error", "artifact_not_found"}});
         res.headers.erase("Content-Security-Policy");
         res.set_header("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'; "
@@ -69,13 +70,13 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
         const auto value = req.matches[1].str();
         Id id = 0;
         const auto parsed = std::from_chars(value.data(), value.data() + value.size(), id);
-        const auto attachment = parsed.ec == std::errc{} ? store.attachment(person(callbacks, req), id) : std::nullopt;
+        const auto attachment = parsed.ec == std::errc{} ? Channels(store).attachment(person(callbacks, req), id) : std::nullopt;
         if (!attachment) return reply(res, 404, {{"error", "attachment_not_found"}});
         if (attachment->mimeType == "text/plain") res.set_header("Content-Disposition", "attachment");
         res.set_content(attachment->bytes, attachment->mimeType);
     });
     server.Get("/api/channels/local-connections",
-               [&](const auto& req, auto& res) { reply(res, 200, store.localConnections(person(callbacks, req))); });
+               [&](const auto& req, auto& res) { reply(res, 200, LocalMachines(store).localConnections(person(callbacks, req))); });
     server.Post("/api/channels/local-operations", [&](const auto& req, auto& res) {
         if (!callbacks.authenticateSessionBridge || req.get_header_value_count("Authorization") != 1 ||
             !callbacks.authenticateSessionBridge(req.get_header_value("Authorization")))
@@ -85,7 +86,7 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
             const auto body = Json::parse(req.body);
             const RunRef run{body.at("threadId"), body.at("runId"), {}, {}};
             reply(res, 200,
-                  store.runLocalMachineOperation(
+                  LocalMachines(store).runLocalMachineOperation(
                       body.at("environmentId").template get<std::string>(), run, body.at("machineId").template get<std::string>(),
                       body.at("operation").template get<std::string>(), body.at("path").template get<std::string>()));
         } catch (const ChannelAccessDenied&) {
@@ -102,9 +103,9 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
             const auto body = Json::parse(req.body);
             const auto actor = person(callbacks, req);
             if (req.matches[1].str() == "decide")
-                store.decideLocalConnection(actor, connectionId(body), body.at("approve").template get<bool>());
+                LocalMachines(store).decideLocalConnection(actor, connectionId(body), body.at("approve").template get<bool>());
             else
-                store.disconnectLocalConnection(actor, connectionId(body));
+                LocalMachines(store).disconnectLocalConnection(actor, connectionId(body));
             reply(res, 200, {{"ok", true}});
         } catch (const ChannelAccessDenied&) {
             reply(res, 403, {{"error", "access_denied"}});

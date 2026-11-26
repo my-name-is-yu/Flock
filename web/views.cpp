@@ -1,4 +1,6 @@
 #include "views.hpp"
+#include "flock/peer_conversations.hpp"
+#include "flock/workflows.hpp"
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/markdown.hpp"
@@ -492,7 +494,7 @@ Json peerConversation(Store& store, std::string_view bot, std::string_view peer,
         return containsProtectedText(policy, bot, text) || containsProtectedText(policy, peer, text);
     };
     const auto olderSize = anchor ? conversationSize / 2 : conversationSize;
-    auto events = store.peerConversation(bot, peer, anchor ? anchor : before, olderSize + 1, 0, viewer);
+    auto events = PeerConversations(store).peerConversation(bot, peer, anchor ? anchor : before, olderSize + 1, 0, viewer);
     events = policy.redactSecrets(bot, events);
     events = policy.redactSecrets(peer, events);
     const bool more = events.size() > olderSize;
@@ -501,7 +503,7 @@ Json peerConversation(Store& store, std::string_view bot, std::string_view peer,
     for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event) page.push_back(eventView(*event, sensitive));
     if (anchor) {
         result["anchorId"] = anchor;
-        auto newer = store.peerConversation(bot, peer, 0, conversationSize - olderSize, anchor, viewer);
+        auto newer = PeerConversations(store).peerConversation(bot, peer, 0, conversationSize - olderSize, anchor, viewer);
         newer = policy.redactSecrets(bot, newer);
         newer = policy.redactSecrets(peer, newer);
         for (const auto& event : newer) page.push_back(eventView(event, sensitive));
@@ -539,7 +541,7 @@ Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changed
     } else {
         result.update(sessions(store, id, 0));
     }
-    result["workflows"] = store.workflows(id);
+    result["workflows"] = Workflows(store).workflows(id);
     result["compactions"] = Conversations(store).compactions(id, 0, 1);
     result["bot"] = botSettings(bot);
     auto& paused = result["pausedConversations"] = Json::array();

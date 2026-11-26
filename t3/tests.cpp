@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/identity.hpp"
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
@@ -146,7 +147,7 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     fixture({{"lineageLaunchError", "unsupported"}});
     Store store(database);
     const Person member{"session-member", false};
-    store.setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
+    WebIdentity(store).setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
         if (id == member.id) return false;
         return {};
     });
