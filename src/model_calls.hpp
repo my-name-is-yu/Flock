@@ -58,8 +58,7 @@ public:
     void releaseModelCall(Id attempt);
     Id approveModelBudget(const Person&, const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     void resumeSharedModelBudgetWaits(const Person&, std::string_view budget, Id approvedMessage, Id approvedTask);
-    // Open task waits that an approval of this budget would also resume.
-    std::vector<Id> sharedModelBudgetWaits(std::string_view budget) const;
+    std::vector<Id> taskWaitsCoveredByConversationApproval(std::string_view bot, const ModelBudget&) const;
     void resumeMessageModelCall(std::string_view bot, Id message, Id pause, Id attempt);
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args, bool gitNotification) const;
     ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered, bool gitNotification);

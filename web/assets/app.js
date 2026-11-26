@@ -2117,7 +2117,6 @@ function conversationRows(data, events, keep, source) {
       anchoredToWait.add(item.itemId);
     }
   }
-  // A task's step-allowance pause that resumes with a paused reply would repeat that reply's Continue.
   const sharedBudgetWaits = new Set((data?.pausedConversations ?? []).flatMap((turn) => turn.sharedWaitIds ?? []));
   const shown = timelineMessages(events, dayLabel);
   const rows = [];

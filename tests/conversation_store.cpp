@@ -1051,6 +1051,59 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
           "Shared work did not finish after restart with exactly one new block");
 }
 
+void oneStepBudgetKeepsTaskApprovalAvailable() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    auto limited = Fixture::bot();
+    limited.config["modelCallLimit"] = 1;
+    execution.model.conversation = [](const ModelInput&) -> Decision {
+        return {"start_task", {{"request", "Write a release note"}}, "Start it"};
+    };
+    const auto message = receive(store, "shared-one-step", "Write a release note", 0, limited);
+    execution.runtime.runConversations();
+    const auto taskId = TaskList(store).tasks("alpha").at(0).task.id;
+    execution.reach(store, taskId, "waiting");
+
+    const auto waiting = Tasks(store).task(taskId);
+    check(waiting.wait && waiting.wait->reason() == WaitReason::model_budget, "The task did not exhaust its shared budget");
+    const auto turn = Conversations(store).pausedConversations("alpha").at(0);
+    const auto pending = Inbox(store).inbox(localOwner, "alpha");
+    check(turn.at("sharedWaitIds").empty() && pending.size() == 2 &&
+              std::ranges::any_of(pending, [&](const Json& item) { return item.at("waitId") == waiting.wait->id; }),
+          "A conversation approval that uses the sole new step hid the task approval");
+
+    TaskControl(store).operate(localOwner, TaskTarget::from(waiting.task, waiting.wait->id), "approve");
+    check(!Tasks(store).task(taskId).wait && Conversations(store).pausedConversations("alpha").at(0).at("replyToMessageId") == message,
+          "The task could not reserve the new step independently");
+}
+
+void conversationApprovalListsOnlyItsBotWaits() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    auto limited = Fixture::bot();
+    limited.config["modelCallLimit"] = 2;
+    execution.model.conversation = [](const ModelInput& input) -> Decision {
+        if (turn(input).empty()) return {"start_task", {{"request", "Write a release note"}}, "Start it"};
+        return {"find_tasks", Json::object(), "Look up the work"};
+    };
+    receive(store, "shared-cross-bot", "Write a release note", 0, limited);
+    execution.runtime.runConversations();
+    const auto origin = TaskList(store).tasks("alpha").at(0).task.id;
+    const auto delegated = task(store, "Review the release note", "beta", "review-project");
+    fixture.sql("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task,sender_environment) "
+                "VALUES('release-review','work','working','review-request'," +
+                std::to_string(origin) + "," + std::to_string(delegated) + ",'env')");
+    execution.reach(store, delegated, "waiting");
+    const auto delegatedWait = Tasks(store).task(delegated).wait;
+    check(delegatedWait && delegatedWait->reason() == WaitReason::model_budget && delegatedWait->allowance == 2,
+          "The other Bot did not exhaust the same allowance");
+    const auto turn = Conversations(store).pausedConversations("alpha").at(0);
+    const auto shared = turn.at("sharedWaitIds").get<std::vector<Id>>();
+    check(std::ranges::find(shared, delegatedWait->id) == shared.end(), "The conversation included a wait ID from another Bot");
+}
+
 void notesFailureReleasesUnusedApproval() {
     Fixture fixture;
     Store store(fixture.database());
@@ -1172,6 +1225,8 @@ int main() {
         budgetPauseLetsLaterMessagesRunAndApprovalResumes();
         oneApprovalResumesSharedBudgetWaits(false);
         oneApprovalResumesSharedBudgetWaits(true);
+        oneStepBudgetKeepsTaskApprovalAvailable();
+        conversationApprovalListsOnlyItsBotWaits();
         notesFailureReleasesUnusedApproval();
         replyTargetsReachTheTurn();
         conversationPagesCombineTaskAndMessageHistory();
