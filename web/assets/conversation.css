@@ -638,3 +638,30 @@
 }
 .peer-forwarded-message + .event-text { margin-block-start: .45rem; }
 .peer-status { margin-bottom: var(--space-4); text-align: center; color: var(--danger); font-size: var(--text-sm); }
+
+.setup-role-diff {
+  display: inline-block;
+  vertical-align: top;
+}
+
+.setup-role-diff summary {
+  cursor: pointer;
+}
+
+.setup-role-diff pre {
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: min(54ch, 60vw);
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.setup-role-diff del,
+.setup-role-diff ins {
+  display: block;
+}
+
+.setup-role-diff ins {
+  text-decoration: none;
+}

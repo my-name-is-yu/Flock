@@ -4,7 +4,6 @@ export const actionLabels = {
   'bot.decide': 'Respond to Bot requests',
   'bot.settings': 'Change Bot settings',
   'bot.create': 'Create Bots',
-  'bot.rename': 'Rename Bots',
   'rules.manage': 'Manage permission rules',
   'repository.read': 'Read repositories',
   'repository.write': 'Write to repositories',

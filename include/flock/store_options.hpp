@@ -1,6 +1,7 @@
 #pragma once
 
 #include "flock/types.hpp"
+#include "flock/bot_setup.hpp"
 #include <functional>
 #include <optional>
 #include <string>
@@ -19,5 +20,7 @@ using AutomationModelResolver = std::function<std::optional<PlannerModel>(std::s
 struct StoreOptions {
     MemorySeed memorySeed = {};
     AutomationModelResolver automationModel = {};
+    SaveBotSetup saveBotSetup = {};
+    std::function<Json()> botSetupCatalog = {};
 };
 }

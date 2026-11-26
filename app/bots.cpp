@@ -396,6 +396,7 @@ void reportScheduleErrors(std::string_view id, const std::vector<ScheduleImportE
 }
 
 Bot Bots::get(std::string_view id) const {
+    std::lock_guard lock(mutex_);
     return configuredBot(id, readBotConfig(path(id) / "config.json"));
 }
 
@@ -419,6 +420,7 @@ std::optional<PlannerModel> Bots::plannerModel(std::string_view id) const {
 }
 
 std::string Bots::readOptionalNotes(std::string_view id, std::string_view filename, std::size_t limit) const try {
+    std::lock_guard lock(mutex_);
     return readText(path(id) / filename, limit, true);
 } catch (const Conflict& error) {
     throw BotNotesUnavailable(error.what());
@@ -472,6 +474,17 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
     }
 
     Json item = {{"id", id}, {"name", name}, {"soul", readText(botDir / "SOUL.md", maxBotRoleBytes, true)}, {"cron", schedules}};
+    if (const auto stamps = config.find("setupChanges"); stamps != config.end() && stamps->is_object()) {
+        item["setupChangedBy"] = Json::object();
+        for (auto field : botSetupFields)
+            if (const auto stamp = stamps->find(field); stamp != stamps->end() && stamp->is_object())
+                item["setupChangedBy"][field] = stamp->value("by", "person");
+    }
+    if (const auto session = config.find("session"); session != config.end() && session->is_object()) {
+        if (session->contains("model") && session->contains("providerInstanceId"))
+            item["sessionModel"] = {{"model", session->at("model")}, {"providerInstanceId", session->at("providerInstanceId")}};
+        if (session->contains("workspaceStrategy")) item["workspaceStrategy"] = session->at("workspaceStrategy");
+    }
     if (const auto fix = config.find("fixPullRequests"); fix != config.end()) item["fixPullRequests"] = *fix == true;
     for (const std::string_view key : botRunSettingFields) {
         if (key == "model" || key == "reasoningEffort") {
@@ -546,12 +559,7 @@ bool Bots::reconcileCreation(const BotChange& change) {
 }
 
 void Bots::apply(const BotChange& change) try {
-    if (change.operation == "rename_bot") {
-        updateProfile(change.target, {{"name", change.name}});
-        return;
-    }
-    if (change.operation != "create_bot" || !validBotId(change.target) || !validBotId(change.requestKey))
-        throw Conflict("Invalid Bot creation request");
+    if (!validBotId(change.target) || !validBotId(change.requestKey)) throw Conflict("Invalid Bot creation request");
     const auto name = validatedBotName({{"name", change.name}});
     std::lock_guard lock(mutex_);
     std::filesystem::create_directories(directory_);
@@ -648,113 +656,236 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image, 
     }
 }
 
+namespace {
+void editRunSettings(Json& config, const Json& settings, const Json& modelCatalog) {
+    for (const auto& [key, value] : settings.items()) {
+        auto setting = validatedBotRunSetting(key, value);
+        if (key == "model") {
+            const auto previous = config.find(key);
+            if (!settings.contains("reasoningEffort") && (setting == "" || previous == config.end() || *previous != setting))
+                config.erase("reasoningEffort");
+            if (setting == "")
+                config.erase("modelProvider");
+            else
+                config["modelProvider"] = "chatgpt";
+        }
+        if (setting == "")
+            config.erase(key);
+        else
+            config[key] = std::move(setting);
+    }
+    if (config.contains("projectId") && !config.contains("environmentId"))
+        throw BotProfileError("invalid_workspace", "A pinned T3 project needs its environmentId");
+    if (settings.contains("reasoningEffort") && config.contains("reasoningEffort")) {
+        const auto& effort = config.at("reasoningEffort");
+        const auto model = config.find("model");
+        const auto provider = config.find("modelProvider");
+        const auto slug =
+            model != config.end() && model->is_string() ? std::string_view(model->get_ref<const std::string&>()) : std::string_view{};
+        const auto& levels = modelReasoningEfforts(modelCatalog, slug);
+        if (!validPlainId(slug) || provider == config.end() || *provider != "chatgpt" ||
+            std::find(levels.begin(), levels.end(), effort) == levels.end())
+            throw BotProfileError("invalid_reasoning_effort", "Choose an effort this model supports or use Model default");
+    }
+}
+
+void editSessionSettings(Json& config, const Json& patch) {
+    if (!patch.contains("sessionModel") && !patch.contains("workspaceStrategy")) return;
+    auto session = config.value("session", Json::object());
+    if (patch.contains("sessionModel")) {
+        const auto& model = patch.at("sessionModel");
+        if (!model.is_null() &&
+            (!model.is_object() || model.size() != 2 || !model.contains("model") || !model.contains("providerInstanceId")))
+            throw Conflict("Choose both the Session provider and model");
+        for (const auto* key : {"model", "providerInstanceId"}) {
+            if (model.is_null())
+                session.erase(key);
+            else
+                session[key] = model.at(key);
+        }
+    }
+    if (patch.contains("workspaceStrategy")) {
+        if (patch.at("workspaceStrategy").is_null())
+            session.erase("workspaceStrategy");
+        else
+            session["workspaceStrategy"] = patch.at("workspaceStrategy");
+    }
+    if (session.empty())
+        config.erase("session");
+    else
+        config["session"] = normalizeSessionSettings(session);
+}
+
+Json setupValues(const Json& config, std::string_view id) {
+    auto result = Json::object();
+    for (auto field : botSetupFields)
+        if (const auto value = config.find(field); value != config.end()) result[field] = *value;
+    result["name"] = config.value("name", std::string(id));
+    result["fixPullRequests"] = config.value("fixPullRequests", true);
+    result["model"] = {{"model", result.value("model", Json(nullptr))}, {"provider", config.value("modelProvider", Json(nullptr))}};
+    if (const auto session = config.find("session"); session != config.end() && session->is_object()) {
+        if (session->contains("model") && session->contains("providerInstanceId"))
+            result["sessionModel"] = {{"model", session->at("model")}, {"providerInstanceId", session->at("providerInstanceId")}};
+        if (session->contains("workspaceStrategy")) result["workspaceStrategy"] = session->at("workspaceStrategy");
+    }
+    return result;
+}
+
+void restoreSetup(Json& config, const Json& patch) {
+    editSessionSettings(config, patch);
+    for (const auto& [key, value] : patch.items()) {
+        if (key == "sessionModel" || key == "workspaceStrategy" || key == "soul") continue;
+        if (key == "model") {
+            for (const auto& [field, saved] : {std::pair{"model", "model"}, {"modelProvider", "provider"}}) {
+                if (value.at(saved).is_null())
+                    config.erase(field);
+                else
+                    config[field] = value.at(saved);
+            }
+        } else if (value.is_null()) {
+            config.erase(key);
+        } else {
+            config[key] = value;
+        }
+    }
+    if (config.contains("projectId") && !config.contains("environmentId"))
+        throw BotProfileError("setup_changed", "Bot settings have changed since this update");
+}
+
+void saveSoul(const std::filesystem::path& path, std::string_view text) {
+    if (text.empty()) {
+        std::error_code failure;
+        std::filesystem::remove(path, failure);
+        if (failure) throw Conflict("Unable to clear the Bot role");
+    } else {
+        writeAtomic(path, text);
+    }
+}
+}
+
 Json Bots::updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
     if (botRunSettingCount(profile)) throw Conflict("Save how the Bot runs separately from its profile");
-
-    std::lock_guard lock(mutex_);
-    const auto botDir = path(id);
-    const auto file = botDir / "config.json";
-    auto config = readBotConfig(file);
-    if (const auto fix = profile.find("fixPullRequests"); fix != profile.end()) {
-        if (profile.size() != 1 || image) throw Conflict("Save pull request follow-ups separately from other settings");
-        config["fixPullRequests"] = validatedBotFixPullRequests(*fix);
-        writeAtomic(file, profileText(config));
-        return cardLocked(id);
-    }
-    if (const auto soul = profile.find("soul"); soul != profile.end()) {
-        const auto original = profile.find("originalSoul");
-        if (profile.size() != 2 || original == profile.end() || !original->is_string() || image)
-            throw Conflict("Save the role separately from other settings with its original text");
-        const auto text = validatedBotSoul(*soul);
-        const auto roleFile = botDir / "SOUL.md";
-        const auto& expected = original->get_ref<const std::string&>();
-        if (expected.size() > maxBotRoleBytes || expected.find('\0') != expected.npos ||
-            readUpTo(roleFile, maxBotRoleBytes + 1, true) != expected)
-            throw BotProfileError("role_changed", "The Bot role changed or contains text the editor could not show");
-        if (text.empty()) {
-            std::error_code failure;
-            std::filesystem::remove(roleFile, failure);
-            if (failure) throw Conflict("Unable to clear the Bot role");
-        } else {
-            writeAtomic(roleFile, text);
-        }
-        return cardFromDirectory(id, botDir);
-    }
-
-    const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
-    const bool changeAvatar = profile.contains("avatar");
-    config["name"] = validatedBotName(profile);
-    if (changeAvatar) config["avatar"] = prepareAvatar(profile, botDir, existingAvatar, image);
-
-    const auto previousFile = changeAvatar ? storedAvatarFile(existingAvatar) : std::string{};
-    saveProfile(botDir, config, changeAvatar && image ? &*image : nullptr, previousFile);
-    if (!previousFile.empty() && previousFile != storedAvatarFile(config.at("avatar")) && isAvatarFile(botDir / previousFile)) {
-        std::error_code ignore;
-        std::filesystem::remove(botDir / previousFile, ignore);
-    }
-    return cardLocked(id);
+    if (profile.contains("fixPullRequests") && (profile.size() != 1 || image))
+        throw Conflict("Save pull request follow-ups separately from other settings");
+    if (profile.contains("soul") &&
+        (profile.size() != 2 || !profile.contains("originalSoul") || !profile.at("originalSoul").is_string() || image))
+        throw Conflict("Save the role separately from other settings with its original text");
+    if (!profile.contains("soul") && !profile.contains("fixPullRequests")) validatedBotName(profile);
+    return saveSetup(nullptr, id, {profile, {}}, 0, {}, Json::array(), image);
 }
 
 Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& settings, Seconds now, const ScheduleReporter& report,
                              const Json& modelCatalog, const Person* editor) {
     if (!settings.is_object() || settings.empty() || settings.size() != botRunSettingCount(settings))
         throw BotProfileError("invalid_profile_update", "Save how the Bot runs separately from its profile");
+    return saveSetup(&store, id, {settings, {}}, now, report, modelCatalog, std::nullopt, editor);
+}
+
+Json Bots::saveSetup(Store* store, std::string_view id, const BotSetupEdit& edit, Seconds now, const ScheduleReporter& report,
+                     const Json& modelCatalog, const std::optional<AvatarImage>& image, const Person* editor) {
+    const auto& patch = edit.patch;
     std::vector<std::string> configErrors;
-    const auto importErrors = Automations(store).syncSchedules(id, now, [&](const auto& commit) {
+    Json card;
+    const auto save = [&](const auto& commit) {
         std::lock_guard lock(mutex_);
-        const auto file = path(id) / "config.json";
+        const auto dir = path(id);
+        const auto file = dir / "config.json";
+        const auto roleFile = dir / "SOUL.md";
         const auto original = readText(file, maxConfigBytes);
         auto config = parseBotConfig(original);
-        const auto previousDestination = projectDestination(config);
-        for (const auto& [key, value] : settings.items()) {
-            auto setting = validatedBotRunSetting(key, value);
-            if (key == "model") {
-                const auto previous = config.find(key);
-                if (!settings.contains("reasoningEffort") && (setting == "" || previous == config.end() || *previous != setting))
-                    config.erase("reasoningEffort");
-                if (setting == "")
-                    config.erase("modelProvider");
-                else
-                    config["modelProvider"] = "chatgpt";
+        const auto beforeConfig = config;
+        const auto stamps = config.value("setupChanges", Json::object());
+        auto before = setupValues(config, id);
+        std::string oldSoul, nextSoul;
+        if (patch.contains("soul")) {
+            oldSoul = readUpTo(roleFile, maxBotRoleBytes + 1, true);
+            if (oldSoul.size() > maxBotRoleBytes || oldSoul.find('\0') != oldSoul.npos ||
+                (patch.contains("originalSoul") && patch.at("originalSoul") != oldSoul))
+                throw BotProfileError("role_changed", "The Bot role changed or contains text the editor could not show");
+            nextSoul = edit.expected ? patch.at("soul").get<std::string>() : validatedBotSoul(patch.at("soul"));
+            before["soul"] = oldSoul;
+        }
+        if (edit.expected) {
+            for (const auto& [key, value] : edit.expected->items()) {
+                if (before.value(key, Json(nullptr)) != value ||
+                    (patch.contains(key) && stamps.value(key, Json::object()).value("change", "") != edit.change))
+                    throw BotProfileError("setup_changed", "Bot settings have changed since this update");
             }
-            if (setting == "")
-                config.erase(key);
-            else
-                config[key] = std::move(setting);
+            restoreSetup(config, patch);
+        } else {
+            auto run = Json::object();
+            for (const auto* key : botRunSettingFields)
+                if (patch.contains(key)) run[key] = patch.at(key);
+            if (!run.empty()) editRunSettings(config, run, modelCatalog);
+            editSessionSettings(config, patch);
+            if (patch.contains("name")) config["name"] = validatedBotName(patch);
+            if (patch.contains("fixPullRequests")) config["fixPullRequests"] = validatedBotFixPullRequests(patch.at("fixPullRequests"));
+            if (patch.contains("avatar")) config["avatar"] = prepareAvatar(patch, dir, config.value("avatar", Json()), image);
         }
-        if (config.contains("projectId") && !config.contains("environmentId"))
-            throw BotProfileError("invalid_workspace", "A pinned T3 project needs its environmentId");
-        if (settings.contains("reasoningEffort") && config.contains("reasoningEffort")) {
-            const auto& effort = config.at("reasoningEffort");
-            const auto model = config.find("model");
-            const auto provider = config.find("modelProvider");
-            const auto slug =
-                model != config.end() && model->is_string() ? std::string_view(model->get_ref<const std::string&>()) : std::string_view{};
-            const auto& levels = modelReasoningEfforts(modelCatalog, slug);
-            if (!validPlainId(slug) || provider == config.end() || *provider != "chatgpt" ||
-                std::find(levels.begin(), levels.end(), effort) == levels.end())
-                throw BotProfileError("invalid_reasoning_effort", "Choose an effort this model supports or use Model default");
+        auto after = setupValues(config, id);
+        if (patch.contains("soul")) after["soul"] = nextSoul;
+        auto previous = Json::object(), changed = Json::object();
+        const auto stamp = actionId();
+        const bool byBot = !edit.change.empty() && !edit.expected;
+        for (auto field : botSetupFields) {
+            const auto old = before.value(field, Json(nullptr));
+            const auto value = after.value(field, Json(nullptr));
+            if (old == value) continue;
+            previous[field] = old;
+            changed[field] = value;
+            config["setupChanges"][field] = {{"by", byBot ? "bot" : "person"}, {"change", byBot ? edit.change : stamp}};
         }
-        const auto updated = profileText(config);
-        const auto schedules = configuredSchedules(id, config, configErrors);
-        bool published = false;
+        const auto previousFile = storedAvatarFile(beforeConfig.value("avatar", Json()));
+        const bool soulChanged = oldSoul != nextSoul;
+        bool wroteConfig = false, wroteSoul = false;
         try {
-            commit(schedules, [&] {
-                if (const auto destination = projectDestination(config); editor && destination && destination != previousDestination) {
-                    BotAccess{store}.rememberProjectAssignment(*editor, id, destination->first, destination->second);
+            const auto publish = [&] {
+                if (editor) {
+                    const auto destination = projectDestination(config);
+                    if (destination && destination != projectDestination(beforeConfig))
+                        BotAccess{*store}.rememberProjectAssignment(*editor, id, destination->first, destination->second);
                 }
-                writeAtomic(file, updated);
-                published = true;
-            });
+                if (edit.record && !changed.empty()) {
+                    auto dependencies = Json::object();
+                    for (const auto& [first, second] : {std::pair{"model", "reasoningEffort"}, {"environmentId", "projectId"}}) {
+                        if (changed.contains(first) && !changed.contains(second)) dependencies[second] = after.value(second, Json(nullptr));
+                        if (changed.contains(second) && !changed.contains(first)) dependencies[first] = after.value(first, Json(nullptr));
+                    }
+                    edit.record(previous, changed, dependencies);
+                }
+                if (soulChanged) {
+                    saveSoul(roleFile, nextSoul);
+                    wroteSoul = true;
+                }
+                if (config != beforeConfig) {
+                    saveProfile(dir, config, image ? &*image : nullptr, previousFile);
+                    wroteConfig = true;
+                }
+                card = cardFromDirectory(id, dir);
+            };
+            if (store)
+                commit(configuredSchedules(id, config, configErrors), publish);
+            else
+                publish();
         } catch (...) {
-            if (published) writeAtomic(file, original);
+            if (wroteConfig) writeAtomic(file, original);
+            if (wroteSoul) saveSoul(roleFile, oldSoul);
             throw;
         }
-    });
-    reportScheduleErrors(id, importErrors, configErrors, report);
-    std::lock_guard lock(mutex_);
-    return cardLocked(id);
+        if (edit.change.empty() && patch.contains("avatar") && !previousFile.empty() &&
+            previousFile != storedAvatarFile(config.at("avatar")) && isAvatarFile(dir / previousFile)) {
+            std::error_code ignore;
+            std::filesystem::remove(dir / previousFile, ignore);
+        }
+    };
+    if (store) {
+        const auto errors = Automations(*store).syncSchedules(id, now, save);
+        reportScheduleErrors(id, errors, configErrors, report);
+    } else {
+        save([](const auto&, const auto& publish) { publish(); });
+    }
+    return card;
 }
 
 std::optional<AvatarImage> Bots::avatarImage(std::string_view id) const {

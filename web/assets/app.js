@@ -10,7 +10,8 @@ import { createBotRoleCard } from '/bot-role.js';
 import { createBotWorkspaceCard } from '/bot-workspace.js';
 import { mountBotDeletion } from '/bot-deletion.js';
 import { mountBotPause } from '/bot-pause.js';
-import { isMemoryNotice, messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
+import { setupNotice, createSetupSettings, orderSetupNotices } from '/bot-setup.js';
+import { isMemoryNotice, isSystemNotice, messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox, pendingKindLabels, taskWaitDecision } from '/board-inbox.js';
 import { screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
@@ -1525,6 +1526,18 @@ function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
+  if (event.kind === 'bot_setup_updated')
+    return setupNotice(event, !context.readOnly && bot?.canDelete, async () => {
+      const active = view;
+      await api('bots/setup/undo', { botId: bot.id, eventId: event.id });
+      const current = active.events.get(event.id);
+      if (current) active.events.set(event.id, { ...current, data: { ...current.data, undone: true } });
+      if (active === view) {
+        renderTimeline();
+        void active.refresh();
+        void refreshBots();
+      }
+    });
   if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (data.sessionWake || data.sessionInvitation) {
@@ -2115,7 +2128,7 @@ function conversationRows(data, events, keep, source) {
       anchoredToWait.add(item.itemId);
     }
   }
-  const shown = timelineMessages(events, dayLabel);
+  const shown = timelineMessages(orderSetupNotices(events), dayLabel);
   const eventsById = new Map(events.map((event) => [event.id, event]));
   const rows = [];
   let peerMessages = [];
@@ -2168,7 +2181,7 @@ function conversationRows(data, events, keep, source) {
         waitDecision && decisions.busy(waitDecision),
         wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), blocker,
         request ? timeline.parallelTasks.get(event.taskId) : null,
-        isMemoryNotice(event) && bot?.canDelete,
+        isSystemNotice(event) && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
@@ -2428,6 +2441,7 @@ const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stro
 let detailAvatar = null;
 let detailRole = null;
 let detailWorkspace = null;
+let detailSetup = null;
 let detailOrigin = null;
 let recurringRequests = null;
 
@@ -2448,6 +2462,7 @@ function clearDetailSectionTransition() {
 function setDetail(selection) {
   releaseDetailRole();
   detailWorkspace = null;
+  detailSetup = null;
   recurringRequests?.close();
   recurringRequests = selection?.kind === 'settings' ? createRecurringRequests(view.id, api) : null;
   detail = selection;
@@ -2817,7 +2832,12 @@ function generalContent(bot) {
     remove.setAttribute('aria-haspopup', 'dialog');
     rows.append(remove);
   }
-  return [hero, workspaceCard(bot), roleCard(bot), rows];
+  detailSetup ??= createSetupSettings(async (patch) => {
+    const saved = await api('bots/profile', { botId: bot.id, ...patch });
+    if (view?.id === bot.id) void view.refresh();
+    return saved;
+  });
+  return [hero, workspaceCard(bot), roleCard(bot), detailSetup.element, rows];
 }
 function workspaceCard(bot) {
   detailWorkspace ??= createBotWorkspaceCard(async (workspace) => {
@@ -2937,6 +2957,7 @@ function replaceDetail(render) {
   const content = render();
   if (detailRole && !content.includes(detailRole.element)) releaseDetailRole();
   if (detailWorkspace && !content.includes(detailWorkspace.element)) detailWorkspace = null;
+  if (detailSetup && !content.includes(detailSetup.element)) detailSetup = null;
   placeRows(elements['detail-body'], content);
   if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
 }
@@ -2946,10 +2967,11 @@ function renderDetail() {
     const bot = view.data.bot;
     labelDetail(`${bot.name} settings`);
     renderDetailNav(settingsTabs, detail.section);
-    const { soul, environmentId, projectId, model, reasoningEffort, ...settings } = bot;
+    const { soul, environmentId, projectId, model, reasoningEffort, setupChangedBy, sessionModel, workspaceStrategy, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
     const canEdit = bot.canDelete === true;
     detailRole?.update(soul, canEdit);
+    detailSetup?.update({ setupChangedBy, sessionModel, workspaceStrategy, canDelete: canEdit });
     detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort }, canEdit);
     return;
   }

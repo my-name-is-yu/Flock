@@ -24,6 +24,7 @@
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
 #include "flock/store.hpp"
+#include "flock/store_options.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
 #include "flock/task.hpp"
@@ -109,7 +110,7 @@ void rules(const std::filesystem::path& path) {
     PolicyRules policyRules{store};
     const auto asks = {Action::repository_write, Action::repository_pr, Action::repository_review,  Action::repository_issues,
                        Action::channel_post,     Action::email_send,    Action::environment_launch, Action::t3_send,
-                       Action::bot_create,       Action::bot_rename,    Action::automation_change,  Action::destructive_write,
+                       Action::bot_create,       Action::bot_settings,  Action::automation_change,  Action::destructive_write,
                        Action::secret_use,       Action::mcp_invoke};
     for (const auto mode : {"full", "supervised"}) {
         policyRules.setMode(localOwner, mode);
@@ -196,20 +197,21 @@ void reopenDirectTask(const std::filesystem::path& path) {
 }
 
 void turns(const std::filesystem::path& path) {
-    Store store(path);
+    int actions = 0;
+    Store store(path, {.saveBotSetup = [&](Store&, std::string_view, const BotSetupEdit&, const Json&) {
+                    ++actions;
+                    return Json::object();
+                }});
     PolicyRules policyRules{store};
     BotAccess botAccess{store};
     botAccess.setOwner(requester, "release");
-    botAccess.setOwner(requester, "target");
     botAccess.setMember(requester, "release", member.id, true);
     policyRules.setMode(localOwner, "supervised");
     Seconds now = 1'800'000'000;
     FixtureModel model;
     Adapter adapter;
-    int actions = 0;
     RuntimeOptions options;
     options.clock = [&] { return now; };
-    options.applyBotChange = [&](const BotChange&) { ++actions; };
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; }, options);
     int sequence = 0;
     auto send = [&](std::string_view text, const Person& actor = requester) {
@@ -217,16 +219,12 @@ void turns(const std::filesystem::path& path) {
         runtime.runConversations();
         return receipt.at("messageId").get<Id>();
     };
-    auto rename = [&] {
-        model.action = {
-            "request_bot_change", {{"operation", "rename_bot"}, {"targetBotId", "target"}, {"name", "Release candidate"}}, "Rename"};
-    };
+    model.action = {"update_bot_setup", {{"name", "Release candidate"}}, ""};
     auto card = [&] {
         const auto items = Inbox(store).inbox(requester);
         check(items.size() == 1, "expected one card at message " + std::to_string(sequence) + ": " + items.dump());
         return items.at(0);
     };
-    rename();
     const auto message = send("Rename the Bot");
     auto item = card();
     check(item.at("conversationEventId") == message && item.at("expiresAt") == 0 &&
@@ -271,7 +269,7 @@ void turns(const std::filesystem::path& path) {
     constexpr int rulesPerKind = 32;
     for (auto kind : {RuleKind::allow, RuleKind::ask})
         for (int i = 0; i < rulesPerKind; ++i)
-            policyRules.changeRule(localOwner, kind, Action::bot_rename, "fixture-" + std::to_string(i), true);
+            policyRules.changeRule(localOwner, kind, Action::bot_settings, "fixture-" + std::to_string(i), true);
     const auto existingRules = policyRules.rules();
     check(existingRules.size() == 2 * rulesPerKind, "Adding many rules did not keep every Allow and Ask-first rule");
     send("New request after the denial");
@@ -302,16 +300,16 @@ void turns(const std::filesystem::path& path) {
     check(actions == 2 && policyRules.rules().size() == existingRules.size() + 1, "Always allow did not run and add one rule");
     send("Use the saved rule");
     check(actions == 3 && Inbox(store).inbox(requester).empty(), "saved exact rule did not allow the next action");
-    policyRules.changeRule(localOwner, RuleKind::allow, Action::bot_rename, "target", false);
+    policyRules.changeRule(localOwner, RuleKind::allow, Action::bot_settings, "release", false);
     check(policyRules.rules() == existingRules, "Saving a rule from a card changed an existing rule");
 
     send("Pending change before Never");
     item = card();
-    policyRules.changeRule(localOwner, RuleKind::never, Action::bot_rename, "tar*", true);
+    policyRules.changeRule(localOwner, RuleKind::never, Action::bot_settings, "rel*", true);
     Inbox(store).decideInbox(requester, target(item), "allow_once");
     runtime.runConversations();
     check(actions == 3, "Never added after card creation lost to approval");
-    policyRules.changeRule(localOwner, RuleKind::never, Action::bot_rename, "tar*", false);
+    policyRules.changeRule(localOwner, RuleKind::never, Action::bot_settings, "rel*", false);
 
     send("Pending change before mode switch");
     item = card();

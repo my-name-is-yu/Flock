@@ -33,6 +33,7 @@ Json checkpointJson(const DecisionCheckpoint& checkpoint) {
               {"attemptId", decision.attemptId}};
     if (!decision.reason.empty()) data["reason"] = decision.reason;
     if (!decision.rejection.empty()) data["rejection"] = decision.rejection;
+    if (decision.setup) data["setup"] = *decision.setup;
     return data;
 }
 
@@ -43,7 +44,8 @@ DecisionCheckpoint decodeCheckpoint(const Json& data, const RecordDecoder& row) 
             {{row.get<std::string>(data, "tool"), row.require(data, "args"), row.optional<std::string>(data, "reason").value_or("")},
              row.require(data, "usage"),
              row.get<Id>(data, "attemptId"),
-             row.optional<std::string>(data, "rejection").value_or("")}};
+             row.optional<std::string>(data, "rejection").value_or(""),
+             row.optional<Json>(data, "setup")}};
 }
 
 QuestionOption decodeQuestionOption(const Json& data, const RecordDecoder& row) {

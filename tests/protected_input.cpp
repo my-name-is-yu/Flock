@@ -359,21 +359,16 @@ void exercise(const std::filesystem::path& dir) {
     t3.connected = false;
     check(turn("check_environment_readiness").find("T3 sign-in") != std::string::npos, "OAuth denial");
     t3.connected = true;
-    for (auto op : {"create_bot", "rename_bot"})
-        check(turn("request_bot_change", {{"operation", op}, {"targetBotId", "Target"}, {"name", "New"}}).find("\"status\":\"applied\"") !=
-                  std::string::npos,
-              "Full did not apply a Bot change");
-    check(applied.size() == 2 && Inbox(store).inbox(owner).size() == 1, "Full queued a Bot change for review");
-    denied([&] {
-        botAccess.applyBotChange("Ernest", Person{"member", false}, "rename_bot", "Target", "Hijacked", 0, 0, options.applyBotChange);
-    });
-    check(applied.size() == 2, "a non-owner renamed another person's Bot");
-    rules.changeNeverRule(owner, Action::bot_rename, "Target", true);
+    check(turn("request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "Target"}, {"name", "New"}})
+                  .find("\"status\":\"applied\"") != std::string::npos,
+          "Full did not apply Bot creation");
+    check(applied.size() == 1 && Inbox(store).inbox(owner).size() == 1, "Full queued Bot creation for review");
+    rules.changeNeverRule(owner, Action::bot_create, "Denied", true);
     check(
-        turn("request_bot_change", {{"operation", "rename_bot"}, {"targetBotId", "Target"}, {"name", "Denied"}}).find("denied by policy") !=
+        turn("request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "Denied"}, {"name", "Denied"}}).find("denied by policy") !=
                 std::string::npos &&
-            applied.size() == 2,
-        "Never allowed a Bot change");
+            applied.size() == 1,
+        "Never allowed Bot creation");
     check(Conversations(store).conversation("Ernest").dump().find(credential) == std::string::npos &&
               botAccess.botSettings(owner, "Ernest").dump().find(credential) == std::string::npos,
           "value in conversation or audit");

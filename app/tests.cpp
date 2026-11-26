@@ -605,6 +605,7 @@ void responseContract() {
                    "list_connections",
                    "check_environment_readiness",
                    "request_bot_change",
+                   "update_bot_setup",
                    "read_memory",
                    "write_memory",
                    "revert_memory_edit",
@@ -655,8 +656,10 @@ void responseContract() {
     for (auto name : {"list_secrets", "list_connections", "check_environment_readiness"})
         check(turnTool(name).at("required") == Json::array(), "unexpected mandatory access-tool parameter");
     check(turnTool("request_bot_change").at("required") == Json::array({"operation", "targetBotId", "name"}) &&
-              turnTool("request_bot_change").at("properties").at("operation").at("enum") == Json::array({"create_bot", "rename_bot"}),
+              turnTool("request_bot_change").at("properties").at("operation").at("enum") == Json::array({"create_bot"}),
           "Bot change schema does not match dispatch");
+    const auto& setup = turnTool("update_bot_setup");
+    check(setup.at("required").empty() && setup.at("properties").size() == 10, "Bot setup schema must describe one partial patch");
     const std::map<std::string, Json> memoryAutomationRequired{{"read_memory", Json::array()},
                                                                {"memory_history", Json::array()},
                                                                {"write_memory", {"baseVersion", "content", "summary"}},
@@ -1265,7 +1268,10 @@ void pullRequestSettings() {
     std::ifstream file(folder / "config.json");
     auto expected = config;
     expected["fixPullRequests"] = false;
-    check(Json::parse(file) == expected && Bots(root).get("release").settings.at("fixPullRequests") == false,
+    auto persisted = Json::parse(file);
+    check(persisted.at("setupChanges").at("fixPullRequests").at("by") == "person", "PR follow-up attribution was not saved");
+    persisted.erase("setupChanges");
+    check(persisted == expected && Bots(root).get("release").settings.at("fixPullRequests") == false,
           "the PR setting was not persisted or an unrelated setting changed");
 
     expected["fixPullRequests"] = true;

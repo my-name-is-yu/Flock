@@ -24,6 +24,7 @@ class AttachmentStorage;
 class AutomationStorage;
 class BotLifecycleStorage;
 class BotSettingsStorage;
+class BotSetupStorage;
 class ChannelStorage;
 class ConversationContextStorage;
 class ConversationTools;
@@ -75,7 +76,7 @@ class ConversationStorage {
 public:
     ConversationStorage(Database& database, AttachmentStorage& attachments, AutomationStorage& automationStorage,
                         BotLifecycleStorage& botLifecycle, BotAccess& botAccess, BotSettingsStorage& botSettingsStorage,
-                        ChannelStorage& channelStorage, ConversationContextStorage& conversationContextStorage,
+                        BotSetupStorage& botSetup, ChannelStorage& channelStorage, ConversationContextStorage& conversationContextStorage,
                         ConversationTools& conversationTools, GitStorage& gitStorage, Policy& permissions, JournalStorage& journalStorage,
                         LocalMachineStorage& localMachineStorage, MemoryStorage& memoryStorage, ModelCalls& modelCalls,
                         PeerStorage& peerStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
@@ -83,7 +84,7 @@ public:
                         SessionReadStorage& sessionReadStorage, TaskOperations& taskOperations, TaskRecords& taskRecords,
                         TaskRouting& taskRouting, WaitStorage& waitStorage, WebIdentityState& webIdentity, WorkflowStorage& workflowStorage)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
-          botAccess(botAccess), botSettingsStorage(botSettingsStorage), channelStorage(channelStorage),
+          botAccess(botAccess), botSettingsStorage(botSettingsStorage), botSetup(botSetup), channelStorage(channelStorage),
           conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
           permissions(permissions), journalStorage(journalStorage), localMachineStorage(localMachineStorage), memoryStorage(memoryStorage),
           modelCalls(modelCalls), peerStorage(peerStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
@@ -117,10 +118,12 @@ private:
     void deferConversation(Id, Seconds now);
     CallOutcome executeConversationStep(const conversation::Message&, int step, const std::vector<ModelCall>&, std::string_view effectType,
                                         const BotTools&, const ConversationCallContext&);
+    CallOutcome executeBotSetup(const conversation::Message&, int step, const Decision&, std::string_view key,
+                                const ConversationCallContext&, const Decision* reply = nullptr);
     CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&, std::string_view key,
                                              const ConversationCallContext&);
     CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                         const std::function<Seconds()>&);
+                                         const std::function<Seconds()>&, const Json* setup = nullptr);
     CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
                                              const ConversationCallContext&);
     std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
@@ -138,6 +141,7 @@ private:
     BotLifecycleStorage& botLifecycle;
     BotAccess& botAccess;
     BotSettingsStorage& botSettingsStorage;
+    BotSetupStorage& botSetup;
     ChannelStorage& channelStorage;
     ConversationContextStorage& conversationContextStorage;
     ConversationTools& conversationTools;

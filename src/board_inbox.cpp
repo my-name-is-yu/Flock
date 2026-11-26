@@ -113,7 +113,7 @@ WITH RECURSIVE task_bots(bot) AS (
 )
 SELECT bot FROM task_bots WHERE bot IS NOT NULL UNION SELECT bot FROM message_bots WHERE bot IS NOT NULL
 UNION SELECT bot FROM bot_owners UNION SELECT bot FROM bot_members
-UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION SELECT bot_id FROM inbox_decisions
+UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_creations UNION SELECT bot_id FROM inbox_decisions
 )SQL")
             : database.query("SELECT bot FROM bot_owners WHERE person=?1 UNION SELECT bot FROM bot_members WHERE person=?1 ORDER BY bot",
                              {actor.id});

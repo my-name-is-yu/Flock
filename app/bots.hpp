@@ -52,6 +52,8 @@ public:
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     Json updateRunSettings(Store&, std::string_view id, const Json& settings, Seconds now, const ScheduleReporter&,
                            const Json& modelCatalog = Json::array(), const Person* editor = nullptr);
+    Json saveSetup(Store*, std::string_view id, const BotSetupEdit&, Seconds, const ScheduleReporter&, const Json& modelCatalog,
+                   const std::optional<AvatarImage>& image = std::nullopt, const Person* editor = nullptr);
     std::optional<AvatarImage> avatarImage(std::string_view id) const;
     void syncSchedules(Store&, Seconds now, const ScheduleReporter&) const;
 private:

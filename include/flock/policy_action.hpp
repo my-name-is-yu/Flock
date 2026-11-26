@@ -11,7 +11,6 @@ enum class Action {
     bot_decide,
     bot_settings,
     bot_create,
-    bot_rename,
     rules_manage,
     repository_read,
     repository_write,

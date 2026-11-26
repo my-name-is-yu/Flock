@@ -2,6 +2,7 @@
 #include "flock/git_host.hpp"
 
 #include "memory_storage.hpp"
+#include "bot_setup_storage.hpp"
 #include "flock/decision.hpp"
 #include "journal_peer.hpp"
 #include "journal_task.hpp"
@@ -55,11 +56,13 @@ runtime::TaskTurn::TaskTurn(Database& database, GitStorage& gitStorage, ModelCal
                             WaitStorage& waitStorage, MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul,
                             const std::function<Seconds()>& clock, GitHost* gitHost, const std::string& sessionRead, std::stop_token stop,
                             TaskUpdates& updates, RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges,
-                            RunObserver& runs, SessionPrompts& prompts, TaskDecisions& decisions)
+                            RunObserver& runs, SessionPrompts& prompts, TaskDecisions& decisions, BotSetupStorage& botSetup,
+                            const IntakeResolver& intake)
     : database(database), gitStorage(gitStorage), modelCalls(modelCalls), peerStorage(peerStorage), secretStorage(secretStorage),
       taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), memoryStorage(memoryStorage),
       model(model), soul(soul), clock(clock), gitHost(gitHost), sessionRead(sessionRead), stop(std::move(stop)), updates(updates),
-      reports(reports), sessionHistory(sessionHistory), peerExchanges(peerExchanges), runs(runs), prompts(prompts), decisions(decisions) {}
+      reports(reports), sessionHistory(sessionHistory), peerExchanges(peerExchanges), runs(runs), prompts(prompts), decisions(decisions),
+      botSetup(botSetup), intake(intake) {}
 
 std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, const Json& event, const std::optional<PeerExchange>& peer,
                                                       bool canSend, bool canRead) {
@@ -85,6 +88,13 @@ std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, cons
     if (canRead) tools.push_back("read_bot_evidence");
     if (canSend && (!task.selectedSession || RunReports::hasSettledRun(task))) tools.push_back("send_bot_message");
     return tools;
+}
+
+std::optional<Json> runtime::TaskTurn::launchDefaults(const TaskData& task) const {
+    if (task.selectedSession && !task.newSessionRequired) return std::nullopt;
+    const auto live = botSetup.liveIntake(intake, task.botId, task.intent);
+    if (!live) return std::nullopt;
+    return live->config.value("session", Json::object());
 }
 
 void runtime::TaskTurn::recordFailure(TaskData& task, const Json& event, std::string_view detail, bool transient, FailureCause cause) {
@@ -124,8 +134,9 @@ std::optional<TaskDecision> runtime::TaskTurn::persistTaskInference(Id id) {
             recordFailure(current, taskEvents.currentEvent(current), error->detail, error->transient, error->cause);
             updates.saveTask(current);
         } else {
-            const auto& call = std::get<ModelCall>(inference.outcome);
-            decision = TaskDecision{call, inference.usage, inference.attemptId, call.rejection};
+            decision = std::get<TaskDecision>(inference.outcome);
+            decision->usage = inference.usage;
+            decision->attemptId = inference.attemptId;
             taskRecords.saveDecisionCheckpoint(current, {inference.generation, inference.eventId, inference.revisionId, *decision});
         }
     }
@@ -200,6 +211,8 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
     if (event.at("kind") == "external_check") gitStorage.projectExternalCheck(gitHost, task, event);
     TaskInference inference{task.generation, event.at("id"), attempt, task.currentRevision};
     try {
+        auto config = task.config;
+        botSetup.refreshPlannerModel(task.botId, config);
         auto turn = modelCalls.callModel(task.botId, model,
                                          {summary,
                                           event,
@@ -208,16 +221,27 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
                                           tools,
                                           task.feedback.value_or(""),
                                           std::move(evidence),
-                                          task.config,
+                                          std::move(config),
                                           needsDoneWhen(task),
                                           summary.contains("forwardableUserMessage"),
                                           {},
                                           std::move(learningRunId)});
         inference.usage = std::move(turn.usage);
-        if (turn.calls.size() == 1)
-            inference.outcome = std::move(turn.calls.front());
-        else
-            inference.outcome = InferenceFailure{"Return one task action", false};
+        std::optional<Json> setup;
+        if (turn.calls.size() == 2) {
+            const auto edit = std::ranges::find(turn.calls, botSetupTool, &ModelCall::tool);
+            if (edit != turn.calls.end() && edit->rejection.empty()) {
+                setup = std::move(edit->args);
+                turn.calls.erase(edit);
+            }
+        }
+        if (turn.calls.size() == 1 && turn.calls.front().tool != botSetupTool) {
+            auto& call = turn.calls.front();
+            const auto rejection = call.rejection;
+            inference.outcome = TaskDecision{std::move(call), {}, 0, rejection, std::move(setup)};
+        } else {
+            inference.outcome = InferenceFailure{"Return one task action and optionally one Bot setup change", false};
+        }
     } catch (const ModelError& error) {
         inference.usage = error.usage;
         const auto cause =
@@ -306,6 +330,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message',
         auto tools = available(task, event, peer, !choices.empty(), canRead);
         if (gitHost && !task.activeRun && event["kind"] == "result")
             tools.insert(tools.end(), gitTools(false).begin(), gitTools(false).end());
+        if (!peer && botSetup.taskAvailable(task)) tools.emplace_back(botSetupTool);
         if (task.pendingInstructions.size() != pending.size()) {
             std::erase(tools, "complete");
             std::erase(tools, "wait_for_event");
@@ -334,7 +359,9 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message',
                 throw Conflict("Return exactly one permitted action with valid arguments");
             if (recordsTaskDecisionReason(decision->tool) && !validDecisionReason(decision->reason))
                 throw Conflict("This action requires a brief reason");
-            decisions.accept(task, event, *decision);
+            if (decision->setup && !botSetup.applyForTask(task, *decision->setup, clock(), decision->attemptId)) return;
+            const auto defaults = decision->tool == "delegate" ? launchDefaults(task) : std::nullopt;
+            decisions.accept(task, event, *decision, {}, defaults ? &*defaults : nullptr);
         } catch (const Conflict& error) {
             decisions.rejectDecision(task, event, *decision, error.what());
         }

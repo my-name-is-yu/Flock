@@ -284,8 +284,23 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             throw Conflict("Unknown run option: " + option);
     }
     const IntakeResolver intake = [&](std::string_view botId, std::string_view request) { return bots.get(botId).intake(request); };
-    Store store(home / "flock.sqlite3", {.memorySeed = [&](std::string_view id) { return bots.initialMemory(id); },
-                                         .automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
+    std::function<Json()> setupModelCatalog;
+    const auto reportSchedule = [](std::string_view id, std::string_view error) {
+        std::cerr << "Flock Bot " << id << ": " << error << '\n';
+    };
+    const auto loadSetupModelCatalog = [&] {
+        try {
+            return setupModelCatalog();
+        } catch (const ModelError&) {
+            return Json::array();
+        }
+    };
+    Store store(home / "flock.sqlite3",
+                {.memorySeed = [&](std::string_view id) { return bots.initialMemory(id); },
+                 .automationModel = [&](std::string_view id) { return bots.plannerModel(id); },
+                 .saveBotSetup = [&](Store& target, std::string_view id, const BotSetupEdit& edit,
+                                     const Json& catalog) { bots.saveSetup(&target, id, edit, options.clock(), reportSchedule, catalog); },
+                 .botSetupCatalog = loadSetupModelCatalog});
     SettingsSystem system(home, port, sessionRead);
     SettingsConnections connections(home);
     SettingsAccess access(store, home, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
@@ -323,9 +338,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
     options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store, *model, *t3, soul, options);
-    const auto reportSchedule = [](std::string_view id, std::string_view error) {
-        std::cerr << "Flock Bot " << id << ": " << error << '\n';
-    };
     bots.syncSchedules(store, options.clock(), reportSchedule);
     Json exportedBots;
     // Web callbacks and the filesystem refresh both update the same on-disk skills.
@@ -375,15 +387,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         callbacks.modelStatus = [] { return Json{{"connected", true}, {"demo", true}}; };
         callbacks.modelCatalog = [] { return Json::array({{{"slug", "demo"}, {"displayName", "Demo"}}}); };
     }
-    callbacks.updateBot = [&, modelCatalog = callbacks.modelCatalog](const Person& editor, std::string_view botId, const Json& profile,
-                                                                     const std::optional<AvatarImage>& image) {
-        auto catalog = Json::array();
-        if (!profile.value("reasoningEffort", "").empty()) {
-            try {
-                catalog = modelCatalog();
-            } catch (const ModelError&) {
-            }
-        }
+    setupModelCatalog = callbacks.modelCatalog;
+    callbacks.updateBot = [&](const Person& editor, std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image) {
+        const auto catalog = field(profile, "reasoningEffort").empty() ? Json::array() : loadSetupModelCatalog();
+        if (profile.contains("sessionModel") || profile.contains("workspaceStrategy"))
+            return bots.saveSetup(&store, botId, {profile, {}}, options.clock(), reportSchedule, catalog);
         auto updated = botRunSettingCount(profile)
                            ? bots.updateRunSettings(store, botId, profile, options.clock(), reportSchedule, catalog, &editor)
                            : bots.updateProfile(botId, profile, image);

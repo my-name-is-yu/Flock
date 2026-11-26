@@ -14,6 +14,7 @@
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/web.hpp"
+#include "flock/bot_setup.hpp"
 #include "change_feed.hpp"
 #include "embedded_assets.hpp"
 #include "http_payload.hpp"
@@ -163,6 +164,13 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
         const auto original = body.find("originalSoul");
         if (body.size() != 3 || original == body.end() || !original->is_string()) throw InputError("invalid_profile_update");
         return {{{"soul", validatedBotSoul(body.at("soul"))}, {"originalSoul", *original}}, std::nullopt};
+    }
+    if (!creating && (body.contains("sessionModel") || body.contains("workspaceStrategy"))) {
+        auto profile = body;
+        profile.erase("botId");
+        for (auto it = profile.begin(); it != profile.end(); ++it)
+            if (it.key() != "sessionModel" && it.key() != "workspaceStrategy") throw InputError("invalid_profile_update");
+        return {std::move(profile), std::nullopt};
     }
     if (const auto fields = creating ? 0 : botRunSettingCount(body); fields) {
         if (body.size() != fields + 1) throw InputError("invalid_profile_update");
@@ -391,6 +399,24 @@ public:
         }
         server_.Post("/api/bots", [this](const Request& req, Response& res) { saveBot(req, res, false); });
         server_.Post("/api/bots/profile", [this](const Request& req, Response& res) { saveBot(req, res, true); });
+        server_.Post("/api/bots/setup/undo", [this](const Request& req, Response& res) {
+            try {
+                const auto body = Json::parse(req.body, nullptr, false);
+                if (!body.is_object()) return error(res, 400, "invalid_json");
+                undoBotSetup(store_, web::person(callbacks_, req), requiredText(body, "botId", 128), bodyId(body, "eventId"));
+                changes_.rescan();
+                json(res, 200, {{"ok", true}});
+            } catch (const InputError& e) {
+                error(res, 400, e.what());
+            } catch (const DecisionDenied&) {
+                error(res, 403, "access_denied");
+            } catch (const BotProfileError& e) {
+                const bool stale = e.code == "setup_changed" || e.code == "role_changed";
+                error(res, stale ? 409 : 500, stale ? "setup_changed" : "setup_undo_failed");
+            } catch (const Conflict&) {
+                error(res, 500, "setup_undo_failed");
+            }
+        });
         server_.Post("/api/bots/delete", [this](const Request& req, Response& res) { deleteBot(req, res); });
         server_.Post("/api/bots/pause", [this](const Request& req, Response& res) { setBotPaused(req, res); });
         server_.Post("/api/messages", [this](const Request& req, Response& res) { mutate(req, res, Mutation::Message); });

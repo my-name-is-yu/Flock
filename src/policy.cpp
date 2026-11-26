@@ -27,7 +27,6 @@ constexpr std::pair<Action, std::string_view> actions[] = {
     {Action::bot_decide, "bot.decide"},
     {Action::bot_settings, "bot.settings"},
     {Action::bot_create, "bot.create"},
-    {Action::bot_rename, "bot.rename"},
     {Action::rules_manage, "rules.manage"},
     {Action::repository_read, "repository.read"},
     {Action::repository_write, "repository.write"},
@@ -84,7 +83,7 @@ bool supervisedCategory(Action action) {
     case Action::environment_launch:
     case Action::t3_send:
     case Action::bot_create:
-    case Action::bot_rename:
+    case Action::bot_settings:
     case Action::automation_change:
     case Action::destructive_write:
     case Action::secret_use:
@@ -386,78 +385,65 @@ void policy_storage::audit(Database& database, const Person& actor, std::string_
                   {unixTime(), actor.id, bot, action, details.dump()});
 }
 
-Id BotAccess::applyBotChange(std::string_view bot, const Person& creator, std::string_view operation, std::string_view target,
-                             std::string_view name, Id message, int step, const ApplyBotChange& apply,
-                             const ReconcileBotCreation* onExhausted) {
+Id BotAccess::applyBotChange(std::string_view bot, const Person& creator, std::string_view target, std::string_view name, Id message,
+                             int step, const ApplyBotChange& apply, const ReconcileBotCreation* onExhausted) {
     auto& storage = StoreAccess::get(store_);
     auto& database = storage.database;
-    const bool create = operation == "create_bot";
     const auto requestKey = std::to_string(message) + "-" + std::to_string(step);
-    if (!apply) throw Conflict("Bot changes are unavailable");
-    const BotChange change{std::string(operation), std::string(target), botName(name), requestKey};
+    if (!apply) throw Conflict("Bot creation is unavailable");
+    const BotChange change{std::string(target), botName(name), requestKey};
     std::lock_guard lock(database.mutex);
-    if (auto completed = database.query("SELECT id FROM bot_changes WHERE request_key=?", {requestKey}); completed.next())
+    if (auto completed = database.query("SELECT id FROM bot_creations WHERE request_key=?", {requestKey}); completed.next())
         return completed.number(0);
     if (storage.botLifecycle.botDeleted(target)) throw Conflict("This Bot ID has already been used");
 
     std::string owner;
-    if (create) {
-        auto pending = database.query("SELECT person FROM bot_creation_intents WHERE request_key=? AND target=?", {requestKey, target});
-        if (pending.next()) owner = pending.string(0);
-    }
+    auto pending = database.query("SELECT person FROM bot_creation_intents WHERE request_key=? AND target=?", {requestKey, target});
+    if (pending.next()) owner = pending.string(0);
     if (owner.empty()) {
-        if ((!create && operation != "rename_bot") || !validBotId(target) ||
-            storage.permissions.forbidden(bot, create ? Action::bot_create : Action::bot_rename, target))
-            throw Conflict("Bot change denied by policy");
-        if (!validIdentifier(creator.id) || (!create && !storage.permissions.allows(creator, Action::bot_settings, target)))
-            throw DecisionDenied{};
+        if (!validBotId(target) || storage.permissions.forbidden(bot, Action::bot_create, target))
+            throw Conflict("Bot creation denied by policy");
+        if (!validIdentifier(creator.id)) throw DecisionDenied{};
         storage.secretStorage.redactor(bot).requirePublic({name, target});
-        if (create) {
-            Transaction intent(database.db);
-            storage.secretStorage.sharedRedactor().requirePublic({creator.id, target});
-            if (database
-                    .query("SELECT 1 FROM bot_owners WHERE bot=? UNION ALL SELECT 1 FROM bot_creation_intents WHERE target=?",
-                           {target, target})
-                    .next())
-                throw Conflict("Target Bot already exists");
-            owner = creator.id;
-            database.exec("INSERT INTO bot_creation_intents VALUES(?,?,?)", {requestKey, target, owner});
-            intent.commit();
-        }
+        Transaction intent(database.db);
+        storage.secretStorage.sharedRedactor().requirePublic({creator.id, target});
+        if (database
+                .query("SELECT 1 FROM bot_owners WHERE bot=? UNION ALL SELECT 1 FROM bot_creation_intents WHERE target=?", {target, target})
+                .next())
+            throw Conflict("Target Bot already exists");
+        owner = creator.id;
+        database.exec("INSERT INTO bot_creation_intents VALUES(?,?,?)", {requestKey, target, owner});
+        intent.commit();
     }
+
     Transaction completion(database.db);
-    if (auto completed = database.query("SELECT id FROM bot_changes WHERE request_key=?", {requestKey}); completed.next())
+    if (auto completed = database.query("SELECT id FROM bot_creations WHERE request_key=?", {requestKey}); completed.next())
         return completed.number(0);
     try {
         apply(change);
     } catch (const Conflict&) {
-        // A rejected application leaves no published profile.
-        if (create) database.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
+        database.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
         completion.commit();
         throw;
     } catch (...) {
-        if (!create) throw Conflict("Unable to apply Bot change");
         if (!onExhausted) throw BotCreationUncertain{};
         bool published = false;
         try {
             published = *onExhausted && (*onExhausted)(change);
         } catch (...) {
-            // A failed inspection cannot establish that it is safe to release the ID.
             throw BotCreationUncertain{};
         }
         if (!published) {
             database.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
             completion.commit();
-            throw Conflict("Unable to apply Bot change");
+            throw Conflict("Unable to create Bot");
         }
     }
 
-    if (create) {
-        database.exec("INSERT INTO bot_owners VALUES(?,?)", {target, owner});
-        database.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
-    }
-    database.exec("INSERT INTO bot_changes(bot,operation,target,name,request_key,source_message_id) VALUES(?,?,?,?,?,?)",
-                  {bot, operation, target, change.name, requestKey, message});
+    database.exec("INSERT INTO bot_owners VALUES(?,?)", {target, owner});
+    database.exec("DELETE FROM bot_creation_intents WHERE request_key=?", {requestKey});
+    database.exec("INSERT INTO bot_creations(bot,target,name,request_key,source_message_id) VALUES(?,?,?,?,?)",
+                  {bot, target, change.name, requestKey, message});
     const auto id = database.last();
     completion.commit();
     return id;

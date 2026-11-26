@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 23;
+constexpr Id schemaVersion = 24;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -50,6 +50,7 @@ CREATE TABLE journal(
   session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER, workflow_outcome TEXT,
   CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
 CREATE INDEX journal_task ON journal(task_id,id);
+CREATE UNIQUE INDEX bot_setup_operation ON journal(operation_id) WHERE kind='bot_setup_updated';
 CREATE INDEX journal_wait_anchor ON journal(task_id,wait_id,id)
   WHERE kind='waiting' AND conversation_bot_id IS NULL;
 CREATE INDEX journal_sent_action ON journal(task_id,action_id,id) WHERE kind='send_started';
@@ -130,7 +131,7 @@ CREATE TABLE protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEX
  status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));
 CREATE UNIQUE INDEX pending_secret ON protected_inputs(bot,name) WHERE status='pending';
 CREATE UNIQUE INDEX fulfilled_secret ON protected_inputs(name) WHERE status='fulfilled';
-CREATE TABLE bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target TEXT,name TEXT,
+CREATE TABLE bot_creations(id INTEGER PRIMARY KEY,bot TEXT,target TEXT,name TEXT,
  request_key TEXT UNIQUE NOT NULL,source_message_id INTEGER REFERENCES messages(id));
 CREATE TABLE bot_creation_intents(
  request_key TEXT PRIMARY KEY,target TEXT UNIQUE NOT NULL,person TEXT NOT NULL);

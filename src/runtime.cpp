@@ -104,7 +104,7 @@ struct Runtime::Impl {
           taskTurn(storage.database, storage.gitStorage, storage.modelCalls, storage.peerStorage, storage.secretStorage, storage.taskEvents,
                    storage.taskRecords, storage.taskRouting, storage.waitStorage, storage.memoryStorage, model, soul, options.clock,
                    options.gitHost.get(), options.sessionRead, workers.stopToken(), updates, reports, history, peerExchanges, runs, prompts,
-                   decisions),
+                   decisions, storage.botSetup, options.intake),
           taskScheduler(storage.database, storage.taskEvents, storage.taskRouting, t3, updates, dispatch, options.requireT3Connection,
                         workers.stopToken()),
           lock(storage.database, storage.path, storage.policyApprovals, options.clock) {}
@@ -131,7 +131,10 @@ struct Runtime::Impl {
         else if (state == TaskState::queued)
             taskScheduler.activate(std::move(task));
         else if (state == TaskState::deciding) {
-            if (!decisions.resumeGitApproval(task) && !decisions.continueStage(task)) taskTurn.decide(task);
+            if (!decisions.resumeGitApproval(task)) {
+                const auto defaults = task.freshContextRequested && task.newSessionRequired ? taskTurn.launchDefaults(task) : std::nullopt;
+                if (!decisions.continueStage(task, defaults ? &*defaults : nullptr)) taskTurn.decide(task);
+            }
         } else {
             if (task.activeRun && (state == TaskState::running || state == TaskState::waiting) && runs.ingest(task, runs.observe(task)))
                 return;

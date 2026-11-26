@@ -127,7 +127,8 @@ RunRef runRef(const Json& data) {
 Store::Impl::Impl(Store& store, std::filesystem::path file, StoreOptions options)
     : path(std::move(file)), permissions(store), botAccess(store), secretRequests(store),
       memoryStorage(database, secretStorage, permissions, conversationTurns, std::move(options.memorySeed)),
-      automationStorage(database, secretStorage, botLifecycle, permissions, std::move(options.automationModel), taskOperations) {
+      automationStorage(database, secretStorage, botLifecycle, permissions, std::move(options.automationModel), taskOperations),
+      botSetup(store, database, secretStorage, std::move(options.saveBotSetup), std::move(options.botSetupCatalog)) {
     database.open(path);
 }
 
@@ -259,6 +260,9 @@ SELECT DISTINCT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
   WHEN 'conversation_reply' THEN j.reply_to_message_id ELSE j.message_id END
 WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
   AND j.kind IN ('conversation_reply','instruction_accepted','instruction_delivered')
+UNION ALL
+SELECT conversation_bot_id,json_extract(data,'$.eventId') FROM journal
+WHERE kind='bot_setup_undone' AND id>?1 AND id<=?2 AND (?3='' OR conversation_bot_id=?3)
 ORDER BY 1,2
 )SQL",
                                 {*after, changes.through, bot});
@@ -577,7 +581,7 @@ WITH visible AS NOT MATERIALIZED (
   WHERE id<=?2
     AND (?3=0 OR kind IN ('conversation_reply','report','completed')
          OR (kind='waiting' AND wait_reason IN ('user_question','model_failure')))
-    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','session_participation_stop'))
+    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','session_participation_stop','bot_setup_undone'))
       OR (conversation_bot_id IS NULL
         AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')

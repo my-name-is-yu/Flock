@@ -1,6 +1,7 @@
 #include "flock/bot_access.hpp"
 #include "flock/bot_id.hpp"
 #include "conversation_call.hpp"
+#include "bot_setup_storage.hpp"
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
 #include "task_records.hpp"
@@ -67,6 +68,9 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
     using enum CallOutcome;
     const auto& decision = calls.front();
     const auto& tool = decision.tool;
+    const auto key = tool_batch::turnCallKey(message.id, step);
+    if (calls.size() == 2 && tool == botSetupTool && calls[1].tool == "reply" && decision.rejection.empty() && calls[1].rejection.empty())
+        return executeBotSetup(message, step, decision, key, ctx, &calls[1]);
     if (calls.size() == 1 && tool == "send_to_task" && decision.args.is_object() && decision.args.contains("taskId")) {
         bool destinationTask = false;
         try {
@@ -87,7 +91,6 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
         const ToolContext tools{message.bot, message.id, settings};
         return conversationTools.runToolBatch(message, tools, step, calls, ctx) ? advance : stop;
     }
-    const auto key = tool_batch::turnCallKey(message.id, step);
     const bool offered = decision.rejection.empty();
     if (offered || effectType == "object") {
         if (tool == "message_session" || tool == "fix_pull_request")
@@ -122,6 +125,7 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
     }
 
     if (tool == "reply") return executeConversationReply(message, step, decision, key, ctx.clock);
+    if (tool == botSetupTool) return executeBotSetup(message, step, decision, key, ctx);
     if (tool == "request_bot_change") return executeConversationBotChange(message, step, decision, key, ctx);
 
     if (!isGitTool(tool)) return executeLocalConversationCall(message, step, decision, key, ctx);
@@ -149,6 +153,47 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
     return advance;
 }
 
+CallOutcome ConversationStorage::executeBotSetup(const Message& message, int step, const Decision& decision, std::string_view key,
+                                                 const ConversationCallContext& ctx, const Decision* reply) {
+    using enum CallOutcome;
+    const auto catalog = botSetup.modelCatalog(decision.args);
+    std::lock_guard lock(database.mutex);
+    Json result;
+    try {
+        Transaction authorization(database.db);
+        if (!authorizeTurn(message) || ctx.shutdown.stop_requested()) {
+            authorization.commit();
+            return stop;
+        }
+        if (auto applied = botSetup.recorded(key)) {
+            authorization.commit();
+            result = std::move(*applied);
+        } else {
+            botSetup.validate(message.bot, decision.args);
+            if (!permissions.allows(turnActor(message), Action::bot_settings, message.bot))
+                throw Conflict("You cannot change this Bot’s settings");
+            const auto gate = policyApprovals.approveAction(policyApprovals.policyOrigin(message), {Action::bot_settings, message.bot}, key,
+                                                            decision.args, ctx.clock(), false);
+            authorization.commit();
+            if (gate == ApprovalGate::waiting) return waiting;
+            if (gate != ApprovalGate::allow) throw Conflict(std::string(approvalError(gate)));
+            result = botSetup.apply(message.bot, key, decision.args, catalog, ctx.clock(), 0, message.id);
+        }
+    } catch (const Conflict& error) {
+        result = toolFailure(error.what());
+    }
+    if (reply && result.value("ok", false)) return executeConversationReply(message, step, *reply, key, ctx.clock, &result);
+
+    Transaction transaction(database.db);
+    policyApprovals.consumePolicyApproval(key);
+    if (reply)
+        conversationTools.saveTurnResults(message.id, step, Json::array({result, toolFailure("The Bot setup change did not apply")}));
+    else
+        saveConversationCallResult(message, step, std::move(result));
+    transaction.commit();
+    return advance;
+}
+
 CallOutcome ConversationStorage::executeConversationBotChange(const Message& message, int step, const Decision& decision,
                                                               std::string_view key, const ConversationCallContext& ctx) {
     using enum CallOutcome;
@@ -163,9 +208,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
             const auto target = toolText(args, "targetBotId", 128);
             const auto name = toolText(args, "name", 128);
             const auto actor = turnActor(message);
-            const auto action = operation == "create_bot" ? Action::bot_create : Action::bot_rename;
-            if ((operation != "create_bot" && operation != "rename_bot") || !validBotId(target) ||
-                !permissions.allows(actor, operation == "create_bot" ? Action::bot_create : Action::bot_settings, target))
+            if (operation != "create_bot" || !validBotId(target) || !permissions.allows(actor, Action::bot_create, target))
                 throw ToolError("Bot change denied by policy");
             const auto payload = Json::array({decision.tool, args});
             {
@@ -174,8 +217,8 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
                     authorization.commit();
                     return stop;
                 }
-                const auto gate = policyApprovals.approveAction(policyApprovals.policyOrigin(message), {action, target}, key, payload,
-                                                                ctx.clock(), false);
+                const auto gate = policyApprovals.approveAction(policyApprovals.policyOrigin(message), {Action::bot_create, target}, key,
+                                                                payload, ctx.clock(), false);
                 authorization.commit();
                 if (gate == ApprovalGate::waiting) return waiting;
                 if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
@@ -183,7 +226,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
             constexpr int maxCreationAttempts = 4;
             auto retries = database.query("SELECT failures FROM conversation_retries WHERE message_id=?", {id});
             const bool exhausted = retries.next() && retries.number(0) >= maxCreationAttempts - 1;
-            const auto changeId = botAccess.applyBotChange(message.bot, actor, operation, target, name, id, step, ctx.applyBotChange,
+            const auto changeId = botAccess.applyBotChange(message.bot, actor, target, name, id, step, ctx.applyBotChange,
                                                            exhausted ? &ctx.reconcileBotCreation : nullptr);
             Transaction completed(database.db);
             policyApprovals.consumePolicyApproval(key);
@@ -212,7 +255,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
 }
 
 CallOutcome ConversationStorage::executeConversationReply(const Message& message, int step, const Decision& decision, std::string_view key,
-                                                          const std::function<Seconds()>& clock) {
+                                                          const std::function<Seconds()>& clock, const Json* setup) {
     using enum CallOutcome;
     const auto id = message.id;
     std::lock_guard lock(database.mutex);
@@ -221,6 +264,14 @@ CallOutcome ConversationStorage::executeConversationReply(const Message& message
         transaction.commit();
         return stop;
     }
+    const auto saveReplyResult = [&](Json result) {
+        if (setup) {
+            policyApprovals.consumePolicyApproval(key);
+            conversationTools.saveTurnResults(id, step, Json::array({*setup, result}));
+        } else {
+            saveConversationCallResult(message, step, std::move(result));
+        }
+    };
     try {
         const auto& args = decision.args;
         if (!args.is_object()) throw ToolError("Tool arguments must be an object");
@@ -258,12 +309,12 @@ CallOutcome ConversationStorage::executeConversationReply(const Message& message
             }
             if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
         }
-        conversationTools.saveTurnResults(id, step, Json::array({Json{{"ok", true}}}));
+        saveReplyResult({{"ok", true}});
         finishTurn(message, std::move(reply), suggestions, ConversationReplyRoute::reply, question);
         transaction.commit();
         return finished;
     } catch (const ToolError& error) {
-        saveConversationCallResult(message, step, toolErrorResult(error));
+        saveReplyResult(toolErrorResult(error));
     }
     transaction.commit();
     return advance;

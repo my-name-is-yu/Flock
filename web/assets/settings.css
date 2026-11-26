@@ -255,3 +255,15 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
   .installation-form { grid-template-columns: minmax(0, 1fr); }
   .settings-row .connection-actions, .connection-states { justify-content: flex-start; }
 }
+
+.setup-details > summary {
+  cursor: pointer;
+}
+
+.setup-details > form {
+  margin-top: 1rem;
+}
+
+.setup-details label[hidden] {
+  display: none;
+}

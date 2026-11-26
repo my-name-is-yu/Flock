@@ -4,6 +4,7 @@
 #include "automation_storage.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "bot_settings_storage.hpp"
+#include "bot_setup_storage.hpp"
 #include "channel_storage.hpp"
 #include "conversation_context_storage.hpp"
 #include "conversation_tools.hpp"
@@ -51,6 +52,7 @@ struct Store::Impl {
                                           botLifecycle,
                                           botAccess,
                                           botSettingsStorage,
+                                          botSetup,
                                           channelStorage,
                                           conversationContextStorage,
                                           conversationTools,
@@ -130,6 +132,7 @@ struct Store::Impl {
                                                             policyApprovals};
     SessionReadStorage sessionReadStorage{database,       secretStorage,  sessionParticipationStorage, permissions, conversationTurns,
                                           channelStorage, policyApprovals};
+    BotSetupStorage botSetup;
     Impl(Store&, std::filesystem::path path, StoreOptions);
 };
 
