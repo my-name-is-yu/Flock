@@ -16,6 +16,8 @@ public:
     explicit BotAccess(Store& store) : store_(store) {}
 
     Json createOwnedBot(const Person&, const std::function<Json(const PublishOwnedBot&)>&);
+    void rememberProjectAssignment(const Person&, std::string_view bot, std::string_view environment, std::string_view project);
+    Json recentProjectAssignment(const Person&) const;
     void setOwner(const Person& creator, std::string_view bot);
     void setMember(const Person&, std::string_view bot, std::string_view person, bool add);
     Json botSettings(const Person&, std::string_view bot) const;

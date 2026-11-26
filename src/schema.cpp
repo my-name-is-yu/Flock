@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 21;
+constexpr Id schemaVersion = 22;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -125,6 +125,7 @@ CREATE INDEX policy_denied ON policy_approvals(bot,scope,action,target,status);
 CREATE TABLE secret_destinations(destination TEXT PRIMARY KEY);
 CREATE TABLE bot_owners(bot TEXT PRIMARY KEY,person TEXT NOT NULL);
 CREATE TABLE bot_members(bot TEXT NOT NULL,person TEXT NOT NULL,PRIMARY KEY(bot,person));
+CREATE TABLE recent_project_assignments(person TEXT PRIMARY KEY,environment_id TEXT NOT NULL,project_id TEXT NOT NULL);
 CREATE TABLE policy_journal(id INTEGER PRIMARY KEY,time INTEGER,actor TEXT,bot TEXT,action TEXT,details TEXT);
 CREATE TABLE protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEXT NOT NULL UNIQUE,
  status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));

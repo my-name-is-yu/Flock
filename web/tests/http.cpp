@@ -1693,7 +1693,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         profiles[id] = card;
         return card;
     };
-    cb.updateBot = [&](std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image) {
+    cb.updateBot = [&](const Person&, std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image) {
         auto& card = profiles.at(std::string(botId));
         if (profile.contains("fixPullRequests")) {
             card["fixPullRequests"] = profile.at("fixPullRequests");

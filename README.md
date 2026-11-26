@@ -32,9 +32,10 @@ commit in blame.
    allow plan usage. Start T3 Code and choose **Connect local T3**, or use
    **Use a connection URL** for a T3 server on another machine.
 3. Select **New Bot** in the sidebar, choose a preset or **Start from scratch**,
-   enter a name, and choose **Create**. Open the Bot's settings and choose a
-   **Model** and T3 destination under **How it runs**. Edit **Role** to tell
-   the Bot how to help you.
+   enter a name, and optionally choose a T3 project under **Where does it
+   work?**. Flock preselects the last project you assigned if it is available.
+   Choose **Create**, then set a **Model** under **How it runs**. You can also
+   change the project there and edit **Role** to tell the Bot how to help you.
 4. Send a message such as “What can you help me with?” to see the reply in
    the Bot's conversation.
 

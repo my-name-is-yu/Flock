@@ -61,6 +61,9 @@ if(BUILD_TESTING)
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-deletion.mjs"
               "$<TARGET_FILE:flock>" "${Python3_EXECUTABLE}")
     set_tests_properties(flock_app_bot_deletion PROPERTIES TIMEOUT 25)
+    add_test(NAME flock_app_project_assignment
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/project-assignment.mjs" "$<TARGET_FILE:flock>")
+    set_tests_properties(flock_app_project_assignment PROPERTIES TIMEOUT 25)
     add_test(NAME flock_cli_bot_pause
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-pause.mjs" "$<TARGET_FILE:flock>")
     set_tests_properties(flock_cli_bot_pause PROPERTIES TIMEOUT 20)

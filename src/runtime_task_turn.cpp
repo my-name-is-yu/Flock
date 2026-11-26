@@ -82,7 +82,7 @@ std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, cons
         if (decisions.canComplete(task, event)) tools.push_back("complete");
         if (!peer && !task.workflow && !task.replanning) tools.push_back("wait_for_event");
     }
-    if (canRead && event["evidence"].size() < SessionHistory::maxEvidenceReads) tools.push_back("read_bot_evidence");
+    if (canRead) tools.push_back("read_bot_evidence");
     if (canSend && (!task.selectedSession || RunReports::hasSettledRun(task))) tools.push_back("send_bot_message");
     return tools;
 }
@@ -194,9 +194,6 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
         transaction.commit();
     }
     auto evidence = std::move(event.at("evidence"));
-    const bool canReadHistory =
-        std::ranges::find(tools, "session_read") != tools.end() || std::ranges::find(tools, "read_bot_evidence") != tools.end();
-    summary["remainingEvidenceReads"] = canReadHistory ? SessionHistory::maxEvidenceReads - evidence.size() : 0;
     event.erase("evidence");
     event.erase("consumed");
     if (gitHost && event.at("kind") == "result") gitStorage.projectTaskGitReads(*gitHost, task, event);
@@ -248,7 +245,7 @@ void runtime::TaskTurn::decide(const TaskData& task) {
         if (event["kind"] != "result" && task.lastRun) {
             if (const auto report = reports.settledSessionReport(task)) event["sessionResult"] = encodeRunReport(report->data);
         }
-        if (RunReports::hasSettledRun(task) && event.at("evidence").size() < SessionHistory::maxEvidenceReads) {
+        if (RunReports::hasSettledRun(task)) {
             auto views = sessionRead == "on_demand" ? Json::array({"messages", "activity"}) : Json::array();
             if (reports.reportRetry(task, event)) views.push_back("report");
             if (!views.empty()) event["sessionReadViews"] = std::move(views);
