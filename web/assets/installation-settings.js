@@ -647,7 +647,6 @@ function editSystem(key, state) {
       : 'Bots can read the T3 threads of their own work when a report isn’t enough. Changes apply after restart.', form);
 }
 
-// Show the value in use, and the next one only when a restart will change it.
 function systemValues(title, current, next) {
   if (String(current) === String(next)) return rowLabel(title, String(current));
   const values = element('span', '', 'system-values');
