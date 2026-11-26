@@ -97,26 +97,23 @@ const stateLabels = {
 const waitLabels = {
   user_question: ['Question from $BOT', '$BOT is waiting for your answer.', 'I’m waiting for your answer.'],
   policy_approval: ['Approval needed', '$BOT is waiting for your approval before it continues.', 'I need your approval before I continue.'],
-  model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
-    'I couldn’t choose my next step after several attempts. Try again to continue.'],
-  bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s role and memory, then try again.'],
+  model_failure: ['$BOT’s model needs attention', 'Check the model in Bot settings.'],
+  bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s Role and memory.'],
   t3_input: ['Action in T3', 'Open the thread in T3 to approve or answer.'],
-  unknown_delivery: ['Message to T3 unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Check again asks T3 without resending anything.'],
-  auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then check again.'],
-  settings: ['T3 settings', 'This work is paused because of the T3 connection or execution settings. Fix them, then check again.'],
+  auth: ['T3 sign-in needed', 'Sign in again in T3 Code or reconnect this environment in Flock Settings.'],
+  settings: ['T3 settings need attention', 'Check this T3 environment under Connections in Flock Settings.'],
 };
 // Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
 const pendingActionLabels = {
-  model_failure: 'Try again…',
-  bot_notes_unavailable: 'Try again…',
-  t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
+  t3_input: 'Open in T3…',
 };
 const closedLabels = {
   answer: 'Answered', run_finished: 'Work ended', cancel: 'Stop requested',
   session_question: 'The question changed in T3', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
-  reconcile: 'Check requested', supply: 'Secret saved',
+  supply: 'Secret saved',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock', deny: 'Denied', expired: 'Approval expired',
   stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
+  bot_setup_restored: 'Resumed', action_closed: 'Action closed',
   superseded: 'Replaced', superseded_instruction: 'Replaced by a newer instruction',
 };
 // Confirms what the response will do, so the person isn't left with a bare "Done".
@@ -126,7 +123,6 @@ const decisionConfirmations = {
   always_allow: () => 'Allowed and saved as a rule for this Flock.',
   allow_next_time: () => 'Allow rule saved for this Flock.',
   deny: () => 'Denied.',
-  reconcile: () => 'Check requested.',
   supply: () => 'Secret saved.',
 };
 const errors = {
@@ -1025,6 +1021,15 @@ function requestGroups(history, activeTasks, parallelTasks) {
   const groups = { working: [], waiting: [], done: [] };
   for (const task of [...activeTasks].sort((a, b) => b.id - a.id)) {
     const sessions = runsByTask.get(task.id) ?? (task.session ? [{ ...task.session, state: task.state }] : []);
+    if (task.problem) {
+      const renderProblem = (request, session) => {
+        const row = sessionRow(request, session, waitLabel(task.problem.reason), 'waiting');
+        row.dataset.tooltip = [task.problem.text, row.dataset.tooltip].join(' · ');
+        return row;
+      };
+      groups.waiting.push(requestRow(task, sessions, renderProblem, finishedSessionRow));
+      continue;
+    }
     if (task.state === 'external_waiting') {
       const renderWaiting = (request, session) => {
         const row = sessionRow(request, session, task.waitingNote, 'waiting');
@@ -1619,7 +1624,7 @@ function eventCard(event, context, place, report) {
     else if (pendingWait) {
       if (pendingWait.wait.reason !== 'policy_approval') {
         const open = node('div', 'event-actions question-actions');
-        const label = pendingActionLabels[pendingWait.wait.reason] ?? 'Review…';
+        const label = pendingActionLabels[pendingWait.wait.reason] ?? 'View request…';
         open.append(button(label, 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
         extras.push(open);
       }
@@ -2893,7 +2898,6 @@ function waitContent(context, task) {
     const current = context.data.waits.find(item => item.id === task.id && item.wait.id === wait.id);
     if (current) void operate(context, current, operation, fields);
   };
-  const action = (label, operation) => button(label, 'dialog-button primary', () => perform(operation));
   const approveInT3 = canDecide && wait.reason === 't3_input';
   const runLink = linkToRun(wait.run, approveInT3 ? 'Approve in T3' : 'Open in T3');
   if (runLink) {
@@ -2907,10 +2911,6 @@ function waitContent(context, task) {
   }
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
-  } else if (['model_failure', 'bot_notes_unavailable'].includes(wait.reason)) {
-    primary.append(action('Try again', 'retry'));
-  } else if (['unknown_delivery', 'auth', 'settings'].includes(wait.reason)) {
-    primary.append(action('Check again', 'reconcile'));
   }
   // Stopping can't be undone, so it asks in place, with the safe choice focused, instead of a browser dialog.
   const stop = button('Stop this request', 'wait-cancel', () => {

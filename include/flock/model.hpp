@@ -39,6 +39,7 @@ struct ModelInput {
 class Model {
 public:
     virtual ~Model() = default;
+    virtual bool hasAuthentication() const { return false; }
     virtual ModelTurn decide(const ModelInput&) = 0;
 };
 }

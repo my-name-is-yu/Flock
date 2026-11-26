@@ -17,8 +17,10 @@ class SecretStorage;
 class Model;
 class SecretRedactor;
 struct ModelInput;
+enum class ModelErrorCode;
 
 bool modelArgumentsContainProtected(const SecretRedactor&, std::string_view tool, const Json& args);
+bool repairableModelOutput(ModelErrorCode);
 
 struct ModelCall : Decision {
     std::string rejection;

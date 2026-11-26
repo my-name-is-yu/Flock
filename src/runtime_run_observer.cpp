@@ -98,6 +98,7 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
                 if (supersededAnswer) {
                     outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::closed);
                     task.actionId.clear();
+                    task.t3CheckAt.reset();
                 }
             }
             task.lastRun = std::move(task.activeRun);
@@ -177,12 +178,12 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
         if (observed.kind == Observation::Kind::Unavailable) {
             if (observed.status == "auth" && reason != WaitReason::auth) {
                 questions.suspendQuestion(task);
-                waitStorage.wait(task, SimpleWaitReason::auth, "T3 authentication is unavailable");
+                waitStorage.wait(task, SimpleWaitReason::auth, "Sign in again in T3 Code or reconnect this environment in Flock Settings.");
                 return true;
             }
             if (observed.status == "settings" && reason != WaitReason::settings) {
                 questions.suspendQuestion(task);
-                waitStorage.wait(task, SimpleWaitReason::settings, "T3 connection settings need attention");
+                waitStorage.wait(task, SimpleWaitReason::settings, "Check this T3 environment under Connections in Flock Settings.");
                 return true;
             }
         }
@@ -259,6 +260,7 @@ void runtime::RunObserver::cancelDone(TaskData& task) {
         task.actionId.clear();
     }
     task.runStop.reset();
+    task.t3CheckAt.reset();
     task.replanning = false;
     task.pendingDestination.reset();
     task.queuedInT3 = false;
@@ -317,6 +319,7 @@ void runtime::RunObserver::finishReplan(const TaskData& task) {
         current.replanning = false;
         current.replanningDetail.reset();
         current.runStop.reset();
+        current.t3CheckAt.reset();
         current.feedback.reset();
         return true;
     });

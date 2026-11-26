@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime_components.hpp"
+#include "flock/intake.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/command.hpp"
@@ -18,6 +19,7 @@ namespace flockv0 {
 struct Command;
 struct Delivery;
 struct Observation;
+struct Wait;
 
 class BotLifecycleStorage;
 class ConversationStorage;
@@ -44,16 +46,16 @@ public:
                    TaskRecords& taskRecords, TaskRouting& taskRouting, TaskRunReports& taskRunReports, WaitStorage& waitStorage,
                    OutboxStorage& outboxStorage, T3& t3, const Policy& policy, TaskUpdates& updates, TaskQuestions& questions,
                    RunReports& reports, RunObserver& runs, SessionPrompts& prompts, const std::function<Seconds()>& clock,
-                   bool requireT3Connection, std::stop_token shutdown)
+                   bool requireT3Connection, const IntakeResolver& intake, std::stop_token shutdown)
         : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), journalStorage(journalStorage), path(path),
           policyApprovals(policyApprovals), sessionParticipationStorage(sessionParticipationStorage),
           sessionReadStorage(sessionReadStorage), taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting),
           taskRunReports(taskRunReports), waitStorage(waitStorage), outboxStorage(outboxStorage), t3(t3), policy(policy), updates(updates),
           questions(questions), reports(reports), runs(runs), prompts(prompts), clock(clock), requireT3Connection(requireT3Connection),
-          shutdown(shutdown) {}
+          intake(intake), shutdown(shutdown) {}
 
     void stop(TaskData task);
-    void step(const TaskData& task);
+    bool step(TaskData& task, const Wait* wait);
     void stepDestination(const TaskData& task, const DestinationRun& run);
     void queueAction(TaskData& task, const std::string& id, CommandTool tool, std::string instruction, const Json& args, const Json& event,
                      const TaskRoute* destination = nullptr);
@@ -71,7 +73,9 @@ private:
     bool assignedRunMatches(const TaskData& task, const CommandPayload& command, const RunRef& run);
     DeliveryOutcome classifyDelivery(const TaskData& task, const Outbox& action, Delivery& outcome, bool reply);
     AssignedRun recordRunAssignment(const TaskData& task, const Outbox& action, const RunRef& ref, DestinationRun* destination = nullptr);
-    void rememberRunCandidate(Outbox action, const RunRef& ref);
+    void reportUnconfirmedDelivery(TaskData&, const Outbox&, std::string_view detail);
+    bool refreshSessionSettings(TaskData&, const Outbox&);
+    bool deferSingleDelivery(TaskData&, const Outbox&, OutboxPhase attemptedPhase, const Delivery&, DeliveryOutcome);
     bool deferDestinationDelivery(TaskData& task, DestinationRun& run, const Outbox& action, const Delivery& outcome,
                                   DeliveryOutcome delivery);
 
@@ -98,6 +102,7 @@ private:
     SessionPrompts& prompts;
     const std::function<Seconds()>& clock;
     bool requireT3Connection;
+    const IntakeResolver& intake;
     std::stop_token shutdown;
 };
 }

@@ -18,6 +18,7 @@ class ChatGPTModel final : public Model {
 public:
     explicit ChatGPTModel(std::filesystem::path directory);
     ChatGPTModel(std::filesystem::path directory, chatgpt::HttpTransport, chatgpt::BrowserOpener = chatgpt::openBrowser);
+    bool hasAuthentication() const override;
     ModelTurn decide(const ModelInput&) override;
     Json respond(const Json& request, std::size_t inspectedImageBytes = 0);
     Json login(bool printUrl, bool reconsent);

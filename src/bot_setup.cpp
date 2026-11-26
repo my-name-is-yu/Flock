@@ -34,7 +34,7 @@ Json BotSetupStorage::modelCatalog(const Json& patch) const {
 }
 
 void BotSetupStorage::refreshPlannerModel(std::string_view bot, Json& config) const {
-    if (save) StoreAccess::get(store).automationStorage.refreshPlannerModel(bot, config);
+    StoreAccess::get(store).automationStorage.refreshPlannerModel(bot, config);
 }
 
 std::optional<Intake> BotSetupStorage::liveIntake(const IntakeResolver& resolve, std::string_view bot, std::string_view text) const {

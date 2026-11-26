@@ -43,7 +43,7 @@ bool TaskRouting::projectQuestionOpen(std::string_view bot, std::string_view env
 
 ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, std::string_view environment, bool requireConnection) {
     if (requireConnection && !sessionParticipationStorage.t3EnvironmentConnected(environment))
-        return "Connect this T3 environment in Settings, then try again.";
+        return "Connect this T3 environment under Connections in Flock Settings.";
     auto& policy = permissions;
     if (!policy.allows(bot, Action::environment_inspect, environment) || policy.forbidden(bot, Action::environment_launch, environment))
         return "Flock cannot use this T3 environment under the current permissions.";
@@ -53,7 +53,7 @@ ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, std
         std::erase_if(projects, [&](const T3Project& project) { return scrub.text(project.id) != project.id; });
         return projects;
     } catch (const std::exception&) {
-        return "Flock could not list projects. Check the T3 connection and try again.";
+        return "Flock could not list projects. Check the T3 connection in Flock Settings.";
     }
 }
 
@@ -83,33 +83,35 @@ bool TaskRouting::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
     const auto& bot = task.botId;
     const auto& environment = task.environmentId;
     const auto pending = std::exchange(task.pendingDestination, std::nullopt);
-    if (const auto* problem = std::get_if<std::string>(&catalog)) {
-        waitStorage.wait(task, SimpleWaitReason::settings, *problem);
+    const auto showSettings = [&](std::string_view text) {
+        const auto wait = waitStorage.currentWait(task.id);
+        if (!wait || wait->reason() != WaitReason::settings || wait->text != text)
+            waitStorage.wait(task, SimpleWaitReason::settings, std::string(text));
         return true;
+    };
+    if (const auto* problem = std::get_if<std::string>(&catalog)) {
+        return showSettings(*problem);
     }
     auto& projects = std::get<std::vector<T3Project>>(catalog);
     const auto remembered = rememberedT3Project(bot, environment);
     if (!remembered.empty() && std::ranges::find(projects, remembered, &T3Project::id) == projects.end())
         database.exec("DELETE FROM bot_t3_projects WHERE bot_id=? AND environment_id=? AND project_id=?", {bot, environment, remembered});
-    if (projects.empty()) {
-        waitStorage.wait(task, SimpleWaitReason::settings, "Add or unarchive a project in this T3 environment, then try again.");
-        return true;
-    }
+    if (projects.empty()) return showSettings("Add or unarchive a project in this T3 environment.");
     const auto id = task.id;
     const auto peer = peerStorage.peerExchange(id);
     if (peer && peer->recipient == id && peer->kind == "work")
         std::erase_if(projects,
                       [&](const T3Project& project) { return peerStorage.peerWorkRouteWouldCycle(peer->sender, environment, project.id); });
     if (projects.empty()) {
-        waitStorage.wait(task, SimpleWaitReason::settings,
-                         "Each project in this environment would make project queues wait for one another. "
-                         "Move this task to another environment or retry after related work finishes.");
-        return true;
+        return showSettings("Each project in this environment would make project queues wait for one another. "
+                            "This task can continue after the related work finishes or after moving to another environment.");
     }
     auto selected = pending ? std::ranges::find(projects, pending->route.projectId, &T3Project::id) : projects.end();
     if (selected == projects.end()) selected = std::ranges::find(projects, remembered, &T3Project::id);
     if (selected == projects.end() && projects.size() == 1) selected = projects.begin();
     if (selected != projects.end()) {
+        waitStorage.clearWait(task, "connection_restored");
+        task.state = TaskState::queued;
         task.projectId = selected->id;
         if (auto* targets = std::get_if<RunTargets>(&task.destinations))
             for (auto& target : *targets)

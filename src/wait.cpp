@@ -4,7 +4,6 @@
 #include "wait_storage.hpp"
 #include "run_ref_storage.hpp"
 #include "peer_storage.hpp"
-#include "outbox_storage.hpp"
 #include "journal_storage.hpp"
 #include "database.hpp"
 #include "record_decode.hpp"
@@ -36,11 +35,13 @@ constexpr std::array reasons{
     std::pair{WaitReason::t3_input, std::string_view{"t3_input"}},
     std::pair{WaitReason::auth, std::string_view{"auth"}},
     std::pair{WaitReason::settings, std::string_view{"settings"}},
-    std::pair{WaitReason::unknown_delivery, std::string_view{"unknown_delivery"}},
     std::pair{WaitReason::policy_approval, std::string_view{"policy_approval"}},
 };
 
-constexpr std::string_view unsupportedEffort = "unsupported_reasoning_effort";
+constexpr std::array modelFailures{
+    std::pair{WaitFailureCode::unsupported_reasoning_effort, std::string_view{"unsupported_reasoning_effort"}},
+    std::pair{WaitFailureCode::authentication_required, std::string_view{"authentication_required"}},
+};
 constexpr std::string_view projectQuestionReason = "project_question";
 
 }
@@ -55,7 +56,6 @@ WaitReason waitReason(SimpleWaitReason reason) {
     case SimpleWaitReason::t3_input: return WaitReason::t3_input;
     case SimpleWaitReason::auth: return WaitReason::auth;
     case SimpleWaitReason::settings: return WaitReason::settings;
-    case SimpleWaitReason::unknown_delivery: return WaitReason::unknown_delivery;
     }
     throw std::logic_error("Invalid simple wait reason");
 }
@@ -104,7 +104,7 @@ Json encodeWaitData(const Wait& wait) {
                 data["choices"] = value.choices;
                 data["projectChoices"] = value.projects;
             } else if constexpr (std::is_same_v<T, ModelFailureWait>) {
-                if (value.code) data["failureCode"] = unsupportedEffort;
+                if (value.code) data["failureCode"] = enumName(modelFailures, *value.code);
             } else if constexpr (std::is_same_v<T, PolicyApprovalWait>) {
                 data["approvalId"] = value.approvalId;
             }
@@ -146,8 +146,9 @@ WaitDetails readWaitDetails(const RecordDecoder& decoder, const Json& data, Wait
                                  decoder.get<std::string>(data, "questionId")};
     case WaitReason::model_failure:
         if (const auto code = decoder.optional<std::string>(data, "failureCode")) {
-            if (*code != unsupportedEffort) decoder.fail("failureCode", "unknown model failure code");
-            return ModelFailureWait{WaitFailureCode::unsupported_reasoning_effort};
+            const auto value = enumValue(modelFailures, *code);
+            if (!value) decoder.fail("failureCode", "unknown model failure code");
+            return ModelFailureWait{*value};
         }
         return ModelFailureWait{};
     case WaitReason::policy_approval: return PolicyApprovalWait{decoder.get<Id>(data, "approvalId")};
@@ -155,7 +156,6 @@ WaitDetails readWaitDetails(const RecordDecoder& decoder, const Json& data, Wait
     case WaitReason::t3_input: return SimpleWaitReason::t3_input;
     case WaitReason::auth: return SimpleWaitReason::auth;
     case WaitReason::settings: return SimpleWaitReason::settings;
-    case WaitReason::unknown_delivery: return SimpleWaitReason::unknown_delivery;
     }
     throw std::logic_error("Invalid wait reason");
 }
@@ -248,11 +248,6 @@ Id WaitStorage::wait(TaskData& task, WaitDetails details, std::string text, std:
 Id WaitStorage::wait(TaskData& task, Wait waiting) {
     clearWait(task, "superseded");
     waiting.eventId = task.eventId;
-    if (!waiting.run && waiting.reason() == WaitReason::unknown_delivery) {
-        const auto action = outboxStorage.outbox(task);
-        if (action && action->command.candidate && !action->command.candidate->link.empty())
-            waiting.run = WaitRun{*action->command.candidate};
-    }
     waiting.actionId = task.actionId;
     database.exec("INSERT INTO waits(task_id,reason,data) VALUES(?,?,?)", {task.id, storedWaitReason(waiting), encodeWaitData(waiting)});
     waiting.id = database.last();

@@ -289,8 +289,7 @@ void decodeTaskFields(TaskData& task, const Json& data, const RecordDecoder& row
     if (const auto found = row.find(data, "pendingRunReport"); found != data.end())
         task.pendingRunReport = row.nested("pendingRunReport").decodeClosed(*found, decodePendingRunReport);
     task.pendingStageReport = row.optional<Id>(data, "pendingStageReport");
-    task.sessionReconcileAt = row.optional<Seconds>(data, "sessionReconcileAt");
-    task.workflowReconcileAt = row.optional<Seconds>(data, "workflowReconcileAt");
+    task.t3CheckAt = row.optional<Seconds>(data, "t3CheckAt");
     task.newSessionRequired = row.optional<bool>(data, "newSessionRequired").value_or(false);
     task.freshContextRequested = row.optional<bool>(data, "freshContextRequested").value_or(false);
     task.launchWarning = row.optional<std::string>(data, "launchWarning");
@@ -336,8 +335,7 @@ Json encodeTaskPayload(const TaskData& task) {
         data["pendingRunReport"] = {
             {"report", settledRunReportJson(pending->report)}, {"retryAt", pending->retryAt}, {"attempts", pending->attempts}};
     if (task.pendingStageReport) data["pendingStageReport"] = *task.pendingStageReport;
-    if (task.sessionReconcileAt) data["sessionReconcileAt"] = *task.sessionReconcileAt;
-    if (task.workflowReconcileAt) data["workflowReconcileAt"] = *task.workflowReconcileAt;
+    if (task.t3CheckAt) data["t3CheckAt"] = *task.t3CheckAt;
     if (task.newSessionRequired) data["newSessionRequired"] = true;
     if (task.freshContextRequested) data["freshContextRequested"] = true;
     if (task.launchWarning) data["launchWarning"] = *task.launchWarning;

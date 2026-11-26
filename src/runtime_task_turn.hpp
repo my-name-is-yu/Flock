@@ -35,6 +35,7 @@ class TaskEvents;
 class TaskRecords;
 class TaskRouting;
 class WaitStorage;
+struct Wait;
 
 class MemoryStorage;
 class BotSetupStorage;
@@ -50,13 +51,15 @@ public:
 
     void decide(const TaskData& task);
     std::optional<Json> launchDefaults(const TaskData& task) const;
+    bool resume(const TaskData& task, const Wait& wait);
     void persistTaskInferences();
 private:
-    enum class FailureCause { Model, BotNotes, UnsupportedReasoningEffort };
+    enum class FailureCause { Model, BotNotes, UnsupportedReasoningEffort, Authentication };
     struct InferenceFailure {
         std::string detail;
         bool transient;
         FailureCause cause = FailureCause::Model;
+        std::optional<Json> config{};
     };
     struct TaskInference {
         Id generation, eventId, attemptId;

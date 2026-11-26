@@ -50,9 +50,7 @@ Json payload() {
             {"destinationAction", true},
             {"expectedCommit", "abc123"},
             {"markedCommitChecks", true},
-            {"candidate", {{"threadId", "candidate-thread"}, {"runId", "candidate-run"}, {"link", "candidate-link"}}},
-            {"candidateQuestionId", "candidate-question"},
-            {"launchReceiptThreadId", "launch-receipt-thread"},
+            {"receipt", {{"threadId", "receipt-thread"}, {"runId", "receipt-run"}, {"link", "receipt-link"}}},
             {"stopRunId", "stop-run"},
             {"stopThreadId", "stop-thread"},
             {"stopPolicy",
@@ -123,7 +121,7 @@ void roundTripDeferredAndAnswerCommands() {
               wire.at("instructionBase") == "Start the work",
           "A deferred launch projected a concrete target, revision or instruction");
     check(row.instructionBase == deferred.instructionBase && !row.revisionId && row.command.target.threadId.empty() &&
-              !row.command.candidate && !row.stop && !row.sessionContext.role && !row.sessionContext.memory &&
+              !row.command.receipt && !row.stop && !row.sessionContext.role && !row.sessionContext.memory &&
               outboxColumnValues(row) == stored,
           "A deferred launch did not round-trip");
 

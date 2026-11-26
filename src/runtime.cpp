@@ -26,6 +26,7 @@
 #include "task_events.hpp"
 #include "flock/workspace_tools.hpp"
 #include "outbox_storage.hpp"
+#include "database.hpp"
 
 #include <memory>
 #include <utility>
@@ -39,6 +40,8 @@ RuntimeOptions withDefaultBotTools(RuntimeOptions options) {
 }
 
 struct Runtime::Impl {
+    Database& database;
+    WaitStorage& waitStorage;
     ChannelStorage& channelStorage;
     ConversationStorage& conversationTurns;
     GitStorage& gitStorage;
@@ -76,9 +79,10 @@ struct Runtime::Impl {
     }
 
     Impl(StoreAccess::Impl& storage, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
-        : channelStorage(storage.channelStorage), conversationTurns(storage.conversationTurns), gitStorage(storage.gitStorage),
-          taskEvents(storage.taskEvents), taskRecords(storage.taskRecords), workflowStorage(storage.workflowStorage),
-          policy(storage.permissions), model(m), t3(adapter), soul(std::move(loader)), options(withDefaultBotTools(std::move(opts))),
+        : database(storage.database), waitStorage(storage.waitStorage), channelStorage(storage.channelStorage),
+          conversationTurns(storage.conversationTurns), gitStorage(storage.gitStorage), taskEvents(storage.taskEvents),
+          taskRecords(storage.taskRecords), workflowStorage(storage.workflowStorage), policy(storage.permissions), model(m), t3(adapter),
+          soul(std::move(loader)), options(withDefaultBotTools(std::move(opts))),
           maintenance(storage.database, storage.automationStorage, storage.workflowStorage, storage.policyApprovals, options.clock,
                       options.automationError, options.storageContention),
           prompts(storage.database, storage.secretStorage, storage.memoryStorage, storage.taskEvents, storage.workflowStorage, soul),
@@ -97,7 +101,8 @@ struct Runtime::Impl {
           dispatch(storage.database, storage.botLifecycle, storage.conversationTurns, storage.journalStorage, storage.path,
                    storage.policyApprovals, storage.sessionParticipationStorage, storage.sessionReadStorage, storage.taskEvents,
                    storage.taskRecords, storage.taskRouting, storage.taskRunReports, storage.waitStorage, storage.outboxStorage, t3, policy,
-                   updates, questions, reports, runs, prompts, options.clock, options.requireT3Connection, workers.stopToken()),
+                   updates, questions, reports, runs, prompts, options.clock, options.requireT3Connection, options.intake,
+                   workers.stopToken()),
           decisions(storage.database, storage.conversationTurns, storage.gitStorage, storage.journalStorage, storage.memoryStorage,
                     storage.peerStorage, storage.secretStorage, storage.taskEvents, storage.taskRecords, storage.waitStorage, updates,
                     reports, history, peerExchanges, dispatch, options.sessionRead, options.gitHost.get(), options.clock),
@@ -106,7 +111,7 @@ struct Runtime::Impl {
                    options.gitHost.get(), options.sessionRead, workers.stopToken(), updates, reports, history, peerExchanges, runs, prompts,
                    decisions, storage.botSetup, options.intake),
           taskScheduler(storage.database, storage.taskEvents, storage.taskRouting, t3, updates, dispatch, options.requireT3Connection,
-                        workers.stopToken()),
+                        options.clock, workers.stopToken()),
           lock(storage.database, storage.path, storage.policyApprovals, options.clock) {}
 
     ~Impl() { workers.drain(taskTurn); }
@@ -131,14 +136,27 @@ struct Runtime::Impl {
         else if (state == TaskState::queued)
             taskScheduler.activate(std::move(task));
         else if (state == TaskState::deciding) {
+            if (!task.pendingDecision && dispatch.step(task, nullptr)) task = updates.snapshot(id);
+            if (task.state != TaskState::deciding) return;
             if (!decisions.resumeGitApproval(task)) {
                 const auto defaults = task.freshContextRequested && task.newSessionRequired ? taskTurn.launchDefaults(task) : std::nullopt;
                 if (!decisions.continueStage(task, defaults ? &*defaults : nullptr)) taskTurn.decide(task);
             }
         } else {
-            if (task.activeRun && (state == TaskState::running || state == TaskState::waiting) && runs.ingest(task, runs.observe(task)))
+            if (task.activeRun && (state == TaskState::running || state == TaskState::waiting || state == TaskState::sending) &&
+                runs.ingest(task, runs.observe(task)))
                 return;
-            dispatch.step(task);
+            std::optional<Wait> wait;
+            if (state == TaskState::waiting) {
+                std::lock_guard guard(database.mutex);
+                wait = waitStorage.currentWait(id);
+            }
+            if (wait && taskTurn.resume(task, *wait)) return;
+            if (wait && wait->reason() == WaitReason::settings && task.projectId.empty()) {
+                taskScheduler.activate(std::move(task));
+                return;
+            }
+            dispatch.step(task, wait ? &*wait : nullptr);
         }
     }
 };

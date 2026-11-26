@@ -260,6 +260,14 @@ Json ChatGPTModel::status() {
     return connectionStatus(ProfileLock(directory_).read());
 }
 
+bool ChatGPTModel::hasAuthentication() const {
+    try {
+        return planUsage(ProfileLock(directory_, {}, false).read());
+    } catch (const ModelError&) {
+        return false;
+    }
+}
+
 Json ChatGPTModel::webStatus() {
     const auto profile = ProfileLock(directory_, {}, false).read();
     auto status = connectionStatus(profile);
@@ -280,7 +288,9 @@ std::string ChatGPTModel::accessToken() {
     if (!field(profile, "pending").is_null() ||
         (timestamp(profile, "expiresAt") <= now + 60'000 && timestamp(profile, "earliestRefreshAt") <= now))
         profile = refreshProfile(lock, std::move(profile), transport_);
-    if (!planUsage(profile)) throw ModelError("Flock's ChatGPT plan permission is unavailable. Run 'flock model login --reconsent'", false);
+    if (!planUsage(profile))
+        throw ModelError("Flock's ChatGPT plan permission is unavailable. Run 'flock model login --reconsent'",
+                         ModelErrorCode::authentication_required);
     if (timestamp(profile, "expiresAt") <= chatgpt::nowMillis())
         throw ModelError("ChatGPT credentials cannot be renewed yet. Retry shortly.", true);
     auto token = stringField(profile, "accessToken");

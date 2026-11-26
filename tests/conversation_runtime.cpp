@@ -1429,16 +1429,15 @@ void resumeBatchesOversizedPendingBacklog() {
     f.model.beforeIntake = recordBatch;
     f.model.beforeComplete = recordBatch;
     f.t3.loseNextSend = true;
-    f.reach(next, "waiting");
+    f.reach(next, "sending");
+    f.tick();
     const auto inherited = f.task(next).at("pendingInstructions");
     check(inherited.size() == specs.size() && f.t3.sent.back().tool == CommandTool::delegate,
           "unconfirmed delegate lost part of the inherited backlog");
     for (std::size_t i = 0; i < specs.size(); ++i)
         check(inherited[i].at("text") == specs[i], "unconfirmed delivery changed an inherited specification");
 
-    const auto wait = f.task(next).at("wait");
-    check(wait.at("reason") == "unknown_delivery", "missing acknowledgement did not enter delivery recovery");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(next).task, wait.at("id")), "reconcile");
+    f.now += 5;
     f.reach(next, "running");
     const auto remaining = f.task(next).at("pendingInstructions");
     check(!remaining.empty() && remaining.size() < inherited.size(), "delegate did not consume a bounded batch");
@@ -1597,7 +1596,7 @@ void unknownSendThenScopeChange() {
     const auto id = TaskIntake(*f.store).submit(f.routing());
     f.reach(id, "sending");
     f.t3.loseNextSend = true;
-    f.reach(id, "waiting");
+    f.tick();
     const auto before = f.task(id);
     f.script("Use the updated specification", {change(id, {{"intent", "Measure startup latency"}, {"doneWhen", "p95 レイテンシを報告"}})});
     const auto change = f.receive("revision", "Use the updated specification");
@@ -1633,11 +1632,11 @@ void unknownSendThenScopeChange() {
     f.t3.finish("run-1", "Old response");
     f.reach(id, "sending");
     f.t3.loseNextSend = true;
-    f.reach(id, "waiting");
+    f.tick();
     check(f.t3.sent.size() == 2, "the uncertain replacement did not reach T3 exactly once");
     const auto replacementAction = f.t3.sent.back().actionId;
     f.restart();
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, f.task(id)["wait"]["id"]), "reconcile");
+    f.now += 5;
     f.reach(id, "running");
     check(f.t3.sent.size() == 2 && f.t3.reconciled.back().actionId == replacementAction &&
               f.t3.sent.back().tool == CommandTool::follow_up &&
@@ -4398,6 +4397,7 @@ void standingContextFollowsTheLastDelivery() {
     f.role = roleB;
     f.restart();
     f.t3.deliveryVisible = true;
+    f.now += 5;
     f.reach(id, "running");
     check(f.t3.sent.size() == 1 && !f.t3.reconciled.empty() && f.t3.reconciled.back().instruction == first,
           "recovery did not match the original prompt after a Role edit");

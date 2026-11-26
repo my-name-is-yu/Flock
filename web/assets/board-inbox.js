@@ -4,19 +4,16 @@ import { actionLabel, approvalSummary } from './action-labels.mjs';
 // One name per pending item, said as what the person needs to do; the sidebar and this panel share it.
 export const pendingKindLabels = {
   user_question: 'Question for you',
-  unknown_delivery: 'Message to T3 unconfirmed',
   protected_input: 'Secret needed',
   policy_approval: 'Approval needed',
 };
 const labels = {
   ...pendingKindLabels,
   answer: 'Answered', deny: 'Denied', supply: 'Supplied',
-  reconcile: 'Checked again',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
   allow_next_time: 'Allow rule saved for this Flock',
 };
 const actions = {
-  unknown_delivery: [['reconcile', 'Check T3 again']],
   protected_input: [['supply', 'Save secret']],
   policy_approval: [['allow_once', 'Allow once'], ['always_allow', 'Allow for this Flock'], ['deny', 'Deny']],
 };

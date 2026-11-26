@@ -26,6 +26,12 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
+
+bool repairableModelOutput(ModelErrorCode code) {
+    return code == ModelErrorCode::invalid_tool_count || code == ModelErrorCode::invalid_tool_output ||
+           code == ModelErrorCode::unavailable_tool || code == ModelErrorCode::invalid_tool_arguments;
+}
+
 namespace {
 bool redactsProse(std::string_view tool, std::string_view key) {
     if (tool == "reply") return key == "text";

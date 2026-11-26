@@ -221,17 +221,7 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
 
 Json operationData(const Json& body, std::string_view operation) {
     if (operation == "answer") return {{"text", requiredText(body, "text", limits::messages::maxWaitAnswerBytes)}};
-    if (operation == "reconcile") {
-        Json data = Json::object();
-        for (const auto* key : {"threadId", "runId", "questionId"}) {
-            if (!body.contains(key)) continue;
-            data[key] = requiredText(body, key, 1024);
-        }
-        if (data.contains("threadId") != data.contains("runId") || (data.contains("questionId") && !data.contains("runId")))
-            throw InputError("invalid_reconciliation_target");
-        return data;
-    }
-    if (operation != "retry" && operation != "cancel") throw InputError("invalid_operation");
+    if (operation != "cancel") throw InputError("invalid_operation");
     return Json::object();
 }
 
@@ -864,7 +854,6 @@ private:
             auto data = operationData(body, operation);
             const auto task = Tasks(store_).task(id);
             if (task.task.botId != bot) return error(res, 404, "task_not_found");
-            if (operation == "reconcile") data = TaskControl(store_).reconciliationData(id, wait, std::move(data), callbacks_.intake);
             TaskControl(store_).operate(actor, {bot, id, wait, bodyId(body, "targetRevision", 0), bodyId(body, "targetGeneration", 0)},
                                         operation, data);
             json(res, 200, {{"accepted", true}});
