@@ -75,7 +75,7 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
             auto task = p_->taskRecords.load(id);
             if (terminal(task) || task.state == TaskState::cancelling) continue;
             task.cancelledByBotPause = true;
-            p_->requestCancellation(task);
+            p_->taskOperations.requestCancellation(task);
         }
         p_->settlePolicyApprovals();
         p_->stopPausedBotParticipation(bot);

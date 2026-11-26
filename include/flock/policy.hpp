@@ -118,6 +118,9 @@ private:
     friend class AutomationStorage;
     friend class MemoryStorage;
     friend class Store;
+    friend class ModelCalls;
+    friend class TaskOperations;
+    friend class TaskRouting;
     friend struct Store::Impl;
 };
 }

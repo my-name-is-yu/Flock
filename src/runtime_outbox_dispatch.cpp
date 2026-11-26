@@ -199,7 +199,7 @@ void Runtime::Components::OutboxDispatch::rememberRunCandidate(Outbox action, co
 }
 
 void Runtime::Components::OutboxDispatch::writeDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed) {
-    if (db.recordDestinationReport(task, run, observed) && task.state == TaskState::cancelling) runs.cancelDone(task);
+    if (db.taskRunReports.recordDestinationReport(task, run, observed) && task.state == TaskState::cancelling) runs.cancelDone(task);
 }
 
 bool Runtime::Components::OutboxDispatch::setDestinationStatus(DestinationRun& run, DestinationRunPhase status, std::string detail) {
@@ -537,7 +537,7 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
                 db.botLifecycle.botPaused(cmd.ownerBotId))
                 return false;
             if (destination) {
-                if (!db.projectRouteReady(id, cmd.actionId)) return false;
+                if (!db.taskRouting.projectRouteReady(id, cmd.actionId)) return false;
             } else if (current.actionId != action.command.actionId)
                 return false;
             if (!sessionActionAllowed(current)) {

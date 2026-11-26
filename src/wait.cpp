@@ -1,8 +1,10 @@
+#include "wait_storage.hpp"
+#include "run_ref_storage.hpp"
+#include "model_calls.hpp"
 #include "peer_storage.hpp"
 #include "outbox_storage.hpp"
 #include "journal_storage.hpp"
 #include "database.hpp"
-#include "storage.hpp"
 #include "record_decode.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"
@@ -294,7 +296,7 @@ Id WaitStorage::waitAnchor(Id task, Id wait) const {
 }
 
 Id WaitStorage::waitAllowance(Id task, WaitReason reason) const {
-    if (reason == WaitReason::model_budget) return remaining.taskModelBudget(task).initialLimit;
+    if (reason == WaitReason::model_budget) return modelCalls.taskModelBudget(task).initialLimit;
     if (reason == WaitReason::budget) return initialWorkAllowance;
     return 0;
 }

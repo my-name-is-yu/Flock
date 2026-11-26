@@ -1,3 +1,5 @@
+#include "task_routing.hpp"
+#include "secret_storage.hpp"
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
@@ -110,10 +112,10 @@ std::string verifiedCommit(std::string commit) {
 }
 }
 
-std::set<std::string> Store::Impl::registeredT3Environments(std::string_view bot) {
+std::set<std::string> TaskRouting::registeredT3Environments(std::string_view bot) {
     std::set<std::string> result;
-    Policy policy(*this);
-    auto rows = query("SELECT environment_id FROM t3_connected_environments");
+    Policy policy(remaining);
+    auto rows = database.query("SELECT environment_id FROM t3_connected_environments");
     while (rows.next()) {
         auto id = rows.string(0);
         if (policy.allows(bot, Action::environment_inspect, id) && !policy.forbidden(bot, Action::environment_launch, id))
@@ -122,10 +124,10 @@ std::set<std::string> Store::Impl::registeredT3Environments(std::string_view bot
     return result;
 }
 
-LinkedTaskDestinations Store::Impl::discoverLinkedTaskDestinations(T3& t3, std::string_view bot) {
+LinkedTaskDestinations TaskRouting::discoverLinkedTaskDestinations(T3& t3, std::string_view bot) {
     std::set<std::string> gateways;
     {
-        std::lock_guard lock(mutex);
+        std::lock_guard lock(database.mutex);
         gateways = registeredT3Environments(bot);
     }
     LinkedTaskDestinations result;
@@ -156,8 +158,8 @@ LinkedTaskDestinations Store::Impl::discoverLinkedTaskDestinations(T3& t3, std::
             }
             bool permitted = false;
             {
-                std::lock_guard lock(mutex);
-                Policy policy(*this);
+                std::lock_guard lock(database.mutex);
+                Policy policy(remaining);
                 permitted =
                     policy.allows(bot, Action::environment_inspect, target) && !policy.forbidden(bot, Action::environment_launch, target);
             }
@@ -192,18 +194,18 @@ LinkedTaskDestinations Store::Impl::discoverLinkedTaskDestinations(T3& t3, std::
     return result;
 }
 
-std::string Store::Impl::defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred) {
+std::string TaskRouting::defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred) {
     if (!configured.empty()) return std::string(configured);
     const auto connected = registeredT3Environments(bot);
     if (connected.contains(std::string(preferred))) return std::string(preferred);
     return connected.size() == 1 ? *connected.begin() : std::string{};
 }
 
-std::string Store::Impl::taskEnvironment(std::string_view bot, const Json& routing, std::string_view name) {
+std::string TaskRouting::taskEnvironment(std::string_view bot, const Json& routing, std::string_view name) {
     return taskRoute(bot, routing, name).environmentId;
 }
 
-TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std::string_view name, const TaskData* movingTask,
+TaskRoute TaskRouting::taskRoute(std::string_view bot, const Json& routing, std::string_view name, const TaskData* movingTask,
                                  const LinkedTaskDestinations* linked) {
     using conversation_storage::ToolError;
     const auto configured = field(routing, "environmentId");
@@ -263,14 +265,14 @@ TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std:
             "This destination name resolves to both a configured route and a linked T3 gateway. Choose an unambiguous destination.");
     if (!registeredT3Environments(bot).contains(discovered->gatewayEnvironmentId))
         throw ToolError("The selected T3 gateway is no longer connected. Flock will not switch gateways.");
-    Policy policy(*this);
+    Policy policy(remaining);
     if (!policy.allows(bot, Action::environment_inspect, discovered->environmentId) ||
         policy.forbidden(bot, Action::environment_launch, discovered->environmentId))
         throw ToolError("Flock cannot launch in the linked target under the current permissions.");
     return *discovered;
 }
 
-StartDestinations Store::Impl::startDestinations(const conversation::Message& message, const Json& args, bool resume,
+StartDestinations TaskRouting::startDestinations(const conversation::Message& message, const Json& args, bool resume,
                                                  const WorkSession* selectedSession, const LinkedTaskDestinations& linked) {
     using conversation_storage::text;
     using conversation_storage::ToolError;
@@ -309,7 +311,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
         secretStorage.redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
         return destinations;
     }
-    if (!sessionRef.empty() && (!selectedSession || !permitsWorkSession(message, *selectedSession)))
+    if (!sessionRef.empty() && (!selectedSession || !remaining.permitsWorkSession(message, *selectedSession)))
         throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
     if (selectedSession) {
         if (!environment.empty() || resume) throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
@@ -333,7 +335,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
     return destinations;
 }
 
-TaskChange Store::Impl::taskChange(const conversation::Message& message, const Json& args, const TaskData& task,
+TaskChange TaskRouting::taskChange(const conversation::Message& message, const Json& args, const TaskData& task,
                                    const LinkedTaskDestinations& linked) {
     using conversation_storage::text;
     using conversation_storage::ToolError;

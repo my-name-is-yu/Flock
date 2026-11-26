@@ -196,7 +196,7 @@ Json Store::workflows(std::string_view bot, Id before, unsigned limit) const {
 }
 
 Id Store::Impl::startWorkflow(Id message, const Json& args, std::string_view bot, const Json& routing) {
-    const auto environment = taskEnvironment(bot, routing);
+    const auto environment = taskRouting.taskEnvironment(bot, routing);
     if (environment.empty()) throw Conflict("Choose a connected T3 environment for this workflow");
     auto destination = routing;
     destination["environmentId"] = environment;
@@ -239,7 +239,7 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
         do {
             if (const Id taskId = children.number(0)) {
                 auto task = taskRecords.load(taskId);
-                if (!terminal(task) && task.state != TaskState::cancelling) requestCancellation(task);
+                if (!terminal(task) && task.state != TaskState::cancelling) taskOperations.requestCancellation(task);
                 awaiting |= !terminal(task);
             }
         } while (children.next());
@@ -275,7 +275,7 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
             task->state = TaskState::queued;
             exec("UPDATE workflow_stages SET status='pending',deadline=0,alerted=0 WHERE workflow_id=? AND stage_id=?", {id, target});
         }
-        acceptInstruction(*task, message, step, instruction, std::nullopt, nullptr);
+        taskOperations.acceptInstruction(*task, message, step, instruction, std::nullopt, nullptr);
     }
     auto status = workflowStatus(id, bot, unixTime());
     status["effect"] = "accepted";
@@ -349,7 +349,7 @@ void Store::Impl::materializeWorkflowStages() {
             AND d.workflow_id=? AND d.stage_id=?)SQL",
              {id, stage});
         const TaskRoute route{field(routing, "environmentId"), field(routing, "projectId")};
-        const auto taskId = startConversationTask(routing, bot, request, route, ready.number(4), std::nullopt, false);
+        const auto taskId = taskOperations.startConversationTask(routing, bot, request, route, ready.number(4), std::nullopt, false);
         auto task = taskRecords.load(taskId);
         task.workflow = TaskWorkflow{id, stage, input};
         task.sourceResultRefs = std::move(sources);
@@ -358,7 +358,8 @@ void Store::Impl::materializeWorkflowStages() {
                                 hasPriorRevision ? scrub.text(ready.string(8)) : request, ready.number(9));
         if (!ready.string(5).empty()) {
             const auto next = ready.json(5);
-            acceptInstruction(task, next.at("messageId"), next.at("step"), scrub.text(field(next, "text")), std::nullopt, nullptr);
+            taskOperations.acceptInstruction(task, next.at("messageId"), next.at("step"), scrub.text(field(next, "text")), std::nullopt,
+                                             nullptr);
         } else
             taskRecords.save(task);
         exec("UPDATE workflow_stages SET task_id=?,input=?,instruction=NULL WHERE workflow_id=? AND stage_id=?",

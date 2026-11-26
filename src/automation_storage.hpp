@@ -18,9 +18,11 @@ struct Intake;
 struct Person;
 struct ScheduleImportError;
 
+class TaskOperations;
 class AutomationStorage {
 public:
-    AutomationStorage(Database&, const SecretStorage&, const BotLifecycleStorage&, Store::Impl&, Store::AutomationModelResolver);
+    AutomationStorage(Database&, const SecretStorage&, const BotLifecycleStorage&, Store::Impl&, Store::AutomationModelResolver,
+                      TaskOperations&);
 
     void retireAutomations(const Json& botIds);
     Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
@@ -42,5 +44,6 @@ private:
     const BotLifecycleStorage& lifecycle_;
     Store::Impl& remaining_;
     const Store::AutomationModelResolver model_;
+    TaskOperations& taskOperations;
 };
 }

@@ -1,3 +1,7 @@
+#include "wait_storage.hpp"
+#include "task_run_reports.hpp"
+#include "outbox_storage.hpp"
+#include "journal_storage.hpp"
 #include "storage.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
@@ -54,8 +58,8 @@ bool destinationStopRequested(const std::optional<Outbox>& action, const RunRef&
     return !requested || (requested->runId == run.runId && requested->threadId == run.threadId);
 }
 
-bool Store::Impl::advanceDestinationSessionMessageRun(TaskData& task, DestinationRun& run) {
-    auto pending = query(R"SQL(
+bool TaskRunReports::advanceDestinationSessionMessageRun(TaskData& task, DestinationRun& run) {
+    auto pending = database.query(R"SQL(
 SELECT w.run,w.delivery,w.link
 FROM session_message_waits w
 WHERE w.task_id=? AND w.action_id=?
@@ -64,15 +68,15 @@ WHERE w.task_id=? AND w.action_id=?
     SELECT 1 FROM journal j WHERE j.task_id=? AND j.kind='report'
       AND j.run_environment_id=w.environment AND j.run_id=w.run AND j.run_thread_id=w.thread)
 ORDER BY w.rowid LIMIT 1)SQL",
-                         {task.id, run.actionId, run.environmentId, run.ref.threadId, run.ref.gatewayEnvironmentId, task.id});
+                                  {task.id, run.actionId, run.environmentId, run.ref.threadId, run.ref.gatewayEnvironmentId, task.id});
     if (!pending.next()) return false;
     const auto runId = pending.string(0);
     const auto delivery = pending.string(1);
     const auto link = pending.string(2);
     if (runId == run.ref.runId) return false;
-    exec("UPDATE runs SET thread_id=?,run_id=?,link=? WHERE action_id=? AND task_id=? AND environment_id=?",
-         {run.ref.threadId, runId, link.empty() ? run.ref.link : link, run.actionId, task.id, run.environmentId});
-    if (sqlite3_changes(db) != 1) return false;
+    database.exec("UPDATE runs SET thread_id=?,run_id=?,link=? WHERE action_id=? AND task_id=? AND environment_id=?",
+                  {run.ref.threadId, runId, link.empty() ? run.ref.link : link, run.actionId, task.id, run.environmentId});
+    if (sqlite3_changes(database.db) != 1) return false;
     run.ref.runId = runId;
     run.explicitDirectGateway = run.ref.gatewayEnvironmentId.empty();
     if (!link.empty()) run.ref.link = link;
@@ -90,7 +94,7 @@ ORDER BY w.rowid LIMIT 1)SQL",
     return true;
 }
 
-bool Store::Impl::recordDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed) {
+bool TaskRunReports::recordDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed) {
     const auto& ref = run.ref;
     auto status = observed.status;
     if (status.empty()) status = "failed";
@@ -133,17 +137,17 @@ bool Store::Impl::recordDestinationReport(TaskData& task, DestinationRun& run, c
         waitStorage.clearWait(task, "run_finished");
         task.state = TaskState::running;
     }
-    auto priorReport = query("SELECT 1 FROM journal WHERE task_id=? AND kind='report'"
-                             " AND run_environment_id=? AND run_thread_id=? AND run_id=? AND revision_id IS ? LIMIT 1",
-                             {task.id, run.environmentId, ref.threadId, ref.runId, revision});
+    auto priorReport = database.query("SELECT 1 FROM journal WHERE task_id=? AND kind='report'"
+                                      " AND run_environment_id=? AND run_thread_id=? AND run_id=? AND revision_id IS ? LIMIT 1",
+                                      {task.id, run.environmentId, ref.threadId, ref.runId, revision});
     if (!priorReport.next()) journalStorage.journal(task.id, entry);
     if (advanceDestinationSessionMessageRun(task, run)) return false;
-    auto pendingSends = query(R"SQL(
+    auto pendingSends = database.query(R"SQL(
 SELECT json_extract(effect,'$.actionId') FROM conversation_steps
 WHERE json_extract(effect,'$.kind')='message_session'
   AND json_extract(effect,'$.taskId')=?
 )SQL",
-                              {task.id});
+                                       {task.id});
     auto& results = std::get<RunResults>(task.destinations);
     auto& runs = results.runs;
     bool waitingForSend = false;
@@ -155,7 +159,7 @@ WHERE json_extract(effect,'$.kind')='message_session'
             destination->status = DestinationRunPhase::confirmation_pending;
             destination->detail =
                 "A Session message may have been accepted by T3, but Flock has no receipt to identify its Run. The task remains held.";
-            destination->retryAt = policyClock() + 5;
+            destination->retryAt = remaining.policyClock() + 5;
         }
     }
     if (waitingForSend) return false;

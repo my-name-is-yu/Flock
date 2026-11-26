@@ -124,7 +124,7 @@ void Runtime::Components::PeerExchanges::sendPeer(TaskData& sender, const Json& 
     if (work) {
         if (sender.activeRun || !sender.actionId.empty())
             throw Conflict("Let the assigned Run settle before requesting another Bot's work");
-        peer.intake.environmentId = db.defaultT3Environment(peer.intake.botId, peer.intake.environmentId, sender.environmentId);
+        peer.intake.environmentId = db.taskRouting.defaultT3Environment(peer.intake.botId, peer.intake.environmentId, sender.environmentId);
         if (peer.intake.environmentId.empty()) throw Conflict("Choose a T3 environment for the destination Bot in its configuration");
         if (!peer.intake.projectId.empty() &&
             db.peerStorage.peerWorkRouteWouldCycle(sender.id, peer.intake.environmentId, peer.intake.projectId))
@@ -134,7 +134,7 @@ void Runtime::Components::PeerExchanges::sendPeer(TaskData& sender, const Json& 
     }
     peer.intake.request = note.empty() && forwarded ? forwarded->text : note;
     const auto source = work ? TaskSource::handoff : TaskSource::consultation;
-    const auto id = db.submit(peer.intake, 0, nullptr, source);
+    const auto id = db.taskOperations.submit(peer.intake, 0, nullptr, source);
     auto recipient = db.taskRecords.load(id);
     const PeerExchange exchange{action, kind, "working", "", sender.id, id};
     auto message = peerMessage(exchange, sender, recipient, "request", note, action);

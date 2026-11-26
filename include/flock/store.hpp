@@ -179,10 +179,12 @@ private:
     struct Impl;
     std::unique_ptr<Impl> p_;
     friend class JournalStorage;
-    friend class TaskEvents;
-    friend class WaitStorage;
     friend class AutomationStorage;
     friend class MemoryStorage;
+    friend class ModelCalls;
+    friend class TaskOperations;
+    friend class TaskRouting;
+    friend class TaskRunReports;
     friend class Runtime;
     friend class Policy;
     friend class T3Connections;

@@ -1,3 +1,4 @@
+#include "task_operations.hpp"
 #include "automation_storage.hpp"
 #include "bot_lifecycle_storage.hpp"
 
@@ -131,8 +132,9 @@ void applyPlannerModel(Json& config, const Store::PlannerModel& planner) {
 }
 
 AutomationStorage::AutomationStorage(Database& database, const SecretStorage& secretStorage, const BotLifecycleStorage& lifecycle,
-                                     Store::Impl& remaining, Store::AutomationModelResolver model)
-    : database_(database), secretStorage_(secretStorage), lifecycle_(lifecycle), remaining_(remaining), model_(std::move(model)) {}
+                                     Store::Impl& remaining, Store::AutomationModelResolver model, TaskOperations& taskOperations)
+    : database_(database), secretStorage_(secretStorage), lifecycle_(lifecycle), remaining_(remaining), model_(std::move(model)),
+      taskOperations(taskOperations) {}
 
 Json Store::createAutomation(const Person& actor, const Intake& target, const Json& args, Seconds now) {
     std::lock_guard lock(p_->mutex);
@@ -436,8 +438,8 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
                                          {}};
                 if (def.contains("label")) trigger.label = scrub.text(def.at("label").get<std::string>());
                 const auto routing = automationRoute(bot, row.json(2));
-                const auto task = remaining_.submit(intake(bot, field(def, "request"), routing), 0, nullptr, TaskSource::request,
-                                                    TaskTrigger{id, now, std::move(trigger)});
+                const auto task = taskOperations.submit(intake(bot, field(def, "request"), routing), 0, nullptr, TaskSource::request,
+                                                        TaskTrigger{id, now, std::move(trigger)});
                 const auto receipts = Json::array({{{"taskId", task}, {"botId", bot}, {"triggerId", id}}});
                 database_.exec("INSERT INTO automation_firings VALUES(?,?,?,?)", {key, bot, now, receipts});
             }
@@ -489,8 +491,8 @@ AND json_extract(definition,'$.source')=? ORDER BY id
         if (request.find_first_not_of(" \r\n\t") == request.npos) continue;
         if (!payload) payload = scrub.payload(event);
         const auto id = rows.number(0);
-        const auto task = p_->submit(intake(bot, request, routing), 0, nullptr, TaskSource::request,
-                                     TaskTrigger{id, now, WebhookTaskTrigger{scrub.text(source), *payload}});
+        const auto task = p_->taskOperations.submit(intake(bot, request, routing), 0, nullptr, TaskSource::request,
+                                                    TaskTrigger{id, now, WebhookTaskTrigger{scrub.text(source), *payload}});
         receipts.push_back({{"taskId", task}, {"botId", bot}, {"triggerId", id}});
     }
     if (previous.empty() && received.empty()) throw AccessDenied("Webhook source unavailable");

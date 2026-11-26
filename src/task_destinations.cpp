@@ -1,3 +1,7 @@
+#include "wait_storage.hpp"
+#include "task_routing.hpp"
+#include "secret_storage.hpp"
+#include "peer_storage.hpp"
 #include "storage.hpp"
 #include "flock/types.hpp"
 #include "flock/t3.hpp"
@@ -15,28 +19,30 @@
 #include <vector>
 
 namespace flockv0 {
-std::string Store::Impl::rememberedT3Project(std::string_view bot, std::string_view environment) const {
-    auto row = query("SELECT project_id FROM bot_t3_projects WHERE bot_id=? AND environment_id=?", {bot, environment});
+std::string TaskRouting::rememberedT3Project(std::string_view bot, std::string_view environment) const {
+    auto row = database.query("SELECT project_id FROM bot_t3_projects WHERE bot_id=? AND environment_id=?", {bot, environment});
     return row.next() ? row.string(0) : std::string{};
 }
 
-void Store::Impl::rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project) {
-    exec("INSERT INTO bot_t3_projects VALUES(?,?,?) ON CONFLICT(bot_id,environment_id) "
-         "DO UPDATE SET project_id=excluded.project_id",
-         {bot, environment, project});
+void TaskRouting::rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project) {
+    database.exec("INSERT INTO bot_t3_projects VALUES(?,?,?) ON CONFLICT(bot_id,environment_id) "
+                  "DO UPDATE SET project_id=excluded.project_id",
+                  {bot, environment, project});
 }
 
-bool Store::Impl::projectQuestionOpen(std::string_view bot, std::string_view environment) const {
-    return query("SELECT 1 FROM tasks t JOIN waits w ON w.task_id=t.id "
-                 "WHERE t.bot_id=? AND t.environment_id=? AND t.project_id='' AND w.resolution IS NULL "
-                 "AND w.reason='project_question' LIMIT 1",
-                 {bot, environment})
+bool TaskRouting::projectQuestionOpen(std::string_view bot, std::string_view environment) const {
+    return database
+        .query("SELECT 1 FROM tasks t JOIN waits w ON w.task_id=t.id "
+               "WHERE t.bot_id=? AND t.environment_id=? AND t.project_id='' AND w.resolution IS NULL "
+               "AND w.reason='project_question' LIMIT 1",
+               {bot, environment})
         .next();
 }
 
-ProjectCatalog Store::Impl::readProjectCatalog(T3& t3, std::string_view bot, std::string_view environment, bool requireConnection) {
-    if (requireConnection && !t3EnvironmentConnected(environment)) return "Connect this T3 environment in Settings, then try again.";
-    Policy policy(*this);
+ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, std::string_view environment, bool requireConnection) {
+    if (requireConnection && !remaining.t3EnvironmentConnected(environment))
+        return "Connect this T3 environment in Settings, then try again.";
+    Policy policy(remaining);
     if (!policy.allows(bot, Action::environment_inspect, environment) || policy.forbidden(bot, Action::environment_launch, environment))
         return "Flock cannot use this T3 environment under the current permissions.";
     try {
@@ -71,7 +77,7 @@ ProjectQuestionWait projectQuestion(const std::vector<T3Project>& projects, cons
 }
 }
 
-bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
+bool TaskRouting::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
     const auto& bot = task.botId;
     const auto& environment = task.environmentId;
     const auto pending = std::exchange(task.pendingDestination, std::nullopt);
@@ -82,7 +88,7 @@ bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
     auto& projects = std::get<std::vector<T3Project>>(catalog);
     const auto remembered = rememberedT3Project(bot, environment);
     if (!remembered.empty() && std::ranges::find(projects, remembered, &T3Project::id) == projects.end())
-        exec("DELETE FROM bot_t3_projects WHERE bot_id=? AND environment_id=? AND project_id=?", {bot, environment, remembered});
+        database.exec("DELETE FROM bot_t3_projects WHERE bot_id=? AND environment_id=? AND project_id=?", {bot, environment, remembered});
     if (projects.empty()) {
         waitStorage.wait(task, SimpleWaitReason::settings, "Add or unarchive a project in this T3 environment, then try again.");
         return true;
