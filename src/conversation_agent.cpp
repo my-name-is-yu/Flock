@@ -949,10 +949,10 @@ bool ConversationStorage::authorizeTurn(const Message& message) {
     return false;
 }
 
-void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const std::function<std::string(std::string_view)>& soul,
-                                  const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost,
-                                  const ApplyBotChange& applyBotChange, const ReconcileBotCreation& reconcileBotCreation,
-                                  const IntakeResolver& intake, const PeerResolver& peers, std::stop_token shutdown) {
+void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader& soul, const std::function<Seconds()>& clock,
+                                  const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
+                                  const ReconcileBotCreation& reconcileBotCreation, const IntakeResolver& intake, const PeerResolver& peers,
+                                  std::stop_token shutdown) {
     Message message;
     {
         std::lock_guard lock(database.mutex);
