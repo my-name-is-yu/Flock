@@ -159,7 +159,7 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
     for (const auto& id : withCards)
         for (auto& card : p_->policyApprovalCards(actor, id)) result.push_back(std::move(card));
     for (const auto& id : visible) {
-        const auto scrub = p_->redactor(id);
+        const auto scrub = p_->secretStorage.redactor(id);
         const bool canDecide = policy.allows(actor, Action::bot_decide, id);
         const auto anchorTime = [&](Id anchor) -> Id {
             if (anchor <= 0) return 0;
@@ -249,7 +249,7 @@ ORDER BY p.id DESC
 }
 
 void Store::Impl::recordInboxDecision(const Person& actor, const InboxTarget& target, std::string_view decision) {
-    redactor(target.botId).requirePublic(actor.id);
+    secretStorage.redactor(target.botId).requirePublic(actor.id);
     const auto now = unixTime();
     exec(R"SQL(
 INSERT INTO inbox_decisions(bot_id,item_kind,item_id,wait_id,task_id,target_revision,target_generation,
@@ -289,7 +289,7 @@ END AND (d.item_kind<>'policy_approval' OR NOT EXISTS (SELECT 1 FROM channel_mes
 WHERE d.bot_id=? ORDER BY d.id DESC LIMIT 100
 )SQL",
                               {id});
-        const auto scrub = p_->redactor(id);
+        const auto scrub = p_->secretStorage.redactor(id);
         while (rows.next()) {
             auto row =
                 key({id, parseInboxKind(rows.string(1)), rows.number(2), rows.number(3), rows.number(4), rows.number(5), rows.number(6)});
@@ -382,7 +382,7 @@ void Store::Impl::insertPrReview(const TaskData& task, std::string_view url, std
     if (!(url.starts_with("https://") || url.starts_with("http://")) || url.find_first_of(" \t\r\n") != url.npos ||
         url.find('\0') != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 || prompt.empty() || prompt.size() > 8000)
         throw Conflict("A PR review needs a URL, title, and prompt");
-    const auto scrub = sharedRedactor();
+    const auto scrub = secretStorage.sharedRedactor();
     scrub.requirePublic({url, candidates});
     const auto savedTitle = scrub.text(title);
     const auto savedPrompt = scrub.text(prompt);

@@ -129,7 +129,7 @@ LinkedTaskDestinations Store::Impl::discoverLinkedTaskDestinations(T3& t3, std::
         gateways = registeredT3Environments(bot);
     }
     LinkedTaskDestinations result;
-    const auto scrub = redactor(bot);
+    const auto scrub = secretStorage.redactor(bot);
     std::set<std::tuple<std::string, std::string, std::string>> seenRoutes;
     std::set<std::string> seenNames;
     for (const auto& gateway : gateways) {
@@ -306,7 +306,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
             if (destinations.primary.environmentId.empty()) destinations.primary = route;
             destinations.targets.push_back({name, std::move(route)});
         }
-        redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
+        secretStorage.redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
         return destinations;
     }
     if (!sessionRef.empty() && (!selectedSession || !permitsWorkSession(message, *selectedSession)))
@@ -328,7 +328,7 @@ StartDestinations Store::Impl::startDestinations(const conversation::Message& me
             destinations.primary.projectId = rememberedT3Project(bot, destinations.primary.environmentId);
         if (destinations.primary.projectId.empty()) throw ToolError("Choose a T3 project before verifying a commit");
         destinations.targets.push_back({environment.empty() ? destinations.primary.environmentId : environment, destinations.primary});
-        redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
+        secretStorage.redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
     }
     return destinations;
 }
@@ -345,7 +345,8 @@ TaskChange Store::Impl::taskChange(const conversation::Message& message, const J
     if (!environment.empty()) {
         change.route = taskRoute(message.bot, message.routing, environment, &task, &linked);
         if (change.route.environmentId.empty()) throw ToolError("Unknown environment " + environment + "; use one of task.environments");
-        redactor(message.bot).requirePublic({change.route.environmentId, change.route.projectId, change.route.gatewayEnvironmentId});
+        secretStorage.redactor(message.bot)
+            .requirePublic({change.route.environmentId, change.route.projectId, change.route.gatewayEnvironmentId});
     }
     return change;
 }

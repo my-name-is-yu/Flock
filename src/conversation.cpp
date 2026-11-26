@@ -39,8 +39,7 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 
 void Store::setWebIdentityResolver(WebIdentityResolver resolver, bool liveInteractiveRoles) {
     std::lock_guard lock(p_->mutex);
-    p_->resolveWebIdentity = std::move(resolver);
-    p_->liveInteractiveRoles = liveInteractiveRoles;
+    p_->webIdentity = {std::move(resolver), liveInteractiveRoles};
 }
 
 Id Store::Impl::addRevision(TaskData& task, std::string_view intent, std::string_view doneWhen, Id source) {
@@ -82,7 +81,7 @@ std::optional<Json> Store::Impl::messageReceipt(const Person& actor, std::string
     auto media = Json::array();
     while (stored.next()) media.push_back(stored.json(0));
     if (media != attachments) throw Conflict("This client message ID already has different attachments");
-    return receiptRow(row, redactor(bot).text(std::string(text)), replyTo);
+    return receiptRow(row, secretStorage.redactor(bot).text(std::string(text)), replyTo);
 }
 
 std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
@@ -142,7 +141,7 @@ Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, 
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     initialModelCallLimit(routing.config);
     Json saved{{"environmentId", routing.environmentId}, {"projectId", routing.projectId}, {"config", routing.config}};
-    const auto scrub = redactor(routing.botId);
+    const auto scrub = secretStorage.redactor(routing.botId);
     if (origin) {
         saved["sessionOrigin"] = {
             {"environmentId", origin->target.environmentId}, {"threadId", origin->target.threadId}, {"title", scrub.text(origin->title)}};

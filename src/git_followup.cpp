@@ -75,8 +75,8 @@ LIMIT 2
     } else if (const auto& requesterId = task.requester) {
         const auto& person = *requesterId;
         Person actor{person, person == localOwner.id};
-        if (!person.empty() && resolveWebIdentity) {
-            const auto role = resolveWebIdentity(person);
+        if (!person.empty() && webIdentity.resolve) {
+            const auto role = webIdentity.resolve(person);
             actor = role ? Person{person, *role} : Person{};
         }
         if (Policy(*this).allows(actor, Action::bot_talk, message.bot)) requester = person;
@@ -124,7 +124,7 @@ std::string Store::Impl::gitPrFollowupInstruction(const conversation::Message& m
     using conversation_storage::ToolError;
     if (!decision.args.is_object() || decision.args.size() != 2)
         throw ToolError("Supply a diagnosis and a quoted excerpt from the Git notification or its logs");
-    const auto scrub = sharedRedactor();
+    const auto scrub = secretStorage.sharedRedactor();
     const auto diagnosis = scrub.text(text(decision.args, "diagnosis", 2000, true));
     const auto evidence = scrub.text(text(decision.args, "evidence", 4000, true));
     Json cited{{"diagnosis", diagnosis}, {"excerpt", evidence}};

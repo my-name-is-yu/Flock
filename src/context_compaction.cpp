@@ -63,7 +63,7 @@ std::size_t conversation_storage::boundExpandedContext(Json& turn) {
 }
 
 Json Store::Impl::compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage) const {
-    const auto scrub = redactor(bot);
+    const auto scrub = secretStorage.redactor(bot);
     auto rows =
         query("SELECT id,start_message_id,end_message_id,summary,original_count,created_at,created_by "
               "FROM conversation_compactions WHERE bot_id=? AND (?=0 OR id<?) AND (?=0 OR end_message_id<?) ORDER BY id DESC LIMIT ?",
@@ -86,7 +86,7 @@ Json Store::compactions(std::string_view bot, Id before, unsigned limit) const {
 }
 
 Json Store::Impl::conversationHistory(const conversation::Message& message, const Json& summaries, std::size_t expandedBytes) const {
-    const auto scrub = redactor(message.bot);
+    const auto scrub = secretStorage.redactor(message.bot);
     std::size_t remaining = limits::conversation_context::maxBytes - expandedBytes - limits::conversation_context::emptyHistoryBytes;
     Json history = Json::array();
     Id boundary = 0;
@@ -168,7 +168,7 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
     const Id boundary = latest.empty() ? 0 : latest.front().at("endMessageId").get<Id>();
     if (tool == "compact_conversation") {
         const auto end = identifier(args, "endMessageId", true);
-        const auto summary = redactor(bot).text(conversation_storage::text(args, "summary", maxSummaryBytes, true));
+        const auto summary = secretStorage.redactor(bot).text(conversation_storage::text(args, "summary", maxSummaryBytes, true));
         if (summary.size() > maxSummaryBytes || Json(summary).dump().size() > maxExpandedBytes)
             throw Conflict("Escaped summary exceeds the context budget");
         if (end <= boundary || end >= message.id)
@@ -191,7 +191,7 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
     }
     if (args.contains("endMessageId")) end = std::min(end, identifier(args, "endMessageId", true));
     Json revision;
-    const auto scrub = redactor(bot, &revision);
+    const auto scrub = secretStorage.redactor(bot, &revision);
     Id start = args.contains("startMessageId") ? identifier(args, "startMessageId", true) : 1;
     Id offset = 0;
     Id queryMessage = message.id, queryStep = step;

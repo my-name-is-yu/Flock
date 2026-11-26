@@ -134,7 +134,7 @@ Runtime::Components::SessionPrompts::WorkPrompt Runtime::Components::SessionProm
                                                                                                 const SessionContract* contract) {
     WorkPrompt prompt;
     auto& [instruction, pending, contextIds, resultReferences] = prompt;
-    const auto scrub = db.redactor(task.botId);
+    const auto scrub = db.secretStorage.redactor(task.botId);
     std::size_t reservedBytes =
         limits::session_prompt::instructionReserveBytes + std::max(limits::session_prompt::minActionIdReserveBytes, actionIdBytes);
     if (!contract && event.contains("userAnswer")) {
@@ -225,7 +225,7 @@ void Runtime::Components::SessionPrompts::prepareDelegation(const TaskData& task
     const auto contract = sessionContract(task);
     const auto event = db.currentEvent(task);
     auto prompt = workPrompt(task, event, action.command.actionId.size(), &contract);
-    const auto scrub = db.redactor(task.botId);
+    const auto scrub = db.secretStorage.redactor(task.botId);
     instruction += prompt.instruction;
     action.command.instruction = scrub.text(instruction);
     redactInstructions(prompt.pending, scrub);

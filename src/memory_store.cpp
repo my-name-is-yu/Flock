@@ -85,7 +85,7 @@ BotNotes Store::Impl::loadNotes(std::string_view bot, const std::function<std::s
     if (auto doc = findMemory(db, key))
         notes.memory = std::move(doc->content);
     else
-        notes.memory = seedPrivateMemory(key, bot, redactor(bot), now);
+        notes.memory = seedPrivateMemory(key, bot, secretStorage.redactor(bot), now);
     tx.commit();
     return notes;
 }
@@ -96,7 +96,7 @@ std::optional<SessionMemory> Store::Impl::sessionMemory(const Command& command, 
     const auto key = privateKey(bot);
     const auto doc = findMemory(db, key);
     const auto version = doc ? doc->version : Id{0};
-    const auto scrub = redactor(bot);
+    const auto scrub = secretStorage.redactor(bot);
     auto excerpt = doc ? scrub.text(doc->content) : seedPrivateMemory(key, bot, scrub, now);
     if (excerpt.find_first_not_of(" \t\r\n") == excerpt.npos) return std::nullopt;
     const auto marker = sessionPrompt(command.actionId, {});
@@ -173,7 +173,7 @@ Json Store::Impl::memory(std::string_view bot, const Person& actor, std::string_
 
     const auto key = shared ? "shared:" + id : privateKey(bot);
     const auto author = fromBot ? "bot:" + std::string(bot) : "person:" + actor.id;
-    const auto scrub = shared ? sharedRedactor() : redactor(bot);
+    const auto scrub = shared ? secretStorage.sharedRedactor() : secretStorage.redactor(bot);
     scrub.requirePublic({key, author});
     auto doc = findMemory(db, key);
     if (!doc && !shared) doc = MemoryDocument{seedPrivateMemory(key, bot, scrub, now), 0, now};
@@ -342,7 +342,7 @@ Json Store::Impl::rememberPreference(const conversation::Message& message, int s
         throw Conflict("Use only words stated by the person in their current message");
     auto result = memory(message.bot, turnActor(message), "remember_preference", args, now, true);
     if (!result.value("unchanged", false)) {
-        const Json notice{{"text", redactor(message.bot).text(summary)},
+        const Json notice{{"text", secretStorage.redactor(message.bot).text(summary)},
                           {"revisionId", result.at("revisionId")},
                           {"version", result.at("version")},
                           {"replyToMessageId", message.id}};

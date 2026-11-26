@@ -197,15 +197,15 @@ WHERE t.pause_id IS NOT NULL AND t.status='paused' AND t.message_id<>? ORDER BY 
 }
 
 SecretRedactor Store::Impl::modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args, bool gitNotification) const {
-    if (gitNotification || isGitTool(tool) || (sharedMemoryTool(tool) && args.contains("docId"))) return sharedRedactor();
-    return redactor(bot);
+    if (gitNotification || isGitTool(tool) || (sharedMemoryTool(tool) && args.contains("docId"))) return secretStorage.sharedRedactor();
+    return secretStorage.redactor(bot);
 }
 
 ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const std::vector<std::string>& offered, bool gitNotification) {
     std::string rejection;
     if (std::ranges::find(offered, call.tool) == offered.end()) {
         rejection = "Tool unavailable for this turn";
-        if (redactor(bot).containsProtected(call.tool)) call.tool.clear();
+        if (secretStorage.redactor(bot).containsProtected(call.tool)) call.tool.clear();
     } else if (sharedMemoryTool(call.tool) && call.args.contains("docId") &&
                Policy(*this).forbidden(bot,
                                        (call.tool == "read_memory" || call.tool == "memory_history") ? Action::shared_memory_read
@@ -238,7 +238,7 @@ ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const
 CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input) {
     Json revision;
     const bool conversation = input.event.contains("turn") && input.event.value("kind", "") == "conversation_turn";
-    const auto scrub = redactor(bot, conversation ? &revision : nullptr);
+    const auto scrub = secretStorage.redactor(bot, conversation ? &revision : nullptr);
     CheckedModelTurn checked;
     try {
         auto safe = input;

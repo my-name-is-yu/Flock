@@ -34,7 +34,7 @@ std::size_t Runtime::Components::SessionHistory::readOffset(const Json& args) {
 }
 
 SessionExcerptEntry Runtime::Components::SessionHistory::readExcerpt(std::string_view bot, const ReadRequest& req) {
-    const auto scrub = db.redactor(bot);
+    const auto scrub = db.secretStorage.redactor(bot);
     const auto excerpt = [&] {
         try {
             return t3.read(req);

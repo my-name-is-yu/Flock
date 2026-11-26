@@ -184,7 +184,7 @@ bool Store::Impl::permitsChannel(std::string_view bot, const ChannelOrigin& orig
     const auto linked = connector->second.resolveSender(origin.workspaceId, sender);
     if (!linked || linked->botId != bot || linked->personId != person) return false;
     auto policy = Policy(const_cast<Impl&>(*this));
-    if (resolveWebIdentity && policy.requiresIdentity() && !resolveWebIdentity(person)) return false;
+    if (webIdentity.resolve && policy.requiresIdentity() && !webIdentity.resolve(person)) return false;
     return policy.allows(Person{std::string(person), false}, Action::bot_talk, bot) &&
            policy.allows(bot, Action::channel_use, channelPolicyTarget(origin)) &&
            (operation == "use" ||
@@ -244,7 +244,7 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
 void Store::Impl::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
     if (!permitsChannel(bot, message.origin, message.senderId, message.personId, message.attachments.empty() ? "use" : "read"))
         throw ChannelAccessDenied("Channel access is no longer authorized");
-    const auto scrub = redactor(bot);
+    const auto scrub = secretStorage.redactor(bot);
     scrub.requirePublic({message.origin.json(), message.senderId, message.personId});
     if (replay) {
         auto saved = query("SELECT 1 FROM channel_messages WHERE message_id=? AND sender_id=? AND person_id=?",
@@ -407,7 +407,7 @@ void Store::Impl::queueChannelTaskUpdate(Id task, Id entry, std::string_view tex
     if (text.empty()) return;
     auto source = query("SELECT message_id,t.bot_id FROM channel_tasks c JOIN tasks t ON t.id=c.task_id WHERE t.id=?", {task});
     if (!source.next()) return;
-    const auto scrub = redactor(source.string(1));
+    const auto scrub = secretStorage.redactor(source.string(1));
     queueChannelReply(source.number(0), entry, scrub.text(bounded(text, 8000)), scrub.payload(Json(suggestions)));
 }
 
@@ -518,16 +518,16 @@ AND d.state IN ('pending','unknown') AND json_extract(d.payload,'$.externalMessa
         if (bytes.empty()) bytes = decodeAttachment(field(args, "contentBase64"), std::min(caps.maxAttachmentBytes, attachmentLimit));
         if (!matchesMime(field(payload, "mimeType"), bytes)) throw Conflict("Attachment content does not match its MIME type");
         if (!payload.contains("attachmentId")) {
-            redactor(bot).requirePublic(bytes);
+            secretStorage.redactor(bot).requirePublic(bytes);
             payload["contentBase64"] = encodeAttachment(bytes);
         }
     } else if (tool == "publish_artifact") {
         const auto title = required(args, "title", 255);
         html = required(args, "html", artifactLimit);
-        redactor(bot).requirePublic({title, html});
+        secretStorage.redactor(bot).requirePublic({title, html});
         payload = {{"title", title}, {"url", artifactOrigin + "/api/artifacts/" + key}};
     }
-    redactor(bot).requirePublic(payload);
+    secretStorage.redactor(bot).requirePublic(payload);
     exec("INSERT INTO channel_deliveries(id,source_id,operation,payload) VALUES(?,?,?,?)", {key, message, tool, payload});
     Json result{{"ok", true}, {"delivery", "queued"}, {"deliveryId", key}};
     if (tool == "publish_artifact") {
@@ -700,7 +700,7 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
         std::lock_guard lock(mutex);
         auto& external = outcome.externalMessageId;
         if (external.size() > 128 || external.find('\0') != external.npos || !conversation_storage::hasText(external) ||
-            redactor(bot).text(external) != external)
+            secretStorage.redactor(bot).text(external) != external)
             external.clear();
         const auto next = outcome.state == ChannelDelivery::State::accepted  ? "accepted"
                           : outcome.state == ChannelDelivery::State::notSent ? "pending"

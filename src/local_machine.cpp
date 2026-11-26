@@ -141,8 +141,9 @@ void Store::setWebOrigin(std::string origin) {
 }
 
 bool Store::Impl::permitsLocalMachineOwner(std::string_view owner, std::string_view bot) const {
-    const auto root = liveInteractiveRoles && resolveWebIdentity ? resolveWebIdentity(owner)
-                                                                 : std::optional{std::ranges::find(rootPeople, owner) != rootPeople.end()};
+    const auto root = webIdentity.liveInteractiveRoles && webIdentity.resolve
+                          ? webIdentity.resolve(owner)
+                          : std::optional{std::ranges::find(rootPeople, owner) != rootPeople.end()};
     if (!root) return false;
     const Person person{std::string(owner), *root};
     return Policy(const_cast<Impl&>(*this)).allows(person, Action::bot_decide, bot);
@@ -177,7 +178,7 @@ WHERE bot_id=? AND task_id=? AND environment_id=? AND thread_id=? AND machine_id
 )SQL",
                             {bot, task, environment, thread, machineId});
     const auto rules = localRules(args);
-    redactor(bot).requirePublic({thread, run, machineId, owner, rules});
+    secretStorage.redactor(bot).requirePublic({thread, run, machineId, owner, rules});
     Id id;
     std::string status = "pending";
     if (connection.next()) {
@@ -228,7 +229,7 @@ AND t.environment_id=r.environment_id
     const auto bot = connection.string(0);
     const auto rules = connection.json(1);
     if (std::ranges::find(rules, rule) == rules.end()) throw ChannelAccessDenied("The operation is outside the approved local rules");
-    auto output = p_->redactor(bot).payload(machine->second->run(operation, path));
+    auto output = p_->secretStorage.redactor(bot).payload(machine->second->run(operation, path));
     tx.commit();
     return output;
 }
@@ -243,13 +244,13 @@ FROM local_machine_connections ORDER BY id DESC
     while (rows.next()) {
         const auto bot = rows.string(1);
         if (rows.string(5) != actor.id || !Policy(*p_).allows(actor, Action::bot_decide, bot)) continue;
-        result.push_back(p_->redactor(bot).record({{"id", rows.number(0)},
-                                                   {"botId", bot},
-                                                   {"threadId", rows.string(2)},
-                                                   {"runId", rows.string(3)},
-                                                   {"machineId", rows.string(4)},
-                                                   {"rules", rows.json(6)},
-                                                   {"status", rows.string(7)}}));
+        result.push_back(p_->secretStorage.redactor(bot).record({{"id", rows.number(0)},
+                                                                 {"botId", bot},
+                                                                 {"threadId", rows.string(2)},
+                                                                 {"runId", rows.string(3)},
+                                                                 {"machineId", rows.string(4)},
+                                                                 {"rules", rows.json(6)},
+                                                                 {"status", rows.string(7)}}));
     }
     return result;
 }

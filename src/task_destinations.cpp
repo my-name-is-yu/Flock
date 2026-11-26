@@ -41,7 +41,7 @@ ProjectCatalog Store::Impl::readProjectCatalog(T3& t3, std::string_view bot, std
         return "Flock cannot use this T3 environment under the current permissions.";
     try {
         auto projects = t3.projects(environment);
-        const auto scrub = redactor(bot);
+        const auto scrub = secretStorage.redactor(bot);
         std::erase_if(projects, [&](const T3Project& project) { return scrub.text(project.id) != project.id; });
         return projects;
     } catch (const std::exception&) {
@@ -109,7 +109,7 @@ bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
         return true;
     }
     if (projectQuestionOpen(bot, environment)) return false;
-    wait(task, projectQuestion(projects, redactor(bot)), "Which T3 project should this Bot use in this environment?");
+    wait(task, projectQuestion(projects, secretStorage.redactor(bot)), "Which T3 project should this Bot use in this environment?");
     return true;
 }
 }

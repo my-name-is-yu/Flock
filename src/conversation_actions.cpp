@@ -114,7 +114,7 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
         auto failure = error.details;
         failure["ok"] = false;
         failure["error"] = error.what();
-        saveTurnResults(id, step, Json::array({redactor(message.bot).record(std::move(failure))}));
+        saveTurnResults(id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(failure))}));
     };
     const auto& args = decision.args;
     const auto admit = [&](Id taskId, Id expected, const AssignedRun* expectedRun) {
@@ -228,7 +228,7 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
         const std::string detail = "T3 may have received the interrupt: ";
         outcome = {{"ok", false}, {"taskId", effect->taskId}, {"delivery", "unknown"}, {"error", detail + error.what()}};
     }
-    outcome = redactor(message.bot).record(std::move(outcome));
+    outcome = secretStorage.redactor(message.bot).record(std::move(outcome));
     std::lock_guard lock(mutex);
     Transaction transaction(db);
     if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step}).next()) return stop;
@@ -254,7 +254,7 @@ bool Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& rec
          {message, receipt.bot, target.environmentId, target.threadId, delivery.run.runId, receipt.title,
           interruptAt || !receipt.notify || sessionParticipationStopped(receipt.bot, target, message) ? 1 : 0, target.gatewayEnvironmentId,
           receipt.taskId, receipt.actionId, delivery.delivery == "queued" ? "queued" : "started",
-          redactor(receipt.bot).text(delivery.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
+          secretStorage.redactor(receipt.bot).text(delivery.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
     if (!receipt.taskId || receipt.actionId.empty()) return true;
     auto task = load(receipt.taskId);
     if (terminal(task)) return true;
@@ -269,7 +269,7 @@ AND run_environment_id=? AND run_id=? AND run_thread_id=? LIMIT 1)SQL",
 
 void Store::Impl::saveSessionSendResult(std::string_view bot, Id message, int step, Json result) {
     const bool unknown = field(result, "delivery") == "unknown";
-    const auto results = Json::array({redactor(bot).record(std::move(result))});
+    const auto results = Json::array({secretStorage.redactor(bot).record(std::move(result))});
     exec(R"SQL(
 UPDATE conversation_steps
 SET result=?,effect=CASE WHEN ? AND json_extract(effect,'$.taskId') IS NOT NULL THEN effect END
@@ -421,7 +421,9 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
     using enum CallOutcome;
     const auto id = message.id;
     const bool fixesPullRequest = decision.tool == "fix_pull_request";
-    const auto save = [&](Json result) { saveTurnResults(id, step, Json::array({redactor(message.bot).record(std::move(result))})); };
+    const auto save = [&](Json result) {
+        saveTurnResults(id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
+    };
     Command command;
     command.tool = CommandTool::message_session;
     command.actionId = "flock-turn-" + actionId();
@@ -510,7 +512,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                 command.instruction +=
                     "\n\n(reference only):\n" + bounded(field(source, "text"), limits::session_prompt::maxQuoteTextBytes);
             if (!expectedCommit.empty()) command.instruction = commit_check::instructions(std::move(command.instruction), expectedCommit);
-            command.instruction = redactor(message.bot).text(command.instruction);
+            command.instruction = secretStorage.redactor(message.bot).text(command.instruction);
             if (decision.tool == "message_session" &&
                 (decision.args.contains("taskId") || decision.args.contains("generation") || decision.args.contains("runId")))
                 throw ToolError("Use the Session identifiers");
@@ -635,7 +637,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
         if (!sqlite3_changes(db)) return stop;
         const auto read = Resource::sessionRead(target.environmentId, target.threadId);
         if (!message.channelScope.empty() || !Policy(*this).allows(message.bot, read)) title.clear();
-        title = bounded(redactT3Tokens(redactor(message.bot).text(title)), 512);
+        title = bounded(redactT3Tokens(secretStorage.redactor(message.bot).text(title)), 512);
         exec(R"SQL(
 INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state)
 SELECT ?,?,?,person_id,'active' FROM t3_connector WHERE singleton=1
@@ -726,7 +728,7 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
         return stop;
     }
     const auto save = [&](Json result) {
-        saveTurnResults(message.id, step, Json::array({redactor(message.bot).record(std::move(result))}));
+        saveTurnResults(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
     };
     const auto fail = [&](const ToolError& error) {
         auto result = error.details;
@@ -923,7 +925,7 @@ void rememberSourceResult(TaskData& task, const OutboxSource& source) {
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute& destination,
                                       Id messageId, const std::optional<OutboxSource>& reference, bool resume,
                                       const WorkSession* selectedSession) {
-    if (selectedSession) redactor(bot).requirePublic(selectedSession->target.threadId);
+    if (selectedSession) secretStorage.redactor(bot).requirePublic(selectedSession->target.threadId);
     const auto id = submit({std::string(bot), std::string(request), destination.environmentId, destination.projectId, routing.at("config")},
                            messageId, reference ? &*reference : nullptr);
     auto task = load(id);
@@ -942,7 +944,7 @@ WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.
                             {messageId, reference.value().taskId, bot});
         if (parent.next()) task.sessionOrigin = SessionOrigin{{parent.string(0), parent.string(1), parent.string(2)}, parent.string(3)};
     }
-    if (task.sessionOrigin) task.sessionOrigin->title = redactor(bot).text(task.sessionOrigin->title);
+    if (task.sessionOrigin) task.sessionOrigin->title = secretStorage.redactor(bot).text(task.sessionOrigin->title);
     if (selectedSession)
         task.selectedSession = WorkSession{
             {destination.environmentId, selectedSession->target.threadId, task.gatewayEnvironmentId.value_or("")}, destination.projectId};
@@ -1072,7 +1074,7 @@ void Store::Impl::recordTaskBlocker(TaskData& task, std::string_view reason, Id 
         if (reason.empty() || task.state != TaskState::waiting || !wait || wait->id != waitId || !waitIsActionable(task))
             throw DecisionUnavailable{};
     }
-    const auto publicReason = redactor(task.botId).text(std::string(reason));
+    const auto publicReason = secretStorage.redactor(task.botId).text(std::string(reason));
     if (reason.empty())
         task.blocker.reset();
     else

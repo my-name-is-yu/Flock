@@ -1,6 +1,8 @@
-#include "storage.hpp"
+#include "secret_storage.hpp"
+#include "database.hpp"
 #include "flock/types.hpp"
-#include "flock/store.hpp"
+#include "flock/policy.hpp"
+#include "flock/secrets.hpp"
 #include "flock/json.hpp"
 
 #include <algorithm>
@@ -62,18 +64,18 @@ bool SecretRef::valid() const {
            name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") == name.npos;
 }
 
-SecretStore::SecretStore(const std::filesystem::path& stateDirectory) {
+SecretStorage::SecretStorage(Database& db, const std::filesystem::path& stateDirectory) : db_(db) {
     const auto path = stateDirectory.empty() ? std::filesystem::path(".") : stateDirectory;
     std::filesystem::create_directories(path);
     stateDirectory_ = open(std::filesystem::canonical(path).c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
     if (stateDirectory_ < 0) throw Conflict("Cannot open vault parent directory");
 }
 
-SecretStore::~SecretStore() {
+SecretStorage::~SecretStorage() {
     close(stateDirectory_);
 }
 
-void SecretStore::insert(const SecretRef& ref, std::string_view value) {
+void SecretStorage::insert(const SecretRef& ref, std::string_view value) {
     if (!ref.valid() || value.empty() || value.size() > 65536) throw Conflict("Invalid secret name or size");
     auto directory = openDirectory(stateDirectory_, true);
     const auto staging = ".pending-" + actionId();
@@ -97,7 +99,7 @@ void SecretStore::insert(const SecretRef& ref, std::string_view value) {
     if (fsync(directory.fd)) throw Conflict("Cannot persist secret directory");
 }
 
-std::string SecretStore::read(const SecretRef& ref) const {
+std::string SecretStorage::read(const SecretRef& ref) const {
     if (!ref.valid()) throw Conflict("Invalid secret reference");
     auto directory = openDirectory(stateDirectory_, false);
     File file(openat(directory.fd, ref.name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
@@ -190,47 +192,42 @@ bool SecretRedactor::containsProtectedText(std::string_view text) const {
     return std::ranges::any_of(values_, [&](const auto& secret) { return text.find(secret) != text.npos; });
 }
 
-static SecretRedactor readRedactor(Statement rows, const SecretStore& secrets, std::vector<std::string> values) {
-    while (rows.next()) values.push_back(secrets.read({rows.string(0)}));
-    return SecretRedactor(std::move(values));
-}
-
-void Store::protectGitCredential(std::string value) {
+void SecretStorage::protectGitCredential(std::string value) {
     if (value.empty()) return;
-    std::lock_guard lock(p_->mutex);
-    if (std::ranges::find(p_->gitCredentials, value) != p_->gitCredentials.end()) return;
-    auto epoch = p_->query("SELECT random()");
+    std::lock_guard lock(db_.mutex);
+    if (std::ranges::find(gitCredentials_, value) != gitCredentials_.end()) return;
+    auto epoch = db_.query("SELECT random()");
     epoch.next();
-    p_->gitCredentials.push_back(std::move(value));
-    p_->gitRedactionEpoch = epoch.number(0);
+    gitCredentials_.push_back(std::move(value));
+    gitRedactionEpoch_ = epoch.number(0);
 }
 
-SecretRedactor Store::Impl::redactor(std::string_view, Json* revision) const {
-    std::lock_guard lock(mutex);
-    auto rows = query(R"SQL(
+SecretRedactor SecretStorage::redactor(std::string_view, Json* revision) const {
+    std::lock_guard lock(db_.mutex);
+    auto rows = db_.query(R"SQL(
 SELECT file,id FROM protected_inputs p WHERE p.status='fulfilled'
 
  ORDER BY id
 )SQL");
-    auto values = gitCredentials;
-    if (revision) *revision = Json::array({gitRedactionEpoch});
+    auto values = gitCredentials_;
+    if (revision) *revision = Json::array({gitRedactionEpoch_});
     while (rows.next()) {
-        values.push_back(secrets.read({rows.string(0)}));
+        values.push_back(read({rows.string(0)}));
         if (revision) revision->push_back(rows.number(1));
     }
     return SecretRedactor(std::move(values));
 }
 
-SecretRedactor Store::Impl::sharedRedactor() const {
-    std::lock_guard lock(mutex);
-    return readRedactor(query("SELECT file FROM protected_inputs WHERE status='fulfilled'"), secrets, gitCredentials);
+SecretRedactor SecretStorage::sharedRedactor() const {
+    std::lock_guard lock(db_.mutex);
+    auto rows = db_.query("SELECT file FROM protected_inputs WHERE status='fulfilled'");
+    auto values = gitCredentials_;
+    while (rows.next()) values.push_back(read({rows.string(0)}));
+    return SecretRedactor(std::move(values));
 }
 
-SecretRedactor Policy::secretRedactor(std::string_view bot) const {
-    return db_.redactor(bot);
-}
-
-Json Policy::redactSecrets(std::string_view bot, const Json& data) const {
-    return secretRedactor(bot).record(data, SecretRedactor::Fields::external);
+std::size_t SecretStorage::gitCredentialCount() const {
+    std::lock_guard lock(db_.mutex);
+    return gitCredentials_.size();
 }
 }

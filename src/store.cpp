@@ -276,6 +276,10 @@ std::string effectiveDoneWhen(const TaskData& task) {
 Store::Store(std::filesystem::path db, MemorySeed seed, AutomationModelResolver automationModel)
     : p_(std::make_unique<Impl>(std::move(db), std::move(seed), std::move(automationModel))) {}
 Store::~Store() = default;
+
+void Store::protectGitCredential(std::string value) {
+    p_->secretStorage.protectGitCredential(std::move(value));
+}
 Database& Database::of(Store& store) {
     return *store.p_;
 }
@@ -383,7 +387,7 @@ WHERE j.conversation_bot_id IS NULL AND (
 std::optional<Store::BotViewStamp> Store::botViewStamp() const {
     std::lock_guard lock(p_->mutex);
     if (!p_->channels.empty() || p_->query("SELECT 1 FROM protected_inputs WHERE status='fulfilled' LIMIT 1").next()) return std::nullopt;
-    return BotViewStamp{changeStamp(), p_->gitCredentials.size()};
+    return BotViewStamp{changeStamp(), p_->secretStorage.gitCredentialCount()};
 }
 
 Id Store::submit(const Intake& item, const Person* requester) {
@@ -397,7 +401,7 @@ Id Store::submit(const Intake& item, const Person* requester) {
 Id Store::Impl::submitRequest(const Intake& item, const Person* requester) {
     if (!requester) return submit(item);
     if (!Policy(*this).allows(*requester, Action::bot_talk, item.botId)) throw DecisionDenied{};
-    sharedRedactor().requirePublic(requester->id);
+    secretStorage.sharedRedactor().requirePublic(requester->id);
     return submit(item, 0, nullptr, TaskSource::request, {}, requester->id);
 }
 
@@ -410,7 +414,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const OutboxSourc
                        " bytes), and environment are required");
     if (botDeleted(item.botId)) throw Conflict("Bot has been deleted");
     if (botPaused(item.botId)) throw BotPaused{};
-    const auto scrub = redactor(item.botId);
+    const auto scrub = secretStorage.redactor(item.botId);
     scrub.requirePublic({item.botId, item.environmentId, item.projectId, item.config});
     initialModelCallLimit(item.config);
     const auto request = scrub.text(item.request);
@@ -490,7 +494,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     if (operation != "cancel" && botPaused(bot)) throw BotPaused{};
     auto task = load(id);
     if (task.botId != bot || task.currentRevision.value_or(0) != revision) throw RequestChanged{};
-    const auto data = redactor(bot).payload(input);
+    const auto data = secretStorage.redactor(bot).payload(input);
     if (!data.is_object()) throw Conflict("Operation data must be an object");
     const auto wait = currentWait(id);
     if (operation == "cancel") {

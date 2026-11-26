@@ -31,7 +31,7 @@ Json toolErrorResult(const ToolError& error) {
 }
 
 void Store::Impl::saveConversationCallResult(const Message& message, int step, Json result) {
-    saveTurnResults(message.id, step, Json::array({redactor(message.bot).record(std::move(result))}));
+    saveTurnResults(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
 }
 
 Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& message, int step, const std::vector<ModelCall>& calls,

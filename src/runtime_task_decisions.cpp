@@ -120,7 +120,7 @@ void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const 
         } catch (const StorageError&) {
             throw;
         } catch (const std::exception& error) {
-            result = {{"ok", false}, {"error", db.sharedRedactor().text(error.what())}};
+            result = {{"ok", false}, {"error", db.secretStorage.sharedRedactor().text(error.what())}};
         }
         if (result.value("policyWaiting", false)) return;
         updates.change(snapshot, [&](TaskData& current) {
@@ -132,7 +132,8 @@ void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const 
             if (result.contains("readId"))
                 data["gitResults"].push_back({{"tool", tool}, {"readId", result.at("readId")}});
             else
-                data["gitResults"].push_back(db.redactor(current.botId).record(Json{{"tool", tool}, {"result", std::move(result)}}));
+                data["gitResults"].push_back(
+                    db.secretStorage.redactor(current.botId).record(Json{{"tool", tool}, {"result", std::move(result)}}));
             if (data["gitResults"].size() > 4) data["gitResults"].erase(data["gitResults"].begin());
             db.exec("UPDATE events SET data=? WHERE id=?", {data, event.at("id")});
             return true;

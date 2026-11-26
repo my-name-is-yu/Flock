@@ -38,7 +38,7 @@ Observation Runtime::Components::RunObserver::observeRun(const std::string& bot,
                                                          const RunRef& run) {
     try {
         auto observed = t3.observe(environment, config, run);
-        const auto scrub = db.redactor(bot);
+        const auto scrub = db.secretStorage.redactor(bot);
         redactQuestion(observed.question, scrub);
         for (auto* value : {&observed.resultRunId, &observed.itemId, &observed.checkedCommit})
             if (scrub.text(*value) != *value) value->clear();
