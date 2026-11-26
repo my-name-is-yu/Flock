@@ -1,8 +1,4 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { assetUrl, dumpFixture, requirePass } from './dom-harness.mjs';
 
 async function exercise(createRecurringRequests) {
   const check = (value, message) => { if (!value) throw new Error(message); };
@@ -150,24 +146,13 @@ async function exercise(createRecurringRequests) {
   check(!poll && reads === beforeClose, 'closed settings kept refreshing');
 }
 
-const directory = mkdtempSync(join(tmpdir(), 'flock-recurring-requests-'));
-try {
-  const module = new URL('../assets/recurring-requests.js', import.meta.url);
-  const fixture = join(directory, 'index.html');
-  writeFileSync(fixture, `<!doctype html><html><body><script type="module">
-    import { createRecurringRequests } from ${JSON.stringify(module.href)};
-    try {
-      await (${exercise})(createRecurringRequests);
-      document.documentElement.dataset.flockResult = 'pass';
-    } catch (error) {
-      document.documentElement.dataset.flockResult = error.message;
-    }
-  </script></body></html>`);
-  const output = execFileSync(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', '--allow-file-access-from-files', `--user-data-dir=${directory}`,
-    '--virtual-time-budget=3000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });
-  const result = output.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the DOM checks');
-} finally {
-  rmSync(directory, { recursive: true, force: true });
-}
+const html = `<!doctype html><html><body><script type="module">
+  import { createRecurringRequests } from ${JSON.stringify(assetUrl('recurring-requests.js'))};
+  try {
+    await (${exercise})(createRecurringRequests);
+    document.documentElement.dataset.flockResult = 'pass';
+  } catch (error) {
+    document.documentElement.dataset.flockResult = error.message;
+  }
+</script></body></html>`;
+requirePass(await dumpFixture(process.argv[2], html), 'The browser did not finish the DOM checks');

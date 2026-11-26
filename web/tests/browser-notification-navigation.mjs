@@ -1,10 +1,4 @@
-import { execFile } from 'node:child_process';
-import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
-import { extname, join } from 'node:path';
-import { promisify } from 'node:util';
+import { dumpDom, readAsset, requirePass, respondWithAsset, withServer } from './dom-harness.mjs';
 
 function fixtures() {
   window.EventSource = undefined;
@@ -99,9 +93,7 @@ async function exercise() {
   check(document.body.textContent.includes('Save this draft'), 'The saved Bot did not reach the roster');
 }
 
-const assets = new URL('../assets/', import.meta.url);
-const read = path => readFile(new URL(`.${path}`, assets));
-const html = (await read('/index.html')).toString().replace('<script type="module" src="/app.js"></script>', `
+const html = (await readAsset('/index.html')).replace('<script type="module" src="/app.js"></script>', `
   <img hidden src="/test-pending.svg">
   <script>(${fixtures})();</script>
   <script type="module">
@@ -110,10 +102,9 @@ const html = (await read('/index.html')).toString().replace('<script type="modul
     catch (error) { document.documentElement.dataset.flockResult = error.message; }
     finally { await fetch('/test-complete'); }
   </script>`);
-const contentTypes = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 let pendingAsset;
 let testComplete = false;
-const server = createServer(async (request, response) => {
+await withServer((request, response) => {
   const { pathname } = new URL(request.url, 'http://localhost');
   // Keep the browser alive until the dialog's native close event has run.
   if (pathname === '/test-pending.svg' && !testComplete) { pendingAsset = response; return; }
@@ -123,23 +114,8 @@ const server = createServer(async (request, response) => {
     response.writeHead(204).end();
     return;
   }
-  try {
-    response.setHeader('Content-Type', pathname === '/' ? 'text/html' : contentTypes[extname(pathname)] ?? 'application/octet-stream');
-    response.end(pathname === '/' ? html : await read(pathname));
-  } catch {
-    response.writeHead(404).end();
-  }
+  return respondWithAsset(response, pathname, { '/': html });
+}, async (origin) => {
+  requirePass(await dumpDom(process.argv[2], `${origin}/?bot=release`, { flags: ['--force-prefers-reduced-motion'], budget: 0 }),
+    'The browser did not finish the alert navigation checks');
 });
-const directory = await mkdtemp(join(tmpdir(), 'flock-notification-navigation-'));
-try {
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--force-prefers-reduced-motion', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', `--user-data-dir=${directory}`, '--dump-dom',
-    `http://127.0.0.1:${server.address().port}/?bot=release`], { encoding: 'utf8', timeout: 25000 });
-  const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the alert navigation checks');
-} finally {
-  server.close();
-  await rm(directory, { recursive: true, force: true });
-}

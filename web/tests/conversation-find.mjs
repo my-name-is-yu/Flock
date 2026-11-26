@@ -1,11 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
-import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
-import { extname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
+import { assetUrl, dumpDom, dumpFixture, readAsset, requirePass, withAssetServer } from './dom-harness.mjs';
 
 async function exercise(mountConversationFind) {
   const $ = (selector) => document.querySelector(selector);
@@ -171,32 +164,20 @@ async function exercise(mountConversationFind) {
     document.activeElement === draft, 'Closing Find must restore the full draft field');
 }
 
-const assets = new URL('../assets/', import.meta.url);
-const read = (name) => readFileSync(new URL(name, assets), 'utf8');
-const directory = mkdtempSync(join(tmpdir(), 'flock-conversation-find-'));
-try {
-  const html = read('index.html').replace(/<link\b[^>]*>/g, '').replace('<script type="module" src="/app.js"></script>', `
-    <style>${['style.css', 'sidebar.css', 'conversation.css', 'conversation-find.css', 'composer.css'].map(read).join('\n')}</style>
-    <script type="module">
-      import { mountConversationFind } from ${JSON.stringify(new URL('conversation-find.mjs', assets).href)};
-      try {
-        await (${exercise})(mountConversationFind);
-        parent.document.documentElement.dataset.flockResult = 'pass';
-      } catch (error) {
-        parent.document.documentElement.dataset.flockResult = error.message;
-      }
-    </script>`);
-  writeFileSync(join(directory, 'index.html'), html);
-  const fixture = join(directory, 'test.html');
-  writeFileSync(fixture, '<!doctype html><iframe src="index.html" width="390" height="550" style="border:0"></iframe>');
-  const output = execFileSync(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', '--allow-file-access-from-files', `--user-data-dir=${directory}`,
-    '--virtual-time-budget=4000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });
-  const result = output.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the find checks');
-} finally {
-  rmSync(directory, { recursive: true, force: true });
-}
+const frame = (await readAsset('/index.html')).replace(/<link\b[^>]*>/g, '').replace('<script type="module" src="/app.js"></script>', `
+  <style>${(await Promise.all(['style.css', 'sidebar.css', 'conversation.css', 'conversation-find.css', 'composer.css']
+    .map((name) => readAsset(`/${name}`)))).join('\n')}</style>
+  <script type="module">
+    import { mountConversationFind } from ${JSON.stringify(assetUrl('conversation-find.mjs'))};
+    try {
+      await (${exercise})(mountConversationFind);
+      parent.document.documentElement.dataset.flockResult = 'pass';
+    } catch (error) {
+      parent.document.documentElement.dataset.flockResult = error.message;
+    }
+  </script>`);
+requirePass(await dumpFixture(process.argv[2], '<!doctype html><iframe src="frame.html" width="390" height="550" style="border:0"></iframe>',
+  { files: { 'frame.html': frame }, budget: 4000 }), 'The browser did not finish the find checks');
 
 function appFixtures() {
   window.EventSource = undefined;
@@ -248,7 +229,7 @@ async function exerciseAppFolding() {
   check($('#event-1 .bubble')?.dataset.fold === 'unfolded', 'Jumping to a folded match did not unfold it');
 }
 
-const appIndex = read('index.html').replace('<script type="module" src="/app.js"></script>', `
+const appIndex = (await readAsset('/index.html')).replace('<script type="module" src="/app.js"></script>', `
   <script>(${appFixtures})();</script>
   <script type="module">
     import '/app.js';
@@ -259,26 +240,6 @@ const appIndex = read('index.html').replace('<script type="module" src="/app.js"
       document.documentElement.dataset.flockResult = error?.stack || error?.message || String(error);
     }
   </script>`);
-const contentTypes = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
-const server = createServer((request, response) => {
-  const { pathname } = new URL(request.url, 'http://localhost');
-  try {
-    response.setHeader('Content-Type', pathname === '/' ? 'text/html' : contentTypes[extname(pathname)] ?? 'application/octet-stream');
-    response.end(pathname === '/' ? appIndex : readFileSync(new URL(`.${pathname}`, assets)));
-  } catch {
-    response.writeHead(404).end();
-  }
+await withAssetServer({ '/': appIndex }, async (origin) => {
+  requirePass(await dumpDom(process.argv[2], `${origin}/?bot=release`, { budget: 4000 }), 'The browser did not finish folding-on-jump checks');
 });
-const appDirectory = mkdtempSync(join(tmpdir(), 'flock-conversation-find-app-'));
-try {
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', `--user-data-dir=${appDirectory}`, '--virtual-time-budget=4000', '--dump-dom',
-    `http://127.0.0.1:${server.address().port}/?bot=release`], { encoding: 'utf8', timeout: 25000 });
-  const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish folding-on-jump checks');
-} finally {
-  server.close();
-  rmSync(appDirectory, { recursive: true, force: true });
-}

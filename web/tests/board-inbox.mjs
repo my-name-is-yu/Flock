@@ -1,11 +1,10 @@
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
+import { dumpFixture, requirePass } from './dom-harness.mjs';
 
 async function exercise(mountBoardInbox) {
   const byId = (id) => document.getElementById(id);
@@ -691,19 +690,13 @@ async function testLive(browserArgs) {
   }
 }
 
-const directory = await mkdtemp(join(tmpdir(), 'flock-board-inbox-dom-'));
-const browserArgs = ['--headless', '--disable-gpu', '--no-first-run', '--disable-background-networking', `--user-data-dir=${directory}`];
-try {
-  if (process.argv[3] === 'live') {
-    await testLive(browserArgs);
-  } else {
-    const fixture = join(directory, 'index.html');
-    await writeFile(fixture, await boardPage());
-    const { stdout } = await promisify(execFile)(process.argv[2], [...browserArgs, '--allow-file-access-from-files',
-      '--virtual-time-budget=3000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });
-    const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
-    if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the DOM checks');
+if (process.argv[3] === 'live') {
+  const directory = await mkdtemp(join(tmpdir(), 'flock-board-inbox-dom-'));
+  try {
+    await testLive(['--headless', '--disable-gpu', '--no-first-run', '--disable-background-networking', `--user-data-dir=${directory}`]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
-} finally {
-  await rm(directory, { recursive: true, force: true });
+} else {
+  requirePass(await dumpFixture(process.argv[2], await boardPage()), 'The browser did not finish the DOM checks');
 }

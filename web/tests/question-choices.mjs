@@ -1,8 +1,4 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { assetUrl, dumpFixture, requirePass } from './dom-harness.mjs';
 
 function exercise(questionChoiceForm, updateQuestionChoiceForm) {
   const check = (value, message) => { if (!value) throw new Error(message); };
@@ -49,25 +45,13 @@ function exercise(questionChoiceForm, updateQuestionChoiceForm) {
   check(dialogSend.disabled && !dialog.querySelector('input:checked'), 'An unavailable option remained sendable');
 }
 
-const directory = mkdtempSync(join(tmpdir(), 'flock-question-choices-'));
-try {
-  const module = new URL('../assets/question-choices.js', import.meta.url);
-  const html = `<!doctype html><html><body><script type="module">
-    import { questionChoiceForm, updateQuestionChoiceForm } from ${JSON.stringify(module.href)};
-    try {
-      (${exercise})(questionChoiceForm, updateQuestionChoiceForm);
-      document.documentElement.dataset.flockResult = 'pass';
-    } catch (error) {
-      document.documentElement.dataset.flockResult = error.message;
-    }
-  </script></body></html>`;
-  const fixture = join(directory, 'index.html');
-  writeFileSync(fixture, html);
-  const output = execFileSync(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', '--allow-file-access-from-files', `--user-data-dir=${directory}`,
-    '--virtual-time-budget=3000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });
-  const result = output.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the DOM checks');
-} finally {
-  rmSync(directory, { recursive: true, force: true });
-}
+const html = `<!doctype html><html><body><script type="module">
+  import { questionChoiceForm, updateQuestionChoiceForm } from ${JSON.stringify(assetUrl('question-choices.js'))};
+  try {
+    (${exercise})(questionChoiceForm, updateQuestionChoiceForm);
+    document.documentElement.dataset.flockResult = 'pass';
+  } catch (error) {
+    document.documentElement.dataset.flockResult = error.message;
+  }
+</script></body></html>`;
+requirePass(await dumpFixture(process.argv[2], html), 'The browser did not finish the DOM checks');
