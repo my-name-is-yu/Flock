@@ -525,6 +525,8 @@ std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::ve
     const int physical = physicalSourceLine(node, containingParagraph(node));
     if (auto span = readLine(physical)) return span;
     const int reported = cmark_node_get_start_line(node);
+    for (int line = physical - 1; line > reported; --line)
+        if (auto span = readLine(line)) return span;
     return reported == physical ? std::nullopt : readLine(reported);
 }
 

@@ -387,6 +387,14 @@ https://example.com/__main__.py)") == "<p><a href=\"https://example.com/__init__
 See details)") ==
               "<p>Download <a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a> to C:\\<br>\nSee details</p>",
           "Escaped backslashes before a line break truncated a bare URL");
+    check(markdown::toHtml(R"(See\
+https://example.com/__init__.py
+[details](
+https://example.org/)
+https://example.com/__main__.py)") == "<p>See<br>\n<a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a><br>\n"
+                                      "<a href=\"https://example.org/\">details</a><br>\n"
+                                      "<a href=\"https://example.com/__main__.py\">https://example.com/__main__.py</a></p>",
+          "Combining a hard break with a multiline Markdown link hid the physical URL line");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");
