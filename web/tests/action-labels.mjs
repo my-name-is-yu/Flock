@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { actionLabel, approvalSummary } from '../assets/action-labels.mjs';
 
-assert.equal(actionLabel('environment.launch'), 'Start T3 Sessions');
+assert.equal(actionLabel('environment.launch'), 'Start work in T3');
 assert.equal(actionLabel('memory.write'), 'Edit Bot memory');
 assert.equal(actionLabel('custom.action'), 'custom.action');
 const launch = { action: 'environment.launch', target: 'env-demo' };

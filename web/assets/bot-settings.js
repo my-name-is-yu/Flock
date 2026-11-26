@@ -244,7 +244,7 @@ async function loadMachines() {
       entry.append(element('code', path));
       paths.append(entry);
     }
-    const session = `Session ${threadId}`;
+    const session = `T3 thread ${threadId}`;
     const label = rowLabel(machineId, session);
     label.append(paths);
     const item = row(rows, label);
