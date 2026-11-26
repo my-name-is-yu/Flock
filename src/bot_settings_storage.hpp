@@ -13,7 +13,6 @@ class SessionParticipationStorage;
 class TaskRouting;
 class T3;
 struct Decision;
-struct Person;
 
 class BotSettingsStorage {
 public:
@@ -22,9 +21,8 @@ public:
         : database(database), permissions(permissions), secretRequests(secretRequests),
           sessionParticipationStorage(sessionParticipationStorage), taskRouting(taskRouting) {}
 
-    Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
+    Json botSettingsTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
-    Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
 private:
     Database& database;
     Policy& permissions;

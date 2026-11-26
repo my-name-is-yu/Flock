@@ -17,7 +17,6 @@
 #include "task_events.hpp"
 #include "secret_storage.hpp"
 #include "peer_storage.hpp"
-#include "model_calls.hpp"
 #include "journal_storage.hpp"
 #include "session_dispatch_lock.hpp"
 #include "journal.hpp"
@@ -1114,7 +1113,6 @@ bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, s
     OutboxInstruction pending{messageId, step, std::string(instruction), revision, conflicting, std::move(source)};
     if (conflicting) {
         task.replanning = true;
-        modelCalls.releaseModelCall(modelCalls.takeReservedTaskCall(task.eventId));
         if (taskRouting.isUndispatchedNotesWait(task)) {
             waitStorage.clearWait(task, "request_changed");
             task.state = TaskState::queued;
@@ -1122,7 +1120,6 @@ bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, s
             auto previous = waitStorage.currentWait(task.id);
             if (!previous) throw DecisionUnavailable{};
             const auto reason = previous->reason();
-            if (const auto allowance = waitStorage.waitAllowance(task.id, reason)) previous->allowance = allowance;
             waitStorage.clearWait(task, "request_changed");
             const auto waitId = waitStorage.wait(task, std::move(*previous));
             if (task.question) task.question->target = questionTarget(task, reason == WaitReason::user_question ? waitId : 0);

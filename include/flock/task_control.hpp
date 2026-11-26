@@ -20,8 +20,6 @@ class TaskControl {
 public:
     explicit TaskControl(Store&);
 
-    // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
-    // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
     void operate(const Person&, const TaskTarget&, std::string_view operation, const Json& data = Json::object());
     Json reconciliationData(Id task, Id waitId, Json target, const IntakeResolver&) const;
 private:

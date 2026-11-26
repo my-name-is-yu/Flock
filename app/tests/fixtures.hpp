@@ -63,7 +63,6 @@ inline Json botConfig(std::string model = "fixture-model") {
             {"projectId", "project-canonical"},
             {"modelProvider", "chatgpt"},
             {"model", model},
-            {"runTimeoutSeconds", 999},
             {"session",
              {{"model", "child-model"},
               {"providerInstanceId", "child-provider"},

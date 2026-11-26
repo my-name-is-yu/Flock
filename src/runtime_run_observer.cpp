@@ -19,7 +19,6 @@
 #include "flock/run_report.hpp"
 #include "flock/wait.hpp"
 #include "flock/outbox.hpp"
-#include "bot_settings_storage.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "journal_storage.hpp"
@@ -138,11 +137,9 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
                 }
                 if (task.queuedInT3) return connectionWait;
                 task.queuedInT3 = true;
-                task.deadline = 0;
                 return true;
             }
             leftQueue = std::exchange(task.queuedInT3, false);
-            if (leftQueue) task.deadline = clock() + botSettingsStorage.environmentTimeout(task.botId, task.environmentId, task.config);
         }
         if (observed.kind == Observation::Kind::Question) {
             if (observed.question.requestId.empty()) return false;
@@ -196,10 +193,6 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
         if (available && connectionWait) {
             waitStorage.clearWait(task, "connection_restored");
             task.state = TaskState::running;
-            return true;
-        }
-        if (state == TaskState::running && task.deadline > 0 && clock() >= task.deadline) {
-            waitStorage.wait(task, DeadlineWait{}, "This request reached its deadline");
             return true;
         }
         return leftQueue;
@@ -259,8 +252,7 @@ void runtime::RunObserver::cancelDone(TaskData& task) {
     questions.closeQuestion(task, "cancelled");
     if (!task.actionId.empty()) {
         const auto action = outboxStorage.outbox(task);
-        if (action && outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::closed, OutboxPhase::ready))
-            updates.refundUnsentWork(task, *action);
+        if (action) outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::closed, OutboxPhase::ready);
         task.actionId.clear();
     }
     task.runStop.reset();

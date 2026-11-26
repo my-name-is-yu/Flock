@@ -272,11 +272,6 @@ std::optional<Resource> ConversationStorage::conversationCallResource(const Mess
     const auto& tool = decision.tool;
     if (tool == "create_schedule" || tool == "create_reminder" || tool == "create_trigger" || tool == "remove_schedule")
         return Resource{Action::automation_change, message.bot};
-    if (tool == "update_bot_settings") {
-        const auto environment = field(decision.args, "environmentId");
-        if (permissions.forbidden(message.bot, Action::environment_configure, environment)) return std::nullopt;
-        return Resource{Action::environment_configure, environment};
-    }
     const bool shared = decision.args.contains("docId");
     if (tool == "remember_preference") return Resource{Action::private_memory_write, message.bot};
     if (tool == "propose_memory_edit" || tool == "apply_memory_edit" || tool == "revert_memory_edit")

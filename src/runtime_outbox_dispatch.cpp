@@ -29,7 +29,6 @@
 #include "flock/outbox.hpp"
 #include "flock/outbox_instruction.hpp"
 #include "bot_lifecycle_storage.hpp"
-#include "bot_settings_storage.hpp"
 #include "conversation_turns.hpp"
 #include "database.hpp"
 #include "flock/policy.hpp"
@@ -104,7 +103,6 @@ void runtime::OutboxDispatch::stop(TaskData task) {
     if (!cancel && action && action->phase == OutboxPhase::ready) {
         updates.change(task, [&](TaskData& current) {
             if (!outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::superseded, OutboxPhase::ready)) return false;
-            updates.refundUnsentWork(current, *action);
             current.actionId.clear();
             waitStorage.clearWait(current, "superseded_instruction");
             database.writeJournal(current.id, "delivery_superseded",
@@ -353,11 +351,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         if (reply && delivery == DeliveryOutcome::DefinitelyUnsent) detail = bounded("The Session answer was not sent. " + detail, 2048);
         if (delivery == DeliveryOutcome::DefinitelyUnsent) {
             outboxStorage.setOutboxPhase(key, cancelling ? OutboxPhase::closed : OutboxPhase::ready);
-            if (!reply) task.deadline = 0;
-            if (cancelling) {
-                updates.refundUnsentWork(task, action);
-                task.actionId.clear();
-            }
+            if (cancelling) task.actionId.clear();
         }
         if (cancelling) {
             if (task.cancellationDetail == detail && delivery == DeliveryOutcome::Unknown) return false;
@@ -437,7 +431,6 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
         updates.change(task, [&](TaskData& current) {
             if (current.actionId != action.command.actionId) return false;
             if (!outboxStorage.setOutboxPhase(action.command.actionId, OutboxPhase::closed, OutboxPhase::ready)) return false;
-            updates.refundUnsentWork(current, action);
             current.actionId.clear();
             current.state = !current.activeRun ? TaskState::deciding : TaskState::running;
             current.feedback = approvalError(gate);
@@ -585,17 +578,6 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                 }
             }
             if (!outboxStorage.startOutbox(action, cmd.authGeneration)) return false;
-            if (cmd.tool != CommandTool::answer_session_question) {
-                auto* run = destination ? &destinationRun(current, cmd.actionId) : nullptr;
-                if (!(run ? run->deadline.value_or(0) : current.deadline)) {
-                    const auto deadline =
-                        clock() + botSettingsStorage.environmentTimeout(cmd.ownerBotId, cmd.environmentId, current.config);
-                    if (run)
-                        run->deadline = deadline;
-                    else
-                        current.deadline = deadline;
-                }
-            }
             journalStorage.journal(current.id, SendStartedEntry{action.command.actionId});
             return true;
         };
@@ -645,7 +627,7 @@ void runtime::OutboxDispatch::step(const TaskData& task) {
 }
 
 void runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id, CommandTool tool, std::string instruction,
-                                          const Json& args, const Json& event, bool charge, const TaskRoute* destination) {
+                                          const Json& args, const Json& event, const TaskRoute* destination) {
     const auto& run = tool == CommandTool::follow_up ? task.lastRun : task.activeRun;
     auto target = run ? run->ref : RunRef{};
     if (tool == CommandTool::delegate && task.selectedSession) {
@@ -664,7 +646,6 @@ void runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id,
         instruction += prompt.instruction;
         instruction = scrub.text(instruction);
     }
-    if (tool != CommandTool::answer_session_question) task.deadline = 0;
     auto route = destination ? *destination : TaskRoute{task.environmentId, task.projectId, task.gatewayEnvironmentId.value_or("")};
     Outbox action;
     auto& cmd = action.command;
@@ -683,7 +664,6 @@ void runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id,
     action.instructions = std::move(prompt.pending);
     action.contextIds = std::move(prompt.contextIds);
     action.sourceResultRefs = std::move(prompt.resultReferences);
-    action.chargesBudget = charge;
     action.destinationAction = destination != nullptr;
     if (tool == CommandTool::delegate || tool == CommandTool::start_in_session) {
         if (destination && task.requestedCommit) {
@@ -700,12 +680,12 @@ void runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id,
 }
 
 void runtime::OutboxDispatch::queueDestinations(TaskData& task, const std::string& first, std::string_view instruction, const Json& args,
-                                                const Json& event, bool charge) {
+                                                const Json& event) {
     RunResults results;
     for (const auto& target : task.runTargets()) {
         const auto& route = target.route;
         const auto key = results.runs.empty() ? first : actionId();
-        queueAction(task, key, CommandTool::delegate, std::string(instruction), args, event, charge, &route);
+        queueAction(task, key, CommandTool::delegate, std::string(instruction), args, event, &route);
         DestinationRun run{.actionId = key, .name = target.name, .environmentId = route.environmentId};
         run.assignment.projectId = route.projectId;
         if (route.gatewayEnvironmentId != route.environmentId) run.ref.gatewayEnvironmentId = route.gatewayEnvironmentId;

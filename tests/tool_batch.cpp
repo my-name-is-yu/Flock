@@ -60,7 +60,6 @@ void classification() {
                        "compact_conversation",
                        "continue_fresh_session",
                        "request_secret_input",
-                       "update_bot_settings",
                        "request_bot_change",
                        "propose_memory_edit",
                        "apply_memory_edit",

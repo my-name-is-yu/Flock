@@ -77,7 +77,7 @@ async function exercise(resizeScreenshot, stageScreenshots) {
   const draft = { images: [] };
   const unnamedType = new File([small], '画'.repeat(55) + '.png');
   await stageScreenshots(draft, [dense, wide, tall, unnamedType, small], attachmentLimit, () => true);
-  check(draft.images.length === 4 && draft.error === 'Attach up to 4 screenshots per message.', 'Composer should keep four images');
+  check(draft.images.length === 4 && draft.error === 'Attach up to 4 images per message.', 'Composer should keep four images');
   const { attachment, preview } = draft.images[0];
   const previewBlob = await fetch(preview).then((response) => response.blob());
   check(attachment.name === 'Screen.jpg' && attachment.mimeType === previewBlob.type &&

@@ -51,16 +51,16 @@ async function compressScreenshot(bitmap, longestEdge, mimeType) {
     const smallest = jpeg && (!png || jpeg.size < png.size) ? jpeg : png;
     if (smallest?.size <= maxPreparedBytes) return smallest;
   }
-  throw new ScreenshotError('Could not prepare this screenshot.');
+  throw new ScreenshotError('Could not prepare this image.');
 }
 
 export async function resizeScreenshot(file) {
-  if (file.type && !Object.hasOwn(signatures, file.type)) throw new ScreenshotError('Choose a PNG or JPEG screenshot.');
-  if (file.size > maxSourceBytes) throw new ScreenshotError('Choose a screenshot up to 20 MiB.');
+  if (file.type && !Object.hasOwn(signatures, file.type)) throw new ScreenshotError('Choose a PNG or JPEG image.');
+  if (file.size > maxSourceBytes) throw new ScreenshotError('Choose an image up to 20 MB.');
 
   const bytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
   const mimeType = Object.keys(signatures).find((type) => signatures[type].every((byte, index) => bytes[index] === byte));
-  if (!mimeType || (file.type && file.type !== mimeType)) throw new ScreenshotError('Choose a valid PNG or JPEG screenshot.');
+  if (!mimeType || (file.type && file.type !== mimeType)) throw new ScreenshotError('Choose a valid PNG or JPEG image.');
 
   const bitmap = await createImageBitmap(file);
   try {
@@ -84,7 +84,7 @@ export async function stageScreenshots(draft, files, maxAttachments, isCurrent) 
   for (const file of files) {
     if (!isCurrent()) return;
     if (draft.images.length >= maxAttachments) {
-      draft.error ||= `Attach up to ${maxAttachments} screenshots per message.`;
+      draft.error ||= `Attach up to ${maxAttachments} images per message.`;
       return;
     }
     try {
@@ -95,7 +95,7 @@ export async function stageScreenshots(draft, files, maxAttachments, isCurrent) 
       const preview = URL.createObjectURL(prepared);
       draft.images = [...draft.images, { attachment, preview }];
     } catch (error) {
-      if (isCurrent()) draft.error ||= error instanceof ScreenshotError ? error.message : 'Could not open this PNG or JPEG screenshot.';
+      if (isCurrent()) draft.error ||= error instanceof ScreenshotError ? error.message : 'Could not open this PNG or JPEG image.';
     }
   }
 }

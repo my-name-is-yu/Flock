@@ -116,8 +116,13 @@ async function exercise(mountBoardInbox) {
     'The layer did not open inside the conversation with an accessible title and usable composer');
   check(item.textContent.includes(prompt) && !item.textContent.includes(docs.prompt) && !item.querySelector('img,a') &&
     previous.disabled && !next.disabled, 'The first card displayed another Bot, unsafe markup, or invalid navigation');
+  check(panel.querySelector('.board-inbox-submeta')?.textContent.includes('Question for you'),
+    'The panel named the question differently from the sidebar');
   check(choices().querySelector('legend').textContent === prompt && sendChoice().disabled && !selected(),
     'The structured question did not start with a labeled, unselected radio group');
+  const historyToggle = byId('decision-history');
+  check(!historyToggle.hidden && historyToggle.getAttribute('aria-pressed') === 'false' && byId('decision-more').hidden,
+    'History hid behind an overflow menu with nothing else in it');
 
   await browse(button('Show in conversation'));
   check(layer.hidden && !conversation.inert && sources.length === 1 && sources[0][0] === 'release' && sources[0][1] === 18,
@@ -223,7 +228,7 @@ async function exercise(mountBoardInbox) {
   board.openHistory(trigger);
   await settled();
   check(!layer.hidden && byId(panel.getAttribute('aria-labelledby')).textContent === 'History' &&
-    message.textContent.includes('Nothing here yet') && !board.composer(),
+    message.textContent === 'No answered questions or approvals yet.' && !board.composer(),
     'The Bot’s decision history lost its scoped title or empty state');
   check(calls.some(([path]) => path === 'inbox/history?bot=release'), 'History did not request this Bot’s history');
   byId('decision-close').click();
@@ -313,7 +318,7 @@ async function exercise(mountBoardInbox) {
 }
 
 function liveFixture() {
-  const bot = { id: 'release', name: 'Release', latestIncomingEventId: 0,
+  const bot = { id: 'release', name: 'Release', model: 'demo', latestIncomingEventId: 0,
     presence: 'waiting', preview: 'Which branch?' };
   const decision = { botId: bot.id, botName: bot.name, itemKind: 'user_question', itemId: 1, waitId: 1,
     taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'ask:Which branch?', prompt: 'Which branch?', canDecide: true };

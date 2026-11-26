@@ -25,8 +25,7 @@ void runtime::TaskQuestions::suspendQuestion(TaskData& task) {
     auto& question = *task.question;
     if (const auto wait = waits.currentWait(task.id)) {
         const auto reason = wait->reason();
-        if (reason == WaitReason::user_question || reason == WaitReason::model_budget || reason == WaitReason::model_failure)
-            question.suspendedWaitId = wait->id;
+        if (reason == WaitReason::user_question || reason == WaitReason::model_failure) question.suspendedWaitId = wait->id;
     }
     const auto& pending = task.pendingDecision;
     if (pending && TaskUpdates::checkpointMatches(*pending, task)) question.suspendedDecision = *pending;

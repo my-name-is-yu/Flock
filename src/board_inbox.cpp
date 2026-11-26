@@ -2,7 +2,6 @@
 #include "git_storage.hpp"
 #include "flock/decision_errors.hpp"
 #include "inbox_storage.hpp"
-#include "model_calls.hpp"
 #include "task_operations.hpp"
 #include "journal_peer.hpp"
 #include "task_storage.hpp"
@@ -24,7 +23,6 @@
 
 #include <algorithm>
 #include <optional>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -36,16 +34,9 @@
 namespace flockv0 {
 namespace {
 using enum InboxKind;
-constexpr std::pair<InboxKind, std::string_view> kinds[] = {{user_question, "user_question"},
-                                                            {extra_run, "extra_run"},
-                                                            {deadline, "deadline"},
-                                                            {model_budget, "model_budget"},
-                                                            {conversation_model_budget, "conversation_model_budget"},
-                                                            {unknown_delivery, "unknown_delivery"},
-                                                            {protected_input, "protected_input"},
-                                                            {pr_review, "pr_review"},
-                                                            {pr_reconciliation, "pr_reconciliation"},
-                                                            {policy_approval, "policy_approval"}};
+constexpr std::pair<InboxKind, std::string_view> kinds[] = {
+    {user_question, "user_question"}, {unknown_delivery, "unknown_delivery"},   {protected_input, "protected_input"},
+    {pr_review, "pr_review"},         {pr_reconciliation, "pr_reconciliation"}, {policy_approval, "policy_approval"}};
 
 Json key(const InboxTarget& item) {
     return {{"botId", item.botId},
@@ -81,10 +72,6 @@ void addAnchor(Json& view, Id anchor) {
 bool validDecision(InboxKind kind, std::string_view decision) {
     switch (kind) {
     case user_question: return decision == "answer";
-    case extra_run:
-    case model_budget:
-    case conversation_model_budget: return decision == "approve";
-    case deadline: return decision == "extend";
     case unknown_delivery: return decision == "reconcile";
     case protected_input: return decision == "supply";
     case pr_reconciliation: return decision == "link_pr" || decision == "reject_pr";
@@ -98,9 +85,6 @@ bool validDecision(InboxKind kind, std::string_view decision) {
 
 std::optional<InboxKind> inboxWaitKind(WaitReason reason) {
     if (reason == WaitReason::user_question) return user_question;
-    if (reason == WaitReason::budget) return extra_run;
-    if (reason == WaitReason::deadline) return deadline;
-    if (reason == WaitReason::model_budget) return model_budget;
     if (reason == WaitReason::unknown_delivery) return unknown_delivery;
     return {};
 }
@@ -199,16 +183,6 @@ Json InboxStorage::inbox(const Person& actor, std::string_view bot) const {
                  {"prompt", std::move(prompt)}},
                 messageAnchor(database, id, message), createdAt);
         };
-        std::set<Id> sharedBudgetWaits;
-        auto pausedTurns = database.query(R"SQL(
-SELECT t.message_id FROM conversation_turns t CROSS JOIN messages m ON m.id=t.message_id
-WHERE t.pause_id IS NOT NULL AND t.status='paused' AND m.bot_id=?
-)SQL",
-                                          {id});
-        while (pausedTurns.next())
-            for (const auto wait :
-                 modelCalls.taskWaitsCoveredByConversationApproval(id, modelCalls.messageModelBudget(pausedTurns.number(0))))
-                sharedBudgetWaits.insert(wait);
         static const auto waitSql = "SELECT w.id,w.reason,w.data," + taskProjection() + R"SQL(
 FROM tasks t JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL
 WHERE t.bot_id=? AND t.state='waiting'
@@ -222,29 +196,9 @@ ORDER BY w.id DESC
             const auto reason = wait.reason();
             const auto kind = inboxWaitKind(reason);
             if (!kind || !waitStorage.waitIsActionable(task)) continue;
-            if (reason == WaitReason::model_budget && sharedBudgetWaits.contains(waitId)) continue;
             Json view{{"requestTitle", taskTitle(task)}, {"request", task.request}, {"prompt", wait.text}, {"choices", wait.choices()}};
-            if (const auto allowance = waitStorage.waitAllowance(task.id, reason); allowance) view["allowance"] = allowance;
             add({id, *kind, waitId, waitId, task.id, task.currentRevision.value_or(0), task.generation}, std::move(view),
                 waitStorage.waitAnchor(task.id, waitId));
-        }
-        auto turns = database.query(R"SQL(
-SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
--- Seek the populated pause IDs instead of visiting all messages for the Bot.
-FROM conversation_turns t
-CROSS JOIN messages m ON m.id=t.message_id CROSS JOIN journal j ON j.id=t.pause_id
-WHERE t.pause_id IS NOT NULL AND t.status='paused' AND m.bot_id=? ORDER BY t.pause_id DESC
-)SQL",
-                                    {id});
-        while (turns.next()) {
-            const auto message = turns.number(0);
-            const auto request = turns.string(1);
-            add({id, conversation_model_budget, message, turns.number(2), 0, 0, turns.number(2)},
-                {{"requestTitle", title(request)},
-                 {"request", request},
-                 {"prompt", field(turns.json(3), "text")},
-                 {"allowance", modelCalls.messageModelBudget(message).initialLimit}},
-                turns.number(4) ? turns.number(2) : 0);
         }
         auto inputs = database.query(R"SQL(
 SELECT p.id,p.name,m.text,m.id FROM protected_inputs p
@@ -310,7 +264,6 @@ LEFT JOIN task_revisions r ON r.id=d.target_revision AND r.task_id=t.id
 LEFT JOIN policy_approvals a ON d.item_kind='policy_approval' AND a.id=d.item_id AND a.bot=d.bot_id
 LEFT JOIN protected_inputs p ON d.item_kind='protected_input' AND p.id=d.item_id AND p.bot=d.bot_id
 LEFT JOIN messages m ON m.bot_id=d.bot_id AND m.id=CASE d.item_kind
-    WHEN 'conversation_model_budget' THEN d.item_id
     WHEN 'protected_input' THEN p.source_message_id
     WHEN 'policy_approval' THEN a.anchor
 END AND (d.item_kind<>'policy_approval' OR NOT EXISTS (SELECT 1 FROM channel_messages c WHERE c.message_id=m.id))
@@ -359,18 +312,6 @@ void InboxStorage::decideInbox(GitStorage& git, const Person& actor, const Inbox
     } else if (kind == protected_input) {
         if (item.waitId || item.taskId || item.targetRevision || item.targetGeneration) throw RequestChanged{};
         policy_storage::fulfillSecret(database, policy, secretStorage, *this, actor, item.botId, item.itemId, textInput("value"));
-    } else if (kind == conversation_model_budget) {
-        if (!policy.allows(actor, Action::bot_decide, item.botId)) throw DecisionDenied{};
-        auto paused = database.query(R"SQL(
-SELECT t.pause_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
-WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
-)SQL",
-                                     {item.botId, item.itemId});
-        if (!paused.next()) throw DecisionUnavailable{};
-        if (item.taskId || item.targetRevision || item.waitId != paused.number(0) || item.targetGeneration != paused.number(0))
-            throw RequestChanged{};
-        modelCalls.approveMessageModelCall(actor, item.botId, item.itemId, item.waitId);
-        recordInboxDecision(actor, item, decision);
     } else if (kind == pr_review || kind == pr_reconciliation) {
         if (!policy.allows(actor, Action::bot_decide, item.botId)) throw DecisionDenied{};
         if (!database.query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?", {item.taskId, item.botId}).next()) throw RequestChanged{};
@@ -397,7 +338,6 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (item.itemId != item.waitId) throw RequestChanged{};
         auto args = Json::object();
         if (kind == user_question) args["text"] = textInput("text");
-        if (kind == deadline) args["deadline"] = data.at("deadline");
         if (kind == unknown_delivery)
             for (const auto* name : {"threadId", "runId", "questionId"})
                 if (data.contains(name)) args[name] = textInput(name);

@@ -1,20 +1,24 @@
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
-import { actionLabel, approvalSummary, continuationLabel } from './action-labels.mjs';
+import { actionLabel, approvalSummary } from './action-labels.mjs';
 
+// One name per pending item, said as what the person needs to do; the sidebar and this panel share it.
+export const pendingKindLabels = {
+  user_question: 'Question for you',
+  pr_review: 'Review requested',
+  pr_reconciliation: 'Confirm the pull request',
+  unknown_delivery: 'Message to T3 unconfirmed',
+  protected_input: 'Secret needed',
+  policy_approval: 'Approval needed',
+};
 const labels = {
-  user_question: 'Question', extra_run: 'Follow-up allowance used', deadline: 'Deadline extension',
-  model_budget: 'Step allowance used', conversation_model_budget: 'Step allowance used',
-  unknown_delivery: 'Unconfirmed message to T3',
-  protected_input: 'Secret value', pr_review: 'Pull request review',
-  pr_reconciliation: 'Unconfirmed pull request',
+  ...pendingKindLabels,
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
-  extend: 'Extended', reconcile: 'Checked again', request_changes: 'Changes requested',
+  reconcile: 'Checked again', request_changes: 'Changes requested',
   link_pr: 'Pull request linked', reject_pr: 'Rejected',
-  policy_approval: 'Approval', allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
+  allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
   allow_next_time: 'Allow rule saved for this Flock',
 };
 const actions = {
-  deadline: [['extend', 'Extend deadline']],
   unknown_delivery: [['reconcile', 'Check T3 again']],
   protected_input: [['supply', 'Save secret']],
   pr_reconciliation: [['reject_pr', 'Reject']],
@@ -142,12 +146,12 @@ function prPreviewCard(rawUrl, title) {
   openBtn.target = '_blank';
   openBtn.rel = 'noopener noreferrer';
   openBtn.setAttribute('aria-label', 'Open pull request in new tab');
-  openBtn.title = 'Open pull request';
+  openBtn.dataset.tooltip = 'Open pull request';
   openBtn.append(iconSpan(svgIcons.external));
   const copyBtn = element('button', '', 'board-inbox-pr-tool');
   copyBtn.type = 'button';
   copyBtn.setAttribute('aria-label', 'Copy pull request link');
-  copyBtn.title = 'Copy link';
+  copyBtn.dataset.tooltip = 'Copy link';
   copyBtn.append(iconSpan(svgIcons.copy));
   let copyTimer = null;
   copyBtn.addEventListener('click', async (event) => {
@@ -209,7 +213,7 @@ function decisionCard(item, submit, source, question, busy) {
 
   const bodyLines = [];
   if (item.request && item.request !== item.requestTitle) bodyLines.push(item.request);
-  const prompt = item.allowance ? '' : approval ? approvalSummary(item.prompt, item) : item.prompt;
+  const prompt = approval ? approvalSummary(item.prompt, item) : item.prompt;
   if (prompt && prompt !== item.requestTitle && prompt !== item.request) bodyLines.push(prompt);
   // A bare pull request URL in the text repeats the card, so drop that line.
   const text = bodyLines.join('\n').split('\n')
@@ -233,12 +237,7 @@ function decisionCard(item, submit, source, question, busy) {
   const form = element('form', '', 'board-inbox-form');
   const inputs = {};
   const buttons = element('div', '', 'board-inbox-actions');
-  if (item.itemKind === 'deadline') {
-    inputs.deadline = element('input');
-    inputs.deadline.type = 'datetime-local';
-    inputs.deadline.required = true;
-    form.append(labeled('New deadline', inputs.deadline));
-  } else if (item.itemKind === 'protected_input') {
+  if (item.itemKind === 'protected_input') {
     inputs.value = element('input');
     inputs.value.type = 'password';
     inputs.value.autocomplete = 'off';
@@ -252,9 +251,7 @@ function decisionCard(item, submit, source, question, busy) {
     btn.dataset.prNumber = pr.prNumber;
     buttons.append(btn);
   }
-  const choices = item.allowance
-    ? [['approve', continuationLabel(item.allowance, item.itemKind === 'extra_run' ? 'round' : 'step')]]
-    : expiredApproval ? [['allow_next_time', 'Allow next time for this Flock']] : actions[item.itemKind];
+  const choices = expiredApproval ? [['allow_next_time', 'Allow next time for this Flock']] : actions[item.itemKind];
   for (const [decision, title] of choices) {
     if (savesFlockRule(decision) && item.canSaveRule !== true) continue;
     const style = item.itemKind === 'pr_review' ? (decision === 'approve' ? 'primary' : 'secondary')
@@ -271,7 +268,6 @@ function decisionCard(item, submit, source, question, busy) {
     if (!event.submitter || event.submitter.disabled) return;
     const data = Object.fromEntries(Object.entries(inputs).map(([field, input]) => [field, input.value]));
     if (event.submitter.dataset.prNumber) data.prNumber = Number(event.submitter.dataset.prNumber);
-    if (data.deadline) data.deadline = Math.floor(new Date(data.deadline).getTime() / 1000);
     void submit(item, event.submitter.value, data);
   });
   article.append(form);
@@ -297,6 +293,7 @@ export function mountBoardInbox({
   const next = byId('decision-next');
   const more = byId('decision-more');
   const moreList = byId('decision-more-list');
+  const historyToggle = byId('decision-history');
   const message = byId('decision-message');
   const host = byId('decision-item');
   const transcript = byId('conversation');
@@ -446,23 +443,12 @@ export function mountBoardInbox({
         });
         actionsList.push(copyBtn);
       }
-      const histBtn = element('button', '', 'decision-more-item');
-      histBtn.type = 'button';
-      histBtn.append(iconSpan(svgIcons.history), element('span', 'History'));
-      histBtn.addEventListener('click', () => {
-        closeMoreMenu();
-        void openHistory(origin);
-      });
-      actionsList.push(histBtn);
-    } else if (mode === 'history' && pending().length) {
-      const pendingBtn = element('button', '', 'decision-more-item');
-      pendingBtn.type = 'button';
-      pendingBtn.append(iconSpan(svgIcons.history), element('span', 'Needs you'));
-      pendingBtn.addEventListener('click', () => {
-        closeMoreMenu();
-        open(origin);
-      });
-      actionsList.push(pendingBtn);
+    }
+    if (historyToggle) {
+      const viewingHistory = mode === 'history';
+      historyToggle.hidden = !(viewingHistory ? pending().length : mode === 'pending' && item);
+      historyToggle.setAttribute('aria-pressed', String(viewingHistory));
+      historyToggle.dataset.tooltip = viewingHistory ? 'Back to Needs you' : 'History';
     }
     more.hidden = !actionsList.length;
     moreList.replaceChildren(...actionsList);
@@ -643,7 +629,7 @@ export function mountBoardInbox({
       if (!sameView()) return;
       const cards = decisions.map(historyCard);
       host.replaceChildren(...cards);
-      message.textContent = decisions.length ? '' : 'Nothing here yet. Questions and approvals you respond to will appear here.';
+      message.textContent = decisions.length ? '' : 'No answered questions or approvals yet.';
       animateHistoryCards(cards);
     } catch {
       if (!sameView()) return;
@@ -821,6 +807,11 @@ export function mountBoardInbox({
 
   trigger.addEventListener('click', () => mode === 'pending' ? close() : open(trigger));
   byId('decision-close').addEventListener('click', () => close());
+  historyToggle?.addEventListener('click', () => {
+    closeMoreMenu();
+    if (mode === 'history') open(historyToggle);
+    else void openHistory(historyToggle);
+  });
   byId('decision-shade').addEventListener('click', () => close());
   previous.addEventListener('click', () => move(-1));
   next.addEventListener('click', () => move(1));

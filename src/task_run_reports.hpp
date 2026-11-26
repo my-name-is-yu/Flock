@@ -12,7 +12,6 @@ class Database;
 class PolicyApprovals;
 class JournalStorage;
 class OutboxStorage;
-class WaitStorage;
 struct TaskData;
 struct DestinationRun;
 struct Observation;
@@ -25,10 +24,8 @@ void setReportEvidence(Json&, const RunEvidence&);
 
 class TaskRunReports {
 public:
-    TaskRunReports(Database& database, PolicyApprovals& policyApprovals, JournalStorage& journalStorage, OutboxStorage& outboxStorage,
-                   WaitStorage& waitStorage)
-        : database(database), policyApprovals(policyApprovals), journalStorage(journalStorage), outboxStorage(outboxStorage),
-          waitStorage(waitStorage) {}
+    TaskRunReports(Database& database, PolicyApprovals& policyApprovals, JournalStorage& journalStorage, OutboxStorage& outboxStorage)
+        : database(database), policyApprovals(policyApprovals), journalStorage(journalStorage), outboxStorage(outboxStorage) {}
 
     bool advanceDestinationSessionMessageRun(TaskData&, DestinationRun&);
     bool recordDestinationReport(TaskData& task, DestinationRun& run, const Observation&);
@@ -37,6 +34,5 @@ private:
     PolicyApprovals& policyApprovals;
     JournalStorage& journalStorage;
     OutboxStorage& outboxStorage;
-    WaitStorage& waitStorage;
 };
 }

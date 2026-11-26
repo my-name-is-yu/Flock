@@ -28,7 +28,7 @@ Json stored(std::string_view reason) {
 
 void roundTrip(const WaitDetails& details, Json expected, std::optional<WaitRun> run = {}) {
     constexpr Id id = 47;
-    const Wait wait{details, "Paused", id, 21, 32, 3, "flock-example", std::move(run)};
+    const Wait wait{details, "Paused", id, 21, 32, "flock-example", std::move(run)};
     check(to_json(wait) == expected, "Wait encoded an unexpected public shape");
     auto storedData = expected;
     storedData.erase("reason");
@@ -39,13 +39,11 @@ void roundTrip(const WaitDetails& details, Json expected, std::optional<WaitRun>
     const auto decoded = decodeWait(id, reason, storedData.dump());
     check(decoded.id == id && decoded.details.index() == details.index() && decoded.reason() == wait.reason(),
           "decoded wait lost its row ID or reason variant");
-    check(!decoded.messageId && !decoded.allowance && to_json(decoded) == expected,
-          "round-trip added presentation fields or changed wait data");
+    check(!decoded.messageId && to_json(decoded) == expected, "round-trip added presentation fields or changed wait data");
     auto entry = expected;
-    entry.update({{"id", id}, {"messageId", 32}, {"allowance", 3}});
+    entry.update({{"id", id}, {"messageId", 32}});
     const auto journal = decodeWaitingEntry(101, entry);
-    check(journal.id == id && journal.details.index() == details.index() && journal.messageId == 32 && journal.allowance == 3 &&
-              to_json(journal) == expected,
+    check(journal.id == id && journal.details.index() == details.index() && journal.messageId == 32 && to_json(journal) == expected,
           "Wait decoded an unexpected journal shape");
 }
 
@@ -61,25 +59,6 @@ void roundTrips() {
     auto project = stored("user_question");
     project.update({{"choices", Json::array({"Mobile", "Web"})}, {"projectChoices", {{"Mobile", "app"}, {"Web", "site"}}}});
     roundTrip(ProjectQuestionWait{{"Mobile", "Web"}, {{"Mobile", "app"}, {"Web", "site"}}}, project);
-
-    auto budget = stored("budget");
-    budget.update({{"attempted", "follow_up"},
-                   {"decisionReason", "Run more checks"},
-                   {"usage",
-                    {{"input_tokens", 10},
-                     {"output_tokens", 4},
-                     {"total_tokens", 14},
-                     {"input_tokens_details", {{"cached_tokens", 2}}},
-                     {"wallMs", 1800}}}});
-    roundTrip(WorkBudgetWait{WorkBudgetTool::follow_up, "Run more checks", {10, 4, 14, 2, 1800}}, budget);
-    roundTrip(SimpleWaitReason::model_budget, stored("model_budget"));
-
-    roundTrip(DeadlineWait{}, stored("deadline"));
-    auto deadline = stored("deadline");
-    deadline.update({{"deadline", 200},
-                     {"runActionId", "verify-action"},
-                     {"run", {{"threadId", "verify-thread"}, {"runId", ""}, {"link", ""}, {"environmentId", "build"}}}});
-    roundTrip(DeadlineWait{VerificationDeadline{200, "verify-action"}}, deadline, WaitRun{{"verify-thread", "", "", ""}, "build"});
 
     roundTrip(ModelFailureWait{}, stored("model_failure"));
     auto failure = stored("model_failure");
@@ -118,10 +97,8 @@ void decodeErrors() {
     auto missing = payload;
     missing.erase("eventId");
     rejects("settings", missing, "eventId", "missing required key");
-    auto wrong = payload;
-    wrong.update({{"deadline", 1.5}, {"runActionId", "verify"}});
-    rejects("deadline", wrong, "deadline", "expected an integer");
-    rejects("unsupported", payload, "reason", "unknown wait reason");
+    for (const auto* reason : {"unsupported", "budget", "model_budget", "conversation_model_budget", "deadline"})
+        rejects(reason, payload, "reason", "unknown wait reason");
     rejects("settings", stored("settings"), "reason", "unknown key");
     auto badCode = payload;
     badCode["failureCode"] = "other";

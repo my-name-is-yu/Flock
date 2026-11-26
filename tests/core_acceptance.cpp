@@ -308,9 +308,9 @@ struct Fixture {
         runtime = std::make_unique<Runtime>(
             *store, model, t3, [&](std::string_view id) { return notes.at(std::string(id)).soul; }, std::move(options));
     }
-    void allowBeta() { peers["alpha"] = {{"Verifier", {"beta", "", "e", "p", {{"runTimeoutSeconds", 10}, {"model", "beta-model"}}}}}; }
+    void allowBeta() { peers["alpha"] = {{"Verifier", {"beta", "", "e", "p", {{"model", "beta-model"}}}}}; }
     Id submit(std::string request = "inspect", std::string bot = "alpha", std::string project = "p") {
-        return TaskIntake(*store).submit({bot, request, "e", project, {{"runTimeoutSeconds", 10}}});
+        return TaskIntake(*store).submit({bot, request, "e", project});
     }
     Json task(Id id) { return taskJson(Tasks(*store).task(id)); }
     void reach(Id id, std::string state) {
@@ -387,10 +387,10 @@ void selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun() {
     f.t3.runs.at("run-1").status = "queued";
     f.restart();
     f.reach(task, "running");
-    f.now += 30;
+    f.now += 2 * 86400;
     f.runtime->tick();
     check(f.t3.selectedStarts == 1 && f.t3.reconciles == 1 && f.task(task).at("state") == "running",
-          "Restart duplicated the send or a confirmed queued Run reached a work deadline");
+          "Restart changed the queued Run or duplicated the send");
     TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(task).task, 0), "cancel");
     f.runtime->tick();
     check(f.t3.interruptedRuns.size() == 1 && f.t3.interruptedRuns.front().runId == "run-1" &&
@@ -649,7 +649,7 @@ void correctInvalidTaskArguments() {
 void replayQuestionDecision(std::string_view outage = {}) {
     for (const bool stillOpen : {true, false}) {
         Fixture f;
-        const auto id = TaskIntake(*f.store).submit({"alpha", "Use main", "e", "p", {{"modelCallLimit", 2}}});
+        const auto id = TaskIntake(*f.store).submit({"alpha", "Use main", "e", "p"});
         f.model.script = [&](const ModelInput& input) {
             if (input.event.at("kind") == "intake") return work();
             // Lose T3 visibility at the post-inference liveness check, before any reply can commit.
@@ -716,7 +716,7 @@ void ambiguityAndFailure() {
     check(f.logs(id, "report") == 2 && f.logs(id, "user_answer") == 1, "bad task history");
 }
 
-void deadlineApprovalAndCancel() {
+void longRunApprovalAndCancel() {
     Fixture f;
     const auto id = f.submit();
     const auto queued = f.submit("Next");
@@ -731,11 +731,17 @@ void deadlineApprovalAndCancel() {
     check(f.model.calls == calls && f.t3.interrupts == 0 && f.t3.launches == 1, "automatic work during T3 approval");
     f.t3.runs.at("run-1") = {};
     f.reach(id, "running");
-    f.now += 20;
-    f.wait(id, "deadline");
     f.runtime->tick();
-    check(f.model.calls == calls && f.t3.interrupts == 0 && f.t3.launches == 1, "automatic work at deadline");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, 0), "cancel");
+    const auto before = Tasks(*f.store).task(id);
+    f.now += 2 * 86400;
+    f.restart();
+    f.runtime->tick();
+    const auto after = Tasks(*f.store).task(id);
+    check(after.task.state == TaskState::running && after.task.generation == before.task.generation && !after.wait &&
+              Inbox(*f.store).inbox(localOwner, "alpha").empty(),
+          "a silent two-day Run interrupted the request");
+    check(f.model.calls == calls && f.t3.interrupts == 0 && f.t3.launches == 1, "a silent Run triggered more work");
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(before.task, 0), "cancel");
     f.runtime->tick();
     check(f.t3.interrupts == 1 && f.task(id)["state"] == "cancelling" && f.task(queued)["state"] == "queued",
           "cancel released project before confirmation");
@@ -752,40 +758,25 @@ void deadlineApprovalAndCancel() {
           "a cancelled request emitted a failure alert for its interrupted Run");
 }
 
-void budgetAndStaleWaits() {
+void longFollowupSequence() {
     Fixture f;
     const auto id = f.submit();
+    constexpr int followupCount = 32;
     f.model.script = [&](const ModelInput& input) {
         if (input.event["kind"] == "intake") return work();
-        if (input.event["kind"] == "question") return reply();
-        const auto used = input.task["additionalUsed"].get<int>();
-        if (used == 3 && !input.event.contains("userAnswer") && f.logs(id, "user_answer") == 0) return ask();
-        return work(used == 1 ? "delegate" : "follow_up", false);
+        return f.t3.follows < followupCount ? work("follow_up", false) : complete();
     };
     f.reach(id, "running");
-    for (int i = 1; i <= 3; ++i) {
-        f.t3.finish("run-" + std::to_string(i));
+    for (int run = 1; run <= followupCount + 1; ++run) {
+        const auto runId = "run-" + std::to_string(run);
+        f.t3.finish(runId);
         f.reach(id, "deciding");
-        f.reach(id, "running");
+        f.reach(id, run <= followupCount ? "running" : "completed");
+        check(!Tasks(*f.store).task(id).wait, "follow-up prompted the user");
     }
-    check(f.t3.launches == 2 && f.t3.follows == 2 && f.task(id)["remaining"] == 0, "wrong shared work budget");
-    f.t3.finish("run-4");
-    const auto question = f.wait(id, "user_question");
-    f.rejects(id, question, "approve");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, question), "answer",
-                                  {{"text", "keep going"}});
-    const auto budget = f.wait(id, "budget");
-    f.rejects(id, budget, "answer", {{"text", "yes"}});
-    check(f.task(id)["wait"]["attempted"] == "follow_up" && f.task(id)["remaining"] == 0 && f.t3.seen.size() == 4,
-          "normal answer permitted an extra follow-up");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, budget), "approve");
-    f.rejects(id, budget, "approve");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, 0), "cancel");
-    f.reach(id, "cancelled");
-    f.rejects(id, budget, "approve");
-    f.runtime->tick();
-    check(f.task(id)["remaining"] == 3 && f.logs(id, "budget_granted") == 1 && f.t3.seen.size() == 4,
-          "replayed permit or late work after cancel");
+    check(f.model.calls == followupCount + 2 && f.t3.launches == 1 && f.t3.follows == followupCount && f.logs(id, "waiting") == 0 &&
+              Inbox(*f.store).inbox(localOwner).empty(),
+          "the long sequence of decisions and follow-ups did not finish autonomously");
 }
 
 void sessionQuestions() {
@@ -798,7 +789,7 @@ void sessionQuestions() {
                 if (needsUser && !input.event.contains("userAnswer")) return ask();
                 return reply();
             }
-            if (input.task["additionalUsed"] == 0) return work("follow_up", false);
+            if (input.event.at("run").at("runId") == "run-1") return work("follow_up", false);
             return complete();
         };
         f.reach(id, "running");
@@ -823,13 +814,12 @@ void sessionQuestions() {
                   "answer did not advance the question target");
         }
         f.reach(id, "running");
-        check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.follows == 0 && f.task(id)["additionalUsed"] == 0 &&
-                  f.logs(id, "user_answer") == needsUser,
+        check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.follows == 0 && f.logs(id, "user_answer") == needsUser,
               "wrong branch reply behavior");
         f.t3.finish("run-1");
         f.reach(id, "deciding");
         f.reach(id, "running");
-        check(f.t3.follows == 1 && f.task(id)["additionalUsed"] == 1, "follow-up did not add one Run and one unit");
+        check(f.t3.follows == 1, "follow-up did not add exactly one Run");
         f.t3.finish("run-2");
         f.reach(id, "completed");
     }
@@ -849,11 +839,7 @@ void waitsExpireWithReality() {
     f.t3.runs.at("run-1") = {};
     f.reach(id, "running");
     f.rejects(id, question, "answer", {{"text", "main"}});
-    f.now += 20;
-    const auto deadline = f.wait(id, "deadline");
     f.t3.finish("run-1");
-    f.reach(id, "deciding");
-    f.rejects(id, deadline, "extend", {{"deadline", f.now + 100}});
     f.reach(id, "completed");
     check(f.t3.replies == 0 && f.logs(id, "user_answer") == 0 && f.t3.seen.size() == 1, "stale waiting operation executed");
 }
@@ -964,29 +950,6 @@ void connectionRecoveryReconsidersNewDirections() {
     check(f.t3.replies == 1 && f.t3.seen.back().answers.at("branch") == "dev", "connection recovery applied the old Session answer");
 }
 
-void connectionRecoveryRestoresQuestionModelApproval() {
-    Fixture f;
-    const auto id = TaskIntake(*f.store).submit({"alpha", "Check main", "e", "p", {{"modelCallLimit", 1}}});
-    f.model.script = [](const ModelInput& i) { return i.event.at("kind") == "intake" ? work() : reply(); };
-    f.reach(id, "running");
-    f.t3.question("run-1");
-    const auto old = f.wait(id, "model_budget");
-    for (const auto* outage : {"auth", "settings"}) {
-        f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable, .status = outage};
-        f.runtime->tick();
-        f.wait(id, outage);
-    }
-    f.restart();
-    f.t3.question("run-1");
-    f.runtime->tick();
-    const auto restored = f.wait(id, "model_budget");
-    check(restored != old && f.model.calls == 1, "recovery bypassed the pending model approval");
-    f.rejects(id, old, "approve");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, restored), "approve");
-    f.reach(id, "running");
-    check(f.model.calls == 2 && f.t3.replies == 1, "restored approval could not resume the open question");
-}
-
 void failedPreflightIsUnsent() {
     Fixture f;
     const auto id = f.submit();
@@ -1008,7 +971,7 @@ void recoveredDelivery() {
         const auto id = f.submit();
         f.model.script = [](const ModelInput& i) {
             if (i.event["kind"] == "intake") return work();
-            if (i.task["additionalUsed"] == 0) return work("follow_up", false);
+            if (i.event.at("run").at("runId") == "run-1") return work("follow_up", false);
             return complete();
         };
         if (!launch) {
@@ -1052,8 +1015,7 @@ void recoveredDelivery() {
     f.restart();
     TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "reconcile");
     f.reach(id, "running");
-    check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.reconciles == 1 && f.task(id)["additionalUsed"] == 0,
-          "recovered answer created duplicate work");
+    check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.reconciles == 1, "recovered answer created duplicate work");
 }
 
 void launchReceiptSurvivesRecovery() {
@@ -1210,7 +1172,7 @@ void settledReportCanRecoverAfterRestart() {
         };
         f.restart();
         f.runtime->tick();
-        check(f.model.calls == 1 && attempts == 0, "recovery spent model allowance or retried before the scheduled time");
+        check(f.model.calls == 1 && attempts == 0, "recovery made a model call or retried before the scheduled time");
         f.now += 5;
         f.runtime->tick();
         if (!available) {
@@ -1252,7 +1214,7 @@ void lateReportCanRestoreCompletion() {
               "missing report was not recoverable in default mode");
         if (!input.evidence.empty()) {
             check(input.evidence.at(0).at("reportAvailable") == false && input.task.at("remainingEvidenceReads") == 2,
-                  "failed report read did not use the event allowance");
+                  "failed report read did not count as an evidence read");
             return ask();
         }
         auto run = "run-1-result";
@@ -1386,12 +1348,11 @@ void evidenceResume() {
     f.t3.finish("run-1");
     f.reach(id, "deciding");
     f.runtime->tick();
-    check(f.t3.reads == 1 && f.task(id)["additionalUsed"] == 0 && f.logs(id, "decision") == 1 && f.task(id)["state"] == "deciding",
-          "read committed a terminal action");
+    check(f.t3.reads == 1 && f.logs(id, "decision") == 1 && f.task(id)["state"] == "deciding", "read committed a terminal action");
     f.restart();
     f.reach(id, "completed");
     check(f.t3.reads == 2 && f.t3.launches == 1 && f.t3.follows == 0 && f.logs(id, "session_read") == 2,
-          "history read did not resume its budget");
+          "history read did not restore its saved evidence");
 }
 
 void redactedHistoryPagination() {
@@ -1549,8 +1510,8 @@ void peerWorkAndRestart() {
     f.restart();
     f.reach(root, "completed");
     f.wait(unrelated, "user_question");
-    check(TaskList(*f.store).tasks("beta").size() == 1 && f.t3.launches == 1 && f.t3.reads == 1 && f.task(root)["additionalUsed"] == 0 &&
-              f.logs(root, "user_answer") == 1 && f.logs(root, "completed") == 1,
+    check(TaskList(*f.store).tasks("beta").size() == 1 && f.t3.launches == 1 && f.t3.reads == 1 && f.logs(root, "user_answer") == 1 &&
+              f.logs(root, "completed") == 1,
           "restart duplicated the recipient, Session, evidence read, user answer or completion");
     const auto result = f.botMessages("alpha").back();
     const auto completion = lastTaskEvent(*f.store, root, "completed").at("data");
@@ -1604,47 +1565,6 @@ void peerWorkAndRestart() {
         }
         check(messages.back().at("status") == "completed", "conversation lost the successful outcome");
     }
-}
-
-void peerWorkSharesBudgetWithDirectT3Work() {
-    Fixture f;
-    f.allowBeta();
-    const auto root = f.submit("Verify and report the PR");
-    f.model.usage = {{"total_tokens", 37}};
-    int peerReplies = 0;
-    f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.task["id"] != root) {
-            ++peerReplies;
-            return botReply("result", "Verified the requested pass");
-        }
-        if (input.event["kind"] == "bot_result" && peerReplies == 4) return work("delegate", false);
-        Json args = {{"botId", "beta"}, {"kind", "work"}, {"text", "Verify the PR"}};
-        if (input.event["kind"] == "intake") args["doneWhen"] = Evidence;
-        return {"send_bot_message", std::move(args), "Use the configured verifier"};
-    };
-
-    for (int step = 0; step < 64 && f.task(root)["state"] != "waiting"; ++step) f.runtime->tick();
-    const auto budget = f.wait(root, "budget");
-    const auto beforeApproval = f.task(root);
-    check(beforeApproval["wait"]["attempted"] == "delegate" && beforeApproval["remaining"] == 0 && beforeApproval["additionalUsed"] == 3 &&
-              f.t3.launches == 0 && TaskList(*f.store).tasks("beta").size() == 4,
-          "direct T3 work bypassed the allowance exhausted by peer work");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(root).task, budget), "approve");
-    f.restart();
-    f.reach(root, "running");
-    check(f.t3.launches == 1 && f.task(root)["remaining"] == 2 && f.task(root)["additionalUsed"] == 4,
-          "the direct T3 action did not spend one round from the renewed allowance");
-    f.t3.finish("run-1");
-    for (int step = 0; step < 64 && f.task(root)["state"] != "waiting"; ++step) f.runtime->tick();
-    const auto secondBudget = f.wait(root, "budget");
-    const auto paused = f.task(root);
-    check(secondBudget != budget && paused["remaining"] == 0 && paused["additionalUsed"] == 6 &&
-              TaskList(*f.store).tasks("beta").size() == 6,
-          "T3 and peer work did not share the renewed allowance");
-    const auto& wait = paused.at("wait");
-    check(wait.at("attempted") == "send_bot_message" && wait.at("decisionReason") == "Use the configured verifier" &&
-              wait.at("usage") == Json{{"total_tokens", 37}},
-          "the peer budget wait lost the proposed action or its usage");
 }
 
 void peerCompletionRespectsSessionReadPolicy() {
@@ -1745,7 +1665,7 @@ void checkPeerClarificationAfterRun(std::string_view readMode) {
     const auto continuation = f.t3.seen.back();
     check(f.t3.launches == 1 && f.t3.follows == 1 && continuation.target.threadId == initialRun["threadId"].get<std::string>() &&
               continuation.target.runId == initialRun["runId"].get<std::string>() &&
-              continuation.instruction.find("Retest main") != std::string::npos && f.task(recipient)["additionalUsed"] == 1,
+              continuation.instruction.find("Retest main") != std::string::npos,
           "the retest did not continue the same settled T3 Session");
     f.t3.finish("run-2");
     f.reach(root, "completed");
@@ -1902,7 +1822,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
     recipient = TaskList(*f.store).tasks("beta").front().task.id;
     f.reach(recipient, "running");
     const std::string revisionText = "Revise Verify release completion criteria to " + std::string(revisedCriteria);
-    const Intake betaRouting{"beta", revisionText, "e", "p", {{"runTimeoutSeconds", 10}, {"model", "beta-model"}}};
+    const Intake betaRouting{"beta", revisionText, "e", "p", {{"model", "beta-model"}}};
     ConversationIntake(*f.store).receive(localOwner, betaRouting, "recipient-revision", revisionText);
     f.runtime->runConversations();
     check(f.task(recipient).value("replanning", false) && f.task(recipient)["doneWhen"] == revisedCriteria &&
@@ -1944,7 +1864,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
 
 void checkRecipientRevisionDuringPeerQuestion(bool moves) {
     Fixture f;
-    f.peers["alpha"] = {{"Verifier", {"beta", "", "e", "beta-project", {{"runTimeoutSeconds", 10}, {"model", "beta-model"}}}}};
+    f.peers["alpha"] = {{"Verifier", {"beta", "", "e", "beta-project", {{"model", "beta-model"}}}}};
     const auto sender = f.submit("Verify the release");
     Id recipient = 0;
     constexpr auto revisedCriteria = "Confirm the rollback plan with the revised evidence";
@@ -2006,11 +1926,8 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
 
     const std::string revisionText =
         "Revise Verify the release completion criteria to " + std::string(revisedCriteria) + (moves ? " and move it to cloud" : "");
-    const Intake betaRouting{"beta",
-                             revisionText,
-                             "e",
-                             "beta-project",
-                             {{"runTimeoutSeconds", 10}, {"model", "beta-model"}, {"conversationEnvironments", {{"cloud", "cloud"}}}}};
+    const Intake betaRouting{
+        "beta", revisionText, "e", "beta-project", {{"model", "beta-model"}, {"conversationEnvironments", {{"cloud", "cloud"}}}}};
     ConversationIntake(*f.store).receive(localOwner, betaRouting, "recipient-question-revision", revisionText);
     f.runtime->runConversations();
     for (int step = 0; step < 3; ++step) f.runtime->tick();
@@ -2221,8 +2138,8 @@ void peerConsultationAndPermission() {
     f.reach(consultation, "completed");
     const auto messages = f.botMessages("alpha");
     check(f.t3.seen.size() == 1 && f.t3.interrupts == 0 && f.task(busy)["state"] == "running" &&
-              f.task(consultation)["additionalUsed"] == 0 && TaskList(*f.store).tasks("beta").size() == 2,
-          "consultation used T3, consumed work allowance or affected the Verifier's active Run");
+              TaskList(*f.store).tasks("beta").size() == 2,
+          "consultation used T3 or affected the Verifier's active Run");
     check(messages.size() == 2 && messages.front().at("text") == "What is the release policy?" &&
               messages.back().at("fromBotId") == "beta" && messages.back().at("text") == "Require a verified PR",
           "consultation did not record the corresponding request and response");
@@ -2294,54 +2211,8 @@ void requestedCriteriaApplyToFirstPeerWork() {
     const Id sender = TaskList(*f.store).tasks("alpha").at(0).task.id;
     f.reach(sender, "peer_waiting");
     const auto task = f.task(sender);
-    check(task.at("doneWhen") == "Confirm the signature" && task.at("remaining") == 3 &&
-              task.at("revisions").at(0).at("sourceMessageId") == receipt.at("messageId"),
+    check(task.at("doneWhen") == "Confirm the signature" && task.at("revisions").at(0).at("sourceMessageId") == receipt.at("messageId"),
           "first peer work did not adopt the saved criterion and its source");
-}
-
-void modelBudgetFollowsBotConsultation() {
-    Fixture f;
-    f.allowBeta();
-    constexpr auto request = "Check the release policy";
-    const auto receipt =
-        ConversationIntake(*f.store).receive(localOwner, {"alpha", request, "e", "p", {{"modelCallLimit", 3}}}, "policy", request);
-    f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.event["kind"] == "conversation_turn") return converse(input, "start_task", 0, Json::object());
-        if (input.event["kind"] == "intake") return botRequest("beta", "consult", "What is the release policy?");
-        if (input.event["kind"] == "bot_request") {
-            check(input.config["model"] == "beta-model", "recipient did not get its own model configuration");
-            return botReply("result", "Require a verified PR");
-        }
-        check(input.event["kind"] == "bot_result", "sender did not resume with the consultation reply");
-        return complete();
-    };
-    f.runtime->runConversations();
-    const Id sender = TaskList(*f.store).tasks("alpha").front().task.id;
-    check(f.task(sender)["sourceMessageId"] == receipt["messageId"], "routed task lost its originating message");
-    f.reach(sender, "peer_waiting");
-    const Id recipient = TaskList(*f.store).tasks("beta").front().task.id;
-    const auto recipientWait = f.wait(recipient, "model_budget");
-    f.restart();
-    for (int i = 0; i < 4; ++i) f.runtime->tick();
-    check(f.model.calls == 3 && f.task(recipient)["wait"]["id"] == recipientWait && f.task(recipient)["wait"]["allowance"] == 3,
-          "the recipient reached the provider without approval, or restart changed its wait");
-    Store writer(f.directory / "state.db");
-    const Person verifier{"verifier", false};
-    BotAccess{writer}.setMember(localOwner, "beta", verifier.id, true);
-    executeSql(f.directory / "state.db", R"SQL(
-INSERT INTO journal(time,kind,data,conversation_bot_id)
-VALUES(0,'conversation_budget_wait','{}','alpha');
-UPDATE conversation_turns SET status='paused',pause_id=last_insert_rowid()
-WHERE message_id=(SELECT id FROM messages WHERE bot_id='alpha' ORDER BY id LIMIT 1);
-)SQL");
-    check(Conversations(writer).pausedConversations("alpha").size() == 1, "the shared conversation fixture is not paused");
-    TaskControl(writer).operate(verifier, TaskTarget::from(Tasks(writer).task(recipient).task, recipientWait), "approve");
-    check(Conversations(writer).pausedConversations("alpha").size() == 1,
-          "a member of the receiving Bot resumed a conversation on the originating Bot");
-    f.rejects(recipient, recipientWait, "approve");
-    f.reach(sender, "completed");
-    check(f.model.calls == 5 && f.task(recipient)["state"] == "completed" && f.t3.launches == 0 && f.task(sender)["remaining"] == 3,
-          "the recipient and sender did not finish under one renewal of their shared model allowance");
 }
 
 void peerResultWaitsForRecipientTurn() {
@@ -2372,110 +2243,9 @@ void peerResultWaitsForRecipientTurn() {
     check(recipientDecisions == 1 && f.task(recipient)["state"] == "completed", "the held peer result asked the model again or was lost");
 }
 
-void cancelledPeerRefundsUnusedModelApproval() {
-    Fixture f;
-    f.allowBeta();
-    constexpr auto request = "Check the release policy";
-    ConversationIntake(*f.store).receive(localOwner, {"alpha", request, "e", "p", {{"modelCallLimit", 3}}}, "policy", request);
-    f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.event["kind"] == "conversation_turn") return converse(input, "start_task", 0, Json::object());
-        if (input.event["kind"] == "intake") return botRequest("beta", "consult", "What is the release policy?");
-        if (input.event["kind"] == "bot_request") throw std::runtime_error("Cancelled recipient reached the provider");
-        check(input.event["kind"] == "bot_result", "sender did not resume on peer cancellation");
-        return ask();
-    };
-    f.runtime->runConversations();
-    const Id sender = TaskList(*f.store).tasks("alpha").front().task.id;
-    f.reach(sender, "peer_waiting");
-    const Id recipient = TaskList(*f.store).tasks("beta").front().task.id;
-    const auto recipientWait = f.wait(recipient, "model_budget");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(recipient).task, recipientWait), "approve");
-    check(f.model.calls == 3, "shared approval was not reserved");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(recipient).task, 0), "cancel");
-    f.reach(recipient, "cancelled");
-    f.reach(sender, "waiting");
-    const auto wait = f.task(sender).at("wait").at("reason");
-    check(wait == "user_question" && f.model.calls == 4,
-          "cancelled recipient lost the unused approved attempt from the sender's shared budget");
-}
-
-void revisedTaskRefundsUnusedModelApproval() {
-    Fixture f;
-    const auto taskId = TaskIntake(*f.store).submit({"alpha", "Original criteria", "e", "p", {{"modelCallLimit", 1}}});
-    bool first = true;
-    f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.event.at("kind") == "conversation_turn")
-            return converse(input, "change_task", taskId, {{"intent", "Use revised criteria"}});
-        if (std::exchange(first, false)) throw ModelError("Fixture failure", true);
-        return work();
-    };
-    f.reach(taskId, "deciding");
-    f.runtime->tick();
-    f.now += 5;
-    const auto approval = f.wait(taskId, "model_budget");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(taskId).task, approval), "approve");
-    check(f.model.calls == 1, "provider already reached the new approval");
-    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p", Json::object()}, "revise", "Revise the original request.");
-    f.runtime->runConversations();
-    check(f.task(taskId).value("replanning", false), "conversation did not revise the task");
-    f.reach(taskId, "running");
-    check(f.model.calls == 4 && f.t3.launches == 1, "replanning the task consumed the approval without a call");
-}
-
-void modelBudgetCountsFailedAttempts() {
-    Fixture f;
-    const auto id = TaskIntake(*f.store).submit({"alpha", "Retry a decision", "e", "p", {{"modelCallLimit", 2}}});
-    f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.task["id"] != id || f.model.calls >= 4) return ask();
-        if (f.model.calls == 1) throw ModelError("Transient failure with usage", true, {{"input_tokens", 42}});
-        throw ModelError("Transient failure without usage", true);
-    };
-    f.reach(id, "deciding");
-    f.runtime->tick();
-    f.now += 5;
-    f.runtime->tick();
-    f.now += 5;
-    const auto wait = f.wait(id, "model_budget");
-    f.restart();
-    f.runtime->tick();
-    check(f.model.calls == 2 && f.task(id)["wait"]["id"] == wait, "the third failed retry reached the model");
-
-    sqlite3* raw = nullptr;
-    const auto opened = sqlite3_open_v2(f.store->path().c_str(), &raw, SQLITE_OPEN_READONLY, nullptr);
-    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
-    check(opened == SQLITE_OK, "could not read the attempt ledger");
-    std::vector<Json> usage;
-    const auto result = sqlite3_exec(
-        db.get(), "SELECT coalesce(usage,'null') FROM model_attempts ORDER BY id",
-        [](void* context, int, char** values, char**) {
-            static_cast<std::vector<Json>*>(context)->push_back(Json::parse(values[0], nullptr, false));
-            return 0;
-        },
-        &usage, nullptr);
-    check(result == SQLITE_OK && usage == std::vector<Json>{{{"input_tokens", 42}}, nullptr},
-          "usage was lost or missing usage was counted as zero");
-
-    const auto independent = TaskIntake(*f.store).submit({"alpha", "Independent request", "e", "other", {{"modelCallLimit", 2}}});
-    f.wait(independent, "user_question");
-    check(f.model.calls == 3 && f.task(id)["wait"]["id"] == wait, "an independent request needed the paused budget");
-    const auto approval = TaskTarget::from(Tasks(*f.store).task(id).task, wait);
-    check(f.task(id)["wait"]["allowance"] == 2, "the pause did not show the original allowance");
-    TaskControl(*f.store).operate(localOwner, approval, "approve");
-    f.restart();
-    f.rejects(id, wait, "approve");
-    for (const auto* answer : {"Use main", "Yes, use main"}) {
-        const auto question = f.wait(id, "user_question");
-        TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, question), "answer", {{"text", answer}});
-    }
-    const auto next = f.wait(id, "model_budget");
-    check(next != wait && f.model.calls == 5 && f.task(id)["remaining"] == 3,
-          "one approval did not restore exactly the original allowance after restart");
-    f.rejects(id, wait, "approve");
-}
-
 void taskInferenceSurvivesWriterContention(bool modelFails, bool restart = false) {
     Fixture f;
-    const auto taskId = TaskIntake(*f.store).submit({"alpha", "Check the fixture", "e", "p", {{"modelCallLimit", 1}}});
+    const auto taskId = TaskIntake(*f.store).submit({"alpha", "Check the fixture", "e", "p"});
     sqlite3* connection = nullptr;
     const auto opened = sqlite3_open((f.directory / "state.db").c_str(), &connection);
     const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> writer(connection, sqlite3_close);
@@ -2522,10 +2292,10 @@ void taskInferenceSurvivesWriterContention(bool modelFails, bool restart = false
           "The Task did not save the original model attempt's usage");
 }
 
-void modelBudgetAllowsT3ObservationAndRecovery() {
+void recoveredRunAcceptsQuestion() {
     Fixture f;
     f.model.script = [](const ModelInput& input) { return input.event["kind"] == "intake" ? work() : reply(); };
-    const auto id = TaskIntake(*f.store).submit({"alpha", "Use one model call", "e", "p", {{"modelCallLimit", 1}}});
+    const auto id = TaskIntake(*f.store).submit({"alpha", "Recover and answer", "e", "p"});
     f.reach(id, "sending");
     f.t3.loseAcknowledgement = true;
     const auto deliveryWait = f.wait(id, "unknown_delivery");
@@ -2533,16 +2303,10 @@ void modelBudgetAllowsT3ObservationAndRecovery() {
     f.reach(id, "running");
     check(f.model.calls == 1 && f.t3.reconciles == 1 && f.t3.launches == 1, "delivery recovery used a model call or resent the Run");
     f.t3.question("run-1");
-    const auto modelWait = f.wait(id, "model_budget");
-    const auto polls = f.t3.polls;
+    f.reach(id, "deciding");
     f.restart();
-    f.runtime->tick();
-    check(f.t3.polls > polls && f.model.calls == 1 && f.task(id)["wait"]["id"] == modelWait,
-          "model approval blocked T3 observation or reset the pending decision");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, modelWait), "approve");
     f.reach(id, "running");
-    check(f.model.calls == 2 && f.t3.replies == 1 && f.task(id)["remaining"] == 3,
-          "the approved call did not answer the original question");
+    check(f.model.calls == 2 && f.t3.replies == 1, "delivery recovery lost the original question");
 }
 
 void unsuccessfulConsultationsDoNotComplete() {
@@ -3066,6 +2830,7 @@ int main() {
                                                                                    {"invalid decisions", invalidDecisions},
                                                                                    {"correct invalid task arguments",
                                                                                     correctInvalidTaskArguments},
+
                                                                                    {"failed preflight", failedPreflightIsUnsent},
                                                                                    {"replay saved question decision",
                                                                                     [] { replayQuestionDecision(); }},
@@ -3074,17 +2839,17 @@ int main() {
                                                                                     [] { replayQuestionDecision("auth"); }},
                                                                                    {"replay question decision after settings reconciliation",
                                                                                     [] { replayQuestionDecision("settings"); }},
-                                                                                   {"deadline, approval and cancel",
-                                                                                    deadlineApprovalAndCancel},
-                                                                                   {"additional work budget", budgetAndStaleWaits},
+                                                                                   {"long Run, approval and cancel",
+                                                                                    longRunApprovalAndCancel},
+
+                                                                                   {"long sequence of follow-ups", longFollowupSequence},
+
                                                                                    {"branch questions", sessionQuestions},
                                                                                    {"stale waits", waitsExpireWithReality},
                                                                                    {"recover live question across auth and settings waits",
                                                                                     connectionRecoveryRestoresSessionQuestion},
                                                                                    {"discard expired question after connection recovery",
                                                                                     connectionRecoveryDiscardsExpiredSessionQuestion},
-                                                                                   {"recover the question's model approval",
-                                                                                    connectionRecoveryRestoresQuestionModelApproval},
                                                                                    {"reconsider new directions after question recovery",
                                                                                     connectionRecoveryReconsidersNewDirections},
                                                                                    {"delivery recovery", recoveredDelivery},
@@ -3124,8 +2889,7 @@ int main() {
                                                                                    {"project owners on task pages",
                                                                                     taskPagesShowProjectOwners},
                                                                                    {"Bot handoff and restart", peerWorkAndRestart},
-                                                                                   {"peer work budget shared with direct T3",
-                                                                                    peerWorkSharesBudgetWithDirectT3Work},
+
                                                                                    {"Peer completion evidence follows the Session read policy",
                                                                                     peerCompletionRespectsSessionReadPolicy},
                                                                                    {"Bot clarification after a settled Run",
@@ -3156,14 +2920,10 @@ int main() {
                                                                                     automaticPeerWorkResolvesTheProject},
                                                                                    {"Requested criteria for first peer work",
                                                                                     requestedCriteriaApplyToFirstPeerWork},
-                                                                                   {"Model budget across a conversation turn and Bot consultation",
-                                                                                    modelBudgetFollowsBotConsultation},
                                                                                    {"Peer result waits for the recipient's conversation turn",
                                                                                     peerResultWaitsForRecipientTurn},
-                                                                                   {"Model budget counts failed attempts",
-                                                                                    modelBudgetCountsFailedAttempts},
-                                                                                   {"Model budget permits T3 observation and reconciliation",
-                                                                                    modelBudgetAllowsT3ObservationAndRecovery},
+                                                                                   {"Recovered Run accepts its original question",
+                                                                                    recoveredRunAcceptsQuestion},
                                                                                    {"Unsuccessful consultations",
                                                                                     unsuccessfulConsultationsDoNotComplete},
                                                                                    {"Concurrent Bot handoff", concurrentPeerHandoff},

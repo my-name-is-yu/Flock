@@ -56,7 +56,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <functional>
-#include <limits>
 #include <optional>
 #include <set>
 #include <string>
@@ -132,14 +131,13 @@ const std::vector<std::string> turnTools{"start_task",
                                          "flock_session_events",
                                          "read_tool_result",
                                          "reply"};
-const std::vector<std::string> webTools{"start_workflow",       "workflow_status",        "instruct_workflow_stage",
-                                        "stop_workflow_stage",  "stop_workflow",          "compact_conversation",
-                                        "expand_context",       "continue_fresh_session", "list_secrets",
-                                        "request_secret_input", "list_connections",       "check_environment_readiness",
-                                        "update_bot_settings",  "request_bot_change",     "read_memory",
-                                        "propose_memory_edit",  "apply_memory_edit",      "revert_memory_edit",
-                                        "memory_history",       "create_schedule",        "list_schedules",
-                                        "remove_schedule",      "create_reminder",        "create_trigger"};
+const std::vector<std::string> webTools{
+    "start_workflow",     "workflow_status",      "instruct_workflow_stage", "stop_workflow_stage",
+    "stop_workflow",      "compact_conversation", "expand_context",          "continue_fresh_session",
+    "list_secrets",       "request_secret_input", "list_connections",        "check_environment_readiness",
+    "request_bot_change", "read_memory",          "propose_memory_edit",     "apply_memory_edit",
+    "revert_memory_edit", "memory_history",       "create_schedule",         "list_schedules",
+    "remove_schedule",    "create_reminder",      "create_trigger"};
 
 std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
@@ -630,7 +628,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
             tool == "stop_workflow")
             return workflowStorage.workflowTool(tool, args, bot, message.id, step, routing);
         const auto actor = turnActor(message);
-        auto result = botSettingsStorage.botSettingsTool(bot, actor, message.id, routing, decision);
+        auto result = botSettingsStorage.botSettingsTool(bot, message.id, routing, decision);
         if (result.is_null()) result = memoryStorage.memory(bot, actor, tool, args, now, true);
         if (result.is_null()) result = automationStorage.automationTool(bot, actor, routing, decision, now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
@@ -984,7 +982,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                 std::lock_guard lock(database.mutex);
                 if (gitStorage.canReceiveGitWebhook(message.bot, event)) {
                     const auto followup = gitStorage.gitPrFollowup(message, intake);
-                    shouldVerify = followup && followup->status != GitStorage::GitPrFollowup::Status::attempted;
+                    shouldVerify = followup && followup->status == GitStorage::GitPrFollowup::Status::available;
                 }
             }
             currentCheck = shouldVerify && gitStorage.currentGitPrCheck(*gitHost, message);
@@ -1007,9 +1005,6 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                     if (currentCheck) offered.push_back("fix_pull_request");
                     break;
                 case GitStorage::GitPrFollowup::Status::attempted: followupStatus = "already_requested"; break;
-                case GitStorage::GitPrFollowup::Status::limitReached:
-                    if (currentCheck) followupStatus = "limit_reached";
-                    break;
                 }
             }
         } else {
@@ -1062,8 +1057,8 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                 if (checkpoint.attempt && repairableModelOutput(error.code) &&
                     !database.query("SELECT 1 FROM conversation_model_failures WHERE message_id=? AND repair_attempt_id IS NOT NULL", {id})
                          .next()) {
-                    repair = modelCalls.reserveModelCall(modelCalls.messageModelBudget(id), "conversation_turn", id, 0, 0);
-                    if (repair) database.exec("UPDATE conversation_turns SET reserved_attempt=? WHERE message_id=?", {repair, id});
+                    repair = modelCalls.recordAttempt(modelCalls.messageModelScope(id), "conversation_turn", id, 0, 0);
+                    database.exec("UPDATE conversation_turns SET reserved_attempt=? WHERE message_id=?", {repair, id});
                 }
                 if (checkpoint.attempt)
                     database.exec(
@@ -1083,7 +1078,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         return hasDecision;
     };
     if (!persistModelCheckpoint()) return;
-    for (int step = 1; step < std::numeric_limits<int>::max() && !shutdown.stop_requested(); ++step) {
+    for (int step = 1; !shutdown.stop_requested(); ++step) {
         if (!message.channelScope.empty()) channelStorage.deliverChannels(shutdown);
         std::vector<ModelCall> calls;
         std::string effectType;
@@ -1197,17 +1192,6 @@ WHERE conversation_steps.result IS NULL
                     }
                     input = std::move(*prepared);
                 }
-                if (!database
-                         .query(R"SQL(
-SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=call_limit)
-    OR EXISTS(SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL)
-)SQL",
-                                {modelCalls.messageModelBudget(id).id, id})
-                         .next()) {
-                    modelCalls.pauseTurn(message);
-                    transaction.commit();
-                    return;
-                }
                 if (!reviewPreference) {
                     std::vector<ModelImage> images;
                     auto context = turnInput(message, step, now, std::move(machines), images, linkedDestinations);
@@ -1239,15 +1223,11 @@ SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=ca
                     }
                     auto& attempt = checkpoint.attempt;
                     attempt = modelCalls.takeReservedConversationCall(id);
-                    if (!attempt) attempt = modelCalls.reserveModelCall(modelCalls.messageModelBudget(id), "conversation_turn", id, 0, 0);
-                    if (!attempt)
-                        modelCalls.pauseTurn(message);
-                    else
-                        database.exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
-                                      " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",
-                                      {id, step, attempt});
+                    if (!attempt) attempt = modelCalls.recordAttempt(modelCalls.messageModelScope(id), "conversation_turn", id, 0, 0);
+                    database.exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
+                                  " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",
+                                  {id, step, attempt});
                     transaction.commit();
-                    if (!attempt) return;
                 }
                 auto response = modelCalls.callModel(message.bot, model, input);
                 checkpoint.usage = std::move(response.usage);
@@ -1282,8 +1262,5 @@ SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=ca
                                                       .hasWebEvidence = hasWebEvidence});
         if (outcome != CallOutcome::advance) return;
     }
-    if (shutdown.stop_requested()) return;
-    finishError(ja ? "このメッセージの処理が長くなりすぎたため中断しました。必要なら、もう一度送ってください。"
-                   : "I stopped because handling this message took too many steps. Send it again if needed.");
 }
 }

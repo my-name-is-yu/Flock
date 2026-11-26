@@ -14,7 +14,6 @@ class Policy;
 class GitStorage;
 class JournalStorage;
 class SecretStorage;
-class ModelCalls;
 class TaskOperations;
 class Statement;
 class TaskRecords;
@@ -31,11 +30,9 @@ class PolicyApprovals;
 class InboxStorage {
 public:
     InboxStorage(Database& database, SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage,
-                 JournalStorage& journalStorage, Policy& permissions, ModelCalls& modelCalls, TaskOperations& taskOperations,
-                 PolicyApprovals& policyApprovals)
+                 JournalStorage& journalStorage, Policy& permissions, TaskOperations& taskOperations, PolicyApprovals& policyApprovals)
         : database(database), secretStorage(secretStorage), taskRecords(taskRecords), waitStorage(waitStorage),
-          journalStorage(journalStorage), permissions(permissions), modelCalls(modelCalls), taskOperations(taskOperations),
-          policyApprovals(policyApprovals) {}
+          journalStorage(journalStorage), permissions(permissions), taskOperations(taskOperations), policyApprovals(policyApprovals) {}
 
     Json inbox(const Person&, std::string_view bot) const;
     Json decisionHistory(const Person&, std::string_view bot) const;
@@ -53,7 +50,6 @@ private:
     WaitStorage& waitStorage;
     JournalStorage& journalStorage;
     Policy& permissions;
-    ModelCalls& modelCalls;
     TaskOperations& taskOperations;
     PolicyApprovals& policyApprovals;
 };

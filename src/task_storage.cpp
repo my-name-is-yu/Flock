@@ -1,7 +1,6 @@
 #include "flock/task_history.hpp"
 #include "flock/task_list.hpp"
 #include "task_operations.hpp"
-#include "model_calls.hpp"
 #include "conversation_storage.hpp"
 #include "journal_storage.hpp"
 #include <sqlite3.h>
@@ -102,7 +101,6 @@ DestinationRun decodeDestinationRun(const Json& data, const RecordDecoder& row) 
     run.ref = {row.optional<std::string>(data, "threadId").value_or(""), row.optional<std::string>(data, "runId").value_or(""),
                row.optional<std::string>(data, "link").value_or(""), std::move(route.gatewayEnvironmentId)};
     run.status = destinationRunStatusFromName(row.get<std::string>(data, "status"));
-    run.deadline = row.optional<Seconds>(data, "deadline");
     run.retryAt = row.optional<Seconds>(data, "retryAt");
     run.stopRetryAt = row.optional<Seconds>(data, "stopRetryAt");
     run.evidenceAttempts = row.optional<unsigned>(data, "evidenceAttempts").value_or(0);
@@ -212,7 +210,6 @@ Json destinationRunJson(const DestinationRun& run) {
     data["actionId"] = run.actionId;
     if (!run.ref.gatewayEnvironmentId.empty() || run.explicitDirectGateway) data["gatewayEnvironmentId"] = run.ref.gatewayEnvironmentId;
     if (!run.assignment.ownerBotId.empty()) encodeRunAssignment(data, run.assignment);
-    if (run.deadline) data["deadline"] = *run.deadline;
     if (run.retryAt) data["retryAt"] = *run.retryAt;
     if (run.stopRetryAt) data["stopRetryAt"] = *run.stopRetryAt;
     if (run.evidenceAttempts) data["evidenceAttempts"] = run.evidenceAttempts;
@@ -272,7 +269,6 @@ void decodeTaskFields(TaskData& task, const Json& data, const RecordDecoder& row
     task.config = row.object(row.require(data, "config"), "config");
     task.gatewayEnvironmentId = row.optional<std::string>(data, "gatewayEnvironmentId");
     task.eventId = row.get<Id>(data, "eventId");
-    task.deadline = row.get<Seconds>(data, "deadline");
     if (const auto found = row.find(data, "runStop"); found != data.end())
         task.runStop = row.nested("runStop").decodeClosed(*found, decodeRunStop);
     task.queuedInT3 = row.optional<bool>(data, "queuedInT3").value_or(false);
@@ -292,7 +288,6 @@ void decodeTaskFields(TaskData& task, const Json& data, const RecordDecoder& row
     task.freshContextRequested = row.optional<bool>(data, "freshContextRequested").value_or(false);
     task.launchWarning = row.optional<std::string>(data, "launchWarning");
     task.createdAt = row.get<Seconds>(data, "createdAt");
-    task.allowance = {row.get<int>(data, "remaining"), row.get<int>(data, "additionalUsed")};
     auto criteria = row.optional<std::string>(data, "requestedDoneWhen");
     const auto criteriaSource = row.optional<Id>(data, "criteriaSourceMessageId");
     if (criteria)
@@ -320,10 +315,7 @@ Json encodeTaskPayload(const TaskData& task) {
               {"doneWhen", task.doneWhen},
               {"config", task.config},
               {"eventId", task.eventId},
-              {"deadline", task.deadline},
-              {"createdAt", task.createdAt},
-              {"remaining", task.allowance.remaining},
-              {"additionalUsed", task.allowance.additionalUsed}};
+              {"createdAt", task.createdAt}};
     if (task.gatewayEnvironmentId) data["gatewayEnvironmentId"] = *task.gatewayEnvironmentId;
     if (task.runStop) data["runStop"] = runStopJson(*task.runStop);
     if (task.queuedInT3) data["queuedInT3"] = true;
@@ -393,7 +385,6 @@ Json taskWaitJson(const TaskData& task, const std::optional<Wait>& wait) {
     auto result = to_json(*wait);
     result["id"] = wait->id;
     if (wait->messageId) result["messageId"] = *wait->messageId;
-    if (wait->allowance) result["allowance"] = *wait->allowance;
     if (wait->reason() == WaitReason::user_question && !task.question) result["target"] = questionTargetJson(waitQuestionTarget(*wait));
     return result;
 }
@@ -838,7 +829,6 @@ Json TaskEvents::currentEvent(const TaskData& task) const {
 }
 
 void TaskEvents::consumeEvent(const TaskData& task) {
-    modelCalls.releaseModelCall(modelCalls.takeReservedTaskCall(task.eventId));
     database.exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=? AND consumed=0", {task.eventId, task.id});
 }
 

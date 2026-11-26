@@ -1116,34 +1116,26 @@ void notificationCannotControlASession() {
           "A generic model executed a Session write that the turn did not offer");
 }
 
-void notificationBudgetAndRevocation() {
+void notificationEvidenceAndRevocation() {
     Directory directory;
     Store store(directory.path / "state.db");
     auto host = std::make_shared<FakeHost>();
     Script script;
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    auto limited = intake();
-    limited.config["modelCallLimit"] = 1;
-    const auto task = TaskIntake(store).submit(limited);
+    const auto task = TaskIntake(store).submit(intake());
     auto args = openArgs();
     args["taskId"] = task;
     check(invoke(store, runtime, script, "create-watch", "git_open_pr", args).at("ok") == true, "Could not create watch");
-    check(GitEvents(store).receiveGitWebhook({hostName, "budget-event", repoName, "ci", "completed", {1}, sha, "A job failed", 81}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "failed-job", repoName, "ci", "completed", {1}, sha, "A job failed", 81}),
           "Could not enqueue job");
-    runtime.runConversations();
-    const auto inbox = Inbox(store).inbox(localOwner, "owner");
-    const auto approval =
-        std::find_if(inbox.begin(), inbox.end(), [](const Json& row) { return row.at("itemKind") == "conversation_model_budget"; });
-    check(approval != inbox.end(), "The notification did not pause for model budget");
-    Inbox(store).decideInbox(localOwner, target(*approval), "approve");
     runtime.runConversations();
     const auto history = TaskHistory(store).history(task);
     const auto event = std::find_if(history.begin(), history.end(), [](const Json& row) { return row.at("kind") == "git_webhook"; });
     check(event != history.end() && event->at("data").at("jobId") == 81 && event->at("data").at("headSha") == sha &&
               event->at("data").at("prNumber") == 1,
-          "Budget approval erased the Git delivery from task history");
-    check(history.dump().find("CI failed. linker: missing symbol") != std::string::npos, "Approved model call did not resume");
+          "The Git delivery lost its job, head, or pull request");
+    check(history.dump().find("CI failed. linker: missing symbol") != std::string::npos, "The reporting turn lost its CI log evidence");
 
     script.onNotification = [&] { PolicyRules{store}.changeNeverRule(localOwner, Action::repository_read, repositoryTarget, true); };
     const auto replies = historyCount(store, task, "conversation_reply");
@@ -1254,7 +1246,7 @@ int main(int argc, char** argv) {
         boundedTaskReadAndForeignReference(true);
         redaction();
         notificationCannotControlASession();
-        notificationBudgetAndRevocation();
+        notificationEvidenceAndRevocation();
         testGitPrFollowup();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

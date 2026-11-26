@@ -2,14 +2,12 @@
 #include "journal_storage.hpp"
 #include "task_events.hpp"
 #include "task_records.hpp"
-#include "wait_storage.hpp"
 #include "runtime_task_updates.hpp"
 #include "journal_task.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
-#include "flock/outbox.hpp"
 
 #include <optional>
 #include <string>
@@ -43,19 +41,6 @@ bool runtime::TaskUpdates::checkpointMatches(const DecisionCheckpoint& checkpoin
     return checkpoint.eventId == task.eventId && checkpoint.generation == task.generation && checkpoint.revisionId == task.currentRevision;
 }
 
-bool runtime::TaskUpdates::admitWork(TaskData& task, const TaskDecision& decision, bool& charge) {
-    charge = task.lastRun || database.query("SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1", {task.id}).next();
-    if (!charge) return true;
-    if (task.allowance.remaining == 0) {
-        waits.wait(task, WorkBudgetWait{workBudgetTool(decision.tool), decision.reason, waitUsage(decision.usage)},
-                   "This request used its allowance for follow-up work.");
-        return false;
-    }
-    --task.allowance.remaining;
-    ++task.allowance.additionalUsed;
-    return true;
-}
-
 void runtime::TaskUpdates::establishCriteria(TaskData& task, const Json& args) {
     if (task.currentRevision) return;
     const auto source = task.sourceMessageId.value_or(0);
@@ -71,10 +56,4 @@ void runtime::TaskUpdates::recordDecision(const TaskData& task, const Json& even
                                            event.at("evidence"), decision.usage});
 }
 
-void runtime::TaskUpdates::refundUnsentWork(TaskData& task, const Outbox& action) {
-    if (action.chargesBudget) {
-        ++task.allowance.remaining;
-        --task.allowance.additionalUsed;
-    }
-}
 }
