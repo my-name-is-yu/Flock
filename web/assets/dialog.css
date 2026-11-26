@@ -219,6 +219,12 @@ button.settings-row:focus-visible, a.settings-row:focus-visible { outline-offset
 .settings-row-switch:disabled { cursor: default; opacity: .55; }
 .settings-row-switch:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .settings-row-switch, .settings-row-switch::before { transition: none; } }
+@media (forced-colors: active) {
+  .settings-row-switch { border: 1px solid CanvasText; background: Canvas; }
+  .settings-row-switch::before { inset-block-start: 1px; background: CanvasText; box-shadow: none; }
+  .settings-row-switch:checked { background: Highlight; }
+  .settings-row-switch:checked::before { background: HighlightText; }
+}
 .settings-row-label .settings-card-feedback { display: block; }
 a.settings-row svg { margin-left: auto; }
 .settings-row svg { width: 1rem; height: 1rem; color: var(--text-3); margin-right: -.25rem; transition: transform .16s cubic-bezier(0.23, 1, 0.32, 1), color .14s ease; }
