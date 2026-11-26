@@ -313,7 +313,7 @@ async function exercise(mountBoardInbox) {
 }
 
 function liveFixture() {
-  const bot = { id: 'release', name: 'Release', latestIncomingEventId: 0,
+  const bot = { id: 'release', name: 'Release', model: 'demo', latestIncomingEventId: 0,
     presence: 'waiting', preview: 'Which branch?' };
   const decision = { botId: bot.id, botName: bot.name, itemKind: 'user_question', itemId: 1, waitId: 1,
     taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'ask:Which branch?', prompt: 'Which branch?', canDecide: true };
@@ -475,8 +475,8 @@ async function exerciseLiveRetry() {
   writeInline.click();
   expectComposer(answerCopy);
   expectComposerLimit(waitAnswerBytes);
-  document.querySelector('#event-2 button[aria-label="Answer this question"]').click();
-  expectComposer(answerCopy);
+  if (document.querySelector('#event-2 .msg-actions [data-timeline-action="reply"]'))
+    throw new Error('The open question repeated Write an answer as a hover control');
   document.querySelector('#event-3 button[aria-label="Reply to this review"]').click();
   expectComposer(reviewCopy);
   byId('cancel-reply').click();

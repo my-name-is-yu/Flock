@@ -30,7 +30,7 @@ function fixtures() {
     if (path === '/api/bots' && request?.method === 'POST') {
       const { name } = JSON.parse(request.body);
       await new Promise(resolve => { window.finishBotSave = resolve; });
-      const bot = { id: 'new-bot', name };
+      const bot = { id: 'new-bot', name, model: 'demo' };
       bots.push(bot);
       return Response.json(bot);
     }
