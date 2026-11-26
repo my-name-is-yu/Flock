@@ -1248,8 +1248,7 @@ void lateReportCanRestoreCompletion() {
         check(!hasTool(input, "complete") && hasTool(input, "session_read") && event.at("sessionReadViews") == Json::array({"report"}),
               "missing report was not recoverable in default mode");
         if (!input.evidence.empty()) {
-            check(input.evidence.at(0).at("reportAvailable") == false && input.task.at("remainingEvidenceReads") == 2,
-                  "failed report read did not count as an evidence read");
+            check(input.evidence.at(0).at("reportAvailable") == false, "failed report read did not return unavailable evidence");
             return ask();
         }
         auto run = "run-1-result";
@@ -1370,11 +1369,22 @@ void evidenceResume() {
     Fixture f;
     f.read = "on_demand";
     f.restart();
+    constexpr std::size_t excerptBytes = 8'192;
+    f.t3.historyPages = {
+        {"First page", {}, {}, "item-1", "2", 0, true}, {"Second page", {}, {}, "item-2", "3", 0, true},
+        {"Third page", {}, {}, "item-3", "4", 0, true}, {std::string(excerptBytes + 1, 'x'), {}, {}, "item-4", "5", 0, true},
+        {"Final page", {}, {}, "item-5", {}, 0, false},
+    };
     const auto id = f.submit();
-    f.model.script = [](const ModelInput& i) {
+    f.model.script = [&](const ModelInput& i) {
         if (i.event["kind"] == "intake") return work();
-        if (i.evidence.size() == 2) return complete();
-        check(std::find(i.tools.begin(), i.tools.end(), "session_read") != i.tools.end(), "read tool not presented");
+        check(!i.task.contains("remainingEvidenceReads"), "read allowance remained in task context");
+        if (i.evidence.size() == f.t3.historyPages.size()) {
+            check(i.evidence.at(3).at("text") == std::string(excerptBytes, 'x') && i.evidence.back().at("text") == "Final page",
+                  "history exceeded the excerpt bound or omitted the final page");
+            return complete();
+        }
+        check(hasTool(i, "session_read"), "read tool not presented");
         auto req = Json{{"threadId", i.event["run"]["threadId"]}, {"runId", i.event["run"]["runId"]}, {"view", "activity"}};
         if (!i.evidence.empty()) req["cursor"] = i.evidence.back()["nextCursor"];
         return Decision{"session_read", req, {}};
@@ -1386,7 +1396,8 @@ void evidenceResume() {
     check(f.t3.reads == 1 && f.logs(id, "decision") == 1 && f.task(id)["state"] == "deciding", "read committed a terminal action");
     f.restart();
     f.reach(id, "completed");
-    check(f.t3.reads == 2 && f.t3.launches == 1 && f.t3.follows == 0 && f.logs(id, "session_read") == 2,
+    check(f.t3.reads == 5 && f.t3.launches == 1 && f.t3.follows == 0 && f.logs(id, "session_read") == 5 &&
+              f.t3.readRequests.back().cursor == "5",
           "history read did not restore its saved evidence");
 }
 
@@ -1470,6 +1481,13 @@ void taskPagesShowProjectOwners() {
 void peerWorkAndRestart() {
     Fixture f;
     f.allowBeta();
+    f.t3.historyPages = {
+        {"commit wanted, updates enabled", {}, {}, "item-1", "1", 100, true},
+        {"Build finished", {}, {}, "item-1", {}, 200, true},
+        {"Tests passed", {}, {}, "item-1", {}, 300, true},
+        {"Verified main", {}, {}, "item-1", {}, 400, true},
+        {"Ready to ship", {}, {}, "item-1", {}, 0, false},
+    };
     const auto root = f.submit("Decide whether the PR can ship");
     const auto unrelated = f.submit("Ordinary request queued before the handoff");
     f.model.script = [&](const ModelInput& input) -> Decision {
@@ -1489,11 +1507,17 @@ void peerWorkAndRestart() {
             }
             check(event["kind"] == "bot_result" && event["text"] == "Verified the PR on main" && input.task["doneWhen"] == Evidence,
                   "peer result did not resume the original work contract");
-            if (input.evidence.empty()) {
+            if (input.evidence.size() < f.t3.historyPages.size()) {
                 check(hasTool(input, "read_bot_evidence"), "peer result evidence could not be inspected");
-                return {"read_bot_evidence", {{"messageId", event["messageId"]}}, "Verify the specialist's evidence"};
+                Json args = {{"messageId", event["messageId"]}};
+                if (!input.evidence.empty()) {
+                    args["itemId"] = input.evidence.back().at("itemId");
+                    args["offset"] = input.evidence.back().at("nextOffset");
+                }
+                return {"read_bot_evidence", std::move(args), "Verify the specialist's evidence"};
             }
-            check(input.evidence.back()["text"] == "commit wanted, updates enabled", "owned peer Session evidence was not returned");
+            check(input.evidence.front()["text"] == "commit wanted, updates enabled" && input.evidence.back()["text"] == "Ready to ship",
+                  "owned peer Session evidence was not returned");
             return complete();
         }
         check(input.task["botId"] == "beta" && input.notes.soul == "Second SOUL" && input.notes.memory == "BETA_ONLY",
@@ -1545,8 +1569,8 @@ void peerWorkAndRestart() {
     f.restart();
     f.reach(root, "completed");
     f.wait(unrelated, "user_question");
-    check(TaskList(*f.store).tasks("beta").size() == 1 && f.t3.launches == 1 && f.t3.reads == 1 && f.logs(root, "user_answer") == 1 &&
-              f.logs(root, "completed") == 1,
+    check(TaskList(*f.store).tasks("beta").size() == 1 && f.t3.launches == 1 && f.t3.reads == 5 && f.logs(root, "user_answer") == 1 &&
+              f.logs(root, "read_bot_evidence") == 5 && f.logs(root, "completed") == 1 && f.t3.readRequests.back().offset == 400,
           "restart duplicated the recipient, Session, evidence read, user answer or completion");
     const auto result = f.botMessages("alpha").back();
     const auto completion = lastTaskEvent(*f.store, root, "completed").at("data");
