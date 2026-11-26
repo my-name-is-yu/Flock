@@ -114,7 +114,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .settings-scope, .settings-help { color: var(--text-2); font-size: var(--text-sm); }
 .settings-scope { margin: .25rem 0 0; }
 .settings-help { margin: var(--space-3) .1rem 0; }
-/* Inline links read as Flock links, not the browser's default blue. */
 .row-label small a, .settings-help a { color: var(--accent); font-weight: 550; text-decoration: none; border-radius: 3px; }
 .row-label small a:hover, .settings-help a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .row-label small a:focus-visible, .settings-help a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
