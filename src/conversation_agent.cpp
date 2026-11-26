@@ -355,7 +355,8 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             const auto tool = field(decision, "tool");
             if ((decision.contains("rejection") && result.value("untrustedData", false)) ||
                 modelArgumentsContainProtected(
-                    modelCallRedactor(message.bot, tool, args, message.principalSource == PrincipalSource::gitWebhook), tool, args)) {
+                    modelCalls.modelCallRedactor(message.bot, tool, args, message.principalSource == PrincipalSource::gitWebhook), tool,
+                    args)) {
                 args = Json::object();
                 result = toolFailure("Saved tool history is unavailable. Check the target before retrying.");
             }
@@ -496,15 +497,15 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
     }
 
     Json environments = Json::array();
-    const auto initial = taskEnvironment(message.bot, message.routing);
+    const auto initial = taskRouting.taskEnvironment(message.bot, message.routing);
     if (!initial.empty()) environments.push_back({{"name", initial}, {"environmentId", initial}, {"default", true}});
     if (field(message.routing, "environmentId").empty())
-        for (const auto& environment : registeredT3Environments(message.bot))
+        for (const auto& environment : taskRouting.registeredT3Environments(message.bot))
             if (environment != initial) environments.push_back({{"name", environment}, {"environmentId", environment}});
     const auto& config = message.routing.at("config");
     if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object()) {
         for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) {
-            const auto id = taskEnvironment(message.bot, message.routing, alias.key());
+            const auto id = taskRouting.taskEnvironment(message.bot, message.routing, alias.key());
             if (!id.empty()) {
                 auto choice = Json{{"name", alias.key()}, {"environmentId", id}};
                 const auto gateway = conversationGatewayEnvironmentId(alias.value());
@@ -620,11 +621,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto request = text(args, "request", maxBodyBytes, true);
         const auto doneWhen = text(args, "doneWhen", limits::session_prompt::maxDecisionTextBytes, false);
         const bool resume = args.value("resume", false);
-        auto [destination, targets, commit] = startDestinations(message, args, resume, selectedSession, linked);
+        auto [destination, targets, commit] = taskRouting.startDestinations(message, args, resume, selectedSession, linked);
         const auto result = source(nullptr);
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
-        const auto id = startConversationTask(routing, bot, request, destination, message.id, sourceRef(result), resume, selectedSession);
+        const auto id = taskOperations.startConversationTask(routing, bot, request, destination, message.id, sourceRef(result), resume,
+                                                             selectedSession);
         if (!doneWhen.empty() || !targets.empty()) {
             auto task = taskRecords.load(id);
             if (!doneWhen.empty()) task.criteriaProposal = TaskCriteriaProposal{doneWhen, message.id};
@@ -655,9 +657,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                 throw ToolError(
                     "stale",
                     {{"applied", 0}, {"taskId", task.id}, {"expected", {{"revisionId", revision}}}, {"current", taskState(task, message)}});
-            change = taskChange(message, args, task, linked);
+            change = taskRouting.taskChange(message, args, task, linked);
         }
-        const bool conflicting = acceptInstruction(task, message.id, step, instruction, sourceRef(result), change ? &*change : nullptr);
+        const bool conflicting =
+            taskOperations.acceptInstruction(task, message.id, step, instruction, sourceRef(result), change ? &*change : nullptr);
         return {{"ok", true}, {"effect", conflicting ? "replanning" : "accepted"}, {"taskId", task.id}};
     }
     if (tool == "answer_task_question") {
@@ -671,7 +674,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (const auto error = questionAnswerError(task, message, wait))
             throw ToolError(error, {{"taskId", task.id}, {"current", taskState(task, message)}});
         const TaskTarget target{bot, task.id, waitId, identifier(args, "revisionId", true, 0), identifier(args, "generation", true, 0)};
-        operate(turnActor(message), target, "answer", {{"text", answer}}, message.id, InboxKind::user_question);
+        taskOperations.operate(turnActor(message), target, "answer", {{"text", answer}}, message.id, InboxKind::user_question);
         return {{"ok", true}, {"effect", "answered"}, {"taskId", task.id}};
     }
     if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
@@ -682,9 +685,9 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const bool record = tool == "record_task_blocker";
         const auto reason = record ? args.at("blockerReason").get<std::string>() : std::string{};
         if (record)
-            recordTaskBlocker(task, reason, identifier(args, "waitId", false));
+            taskOperations.recordTaskBlocker(task, reason, identifier(args, "waitId", false));
         else
-            withdrawTaskQuestion(task, identifier(args, "waitId", true));
+            taskOperations.withdrawTaskQuestion(task, identifier(args, "waitId", true));
         const auto effect = record ? (reason.empty() ? "blocker_cleared" : "blocker_recorded") : "question_withdrawn";
         return {{"ok", true}, {"effect", effect}, {"taskId", task.id}, {"current", taskState(task, message)}};
     }
@@ -693,7 +696,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto task = ownTask(identifier(args, "taskId", true), message);
         expectGeneration(task);
         active(task);
-        operate(turnActor(message), TaskTarget::from(task, 0), "cancel", Json::object());
+        taskOperations.operate(turnActor(message), TaskTarget::from(task, 0), "cancel", Json::object());
         const auto state = taskRecords.load(task.id).state;
         return {{"ok", true}, {"effect", state == TaskState::cancelled ? "cancelled" : "cancelling"}, {"taskId", task.id}};
     }
@@ -840,7 +843,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
     if (!message.channelScope.empty() && channelMessageAuthorized(message.id, message.bot))
         queueChannelReply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
     exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});
-    releaseModelCall(takeReservedConversationCall(message.id));
+    modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
     exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {replyId, message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
     std::erase_if(unpersistedToolResults, [&](const auto& entry) { return entry.first.first == message.id; });
@@ -877,7 +880,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     if (!isNextTurn(message.id) || botLifecycle.botPaused(message.bot)) return false;
     if (message.principalSource == PrincipalSource::gitWebhook) {
         if (canReceiveGitWebhook(message.bot, message.routing.at("gitEvent"))) return true;
-        releaseModelCall(takeReservedConversationCall(message.id));
+        modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
         exec("UPDATE conversation_turns SET status='done' WHERE message_id=?", {message.id});
         exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
         return false;
@@ -897,7 +900,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
         if (!message.channelScope.empty() && channelMessageAuthorized(message.id, message.bot)) return true;
     } else if (Policy(*this).allows(turnActor(message), Action::bot_talk, message.bot))
         return true;
-    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(attempt);
+    if (const auto attempt = modelCalls.takeReservedConversationCall(message.id)) modelCalls.releaseModelCall(attempt);
     if (message.principalSource == PrincipalSource::channel)
         finishTurn(message, "This channel connection is no longer authorized.", nullptr, ConversationReplyRoute::channel_access);
     else
@@ -1017,7 +1020,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const std::function<std::
                 Id repair = 0;
                 if (checkpoint.attempt && repairableModelOutput(error.code) &&
                     !query("SELECT 1 FROM conversation_model_failures WHERE message_id=? AND repair_attempt_id IS NOT NULL", {id}).next()) {
-                    repair = reserveModelCall(messageModelBudget(id), "conversation_turn", id, 0, 0);
+                    repair = modelCalls.reserveModelCall(modelCalls.messageModelBudget(id), "conversation_turn", id, 0, 0);
                     if (repair) exec("UPDATE conversation_turns SET reserved_attempt=? WHERE message_id=?", {repair, id});
                 }
                 if (checkpoint.attempt)
@@ -1063,7 +1066,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const std::function<std::
                         if (auto rejection = saved.value("rejection", std::string{}); !rejection.empty())
                             calls.push_back({std::move(call), std::move(rejection)});
                         else {
-                            auto checked = checkModelCall(message.bot, std::move(call), offered, notification);
+                            auto checked = modelCalls.checkModelCall(message.bot, std::move(call), offered, notification);
                             rejectionChanged |= !checked.rejection.empty();
                             calls.push_back(std::move(checked));
                         }
@@ -1099,7 +1102,8 @@ LIMIT 1
                                : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.");
                 return;
             }
-            const auto linkedDestinations = reviewPreference ? LinkedTaskDestinations{} : discoverLinkedTaskDestinations(t3, message.bot);
+            const auto linkedDestinations =
+                reviewPreference ? LinkedTaskDestinations{} : taskRouting.discoverLinkedTaskDestinations(t3, message.bot);
             ModelInput input;
             {
                 std::lock_guard lock(mutex);
@@ -1152,9 +1156,9 @@ WHERE conversation_steps.result IS NULL
 SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=call_limit)
     OR EXISTS(SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL)
 )SQL",
-                           {messageModelBudget(id).id, id})
+                           {modelCalls.messageModelBudget(id).id, id})
                          .next()) {
-                    pauseTurn(message);
+                    modelCalls.pauseTurn(message);
                     transaction.commit();
                     return;
                 }
@@ -1188,10 +1192,10 @@ SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=ca
                         return;
                     }
                     auto& attempt = checkpoint.attempt;
-                    attempt = takeReservedConversationCall(id);
-                    if (!attempt) attempt = reserveModelCall(messageModelBudget(id), "conversation_turn", id, 0, 0);
+                    attempt = modelCalls.takeReservedConversationCall(id);
+                    if (!attempt) attempt = modelCalls.reserveModelCall(modelCalls.messageModelBudget(id), "conversation_turn", id, 0, 0);
                     if (!attempt)
-                        pauseTurn(message);
+                        modelCalls.pauseTurn(message);
                     else
                         exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
                              " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",
@@ -1199,7 +1203,7 @@ SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=ca
                     transaction.commit();
                     if (!attempt) return;
                 }
-                auto response = callModel(message.bot, model, input);
+                auto response = modelCalls.callModel(message.bot, model, input);
                 checkpoint.usage = std::move(response.usage);
                 calls = std::move(response.calls);
                 if (calls.empty() || calls.size() > maxToolCalls)

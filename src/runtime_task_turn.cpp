@@ -82,7 +82,7 @@ void Runtime::Components::TaskTurn::recordFailure(TaskData& task, const Json& ev
     if (cause == FailureCause::UnsupportedReasoningEffort)
         db.waitStorage.wait(task, ModelFailureWait{WaitFailureCode::unsupported_reasoning_effort}, why);
     else if (attempts >= 3) {
-        if (cause == FailureCause::BotNotes && db.automationBeforeDispatch(task.id))
+        if (cause == FailureCause::BotNotes && db.taskRouting.automationBeforeDispatch(task.id))
             db.waitStorage.wait(task, SimpleWaitReason::bot_notes_unavailable, why);
         else
             db.waitStorage.wait(task, ModelFailureWait{}, why);
@@ -183,8 +183,9 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::inferDecision(const T
         if (current.generation != task.generation || current.eventId != event["id"] || current.currentRevision != task.currentRevision ||
             current.state != TaskState::deciding)
             return std::nullopt;
-        attempt = db.takeReservedTaskCall(event["id"]);
-        if (!attempt) attempt = db.reserveModelCall(db.taskModelBudget(task.id), "task_decision", 0, task.id, event["id"]);
+        attempt = db.modelCalls.takeReservedTaskCall(event["id"]);
+        if (!attempt)
+            attempt = db.modelCalls.reserveModelCall(db.modelCalls.taskModelBudget(task.id), "task_decision", 0, task.id, event["id"]);
         if (!attempt) {
             db.waitStorage.wait(current, SimpleWaitReason::model_budget, "This request used its step allowance.");
             updates.saveTask(current);
@@ -195,9 +196,9 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::inferDecision(const T
     if (gitHost && event.at("kind") == "result") db.projectTaskGitReads(*gitHost, task, event);
     TaskInference inference{task.generation, event.at("id"), attempt, task.currentRevision};
     try {
-        auto turn = db.callModel(task.botId, model,
-                                 {summary, event, history, bot, tools, task.feedback.value_or(""), evidence, task.config,
-                                  needsDoneWhen(task), summary.contains("forwardableUserMessage")});
+        auto turn = db.modelCalls.callModel(task.botId, model,
+                                            {summary, event, history, bot, tools, task.feedback.value_or(""), evidence, task.config,
+                                             needsDoneWhen(task), summary.contains("forwardableUserMessage")});
         inference.usage = std::move(turn.usage);
         if (turn.calls.size() == 1)
             inference.outcome = std::move(turn.calls.front());
@@ -299,7 +300,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             return;
         }
         if (replay) {
-            auto call = db.checkModelCall(task.botId, *decision, tools, false);
+            auto call = db.modelCalls.checkModelCall(task.botId, *decision, tools, false);
             if (!call.rejection.empty()) {
                 decisions.rejectDecision(task, event, TaskDecision{std::move(call), decision->usage, decision->attemptId}, call.rejection,
                                          true);

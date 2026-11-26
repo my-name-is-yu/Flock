@@ -1,5 +1,4 @@
 #pragma once
-#include "flock/store.hpp"
 
 #include "flock/types.hpp"
 #include "flock/json.hpp"
@@ -29,13 +28,14 @@ class JournalStorage;
 class OutboxStorage;
 class PeerStorage;
 
+class ModelCalls;
 class WaitStorage {
 public:
-    static constexpr Id initialWorkAllowance = 3;
+    static constexpr int initialWorkAllowance = 3;
 
-    WaitStorage(Database& database, Store::Impl& remaining, JournalStorage& journalStorage, OutboxStorage& outboxStorage,
-                PeerStorage& peers)
-        : database(database), remaining(remaining), journalStorage(journalStorage), outboxStorage(outboxStorage), peers(peers) {}
+    WaitStorage(Database& database, JournalStorage& journalStorage, OutboxStorage& outboxStorage, PeerStorage& peers,
+                ModelCalls& modelCalls)
+        : database(database), journalStorage(journalStorage), outboxStorage(outboxStorage), peers(peers), modelCalls(modelCalls) {}
 
     Id waitAllowance(Id taskId, WaitReason reason) const;
     bool waitIsActionable(const TaskData& task) const;
@@ -48,9 +48,9 @@ public:
     void unlockQuestion(TaskData&, std::string_view reason);
 private:
     Database& database;
-    Store::Impl& remaining;
     JournalStorage& journalStorage;
     OutboxStorage& outboxStorage;
     PeerStorage& peers;
+    ModelCalls& modelCalls;
 };
 }

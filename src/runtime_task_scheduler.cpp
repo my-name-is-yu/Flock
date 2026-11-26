@@ -87,11 +87,14 @@ bool Runtime::Components::TaskScheduler::selectProject(TaskData& task) {
     const auto environment = task.environmentId;
     {
         std::lock_guard lock(db.mutex);
-        if (db.projectQuestionOpen(bot, environment)) return false;
+        if (db.taskRouting.projectQuestionOpen(bot, environment)) return false;
     }
-    auto catalog = db.readProjectCatalog(t3, bot, environment, requireT3Connection);
+    auto catalog = db.taskRouting.readProjectCatalog(t3, bot, environment, requireT3Connection);
     return updates.change(
-               task, [&](TaskData& current) { return !shutdown.stop_requested() && db.applyProjectCatalog(current, std::move(catalog)); },
+               task,
+               [&](TaskData& current) {
+                   return !shutdown.stop_requested() && db.taskRouting.applyProjectCatalog(current, std::move(catalog));
+               },
                &task) &&
            !task.projectId.empty();
 }

@@ -1,3 +1,11 @@
+#include "task_routing.hpp"
+#include "task_records.hpp"
+#include "task_operations.hpp"
+#include "secret_storage.hpp"
+#include "peer_storage.hpp"
+#include "model_calls.hpp"
+#include "bot_lifecycle_storage.hpp"
+#include "automation_storage.hpp"
 #include "wait_storage.hpp"
 #include "task_events.hpp"
 #include "journal_storage.hpp"
@@ -92,14 +100,14 @@ RunRef runRef(const Json& data) {
 
 Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelResolver model)
     : path(std::move(file)), memoryStorage(*this, secretStorage, *this, std::move(seed)),
-      automationStorage(*this, secretStorage, botLifecycle, *this, std::move(model)) {
+      automationStorage(*this, secretStorage, botLifecycle, *this, std::move(model), taskOperations) {
     open(path);
 }
 
-void Store::Impl::requestCancellation(TaskData& task, SessionStop stop) {
+void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
     const Id id = task.id;
     const auto peer = peerStorage.peerExchange(id);
-    const bool undispatched = task.state == TaskState::queued || isUndispatchedNotesWait(task);
+    const bool undispatched = task.state == TaskState::queued || taskRouting.isUndispatchedNotesWait(task);
     if (!task.pendingInstructions.empty()) task.cancelledInstructions = task.pendingInstructions;
     waitStorage.clearWait(task, "cancel");
     taskEvents.consumeEvent(task);
@@ -117,7 +125,7 @@ void Store::Impl::requestCancellation(TaskData& task, SessionStop stop) {
         auto recipient = taskRecords.load(peer->recipient);
         if (stop.participation && peer->kind == "work") {
             // The Session exit owns this task's Run, while the peer still owns its own task and Run.
-            exec("UPDATE peer_exchanges SET phase='closed' WHERE id=?", {peer->id});
+            database.exec("UPDATE peer_exchanges SET phase='closed' WHERE id=?", {peer->id});
             if (recipient.state == TaskState::peer_waiting) {
                 taskEvents.event(recipient, "peer-closed/" + peer->id, {{"kind", "intake"}});
                 recipient.state = TaskState::deciding;
@@ -252,20 +260,20 @@ std::optional<Store::BotViewStamp> Store::botViewStamp() const {
 Id Store::submit(const Intake& item, const Person* requester) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    const auto id = p_->submitRequest(item, requester);
+    const auto id = p_->taskOperations.submitRequest(item, requester);
     transaction.commit();
     return id;
 }
 
-Id Store::Impl::submitRequest(const Intake& item, const Person* requester) {
+Id TaskOperations::submitRequest(const Intake& item, const Person* requester) {
     if (!requester) return submit(item);
-    if (!Policy(*this).allows(*requester, Action::bot_talk, item.botId)) throw DecisionDenied{};
+    if (!Policy(remaining).allows(*requester, Action::bot_talk, item.botId)) throw DecisionDenied{};
     secretStorage.sharedRedactor().requirePublic(requester->id);
     return submit(item, 0, nullptr, TaskSource::request, {}, requester->id);
 }
 
-Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const OutboxSource* source, TaskSource sourceKind,
-                       std::optional<TaskTrigger> trigger, std::optional<std::string> requester) {
+Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSource* source, TaskSource sourceKind,
+                          std::optional<TaskTrigger> trigger, std::optional<std::string> requester) {
     const bool consultation = sourceKind == TaskSource::consultation;
     if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
         item.request.size() > limits::messages::maxBodyBytes || (!consultation && item.environmentId.empty()) || !item.config.is_object())
@@ -342,14 +350,14 @@ TaskTarget TaskTarget::from(const TaskData& task, Id waitId) {
 void Store::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& data) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    p_->operate(actor, target, operation, data);
+    p_->taskOperations.operate(actor, target, operation, data);
     transaction.commit();
 }
 
-void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& input, Id sourceMessage,
-                          std::optional<InboxKind> expectedKind) {
+void TaskOperations::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& input, Id sourceMessage,
+                             std::optional<InboxKind> expectedKind) {
     const auto& [bot, id, waitId, revision, generation] = target;
-    if (!Policy(*this).allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
+    if (!Policy(remaining).allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
     if (operation != "cancel" && botLifecycle.botPaused(bot)) throw BotPaused{};
     auto task = taskRecords.load(id);
     if (task.botId != bot || task.currentRevision.value_or(0) != revision) throw RequestChanged{};
@@ -364,7 +372,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     }
     if (!waitStorage.waitIsActionable(task)) throw RequestChanged{};
     if (!wait || wait->id != waitId) {
-        auto prior = query("SELECT resolution FROM waits WHERE id=? AND task_id=?", {waitId, id});
+        auto prior = database.query("SELECT resolution FROM waits WHERE id=? AND task_id=?", {waitId, id});
         if (!prior.next() || prior.string(0) == "request_changed") throw RequestChanged{};
         throw DecisionUnavailable{};
     }
@@ -391,7 +399,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
             if (peerStorage.recipientRouteWouldCycle(id, environment, project))
                 throw Conflict("This project would make project queues wait for one another. Choose another project or move the task.");
             task.projectId = project;
-            rememberT3Project(bot, environment, project);
+            taskRouting.rememberT3Project(bot, environment, project);
             next = TaskState::queued;
             journalStorage.journal(id, "project_selected", encodeUserAnswer(entry));
         } else {
@@ -408,15 +416,15 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         journalStorage.journal(id, "budget_granted", {{"waitId", waitId}, {"remaining", task.allowance.remaining}});
     } else if (operation == "approve" && reason == WaitReason::model_budget) {
         const Id eventId = task.eventId;
-        const auto attempt = approveModelBudget(actor, taskModelBudget(id), "task_decision", 0, id, eventId);
-        exec("UPDATE events SET reserved_attempt=? WHERE id=? AND task_id=?", {attempt, eventId, id});
+        const auto attempt = modelCalls.approveModelBudget(actor, modelCalls.taskModelBudget(id), "task_decision", 0, id, eventId);
+        database.exec("UPDATE events SET reserved_attempt=? WHERE id=? AND task_id=?", {attempt, eventId, id});
         journalStorage.journal(id, "model_budget_granted", {{"waitId", waitId}, {"attemptId", attempt}});
-    } else if (operation == "retry" && (reason == WaitReason::model_failure || isUndispatchedNotesWait(task))) {
+    } else if (operation == "retry" && (reason == WaitReason::model_failure || taskRouting.isUndispatchedNotesWait(task))) {
         if (reason == WaitReason::bot_notes_unavailable) next = TaskState::queued;
         if (const auto* failure = std::get_if<ModelFailureWait>(&wait->details);
             failure && failure->code == WaitFailureCode::unsupported_reasoning_effort)
             automationStorage.refreshPlannerModel(bot, task.config);
-        exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task.eventId});
+        database.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task.eventId});
         task.feedback.reset();
         journalStorage.journal(id, "model_retry", {{"waitId", waitId}});
     } else if (operation == "extend" && reason == WaitReason::deadline) {
@@ -475,7 +483,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     if (operation == "answer" && task.question) task.question->target = questionTarget(task);
     task.state = next;
     taskRecords.save(task);
-    if (kind) recordInboxDecision(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
+    if (kind) remaining.recordInboxDecision(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
 }
 
 bool Store::hasTask(Id id) const {

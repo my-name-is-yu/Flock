@@ -1,3 +1,4 @@
+#include "model_calls.hpp"
 #include "conversation_storage.hpp"
 #include "journal_storage.hpp"
 #include <sqlite3.h>
@@ -838,7 +839,7 @@ Json TaskEvents::currentEvent(const TaskData& task) const {
 }
 
 void TaskEvents::consumeEvent(const TaskData& task) {
-    remaining.releaseModelCall(remaining.takeReservedTaskCall(task.eventId));
+    modelCalls.releaseModelCall(modelCalls.takeReservedTaskCall(task.eventId));
     database.exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=? AND consumed=0", {task.eventId, task.id});
 }
 

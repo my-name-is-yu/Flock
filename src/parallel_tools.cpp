@@ -159,7 +159,7 @@ private:
             return std::nullopt;
         }
         const auto origin = store_.policyOrigin(message_);
-        const auto budget = store_.messageModelBudget(message_.id);
+        const auto budget = store_.modelCalls.messageModelBudget(message_.id);
         std::vector<std::size_t> reserved;
         for (const auto& [slot, provider] : eligible) {
             if (isBotTool(calls_[slot].tool) && !reserveBotCall(slot, provider, origin, budget)) continue;
@@ -196,7 +196,8 @@ private:
             saveSlot(slot, toolFailure(approvalError(gate)));
             return false;
         }
-        if (!store_.takeReservedConversationCall(message_.id) && !store_.reserveModelCall(budget, "bot_tool", message_.id, 0, 0)) {
+        if (!store_.modelCalls.takeReservedConversationCall(message_.id) &&
+            !store_.modelCalls.reserveModelCall(budget, "bot_tool", message_.id, 0, 0)) {
             blocked_[slot] = true;
             return false;
         }
@@ -322,7 +323,7 @@ private:
         auto row = store_.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=?", {message_.id, step_});
         if (!row.next()) throw Conflict("Tool batch step is missing");
         const auto results = row.json(0);
-        store_.releaseModelCall(store_.takeReservedConversationCall(message_.id));
+        store_.modelCalls.releaseModelCall(store_.modelCalls.takeReservedConversationCall(message_.id));
         const bool complete = std::ranges::none_of(results, [](const auto& result) { return result.is_null(); });
         if (complete) {
             store_.saveTurnResults(message_.id, step_, results);
@@ -331,7 +332,7 @@ private:
                         " AND EXISTS (SELECT 1 FROM policy_approvals WHERE turn=? AND status='pending')",
                         {message_.id, message_.id});
         } else {
-            store_.pauseTurn(message_);
+            store_.modelCalls.pauseTurn(message_);
         }
         transaction.commit();
         return complete;

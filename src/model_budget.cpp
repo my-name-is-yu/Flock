@@ -1,3 +1,9 @@
+#include "wait_storage.hpp"
+#include "task_records.hpp"
+#include "secret_storage.hpp"
+#include "model_calls.hpp"
+#include "journal_storage.hpp"
+#include "bot_lifecycle_storage.hpp"
 #include "conversation_storage.hpp"
 #include "flock/limits.hpp"
 #include "journal_conversation.hpp"
@@ -72,13 +78,13 @@ Id initialModelCallLimit(const Json& config) {
     return limit->get<Id>();
 }
 
-ModelBudget Store::Impl::messageModelBudget(Id messageId) const {
+ModelBudget ModelCalls::messageModelBudget(Id messageId) const {
     for (;;) {
-        auto row = query(R"SQL(
+        auto row = database.query(R"SQL(
 SELECT m.routing,i.source_message_id FROM messages m
 LEFT JOIN session_invitations i ON i.message_id=m.id WHERE m.id=?
 )SQL",
-                         {messageId});
+                                  {messageId});
         if (!row.next()) throw Conflict("The originating message is missing");
         const auto routing = row.json(0);
         const auto wake = routing.find("sessionWake");
@@ -89,7 +95,7 @@ LEFT JOIN session_invitations i ON i.message_id=m.id WHERE m.id=?
     }
 }
 
-ModelBudget Store::Impl::taskModelBudget(Id taskId) const {
+ModelBudget ModelCalls::taskModelBudget(Id taskId) const {
     static const auto sql = R"SQL(
 WITH RECURSIVE ancestry(id) AS (
   SELECT ? UNION ALL
@@ -98,73 +104,73 @@ WITH RECURSIVE ancestry(id) AS (
 )
 SELECT )SQL" + taskProjection() +
                             " FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1";
-    auto ancestor = query(sql.c_str(), {taskId});
+    auto ancestor = database.query(sql.c_str(), {taskId});
     if (!ancestor.next()) throw Conflict("The originating task is missing");
     const auto root = taskRecords.readTask(ancestor);
     if (root.sourceMessageId) return messageModelBudget(*root.sourceMessageId);
     return {"task/" + std::to_string(root.id), initialModelCallLimit(root.config)};
 }
 
-Id Store::Impl::reserveModelCall(const ModelBudget& budget, std::string_view purpose, Id messageId, Id taskId, Id eventId) {
-    exec("INSERT OR IGNORE INTO model_budgets(id,call_limit) VALUES(?,?)", {budget.id, budget.initialLimit});
-    exec("UPDATE model_budgets SET attempts=attempts+1 WHERE id=? AND attempts<call_limit", {budget.id});
-    if (!sqlite3_changes(db)) return 0;
-    exec("INSERT INTO model_attempts(budget_id,purpose,time,message_id,task_id,event_id) VALUES(?,?,?,?,?,?)",
-         {budget.id, purpose, unixTime(), messageId ? Json(messageId) : Json(nullptr), taskId ? Json(taskId) : Json(nullptr),
-          eventId ? Json(eventId) : Json(nullptr)});
-    return last();
+Id ModelCalls::reserveModelCall(const ModelBudget& budget, std::string_view purpose, Id messageId, Id taskId, Id eventId) {
+    database.exec("INSERT OR IGNORE INTO model_budgets(id,call_limit) VALUES(?,?)", {budget.id, budget.initialLimit});
+    database.exec("UPDATE model_budgets SET attempts=attempts+1 WHERE id=? AND attempts<call_limit", {budget.id});
+    if (!sqlite3_changes(database.db)) return 0;
+    database.exec("INSERT INTO model_attempts(budget_id,purpose,time,message_id,task_id,event_id) VALUES(?,?,?,?,?,?)",
+                  {budget.id, purpose, unixTime(), messageId ? Json(messageId) : Json(nullptr), taskId ? Json(taskId) : Json(nullptr),
+                   eventId ? Json(eventId) : Json(nullptr)});
+    return database.last();
 }
 
-Id Store::Impl::takeReservedConversationCall(Id message) {
-    auto reserved = query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
-                          " AND reserved_attempt IS NOT NULL",
-                          {message});
+Id ModelCalls::takeReservedConversationCall(Id message) {
+    auto reserved = database.query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
+                                   " AND reserved_attempt IS NOT NULL",
+                                   {message});
     if (!reserved.next()) return 0;
     const auto id = reserved.number(0);
-    exec("UPDATE conversation_turns SET reserved_attempt=NULL WHERE message_id=?", {message});
+    database.exec("UPDATE conversation_turns SET reserved_attempt=NULL WHERE message_id=?", {message});
     return id;
 }
 
-Id Store::Impl::takeReservedTaskCall(Id event) {
-    auto reserved = query("SELECT reserved_attempt FROM events WHERE id=? AND reserved_attempt IS NOT NULL", {event});
+Id ModelCalls::takeReservedTaskCall(Id event) {
+    auto reserved = database.query("SELECT reserved_attempt FROM events WHERE id=? AND reserved_attempt IS NOT NULL", {event});
     if (!reserved.next()) return 0;
     const auto id = reserved.number(0);
-    exec("UPDATE events SET reserved_attempt=NULL WHERE id=?", {event});
+    database.exec("UPDATE events SET reserved_attempt=NULL WHERE id=?", {event});
     return id;
 }
 
-void Store::Impl::releaseModelCall(Id attempt) {
+void ModelCalls::releaseModelCall(Id attempt) {
     if (!attempt) return;
     std::string budget;
     {
-        auto removed = query("DELETE FROM model_attempts WHERE id=? RETURNING budget_id", {attempt});
+        auto removed = database.query("DELETE FROM model_attempts WHERE id=? RETURNING budget_id", {attempt});
         if (!removed.next()) return;
         budget = removed.string(0);
         removed.next();
     }
-    exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?", {budget});
+    database.exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?", {budget});
 }
 
-Id Store::Impl::approveModelBudget(const Person& actor, const ModelBudget& budget, std::string_view purpose, Id messageId, Id taskId,
-                                   Id eventId) {
-    exec("UPDATE model_budgets SET call_limit=call_limit+? WHERE id=? AND call_limit<=?",
-         {budget.initialLimit, budget.id, std::numeric_limits<Id>::max() - budget.initialLimit});
-    if (!sqlite3_changes(db)) throw Conflict("Cannot increase this model call limit");
+Id ModelCalls::approveModelBudget(const Person& actor, const ModelBudget& budget, std::string_view purpose, Id messageId, Id taskId,
+                                  Id eventId) {
+    database.exec("UPDATE model_budgets SET call_limit=call_limit+? WHERE id=? AND call_limit<=?",
+                  {budget.initialLimit, budget.id, std::numeric_limits<Id>::max() - budget.initialLimit});
+    if (!sqlite3_changes(database.db)) throw Conflict("Cannot increase this model call limit");
     const auto attempt = reserveModelCall(budget, purpose, messageId, taskId, eventId);
     if (!attempt) throw Conflict("The approved model call could not be reserved");
     resumeSharedModelBudgetWaits(actor, budget.id, messageId, taskId);
     return attempt;
 }
 
-void Store::Impl::resumeSharedModelBudgetWaits(const Person& actor, std::string_view budget, Id approvedMessage, Id approvedTask) {
-    if (!query("SELECT 1 FROM model_budgets WHERE id=? AND attempts<call_limit", {budget}).next()) return;
-    const auto policy = Policy(*this);
+void ModelCalls::resumeSharedModelBudgetWaits(const Person& actor, std::string_view budget, Id approvedMessage, Id approvedTask) {
+    if (!database.query("SELECT 1 FROM model_budgets WHERE id=? AND attempts<call_limit", {budget}).next()) return;
+    const auto policy = Policy(remaining);
     std::vector<Id> tasks;
-    auto waits = query(R"SQL(
+    auto waits = database.query(R"SQL(
 SELECT w.task_id,t.bot_id FROM waits w CROSS JOIN tasks t ON t.id=w.task_id
 WHERE w.resolution IS NULL AND w.task_id<>? AND w.reason='model_budget' AND t.state='waiting'
 )SQL",
-                       {approvedTask});
+                                {approvedTask});
     while (waits.next()) {
         const auto task = waits.number(0);
         if (policy.allows(actor, Action::bot_decide, waits.string(1)) && taskModelBudget(task).id == budget) tasks.push_back(task);
@@ -182,11 +188,11 @@ WHERE w.resolution IS NULL AND w.task_id<>? AND w.reason='model_budget' AND t.st
         Id message, pause;
     };
     std::vector<PausedMessage> messages;
-    auto paused = query(R"SQL(
+    auto paused = database.query(R"SQL(
 SELECT t.message_id,t.pause_id,m.bot_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
 WHERE t.pause_id IS NOT NULL AND t.status='paused' AND t.message_id<>? ORDER BY t.pause_id
 )SQL",
-                        {approvedMessage});
+                                 {approvedMessage});
     while (paused.next()) {
         const auto message = paused.number(0);
         auto bot = paused.string(2);
@@ -196,21 +202,21 @@ WHERE t.pause_id IS NOT NULL AND t.status='paused' AND t.message_id<>? ORDER BY 
     for (const auto& [bot, message, pause] : messages) resumeMessageModelCall(bot, message, pause, 0);
 }
 
-SecretRedactor Store::Impl::modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args, bool gitNotification) const {
+SecretRedactor ModelCalls::modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args, bool gitNotification) const {
     if (gitNotification || isGitTool(tool) || (sharedMemoryTool(tool) && args.contains("docId"))) return secretStorage.sharedRedactor();
     return secretStorage.redactor(bot);
 }
 
-ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const std::vector<std::string>& offered, bool gitNotification) {
+ModelCall ModelCalls::checkModelCall(std::string_view bot, Decision call, const std::vector<std::string>& offered, bool gitNotification) {
     std::string rejection;
     if (std::ranges::find(offered, call.tool) == offered.end()) {
         rejection = "Tool unavailable for this turn";
         if (secretStorage.redactor(bot).containsProtected(call.tool)) call.tool.clear();
     } else if (sharedMemoryTool(call.tool) && call.args.contains("docId") &&
-               Policy(*this).forbidden(bot,
-                                       (call.tool == "read_memory" || call.tool == "memory_history") ? Action::shared_memory_read
-                                                                                                     : Action::shared_memory_write,
-                                       field(call.args, "docId"))) {
+               Policy(remaining).forbidden(bot,
+                                           (call.tool == "read_memory" || call.tool == "memory_history") ? Action::shared_memory_read
+                                                                                                         : Action::shared_memory_write,
+                                           field(call.args, "docId"))) {
         rejection = "Memory access denied";
     } else {
         const auto scrub = modelCallRedactor(bot, call.tool, call.args, gitNotification);
@@ -235,7 +241,7 @@ ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const
     return {std::move(call), std::move(rejection)};
 }
 
-CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input) {
+CheckedModelTurn ModelCalls::callModel(std::string_view bot, Model& model, const ModelInput& input) {
     Json revision;
     const bool conversation = input.event.contains("turn") && input.event.value("kind", "") == "conversation_turn";
     const auto scrub = secretStorage.redactor(bot, conversation ? &revision : nullptr);
@@ -251,7 +257,7 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
         safe.feedback = scrub.text(input.feedback);
         if (conversation) conversation_storage::projectToolHistory(safe.event.at("turn"), revision);
         {
-            std::lock_guard lock(mutex);
+            std::lock_guard lock(database.mutex);
             if (botLifecycle.botPaused(bot)) throw BotPaused{};
         }
         auto turn = model.decide(safe);
@@ -278,7 +284,7 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
     return checked;
 }
 
-void Store::Impl::pauseTurn(const conversation::Message& message) {
+void ModelCalls::pauseTurn(const conversation::Message& message) {
     const auto task = message.principalSource == conversation::PrincipalSource::gitWebhook
                           ? std::optional{message.routing.at("gitEvent").at("taskId").get<Id>()}
                           : std::nullopt;
@@ -288,8 +294,8 @@ void Store::Impl::pauseTurn(const conversation::Message& message) {
                                                                 .text = std::string(text),
                                                                 .status = ConversationReplyStatus::needs_you,
                                                                 .route = ConversationReplyRoute::model_budget});
-    if (!message.channelScope.empty()) queueChannelReply(message.id, reply, text);
-    exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?", {reply, message.id});
+    if (!message.channelScope.empty()) remaining.queueChannelReply(message.id, reply, text);
+    database.exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?", {reply, message.id});
 }
 
 Json Store::pausedConversations(std::string_view bot) const {
@@ -305,19 +311,19 @@ WHERE t.pause_id IS NOT NULL AND t.status='paused' AND j.conversation_bot_id=? O
     while (rows.next()) {
         auto turn = rows.json(0);
         turn["text"] = modelBudgetPauseText(rows.string(2));
-        turn["allowance"] = p_->messageModelBudget(rows.number(1)).initialLimit;
+        turn["allowance"] = p_->modelCalls.messageModelBudget(rows.number(1)).initialLimit;
         result.push_back(std::move(turn));
     }
     return result;
 }
 
-void Store::Impl::approveMessageModelCall(const Person& actor, std::string_view bot, Id message, Id waitMessageId) {
-    auto slots = query(R"SQL(
+void ModelCalls::approveMessageModelCall(const Person& actor, std::string_view bot, Id message, Id waitMessageId) {
+    auto slots = database.query(R"SQL(
 SELECT json_extract(s.decision,'$[' || slot.key || '].tool')
 FROM conversation_steps s, json_each(s.effect) slot
 WHERE s.message_id=? AND s.result IS NULL AND json_type(s.effect)='array' AND slot.type='null'
 )SQL",
-                       {message});
+                                {message});
     bool toolPending = false;
     while (!toolPending && slots.next()) toolPending = isBotTool(slots.string(0));
     const auto attempt =
@@ -325,9 +331,9 @@ WHERE s.message_id=? AND s.result IS NULL AND json_type(s.effect)='array' AND sl
     resumeMessageModelCall(bot, message, waitMessageId, attempt);
 }
 
-void Store::Impl::resumeMessageModelCall(std::string_view bot, Id message, Id waitMessageId, Id attempt) {
-    exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
-         {attempt ? Json(attempt) : Json(nullptr), message});
+void ModelCalls::resumeMessageModelCall(std::string_view bot, Id message, Id waitMessageId, Id attempt) {
+    database.exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
+                  {attempt ? Json(attempt) : Json(nullptr), message});
     journalStorage.journalConversationBudgetApproved(message, waitMessageId, bot);
 }
 }

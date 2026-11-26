@@ -115,9 +115,9 @@ WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
     }
     if (item.botId != bot) throw Conflict(std::string(botUnavailable));
     item.request = request;
-    item.environmentId = db.defaultT3Environment(bot, item.environmentId, {});
+    item.environmentId = db.taskRouting.defaultT3Environment(bot, item.environmentId, {});
     if (item.environmentId.empty()) throw Conflict("Connect T3 or configure a T3 environment for this Bot before submitting tasks");
-    const auto task = db.submitRequest(item, &actor);
+    const auto task = db.taskOperations.submitRequest(item, &actor);
     db.exec("INSERT INTO external_mcp_receipts VALUES(?,?,?,?)", {connection.id, requestId, fingerprint, task});
     tx.commit();
     return task;
@@ -227,8 +227,8 @@ void ExternalMcp::answer(const ExternalMcpConnection& connection, Id taskId, Id 
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
     const auto owner = authorizeTask(connection, taskId);
-    db.operate(owner.actor, {owner.bot, taskId, waitId, revision, generation}, "answer",
-               {{"text", redactConnectionTokens(std::string(text))}}, 0, InboxKind::user_question);
+    db.taskOperations.operate(owner.actor, {owner.bot, taskId, waitId, revision, generation}, "answer",
+                              {{"text", redactConnectionTokens(std::string(text))}}, 0, InboxKind::user_question);
     tx.commit();
 }
 }

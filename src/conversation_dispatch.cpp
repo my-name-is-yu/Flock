@@ -274,7 +274,7 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(const Message
         }
     }
     if ((decision.tool == "start_task" || decision.tool == "change_task") && !selectedSession && result.is_null())
-        linked = discoverLinkedTaskDestinations(ctx.t3, message.bot);
+        linked = taskRouting.discoverLinkedTaskDestinations(ctx.t3, message.bot);
     std::lock_guard lock(mutex);
     Transaction transaction(db);
     if (!authorizeTurn(message)) {

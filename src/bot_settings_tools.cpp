@@ -45,7 +45,7 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     std::string id;
     {
         std::lock_guard lock(mutex);
-        id = taskEnvironment(bot, routing, name);
+        id = taskRouting.taskEnvironment(bot, routing, name);
     }
     auto failure = [&](std::string reason) -> Json { return {{"ready", false}, {"reason", reason}, {"settingsLink", "/settings"}}; };
     if (id.empty()) return failure("Choose a connected T3 environment");
@@ -101,7 +101,7 @@ Json Store::Impl::botSettingsTool(std::string_view bot, const Person& actor, Id 
                     {"services", config.value("services", Json::array())},
                     {"mcpServers", config.value("mcpServers", Json::array())}};
         auto ids = environments(routing);
-        if (field(routing, "environmentId").empty()) ids.merge(registeredT3Environments(bot));
+        if (field(routing, "environmentId").empty()) ids.merge(taskRouting.registeredT3Environments(bot));
         for (const auto& id : ids) {
             Json entry{{"environmentId", id}};
             if (policy.allows(bot, Action::environment_inspect, id)) entry["runTimeoutSeconds"] = environmentTimeout(bot, id, config);
@@ -112,7 +112,7 @@ Json Store::Impl::botSettingsTool(std::string_view bot, const Person& actor, Id 
     if (tool == "update_bot_settings") {
         if (!policy.allows(actor, Action::bot_settings, bot)) throw AccessDenied("Bot settings access denied");
         const auto id = argument(args, "environmentId");
-        if (taskEnvironment(bot, routing, id) != id || policy.forbidden(bot, Action::environment_configure, id))
+        if (taskRouting.taskEnvironment(bot, routing, id) != id || policy.forbidden(bot, Action::environment_configure, id))
             throw Conflict("Environment configure access required");
         if (!args.contains("runTimeoutSeconds") || !args.at("runTimeoutSeconds").is_number_integer())
             throw Conflict("Integer timeout required");

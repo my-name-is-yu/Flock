@@ -634,7 +634,7 @@ ORDER BY t.id
     while (children.next()) cancellations.emplace_back(children.number(0), children.number(1));
     for (const auto& [taskId, participation] : cancellations) {
         auto task = taskRecords.load(taskId);
-        if (!terminal(task) && task.state != TaskState::cancelling) requestCancellation(task, {participation, cutoff});
+        if (!terminal(task) && task.state != TaskState::cancelling) taskOperations.requestCancellation(task, {participation, cutoff});
     }
     auto selected = query((stopCascade + R"SQL(
 SELECT t.id,m.id,p.person_id,p.environment_id,p.thread_id
@@ -656,7 +656,7 @@ WHERE t.selected_environment_id=p.environment_id AND t.selected_thread_id=p.thre
     }
     for (const auto taskId : unassigned) {
         auto task = taskRecords.load(taskId);
-        requestCancellation(task);
+        taskOperations.requestCancellation(task);
     }
     auto approvals = query((stopCascade + R"SQL(
 UPDATE policy_approvals SET status='stale' WHERE status IN ('pending','approved') AND turn<>0
@@ -742,7 +742,7 @@ WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
                         if (task.state == TaskState::cancelling)
                             taskRecords.save(task);
                         else
-                            requestCancellation(task);
+                            taskOperations.requestCancellation(task);
                     }
                 }
             }

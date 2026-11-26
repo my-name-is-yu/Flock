@@ -90,7 +90,7 @@ void Runtime::Components::OutboxDispatch::stepDestination(const TaskData& task, 
     if (now < run.retryAt.value_or(0)) return;
     if (phase == OutboxPhase::ready) {
         std::lock_guard lock(db.mutex);
-        if (!db.projectRouteReady(id, key)) return;
+        if (!db.taskRouting.projectRouteReady(id, key)) return;
     }
     if ((phase == OutboxPhase::ready || phase == OutboxPhase::started) && !stopRequested) return deliver(task, std::move(*action));
     if (phase != OutboxPhase::accepted) return;

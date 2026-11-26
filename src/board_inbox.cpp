@@ -216,7 +216,7 @@ WHERE t.pause_id IS NOT NULL AND t.status='paused' AND m.bot_id=? ORDER BY t.pau
                 {{"requestTitle", title(request)},
                  {"request", request},
                  {"prompt", field(turns.json(3), "text")},
-                 {"allowance", p_->messageModelBudget(message).initialLimit}},
+                 {"allowance", p_->modelCalls.messageModelBudget(message).initialLimit}},
                 turns.number(4) ? turns.number(2) : 0);
         }
         auto inputs = p_->query(R"SQL(
@@ -341,7 +341,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (!paused.next()) throw DecisionUnavailable{};
         if (item.taskId || item.targetRevision || item.waitId != paused.number(0) || item.targetGeneration != paused.number(0))
             throw RequestChanged{};
-        p_->approveMessageModelCall(actor, item.botId, item.itemId, item.waitId);
+        p_->modelCalls.approveMessageModelCall(actor, item.botId, item.itemId, item.waitId);
         p_->recordInboxDecision(actor, item, decision);
     } else if (kind == pr_review || kind == pr_reconciliation) {
         if (!policy.allows(actor, Action::bot_decide, item.botId)) throw DecisionDenied{};
@@ -372,7 +372,8 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (kind == unknown_delivery)
             for (const auto* name : {"threadId", "runId", "questionId"})
                 if (data.contains(name)) args[name] = textInput(name);
-        p_->operate(actor, {item.botId, item.taskId, item.waitId, item.targetRevision, item.targetGeneration}, decision, args, 0, kind);
+        p_->taskOperations.operate(actor, {item.botId, item.taskId, item.waitId, item.targetRevision, item.targetGeneration}, decision,
+                                   args, 0, kind);
     }
     transaction.commit();
 }
