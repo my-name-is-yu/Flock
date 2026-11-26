@@ -513,10 +513,10 @@ function menuPopover(bot) {
       selectBot(bot.id);
       void decisions.openHistory(sidebar.querySelector(`[data-focus="${CSS.escape(`menu:${bot.id}`)}"]`));
     }],
-    ['Open settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
+    ['Settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
   if (bot.canDelete) {
-    actions.push([bot.paused ? 'Resume' : 'Pause…', bot.paused ? sidebarIcons.resume : sidebarIcons.pause, () => {
+    actions.push([bot.paused ? 'Resume…' : 'Pause…', bot.paused ? sidebarIcons.resume : sidebarIcons.pause, () => {
       closeMenu();
       botPause.open(bot, () => focusKey(`menu:${bot.id}`));
     }]);
@@ -532,7 +532,7 @@ function menuPopover(bot) {
   };
   list.append(...actions.map(menuItem));
   if (bot.canDelete) {
-    const remove = menuItem(['Delete', sidebarIcons.trash, () => {
+    const remove = menuItem(['Delete…', sidebarIcons.trash, () => {
       closeMenu();
       botDeletion.open(bots.find(({ id }) => id === bot.id), document.activeElement);
     }], actions.length);
@@ -2782,7 +2782,7 @@ function generalContent(bot) {
   rows.append(settings);
   const activity = settingsRow('Bot activity', bot.paused ? 'Paused' : 'Active');
   if (bot.canDelete) {
-    const pause = button(bot.paused ? 'Resume' : 'Pause', 'dialog-button quiet',
+    const pause = button(bot.paused ? 'Resume…' : 'Pause…', 'dialog-button quiet',
       () => botPause.open(bot, () => byId('bot-pause-setting')?.focus({ preventScroll: true })));
     pause.id = 'bot-pause-setting';
     pause.setAttribute('aria-haspopup', 'dialog');
@@ -2790,7 +2790,7 @@ function generalContent(bot) {
   }
   rows.append(activity);
   if (bot.canDelete) {
-    const remove = button('Delete', 'settings-row danger', (event) => botDeletion.open(bot, event.currentTarget));
+    const remove = button('Delete…', 'settings-row danger', (event) => botDeletion.open(bot, event.currentTarget));
     remove.id = 'delete-bot-settings';
     remove.setAttribute('aria-haspopup', 'dialog');
     rows.append(remove);

@@ -62,7 +62,7 @@ async function exercise() {
   message.value = 'Draft for after resume';
   message.dispatchEvent(new Event('input'));
   $('#profile-avatar-button').click();
-  check(settings.open && pauseSetting().textContent === 'Pause', 'The owner could not find Pause in settings');
+  check(settings.open && pauseSetting().textContent === 'Pause…', 'The owner could not find Pause in settings');
   pauseSetting().click();
   check(confirmation.open && $('#bot-pause-title').textContent === 'Pause Release?', 'Pause did not confirm the Bot');
   $('#bot-pause-cancel').click();
@@ -70,7 +70,7 @@ async function exercise() {
   await new Promise(resolve => setTimeout(resolve, 20));
   pauseSetting().click();
   $('#bot-pause-confirm').click();
-  await waitFor(() => !confirmation.open && pauseSetting().textContent === 'Resume', 'Settings did not switch to Resume');
+  await waitFor(() => !confirmation.open && pauseSetting().textContent === 'Resume…', 'Settings did not switch to Resume');
   check(pauseChanges.length === 1 && pauseChanges[0].botId === 'release' && pauseChanges[0].paused === true,
     'Settings did not pause the selected Bot');
   $('#close-detail').click();
@@ -90,7 +90,7 @@ async function exercise() {
   $('#bot-pause-confirm').click();
   await waitFor(() => !confirmation.open && !pauseBanner.hidden, 'The Bot menu could not pause');
   menu.click();
-  menuItems().find(item => item.textContent === 'Resume').click();
+  menuItems().find(item => item.textContent === 'Resume…').click();
   $('#bot-pause-confirm').click();
   await waitFor(() => !confirmation.open && pauseBanner.hidden, 'The Bot menu could not resume');
 
@@ -98,7 +98,7 @@ async function exercise() {
   await waitFor(() => !pauseBanner.hidden, 'A paused Bot still showed its composer to a member');
   check(resume.hidden, 'A member could resume from the composer');
   menu.click();
-  check(menuItems().every(item => !['Pause…', 'Resume'].includes(item.textContent)), 'A member could manage pause from the menu');
+  check(menuItems().every(item => !['Pause…', 'Resume…'].includes(item.textContent)), 'A member could manage pause from the menu');
   menu.click();
   $('#profile-avatar-button').click();
   check(settings.open && !pauseSetting(), 'A member could manage pause from settings');
