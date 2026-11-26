@@ -1,3 +1,4 @@
+#include "flock/soul_loader.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
@@ -4193,7 +4194,7 @@ void existingAutomationUsesLiveMemorySharing() {
     RuntimeOptions options{[&] { return f.now; }};
     options.intake = [&](std::string_view, std::string_view) { return f.routing(); };
     f.runtime.reset();
-    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, Runtime::SoulLoader{}, options);
+    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, SoulLoader{}, options);
 
     f.now = schedule.at("nextRunAt");
     Automations(*f.store).fireDueAutomations(f.now);
@@ -4221,7 +4222,7 @@ void privateMemoryStaysInFlockByDefault() {
         return f.routing();
     };
     f.runtime.reset();
-    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, Runtime::SoulLoader{}, options);
+    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, SoulLoader{}, options);
     routing.config["shareMemoryWithSessions"] = true;
     f.reach(TaskIntake(*f.store).submit(routing), "running");
     check(f.t3.sent.size() == 2 && f.t3.sent.back().instruction.find("Private convention") == std::string::npos,

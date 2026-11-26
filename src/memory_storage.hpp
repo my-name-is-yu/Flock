@@ -1,10 +1,10 @@
 #pragma once
 
+#include "flock/soul_loader.hpp"
 #include "flock/store_options.hpp"
 #include "flock/json.hpp"
 #include "flock/types.hpp"
 
-#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -30,7 +30,7 @@ class MemoryStorage {
 public:
     MemoryStorage(Database&, const SecretStorage&, Policy&, ConversationStorage&, MemorySeed);
 
-    BotNotes loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>& soul, Seconds now);
+    BotNotes loadNotes(std::string_view bot, const SoulLoader& soul, Seconds now);
     std::optional<SessionMemory> sessionMemory(const Command&, Seconds now);
     Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&, Seconds now, bool fromBot = false);
     bool canReviewPreference(const conversation::Message&);

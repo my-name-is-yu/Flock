@@ -1,3 +1,4 @@
+#include "flock/soul_loader.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
@@ -319,7 +320,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
     options.intake = intake;
-    const Runtime::SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
+    const SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
     options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store, *model, *t3, soul, options);

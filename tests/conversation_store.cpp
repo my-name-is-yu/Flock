@@ -1,3 +1,4 @@
+#include "flock/soul_loader.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
@@ -180,7 +181,7 @@ struct SimulatedT3 : T3 {
 struct RuntimeFixture {
     ScriptedModel model;
     SimulatedT3 t3;
-    Runtime::SoulLoader notes = [](std::string_view) { return std::string{}; };
+    SoulLoader notes = [](std::string_view) { return std::string{}; };
     Seconds now = 100;
     Runtime runtime;
 
