@@ -278,7 +278,7 @@ function editChannel(type, entry = {}) {
     return result;
   };
   if (channels.hostManaged) {
-    openEditor(title, 'The Flock host manages these bridge settings.',
+    openEditor(title, 'These bridge settings are set on the computer running Flock.',
       entriesList(entries, (bridge) => `Local port ${bridge.port}`,
         {test, status: (bridge) => ({...bridgeStatus(bridge), hostManaged: true})}), checkResult);
     return;
@@ -311,7 +311,7 @@ function editChannel(type, entry = {}) {
     if (credential) body.credential = credential;
     return saveInstallation('channels', body);
   }, actions);
-  openEditor(title, 'Register a bridge running on the Flock host. Choose which Bot replies from its Access page.',
+  openEditor(title, 'Register a bridge on the computer running Flock. Choose which Bot replies from its Access page.',
     list, checkResult, form);
 }
 
@@ -338,7 +338,7 @@ function editMachines(entry = {}) {
     settingField('personId', 'Owner’s person ID', {required: true, value: entry.personId, placeholder: 'local-owner'}),
   ], editing ? 'Save machine' : 'Add machine', ({id, personId}) =>
     saveInstallation('channels', {action: 'saveMachine', id: id.trim(), personId: personId.trim()}));
-  openEditor('Local machines', 'Register the Flock host for approved requests to read local files.', list, form);
+  openEditor('Local machines', 'Let approved requests read files on the computer running Flock.', list, form);
 }
 
 function editChannelOptions() {
@@ -381,7 +381,7 @@ function registeredEntry(entry) {
 function editMcp(entry = {}) {
   const {hostManaged, mcpServers} = installation.connections.tools;
   if (hostManaged) {
-    openEditor('MCP servers', 'The Flock host manages these shared connections.', entriesList(mcpServers, (server) => server.url));
+    openEditor('MCP servers', 'These shared connections are set on the computer running Flock.', entriesList(mcpServers, (server) => server.url));
     return;
   }
   const editing = Boolean(entry.id);
@@ -414,7 +414,7 @@ function editSkill(entry = {}) {
   const {hostManaged, skills} = installation.connections.tools;
   const skillLabel = (skill) => `${skill.path}${skill.available === false ? ' · Folder unavailable' : ''}`;
   if (hostManaged) {
-    openEditor('Skills', 'The Flock host manages these skill folders.', entriesList(skills, skillLabel));
+    openEditor('Skills', 'These skill folders are set on the computer running Flock.', entriesList(skills, skillLabel));
     return;
   }
   const editing = Boolean(entry.id);
@@ -432,7 +432,7 @@ function editSkill(entry = {}) {
     settingField('path', 'Skill folder', {required: true, value: entry.path, placeholder: 'writing'}),
   ], editing ? 'Save skill' : 'Add skill', ({id, path}) =>
     saveInstallation('tools', {action: 'saveSkill', id: id.trim(), path: path.trim()}));
-  openEditor('Skills', 'Register an existing skill folder from the Flock host’s managed skills directory.', list, form);
+  openEditor('Skills', 'Register a skill folder from the managed skills directory on the computer running Flock.', list, form);
 }
 
 function renderIntegrations(connections) {
@@ -456,7 +456,7 @@ function renderIntegrations(connections) {
       const checked = bridges.some((bridge) => bridge.reachable === false) ? false
         : configured && bridges.every((bridge) => bridge.reachable === true) ? true : undefined;
       const description = type === 'slack' ? 'Connect a workspace through its local bridge.'
-        : 'Connect Messages through a bridge on the Flock host.';
+        : 'Connect Messages through a bridge on the computer running Flock.';
       connectionRow('integrations', name, description, {
         configured, checked, checkedLabel: bridges.length > 1 ? 'Bridges reachable' : 'Bridge reachable',
         checkedAt: bridges.length === 1 ? bridges[0].checkedAt : undefined,
@@ -467,7 +467,7 @@ function renderIntegrations(connections) {
     }
     const viewMachines = !hostManaged && canManageHost || channels.localMachines.length > 0;
     connectionRow('integrations', 'Local machines', canManageHost
-      ? 'Manage hosts that can receive requests for local files.'
+      ? 'Computers where approved requests can read local files.'
       : 'The installation owner manages access to local machines.', {
       configured: channels.localMachines.length > 0, pending: channels.localMachinesPending,
       hostManaged, readOnly: hostManaged || !canManageHost, manage: viewMachines ? editMachines : null,
@@ -486,7 +486,7 @@ function renderIntegrations(connections) {
       configured: tools.mcpServers.length > 0, pending: tools.mcpPending, hostManaged, readOnly: hostManaged,
       manage: !hostManaged || tools.mcpServers.length ? editMcp : null,
     });
-    connectionRow('tools', 'Skills', 'Reusable instructions available on the Flock host.', {
+    connectionRow('tools', 'Skills', 'Reusable instructions on the computer running Flock.', {
       configured: tools.skills.length > 0, pending: tools.skillsPending, hostManaged, readOnly: hostManaged,
       manage: !hostManaged || tools.skills.length ? editSkill : null,
     });
