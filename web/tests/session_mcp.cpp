@@ -564,7 +564,7 @@ void sessionInvitations() {
             {"release", "Release Bot"}, {"triage", "Triage Bot"}, {"settings", "Settings Bot"}, {"specialist", "Specialist Bot"}};
         return {std::string(bot), std::string(request), "env-1", "bot-project", {{"botDisplayName", names.at(bot)}}};
     };
-    for (const auto* bot : {"release", "triage", "settings", "specialist", "broken"}) store.policy().setMember(alice, bot, bob.id, true);
+    for (const auto* bot : {"release", "triage", "settings", "specialist", "broken"}) Policy{store}.setMember(alice, bot, bob.id, true);
     const auto token = T3Connections(store).connect("env-1", bob.id, 4173);
     const auto server = startWeb(store, 0, cb);
     Mcp mcp(*server, token);
@@ -578,7 +578,7 @@ void sessionInvitations() {
                                  },
                                  .intake = cb.intake};
     auto runtime = std::make_unique<Runtime>(store, model, t3, soul, options);
-    store.policy().setMode(alice, "supervised");
+    Policy{store}.setMode(alice, "supervised");
     const auto ask =
         mcp.call("flock_ask",
                  {{"bot", "release"}, {"threadId", "thread"}, {"requestId", "invite-chain"}, {"text", "Invite a Bot to review staging."}});
@@ -663,9 +663,9 @@ void sessionInvitations() {
     reject("forbidden", "unknown", "Bot access is required");
     reject("not-allowlisted", "settings", "The destination Bot is unavailable or not allowed");
     const auto read = Resource::sessionRead("env-1", "thread");
-    store.policy().changeNeverRule(alice, read.action, read.target, true);
+    Policy{store}.changeNeverRule(alice, read.action, read.target, true);
     reject("restricted-title", "triage", "This Session is unavailable through your T3 connection");
-    store.policy().changeNeverRule(alice, read.action, read.target, false);
+    Policy{store}.changeNeverRule(alice, read.action, read.target, false);
     reject("bad-intake", "broken", "The invited Bot is unavailable");
     model.thread = "unrelated";
     reject("unrelated", "triage", "Invite a Bot into a Session you participate in or launched");
@@ -837,7 +837,7 @@ void slowProbeAndStoppedApproval() {
     cb.sessionT3 = &t3;
     const auto server = startWeb(store, 0, cb);
     Mcp mcp(*server, token);
-    store.policy().setMode(localOwner, "supervised");
+    Policy{store}.setMode(localOwner, "supervised");
     mcp.call("flock_ask", {{"bot", "release"}, {"threadId", "thread"}, {"requestId", "healthy"}, {"text", "Check staging."}})
         .at("structuredContent");
     AskModel model;
@@ -1059,7 +1059,7 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
         return store;
     };
     auto db = makeStore();
-    db->policy().setMember(alice, "release", bob.id, true);
+    Policy{*db}.setMember(alice, "release", bob.id, true);
     const auto token = T3Connections(*db).connect("env-1", bob.id, 4173);
 
     auto cb = callbacks();
@@ -1124,7 +1124,7 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
     AskModel model;
     const auto soul = [](std::string_view) { return std::string{}; };
     auto runtime = std::make_unique<Runtime>(*db, model, *t3, soul);
-    db->policy().setMode(alice, "supervised");
+    Policy{*db}.setMode(alice, "supervised");
     runtime->runConversations();
     check(model.asks == 1 && model.origin == sessionOrigin, "Ask did not start an ordinary Bot turn with the Session origin");
     const auto approval = Inbox(*db).inbox(bob).at(0);
@@ -1145,7 +1145,7 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
                                    {"clientRequestId", action}},
           "The Bot's reply did not use the named, idempotent Session queue path");
 
-    db->policy().setMode(alice, "full");
+    Policy{*db}.setMode(alice, "full");
     configure({{"differentWaitRun", true}, {"personFinished", true}});
     runtime->runConversations();
     check(model.wakes == 0, "The person's Run caused the Bot to wake");
@@ -1377,7 +1377,7 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
         if (bot == "release") return {{"Triage", {"triage", "", "env-1", "peer-project", Json::object()}}};
         return {};
     }};
-    db->policy().setMode(localOwner, "full");
+    Policy{*db}.setMode(localOwner, "full");
     const auto token = T3Connections(*db).connect("env-1", localOwner.id, 4173);
     auto server = startWeb(*db, 0, cb);
     const auto soul = [](std::string_view) { return std::string{}; };

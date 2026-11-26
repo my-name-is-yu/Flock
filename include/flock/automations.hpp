@@ -2,7 +2,6 @@
 
 #include "flock/json.hpp"
 #include "flock/types.hpp"
-#include "flock/policy.hpp"
 #include <functional>
 #include <string>
 #include <string_view>
@@ -13,6 +12,7 @@ class Store;
 class AutomationStorage;
 class BotLifecycleStorage;
 class Database;
+class Policy;
 class SecretStorage;
 class TaskOperations;
 struct ConfiguredSchedule;
@@ -41,6 +41,6 @@ private:
     const BotLifecycleStorage& lifecycle_;
     const SecretStorage& secrets_;
     TaskOperations& tasks_;
-    Policy policy_;
+    const Policy& policy_;
 };
 }

@@ -21,7 +21,7 @@ namespace flockv0::http_test {
 void boardInboxEndpoints(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"owner", true};
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setMember(owner, "release", "reviewer", true);
     policy.setMember(owner, "release", "reader", true);
     const auto release = Tasks(store).submit({"release", "Draft notes", "local-env", "release"});

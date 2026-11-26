@@ -93,7 +93,7 @@ struct Adapter : T3 {
 
 void rules(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     const auto asks = {Action::repository_write, Action::repository_pr, Action::repository_review,  Action::repository_issues,
                        Action::channel_post,     Action::email_send,    Action::environment_launch, Action::t3_send,
                        Action::bot_create,       Action::bot_rename,    Action::automation_change,  Action::destructive_write,
@@ -128,12 +128,12 @@ void reopen(const std::filesystem::path& path) {
     Id oldMessage;
     {
         Store store(path);
-        store.policy().setOwner(requester, "release");
-        store.policy().changeNeverRule(localOwner, Action::repository_read, "github.com/example/private", true);
+        Policy{store}.setOwner(requester, "release");
+        Policy{store}.changeNeverRule(localOwner, Action::repository_read, "github.com/example/private", true);
         oldMessage = Conversations(store).receive(requester, intake, "existing", "Existing turn").at("messageId");
     }
     Store reopened(path);
-    auto policy = reopened.policy();
+    Policy policy{reopened};
     check(policy.mode() == "full" && policy.forbidden("release", Action::repository_read, "github.com/example/private"),
           "Reopening lost settings or Never rules");
     policy.setMode(localOwner, "supervised");
@@ -156,8 +156,8 @@ void reopenDirectTask(const std::filesystem::path& path) {
     Id task;
     {
         Store store(path);
-        store.policy().setOwner(requester, "release");
-        store.policy().setMode(localOwner, "supervised");
+        Policy{store}.setOwner(requester, "release");
+        Policy{store}.setMode(localOwner, "supervised");
         Memory(store).memory(requester, "release", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the old signing process."}});
         task = Tasks(store).submit({"release", "Build the release", "env", "project", {{"shareMemoryWithSessions", true}}}, &requester);
     }
@@ -182,7 +182,7 @@ void reopenDirectTask(const std::filesystem::path& path) {
 
 void turns(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setOwner(requester, "release");
     policy.setOwner(requester, "target");
     policy.setMember(requester, "release", member.id, true);
@@ -312,7 +312,7 @@ void turns(const std::filesystem::path& path) {
 
 void downstreamApproval(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setMode(localOwner, "supervised");
     policy.changeRule(localOwner, RuleKind::ask, Action::shared_memory_write, "shared-playbook", true);
     policy.changeRule(localOwner, RuleKind::ask, Action::private_memory_write, "release", true);
@@ -351,7 +351,7 @@ void downstreamApproval(const std::filesystem::path& path) {
 
 void scheduled(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setOwner(requester, "release");
     policy.setMode(localOwner, "supervised");
     Seconds now = 1'800'000'000;
@@ -421,7 +421,7 @@ void scheduled(const std::filesystem::path& path) {
 
 void channel(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setOwner(requester, "release");
     policy.setMember(requester, "release", member.id, true);
     policy.setMode(localOwner, "supervised");
@@ -490,7 +490,7 @@ void channel(const std::filesystem::path& path) {
 
 void stopRequesterDecidesCurrentStopApproval(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setMode(localOwner, "supervised");
     const Person stopRequester{"stop-requester"};
     policy.setMember(localOwner, "release", stopRequester.id, true);
@@ -565,7 +565,7 @@ VALUES('run-stop/stop-request-1','release','t3_send','cloud:thread','fixture','S
 
 void secrets(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setOwner(requester, "release");
     policy.setMode(localOwner, "supervised");
     const SecretRef secret{"deployment-token"};

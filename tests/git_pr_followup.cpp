@@ -135,7 +135,7 @@ struct Fixture {
         auto request = intake();
         host->result["state"] = "open";
         if (!fixPullRequests) request.config["fixPullRequests"] = false;
-        store.policy().setOwner(testRequester, request.botId);
+        Policy{store}.setOwner(testRequester, request.botId);
         T3Connections connections(store);
         const auto bearer = connections.connect("sandbox", testRequester.id, 48123);
         if (fromSession) {
@@ -307,7 +307,7 @@ void checksAgainBeforeSending() {
 
 void waitsForSupervisedApproval() {
     Fixture f;
-    f.store.policy().setMode(localOwner, "supervised");
+    Policy{f.store}.setMode(localOwner, "supervised");
     f.notify(review("supervised-review"));
     const auto inbox = Inbox(f.store).inbox(testRequester, "owner");
     const auto card = std::ranges::find_if(inbox, [](const auto& row) { return row.at("itemKind") == "policy_approval"; });
@@ -326,7 +326,7 @@ void waitsForSupervisedApproval() {
 }
 void rejectsStaleSupervisedApproval(bool disconnect) {
     Fixture f;
-    f.store.policy().setMode(localOwner, "supervised");
+    Policy{f.store}.setMode(localOwner, "supervised");
     f.notify(failure("waiting"));
     const auto inbox = Inbox(f.store).inbox(testRequester, "owner");
     const auto card = std::ranges::find_if(inbox, [](const auto& row) { return row.at("itemKind") == "policy_approval"; });

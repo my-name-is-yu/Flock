@@ -202,7 +202,7 @@ Json callSessionTool(Store& store, const WebCallbacks& callbacks, const T3Connec
         auto rows = Json::array();
         for (const auto& bot : bots) {
             const auto botId = bot.value("id", std::string{});
-            if (!names.contains(botId) || !store.policy().allows(actor, Action::bot_decide, botId)) continue;
+            if (!names.contains(botId) || !Policy{store}.allows(actor, Action::bot_decide, botId)) continue;
             try {
                 if (callbacks.intake(botId, "").botId != botId) continue;
             } catch (const std::exception&) {

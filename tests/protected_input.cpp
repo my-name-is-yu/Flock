@@ -99,7 +99,7 @@ struct RunningAdapter : Adapter {
 
 void runningSessions(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     WorkModel model;
     RunningAdapter adapter;
     RuntimeOptions options;
@@ -129,7 +129,7 @@ void runningSessions(const std::filesystem::path& path) {
         policy.executeSessionResource(
             "env", adapter.running.at("Ernest"), readRepo,
             [&] {
-                authority.policy().changeNeverRule(owner, readRepo.action, readRepo.target, true);
+                Policy{authority}.changeNeverRule(owner, readRepo.action, readRepo.target, true);
                 return true;
             },
             [&](Id) { completed.push_back("denied"); });
@@ -141,7 +141,7 @@ void runningSessions(const std::filesystem::path& path) {
 
 void policyRules(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     check(policy.mode() == "full" && policy.rules().empty(), "fresh installation is not Full");
     check(policy.check("Ernest", readRepo.action, readRepo.target) == PolicyResult::allow, "Full denied a read");
     policy.changeNeverRule(owner, readRepo.action, readRepo.target, true);
@@ -155,7 +155,7 @@ void policyRules(const std::filesystem::path& path) {
           "exact or wildcard matching failed");
     policy.changeNeverRule(owner, readRepo.action, readRepo.target, false);
     Store reopened(path);
-    check(reopened.policy().rules().size() == 1 && reopened.policy().allows("Ernest", readRepo), "rule changes were not persisted");
+    check(Policy{reopened}.rules().size() == 1 && Policy{reopened}.allows("Ernest", readRepo), "rule changes were not persisted");
     denied([&] { policy.changeNeverRule(admin, readRepo.action, readRepo.target, true); });
 
     policy.setOwner(admin, "Ernest");
@@ -179,7 +179,7 @@ void freshLaunch(const std::filesystem::path& path) {
     WorkModel model;
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; });
     auto task = Tasks(store).submit({"Fresh", "read repository", "env", "project"});
-    store.policy().changeNeverRule(owner, Action::environment_launch, "env", true);
+    Policy{store}.changeNeverRule(owner, Action::environment_launch, "env", true);
     for (int i = 0; i < 6; ++i) runtime.tick();
     check(adapter.running.empty() && taskJson(Tasks(store).task(task)).at("wait").at("reason") == "settings",
           "pending launch permission reached T3");
@@ -188,18 +188,18 @@ void freshLaunch(const std::filesystem::path& path) {
 void freshPendingSecretRequests(const std::filesystem::path& path) {
     check(!std::filesystem::exists(path), "secret schema fixture must start with a fresh database");
     Store left(path), right(path);
-    auto policy = left.policy();
+    Policy policy{left};
     check(policy.botSettings(owner, "Ernest").at("secretInputs").empty(), "fresh protected input table is not empty");
     const SecretRef ref{"fixture-token"};
     std::barrier start(2);
     auto request = [&](Store& store) {
         start.arrive_and_wait();
-        return store.policy().requestSecret("Ernest", ref);
+        return Policy{store}.requestSecret("Ernest", ref);
     };
     auto other = std::async(std::launch::async, request, std::ref(right));
     const auto id = request(left);
     check(id == other.get(), "repeated secret request returned a different ID");
-    check(right.policy().requestSecret("Reviewer", ref) != id, "pending secret uniqueness crossed Bot boundaries");
+    check(Policy{right}.requestSecret("Reviewer", ref) != id, "pending secret uniqueness crossed Bot boundaries");
     denied([&] { policy.submitSecret(owner, "Ernest", id, "nest"); });
     policy.submitSecret(owner, "Ernest", id, credential);
     check(policy.botSettings(owner, "Ernest").at("secretInputs") ==
@@ -212,7 +212,7 @@ void freshPendingSecretRequests(const std::filesystem::path& path) {
 void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool publish, bool failReplay = false) {
     const Person creator{"creator", false};
     Store store(path);
-    store.policy().setOwner(creator, "Ernest");
+    Policy{store}.setOwner(creator, "Ernest");
     ToolModel model;
     Adapter t3;
     RuntimeOptions options;
@@ -251,7 +251,7 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool p
     Conversations(store).receive(creator, Intake{"Ernest", "", "env", "project"}, "create", "Create a Bot");
     run(store);
     check(model.result.is_null() && attempts == 1, "Uncertain creation saved a terminal tool result");
-    check(!store.policy().allows(creator, Action::bot_settings, "NewBot"), "Interrupted creation finalized ownership prematurely");
+    check(!Policy{store}.allows(creator, Action::bot_settings, "NewBot"), "Interrupted creation finalized ownership prematurely");
     Store restarted(path);
     run(restarted);
     check(attempts == 1, "Retry ran before the scheduled time");
@@ -268,7 +268,7 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool p
     }
     if (!publish) {
         check(model.result.at("turn").back().at("result").at("ok") == false, "Retry exhaustion did not produce a tool error");
-        check(!restarted.policy().allows(creator, Action::bot_settings, "NewBot"), "Unpublished creation granted ownership");
+        check(!Policy{restarted}.allows(creator, Action::bot_settings, "NewBot"), "Unpublished creation granted ownership");
         appliedKey.clear();
         failing = false;
         model.next = {"request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "NewBot"}, {"name", "New Bot"}}, {}};
@@ -277,14 +277,14 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool p
     }
     check(!publishedKey.empty() && model.result.at("turn").back().at("result").at("status") == "applied",
           "Creation did not produce a successful tool result");
-    check(restarted.policy().allows(creator, Action::bot_settings, "NewBot"),
+    check(Policy{restarted}.allows(creator, Action::bot_settings, "NewBot"),
           "Creation did not finalize ownership for the original creator");
 }
 
 void exercise(const std::filesystem::path& dir) {
     auto path = dir / "state.db";
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     Intake ernest{"Ernest", "read", "env", "project"}, reviewer{"Reviewer", "review", "env", "project"};
     auto child = Tasks(store).submit(ernest), peerChild = Tasks(store).submit(reviewer);
     ToolModel model;

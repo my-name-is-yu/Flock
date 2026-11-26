@@ -110,7 +110,7 @@ const Json& lastResult(const ModelInput& input) {
 
 void memoryFlow(const std::filesystem::path& db) {
     Store store(db, [](std::string_view id) { return id == "alpha" ? "Prefer CSV.\n" : "Beta private."; });
-    auto policy = store.policy();
+    Policy policy{store};
     const std::string path = "team/staging.md";
 
     Adapter adapter;
@@ -318,7 +318,7 @@ void proactiveMemory(const std::filesystem::path& db) {
               notices().size() == 1,
           "A preference missing from the person's message changed memory");
 
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setMode(owner, "supervised");
     policy.changeRule(owner, RuleKind::ask, Action::private_memory_write, alpha.botId, true);
     send("correction", correction, remember(1, corrected, "Use Markdown for release notes.", correction));
@@ -355,7 +355,7 @@ void proactiveMemory(const std::filesystem::path& db) {
 
 void unavailablePreferenceReviewStillReplies(const std::filesystem::path& db) {
     Store store(db, [](auto) { return "Prefer CSV."; });
-    auto policy = store.policy();
+    Policy policy{store};
     policy.submitSecret(owner, alpha.botId, policy.requestSecret(alpha.botId, {"fixture-token"}), "memory");
     Script model;
     Adapter adapter;
@@ -377,7 +377,7 @@ void unavailablePreferenceReviewStillReplies(const std::filesystem::path& db) {
 
 void memoryRedactionLimit(const std::filesystem::path& db) {
     Store store(db, [](auto) { return "Original"; });
-    auto policy = store.policy();
+    Policy policy{store};
     const auto secret = policy.requestSecret(alpha.botId, {"short-fixture-value"});
     policy.submitSecret(owner, alpha.botId, secret, "z9q7");
 
@@ -563,7 +563,7 @@ void isolatedFirings(const std::filesystem::path& db) {
     };
     const auto invalid = reminder({"broken", "", "env", "protected-destination"});
     const auto regular = reminder(beta);
-    auto policy = store.policy();
+    Policy policy{store};
     const auto secret = policy.requestSecret("broken", {"deployment-token"});
     policy.submitSecret(owner, "broken", secret, "protected-destination");
     Automations(store).fireDueAutomations(now);
@@ -632,7 +632,7 @@ void webhookPolicy(const std::filesystem::path& db) {
     Json alphaReceipt;
     {
         Store store(db);
-        auto policy = store.policy();
+        Policy policy{store};
         policy.setMember(owner, "alpha", sender.id, true);
         policy.setMember(owner, "beta", other.id, true);
         policy.submitSecret(owner, "beta", policy.requestSecret("beta", {"webhook-secret"}), "fixture-webhook-token");
@@ -667,7 +667,7 @@ void pausedWebhookFanout(const std::filesystem::path& db) {
     Json activeReceipts;
     {
         Store store(db);
-        store.policy().setMember(owner, alpha.botId, sender.id, true);
+        Policy{store}.setMember(owner, alpha.botId, sender.id, true);
         Automations(store).createAutomation(owner, alpha, trigger, now);
         Automations(store).createAutomation(owner, beta, trigger, now);
         store.setBotPaused(owner, alpha.botId, true);
@@ -709,7 +709,7 @@ void webhookMatchesRawPublicFields(const std::filesystem::path& db) {
     };
     const auto marker = trigger("[redacted]");
     trigger(secret);
-    auto policy = store.policy();
+    Policy policy{store};
     const auto request = policy.requestSecret(alpha.botId, {"status-token"});
     policy.submitSecret(owner, alpha.botId, request, secret);
 
@@ -739,7 +739,7 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
     const auto publicId = Automations(store)
                               .createAutomation(owner, alpha, {{"kind", "trigger"}, {"source", source}, {"request", "Check " + token}}, now)
                               .at("id");
-    auto policy = store.policy();
+    Policy policy{store};
     policy.submitSecret(owner, beta.botId, policy.requestSecret(beta.botId, {"source-token"}), source);
     policy.submitSecret(owner, beta.botId, policy.requestSecret(beta.botId, {"request-token"}), token);
 
@@ -789,7 +789,7 @@ void webhookEventIdsStayPrivate(const std::filesystem::path& db) {
     Store store(db);
     const auto now = utc(2026, 1, 1);
     const Person sender{"sender", false};
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setMember(owner, alpha.botId, sender.id, true);
     const Json trigger{{"kind", "trigger"}, {"source", "deploy"}, {"request", "Check deployment"}};
     Automations(store).createAutomation(owner, alpha, trigger, now);

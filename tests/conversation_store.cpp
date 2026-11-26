@@ -395,7 +395,7 @@ void protectedArgumentKeyCannotReachTaskIntake() {
     Store store(fixture.database());
     RuntimeFixture execution(store);
     const std::string marker = "protected-top-level-key-fixture";
-    auto policy = store.policy();
+    Policy policy{store};
     policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"fixture"}), marker);
     Json observed;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
@@ -416,7 +416,7 @@ void rejectedSessionReadStillAllowsAnOrdinaryReply() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    auto policy = store.policy();
+    Policy policy{store};
     policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"fixture"}), "text");
     bool rejected = false;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
@@ -446,7 +446,7 @@ void savedCallsAreCheckedBeforeExecution() {
     const auto protectedMessage = receive(store, "saved-protected", "Write my workspace file.");
     save(protectedMessage,
          {"workspace_write_file", {{"path", protectedPath}, {"text", "Fixture data"}}, "Saved before the path was protected"});
-    auto access = store.policy();
+    Policy access{store};
     access.submitSecret(localOwner, "alpha", access.requestSecret("alpha", {"replay-fixture"}), protectedPath);
     const auto taskId = task(store, "Prepare repository evidence");
     const auto inFlight = receive(store, "saved-git-effect", "Comment on the issue.");

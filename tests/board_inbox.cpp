@@ -213,7 +213,7 @@ void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store concurrent(path);
     Database db(path);
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setMember(owner, "report", alice.id, true);
     policy.setMember(owner, "review", alice.id, true);
     policy.setMember(owner, "review", bob.id, true);
@@ -438,7 +438,7 @@ SELECT )SQL" +
 
 void protectedInputSource(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     const SecretRef ref{"report-credential"};
     const auto routing = intake("report", "Prepare the report", "question");
     const auto request = policy.requestSecret("report", ref);
@@ -454,7 +454,7 @@ void protectedInputSource(const std::filesystem::path& path) {
 
 void chatDecision(const std::filesystem::path& path) {
     Store store(path);
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setMember(owner, "report", alice.id, true);
     const auto routing = intake("report", "Prepare the report", "question");
     const auto taskId = Tasks(store).submit(routing);

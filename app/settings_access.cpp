@@ -139,14 +139,14 @@ SettingsAccess::SettingsAccess(Store& store, const std::filesystem::path&, const
         Transaction transaction(db.db);
         if (accessMode(db) == Mode::managed) throw Conflict("Remove the external Web identity file setting to use managed users");
         external_ = loadIdentities(store_, externalFile);
-        store_.policy().requireWebIdentity();
+        Policy{store_}.requireWebIdentity();
         transaction.commit();
     }
     WebIdentity(store_).setWebIdentityResolver(identities().resolveRoot, !external_.authenticate);
 }
 
 bool SettingsAccess::canManageInstallation(const Person& actor) const {
-    if (!store_.policy().allows(actor, Action::rules_manage, "installation")) return false;
+    if (!Policy{store_}.allows(actor, Action::rules_manage, "installation")) return false;
     // Host-managed identities authenticate a specific credential. The
     // conservative per-person resolver applies to queued work.
     return external_.authenticate || resolve(store_, actor.id).value_or(false);

@@ -357,8 +357,8 @@ void peerCompletion(const std::optional<std::string>& peerUrl, const Json& expec
         if (person == requester) return false;
         return std::nullopt;
     });
-    store.policy().setMember(localOwner, "release", requester, true);
-    store.policy().setMember(localOwner, "triage", requester, true);
+    Policy{store}.setMember(localOwner, "release", requester, true);
+    Policy{store}.setMember(localOwner, "triage", requester, true);
     const auto token = ExternalMcp(store).connect(requester, {"release"}).bearerToken;
     const auto cb = callbacks();
     const auto server = startWeb(store, 0, cb);
@@ -391,12 +391,12 @@ void peerCompletion(const std::optional<std::string>& peerUrl, const Json& expec
           "Peer completion did not use the saved result Session and URL");
     if (!expectedLink.is_null()) {
         const auto target = Resource::sessionRead("linked env", "thread-triage").target;
-        store.policy().changeNeverRule(localOwner, Action::session_read, target, true);
+        Policy{store}.changeNeverRule(localOwner, Action::session_read, target, true);
         const auto revoked = mcp.success(statusTool, task);
         check(revoked.at("result") == status.at("result") && revoked.at("sessionLink").is_null(),
               "A completed task exposed a peer Session link after access was revoked");
-        store.policy().changeNeverRule(localOwner, Action::session_read, target, false);
-        store.policy().setMember(localOwner, "triage", requester, false);
+        Policy{store}.changeNeverRule(localOwner, Action::session_read, target, false);
+        Policy{store}.setMember(localOwner, "triage", requester, false);
         const auto hidden = mcp.success(statusTool, task);
         check(hidden.at("result") == status.at("result") && hidden.at("sessionLink").is_null(),
               "A completed task exposed a Session link from a Bot the requester can no longer view");

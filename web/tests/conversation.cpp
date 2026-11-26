@@ -271,8 +271,8 @@ void tick(Runtime& runtime, int count) {
 void botPauseEndpoints(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"owner", false};
-    store.policy().setOwner(owner, "release");
-    store.policy().setMember(owner, "release", "reader", true);
+    Policy{store}.setOwner(owner, "release");
+    Policy{store}.setMember(owner, "release", "reader", true);
     auto settings = callbacks();
     settings.authenticate = [](std::string_view credential) {
         if (credential == "Bearer owner") return Person{"owner", false};
@@ -363,7 +363,7 @@ void inspectors(const std::filesystem::path& path) {
     Conversations(store).receive({"fixture", true}, routing, "b", "Summarize");
     Conversations(store).receive({"fixture", true}, routing, "c", "Release");
     runtime.runConversations();
-    auto policy = store.policy();
+    Policy policy{store};
     policy.submitSecret({"fixture", true}, "release", policy.requestSecret("release", {"inspector-token"}), model.credential);
     const auto summaries = browser.get("/api/compactions?bot=release");
     const auto workflows = browser.get("/api/workflows?bot=release");
@@ -403,7 +403,7 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
         if (person == "reader") return false;
         return std::nullopt;
     };
-    store.policy().setMember({"owner", true}, "release", "reader", true);
+    Policy{store}.setMember({"owner", true}, "release", "reader", true);
     const auto server = startWeb(store, 0, std::move(config));
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization", "Bearer owner"}});
@@ -869,9 +869,9 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
                            Json::array({{{"authorization", "Bearer fixture-author"}, {"person", author.id}, {"adminRoot", true}},
                                         {{"authorization", "Bearer fixture-reader"}, {"person", "fixture-shared-reader"}}}));
         configureWebIdentities(store, identities, web);
-        for (const auto* bot : {"ernest", "reviewer"}) store.policy().setMember(author, bot, "fixture-shared-reader", true);
-        ampRequest = store.policy().requestSecret("ernest", {"peer-ernest-renderer"});
-        markdownRequest = store.policy().requestSecret("reviewer", {"peer-reviewer-renderer"});
+        for (const auto* bot : {"ernest", "reviewer"}) Policy{store}.setMember(author, bot, "fixture-shared-reader", true);
+        ampRequest = Policy{store}.requestSecret("ernest", {"peer-ernest-renderer"});
+        markdownRequest = Policy{store}.requestSecret("reviewer", {"peer-reviewer-renderer"});
     }
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, RuntimeOptions{.peers = peers});
     const auto server = startWeb(store, 0, web);
@@ -911,7 +911,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     std::string expectedNote(note);
     std::string expectedReview(review);
     if (authenticated) {
-        auto policy = store.policy();
+        Policy policy{store};
         policy.submitSecret(author, "ernest", ampRequest, peerAmpSecret);
         policy.submitSecret(author, "reviewer", markdownRequest, peerMarkdownSecret);
         if (const auto found = expectedNote.find(peerAmpSecret); found != expectedNote.npos)
@@ -973,7 +973,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
 void fullModeProfiles(const std::filesystem::path& directory) {
     Store store(directory / "state.db");
     app::Bots bots(directory / "bots");
-    auto policy = store.policy();
+    Policy policy{store};
     const Person creator{"creator"};
     policy.setOwner(creator, "release");
     struct ProfileModel final : Model {
@@ -1280,7 +1280,7 @@ void botRolePreviewRedactsBeforeBounding(const std::filesystem::path& path) {
     cb.bots = [&] {
         return Json::array({{{"id", "release"}, {"name", "Release"}, {"soul", visible + protectedValue + "\nRole details"}}});
     };
-    auto policy = store.policy();
+    Policy policy{store};
     const auto request = policy.requestSecret("release", {"fixture-role-token"});
     policy.submitSecret(localOwner, "release", request, protectedValue);
     auto server = startWeb(store, 0, cb);
@@ -1302,7 +1302,7 @@ void botRoleSavesRequireCompleteOriginal(const std::filesystem::path& home) {
     };
     app::Bots bots(home / "bots");
     Store store(home / "flock.db");
-    auto policy = store.policy();
+    Policy policy{store};
     const auto request = policy.requestSecret("release", {"fixture-role-token"});
     policy.submitSecret(localOwner, "release", request, privateValue);
     auto cb = callbacks();
@@ -1367,7 +1367,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
         return Json{{"id", id}, {"name", profile.at("name")}};
     };
     const Person owner{"owner", true};
-    auto policy = store.policy();
+    Policy policy{store};
     policy.setMember(owner, "staging-triage", "alice", true);
     const auto request = policy.requestSecret("release", {"fixture-token"});
     const auto ampRequest = policy.requestSecret("release", {"renderer-amp"});
@@ -1647,8 +1647,8 @@ void queuedWebAuthority(const std::filesystem::path& path) {
                                                 identity(retained, "retained", true), identity(memberCredential, "member", true),
                                                 identity(alternate, "mixed", true)}));
         Browser browser(*server);
-        store.policy().setMember(localOwner, "release", "member", true);
-        store.policy().setMember(localOwner, "release", "removed", true);
+        Policy{store}.setMember(localOwner, "release", "member", true);
+        Policy{store}.setMember(localOwner, "release", "removed", true);
         demotedPause = send(browser, demoted, "Paused demoted root");
         retainedPause = send(browser, retained, "Paused retained root");
         Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
@@ -1734,7 +1734,7 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
         if (credential == "Bearer reader") return Person{"reader", false};
         return Person{};
     };
-    store.policy().setMember({"owner", true}, "release", "reader", true);
+    Policy{store}.setMember({"owner", true}, "release", "reader", true);
     auto server = startWeb(store, 0, cb);
     Browser browser(*server);
     Browser::checked(browser.client.Get("/api/memory?bot=release"), 401);
@@ -1813,9 +1813,9 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     check(send(webhook("skip", "test")).at("tasks").empty(), "Webhook filter did not match exactly");
     browser.client.set_default_headers({{"Authorization", "Bearer reader"}});
     check(browser.get("/api/schedules?bot=release&active=1").at("canManage") == false, "a Bot member was offered schedule controls");
-    store.policy().setMember(localOwner, "release", "reader", false);
+    Policy{store}.setMember(localOwner, "release", "reader", false);
     Browser::checked(browser.client.Post("/api/webhooks/deploy", headers, webhook("event-1", "main"), "application/json"), 403);
-    store.policy().setMember(localOwner, "release", "reader", true);
+    Policy{store}.setMember(localOwner, "release", "reader", true);
     browser.post("/api/memory/apply", {{"botId", "release"}, {"baseVersion", 2}, {"content", "Unauthorized"}}, 403);
     browser.client.set_default_headers({{"Authorization", "Bearer owner"}});
     const auto accepted = send(webhook("event-1", "main")), replayed = send(webhook("event-1", "main"));

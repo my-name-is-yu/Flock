@@ -1025,7 +1025,7 @@ void botCreationCollisionIsRecoverable() {
     Bots bots(directory);
     Store store(temp.path / "state.db");
     const Person creator{"creator", false};
-    store.policy().setOwner(creator, "Source");
+    Policy{store}.setOwner(creator, "Source");
     NotesT3 t3;
     RuntimeOptions options;
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
@@ -1052,7 +1052,7 @@ void botProfilesAndAvatars() {
 
     {
         Store store(temp.path / "creation.db");
-        auto policy = store.policy();
+        Policy policy{store};
         const Person creator{"bot-creator", false};
         const Json profile{{"name", "Blue Lake"}, {"avatar", {{"kind", "shape"}, {"example", "sprout"}, {"color", "#69c9ac"}}}};
         policy.submitSecret(localOwner, "secrets", policy.requestSecret("secrets", {"creation-fixture"}), "blue-lake");

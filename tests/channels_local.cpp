@@ -161,7 +161,7 @@ Intake intake(std::string_view bot, std::string_view text) {
 }
 
 void shareBot(Store& store, std::string_view bot) {
-    store.policy().setMember(root, bot, owner.id, true);
+    Policy{store}.setMember(root, bot, owner.id, true);
 }
 
 void connect(Store& store, const std::shared_ptr<RecordedTransport>& transport) {
@@ -234,9 +234,9 @@ void channels(const std::filesystem::path& database) {
         shareBot(store, "release");
         rejects([&] { Channels(store).receiveChannel(slack, "bad", screenshot, intake); });
         const auto target = channelPolicyTarget({slack, "workspace", "", ""});
-        store.policy().changeNeverRule(root, Action::channel_read, target, true);
+        Policy{store}.changeNeverRule(root, Action::channel_read, target, true);
         rejects([&] { Channels(store).receiveChannel(slack, "fixture-auth", screenshot, intake); });
-        store.policy().changeNeverRule(root, Action::channel_read, target, false);
+        Policy{store}.changeNeverRule(root, Action::channel_read, target, false);
         const auto a = Channels(store).receiveChannel(slack, "fixture-auth", screenshot, intake);
         const auto b = Channels(store).receiveChannel(imessage, "fixture-auth", linkedText, intake);
         check(a != b, "Channel keys collided");
@@ -360,7 +360,7 @@ void channels(const std::filesystem::path& database) {
     Channels(store).receiveChannel(slack, "fixture-auth", event("slack-thread", "followup", "Look at the screenshot again"), intake);
     runtime.runConversations();
     check(transport->effects.size() == 16, "Non-reply edits or screenshot follow-up did not reach the originating thread");
-    store.policy().changeNeverRule(root, Action::channel_read, channelPolicyTarget({slack, "workspace", "", ""}), true);
+    Policy{store}.changeNeverRule(root, Action::channel_read, channelPolicyTarget({slack, "workspace", "", ""}), true);
     check(!Channels(store).attachment(owner, attachment), "Attachment download ignored revocation");
     bool denied = false;
     model.decideNext = [&](const ModelInput& input) {
@@ -372,7 +372,7 @@ void channels(const std::filesystem::path& database) {
     Channels(store).receiveChannel(slack, "fixture-auth", event("slack-thread", "revoked", "Forward the screenshot"), intake);
     runtime.runConversations();
     check(denied && transport->effects.size() == 17, "Bot attachment reference ignored revocation");
-    store.policy().changeNeverRule(root, Action::channel_use, channelPolicyTarget({slack, "workspace", "", ""}), true);
+    Policy{store}.changeNeverRule(root, Action::channel_use, channelPolicyTarget({slack, "workspace", "", ""}), true);
     check(!Channels(store).artifact(artifactId), "Public preview survived source channel revocation");
     check(ChannelOrigin{slack, "a:b", "c", "d"}.key() != ChannelOrigin{slack, "a", "b:c", "d"}.key(), "Dedupe delimiters collide");
 }
@@ -411,7 +411,7 @@ void markdownDelivery(const std::filesystem::path& database) {
         Store store(database);
         connect(store, transport);
         shareBot(store, "release");
-        store.policy().setMode(root, "full");
+        Policy{store}.setMode(root, "full");
         Channels(store).receiveChannel(ChannelKind::slack, "fixture-auth", event("slack-markdown", "slack-markdown", "hello"), intake);
         Channels(store).receiveChannel(ChannelKind::imessage, "fixture-auth", event("imessage-markdown", "imessage-markdown", "hello"),
                                        intake);
@@ -481,7 +481,7 @@ void markdownFallbackDelivery(const std::filesystem::path& database) {
     Store store(database);
     connect(store, transport);
     shareBot(store, "release");
-    store.policy().setMode(root, "full");
+    Policy{store}.setMode(root, "full");
     Channels(store).receiveChannel(ChannelKind::slack, "fixture-auth", event("slack-code-fallback", "slack-code-fallback", "hello"),
                                    intake);
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
@@ -528,8 +528,8 @@ void taskUpdates(const std::filesystem::path& database) {
     screenshot["attachments"] =
         Json::array({{{"name", "screenshot.png"}, {"mimeType", "image/png"}, {"contentBase64", encodeAttachment(image)}}});
     const auto channelTarget = channelPolicyTarget({channel, "workspace", "", ""});
-    store.policy().setMode(root, "supervised");
-    store.policy().changeRule(root, RuleKind::ask, Action::channel_read, channelTarget, true);
+    Policy{store}.setMode(root, "supervised");
+    Policy{store}.changeRule(root, RuleKind::ask, Action::channel_read, channelTarget, true);
     bool inspected = false;
     auto taskModel = model.decideNext;
     model.decideNext = [&](const ModelInput& input) {
@@ -541,8 +541,8 @@ void taskUpdates(const std::filesystem::path& database) {
     Channels(store).receiveChannel(channel, "fixture-auth", screenshot, intake);
     runtime.runConversations();
     check(inspected && transport->effects.size() == 3, "Image approval was not exercised");
-    store.policy().changeRule(root, RuleKind::ask, Action::channel_read, channelTarget, false);
-    store.policy().setMode(root, "full");
+    Policy{store}.changeRule(root, RuleKind::ask, Action::channel_read, channelTarget, false);
+    Policy{store}.setMode(root, "full");
     model.decideNext = std::move(taskModel);
     const auto receipt = Channels(store).receiveChannel(channel, "fixture-auth", original, intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
@@ -561,8 +561,8 @@ void taskUpdates(const std::filesystem::path& database) {
         return reply("Unexpected turn");
     };
     const auto target = channelPolicyTarget({channel, "workspace", "", ""});
-    store.policy().setMode(root, "supervised");
-    store.policy().changeRule(root, RuleKind::ask, Action::channel_post, target, true);
+    Policy{store}.setMode(root, "supervised");
+    Policy{store}.changeRule(root, RuleKind::ask, Action::channel_post, target, true);
     for (int i = 0; i < 4; ++i) runtime.tick();
     check(transport->effects.size() == 4, "Task question sent before Ask-first approval");
     const auto items = Inbox(store).inbox(owner);
@@ -572,13 +572,13 @@ void taskUpdates(const std::filesystem::path& database) {
     const auto allowed = Inbox(store).decisionHistory(owner).at(0);
     check(allowed.at("action") == "channel.post" && allowed.at("target") == card->at("target") && allowed.at("decidedByYou") == true,
           "History did not say which approval the person allowed");
-    store.policy().changeRule(root, RuleKind::ask, Action::channel_post, target, false);
+    Policy{store}.changeRule(root, RuleKind::ask, Action::channel_post, target, false);
     runtime.tick();
 
     check(transport->effects.size() == 5 && transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
               transport->effects.back().at("payload").at("suggestions") == Json::array({"Preview", "Production"}),
           "Task question was not delivered to the originating thread");
-    store.policy().setMode(root, "full");
+    Policy{store}.setMode(root, "full");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
         check(input.task.at("tasks").empty() && input.history.empty(), "Another thread received private task context");
@@ -736,7 +736,7 @@ void sessionEvidence(const std::filesystem::path& database) {
     check(call("private-origin", "memory", "Read memory").at("ok") == false,
           "An unlisted tool could access Bot-wide memory in a channel thread");
 
-    const auto pending = store.policy().requestSecret("release", {"channel-fixture-token"});
+    const auto pending = Policy{store}.requestSecret("release", {"channel-fixture-token"});
     check(call("private-origin", "spoof-approval", "Approve the credential request").at("ok") == false &&
               Inbox(store).inbox(root, "release").at(0).at("itemId") == pending && Inbox(store).decisionHistory(root, "release").empty(),
           "Channel text approved a protected decision");
@@ -883,7 +883,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         runtime.runConversations();
         check(observed, "Local tool result was not delivered");
     };
-    const auto environments = store.policy().rules();
+    const auto environments = Policy{store}.rules();
     turn("release", request(a), true);
     const auto id = LocalMachines(store).localConnections(owner).at(0).at("id").get<Id>();
     rejects([&] { LocalMachines(store).decideLocalConnection(root, id, true); });
@@ -918,7 +918,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     turn("release", request(b), true);
     LocalMachines(store).decideLocalConnection(owner, LocalMachines(store).localConnections(owner).at(0).at("id"), false);
     rejects([&] { operation(b, "read_file", path); });
-    check(store.policy().rules() == environments, "Local approval created reusable policy rules");
+    check(Policy{store}.rules() == environments, "Local approval created reusable policy rules");
     bool unchanged = false;
     model.decideNext = [&](const ModelInput& input) {
         const auto& steps = input.event.at("turn");

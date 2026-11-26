@@ -1,4 +1,5 @@
 #include "flock/runtime.hpp"
+#include "flock/policy.hpp"
 #include "channel_storage.hpp"
 #include "runtime_lifecycle.hpp"
 #include "runtime_maintenance.hpp"
@@ -121,7 +122,7 @@ struct Runtime::Impl {
 };
 
 Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOptions options)
-    : p_(std::make_unique<Impl>(*store.p_, store.policy(), model, t3, std::move(soul), std::move(options))) {}
+    : p_(std::make_unique<Impl>(*store.p_, Policy{store}, model, t3, std::move(soul), std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::requestStop() {
     p_->workers.requestStop();

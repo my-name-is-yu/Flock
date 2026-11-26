@@ -343,7 +343,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         intake,
         [&](const Person& creator, const Json& profile, const std::optional<AvatarImage>& image) {
             auto created =
-                store.policy().createOwnedBot(creator, [&](const auto& publishOwned) { return bots.create(profile, image, publishOwned); });
+                Policy{store}.createOwnedBot(creator, [&](const auto& publishOwned) { return bots.create(profile, image, publishOwned); });
             syncSkills();
             return created;
         },
@@ -501,7 +501,7 @@ void taskCommand(const std::filesystem::path& home, const std::string& command, 
 void rulesCommand(const std::filesystem::path& home, Arguments& args) {
     const auto command = args.pop("rules command");
     auto store = openStore(home);
-    auto policy = store.policy();
+    Policy policy{store};
     if (command == "list") {
         args.end();
     } else {
@@ -546,9 +546,9 @@ int runCli(Arguments& args) {
         if (!args.empty()) {
             const auto mode = args.pop("mode");
             args.end();
-            store.policy().setMode(localOwner, mode);
+            Policy{store}.setMode(localOwner, mode);
         }
-        std::cout << store.policy().mode() << '\n';
+        std::cout << Policy{store}.mode() << '\n';
     } else if (command == "message") {
         const auto botId = args.pop("Bot ID");
         const auto message = args.pop("message");

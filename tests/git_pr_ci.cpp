@@ -611,7 +611,7 @@ void accessAndActions() {
         {"git_manage_issue", {{"action", "update"}, {"issueNumber", 2}, {"state", "closed"}, {"labels", Json::array()}}},
     };
     for (auto action : {Action::repository_pr, Action::repository_issues})
-        store.policy().changeNeverRule(localOwner, action, repositoryTarget, true);
+        Policy{store}.changeNeverRule(localOwner, action, repositoryTarget, true);
     auto readOnly = openArgs();
     readOnly["taskId"] = task;
     check(invoke(store, runtime, script, "read-is-not-pr", "git_open_pr", readOnly).at("ok") == false && host->createCalls == 0,
@@ -626,10 +626,10 @@ void accessAndActions() {
     check(deniedIssueUpdate.at("error") == "Repository access denied" && host->hostCalls == 0,
           "repository read or write allowed an issue update");
     for (auto action : {Action::repository_pr, Action::repository_issues})
-        store.policy().changeNeverRule(localOwner, action, repositoryTarget, false);
+        Policy{store}.changeNeverRule(localOwner, action, repositoryTarget, false);
     for (auto action :
          {Action::repository_read, Action::repository_write, Action::repository_pr, Action::repository_issues, Action::repository_review})
-        store.policy().changeNeverRule(localOwner, action, "github.com/*/private", true);
+        Policy{store}.changeNeverRule(localOwner, action, "github.com/*/private", true);
     auto argsFor = [task](Json args, std::string repo) {
         args.update({{"host", hostName}, {"repo", std::move(repo)}, {"taskId", task}});
         return args;
@@ -648,12 +648,12 @@ void accessAndActions() {
     const auto find = invoke(store, runtime, script, "find", "git_find_repos", {{"host", hostName}, {"query", "FLOCK"}});
     check(find.at("repos") == Json::array({repoName}), "repository discovery exposed ungranted repositories");
     const auto repoTarget = GitRepository{hostName, repoName}.resource();
-    store.policy().setMode(localOwner, "supervised");
-    store.policy().changeRule(localOwner, RuleKind::ask, Action::repository_read, repoTarget, true);
+    Policy{store}.setMode(localOwner, "supervised");
+    Policy{store}.changeRule(localOwner, RuleKind::ask, Action::repository_read, repoTarget, true);
     const auto askFirst = invoke(store, runtime, script, "ask-first-repos", "git_find_repos", {{"host", hostName}, {"query", "FLOCK"}});
     check(askFirst.at("repos").empty(), "Discovery exposed a repository requiring approval");
-    store.policy().changeRule(localOwner, RuleKind::ask, Action::repository_read, repoTarget, false);
-    store.policy().setMode(localOwner, "full");
+    Policy{store}.changeRule(localOwner, RuleKind::ask, Action::repository_read, repoTarget, false);
+    Policy{store}.setMode(localOwner, "full");
     const auto later =
         invoke(store, runtime, script, "later-repos", "git_find_repos", {{"host", hostName}, {"query", "FLOCK"}, {"page", 11}});
     check(later.at("repos").empty() && later.at("nextPage") == 12, "An empty filtered page lost the GitHub continuation");
@@ -678,13 +678,13 @@ void accessAndActions() {
           "blocked fork was used");
     const auto fork = GitRepository{hostName, "fork/public"}.resource();
     cross["headRepo"] = "fork/public";
-    store.policy().changeRule(localOwner, RuleKind::ask, Action::repository_read, fork, true);
-    store.policy().changeRule(localOwner, RuleKind::allow, Action::repository_pr, repoTarget, true);
-    store.policy().setMode(localOwner, "supervised");
+    Policy{store}.changeRule(localOwner, RuleKind::ask, Action::repository_read, fork, true);
+    Policy{store}.changeRule(localOwner, RuleKind::allow, Action::repository_pr, repoTarget, true);
+    Policy{store}.setMode(localOwner, "supervised");
     check(invoke(store, runtime, script, "cross-repo-head-ask", "git_open_pr", cross).at("error") == "Head repository read access denied" &&
               host->createCalls == 0,
           "A base PR Allow bypassed the fork's Ask-first read rule");
-    store.policy().setMode(localOwner, "full");
+    Policy{store}.setMode(localOwner, "full");
     for (const auto& [tool, args] : commands) {
         const auto name = "allowed-" + std::to_string(++counter);
         const auto result = invoke(store, runtime, script, name, tool, argsFor(args, repoName));
@@ -882,9 +882,7 @@ void taskReadRecovery() {
         check(host->logCalls == 5, "fixture did not read five jobs");
     }
     Store store(path);
-    const auto blockRead = [&](bool block) {
-        store.policy().changeNeverRule(localOwner, Action::repository_read, repositoryTarget, block);
-    };
+    const auto blockRead = [&](bool block) { Policy{store}.changeNeverRule(localOwner, Action::repository_read, repositoryTarget, block); };
     int phase = 0;
     Id saved = 0;
     script.onTaskResult = [&](const ModelInput& input) -> Decision {
@@ -934,9 +932,9 @@ void approvedTaskReadProjects() {
         check(read.at("sourceTool") == "git_repo_info" && read.at("result").at("ok") == true, "Ask-first hid its approved Git read");
         return {"complete", {{"report", "Reviewed repository information"}}, {}};
     };
-    store.policy().setMode(localOwner, "supervised");
-    store.policy().changeRule(localOwner, RuleKind::allow, Action::environment_launch, intake().environmentId, true);
-    store.policy().changeRule(localOwner, RuleKind::ask, Action::repository_read, GitRepository{hostName, repoName}.resource(), true);
+    Policy{store}.setMode(localOwner, "supervised");
+    Policy{store}.changeRule(localOwner, RuleKind::allow, Action::environment_launch, intake().environmentId, true);
+    Policy{store}.changeRule(localOwner, RuleKind::ask, Action::repository_read, GitRepository{hostName, repoName}.resource(), true);
     Runtime runtime(store, script, sessions, [](auto) { return std::string{}; }, options(host));
     const auto task = Tasks(store).submit(intake(), &localOwner);
     for (int i = 0; i < 8 && Inbox(store).inbox(localOwner).empty(); ++i) runtime.tick();
@@ -1040,7 +1038,7 @@ void redaction() {
     const std::string credential = "fixture-pr-credential-value";
     const std::string secret = "fixture-protected-other-bot-value";
     GitEvents(store).protectGitCredential(credential);
-    auto policy = store.policy();
+    Policy policy{store};
     const auto input = policy.requestSecret("other", {"example"});
     policy.submitSecret(localOwner, "other", input, secret);
     const auto task = Tasks(store).submit(intake());
@@ -1134,7 +1132,7 @@ void notificationBudgetAndRevocation() {
           "Budget approval erased the Git delivery from task history");
     check(history.dump().find("CI failed. linker: missing symbol") != std::string::npos, "Approved model call did not resume");
 
-    script.onNotification = [&] { store.policy().changeNeverRule(localOwner, Action::repository_read, repositoryTarget, true); };
+    script.onNotification = [&] { Policy{store}.changeNeverRule(localOwner, Action::repository_read, repositoryTarget, true); };
     const auto replies = historyCount(store, task, "conversation_reply");
     check(GitEvents(store).receiveGitWebhook({hostName, "revoked-turn", repoName, "comment", "created", {1}, sha, "An update", 0}),
           "Could not enqueue new event");

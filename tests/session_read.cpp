@@ -230,7 +230,7 @@ struct Fixture {
         return model.result;
     }
     void blockSession(std::string_view thread, bool blocked = false) {
-        store->policy().changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(env, thread).target, blocked);
+        Policy{*store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(env, thread).target, blocked);
     }
 };
 
@@ -248,7 +248,7 @@ void acceptance() {
     f.blockSession(staging, true);
     f.blockSession(second, true);
     f.blockSession("internal-shared-but-denied", true);
-    f.store->policy().changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
+    Policy{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
     check(f.call(search, filters) == empty && f.t3.reads == 0, "blocked Session contacted T3 or entered search");
     const auto missing = f.call(events, {{"sessionRef", "random"}, {"operation", "counts"}});
     check(missing == f.call(events, {{"sessionRef", staging}, {"operation", "counts"}, {"bot", "beta"}}) && missing.at("ok") == false &&
@@ -257,7 +257,7 @@ void acceptance() {
     f.blockSession(staging);
     f.blockSession(second);
     f.blockSession("internal-shared-but-denied");
-    f.store->policy().changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
+    Policy{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
     const auto found = f.call(search, filters);
     const auto searchCursor = found.at("nextCursor");
     check(found.at("sessions").size() == 1 && searchCursor.is_string(), "search pagination missing");
@@ -321,7 +321,7 @@ void acceptance() {
     check(log.at("attachment").at("content").get<std::string>().starts_with("fixture failed") &&
               log.at("attachment").at("content").get<std::string>().size() == 8192 && log.at("truncated") == true,
           "attachment content or truncation was lost");
-    f.store->policy().changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, false);
+    Policy{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, false);
     const auto acrossEnvironments = f.call(search, Json::object()).at("sessions");
     const auto remoteRef = acrossEnvironments.back().at("sessionRef");
     check(acrossEnvironments.size() == 3 && remoteRef != sessionRef &&
@@ -330,7 +330,7 @@ void acceptance() {
               f.call(events, {{"sessionRef", remoteRef}, {"operation", "get_attachment"}, {"attachmentRef", attachmentRef}}).dump() ==
                   missingAttachment.dump(),
           "references crossed environments for the same T3 thread identifier");
-    f.store->policy().changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
+    Policy{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
     auto tampered = sessionRef.get<std::string>();
     tampered.back() = tampered.back() == 'a' ? 'b' : 'a';
     check(f.call(events, {{"sessionRef", tampered}, {"operation", "counts"}}).dump() == missing.dump() &&
@@ -347,7 +347,7 @@ void acceptance() {
     const auto running = taskJson(Tasks(*f.store).task(task));
     check(running.at("state") == "running" && f.t3.writes.size() == 1, "foreign task did not start");
     const auto foreign = Resource::sessionRead(env, "foreign-thread");
-    check(f.store->policy().allows("beta", foreign) && f.store->policy().allows("alpha", foreign),
+    check(Policy{*f.store}.allows("beta", foreign) && Policy{*f.store}.allows("alpha", foreign),
           "Full did not allow Session reads for both Bots");
     check(f.call(search, {{"query", "Foreign"}}, "beta").at("sessions").size() == 1, "owned Session missing without a grant");
     auto outside = f.intake("outside");
@@ -384,7 +384,7 @@ void acceptance() {
 
     f.t3.onRead = [&] {
         Store writer(f.dir / "state.db");
-        writer.policy().changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(env, staging).target, true);
+        Policy{writer}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(env, staging).target, true);
     };
     check(request("read_event", {{"eventRef", eventRef}}) == missing, "revocation during an upstream read was ignored");
     f.t3.onRead = {};
@@ -469,7 +469,7 @@ void connectedSearchRespectsCurrentAccess() {
           "upstream denial did not revoke a discovered Session");
     denied = false;
 
-    auto policy = f.store->policy();
+    Policy policy{*f.store};
     policy.changeNeverRule(localOwner, Action::environment_inspect, otherEnv, true);
     check(f.call(search, filters).at("sessions").empty() && f.call(events, read).at("ok") == false,
           "a Never rule did not revoke connected search access");
@@ -525,7 +525,7 @@ void approvedCallSurvivesReadPreflightContention() {
 void redactionAndResumedHistory() {
     Fixture f;
     f.blockSession(staging);
-    auto policy = f.store->policy();
+    Policy policy{*f.store};
     const auto secret = "synthetic-session-credential";
     const auto key = policy.requestSecret("beta", {"beta-fixture"});
     policy.submitSecret({"root", true}, "beta", key, secret);

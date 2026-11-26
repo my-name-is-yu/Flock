@@ -224,7 +224,7 @@ struct Fixture {
                                   allow ? "allow_once" : "deny");
     }
     void requireApproval(const Resource& resource) {
-        auto policy = store->policy();
+        Policy policy{*store};
         policy.setMode(localOwner, "supervised");
         policy.changeRule(localOwner, RuleKind::ask, resource.action, resource.target, true);
     }
@@ -262,7 +262,7 @@ void mixedReads() {
 
 void approval(bool allow) {
     Fixture f;
-    f.store->policy().setMode(localOwner, "supervised");
+    Policy{*f.store}.setMode(localOwner, "supervised");
     f.receive({search, invoke, readResource});
     f.runtime->runConversations();
     const auto slots = f.results("effect");
@@ -473,7 +473,7 @@ void conversationReadParity() {
     Automations(*f.store).createAutomation(
         localOwner, intake, {{"kind", "schedule"}, {"cron", "0 9 * * 1"}, {"timezone", "Etc/UTC"}, {"request", "Weekly progress"}},
         unixTime());
-    auto policy = f.store->policy();
+    Policy policy{*f.store};
     const auto secret = policy.requestSecret("alpha", {"fixture-token"});
     policy.submitSecret(localOwner, "alpha", secret, "fixture-protected-value");
     Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Private notes"}});

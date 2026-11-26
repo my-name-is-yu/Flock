@@ -32,7 +32,6 @@ struct BotPaused : Conflict {
     BotPaused() : Conflict(botPausedMessage) {}
 };
 
-class Policy;
 class SessionParticipation;
 struct ConfiguredSchedule;
 struct GitWebhook;
@@ -53,7 +52,6 @@ public:
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;
 
-    Policy policy();
     bool botDeleted(std::string_view bot) const;
     void deleteBot(const Person&, std::string_view bot);
     bool botPaused(std::string_view bot) const;

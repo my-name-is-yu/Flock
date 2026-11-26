@@ -91,7 +91,7 @@ void sessionConversationDispatch(Store& store, const Json& config) {
             } else if (steps.size() == 4) {
                 const auto& event = steps[3].at("result").at("events").at(0);
                 paged = event.at("excerpt") == "staging failed";
-                store.policy().changeNeverRule(localOwner, shared.action, shared.target, true);
+                Policy{store}.changeNeverRule(localOwner, shared.action, shared.target, true);
                 tool = "flock_session_events";
                 args = {{"sessionRef", sessionRef}, {"operation", "read_event"}, {"eventRef", event.at("eventRef")}};
             } else if (steps.size() == 5) {

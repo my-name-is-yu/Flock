@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/policy.hpp"
 #include "session_message_storage.hpp"
 #include "conversation_tools.hpp"
 #include "conversation_turns.hpp"
@@ -250,7 +251,7 @@ Id SessionParticipation::ask(const T3Connection& connection, const SessionAsk& r
         throw Conflict("Invalid flock_ask arguments");
 
     auto& db = *store_.p_;
-    const auto policy = store_.policy();
+    const Policy policy{store_};
     const auto authorizedPerson = [&] {
         const auto actor = person(connection);
         if (!policy.allows(actor, Action::bot_decide, bot)) throw Conflict("Bot access is required");

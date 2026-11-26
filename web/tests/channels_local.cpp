@@ -71,7 +71,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     };
     Store store(database);
     const Person owner{"admin", true}, sender{"alice"};
-    store.policy().setMember(owner, "release", sender.id, true);
+    Policy{store}.setMember(owner, "release", sender.id, true);
     const auto transport = std::make_shared<Transport>();
     const auto authenticate = [](auto credential, auto workspace) { return credential == "Bearer fixture-channel" && workspace == "W"; };
     const auto authorize = [&](auto workspace, auto user) -> std::optional<ChannelSender> {
@@ -93,7 +93,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     std::filesystem::permissions(identities, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     configureWebIdentities(store, identities, cb);
     check(cb.resolveIdentity(owner.id) == false, "The fixture owner must have a conservative queued role");
-    check(!store.policy().allows(Person{owner.id}, Action::bot_decide, "release"),
+    check(!Policy{store}.allows(Person{owner.id}, Action::bot_decide, "release"),
           "Machine owner unexpectedly has permission to decide for the Bot");
     const std::string sessionCredential(32, 's');
     const auto config = database.parent_path() / "session-bridge.json";

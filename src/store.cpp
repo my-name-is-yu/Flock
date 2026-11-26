@@ -124,10 +124,6 @@ Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelRe
 
 Policy::Policy(Store& store) : Policy(store.p_->permissions) {}
 
-Policy Store::policy() {
-    return p_->permissions;
-}
-
 void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
     const Id id = task.id;
     const auto peer = peerStorage.peerExchange(id);
@@ -179,7 +175,7 @@ Memory::Memory(Store& store) : database_(Database::of(store)), memory_(store.p_-
 
 Automations::Automations(Store& store)
     : database_(Database::of(store)), automation_(store.p_->automationStorage), lifecycle_(store.p_->botLifecycle),
-      secrets_(store.p_->secretStorage), tasks_(store.p_->taskOperations), policy_(store.policy()) {}
+      secrets_(store.p_->secretStorage), tasks_(store.p_->taskOperations), policy_(store.p_->permissions) {}
 
 Inbox::Inbox(Store& store) : inbox_(store.p_->inboxStorage), git_(store.p_->gitStorage) {}
 
