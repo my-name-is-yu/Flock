@@ -1,4 +1,5 @@
 #include "views.hpp"
+#include "flock/conversations.hpp"
 #include "flock/markdown.hpp"
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
@@ -244,7 +245,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
 
 void conversationSummary(Json& row, Store& store, std::string_view bot) {
     constexpr unsigned previewSize = 12;
-    const auto events = store.conversation(bot, 0, previewSize);
+    const auto events = Conversations(store).conversation(bot, 0, previewSize);
     std::string request;
     std::string preview;
     Id latestIncoming = 0;
@@ -267,7 +268,8 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
     }
     // A burst of outgoing messages can push an unread reply outside the preview page.
     if (!latestIncoming && events.size() == previewSize) {
-        const auto earlier = store.conversation(bot, events.front().at("id").get<Id>(), 1, Store::ConversationEvents::incoming);
+        const auto earlier =
+            Conversations(store).conversation(bot, events.front().at("id").get<Id>(), 1, Conversations::ConversationEvents::incoming);
         if (!earlier.empty()) latestIncoming = earlier.front().at("id").get<Id>();
     }
     row["preview"] = preview.empty() ? std::move(request) : std::move(preview);
@@ -468,7 +470,7 @@ Json botList(Store& store, const Json& bots) {
 }
 
 Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
-    auto events = store.conversation(bot, before, conversationSize + 1, Store::ConversationEvents::all, viewer);
+    auto events = Conversations(store).conversation(bot, before, conversationSize + 1, Conversations::ConversationEvents::all, viewer);
     const auto redactor = store.policy().secretRedactor(bot);
     for (auto& event : events)
         if (field(event, "kind") == "waiting") event["data"] = waitView(Store::waitingEvent(event));
@@ -537,10 +539,10 @@ Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changed
         result.update(sessions(store, id, 0));
     }
     result["workflows"] = store.workflows(id);
-    result["compactions"] = store.compactions(id, 0, 1);
+    result["compactions"] = Conversations(store).compactions(id, 0, 1);
     result["bot"] = botSettings(bot);
     auto& paused = result["pausedConversations"] = Json::array();
-    for (const auto& turn : store.pausedConversations(id)) {
+    for (const auto& turn : Conversations(store).pausedConversations(id)) {
         Json view = Json::object();
         copyFields(view, turn, {"messageId", "replyToMessageId", "text", "route", "allowance"});
         paused.push_back(std::move(view));

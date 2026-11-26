@@ -1,5 +1,6 @@
 #include "../views.hpp"
 #include "http_fixture.hpp"
+#include "flock/conversations.hpp"
 #include "flock/external_mcp.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/command.hpp"
@@ -431,7 +432,7 @@ void replannedTaskDropsPriorRun() {
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     tick(runtime, 3);
     check(mcp.success(statusTool, task).at("sessionLink") == releaseLink, "The initial Run was not active");
-    store.receive(localOwner, cb.intake("release", ""), "revise-scope", "Include internal changes too");
+    Conversations(store).receive(localOwner, cb.intake("release", ""), "revise-scope", "Include internal changes too");
     runtime.runConversations();
     check(store.task(model.taskId).task.replanning && mcp.success(statusTool, task).at("sessionLink").is_null(),
           "The old Run was still linked during replanning");

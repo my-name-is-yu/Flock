@@ -9,6 +9,7 @@
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/session_ref.hpp"
+#include "flock/conversations.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
@@ -164,9 +165,9 @@ struct Fixture {
         model.first = {std::move(calls)};
         model.followUps.clear();
         model.turns.clear();
-        message = store
-                      ->receive(localOwner, {"alpha", "", "env", "project", {{"modelCallLimit", limit}}}, std::to_string(++sequence),
-                                "Check the fixture")
+        message = Conversations(*store)
+                      .receive(localOwner, {"alpha", "", "env", "project", {{"modelCallLimit", limit}}}, std::to_string(++sequence),
+                               "Check the fixture")
                       .at("messageId");
     }
     auto connect() const {
@@ -612,7 +613,7 @@ Measurement measure(const std::vector<Decision>& reads, bool batch, int limit, F
         for (auto read = reads.begin() + 1; read != reads.end(); ++read) f.model.followUps.push_back({{*read}});
     f.runtime->runConversations();
     if (f.status() == "paused") {
-        const Id pause = f.store->pausedConversations("alpha").at(0).at("messageId");
+        const Id pause = Conversations(*f.store).pausedConversations("alpha").at(0).at("messageId");
         f.store->decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, f.message, pause, 0, 0, pause}, "approve");
         f.runtime->runConversations();
     }

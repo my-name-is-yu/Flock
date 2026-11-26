@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
 #include "task_history.hpp"
@@ -102,13 +103,13 @@ Id task(Store& store, std::string name, std::string bot = "alpha", std::string p
 }
 
 Json reply(Store& store, Id message, std::string_view bot = "alpha") {
-    for (const auto& row : store.conversation(bot, 0, 200))
+    for (const auto& row : Conversations(store).conversation(bot, 0, 200))
         if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == message) return row["data"];
     return nullptr;
 }
 
 Id receive(Store& store, std::string_view id, std::string_view text, Id anchor = 0, Intake intake = Fixture::bot()) {
-    return store.receive(localOwner, intake, id, text, anchor).at("messageId");
+    return Conversations(store).receive(localOwner, intake, id, text, anchor).at("messageId");
 }
 
 Decision say(std::string text, Json suggestions = nullptr) {
@@ -522,7 +523,7 @@ void transientFailureResumesAfterTheLastFinishedStep() {
         for (int i = 0; i < 24; ++i) execution.runtime.runConversations();
         check(store.tasks("alpha").size() == 1 && reply(store, message).is_null() && reply(store, later).is_null() &&
                   reply(store, other, "beta")["text"] == "Hello." && calls[0] == 2 && calls[1] == 1 &&
-                  store.pausedConversations("alpha").empty(),
+                  Conversations(store).pausedConversations("alpha").empty(),
               "A fixed-clock outage spent the budget or displaced a Bot's oldest turn");
     }
     Store restarted(fixture.database());
@@ -906,7 +907,7 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
         execution.model.conversation = script;
         execution.runtime.runConversations();
     }
-    const auto pauses = store.pausedConversations("alpha");
+    const auto pauses = Conversations(store).pausedConversations("alpha");
     check(calls == 14 && pauses.size() == 1 && pauses[0]["allowance"] == 14 && pauses[0]["route"] == "model_budget" &&
               reply(store, paused)["route"] == "model_budget" && reply(store, later)["text"] == "You're welcome.",
           "A paused turn blocked a later message or was not reported");
@@ -914,11 +915,11 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     const InboxTarget target{"alpha",    InboxKind::conversation_model_budget, pauses.at(0).at("replyToMessageId"), waitMessage, 0, 0,
                              waitMessage};
     Store reopened(fixture.database());
-    const auto history = reopened.conversation("alpha");
+    const auto history = Conversations(reopened).conversation("alpha");
     const auto input = std::ranges::find_if(history, [&](const Json& row) { return row.at("id") == paused; });
     check(input != history.end() && input->at("data").at("status") == "needs_you", "Reopening the journal lost a persisted pause");
-    const auto beforeApproval = reopened.conversation("alpha", 0, 2);
-    const auto cursor = reopened.conversationChangesSince(std::nullopt, "alpha").through;
+    const auto beforeApproval = Conversations(reopened).conversation("alpha", 0, 2);
+    const auto cursor = Conversations(reopened).conversationChangesSince(std::nullopt, "alpha").through;
     std::barrier ready(2);
     const auto approve = [&](Store& connection) {
         ready.arrive_and_wait();
@@ -932,8 +933,8 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     auto first = std::async(std::launch::async, [&] { return approve(store); });
     const auto second = approve(reopened);
     check(second != first.get(), "The same pause was accepted twice or both approvals failed");
-    const auto changes = reopened.conversationChangesSince(cursor, "alpha");
-    const auto afterApproval = reopened.conversation("alpha", 0, 2);
+    const auto changes = Conversations(reopened).conversationChangesSince(cursor, "alpha");
+    const auto afterApproval = Conversations(reopened).conversation("alpha", 0, 2);
     check(changes.through > cursor && changes.messages.at("alpha") == std::vector<Id>{paused, waitMessage} && afterApproval.size() == 2 &&
               afterApproval.at(0).at("id") == beforeApproval.at(0).at("id") &&
               afterApproval.at(1).at("id") == beforeApproval.at(1).at("id"),
@@ -947,13 +948,13 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     } catch (const Conflict&) {
         rejected = true;
     }
-    check(rejected && store.pausedConversations("alpha").empty(), "The same pause was approved twice");
+    check(rejected && Conversations(store).pausedConversations("alpha").empty(), "The same pause was approved twice");
     Store afterRestart(fixture.database());
     RuntimeFixture resumed(afterRestart);
     resumed.model.conversation = script;
     resumed.runtime.runConversations();
     Json answered;
-    for (const auto& row : store.conversation("alpha", 0, 200))
+    for (const auto& row : Conversations(store).conversation("alpha", 0, 200))
         if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == paused && row["data"]["route"] == "reply")
             answered = row["data"];
     check(answered["text"] == "Nothing yet." && calls == 28 &&
@@ -988,18 +989,19 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
     }
     const auto task = store.task(taskId);
     const auto taskTarget = TaskTarget::from(task.task, task.wait.value().id);
-    const auto pause = store.pausedConversations("alpha").at(0).at("messageId").get<Id>();
+    const auto pause = Conversations(store).pausedConversations("alpha").at(0).at("messageId").get<Id>();
     const InboxTarget turnTarget{"alpha", InboxKind::conversation_model_budget, message, pause, 0, 0, pause};
-    check(task.wait->reason() == WaitReason::model_budget && store.pausedConversations("beta").size() == 1,
+    check(task.wait->reason() == WaitReason::model_budget && Conversations(store).pausedConversations("beta").size() == 1,
           "The fixture did not exhaust the shared and independent allowances");
-    const auto beforeApproval = store.conversationChangesSince(std::nullopt, "alpha").through;
+    const auto beforeApproval = Conversations(store).conversationChangesSince(std::nullopt, "alpha").through;
     if (approveTask)
         store.operate(localOwner, taskTarget, "approve");
     else
         store.decideInbox(localOwner, turnTarget, "approve");
-    const auto changes = store.conversationChangesSince(beforeApproval, "alpha");
-    check(store.pausedConversations("alpha").empty() && taskJson(store.task(taskId)).at("wait").is_null() &&
-              store.pausedConversations("beta").size() == 1 && changes.messages.at("alpha") == std::vector<Id>{message, pause},
+    const auto changes = Conversations(store).conversationChangesSince(beforeApproval, "alpha");
+    check(Conversations(store).pausedConversations("alpha").empty() && taskJson(store.task(taskId)).at("wait").is_null() &&
+              Conversations(store).pausedConversations("beta").size() == 1 &&
+              changes.messages.at("alpha") == std::vector<Id>{message, pause},
           "Renewal did not clear both shared pauses, invalidate the conversation, or preserve the independent pause");
     bool rejected = false;
     try {
@@ -1017,7 +1019,7 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
     resumed.model.conversation = script;
     resumed.runtime.runConversations();
     resumed.finish(reopened, taskId, "The release note is ready.");
-    auto events = reopened.conversation("alpha", 0, 200);
+    auto events = Conversations(reopened).conversation("alpha", 0, 200);
     check(std::ranges::any_of(events,
                               [&](const Json& row) {
                                   return row.at("kind") == "conversation_reply" && row.at("data").at("replyToMessageId") == message &&
@@ -1040,14 +1042,14 @@ void notesFailureReleasesUnusedApproval() {
     const auto message = receive(store, "approval-notes", "Write a release note", 0, limited);
     execution.runtime.runConversations();
     const auto tasks = taskJson(store.tasks("alpha"));
-    const auto pauses = store.pausedConversations("alpha");
+    const auto pauses = Conversations(store).pausedConversations("alpha");
     check(tasks.size() == 1 && pauses.size() == 1, "The turn did not start a task and pause for approval");
     const Id pause = pauses.at(0).at("messageId");
     store.decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, message, pause, 0, 0, pause}, "approve");
 
     execution.notes = [](std::string_view) -> std::string { throw std::runtime_error("SOUL.md is unreadable"); };
     execution.runtime.runConversations();
-    const auto failure = store.conversation("alpha", 0, 1).at(0).at("data");
+    const auto failure = Conversations(store).conversation("alpha", 0, 1).at(0).at("data");
     check(execution.model.turns.size() == 1 && failure.at("route") == "error" && failure.at("replyToMessageId") == message,
           "The resumed turn did not fail before model dispatch");
     check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 1,
@@ -1093,23 +1095,24 @@ void conversationPagesCombineTaskAndMessageHistory() {
     const auto message = receive(store, "message", "Hello alpha");
     task(store, "Another Bot's task", "beta");
     const auto newer = store.history(task(store, "Newer task")).at(0).at("id").get<Id>();
-    const auto cursor = store.conversationChangesSince(std::nullopt, "alpha").through;
+    const auto cursor = Conversations(store).conversationChangesSince(std::nullopt, "alpha").through;
     execution.runtime.runConversations();
 
-    const auto latest = store.conversation("alpha", 0, 2);
+    const auto latest = Conversations(store).conversation("alpha", 0, 2);
     check(latest.size() == 2 && latest.at(0).at("id") == newer && latest.at(1).at("kind") == "conversation_reply" &&
               latest.at(1).at("data").at("replyToMessageId") == message,
           "The newest page did not merge task and reply history in order");
-    const auto earlier = store.conversation("alpha", newer, 2);
+    const auto earlier = Conversations(store).conversation("alpha", newer, 2);
     check(earlier.size() == 2 && earlier.at(0).at("id") == older && earlier.at(1).at("id") == message &&
-              earlier.at(1).at("data").at("text") == "Hello alpha" && store.conversation("alpha", older, 2).empty(),
+              earlier.at(1).at("data").at("text") == "Hello alpha" && Conversations(store).conversation("alpha", older, 2).empty(),
           "An older page skipped, repeated, or lost details of a visible entry");
 
-    using Events = Store::ConversationEvents;
-    const auto incoming = store.conversation("alpha", 0, 2, Events::incoming);
-    check(incoming == Json::array({latest.at(1)}) && store.conversation("alpha", latest.at(1).at("id"), 2, Events::incoming).empty(),
+    using Events = Conversations::ConversationEvents;
+    const auto incoming = Conversations(store).conversation("alpha", 0, 2, Events::incoming);
+    check(incoming == Json::array({latest.at(1)}) &&
+              Conversations(store).conversation("alpha", latest.at(1).at("id"), 2, Events::incoming).empty(),
           "The incoming-only page included outgoing history or repeated its cursor");
-    const auto changes = store.conversationChangesSince(cursor, "alpha");
+    const auto changes = Conversations(store).conversationChangesSince(cursor, "alpha");
     check(changes.through == latest.at(1).at("id") && changes.messages.at("alpha") == std::vector<Id>{message},
           "A new reply did not invalidate the earlier message");
 }

@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/web.hpp"
 #include "change_feed.hpp"
 #include "embedded_assets.hpp"
@@ -336,7 +337,8 @@ public:
                     const auto before = queryId(req, "before", true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req, res, known, actor, id, before);
                     if (req.path == "/api/compactions" || req.path == "/api/workflows") {
-                        const auto items = req.path == "/api/compactions" ? store_.compactions(id, before) : store_.workflows(id, before);
+                        const auto items =
+                            req.path == "/api/compactions" ? Conversations(store_).compactions(id, before) : store_.workflows(id, before);
                         return json(res, 200, store_.policy().redactSecrets(id, items));
                     }
                     if (req.path == "/api/view") {
@@ -344,7 +346,7 @@ public:
                             req.has_param("changesAfter") ? std::optional{queryId(req, "changesAfter", true)} : std::nullopt;
                         const auto sessionsAfter =
                             req.has_param("sessionsAfter") ? std::optional{queryId(req, "sessionsAfter", true)} : std::nullopt;
-                        const auto changes = store_.conversationChangesSince(changesAfter, id);
+                        const auto changes = Conversations(store_).conversationChangesSince(changesAfter, id);
                         const auto [sessionThrough, sessionTasks] = store_.sessionChangesSince(id, sessionsAfter);
                         auto view = readBotView(actor, id, *bot, sessionsAfter ? &sessionTasks : nullptr);
                         view["bot"]["id"] = id;
@@ -782,7 +784,7 @@ private:
                 const auto clientMessageId = requiredText(body, "clientMessageId", 256);
                 const auto replyTo = body.contains("replyToMessageId") ? bodyId(body, "replyToMessageId") : Id{};
                 const auto attachments = body.value("attachments", Json::array());
-                const auto previous = store_.receipt(actor, bot, clientMessageId, request, replyTo, attachments);
+                const auto previous = Conversations(store_).receipt(actor, bot, clientMessageId, request, replyTo, attachments);
                 if (previous) return json(res, 201, *previous);
                 const bool identityRequired = web::hasWebIdentities(callbacks_);
                 if (identityRequired && !callbacks_.resolveIdentity) return error(res, 503, "message_identity_unavailable");
@@ -794,8 +796,9 @@ private:
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                const auto receipt = identityRequired ? store_.receiveWeb(actor, intake, clientMessageId, request, replyTo, attachments)
-                                                      : store_.receive(actor, intake, clientMessageId, request, replyTo, attachments);
+                const auto receipt = identityRequired
+                                         ? Conversations(store_).receiveWeb(actor, intake, clientMessageId, request, replyTo, attachments)
+                                         : Conversations(store_).receive(actor, intake, clientMessageId, request, replyTo, attachments);
                 return json(res, 201, receipt);
             }
             const auto operation = requiredText(body, "operation", 32);

@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
 #include "flock/command.hpp"
@@ -66,7 +67,7 @@ struct SearchConversation {
         const Intake intake{std::move(bot), "Investigate staging", "env-1", "project", Json::object()};
         model.result = nullptr;
         model.next = {std::move(tool), std::move(args), "Inspect the requested investigation"};
-        store.receive(localOwner, intake, std::to_string(++sequence), "Check the investigation.");
+        Conversations(store).receive(localOwner, intake, std::to_string(++sequence), "Check the investigation.");
         runtime.runConversations();
         return model.result;
     }
@@ -238,7 +239,9 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     };
     T3Connections(*store).connect("env-1", localOwner.id, 3210);
     const Intake intake{"release", "Inspect staging", "env-1", "project", {{"botDisplayName", "Ernest"}}};
-    const auto receive = [&](std::string_view id) { return store->receiveWeb(localOwner, intake, id, "Send the follow-up."); };
+    const auto receive = [&](std::string_view id) {
+        return Conversations(*store).receiveWeb(localOwner, intake, id, "Send the follow-up.");
+    };
     model.next = {"flock_session_search", Json::object(), "Find the Session"};
     receive("find");
     runtime->runConversations();
@@ -362,7 +365,7 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     runtime->runConversations();
     check(model.wakes.size() == 1 && model.wakes.back().at("reason") == "finished" && model.reads.back().at("ok") == true,
           "Restart lost the Bot Run wake or its Session history");
-    const auto timeline = store->conversation(intake.botId);
+    const auto timeline = Conversations(*store).conversation(intake.botId);
     check(std::ranges::any_of(timeline,
                               [&](const Json& event) {
                                   const auto wake = event.at("data").value("sessionWake", Json::object());
@@ -449,7 +452,7 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     check(model.wakes.size() == 3, "The Slack send did not wake the Bot");
     check(model.wakes.back().at("title") == "" && model.reads.back().at("ok") == false,
           "A Slack send or wake gave the thread access to unrelated Session evidence");
-    const auto channelTimeline = store->conversation(intake.botId);
+    const auto channelTimeline = Conversations(*store).conversation(intake.botId);
     check(std::ranges::any_of(channelTimeline,
                               [](const Json& event) {
                                   const auto& data = event.at("data");

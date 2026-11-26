@@ -1,4 +1,5 @@
 #include "fake_git.hpp"
+#include "flock/conversations.hpp"
 #include "flock/decision.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
@@ -36,7 +37,7 @@ public:
             std::lock_guard lock(mutex);
             tools.emplace(message, Script{std::move(tool), std::move(beforeTool), nullptr});
         }
-        store.receive(localOwner, intake(std::string(bot)), message, message);
+        Conversations(store).receive(localOwner, intake(std::string(bot)), message, message);
     }
 
     Json result(std::string_view message) {

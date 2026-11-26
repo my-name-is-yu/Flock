@@ -8,6 +8,7 @@
 #include "settings_system.hpp"
 #include "t3_connection_setup.hpp"
 #include "t3_setup.hpp"
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/bot_profile.hpp"
@@ -560,7 +561,7 @@ int runCli(Arguments& args) {
             intake.request = message;
         }
         auto store = openStore(home);
-        print(store.receive(localOwner, intake, actionId(), message));
+        print(Conversations(store).receive(localOwner, intake, actionId(), message));
     } else if (command == "status") {
         const auto id = number(args, "task ID");
         args.end();

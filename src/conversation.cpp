@@ -1,3 +1,6 @@
+#include "flock/conversations.hpp"
+#include "database.hpp"
+#include "flock/policy.hpp"
 #include "secret_storage.hpp"
 #include "journal_storage.hpp"
 #include "conversation_turns.hpp"
@@ -69,24 +72,24 @@ std::optional<Json> ConversationStorage::messageReceipt(const Person& actor, std
     return receiptRow(row, secretStorage.redactor(bot).text(std::string(text)), replyTo);
 }
 
-std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
-                                   const Json& attachments) const {
-    std::lock_guard lock(p_->mutex);
+std::optional<Json> Conversations::receipt(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text,
+                                           Id replyTo, const Json& attachments) const {
+    std::lock_guard lock(database_.mutex);
     if (reservedMessageId(clientId)) throw Conflict("This client message ID is reserved");
-    if (!p_->permissions.allows(actor, Action::bot_talk, bot)) throw DecisionDenied{};
-    return p_->conversationTurns.messageReceipt(actor, bot, clientId, text, replyTo, attachments);
+    if (!permissions_.allows(actor, Action::bot_talk, bot)) throw DecisionDenied{};
+    return turns_.messageReceipt(actor, bot, clientId, text, replyTo, attachments);
 }
 
-Json Store::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
-                    const Json& attachments) {
-    return p_->conversationTurns.receive(
+Json Conversations::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                            const Json& attachments) {
+    return turns_.receive(
         actor, routing.botId, clientId, text, replyTo, conversation::PrincipalSource::trusted, nullptr, [&] { return routing; },
         attachments);
 }
 
-Json Store::receiveWeb(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
-                       const Json& attachments) {
-    return p_->conversationTurns.receive(
+Json Conversations::receiveWeb(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                               const Json& attachments) {
+    return turns_.receive(
         actor, routing.botId, clientId, text, replyTo, conversation::PrincipalSource::web, nullptr, [&] { return routing; }, attachments);
 }
 

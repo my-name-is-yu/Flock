@@ -1,5 +1,6 @@
 #pragma once
 
+#include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/json.hpp"
 #include "flock/store.hpp"
@@ -71,7 +72,7 @@ private:
         Refresh pending = Refresh::None;
     };
     void monitor();
-    void refresh(const std::vector<Scope>&, const Store::ConversationChanges&);
+    void refresh(const std::vector<Scope>&, const Conversations::ConversationChanges&);
 
     Store& store_;
     Load load_;

@@ -1,5 +1,6 @@
 #include "fake_git.hpp"
 #include "model.hpp"
+#include "flock/conversations.hpp"
 #include "flock/participation.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
@@ -191,7 +192,7 @@ void keepsWorkInOriginatingSession() {
     f.notify(review("another-review"));
     check(sends.size() == 2 && !f.model.canFix && includes(f.store.history(f.task).dump(), "How should I proceed?"),
           "The cap did not ask for human input");
-    f.store.receive(testRequester, intake(), "resume-fixes", "Please continue fixing the PR.");
+    Conversations(f.store).receive(testRequester, intake(), "resume-fixes", "Please continue fixing the PR.");
     f.notify(failure("next-failure"));
     check(sends.size() == 3, "A new message from the requester did not reset the cap");
     f.notify({hostName, "closed", repoName, "pull_request", "closed", {1}, sha, "Closed", 0});

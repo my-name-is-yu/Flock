@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/web.hpp"
 
 #include "bots.hpp"
@@ -353,9 +354,9 @@ void inspectors(const std::filesystem::path& path) {
     const auto routing = callbacks().intake("release", "");
     auto server = startWeb(store, 0, callbacks());
     Browser browser(*server);
-    model.boundary = store.receive({"fixture", true}, routing, "a", "Original release instructions").at("messageId");
-    store.receive({"fixture", true}, routing, "b", "Summarize");
-    store.receive({"fixture", true}, routing, "c", "Release");
+    model.boundary = Conversations(store).receive({"fixture", true}, routing, "a", "Original release instructions").at("messageId");
+    Conversations(store).receive({"fixture", true}, routing, "b", "Summarize");
+    Conversations(store).receive({"fixture", true}, routing, "c", "Release");
     runtime.runConversations();
     auto policy = store.policy();
     policy.submitSecret({"fixture", true}, "release", policy.requestSecret("release", {"inspector-token"}), model.credential);
@@ -982,7 +983,7 @@ void fullModeProfiles(const std::filesystem::path& directory) {
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; }, options);
     const auto send = [&](std::string_view operation, std::string_view name) {
         model.change = {"request_bot_change", {{"operation", operation}, {"targetBotId", "reviewer"}, {"name", name}}, ""};
-        store.receive(creator, {"release", "", "local-env", "release"}, name, name);
+        Conversations(store).receive(creator, {"release", "", "local-env", "release"}, name, name);
         runtime.runConversations();
     };
     send("create_bot", "Review team");
@@ -1369,7 +1370,10 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const auto adjacentRequest = policy.requestSecret("staging-triage", {"renderer-adjacent"});
     const auto formRequest = policy.requestSecret("staging-triage", {"renderer-form"});
     const auto send = [&](std::string_view bot, std::string_view clientId, std::string_view text) {
-        return store.receive(owner, {std::string(bot), "unused", "local-env", "fixture"}, clientId, text).at("messageId").get<Id>();
+        return Conversations(store)
+            .receive(owner, {std::string(bot), "unused", "local-env", "fixture"}, clientId, text)
+            .at("messageId")
+            .get<Id>();
     };
     const std::string ampSecret = "Synthetic&Credential-221";
     const std::string markdownSecret = "**Markdown&Credential-221**";
@@ -1464,8 +1468,8 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
         verifyProtectedHtml(events, hashFormUrlMessage, hashFormUrlText);
     };
     verifyRecentSemanticMessages(viewResponse.at("events"));
-    const auto storedAmp = store.conversation("staging-triage", viewAmpMessage + 1, 1);
-    const auto storedMarkdown = store.conversation("staging-triage", viewMarkdownMessage + 1, 1);
+    const auto storedAmp = Conversations(store).conversation("staging-triage", viewAmpMessage + 1, 1);
+    const auto storedMarkdown = Conversations(store).conversation("staging-triage", viewMarkdownMessage + 1, 1);
     check(storedAmp.size() == 1 && storedAmp.front().at("data").at("text") == ampText && storedMarkdown.size() == 1 &&
               storedMarkdown.front().at("data").at("text") == markdownText,
           "response redaction must preserve canonical journal text");
@@ -1483,7 +1487,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
               exact.at("events").back().at("data").at("text") == "Original handoff for [redacted]",
           "The older conversation projection must redact its text and omit other Bots' messages");
     const auto requireStored = [&](Id id, std::string_view text) {
-        const auto stored = store.conversation("staging-triage", id + 1, 1);
+        const auto stored = Conversations(store).conversation("staging-triage", id + 1, 1);
         check(stored.size() == 1 && stored.front().at("data").at("text") == text, "render-time redaction mutated canonical journal text");
     };
     requireStored(rawSemanticMessage, rawSemanticText);
@@ -1652,7 +1656,9 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         retainedQueue = send(browser, retained, "Queued retained root");
         memberQueue = send(browser, memberCredential, "Queued demoted root with Bot membership");
         mixedQueue = send(browser, alternate, "Queued mixed credential roles");
-        trustedQueue = store.receive(localOwner, {"release", "", "local-env", "release"}, "local", "Trusted local owner").at("messageId");
+        trustedQueue = Conversations(store)
+                           .receive(localOwner, {"release", "", "local-env", "release"}, "local", "Trusted local owner")
+                           .at("messageId");
     }
     {
         Store store(path);

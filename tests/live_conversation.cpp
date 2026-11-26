@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
 #include "live_conversation_judge.hpp"
@@ -158,11 +159,11 @@ struct Scene {
         auto before = snapshot();
         const auto runCount = t3.runs.size();
         const auto interruptCount = t3.interrupted.size();
-        const auto receipt =
-            store.receive(localOwner, intake(), "message-" + std::to_string(store.conversation("release", 0, 200).size()), text, replyTo);
+        const auto receipt = Conversations(store).receive(
+            localOwner, intake(), "message-" + std::to_string(Conversations(store).conversation("release", 0, 200).size()), text, replyTo);
         runtime.runConversations();
         check(t3.runs.size() == runCount && t3.interrupted.size() == interruptCount, "unexpected T3 send or interrupt");
-        for (const auto& row : store.conversation("release", 0, 200)) {
+        for (const auto& row : Conversations(store).conversation("release", 0, 200)) {
             const auto& data = row.at("data");
             if (row.at("kind") != "conversation_reply" || data.at("replyToMessageId") != receipt.at("messageId")) continue;
             checkReply(data);

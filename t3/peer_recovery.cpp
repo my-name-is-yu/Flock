@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/conversations.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
@@ -112,9 +113,9 @@ int main(int argc, char** argv) {
         const auto& runs = verifier.runs;
         check(runs.size() == 1 && runs.at(0).run.ref.threadId == "thread" && runs.at(0).run.ref.runId == "root",
               "Verifier did not adopt the one original Run");
-        check(eventTexts(store.conversation("verifier"), "report", "report") == std::vector<std::string>{"root report"},
+        check(eventTexts(Conversations(store).conversation("verifier"), "report", "report") == std::vector<std::string>{"root report"},
               "Verifier did not receive one report from the recovered Run");
-        const auto releaseHistory = store.conversation("release");
+        const auto releaseHistory = Conversations(store).conversation("release");
         check(eventTexts(releaseHistory, "bot_message", "text") == std::vector<std::string>{"Verify the fixture", "root report"} &&
                   eventTexts(releaseHistory, "completed", "text") == std::vector<std::string>{"root report"} &&
                   store.task(source).task.state == TaskState::completed && model.received == 1,

@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/session_read.hpp"
 #include "flock/t3_connection.hpp"
@@ -221,7 +222,8 @@ struct Fixture {
     Json call(std::string tool, Json args, std::string bot = "alpha") {
         model.result = nullptr;
         model.next = {std::move(tool), std::move(args), "Inspect the requested investigation"};
-        store->receive(localOwner, intake(std::move(bot)), std::to_string(++sequence), "Where did yesterday’s staging investigation fail?");
+        Conversations(*store).receive(localOwner, intake(std::move(bot)), std::to_string(++sequence),
+                                      "Where did yesterday’s staging investigation fail?");
         runtime->runConversations();
         check(!model.result.is_null(), "conversation did not dispatch tool");
         return model.result;
@@ -350,7 +352,7 @@ void acceptance() {
     auto outside = f.intake("outside");
     outside.projectId = "elsewhere";
     f.model.next = {search, {{"query", "Foreign"}}, "Check configured project"};
-    f.store->receive(localOwner, outside, "outside-project", "Search my project");
+    Conversations(*f.store).receive(localOwner, outside, "outside-project", "Search my project");
     f.runtime->runConversations();
     check(f.model.result.at("sessions").empty(), "Search included a recorded run from a different project");
     f.t3.denied["foreign-thread"] = true;
@@ -490,9 +492,9 @@ void approvedCallSurvivesReadPreflightContention() {
     f.model.next = {"flock_session_search", {{"query", "regression"}}, "Find the report"};
     auto intake = f.intake("alpha");
     intake.config["modelCallLimit"] = 1;
-    const auto receipt = f.store->receive(localOwner, intake, "preflight-busy", "Look for the failure");
+    const auto receipt = Conversations(*f.store).receive(localOwner, intake, "preflight-busy", "Look for the failure");
     f.runtime->runConversations();
-    const auto paused = f.store->pausedConversations("alpha");
+    const auto paused = Conversations(*f.store).pausedConversations("alpha");
     check(paused.size() == 1 && f.model.result.is_null(), "turn did not pause after reading evidence");
     const Id pauseId = paused.front().at("messageId");
     f.store->decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId},
@@ -515,7 +517,7 @@ void approvedCallSurvivesReadPreflightContention() {
     check(sqlite3_exec(writer.get(), "ROLLBACK", nullptr, nullptr, nullptr) == SQLITE_OK, "could not release writer");
     f.t3.onRead = {};
     f.runtime->runConversations();
-    const auto after = f.store->pausedConversations("alpha");
+    const auto after = Conversations(*f.store).pausedConversations("alpha");
     check(!f.model.result.is_null() && after.empty(), "Conversation lost its approved call before model dispatch");
 }
 
@@ -557,9 +559,9 @@ void redactionAndResumedHistory() {
         f.model.result = nullptr;
         auto intake = f.intake("alpha");
         intake.config["modelCallLimit"] = 1;
-        const auto receipt = f.store->receive(localOwner, intake, std::to_string(++f.sequence), "Look for the failure");
+        const auto receipt = Conversations(*f.store).receive(localOwner, intake, std::to_string(++f.sequence), "Look for the failure");
         f.runtime->runConversations();
-        const auto paused = f.store->pausedConversations("alpha");
+        const auto paused = Conversations(*f.store).pausedConversations("alpha");
         check(paused.size() == 1 && f.model.result.is_null(), "turn did not pause after reading evidence");
         revoke();
         f.restart();

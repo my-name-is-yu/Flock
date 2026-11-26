@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/web.hpp"
 #include "../../tests/fake_git.hpp"
 #include "flock/decision.hpp"
@@ -198,7 +199,7 @@ void run() {
         check(post(client, "pull_request", "tool-review-request", reviewRequested, 202).at("status") == "received",
               "review request webhook not enqueued during the host call");
     };
-    store.receive(localOwner, intake(), "request-review", "Request a review");
+    Conversations(store).receive(localOwner, intake(), "request-review", "Request a review");
     runtime.runConversations();
     host->beforeCall = {};
     runtime.runConversations();
@@ -223,7 +224,7 @@ void run() {
     check(store.inbox(localOwner, "owner").size() == inboxBeforeRequest + 2, "A distinct review request was suppressed");
 
     const auto inboxBeforeMissingWebhook = store.inbox(localOwner, "owner").size();
-    store.receive(localOwner, intake(), "review-without-webhook", "Request another review");
+    Conversations(store).receive(localOwner, intake(), "review-without-webhook", "Request another review");
     runtime.runConversations();
     const auto afterRequest = store.inbox(localOwner, "owner");
     check(afterRequest.size() == inboxBeforeMissingWebhook + 1 && afterRequest.front().at("prompt") == "Review requested on the Git host.",
@@ -299,7 +300,7 @@ void run() {
         check(post(client, "issue_comment", "own-comment", ownComment, 202).at("status") == "received",
               "Own comment delivery before the host returned was not accepted");
     };
-    store.receive(localOwner, intake(), "write-comment", "Please post the comment");
+    Conversations(store).receive(localOwner, intake(), "write-comment", "Please post the comment");
     runtime.runConversations();
     host->beforeCall = {};
     check(host->comments == 1, "Flock did not author the expected comment");
@@ -317,7 +318,7 @@ void run() {
                                          {"body", "Use a test."}},
                                         "Submit the review the person asked for"};
     host->result["id"] = 203;
-    store.receive(localOwner, intake(), "write-review", "Please submit a review");
+    Conversations(store).receive(localOwner, intake(), "write-review", "Please submit a review");
     runtime.runConversations();
     auto ownReview = changes;
     ownReview["review"] = {{"id", 203}, {"state", "changes_requested"}, {"body", "Use a test."}};

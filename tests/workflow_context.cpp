@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
 #include "flock/command.hpp"
@@ -137,7 +138,8 @@ struct Fixture {
     Id turn(std::string text, std::string tool = {}, Json args = Json::object()) {
         bot.action = {tool, args, "Execute the requested operation"};
         bot.result = nullptr;
-        auto receipt = store->receive({"owner", true}, {"bot", "", "env", "project", Json::object()}, std::to_string(++sequence), text);
+        auto receipt =
+            Conversations(*store).receive({"owner", true}, {"bot", "", "env", "project", Json::object()}, std::to_string(++sequence), text);
         runtime->runConversations();
         return receipt.at("messageId");
     }
@@ -730,7 +732,8 @@ void settledWhileReadingInstruction() {
     const Id task = f.status()["stages"][0]["taskId"];
     f.t3.finish("run-1", {{"artifactVersion", shaA}, {"finding", "Keep the original row count"}});
     f.t3.onObserve = [&] {
-        f.store->receive({"owner", true}, {"bot", "", "env", "project", Json::object()}, "fresh", "Continue in a fresh Session");
+        Conversations(*f.store).receive({"owner", true}, {"bot", "", "env", "project", Json::object()}, "fresh",
+                                        "Continue in a fresh Session");
         f.bot.action = {"continue_fresh_session", {{"taskId", task}}, "Continue the same task"};
     };
     f.ticks(1);
@@ -796,7 +799,7 @@ void scopedCompactionPages() {
     const auto summary = f.call("compact_conversation", {{"endMessageId", end}, {"summary", "Keep the original evidence"}});
     require(summary["compaction"]["originalCount"] == 3, "summary counted messages outside its boundary");
     f.bot.action = {"expand_context", {{"compactionId", summary["compaction"]["compactionId"]}}, "Look up original evidence"};
-    f.store->receive({"owner", true}, {"other", "", "env", "project", Json::object()}, "read", "Read first Bot's evidence");
+    Conversations(*f.store).receive({"owner", true}, {"other", "", "env", "project", Json::object()}, "read", "Read first Bot's evidence");
     f.runtime->runConversations();
     require(f.bot.result.at("ok") == false && f.bot.history.empty(), "compaction crossed Bot histories");
     std::string replay;
@@ -868,7 +871,7 @@ void compactAndContinue() {
                 f.bot.history.dump().find("Newer direction") != std::string::npos &&
                 f.bot.history.dump().find(original) == std::string::npos,
             "model history does not respect compaction");
-    require(f.store->conversation("bot").dump().find(original) != std::string::npos, "audit history was lost");
+    require(Conversations(*f.store).conversation("bot").dump().find(original) != std::string::npos, "audit history was lost");
     auto expanded = f.call("expand_context", {{"query", shaA}, {"limit", 100}});
     require(expanded.at("messages").size() == 1 && expanded["messages"][0]["text"] == original, "missing original evidence");
     expanded = f.call("expand_context", {{"compactionId", compact["compaction"]["compactionId"]}, {"startMessageId", end}});
@@ -877,12 +880,12 @@ void compactAndContinue() {
     f.turn("Invalid boundary", "compact_conversation", {{"endMessageId", first}, {"summary", "Discard coverage"}});
     require(f.bot.result.at("ok") == false, "accepted shrinking boundary");
     f.turn("Same boundary", "compact_conversation", {{"endMessageId", end}, {"summary", std::string(3200, 'z')}});
-    require(f.bot.result.at("ok") == false && f.store->compactions("bot").size() == 1 &&
-                f.store->compactions("bot").at(0) == compact.at("compaction"),
+    require(f.bot.result.at("ok") == false && Conversations(*f.store).compactions("bot").size() == 1 &&
+                Conversations(*f.store).compactions("bot").at(0) == compact.at("compaction"),
             "A same-boundary summary replaced the durable compaction");
     const auto nextBoundary = f.turn("New evidence to include");
     const auto advanced = f.call("compact_conversation", {{"endMessageId", nextBoundary}, {"summary", "Include newer evidence"}});
-    require(advanced.at("compaction").at("endMessageId") == nextBoundary && f.store->compactions("bot").size() == 2,
+    require(advanced.at("compaction").at("endMessageId") == nextBoundary && Conversations(*f.store).compactions("bot").size() == 2,
             "a valid compaction did not advance coverage");
 
     f.call("start_workflow", {{"request", "Implement feature"}});

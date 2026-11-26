@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/channels.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/command.hpp"
@@ -246,7 +247,7 @@ void channels(const std::filesystem::path& database) {
         rejects([&] { store.receiveChannel(slack, "fixture-auth", changed, intake); });
         runtime.runConversations();
         check(calls == 2 && transport->effects.size() == 2, "Replay ran model or sent another reply");
-        const auto history = store.conversation("release");
+        const auto history = Conversations(store).conversation("release");
         check(history.size() == 4 && history[0]["data"]["channel"]["threadRef"] == "slack-thread",
               "Channel events did not enter conversation history");
         check(store.attachment(owner, attachment)->bytes == image && !store.attachment({"outsider", false}, attachment),
@@ -426,7 +427,7 @@ void markdownDelivery(const std::filesystem::path& database) {
         check(slack->at("payload").at("suggestions") == Json::array({"Start here", "Show me more"}) &&
                   imessage->at("payload").at("suggestions") == Json::array({"Start here", "Show me more"}),
               "Channel formatting changed reply suggestions");
-        const auto conversation = store.conversation("release");
+        const auto conversation = Conversations(store).conversation("release");
         check(std::ranges::any_of(conversation,
                                   [&](const Json& item) { return item["kind"] == "conversation_reply" && item["data"]["text"] == source; }),
               "Conversation journal did not retain canonical Markdown");
@@ -457,7 +458,7 @@ void markdownDelivery(const std::filesystem::path& database) {
                   retry["payload"]["deliveryMetadata"]["parse"] == "none" &&
                   retry["payload"]["suggestions"] == Json::array({"Start here", "Show me more"}) && retry["idempotencyKey"] == slackKey,
               "Reloaded retry changed Slack output, metadata, suggestions, or idempotency key");
-        check(std::ranges::any_of(reopened.conversation("release"),
+        check(std::ranges::any_of(Conversations(reopened).conversation("release"),
                                   [&](const Json& item) { return item["kind"] == "conversation_reply" && item["data"]["text"] == source; }),
               "Reloaded conversation projection changed canonical Markdown");
     }
@@ -620,7 +621,8 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
 
     model.decideNext = [](const ModelInput&) { return reply("Recorded in Web"); };
-    const auto original = store.receive(owner, intake("release", ""), "web-original", "Original Web evidence").at("messageId");
+    const auto original =
+        Conversations(store).receive(owner, intake("release", ""), "web-original", "Original Web evidence").at("messageId");
     runtime.runConversations();
 
     Json compaction, workflow;
@@ -634,7 +636,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
         workflow = steps.at(1).at("result").at("workflowId");
         return reply("Started in Web");
     };
-    store.receive(owner, intake("release", ""), "web-workflow", "Summarize and start a workflow");
+    Conversations(store).receive(owner, intake("release", ""), "web-workflow", "Summarize and start a workflow");
     runtime.runConversations();
     check(compaction.is_number() && workflow.is_number(), "Web workflow or compaction tool failed");
 
@@ -643,7 +645,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
         webContext = input.history.at(0).at("compactionId") == compaction && input.task.at("workflows").at(0).at("workflowId") == workflow;
         return reply("Loaded in Web");
     };
-    store.receive(owner, intake("release", ""), "web-context", "Check the workflow");
+    Conversations(store).receive(owner, intake("release", ""), "web-context", "Check the workflow");
     runtime.runConversations();
     check(webContext, "Web turn lost the workflow or compacted summary");
 
@@ -734,7 +736,7 @@ void sessionEvidence(const std::filesystem::path& database) {
           "Channel text approved a protected decision");
 
     t3.listBackground = true;
-    store.receive(owner, intake("release", ""), "web-search", "Search for a missing investigation");
+    Conversations(store).receive(owner, intake("release", ""), "web-search", "Search for a missing investigation");
     runtime.runConversations();
     scanCursor = result.at("nextCursor");
     check(result.at("sessions").empty() && scanCursor.is_string(), "Web search did not produce an empty continuation");
@@ -870,7 +872,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
             observed = true;
             return reply("Chat is available");
         };
-        store.receive(localOwner, intake(bot, ""), std::to_string(++count), "Local connection");
+        Conversations(store).receive(localOwner, intake(bot, ""), std::to_string(++count), "Local connection");
         runtime.runConversations();
         check(observed, "Local tool result was not delivered");
     };
@@ -917,10 +919,10 @@ void local(const std::filesystem::path& database, const std::string& path) {
         unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId", "env"}, {"runTimeoutSeconds", 1800}}});
         return reply("Chat is available");
     };
-    store.receive(localOwner, intake("release", ""), std::to_string(++count), "List reusable environments");
+    Conversations(store).receive(localOwner, intake("release", ""), std::to_string(++count), "List reusable environments");
     runtime.runConversations();
     check(unchanged, "Local connections added a reusable environment");
-    check(store.conversation("release").back()["data"]["text"] == "Chat is available", "Chat disabled after local decline");
+    check(Conversations(store).conversation("release").back()["data"]["text"] == "Chat is available", "Chat disabled after local decline");
 }
 }
 

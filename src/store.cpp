@@ -1,3 +1,7 @@
+#include "flock/conversations.hpp"
+#include "channel_storage.hpp"
+#include "database.hpp"
+#include "memory_storage.hpp"
 #include "task_routing.hpp"
 #include "task_records.hpp"
 #include "task_operations.hpp"
@@ -153,6 +157,11 @@ void Store::protectGitCredential(std::string value) {
 Database& Database::of(Store& store) {
     return *store.p_;
 }
+Conversations::Conversations(Store& store)
+    : database_(Database::of(store)), turns_(store.p_->conversationTurns), context_(store.p_->conversationContextStorage),
+      memory_(store.p_->memoryStorage), modelCalls_(store.p_->modelCalls), channels_(store.p_->channelStorage),
+      permissions_(store.p_->permissions) {}
+
 const std::filesystem::path& Store::path() const {
     return p_->path;
 }
@@ -161,13 +170,13 @@ std::pair<Id, Id> Store::changeStamp() const {
     return p_->changeStamp();
 }
 
-Store::ConversationChanges Store::conversationChangesSince(std::optional<Id> after, std::string_view bot) const {
-    std::lock_guard lock(p_->mutex);
-    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal");
+Conversations::ConversationChanges Conversations::conversationChangesSince(std::optional<Id> after, std::string_view bot) const {
+    std::lock_guard lock(database_.mutex);
+    auto newest = database_.query("SELECT coalesce(max(id),0) FROM journal");
     newest.next();
     ConversationChanges changes{newest.number(0), {}};
     if (!after || *after >= changes.through) return changes;
-    auto rows = p_->query(R"SQL(
+    auto rows = database_.query(R"SQL(
 SELECT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
   WHEN 'conversation_reply' THEN j.reply_to_message_id ELSE j.message_id END
 WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
@@ -179,7 +188,7 @@ WHERE j.id>?1 AND j.id<=?2 AND j.kind='conversation_budget_approved'
   AND (?3='' OR j.conversation_bot_id=?3)
 ORDER BY 1,2
 )SQL",
-                          {*after, changes.through, bot});
+                                {*after, changes.through, bot});
     while (rows.next()) changes.messages[rows.string(0)].push_back(rows.number(1));
     return changes;
 }
@@ -515,11 +524,12 @@ WHERE j.task_id=? AND j.id>? ORDER BY j.id LIMIT ?
     return result;
 }
 
-Json Store::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events, std::string_view viewer) const {
+Json Conversations::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events,
+                                 std::string_view viewer) const {
     if (before == std::numeric_limits<Id>::min()) return Json::array();
     const auto through = before ? before - 1 : std::numeric_limits<Id>::max();
-    std::lock_guard lock(p_->mutex);
-    auto rows = p_->query(R"SQL(
+    std::lock_guard lock(database_.mutex);
+    auto rows = database_.query(R"SQL(
 WITH visible AS NOT MATERIALIZED (
   SELECT id,task_id,conversation_bot_id FROM journal
   WHERE id<=?2
@@ -573,12 +583,12 @@ LEFT JOIN waits w ON page.kind='user_answer'
   AND w.id=page.wait_id AND w.task_id=page.task_id
 LEFT JOIN channel_messages channel ON page.kind='conversation_message' AND channel.message_id=m.id
 ORDER BY page.id DESC)SQL",
-                          {bot, through, events == ConversationEvents::incoming ? 1 : 0, std::clamp(limit, 1u, 200u)});
+                                {bot, through, events == ConversationEvents::incoming ? 1 : 0, std::clamp(limit, 1u, 200u)});
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
-        if (event.at("kind") == "memory_remembered") p_->memoryStorage.projectMemoryNotice(bot, event.at("data"));
-        if (rows.number(5)) event["data"].update(p_->channelStorage.channelContext(rows.number(0), bot, nullptr, viewer));
+        if (event.at("kind") == "memory_remembered") memory_.projectMemoryNotice(bot, event.at("data"));
+        if (rows.number(5)) event["data"].update(channels_.channelContext(rows.number(0), bot, nullptr, viewer));
         if (rows.number(6)) event["data"]["question"] = decodeWaitRow(rows, 6).text;
         result.push_back(std::move(event));
     }

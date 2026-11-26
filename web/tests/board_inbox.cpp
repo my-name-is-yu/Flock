@@ -1,4 +1,5 @@
 #include "http_fixture.hpp"
+#include "flock/conversations.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
@@ -34,7 +35,7 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     const auto before = taskJson(store.task(release));
     const auto history = store.history(release);
     for (int i = 0; i < 40; ++i)
-        store.receive(owner, {"release", "unused", "local-env", "release"}, "new-" + std::to_string(i), "Later message");
+        Conversations(store).receive(owner, {"release", "unused", "local-env", "release"}, "new-" + std::to_string(i), "Later message");
     auto cb = callbacks();
     cb.authenticate = [](std::string_view authorization) -> Person {
         if (authorization == "Bearer reviewer") return {"reviewer"};
